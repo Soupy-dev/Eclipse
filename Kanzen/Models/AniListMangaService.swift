@@ -40,11 +40,16 @@ struct AniListManga: Identifiable, Codable, Hashable {
     let genres: [String]?
     let averageScore: Int?
     let countryOfOrigin: String?
+    let startDate: AniListMangaStartDate?
 
     struct AniListMangaTitle: Codable, Hashable {
         let romaji: String?
         let english: String?
         let native: String?
+    }
+
+    struct AniListMangaStartDate: Codable, Hashable {
+        let year: Int?
     }
 
     struct AniListMangaCover: Codable, Hashable {
@@ -60,6 +65,22 @@ struct AniListManga: Identifiable, Codable, Hashable {
     /// Best available cover URL.
     var coverURL: String? {
         coverImage?.large ?? coverImage?.medium
+    }
+
+    /// Start year from AniList.
+    var startYear: Int? {
+        startDate?.year
+    }
+
+    /// All non-nil title variants for multi-language search.
+    var allTitleCandidates: [String] {
+        var seen = Set<String>()
+        return [title.english, title.romaji, title.native].compactMap { $0 }.filter { value in
+            let cleaned = value.trimmingCharacters(in: .whitespaces)
+            guard !cleaned.isEmpty, !seen.contains(cleaned.lowercased()) else { return false }
+            seen.insert(cleaned.lowercased())
+            return true
+        }
     }
 }
 
@@ -114,6 +135,7 @@ final class AniListMangaService {
         genres
         averageScore
         countryOfOrigin
+        startDate { year }
     """
 
     // MARK: - Catalog Fetching

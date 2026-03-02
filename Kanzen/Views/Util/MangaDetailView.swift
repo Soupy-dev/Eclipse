@@ -12,40 +12,68 @@ import Kingfisher
 struct MangaDetailView: View {
     let manga: AniListManga
     @EnvironmentObject var moduleManager: ModuleManager
+    @StateObject private var sourceFinder = MangaSourceFinder()
+    @AppStorage("kanzenAutoMode") private var autoModeEnabled: Bool = false
     @State private var expandedDescription: Bool = false
+    @State private var navigateToAutoMatch: Bool = false
 
     private let coverWidth: CGFloat = isIPad ? 150 * iPadScaleSmall : 150
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                // Header: cover + metadata
                 headerSection
 
                 Divider()
 
-                // Description
                 if let description = manga.description, !description.isEmpty {
                     descriptionSection(description)
                 }
 
                 Divider()
 
-                // Genres
                 if let genres = manga.genres, !genres.isEmpty {
                     genresSection(genres)
                 }
 
                 Divider()
 
-                // Read with Module
-                modulesSection
+                sourcesSection
             }
             .padding(.horizontal, 16)
             .padding(.top, 8)
         }
         .navigationTitle(manga.displayTitle)
         .navigationBarTitleDisplayMode(.inline)
+        .task {
+            guard !moduleManager.modules.isEmpty else { return }
+            sourceFinder.searchAllModules(for: manga)
+        }
+        .onChange(of: sourceFinder.hasFinished) { finished in
+            guard finished, autoModeEnabled else { return }
+            // In auto mode, refine top matches with chapter counts then navigate
+            sourceFinder.refineTopMatchesWithChapterCounts(for: manga)
+        }
+        .onChange(of: sourceFinder.autoPickedMatch?.id) { _ in
+            // After refinement, if auto mode auto-navigate
+            if autoModeEnabled, sourceFinder.hasFinished, sourceFinder.autoPickedMatch != nil {
+                // Small delay so the user briefly sees what was picked
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                    navigateToAutoMatch = true
+                }
+            }
+        }
+        .background(
+            Group {
+                if let match = sourceFinder.autoPickedMatch {
+                    NavigationLink(
+                        destination: AutoMatchDestination(match: match),
+                        isActive: $navigateToAutoMatch
+                    ) { EmptyView() }
+                    .hidden()
+                }
+            }
+        )
     }
 
     // MARK: - Header
@@ -95,6 +123,11 @@ struct MangaDetailView: View {
                     }
                     if let score = manga.averageScore {
                         Label("\(score)%", systemImage: "star.fill")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                    if let year = manga.startYear {
+                        Label("\(String(year))", systemImage: "calendar")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -156,17 +189,26 @@ struct MangaDetailView: View {
         }
     }
 
-    // MARK: - Modules
+    // MARK: - Sources Section
 
     @ViewBuilder
-    private var modulesSection: some View {
+    private var sourcesSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Read with Module")
-                .font(.headline)
+            HStack {
+                Text("Sources")
+                    .font(.headline)
+                Spacer()
+                if autoModeEnabled {
+                    Text("Auto Mode")
+                        .font(.caption2)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.accentColor.opacity(0.2))
+                        .cornerRadius(4)
+                }
+            }
 
-            let availableModules = moduleManager.modules
-
-            if availableModules.isEmpty {
+            if moduleManager.modules.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "puzzlepiece.extension")
                         .font(.title2)
@@ -178,44 +220,106 @@ struct MangaDetailView: View {
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 12)
+            } else if sourceFinder.isSearching {
+                HStack(spacing: 10) {
+                    ProgressView()
+                    Text("Searching modules…")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+            } else if sourceFinder.matches.isEmpty && sourceFinder.hasFinished {
+                VStack(spacing: 8) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.title2)
+                        .foregroundColor(.secondary)
+                    Text("No matching sources found")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
             } else {
-                ForEach(availableModules) { module in
-                    NavigationLink(destination: ModuleSearchBridge(module: module, searchQuery: manga.displayTitle)) {
-                        HStack(spacing: 12) {
-                            if let iconURL = URL(string: module.moduleData.iconURL) {
-                                KFImage(iconURL)
-                                    .resizable()
-                                    .scaledToFit()
-                                    .frame(width: 36, height: 36)
-                                    .cornerRadius(8)
-                            } else {
-                                Image(systemName: "puzzlepiece.extension")
-                                    .frame(width: 36, height: 36)
-                                    .foregroundColor(.accentColor)
-                            }
-
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(module.moduleData.sourceName)
-                                    .font(.subheadline)
-                                    .fontWeight(.medium)
-                                Text(module.moduleData.language)
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-
-                            Spacer()
-
-                            Image(systemName: "chevron.right")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        .padding(.vertical, 6)
+                ForEach(sourceFinder.matches) { match in
+                    NavigationLink(destination: AutoMatchDestination(match: match)) {
+                        sourceMatchRow(match)
                     }
                     .buttonStyle(.plain)
                     Divider()
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func sourceMatchRow(_ match: SourceMatch) -> some View {
+        HStack(spacing: 12) {
+            if let iconURL = URL(string: match.module.moduleData.iconURL) {
+                KFImage(iconURL)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 36, height: 36)
+                    .cornerRadius(8)
+            } else {
+                Image(systemName: "puzzlepiece.extension")
+                    .frame(width: 36, height: 36)
+                    .foregroundColor(.accentColor)
+            }
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(match.manga.title)
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                        .lineLimit(1)
+
+                    confidenceBadge(match.confidence)
+                }
+
+                HStack(spacing: 8) {
+                    Text(match.module.moduleData.sourceName)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    if let ch = match.chapterCount {
+                        Text("·  \(ch) ch")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    Text("·  \(Int(match.titleScore * 100))% match")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+            }
+
+            Spacer()
+
+            Image(systemName: "chevron.right")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .padding(.vertical, 6)
+    }
+
+    @ViewBuilder
+    private func confidenceBadge(_ confidence: SourceMatch.SourceMatchConfidence) -> some View {
+        let (text, color): (String, Color) = {
+            switch confidence {
+            case .high: return ("High", .green)
+            case .medium: return ("Med", .orange)
+            case .low: return ("Low", .red)
+            }
+        }()
+
+        Text(text)
+            .font(.system(size: 9, weight: .bold))
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(color.opacity(0.2))
+            .foregroundColor(color)
+            .cornerRadius(3)
     }
 
     // MARK: - Helpers
@@ -252,9 +356,45 @@ struct MangaDetailView: View {
     }
 }
 
+// MARK: - Auto Match Destination
+
+/// Loads a module and navigates directly to the content view for a matched manga.
+struct AutoMatchDestination: View {
+    let match: SourceMatch
+    @StateObject private var kanzen = KanzenEngine()
+    @EnvironmentObject var moduleManager: ModuleManager
+    @State private var moduleLoaded = false
+
+    var body: some View {
+        Group {
+            if moduleLoaded {
+                contentView(
+                    parentModule: match.module,
+                    title: match.manga.title,
+                    imageURL: match.manga.imageURL,
+                    params: match.manga.mangaId
+                )
+                .environmentObject(kanzen)
+            } else {
+                ProgressView("Loading module…")
+                    .task { loadModule() }
+            }
+        }
+    }
+
+    private func loadModule() {
+        do {
+            let content = try ModuleManager.shared.getModuleScript(module: match.module)
+            try kanzen.loadScript(content)
+            moduleLoaded = true
+        } catch {
+            Logger.shared.log("AutoMatchDestination: Failed to load module: \(error.localizedDescription)", type: "Error")
+        }
+    }
+}
+
 // MARK: - Flow Layout
 
-/// Simple horizontal wrapping layout for genre tags.
 struct FlowLayout: Layout {
     var spacing: CGFloat = 6
 
@@ -297,10 +437,8 @@ struct FlowLayout: Layout {
     }
 }
 
-// MARK: - Module Search Bridge
+// MARK: - Module Search Bridge (kept for per-module search fallback)
 
-/// Opens a per-module search view pre-filled with the manga title so the user
-/// can pick the correct source entry and jump into reading.
 struct ModuleSearchBridge: View {
     let module: ModuleDataContainer
     let searchQuery: String

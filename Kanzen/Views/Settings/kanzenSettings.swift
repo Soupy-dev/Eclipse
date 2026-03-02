@@ -17,6 +17,7 @@ struct KanzenSettingsView : View
 {
     @AppStorage("showKanzen") private var showKanzen: Bool = false
     @State private var autoUpdateModules = ModuleManager.isAutoUpdateEnabled
+    @AppStorage("kanzenAutoMode") private var autoModeEnabled: Bool = false
     var body: some View
     {
         NavigationView {
@@ -27,11 +28,12 @@ struct KanzenSettingsView : View
                         Text("Home Catalogs")
                     }
                 }
-                Section(header: Text("Modules")) {
+                Section(header: Text("Modules"), footer: Text("Auto Mode will automatically search all modules and pick the best match when you tap a manga. This isn't fully reliable due to the vast amount of media — title variations across languages and regions can cause mismatches.")) {
                     Toggle("Auto-Update Modules", isOn: $autoUpdateModules)
                         .onChange(of: autoUpdateModules) { newValue in
                             ModuleManager.isAutoUpdateEnabled = newValue
                         }
+                    Toggle("Auto Mode", isOn: $autoModeEnabled)
                 }
                 Section(header: Text("Activity")) {
                     NavigationLink(destination: LoggerView()) {

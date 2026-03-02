@@ -138,6 +138,14 @@
 		AA6666662F10000000AA6666 /* CatalogsSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA6666602F10000000AA6660 /* CatalogsSettingsView.swift */; };
 		AA7777712F10000000AA7771 /* HomeViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA7777702F10000000AA7770 /* HomeViewModel.swift */; };
 		AA8888812F10000000AA8881 /* ScheduleViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA8888802F10000000AA8880 /* ScheduleViewModel.swift */; };
+		FF1111112F30000000FF1111 /* AniListMangaService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF1111102F30000000FF1110 /* AniListMangaService.swift */; };
+		FF2222222F30000000FF2222 /* MangaCatalogManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF2222202F30000000FF2220 /* MangaCatalogManager.swift */; };
+		FF3333332F30000000FF3333 /* MangaHomeViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF3333302F30000000FF3330 /* MangaHomeViewModel.swift */; };
+		FF4444442F30000000FF4444 /* MangaSourceFinder.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF4444402F30000000FF4440 /* MangaSourceFinder.swift */; };
+		FF5555552F30000000FF5555 /* KanzenHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF5555502F30000000FF5550 /* KanzenHomeView.swift */; };
+		FF6666662F30000000FF6666 /* KanzenGlobalSearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF6666602F30000000FF6660 /* KanzenGlobalSearchView.swift */; };
+		FF7777712F30000000FF7771 /* MangaDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF7777702F30000000FF7770 /* MangaDetailView.swift */; };
+		FF8888812F30000000FF8881 /* MangaCatalogSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF8888802F30000000FF8880 /* MangaCatalogSettingsView.swift */; };
 
 /* Begin PBXCopyFilesBuildPhase section */
 		12F745372EB539F000889684 /* Embed Frameworks */ = {
@@ -284,6 +292,14 @@
 		DD2222202FB0000000DD2220 /* DownloadsView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = DownloadsView.swift; sourceTree = "<group>"; };
 		DD4444402FB0000000DD4440 /* DownloadedShowDetailView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = DownloadedShowDetailView.swift; sourceTree = "<group>"; };
 		DD3333302FB0000000DD3330 /* FloatingSearchButton.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = FloatingSearchButton.swift; sourceTree = "<group>"; };
+		FF1111102F30000000FF1110 /* AniListMangaService.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AniListMangaService.swift; sourceTree = "<group>"; };
+		FF2222202F30000000FF2220 /* MangaCatalogManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MangaCatalogManager.swift; sourceTree = "<group>"; };
+		FF3333302F30000000FF3330 /* MangaHomeViewModel.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MangaHomeViewModel.swift; sourceTree = "<group>"; };
+		FF4444402F30000000FF4440 /* MangaSourceFinder.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MangaSourceFinder.swift; sourceTree = "<group>"; };
+		FF5555502F30000000FF5550 /* KanzenHomeView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KanzenHomeView.swift; sourceTree = "<group>"; };
+		FF6666602F30000000FF6660 /* KanzenGlobalSearchView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KanzenGlobalSearchView.swift; sourceTree = "<group>"; };
+		FF7777702F30000000FF7770 /* MangaDetailView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MangaDetailView.swift; sourceTree = "<group>"; };
+		FF8888802F30000000FF8880 /* MangaCatalogSettingsView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MangaCatalogSettingsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -401,6 +417,10 @@
 				13E1EDA52ED9E65F00087629 /* favouriteManager.swift */,
 				13E1EDA62ED9E65F00087629 /* Settings.swift */,
 				13E1EDA72ED9E65F00087629 /* pageData.swift */,
+				FF1111102F30000000FF1110 /* AniListMangaService.swift */,
+				FF2222202F30000000FF2220 /* MangaCatalogManager.swift */,
+				FF3333302F30000000FF3330 /* MangaHomeViewModel.swift */,
+				FF4444402F30000000FF4440 /* MangaSourceFinder.swift */,
 			);
 			path = Models;
 			sourceTree = "<group>";
@@ -469,6 +489,7 @@
 				13E1EDCA2ED9E65F00087629 /* Library */,
 				13E1EDCC2ED9E65F00087629 /* Search */,
 				13E1EDCE2ED9E65F00087629 /* Browse */,
+				FF9999902F30000000FF9990 /* Home */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -522,6 +543,7 @@
 			isa = PBXGroup;
 			children = (
 				13E1EDC22ED9E65F00087629 /* kanzenGeneralSettings.swift */,
+				FF8888802F30000000FF8880 /* MangaCatalogSettingsView.swift */,
 			);
 			path = subSettings;
 			sourceTree = "<group>";
@@ -534,6 +556,7 @@
 				13E1EDC72ED9E65F00087629 /* contentCell.swift */,
 				13E1EDC82ED9E65F00087629 /* circularLoading.swift */,
 				13E1EDC92ED9E65F00087629 /* contentView.swift */,
+				FF7777702F30000000FF7770 /* MangaDetailView.swift */,
 			);
 			path = Util;
 			sourceTree = "<group>";
@@ -550,6 +573,7 @@
 			isa = PBXGroup;
 			children = (
 				13E1EDCD2ED9E65F00087629 /* search.swift */,
+				FF6666602F30000000FF6660 /* KanzenGlobalSearchView.swift */,
 			);
 			path = Search;
 			sourceTree = "<group>";
@@ -561,6 +585,14 @@
 				13E1EDD02ED9E65F00087629 /* kanzenModuleView.swift */,
 			);
 			path = Browse;
+			sourceTree = "<group>";
+		};
+		FF9999902F30000000FF9990 /* Home */ = {
+			isa = PBXGroup;
+			children = (
+				FF5555502F30000000FF5550 /* KanzenHomeView.swift */,
+			);
+			path = Home;
 			sourceTree = "<group>";
 		};
 		13F072522E4B2D3300EF90EB = {
@@ -1054,6 +1086,14 @@
 				13F187AC2E6F38CE00747F7E /* LibraryManager.swift in Sources */,
 				14BBB0033FFF111100AAAAAA /* BackupManagementView.swift in Sources */,
 				14BBB0053FFF111100AAAAAA /* BackupManager.swift in Sources */,
+				FF1111112F30000000FF1111 /* AniListMangaService.swift in Sources */,
+				FF2222222F30000000FF2222 /* MangaCatalogManager.swift in Sources */,
+				FF3333332F30000000FF3333 /* MangaHomeViewModel.swift in Sources */,
+				FF4444442F30000000FF4444 /* MangaSourceFinder.swift in Sources */,
+				FF5555552F30000000FF5555 /* KanzenHomeView.swift in Sources */,
+				FF6666662F30000000FF6666 /* KanzenGlobalSearchView.swift in Sources */,
+				FF7777712F30000000FF7771 /* MangaDetailView.swift in Sources */,
+				FF8888812F30000000FF8881 /* MangaCatalogSettingsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
