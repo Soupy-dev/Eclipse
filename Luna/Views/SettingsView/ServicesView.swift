@@ -14,6 +14,7 @@ struct ServicesView: View {
     @State private var showDownloadAlert = false
     @State private var downloadURL = ""
     @State private var showServiceDownloadAlert = false
+    @State private var autoUpdateEnabled: Bool = UserDefaults.standard.bool(forKey: "autoUpdateServicesEnabled")
     
     var body: some View {
         ZStack {
@@ -89,12 +90,23 @@ struct ServicesView: View {
     @ViewBuilder
     private var servicesList: some View {
         List {
-            ForEach(serviceManager.services, id: \.id) { service in
-                ServiceRow(service: service, serviceManager: serviceManager)
+            Section {
+                Toggle("Auto-Update Services", isOn: $autoUpdateEnabled)
+                    .onChange(of: autoUpdateEnabled) { newValue in
+                        serviceManager.isAutoUpdateEnabled = newValue
+                    }
+            } footer: {
+                Text("Automatically check for service updates when the app is opened.")
             }
-            .onDelete(perform: deleteServices)
-            .onMove { indices, newOffset in
-                serviceManager.moveServices(fromOffsets: indices, toOffset: newOffset)
+
+            Section {
+                ForEach(serviceManager.services, id: \.id) { service in
+                    ServiceRow(service: service, serviceManager: serviceManager)
+                }
+                .onDelete(perform: deleteServices)
+                .onMove { indices, newOffset in
+                    serviceManager.moveServices(fromOffsets: indices, toOffset: newOffset)
+                }
             }
         }
     }

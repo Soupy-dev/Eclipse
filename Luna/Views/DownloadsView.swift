@@ -13,7 +13,11 @@ struct DownloadsView: View {
     @StateObject private var downloadManager = DownloadManager.shared
     @State private var showingDeleteAllConfirmation = false
     @State private var showingDeleteCompletedConfirmation = false
+    @State private var showingDeleteSeriesConfirmation = false
+    @State private var seriesToDelete: (tmdbId: Int, title: String)? = nil
     @State private var selectedTab: DownloadsTab = .downloads
+    
+    private let completedDisplayLimit = 25
     
     private enum DownloadsTab: String, CaseIterable {
         case downloads = "Downloads"
@@ -95,6 +99,23 @@ struct DownloadsView: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("This will remove all completed download files. This action cannot be undone.")
+        }
+        .confirmationDialog(
+            "Delete \(seriesToDelete?.title ?? "Series")",
+            isPresented: $showingDeleteSeriesConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete All Downloads", role: .destructive) {
+                if let tmdbId = seriesToDelete?.tmdbId {
+                    downloadManager.deleteAllForShow(tmdbId: tmdbId)
+                }
+                seriesToDelete = nil
+            }
+            Button("Cancel", role: .cancel) {
+                seriesToDelete = nil
+            }
+        } message: {
+            Text("This will remove all downloaded episodes for \(seriesToDelete?.title ?? "this series"). This action cannot be undone.")
         }
     }
     
@@ -193,7 +214,7 @@ struct DownloadsView: View {
             
             if !completedDownloads.isEmpty {
                 Section {
-                    ForEach(completedDownloads) { item in
+                    ForEach(Array(completedDownloads.prefix(completedDisplayLimit))) { item in
                         completedDownloadRow(item)
                             .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
                             .listRowBackground(Color.clear)
@@ -494,7 +515,7 @@ struct DownloadsView: View {
             }
             .resizable()
             .aspectRatio(2/3, contentMode: .fill)
-            .frame(width: 55, height: 82)
+            .frame(width: 55 * iPadScaleSmall, height: 82 * iPadScaleSmall)
             .clipShape(RoundedRectangle(cornerRadius: 8))
     }
     
@@ -581,6 +602,17 @@ struct DownloadsView: View {
                                 completedDownloadRow(item)
                                     .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
                                     .listRowBackground(Color.clear)
+                                    .contextMenu {
+                                        Button(action: { playDownloadedItem(item) }) {
+                                            Label("Play", systemImage: "play.fill")
+                                        }
+                                        Button(role: .destructive) {
+                                            seriesToDelete = (tmdbId: show.id, title: show.title)
+                                            showingDeleteSeriesConfirmation = true
+                                        } label: {
+                                            Label("Delete Download", systemImage: "trash")
+                                        }
+                                    }
                             }
                         } else {
                             // TV Shows: navigate to full detail page
@@ -638,6 +670,14 @@ struct DownloadsView: View {
                             }
                             .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
                             .listRowBackground(Color.clear)
+                            .contextMenu {
+                                Button(role: .destructive) {
+                                    seriesToDelete = (tmdbId: show.id, title: show.title)
+                                    showingDeleteSeriesConfirmation = true
+                                } label: {
+                                    Label("Delete All Downloads", systemImage: "trash")
+                                }
+                            }
                         }
                     }
                     

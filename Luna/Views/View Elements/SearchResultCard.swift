@@ -23,7 +23,7 @@ struct SearchResultCard: View {
                     }
                     .resizable()
                     .aspectRatio(2/3, contentMode: .fill)
-                    .frame(height: 180)
+                    .frame(height: 180 * iPadScale)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                     .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
                 

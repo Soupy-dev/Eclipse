@@ -27,7 +27,7 @@ struct CollectionDetailView: View {
                 .frame(maxHeight: .infinity)
                 .padding(.top, 100)
             } else {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 120))], spacing: 16) {
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: isIPad ? 160 : 120))], spacing: 16) {
                     ForEach(collection.items) { item in
                         NavigationLink(destination: MediaDetailView(searchResult: item.searchResult)) {
                             VStack {
@@ -39,7 +39,7 @@ struct CollectionDetailView: View {
                                         }
                                         .resizable()
                                         .aspectRatio(2/3, contentMode: .fill)
-                                        .frame(width: 120, height: 180)
+                                        .frame(width: 120 * iPadScale, height: 180 * iPadScale)
                                         .clipShape(RoundedRectangle(cornerRadius: 10))
                                         .shadow(color: .black.opacity(0.1), radius: 3, x: 0, y: 1)
                                 }

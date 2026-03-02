@@ -26,7 +26,7 @@ struct HomeView: View {
 #if os(tvOS)
         UIScreen.main.bounds.height * 0.8
 #else
-        580
+        isIPad ? 720 : 580
 #endif
     }
 
@@ -345,7 +345,7 @@ struct MediaSection: View {
     let title: String
     let items: [TMDBSearchResult]
     
-    var gap: Double { isTvOS ? 50.0 : 20.0 }
+    var gap: Double { isTvOS ? 50.0 : (isIPad ? 28.0 : 20.0) }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -409,7 +409,7 @@ struct MediaCard: View {
                             .padding(.vertical, 30)
                     }, else: { view in
                         view
-                            .frame(width: 120, height: 180)
+                            .frame(width: 120 * iPadScale, height: 180 * iPadScale)
                             .clipShape(RoundedRectangle(cornerRadius: 10))
                             .shadow(color: .black.opacity(0.1), radius: 3, x: 0, y: 1)
                     })
@@ -458,7 +458,7 @@ struct MediaCard: View {
                             .applyLiquidGlassBackground(cornerRadius: 12)
                     }
                 }
-                .frame(width: isTvOS ? 280 : 120, alignment: .leading)
+                .frame(width: isTvOS ? 280 : 120 * iPadScale, alignment: .leading)
             }
         }
         .tvos({ view in
@@ -474,7 +474,7 @@ struct ContinueWatchingSection: View {
     let tmdbService: TMDBService
     let onDataChanged: () -> Void
 
-    private var gap: Double { isTvOS ? 50.0 : 16.0 }
+    private var gap: Double { isTvOS ? 50.0 : (isIPad ? 24.0 : 16.0) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -525,10 +525,10 @@ struct ContinueWatchingCard: View {
     @State private var isMetadataReady = false
     @State private var pendingOpenSheet = false
 
-    private var cardWidth: CGFloat { isTvOS ? 380 : 260 }
-    private var cardHeight: CGFloat { isTvOS ? 220 : 146 }
-    private var logoMaxWidth: CGFloat { isTvOS ? 200 : 140 }
-    private var logoMaxHeight: CGFloat { isTvOS ? 60 : 40 }
+    private var cardWidth: CGFloat { isTvOS ? 380 : (isIPad ? 360 : 260) }
+    private var cardHeight: CGFloat { isTvOS ? 220 : (isIPad ? 200 : 146) }
+    private var logoMaxWidth: CGFloat { isTvOS ? 200 : (isIPad ? 180 : 140) }
+    private var logoMaxHeight: CGFloat { isTvOS ? 60 : (isIPad ? 52 : 40) }
 
     private var displayTitle: String {
         title.isEmpty ? item.title : title

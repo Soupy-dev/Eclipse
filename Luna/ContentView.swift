@@ -16,6 +16,7 @@ struct ContentView: View {
     @ObservedObject private var downloadManager = DownloadManager.shared
     @State private var selectedTab: AppTab = .home
     @State private var showingSettings = false
+    @Environment(\.scenePhase) private var scenePhase
     
     var body: some View {
 #if compiler(>=6.0)
@@ -35,6 +36,12 @@ struct ContentView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.25), value: showingSettings)
+            .task { await ServiceManager.shared.autoUpdateServicesIfNeeded() }
+            .onChange(of: scenePhase) { newPhase in
+                if newPhase == .active {
+                    Task { await ServiceManager.shared.autoUpdateServicesIfNeeded() }
+                }
+            }
         } else {
             ZStack {
                 olderTabView
@@ -50,6 +57,12 @@ struct ContentView: View {
                 }
             }
             .animation(.easeInOut(duration: 0.25), value: showingSettings)
+            .task { await ServiceManager.shared.autoUpdateServicesIfNeeded() }
+            .onChange(of: scenePhase) { newPhase in
+                if newPhase == .active {
+                    Task { await ServiceManager.shared.autoUpdateServicesIfNeeded() }
+                }
+            }
         }
 #else
         ZStack {
@@ -66,6 +79,12 @@ struct ContentView: View {
             }
         }
         .animation(.easeInOut(duration: 0.25), value: showingSettings)
+        .task { await ServiceManager.shared.autoUpdateServicesIfNeeded() }
+        .onChange(of: scenePhase) { newPhase in
+            if newPhase == .active {
+                Task { await ServiceManager.shared.autoUpdateServicesIfNeeded() }
+            }
+        }
 #endif
     }
     

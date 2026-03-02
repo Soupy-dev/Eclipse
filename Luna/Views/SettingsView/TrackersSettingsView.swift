@@ -12,71 +12,72 @@ struct TrackersSettingsView: View {
     @State private var selectedTracker: TrackerService?
 
     var body: some View {
-        NavigationView {
-            ZStack {
-                Color.black.ignoresSafeArea()
+        ZStack {
+            Color.black.ignoresSafeArea()
 
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 16) {
-                        Text("Trackers")
-                            .font(.title2)
-                            .fontWeight(.bold)
-                            .foregroundColor(.white)
-                            .padding(.horizontal)
-
-                        VStack(spacing: 12) {
-                            // Sync Toggle
-                            Toggle("Enable Sync", isOn: $trackerManager.trackerState.syncEnabled)
-                                .foregroundColor(.white)
-                                .padding()
-                                .background(Color.gray.opacity(0.2))
-                                .cornerRadius(12)
-
-                            // AniList Section
-                            trackerRow(
-                                service: .anilist,
-                                isConnected: trackerManager.trackerState.getAccount(for: .anilist) != nil,
-                                username: trackerManager.trackerState.getAccount(for: .anilist)?.username,
-                                onConnect: { trackerManager.startAniListAuth() },
-                                onDisconnect: { trackerManager.disconnectTracker(.anilist) }
-                            )
-
-                            // Trakt Section
-                            trackerRow(
-                                service: .trakt,
-                                isConnected: trackerManager.trackerState.getAccount(for: .trakt) != nil,
-                                username: trackerManager.trackerState.getAccount(for: .trakt)?.username,
-                                onConnect: { trackerManager.startTraktAuth() },
-                                onDisconnect: { trackerManager.disconnectTracker(.trakt) }
-                            )
-                        }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Trackers")
+                        .font(.title2)
+                        .fontWeight(.bold)
+                        .foregroundColor(.white)
                         .padding(.horizontal)
 
-                        if let error = trackerManager.authError {
-                            VStack {
-                                HStack {
-                                    Image(systemName: "exclamationmark.circle")
-                                        .foregroundColor(.orange)
-                                    Text(error)
-                                        .font(.caption)
-                                        .foregroundColor(.orange)
-                                }
-                            }
+                    VStack(spacing: 12) {
+                        // Sync Toggle
+                        Toggle("Enable Sync", isOn: $trackerManager.trackerState.syncEnabled)
+                            .foregroundColor(.white)
                             .padding()
-                            .background(Color.orange.opacity(0.1))
-                            .cornerRadius(8)
-                            .padding(.horizontal)
-                        }
+                            .background(Color.gray.opacity(0.2))
+                            .cornerRadius(12)
 
-                        Spacer()
+                        // AniList Section
+                        trackerRow(
+                            service: .anilist,
+                            isConnected: trackerManager.trackerState.getAccount(for: .anilist) != nil,
+                            username: trackerManager.trackerState.getAccount(for: .anilist)?.username,
+                            onConnect: { trackerManager.startAniListAuth() },
+                            onDisconnect: { trackerManager.disconnectTracker(.anilist) }
+                        )
+
+                        // Trakt Section
+                        trackerRow(
+                            service: .trakt,
+                            isConnected: trackerManager.trackerState.getAccount(for: .trakt) != nil,
+                            username: trackerManager.trackerState.getAccount(for: .trakt)?.username,
+                            onConnect: { trackerManager.startTraktAuth() },
+                            onDisconnect: { trackerManager.disconnectTracker(.trakt) }
+                        )
                     }
-                    .padding(.vertical)
+                    .padding(.horizontal)
+
+                    if let error = trackerManager.authError {
+                        VStack {
+                            HStack {
+                                Image(systemName: "exclamationmark.circle")
+                                    .foregroundColor(.orange)
+                                Text(error)
+                                    .font(.caption)
+                                    .foregroundColor(.orange)
+                            }
+                        }
+                        .padding()
+                        .background(Color.orange.opacity(0.1))
+                        .cornerRadius(8)
+                        .padding(.horizontal)
+                    }
+
+                    Spacer()
                 }
+                .padding(.vertical)
+                .frame(maxWidth: isIPad ? 700 : .infinity)
+                .frame(maxWidth: .infinity)
             }
-            #if !os(tvOS)
-            .navigationBarTitleDisplayMode(.inline)
-            #endif
         }
+        .navigationTitle("Trackers")
+        #if !os(tvOS)
+        .navigationBarTitleDisplayMode(.inline)
+        #endif
     }
 
     @ViewBuilder

@@ -45,7 +45,7 @@ struct MediaDetailView: View {
 #if os(tvOS)
         UIScreen.main.bounds.height * 0.8
 #else
-        550
+        isIPad ? 680 : 550
 #endif
     }
 
@@ -54,7 +54,7 @@ struct MediaDetailView: View {
 #if os(tvOS)
         UIScreen.main.bounds.height * 0.8
 #else
-        400
+        isIPad ? 500 : 400
 #endif
     }
 
@@ -327,7 +327,7 @@ struct MediaDetailView: View {
                     }
                     .resizable()
                     .aspectRatio(contentMode: .fit)
-                    .frame(maxWidth: 280, maxHeight: 100)
+                    .frame(maxWidth: isIPad ? 400 : 280, maxHeight: isIPad ? 140 : 100)
                     .shadow(color: .black.opacity(0.5), radius: 4, x: 0, y: 2)
             } else {
                 titleText

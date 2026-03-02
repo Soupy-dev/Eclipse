@@ -163,7 +163,7 @@ struct BookmarkItemCard: View {
                 }
                 .resizable()
                 .aspectRatio(2/3, contentMode: .fill)
-                .frame(width: 120, height: 180)
+                .frame(width: 120 * iPadScale, height: 180 * iPadScale)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .shadow(color: .black.opacity(0.1), radius: 3, x: 0, y: 1)
             
@@ -173,7 +173,7 @@ struct BookmarkItemCard: View {
                 .lineLimit(1)
                 .foregroundColor(.white)
         }
-        .frame(width: 120, alignment: .leading)
+        .frame(width: 120 * iPadScale, alignment: .leading)
     }
 }
 
@@ -184,7 +184,7 @@ struct CollectionCard: View {
         VStack(spacing: 8) {
             RoundedRectangle(cornerRadius: 12)
                 .fill(Color.gray.opacity(0.2))
-                .frame(width: 160, height: 160)
+                .frame(width: 160 * iPadScale, height: 160 * iPadScale)
                 .overlay(
                     collectionPreview
                 )
@@ -200,7 +200,7 @@ struct CollectionCard: View {
                     .font(.caption2)
                     .foregroundColor(.secondary)
             }
-            .frame(width: 160)
+            .frame(width: 160 * iPadScale)
         }
         .contextMenu {
             if collection.name != "Bookmarks" {
@@ -241,7 +241,7 @@ struct CollectionCard: View {
                 }
                 .resizable()
                 .aspectRatio(contentMode: .fill)
-                .frame(width: 160, height: 160)
+                .frame(width: 160 * iPadScale, height: 160 * iPadScale)
                 .id(single.id)
         } else {
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 2), count: 2), spacing: 2) {
@@ -258,7 +258,7 @@ struct CollectionCard: View {
                         }
                         .resizable()
                         .aspectRatio(contentMode: .fill)
-                        .frame(width: 78, height: 78)
+                        .frame(width: 78 * iPadScale, height: 78 * iPadScale)
                         .clipped()
                         .id(item.id)
                 }
@@ -266,7 +266,7 @@ struct CollectionCard: View {
                 ForEach(recentItems.count..<4, id: \.self) { _ in
                     Rectangle()
                         .fill(Color.gray.opacity(0.1))
-                        .frame(width: 78, height: 78)
+                        .frame(width: 78 * iPadScale, height: 78 * iPadScale)
                 }
             }
         }

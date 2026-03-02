@@ -48,7 +48,7 @@ struct EpisodeCell: View {
                         }
                         .resizable()
                         .aspectRatio(16/9, contentMode: .fill)
-                        .frame(width: 240, height: 135)
+                        .frame(width: 240 * iPadScaleSmall, height: 135 * iPadScaleSmall)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                     
                     if progressValue > 0 && progressValue < 0.85 {
@@ -60,7 +60,7 @@ struct EpisodeCell: View {
                                 .padding(.horizontal, 4)
                                 .padding(.bottom, 4)
                         }
-                        .frame(width: 240, height: 135)
+                        .frame(width: 240 * iPadScaleSmall, height: 135 * iPadScaleSmall)
                         .clipShape(RoundedRectangle(cornerRadius: 8))
                     }
 
@@ -136,7 +136,7 @@ struct EpisodeCell: View {
                             .multilineTextAlignment(.leading)
                     }
                 }
-                .frame(width: 240, alignment: .leading)
+                .frame(width: 240 * iPadScaleSmall, alignment: .leading)
             }
         }
         .buttonStyle(PlainButtonStyle())
@@ -174,7 +174,7 @@ struct EpisodeCell: View {
                         }
                         .resizable()
                         .aspectRatio(16/9, contentMode: .fill)
-                        .frame(width: 120, height: 68)
+                        .frame(width: 120 * iPadScaleSmall, height: 68 * iPadScaleSmall)
                         .clipShape(RoundedRectangle(cornerRadius: 10))
                     
                     if progressValue > 0 && progressValue < 0.85 {
@@ -186,7 +186,7 @@ struct EpisodeCell: View {
                                 .padding(.horizontal, 4)
                                 .padding(.bottom, 4)
                         }
-                        .frame(width: 120, height: 68)
+                        .frame(width: 120 * iPadScaleSmall, height: 68 * iPadScaleSmall)
                         .clipShape(RoundedRectangle(cornerRadius: 10))
                     }
 

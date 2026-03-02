@@ -237,12 +237,12 @@ struct ScheduleView: View {
                             .fill(Color.gray.opacity(0.2))
                     }
                     .aspectRatio(contentMode: .fill)
-                    .frame(width: 60, height: 85)
+                    .frame(width: 60 * iPadScaleSmall, height: 85 * iPadScaleSmall)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             } else {
                 Rectangle()
                     .fill(Color.gray.opacity(0.2))
-                    .frame(width: 60, height: 85)
+                    .frame(width: 60 * iPadScaleSmall, height: 85 * iPadScaleSmall)
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             

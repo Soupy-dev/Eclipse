@@ -119,6 +119,9 @@ final class DownloadManager: NSObject, ObservableObject {
         
         loadDownloads()
         
+        // Clean up orphaned files that aren't tracked in metadata
+        cleanOrphanedFiles()
+        
         // Resume any downloads that were marked as downloading (app was killed)
         resumeInterruptedDownloads()
     }
@@ -286,10 +289,47 @@ final class DownloadManager: NSObject, ObservableObject {
         }
     }
     
+    func deleteAllForShow(tmdbId: Int) {
+        let matchingIds = Set(downloads.filter { $0.tmdbId == tmdbId && $0.status == .completed }.map { $0.id })
+        guard !matchingIds.isEmpty else { return }
+
+        for item in downloads where matchingIds.contains(item.id) {
+            if let fileName = item.localFileName {
+                let fileURL = downloadsDirectory.appendingPathComponent(fileName)
+                try? fileManager.removeItem(at: fileURL)
+            }
+            if let subFile = item.subtitleFileName {
+                let subURL = downloadsDirectory.appendingPathComponent(subFile)
+                try? fileManager.removeItem(at: subURL)
+            }
+        }
+
+        DispatchQueue.main.async {
+            self.downloads.removeAll { matchingIds.contains($0.id) }
+            self.saveDownloads()
+        }
+    }
+
     func deleteAllCompleted() {
-        let completed = downloads.filter { $0.status == .completed }
-        for item in completed {
-            removeDownload(id: item.id, deleteFile: true)
+        let completedIds = Set(downloads.filter { $0.status == .completed }.map { $0.id })
+        guard !completedIds.isEmpty else { return }
+
+        // Delete files first
+        for item in downloads where completedIds.contains(item.id) {
+            if let fileName = item.localFileName {
+                let fileURL = downloadsDirectory.appendingPathComponent(fileName)
+                try? fileManager.removeItem(at: fileURL)
+            }
+            if let subFile = item.subtitleFileName {
+                let subURL = downloadsDirectory.appendingPathComponent(subFile)
+                try? fileManager.removeItem(at: subURL)
+            }
+        }
+
+        // Remove all completed items from the array in one pass
+        DispatchQueue.main.async {
+            self.downloads.removeAll { completedIds.contains($0.id) }
+            self.saveDownloads()
         }
     }
     
@@ -305,18 +345,17 @@ final class DownloadManager: NSObject, ObservableObject {
         activeHLSDownloaders.removeAll()
         resumeDataStore.removeAll()
         
-        DispatchQueue.main.async {
-            // Delete all files
-            for item in self.downloads {
-                if let fileName = item.localFileName {
-                    let fileURL = self.downloadsDirectory.appendingPathComponent(fileName)
-                    try? self.fileManager.removeItem(at: fileURL)
-                }
-                if let subFile = item.subtitleFileName {
-                    let subURL = self.downloadsDirectory.appendingPathComponent(subFile)
-                    try? self.fileManager.removeItem(at: subURL)
-                }
+        // Wipe the entire downloads directory to guarantee no orphans remain
+        let dir = downloadsDirectory
+        if let contents = try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
+            for fileURL in contents {
+                // Preserve the metadata JSON itself; it gets overwritten below
+                if fileURL.lastPathComponent == ".downloads_metadata.json" { continue }
+                try? fileManager.removeItem(at: fileURL)
             }
+        }
+        
+        DispatchQueue.main.async {
             self.downloads.removeAll()
             self.saveDownloads()
         }
@@ -625,6 +664,43 @@ final class DownloadManager: NSObject, ObservableObject {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             self.processQueue()
+        }
+    }
+    
+    // MARK: - Orphan Cleanup
+    
+    /// Removes any files in the downloads directory that are not referenced by a tracked download.
+    /// This catches files left behind by interrupted deletions, crashes, or code bugs.
+    private func cleanOrphanedFiles() {
+        let dir = downloadsDirectory
+        guard let contents = try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.fileSizeKey]) else { return }
+        
+        // Build set of all file names currently tracked
+        var trackedFileNames = Set<String>()
+        trackedFileNames.insert(".downloads_metadata.json")
+        for item in downloads {
+            if let f = item.localFileName { trackedFileNames.insert(f) }
+            if let s = item.subtitleFileName { trackedFileNames.insert(s) }
+        }
+        
+        var removedCount = 0
+        var freedBytes: Int64 = 0
+        for fileURL in contents {
+            let name = fileURL.lastPathComponent
+            if !trackedFileNames.contains(name) {
+                if let attrs = try? fileManager.attributesOfItem(atPath: fileURL.path),
+                   let size = attrs[.size] as? Int64 {
+                    freedBytes += size
+                }
+                try? fileManager.removeItem(at: fileURL)
+                removedCount += 1
+            }
+        }
+        
+        if removedCount > 0 {
+            let formatter = ByteCountFormatter()
+            formatter.countStyle = .file
+            Logger.shared.log("Cleaned \(removedCount) orphaned file(s), freed \(formatter.string(fromByteCount: freedBytes))", type: "Download")
         }
     }
     

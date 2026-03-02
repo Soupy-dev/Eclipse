@@ -29,13 +29,58 @@ class ServiceManager: ObservableObject {
     @Published var downloadProgress: Double = 0.0
     @Published var downloadMessage: String = ""
 
+    /// UserDefaults keys for auto-update
+    private static let autoUpdateEnabledKey = "autoUpdateServicesEnabled"
+    private static let lastAutoUpdateKey = "lastServiceAutoUpdateTimestamp"
+    /// Minimum interval between auto-updates (1 hour)
+    private static let autoUpdateInterval: TimeInterval = 3600
+
+    var isAutoUpdateEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.autoUpdateEnabledKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.autoUpdateEnabledKey) }
+    }
+
+    /// Register default values so auto-update is on for new installs
+    private static func registerDefaults() {
+        UserDefaults.standard.register(defaults: [
+            autoUpdateEnabledKey: true
+        ])
+    }
+
+    private var lastAutoUpdateDate: Date? {
+        get {
+            let timestamp = UserDefaults.standard.double(forKey: Self.lastAutoUpdateKey)
+            return timestamp > 0 ? Date(timeIntervalSince1970: timestamp) : nil
+        }
+        set {
+            UserDefaults.standard.set(newValue?.timeIntervalSince1970 ?? 0, forKey: Self.lastAutoUpdateKey)
+        }
+    }
+
     private init() {
+        Self.registerDefaults()
         loadServicesFromCloud()
     }
 
     // MARK: - Public Functions
 
     let delay: UInt64 = 300_000_000 // 300ms
+
+    /// Automatically updates services if auto-update is enabled and enough time has passed.
+    /// Call this on app launch / foreground.
+    func autoUpdateServicesIfNeeded() async {
+        guard isAutoUpdateEnabled, !services.isEmpty, !isDownloading else { return }
+
+        if let last = lastAutoUpdateDate, Date().timeIntervalSince(last) < Self.autoUpdateInterval {
+            Logger.shared.log("Skipping auto-update, last update was \(Int(Date().timeIntervalSince(last)))s ago", type: "ServiceManager")
+            return
+        }
+
+        Logger.shared.log("Starting automatic service update", type: "ServiceManager")
+        await updateServices()
+        lastAutoUpdateDate = Date()
+        Logger.shared.log("Automatic service update completed", type: "ServiceManager")
+    }
 
     func updateServices() async {
         guard !services.isEmpty else { return }

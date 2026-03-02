@@ -47,15 +47,13 @@ struct SearchView: View {
     
     private var columnsCount: Int {
         if UIDevice.current.userInterfaceIdiom == .pad {
-            guard
-                let screen = UIApplication.shared.connectedScenes
-                    .compactMap({ ($0 as? UIWindowScene)?.screen })
-                    .first
-            else {
-                fatalError("⚠️ No active screen found — app may not have a visible window yet.")
-            }
-            
-            let isLandscape = screen.bounds.width > screen.bounds.height
+            let screenWidth = UIApplication.shared.connectedScenes
+                .compactMap({ ($0 as? UIWindowScene)?.screen })
+                .first?.bounds.width ?? 1024
+
+            let isLandscape = screenWidth > (UIApplication.shared.connectedScenes
+                .compactMap({ ($0 as? UIWindowScene)?.screen })
+                .first?.bounds.height ?? 768)
             return isLandscape ? mediaColumnsLandscape : mediaColumnsPortrait
         } else {
             return verticalSizeClass == .compact ? mediaColumnsLandscape : mediaColumnsPortrait
@@ -490,7 +488,7 @@ struct ServiceSearchResultCard: View {
                 }
                 .resizable()
                 .aspectRatio(2/3, contentMode: .fill)
-                .frame(height: 180)
+                .frame(height: 180 * iPadScale)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
             

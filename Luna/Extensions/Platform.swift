@@ -7,6 +7,29 @@
 
 import SwiftUI
 
+// MARK: - iPad Scaling Utilities
+
+/// Returns `true` when running on an iPad (or Mac Catalyst with iPad idiom).
+var isIPad: Bool {
+    #if os(iOS)
+        UIDevice.current.userInterfaceIdiom == .pad
+    #else
+        false
+    #endif
+}
+
+/// A multiplier used to proportionally scale hard-coded dimensions on iPad.
+/// iPhone ≈ 1.0, iPad ≈ 1.45.
+var iPadScale: CGFloat {
+    isIPad ? 1.45 : 1.0
+}
+
+/// A smaller multiplier for elements that should grow on iPad but not as
+/// aggressively (e.g. episode thumbnails, spacing).
+var iPadScaleSmall: CGFloat {
+    isIPad ? 1.25 : 1.0
+}
+
 extension View {
     @ViewBuilder
     func tvos<Content: View, ElseContent: View>(

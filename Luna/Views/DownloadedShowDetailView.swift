@@ -85,7 +85,7 @@ struct DownloadedShowDetailView: View {
                 }
                 .resizable()
                 .aspectRatio(2/3, contentMode: .fill)
-                .frame(width: 120, height: 180)
+                .frame(width: 120 * iPadScaleSmall, height: 180 * iPadScaleSmall)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
                 .shadow(radius: 8)
             
