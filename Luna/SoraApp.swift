@@ -8,11 +8,13 @@
 import SwiftUI
 
 class AppDelegate: NSObject, UIApplicationDelegate {
+#if !os(tvOS)
     static var orientationLock: UIInterfaceOrientationMask = .all
 
     func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
         return AppDelegate.orientationLock
     }
+#endif
 
     func application(_ application: UIApplication,
                      handleEventsForBackgroundURLSession identifier: String,
