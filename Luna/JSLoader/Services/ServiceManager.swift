@@ -102,10 +102,24 @@ class ServiceManager: ObservableObject {
                 let metadata = try await downloadAndParseMetadata(from: service.url)
                 try? await Task.sleep(nanoseconds: delay)
 
+                // Skip update if the version hasn't changed
+                if metadata.version == service.metadata.version {
+                    Logger.shared.log("Service \(service.metadata.sourceName) is already up to date (v\(metadata.version))", type: "ServiceManager")
+                    completed += 1
+                    downloadProgress = completed / total
+                    continue
+                }
+
                 // Download JavaScript
                 await updateProgress(downloadProgress + 0.5 / total, "Downloading JavaScript for \(service.metadata.sourceName)...")
-                let jsContent = try await downloadJavaScript(from: metadata.scriptUrl)
+                var jsContent = try await downloadJavaScript(from: metadata.scriptUrl)
                 try? await Task.sleep(nanoseconds: delay)
+
+                // Preserve user-modified settings from the existing script
+                let existingSettings = parseSettingsFromJS(service.jsScript)
+                if !existingSettings.isEmpty {
+                    jsContent = updateSettingsInJS(jsContent, with: existingSettings)
+                }
 
                 // Save service using existing ID
                 ServiceStore.shared.storeService(
@@ -116,7 +130,7 @@ class ServiceManager: ObservableObject {
                     isActive: service.isActive
                 )
 
-                Logger.shared.log("Service \(service.metadata.sourceName) updated successfully", type: "ServiceManager")
+                Logger.shared.log("Service \(service.metadata.sourceName) updated to v\(metadata.version)", type: "ServiceManager")
             } catch {
                 Logger.shared.log("Failed to update service \(service.metadata.sourceName): \(error.localizedDescription)", type: "ServiceManager")
             }
