@@ -54,17 +54,11 @@ struct ServicesView: View {
             .refreshable {
                 await serviceManager.updateServices()
             }
-            .alert("Add Service", isPresented: $showDownloadAlert) {
-                TextField("JSON URL", text: $downloadURL)
-                Button("Cancel", role: .cancel) {
-                    downloadURL = ""
-                }
-                Button("Add") {
-                    downloadServiceFromURL()
-                }
-            } message: {
-                Text("Enter the direct JSON file URL")
-            }
+            .modifier(AddServiceInputModifier(
+                isPresented: $showDownloadAlert,
+                downloadURL: $downloadURL,
+                onAdd: { downloadServiceFromURL() }
+            ))
             .alert("Service Downloaded", isPresented: $showServiceDownloadAlert) {
                 Button("OK") { }
             } message: {
@@ -227,6 +221,65 @@ struct ServiceRow: View {
         }
         .sheet(isPresented: $showingSettings) {
             ServiceSettingsView(service: service, serviceManager: serviceManager)
+        }
+    }
+}
+
+// MARK: - iOS 15 compatible Add Service input
+
+private struct AddServiceInputModifier: ViewModifier {
+    @Binding var isPresented: Bool
+    @Binding var downloadURL: String
+    var onAdd: () -> Void
+
+    func body(content: Content) -> some View {
+        if #available(iOS 16, *) {
+            content
+                .alert("Add Service", isPresented: $isPresented) {
+                    TextField("JSON URL", text: $downloadURL)
+                    Button("Cancel", role: .cancel) {
+                        downloadURL = ""
+                    }
+                    Button("Add") {
+                        onAdd()
+                    }
+                } message: {
+                    Text("Enter the direct JSON file URL")
+                }
+        } else {
+            content
+                .sheet(isPresented: $isPresented) {
+                    NavigationView {
+                        Form {
+                            Section {
+                                TextField("JSON URL", text: $downloadURL)
+                                    .autocapitalization(.none)
+                                    .disableAutocorrection(true)
+                            } header: {
+                                Text("Enter the direct JSON file URL")
+                            }
+                        }
+                        .navigationTitle("Add Service")
+                        #if !os(tvOS)
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Cancel") {
+                                    downloadURL = ""
+                                    isPresented = false
+                                }
+                            }
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("Add") {
+                                    isPresented = false
+                                    onAdd()
+                                }
+                                .disabled(downloadURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            }
+                        }
+                        #endif
+                    }
+                }
         }
     }
 }
