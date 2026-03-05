@@ -274,7 +274,6 @@ private struct AddServiceInputModifier: ViewModifier {
                                     isPresented = false
                                     onAdd()
                                 }
-                                .disabled(downloadURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                             }
                         }
                         #endif
