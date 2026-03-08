@@ -44,6 +44,22 @@ struct ServicesView: View {
                                 editMode?.wrappedValue == .active ? "checkmark" : "pencil")
                     }
                 }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Menu {
+                        Button {
+                            showDownloadAlert = true
+                        } label: {
+                            Label("Add Service", systemImage: "doc.badge.plus")
+                        }
+                        Button {
+                            showStremioAddAlert = true
+                        } label: {
+                            Label("Add Stremio Addon", systemImage: "play.circle")
+                        }
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                }
             }
 #endif
             .refreshable {
@@ -149,27 +165,7 @@ struct ServicesView: View {
 
     @ViewBuilder
     private var unifiedSectionHeader: some View {
-        HStack {
-            Text("Services & Addons")
-            Spacer()
-            if editMode?.wrappedValue != .active {
-                Menu {
-                    Button {
-                        showDownloadAlert = true
-                    } label: {
-                        Label("Add Service", systemImage: "doc.badge.plus")
-                    }
-                    Button {
-                        showStremioAddAlert = true
-                    } label: {
-                        Label("Add Stremio Addon", systemImage: "play.circle")
-                    }
-                } label: {
-                    Image(systemName: "plus.circle")
-                        .font(.caption)
-                }
-            }
-        }
+        Text("Services & Addons")
     }
 
     private func deleteUnifiedItems(offsets: IndexSet) {
