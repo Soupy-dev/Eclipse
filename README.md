@@ -21,4 +21,4 @@ Notes:
 
 I have 650+ workflows it took a long time. Paul helped test. VLC and this Luna in general has come a long way. There are likely minor issues with VLC that can't be fixed/smoothed without v4."
 
-Why did I close the PR? Wouldn't this be great for users? I agree. But to not stoop low, I'll just say that things got a bit rough, I would be open to making another pr. Also fleshed out manga mode in the app, not pretty but hey it works now
+I would be open to making another pr. Also fleshed out manga mode in the app, not pretty but hey it works now
