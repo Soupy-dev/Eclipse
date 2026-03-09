@@ -401,6 +401,10 @@ private struct AddServiceInputModifier: ViewModifier {
 struct StremioAddonRow: View {
     let addon: StremioAddon
     @ObservedObject var manager: StremioAddonManager
+    @State private var showReconfigure = false
+    @State private var reconfigureURL = ""
+    @State private var reconfigureError: String?
+    @State private var showReconfigureError = false
 
     private var isAddonActive: Bool {
         if let managed = manager.addons.first(where: { $0.id == addon.id }) {
@@ -476,6 +480,43 @@ struct StremioAddonRow: View {
                 manager.setAddonState(addon, isActive: !isAddonActive)
             }
         }
+        .contextMenu {
+            Button {
+                reconfigureURL = addon.configuredURL
+                showReconfigure = true
+            } label: {
+                Label("Reconfigure", systemImage: "gearshape")
+            }
+        }
+        .modifier(ReconfigureStremioAddonModifier(
+            isPresented: $showReconfigure,
+            addonURL: $reconfigureURL,
+            onReconfigure: { reconfigureAddon() }
+        ))
+        .alert("Reconfigure Error", isPresented: $showReconfigureError) {
+            Button("OK", role: .cancel) { reconfigureError = nil }
+        } message: {
+            if let error = reconfigureError {
+                Text(error)
+            }
+        }
+    }
+
+    private func reconfigureAddon() {
+        guard !reconfigureURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        Task {
+            do {
+                try await manager.reconfigureAddon(addon, newURL: reconfigureURL)
+                await MainActor.run {
+                    reconfigureURL = ""
+                }
+            } catch {
+                await MainActor.run {
+                    reconfigureError = error.localizedDescription
+                    showReconfigureError = true
+                }
+            }
+        }
     }
 }
 
@@ -527,6 +568,64 @@ private struct AddStremioAddonInputModifier: ViewModifier {
                                 Button("Add") {
                                     isPresented = false
                                     onAdd()
+                                }
+                            }
+                        }
+                        #endif
+                    }
+                }
+        }
+    }
+}
+
+// MARK: - iOS 15 compatible Reconfigure Stremio Addon input
+
+private struct ReconfigureStremioAddonModifier: ViewModifier {
+    @Binding var isPresented: Bool
+    @Binding var addonURL: String
+    var onReconfigure: () -> Void
+
+    func body(content: Content) -> some View {
+        if #available(iOS 16, *) {
+            content
+                .alert("Reconfigure Addon", isPresented: $isPresented) {
+                    TextField("New Addon URL", text: $addonURL)
+                    Button("Cancel", role: .cancel) {
+                        addonURL = ""
+                    }
+                    Button("Save") {
+                        onReconfigure()
+                    }
+                } message: {
+                    Text("Paste the new configured addon URL")
+                }
+        } else {
+            content
+                .sheet(isPresented: $isPresented) {
+                    NavigationView {
+                        Form {
+                            Section {
+                                TextField("New Addon URL", text: $addonURL)
+                                    .autocapitalization(.none)
+                                    .disableAutocorrection(true)
+                            } header: {
+                                Text("Paste the new configured addon URL")
+                            }
+                        }
+                        .navigationTitle("Reconfigure Addon")
+                        #if !os(tvOS)
+                        .navigationBarTitleDisplayMode(.inline)
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Cancel") {
+                                    addonURL = ""
+                                    isPresented = false
+                                }
+                            }
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("Save") {
+                                    isPresented = false
+                                    onReconfigure()
                                 }
                             }
                         }

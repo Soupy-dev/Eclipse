@@ -90,6 +90,37 @@ class StremioAddonManager: ObservableObject {
         loadAddons()
     }
 
+    // MARK: - Reconfigure
+
+    func reconfigureAddon(_ addon: StremioAddon, newURL: String) async throws {
+        let manifest = try await StremioClient.shared.fetchManifest(from: newURL)
+
+        guard manifest.supportsStreams else {
+            throw StremioAddonError.noStreamSupport
+        }
+
+        var configuredURL = newURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if configuredURL.hasSuffix("/manifest.json") {
+            configuredURL = String(configuredURL.dropLast("/manifest.json".count))
+        }
+        if configuredURL.hasSuffix("/") {
+            configuredURL = String(configuredURL.dropLast())
+        }
+
+        let manifestData = try JSONEncoder().encode(manifest)
+        let manifestJSON = String(data: manifestData, encoding: .utf8) ?? ""
+
+        StremioAddonStore.shared.storeAddon(
+            id: addon.id,
+            configuredURL: configuredURL,
+            manifestJSON: manifestJSON,
+            isActive: addon.isActive
+        )
+
+        loadAddons()
+        Logger.shared.log("Stremio: Reconfigured addon '\(manifest.name)' (\(manifest.id))", type: "Stremio")
+    }
+
     // MARK: - Reorder
 
     func moveAddons(fromOffsets: IndexSet, toOffset: Int) {
