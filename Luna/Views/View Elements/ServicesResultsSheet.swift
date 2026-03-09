@@ -260,10 +260,40 @@ struct ModulesSearchResultsSheet: View {
         }
     }
     
+    private enum ResultItem: Identifiable {
+        case service(Service)
+        case stremio(StremioAddon)
+
+        var id: UUID {
+            switch self {
+            case .service(let s): return s.id
+            case .stremio(let a): return a.id
+            }
+        }
+
+        var sortIndex: Int64 {
+            switch self {
+            case .service(let s): return s.sortIndex
+            case .stremio(let a): return a.sortIndex
+            }
+        }
+    }
+
+    private var sortedResultItems: [ResultItem] {
+        let services: [ResultItem] = serviceManager.activeServices.map { .service($0) }
+        let addons: [ResultItem] = stremioManager.activeAddons.map { .stremio($0) }
+        return (services + addons).sorted { $0.sortIndex < $1.sortIndex }
+    }
+
     @ViewBuilder
-    private var servicesResultsSection: some View {
-        ForEach(Array(serviceManager.activeServices.enumerated()), id: \.element.id) { index, service in
-            serviceSection(service: service)
+    private var unifiedResultsSections: some View {
+        ForEach(sortedResultItems) { item in
+            switch item {
+            case .service(let service):
+                serviceSection(service: service)
+            case .stremio(let addon):
+                stremioAddonSection(addon: addon)
+            }
         }
     }
     
@@ -601,10 +631,7 @@ struct ModulesSearchResultsSheet: View {
                 if serviceManager.activeServices.isEmpty && stremioManager.activeAddons.isEmpty {
                     noActiveServicesSection
                 } else {
-                    if !serviceManager.activeServices.isEmpty {
-                        servicesResultsSection
-                    }
-                    stremioResultsSection
+                    unifiedResultsSections
                 }
             }
             .navigationTitle(downloadMode ? "Download Source" : "Services Result")
@@ -897,13 +924,6 @@ struct ModulesSearchResultsSheet: View {
     }
 
     // MARK: - Stremio Results Section
-
-    @ViewBuilder
-    private var stremioResultsSection: some View {
-        ForEach(stremioManager.activeAddons, id: \.id) { addon in
-            stremioAddonSection(addon: addon)
-        }
-    }
 
     @ViewBuilder
     private func stremioAddonSection(addon: StremioAddon) -> some View {
