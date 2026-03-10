@@ -402,7 +402,7 @@ extension JSContext
     
     // MARK: - Novel Base64 Functions
     
-    func setupBase64Functions()
+    func setupNovelBase64Functions()
     {
         let btoaFunction: @convention(block) (String) -> String? = { data in
             guard let data = data.data(using: .utf8) else { return nil }
@@ -418,7 +418,7 @@ extension JSContext
     
     // MARK: - Novel Scraping Utilities
     
-    func setupScrapingUtilities()
+    func setupNovelScrapingUtilities()
     {
         let scrapingUtils = """
         function getElementsByTag(html, tag) {
@@ -477,8 +477,8 @@ extension JSContext
         setUpNovelConsole()
         setUpNovelFetch()
         setUpNovelFetchV2()
-        setupBase64Functions()
-        setupScrapingUtilities()
+        setupNovelBase64Functions()
+        setupNovelScrapingUtilities()
         setupBundle()
         setupTimeOut()
     }
