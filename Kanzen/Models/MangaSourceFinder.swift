@@ -107,6 +107,7 @@ final class MangaSourceFinder: ObservableObject {
         do {
             let script = try ModuleManager.shared.getModuleScript(module: module)
             let isNovel = module.moduleData.novel == true
+            Logger.shared.log("SourceFinder.searchModule: loading '\(module.moduleData.sourceName)', isNovel=\(isNovel)", type: "Debug")
             try engine.loadScript(script, isNovel: isNovel)
         } catch {
             Logger.shared.log("SourceFinder: Failed to load module \(module.moduleData.sourceName): \(error.localizedDescription)", type: "Error")

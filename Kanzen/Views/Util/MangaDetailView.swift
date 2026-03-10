@@ -674,7 +674,9 @@ struct MangaDetailView: View {
         do {
             let script = try ModuleManager.shared.getModuleScript(module: match.module)
             let isNovel = match.module.moduleData.novel == true
+            Logger.shared.log("MangaDetail.selectSource: loading module '\(match.module.moduleData.sourceName)', isNovel=\(isNovel)", type: "Debug")
             try engine.loadScript(script, isNovel: isNovel)
+            Logger.shared.log("MangaDetail.selectSource: module loaded successfully", type: "Debug")
         } catch {
             loadingChapters = false
             chapterLoadError = "Failed to load module: \(error.localizedDescription)"
