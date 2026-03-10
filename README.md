@@ -17,6 +17,7 @@ Features added:
 13: VLC does have subtitle editing. But I just removed pip. I went through many implementations and spent a bunch of time. But VLC just isn't ready for pip, waiting for VLC v4 for better stability and native pip is the best call. I've pretty much pushed VLC as far as it can go.
 14: Manga mode completed (ugly ui lowkey but I ain't a designer)
 15: Stremio addon support (only ones that return streams, dw they work with downloads and act mostly like regular services)
+16: LN support
 
 Notes:
 
