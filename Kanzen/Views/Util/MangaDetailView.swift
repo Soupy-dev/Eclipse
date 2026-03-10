@@ -687,22 +687,41 @@ struct MangaDetailView: View {
             DispatchQueue.main.async {
                 if let result = result {
                     var parsed: [Chapters] = []
-                    for (key, value) in result {
-                        var chapterList: [Chapter] = []
-                        if let chapters = value as? [Any?] {
-                            for (idx, chapter) in chapters.enumerated() {
-                                if let chapter = chapter as? [Any?],
-                                   let name = chapter[0] as? String,
-                                   let rawData = chapter[1] as? [[String: Any]],
-                                   let data = rawData.compactMap({ ChapterData(dict: $0) }) as? [ChapterData] {
-                                    chapterList.append(Chapter(chapterNumber: name, idx: idx, chapterData: data))
+
+                    if let dictResult = result as? [String: Any] {
+                        // Kanzen format: {language: [[chapterName, [{scanlation_group, id}]]]}
+                        for (key, value) in dictResult {
+                            var chapterList: [Chapter] = []
+                            if let chapters = value as? [Any?] {
+                                for (idx, chapter) in chapters.enumerated() {
+                                    if let chapter = chapter as? [Any?],
+                                       let name = chapter[0] as? String,
+                                       let rawData = chapter[1] as? [[String: Any]],
+                                       let data = rawData.compactMap({ ChapterData(dict: $0) }) as? [ChapterData] {
+                                        chapterList.append(Chapter(chapterNumber: name, idx: idx, chapterData: data))
+                                    }
                                 }
+                            }
+                            if !chapterList.isEmpty {
+                                parsed.append(Chapters(language: key, chapters: chapterList))
+                            }
+                        }
+                    } else if let arrResult = result as? [[String: Any]] {
+                        // Sora format: [{number, title, href}, ...]
+                        var chapterList: [Chapter] = []
+                        for (idx, chapterDict) in arrResult.enumerated() {
+                            let name = (chapterDict["number"] as? Int).map { String($0) }
+                                ?? (chapterDict["title"] as? String)
+                                ?? "Chapter \(idx + 1)"
+                            if let data = ChapterData(dict: chapterDict) {
+                                chapterList.append(Chapter(chapterNumber: name, idx: idx, chapterData: [data]))
                             }
                         }
                         if !chapterList.isEmpty {
-                            parsed.append(Chapters(language: key, chapters: chapterList))
+                            parsed.append(Chapters(language: "default", chapters: chapterList))
                         }
                     }
+
                     self.loadedChapters = parsed
                 } else {
                     self.loadedChapters = []

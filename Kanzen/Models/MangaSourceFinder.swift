@@ -200,12 +200,17 @@ final class MangaSourceFinder: ObservableObject {
             engine.extractChapters(params: candidate.manga.mangaId) { result in
                 var chapterCount: Int? = nil
                 if let result = result {
-                    // Count total chapters across all languages
                     var total = 0
-                    for (_, value) in result {
-                        if let chapters = value as? [Any?] {
-                            total += chapters.count
+                    if let dictResult = result as? [String: Any] {
+                        // Kanzen format: count chapters across all languages
+                        for (_, value) in dictResult {
+                            if let chapters = value as? [Any?] {
+                                total += chapters.count
+                            }
                         }
+                    } else if let arrResult = result as? [[String: Any]] {
+                        // Sora format: flat array of chapter dicts
+                        total = arrResult.count
                     }
                     if total > 0 {
                         chapterCount = total

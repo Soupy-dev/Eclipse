@@ -59,13 +59,21 @@ struct ChapterData: Identifiable
     let params: Any?
     init?(dict: [String:Any])
     {
-        print("dicts are")
-        print(dict)
-        guard let scanlationGroup = dict["scanlation_group"] as? String, let params = dict["id"] else { return nil }
-        
-        self.scanlationGroup = scanlationGroup
-        self.params = params
-        self.title = dict["title"] as? String ?? ""
+        // Kanzen format: requires scanlation_group and id
+        if let scanlationGroup = dict["scanlation_group"] as? String, let params = dict["id"] {
+            self.scanlationGroup = scanlationGroup
+            self.params = params
+            self.title = dict["title"] as? String ?? ""
+            return
+        }
+        // Sora format: uses href as params
+        if let href = dict["href"] as? String {
+            self.params = href
+            self.title = dict["title"] as? String ?? ""
+            self.scanlationGroup = ""
+            return
+        }
+        return nil
     }
 }
 

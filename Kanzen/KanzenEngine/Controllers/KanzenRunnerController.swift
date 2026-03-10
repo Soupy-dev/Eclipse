@@ -31,16 +31,27 @@ class KanzenRunnerController {
         }
     }
     
-    func extractChapters(params:Any, completion: @escaping ([String:Any]?) -> Void )
+    func extractChapters(params:Any, completion: @escaping (Any?) -> Void )
     {
         moduleRunner.extractChapters(params: params){
             jsResult, error in
-            guard let result = jsResult?.toDictionary() as? [String:Any] else
-            {
-                completion(nil)
+            // Try dictionary first (Kanzen format: {language: [[name, [data...]]]})
+            if let result = jsResult?.toDictionary() as? [String:Any] {
+                completion(result)
                 return
             }
-            completion(result)
+            // Try array (Sora format: [{number, title, href}, ...])
+            if let result = jsResult?.toArray() as? [[String:Any]] {
+                completion(result)
+                return
+            }
+            // Try JSON string fallback
+            if let jsonString = jsResult?.toString(), let data = jsonString.data(using: .utf8),
+               let parsed = try? JSONSerialization.jsonObject(with: data) {
+                completion(parsed)
+                return
+            }
+            completion(nil)
         }
     }
     

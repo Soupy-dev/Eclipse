@@ -36,7 +36,7 @@ class KanzenEngine: ObservableObject
         }
     }
     
-    func extractChapters(params: Any, completion: @escaping ([String:Any]?)-> Void)
+    func extractChapters(params: Any, completion: @escaping (Any?)-> Void)
     {
         controller.extractChapters(params: params){
             result in
