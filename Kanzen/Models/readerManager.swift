@@ -69,6 +69,7 @@ var nextControllers: [UIViewController]?
     func resetState()
     {
         cancelAllLoadPagesTasks()
+        index = 0
         prevChapter = []
         currChapter = []
         nextChapter = []

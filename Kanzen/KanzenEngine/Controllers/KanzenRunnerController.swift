@@ -23,11 +23,25 @@ class KanzenRunnerController {
         moduleRunner.extractImages(params: params)
         {
             jsResult, error in
-            guard let result = jsResult?.toArray() as? [String] else {
+            guard let jsValue = jsResult else {
                 completion(nil)
                 return
             }
-            completion(result)
+
+            if let result = jsValue.toArray() as? [String] {
+                completion(result)
+                return
+            }
+
+            // Novel modules may return a JSON string
+            if jsValue.isString, let jsonString = jsValue.toString(),
+               let data = jsonString.data(using: .utf8),
+               let parsed = try? JSONSerialization.jsonObject(with: data) as? [String] {
+                completion(parsed)
+                return
+            }
+
+            completion(nil)
         }
     }
     
@@ -85,12 +99,25 @@ class KanzenRunnerController {
         moduleRunner.extractDetails(params: params)
         {
             jsResult, error in
-            guard let result = jsResult?.toDictionary() as? [String:Any] else
-            {
+            guard let jsValue = jsResult else {
                 completion(nil)
                 return
             }
-            completion(result)
+
+            if let result = jsValue.toDictionary() as? [String:Any] {
+                completion(result)
+                return
+            }
+
+            // Novel modules may return a JSON string
+            if jsValue.isString, let jsonString = jsValue.toString(),
+               let data = jsonString.data(using: .utf8),
+               let parsed = try? JSONSerialization.jsonObject(with: data) as? [String:Any] {
+                completion(parsed)
+                return
+            }
+
+            completion(nil)
         }
     }
     
@@ -127,12 +154,27 @@ class KanzenRunnerController {
         moduleRunner.searchResults(input: _input,page: page)
         {
             jsResult,error in
-            guard let result = jsResult?.toArray() as? [[String:Any]] else {
+            guard let jsValue = jsResult else {
                 completion(nil)
                 return
             }
-            completion(result)
-            
+
+            // If the Promise resolved with a JS array, convert directly
+            if let result = jsValue.toArray() as? [[String:Any]] {
+                completion(result)
+                return
+            }
+
+            // Novel modules may return a JSON string instead of a JS array;
+            // parse it in Swift so .toArray() isn't called on a primitive.
+            if jsValue.isString, let jsonString = jsValue.toString(),
+               let data = jsonString.data(using: .utf8),
+               let parsed = try? JSONSerialization.jsonObject(with: data) as? [[String:Any]] {
+                completion(parsed)
+                return
+            }
+
+            completion(nil)
         }
     }
 }
