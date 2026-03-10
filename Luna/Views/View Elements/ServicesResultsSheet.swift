@@ -898,8 +898,10 @@ struct ModulesSearchResultsSheet: View {
         viewModel.isSearchingStremio = true
 
         let type = isMovie ? "movie" : "series"
-        let season = selectedEpisode?.seasonNumber
-        let episode = selectedEpisode?.episodeNumber
+        // For anime, AniList restructuring remaps season/episode numbers.
+        // Stremio addons index by the original TMDB numbering, so prefer those.
+        let season = originalTMDBSeasonNumber ?? selectedEpisode?.seasonNumber
+        let episode = originalTMDBEpisodeNumber ?? selectedEpisode?.episodeNumber
 
         Task {
             await stremioManager.fetchStreamsFromAddons(
