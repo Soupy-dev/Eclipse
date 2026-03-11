@@ -43,7 +43,7 @@ struct KanzenHistoryView: View {
                                         .scaledToFill()
                                         .frame(width: 50, height: 75)
                                         .clipped()
-                                        .cornerRadius(6)
+                                        .cornerRadius(12)
 
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text(item.progress.title ?? "Unknown Manga")
@@ -69,10 +69,12 @@ struct KanzenHistoryView: View {
                         }
                     }
                     .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
                 }
             }
             .navigationTitle("History")
             .navigationBarTitleDisplayMode(.large)
+            .background(LunaTheme.shared.backgroundBase.ignoresSafeArea())
         }
     }
 

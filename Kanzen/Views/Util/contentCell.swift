@@ -78,7 +78,8 @@ struct contentCell: View {
         }
         .frame(maxWidth: 150)
         .frame(height: 150 * 1.5)
-        .cornerRadius(5)
+        .cornerRadius(16)
+        .shadow(color: .black.opacity(0.25), radius: 8, x: 0, y: 4)
         
         
         

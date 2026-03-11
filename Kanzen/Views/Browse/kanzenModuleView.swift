@@ -32,7 +32,7 @@ struct KanzenModuleView: View {
     var body: some View {
         
         ZStack{
-            Color(UIColor.systemGroupedBackground)
+            LunaTheme.shared.backgroundBase
                 .ignoresSafeArea()
                  Form
                  {
@@ -117,10 +117,10 @@ struct KanzenModuleView: View {
                              .frame(maxWidth: .infinity,alignment: .center)
                              .shadow(color: .black.opacity(selectedModule ? 0.4 : 0.2), radius: selectedModule ? 10 : 4)
                              
-                             .clipShape(RoundedRectangle(cornerRadius: 12))
+                             .clipShape(RoundedRectangle(cornerRadius: 16))
                              
                              .overlay(
-                                 RoundedRectangle(cornerRadius: 12)
+                                 RoundedRectangle(cornerRadius: 16)
                                      .stroke(Color.accentColor.opacity(selectedModule ? 1 : 0), lineWidth: selectedModule ? 5 : 0)
                              )
                             
@@ -141,8 +141,8 @@ struct KanzenModuleView: View {
                  }
                  
                  // Remove default list styling
-                 //.scrollContentBackground(.hidden) // hides default form background
-                 .background(Color(.systemGroupedBackground))
+                 .scrollContentBackground(.hidden)
+                 .background(LunaTheme.shared.backgroundBase)
              .navigationTitle("Modules")
              .navigationBarTitleDisplayMode(.inline)
              .frame(maxWidth: .infinity,alignment: .center)

@@ -115,7 +115,7 @@ struct readerManagerView:View {
                             .font(.body.bold())
                             .foregroundColor(.white)
                             .frame(width: 30, height: 30)
-                            .background(Color.white.opacity(0.2))
+                            .background(Color.white.opacity(0.12))
                             .clipShape(Circle())
                     }
                 }
@@ -192,7 +192,7 @@ struct readerManagerView:View {
                     }
                     .padding(.horizontal, 14)
                     .padding(.vertical, 8)
-                    .background(Color.white.opacity(0.15))
+                    .background(Color.white.opacity(0.10))
                     .cornerRadius(20)
                 }
                 .padding(.horizontal, 16)

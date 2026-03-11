@@ -83,6 +83,7 @@ struct MangaDetailView: View {
         }
         .navigationTitle(manga.displayTitle)
         .navigationBarTitleDisplayMode(.inline)
+        .background(LunaTheme.shared.backgroundBase.ignoresSafeArea())
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
@@ -168,7 +169,7 @@ struct MangaDetailView: View {
                 .scaledToFill()
                 .frame(width: coverWidth, height: coverWidth * 1.5)
                 .clipped()
-                .cornerRadius(8)
+                .cornerRadius(16)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(manga.displayTitle)
@@ -655,7 +656,7 @@ struct MangaDetailView: View {
                 .padding(.vertical, 12)
                 .foregroundColor(.white)
                 .background(Color.accentColor)
-                .cornerRadius(10)
+                .cornerRadius(16)
             }
             .buttonStyle(.plain)
         }

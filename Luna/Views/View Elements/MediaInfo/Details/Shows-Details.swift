@@ -93,7 +93,7 @@ struct TVShowSeasonsSection: View {
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 16)
-                .applyLiquidGlassBackground(cornerRadius: 12)
+                .applyLiquidGlassBackground(cornerRadius: 16)
                 .padding(.horizontal)
                 
                 if !tvShow.seasons.isEmpty {
@@ -304,9 +304,9 @@ struct TVShowSeasonsSection: View {
                                         .resizable()
                                         .aspectRatio(2/3, contentMode: .fill)
                                         .frame(width: 80, height: 120)
-                                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                                        .clipShape(RoundedRectangle(cornerRadius: 12))
                                         .overlay(
-                                            RoundedRectangle(cornerRadius: 8)
+                                            RoundedRectangle(cornerRadius: 12)
                                                 .stroke(selectedSeason?.id == season.id ? Color.accentColor : Color.clear, lineWidth: 2)
                                         )
                                     

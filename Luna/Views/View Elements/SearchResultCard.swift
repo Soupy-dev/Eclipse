@@ -10,9 +10,12 @@ import Kingfisher
 
 struct SearchResultCard: View {
     let result: TMDBSearchResult
+    @Environment(\.heroNamespace) private var heroNamespace
     
     var body: some View {
-        NavigationLink(destination: MediaDetailView(searchResult: result)) {
+        NavigationLink(destination: MediaDetailView(searchResult: result)
+            .heroDestination(id: "media-\(result.id)", namespace: heroNamespace)
+        ) {
             VStack(spacing: 8) {
                 KFImage(URL(string: result.fullPosterURL ?? ""))
                     .placeholder {
@@ -24,8 +27,9 @@ struct SearchResultCard: View {
                     .resizable()
                     .aspectRatio(2/3, contentMode: .fill)
                     .frame(height: 180 * iPadScale)
-                    .clipShape(RoundedRectangle(cornerRadius: 12))
-                    .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .shadow(color: .black.opacity(0.25), radius: 8, x: 0, y: 4)
+                    .heroSource(id: "media-\(result.id)", namespace: heroNamespace)
                 
                 Text(result.displayTitle)
                     .font(.caption)

@@ -53,9 +53,7 @@ struct KanzenSettingsView : View
                         }
                 }
             }.navigationTitle("Settings")
-            
-            
-        
+    .lunaSettingsStyle()
         }
     }
 }

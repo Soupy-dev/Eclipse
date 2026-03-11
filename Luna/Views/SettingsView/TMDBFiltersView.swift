@@ -50,6 +50,7 @@ struct TMDBFiltersView: View {
             }
         }
         .navigationTitle("Content Filters")
+        .lunaSettingsStyle()
     }
 }
 

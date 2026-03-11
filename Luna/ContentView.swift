@@ -17,6 +17,31 @@ struct ContentView: View {
     @State private var selectedTab: AppTab = .home
     @State private var showingSettings = false
     @Environment(\.scenePhase) private var scenePhase
+    @Namespace private var heroNamespace
+    
+    init() {
+        configureTabBarAppearance()
+    }
+    
+    private func configureTabBarAppearance() {
+        #if !os(tvOS)
+        let appearance = UITabBarAppearance()
+        appearance.configureWithOpaqueBackground()
+        appearance.backgroundColor = UIColor(red: 0.06, green: 0.06, blue: 0.06, alpha: 0.92)
+        appearance.shadowColor = .clear
+        
+        let itemAppearance = UITabBarItemAppearance()
+        itemAppearance.normal.iconColor = UIColor.gray
+        itemAppearance.normal.titleTextAttributes = [.foregroundColor: UIColor.gray]
+        
+        appearance.stackedLayoutAppearance = itemAppearance
+        appearance.inlineLayoutAppearance = itemAppearance
+        appearance.compactInlineLayoutAppearance = itemAppearance
+        
+        UITabBar.appearance().standardAppearance = appearance
+        UITabBar.appearance().scrollEdgeAppearance = appearance
+        #endif
+    }
     
     var body: some View {
 #if compiler(>=6.0)
@@ -24,6 +49,7 @@ struct ContentView: View {
             ZStack {
                 modernTabView
                     .accentColor(accentColorManager.currentAccentColor)
+                    .heroNamespace(heroNamespace)
                     .overlay(alignment: .topTrailing) {
                         if (selectedTab == .home || selectedTab == .schedule) && !showingSettings {
                             FloatingSettingsOverlay(showingSettings: $showingSettings)
@@ -32,10 +58,13 @@ struct ContentView: View {
                 
                 if showingSettings {
                     settingsFullScreen
-                        .transition(.move(edge: .trailing))
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .trailing).combined(with: .opacity),
+                            removal: .move(edge: .trailing).combined(with: .opacity)
+                        ))
                 }
             }
-            .animation(.easeInOut(duration: 0.25), value: showingSettings)
+            .animation(.easeInOut(duration: 0.3), value: showingSettings)
             .task { await ServiceManager.shared.autoUpdateServicesIfNeeded() }
             .onChange(of: scenePhase) { newPhase in
                 if newPhase == .active {
@@ -45,6 +74,7 @@ struct ContentView: View {
         } else {
             ZStack {
                 olderTabView
+                    .heroNamespace(heroNamespace)
                     .overlay {
                         if (selectedTab == .home || selectedTab == .schedule) && !showingSettings {
                             FloatingSettingsOverlay(showingSettings: $showingSettings)
@@ -53,10 +83,13 @@ struct ContentView: View {
                 
                 if showingSettings {
                     settingsFullScreen
-                        .transition(.move(edge: .trailing))
+                        .transition(.asymmetric(
+                            insertion: .move(edge: .trailing).combined(with: .opacity),
+                            removal: .move(edge: .trailing).combined(with: .opacity)
+                        ))
                 }
             }
-            .animation(.easeInOut(duration: 0.25), value: showingSettings)
+            .animation(.easeInOut(duration: 0.3), value: showingSettings)
             .task { await ServiceManager.shared.autoUpdateServicesIfNeeded() }
             .onChange(of: scenePhase) { newPhase in
                 if newPhase == .active {
@@ -67,6 +100,7 @@ struct ContentView: View {
 #else
         ZStack {
             olderTabView
+                .heroNamespace(heroNamespace)
                 .overlay {
                     if (selectedTab == .home || selectedTab == .schedule) && !showingSettings {
                         FloatingSettingsOverlay(showingSettings: $showingSettings)
@@ -75,10 +109,13 @@ struct ContentView: View {
             
             if showingSettings {
                 settingsFullScreen
-                    .transition(.move(edge: .trailing))
+                    .transition(.asymmetric(
+                        insertion: .move(edge: .trailing).combined(with: .opacity),
+                        removal: .move(edge: .trailing).combined(with: .opacity)
+                    ))
             }
         }
-        .animation(.easeInOut(duration: 0.25), value: showingSettings)
+        .animation(.easeInOut(duration: 0.3), value: showingSettings)
         .task { await ServiceManager.shared.autoUpdateServicesIfNeeded() }
         .onChange(of: scenePhase) { newPhase in
             if newPhase == .active {
@@ -154,11 +191,8 @@ struct ContentView: View {
                 .navigationViewStyle(StackNavigationViewStyle())
             }
         }
-#if os(iOS)
-        .background(Color(.systemBackground))
-#else
-        .background(Color.black)
-#endif
+        .background(LunaTheme.shared.backgroundBase)
+        .preferredColorScheme(.dark)
     }
     
     private var olderTabView: some View {

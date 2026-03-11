@@ -130,6 +130,7 @@ struct contentView: View {
         }
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
+        .background(LunaTheme.shared.backgroundBase.ignoresSafeArea())
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
@@ -208,7 +209,7 @@ struct contentView: View {
                 .scaledToFill()
                 .frame(width: width, height: width * 1.5)
                 .clipped()
-                .cornerRadius(8)
+                .cornerRadius(16)
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(title)
@@ -491,7 +492,7 @@ struct contentView: View {
                 .padding(.vertical, 12)
                 .foregroundColor(.white)
                 .background(Color.accentColor)
-                .cornerRadius(10)
+                .cornerRadius(16)
             }
             .buttonStyle(.plain)
         }

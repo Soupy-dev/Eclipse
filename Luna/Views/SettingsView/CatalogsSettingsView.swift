@@ -67,6 +67,7 @@ struct CatalogsSettingsView: View {
             }
         }
         .navigationTitle("Catalogs")
+        .lunaSettingsStyle()
         .environment(\.editMode, $editMode)
     }
 }

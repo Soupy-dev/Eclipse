@@ -96,6 +96,7 @@ struct LoggerView: View {
             }
         }
         .navigationTitle(NSLocalizedString("Logs", comment: ""))
+        .lunaSettingsStyle()
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {

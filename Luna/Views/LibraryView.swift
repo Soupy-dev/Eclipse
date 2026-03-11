@@ -13,6 +13,7 @@ struct LibraryView: View {
     
     @StateObject private var accentColorManager = AccentColorManager.shared
     @ObservedObject private var libraryManager = LibraryManager.shared
+    @Environment(\.heroNamespace) private var heroNamespace
     
     var body: some View {
         if #available(iOS 16.0, *) {
@@ -35,6 +36,7 @@ struct LibraryView: View {
             }
             .padding(.top)
         }
+        .background(LunaTheme.shared.backgroundBase.ignoresSafeArea())
         .navigationTitle("Library")
         .navigationBarItems(trailing: Button(action: {
             showingCreateSheet = true
@@ -70,7 +72,9 @@ struct LibraryView: View {
                     LazyHStack(spacing: 12) {
                         // Show oldest bookmarks first so order is predictable
                         ForEach(bookmarksCollection.items.sorted(by: { $0.dateAdded < $1.dateAdded })) { item in
-                            NavigationLink(destination: MediaDetailView(searchResult: item.searchResult)) {
+                            NavigationLink(destination: MediaDetailView(searchResult: item.searchResult)
+                                .heroDestination(id: "media-\(item.searchResult.id)", namespace: heroNamespace)
+                            ) {
                                 BookmarkItemCard(item: item)
                             }
                             .buttonStyle(PlainButtonStyle())
@@ -148,6 +152,7 @@ struct LibraryView: View {
 
 struct BookmarkItemCard: View {
     let item: LibraryItem
+    @Environment(\.heroNamespace) private var heroNamespace
     
     var body: some View {
         VStack(spacing: 8) {
@@ -164,8 +169,9 @@ struct BookmarkItemCard: View {
                 .resizable()
                 .aspectRatio(2/3, contentMode: .fill)
                 .frame(width: 120 * iPadScale, height: 180 * iPadScale)
-                .clipShape(RoundedRectangle(cornerRadius: 10))
-                .shadow(color: .black.opacity(0.1), radius: 3, x: 0, y: 1)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .shadow(color: .black.opacity(0.25), radius: 8, x: 0, y: 4)
+                .heroSource(id: "media-\(item.searchResult.id)", namespace: heroNamespace)
             
             Text(item.searchResult.displayTitle)
                 .font(.caption)
@@ -182,13 +188,13 @@ struct CollectionCard: View {
     
     var body: some View {
         VStack(spacing: 8) {
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.gray.opacity(0.2))
+            RoundedRectangle(cornerRadius: 16)
+                .fill(Color.white.opacity(0.08))
                 .frame(width: 160 * iPadScale, height: 160 * iPadScale)
                 .overlay(
                     collectionPreview
                 )
-                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .clipShape(RoundedRectangle(cornerRadius: 16))
             
             VStack(spacing: 4) {
                 Text(collection.name)

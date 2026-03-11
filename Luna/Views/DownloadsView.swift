@@ -72,6 +72,7 @@ struct DownloadsView: View {
             }
         }
         .navigationTitle("Downloads")
+        .background(LunaTheme.shared.backgroundBase.ignoresSafeArea())
 #if os(iOS)
         .navigationBarTitleDisplayMode(.large)
 #endif
@@ -254,7 +255,7 @@ struct DownloadsView: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 2)
                 .background(Color.gray.opacity(0.3))
-                .cornerRadius(10)
+                .cornerRadius(12)
             
             Spacer()
         }
@@ -310,7 +311,7 @@ struct DownloadsView: View {
             downloadActionButtons(item)
         }
         .padding(10)
-        .applyLiquidGlassBackground(cornerRadius: 12)
+        .applyLiquidGlassBackground(cornerRadius: 16)
         .contextMenu {
             if item.status == .downloading {
                 Button(action: { downloadManager.pauseDownload(id: item.id) }) {
@@ -409,7 +410,7 @@ struct DownloadsView: View {
             }
         }
         .padding(10)
-        .applyLiquidGlassBackground(cornerRadius: 12)
+        .applyLiquidGlassBackground(cornerRadius: 16)
         .contextMenu {
             Button(action: { downloadManager.resumeDownload(id: item.id) }) {
                 Label("Retry", systemImage: "arrow.clockwise")
@@ -469,7 +470,7 @@ struct DownloadsView: View {
         }
         .buttonStyle(PlainButtonStyle())
         .padding(10)
-        .applyLiquidGlassBackground(cornerRadius: 12)
+        .applyLiquidGlassBackground(cornerRadius: 16)
         .contextMenu {
             Button(action: { playDownloadedItem(item) }) {
                 Label("Play", systemImage: "play.fill")
@@ -503,7 +504,7 @@ struct DownloadsView: View {
             .resizable()
             .aspectRatio(2/3, contentMode: .fill)
             .frame(width: 55 * iPadScaleSmall, height: 82 * iPadScaleSmall)
-            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .clipShape(RoundedRectangle(cornerRadius: 12))
     }
     
     // MARK: - Library View (Grouped by Show/Season)

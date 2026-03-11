@@ -49,7 +49,7 @@ struct EpisodeCell: View {
                         .resizable()
                         .aspectRatio(16/9, contentMode: .fill)
                         .frame(width: 240 * iPadScaleSmall, height: 135 * iPadScaleSmall)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
                     
                     if progressValue > 0 && progressValue < 0.85 {
                         VStack {
@@ -61,7 +61,7 @@ struct EpisodeCell: View {
                                 .padding(.bottom, 4)
                         }
                         .frame(width: 240 * iPadScaleSmall, height: 135 * iPadScaleSmall)
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
 
                     if isWatched {
@@ -175,7 +175,7 @@ struct EpisodeCell: View {
                         .resizable()
                         .aspectRatio(16/9, contentMode: .fill)
                         .frame(width: 120 * iPadScaleSmall, height: 68 * iPadScaleSmall)
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
                     
                     if progressValue > 0 && progressValue < 0.85 {
                         VStack {
@@ -187,7 +187,7 @@ struct EpisodeCell: View {
                                 .padding(.bottom, 4)
                         }
                         .frame(width: 120 * iPadScaleSmall, height: 68 * iPadScaleSmall)
-                        .clipShape(RoundedRectangle(cornerRadius: 10))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
 
                     if isWatched {
@@ -264,10 +264,10 @@ struct EpisodeCell: View {
                 }
             }
             .padding(12)
-            .applyLiquidGlassBackground(cornerRadius: 12)
+            .applyLiquidGlassBackground(cornerRadius: 16)
             .overlay(
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(Color.white.opacity(0.1), lineWidth: 1)
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
             )
         }
         .buttonStyle(PlainButtonStyle())

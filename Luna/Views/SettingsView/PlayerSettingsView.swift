@@ -562,6 +562,7 @@ struct PlayerSettingsView: View {
             }
         }
         .navigationTitle("Media Player")
+        .lunaSettingsStyle()
         .onAppear {
             refreshVLCSubtitleStyleStateFromDefaults()
         }

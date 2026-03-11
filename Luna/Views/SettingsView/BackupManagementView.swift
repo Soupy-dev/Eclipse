@@ -95,6 +95,7 @@ struct BackupManagementView: View {
             }
         }
         .navigationTitle("Backup & Import")
+        .lunaSettingsStyle()
         #if !os(tvOS)
         .fileImporter(
             isPresented: $showDocumentPicker,

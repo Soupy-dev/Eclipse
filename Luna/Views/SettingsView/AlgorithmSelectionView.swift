@@ -51,5 +51,6 @@ struct AlgorithmSelectionView: View {
             }
         }
         .navigationTitle("Algorithm")
+        .lunaSettingsStyle()
     }
 }

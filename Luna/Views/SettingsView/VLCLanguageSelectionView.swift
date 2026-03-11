@@ -57,6 +57,7 @@ struct VLCLanguageSelectionView: View {
             }
         }
         .navigationTitle(title)
+        .lunaSettingsStyle()
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif

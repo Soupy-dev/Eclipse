@@ -33,6 +33,7 @@ struct KanzenGeneralSettingsView: View {
                             }
         }
         .navigationTitle(Text("Preferences"))
+        .lunaSettingsStyle()
     }
 
 }

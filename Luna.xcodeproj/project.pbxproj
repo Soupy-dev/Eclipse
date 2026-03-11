@@ -7,6 +7,10 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A1B2C3012FA0000100A1B2C1 /* LunaTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3002FA0000100A1B2C0 /* LunaTheme.swift */; };
+		A1B2C3032FA0000100A1B2C3 /* HeroTransition.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3022FA0000100A1B2C2 /* HeroTransition.swift */; };
+		A1B2C3052FA0000100A1B2C5 /* GlassCardGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3042FA0000100A1B2C4 /* GlassCardGroup.swift */; };
+		A1B2C3072FA0000100A1B2C7 /* GradientBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3062FA0000100A1B2C6 /* GradientBackground.swift */; };
 		12201F512EBE918D0033073C /* ServiceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12201F502EBE91870033073C /* ServiceStore.swift */; };
 		12201F542EBE922D0033073C /* ServiceModels.xcdatamodeld in Sources */ = {isa = PBXBuildFile; fileRef = 12201F522EBE922D0033073C /* ServiceModels.xcdatamodeld */; };
 		5E1111112F60000000AE1111 /* StremioModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E1111102F60000000AE1110 /* StremioModels.swift */; };
@@ -175,6 +179,10 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A1B2C3002FA0000100A1B2C0 /* LunaTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LunaTheme.swift; sourceTree = "<group>"; };
+		A1B2C3022FA0000100A1B2C2 /* HeroTransition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeroTransition.swift; sourceTree = "<group>"; };
+		A1B2C3042FA0000100A1B2C4 /* GlassCardGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassCardGroup.swift; sourceTree = "<group>"; };
+		A1B2C3062FA0000100A1B2C6 /* GradientBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GradientBackground.swift; sourceTree = "<group>"; };
 		12201F502EBE91870033073C /* ServiceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceStore.swift; sourceTree = "<group>"; };
 		12201F532EBE922D0033073C /* ServiceModels.xcdatamodel */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcdatamodel; path = ServiceModels.xcdatamodel; sourceTree = "<group>"; };
 		5E1111102F60000000AE1110 /* StremioModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StremioModels.swift; sourceTree = "<group>"; };
@@ -716,6 +724,8 @@
 				13F0728A2E4B2D9000EF90EB /* FallbackImageView.swift */,
 				13F0728B2E4B2D9000EF90EB /* ServicesResultsSheet.swift */,
 				DD3333302FB0000000DD3330 /* FloatingSearchButton.swift */,
+				A1B2C3042FA0000100A1B2C4 /* GlassCardGroup.swift */,
+				A1B2C3062FA0000100A1B2C6 /* GradientBackground.swift */,
 			);
 			path = "View Elements";
 			sourceTree = "<group>";
@@ -749,6 +759,8 @@
 				13F0728D2E4B2D9100EF90EB /* UIImage */,
 				13F072912E4B2D9100EF90EB /* Color */,
 				136D3E5B2EB75D7E0094210C /* LiquidGlassBackground.swift */,
+				A1B2C3002FA0000100A1B2C0 /* LunaTheme.swift */,
+				A1B2C3022FA0000100A1B2C2 /* HeroTransition.swift */,
 				12E7AF5F2EB80771003B7664 /* Platform.swift */,
 			);
 			path = Extensions;
@@ -1150,6 +1162,10 @@
 				FEE555012F40000000FEE551 /* MangaCreateCollectionView.swift in Sources */,
 				FFF666012F40000000FFF661 /* MangaCollectionDetailView.swift in Sources */,
 				GG1111012F60000000GG1111 /* NovelReaderView.swift in Sources */,
+				A1B2C3012FA0000100A1B2C1 /* LunaTheme.swift in Sources */,
+				A1B2C3032FA0000100A1B2C3 /* HeroTransition.swift in Sources */,
+				A1B2C3052FA0000100A1B2C5 /* GlassCardGroup.swift in Sources */,
+				A1B2C3072FA0000100A1B2C7 /* GradientBackground.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

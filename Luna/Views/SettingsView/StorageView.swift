@@ -76,6 +76,7 @@ struct StorageView: View {
             }
         }
         .navigationTitle("Storage")
+        .lunaSettingsStyle()
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button(action: refreshCacheSize) {

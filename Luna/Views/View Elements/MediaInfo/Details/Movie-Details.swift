@@ -47,7 +47,7 @@ struct MovieDetailsSection: View {
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 16)
-                .applyLiquidGlassBackground(cornerRadius: 12)
+                .applyLiquidGlassBackground(cornerRadius: 16)
                 .padding(.horizontal)
             }
         }

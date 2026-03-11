@@ -38,6 +38,7 @@ struct ScheduleView: View {
     private var scheduleContent: some View {
         ZStack {
             Color.black.ignoresSafeArea()
+            LunaTheme.shared.backgroundBase.ignoresSafeArea()
             
             if viewModel.isLoading {
                 loadingView
@@ -164,8 +165,8 @@ struct ScheduleView: View {
                 .tint(accentColorManager.currentAccentColor)
         }
         .padding()
-        .background(Color.gray.opacity(0.15))
-        .cornerRadius(12)
+        .background(LunaTheme.shared.cardBackground)
+        .cornerRadius(16)
         .padding(.horizontal)
     }
     
@@ -238,12 +239,12 @@ struct ScheduleView: View {
                     }
                     .aspectRatio(contentMode: .fill)
                     .frame(width: 60 * iPadScaleSmall, height: 85 * iPadScaleSmall)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             } else {
                 Rectangle()
                     .fill(Color.gray.opacity(0.2))
                     .frame(width: 60 * iPadScaleSmall, height: 85 * iPadScaleSmall)
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             
             // Info
@@ -269,8 +270,8 @@ struct ScheduleView: View {
             Spacer()
         }
         .padding()
-        .background(Color.gray.opacity(0.15))
-        .cornerRadius(12)
+        .background(LunaTheme.shared.cardBackground)
+        .cornerRadius(16)
     }
     
     // MARK: - Helpers

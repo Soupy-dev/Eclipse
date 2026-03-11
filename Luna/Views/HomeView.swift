@@ -47,6 +47,9 @@ struct HomeView: View {
     
     private var homeContent: some View {
         ZStack {
+            LunaTheme.shared.backgroundBase
+                .ignoresSafeArea(.all)
+            
             Group {
                 homeViewModel.ambientColor
             }
@@ -324,7 +327,13 @@ struct HomeView: View {
             
             Spacer(minLength: 50)
         }
-        .background(Color.clear)
+        .background(
+            LinearGradient(
+                colors: [ambientColor, LunaTheme.shared.backgroundBase],
+                startPoint: .top,
+                endPoint: UnitPoint(x: 0.5, y: 0.3)
+            )
+        )
     }
     
     private func loadContent() {
@@ -387,9 +396,12 @@ struct ScrollClipModifier: ViewModifier {
 struct MediaCard: View {
     let result: TMDBSearchResult
     @State private var isHovering: Bool = false
+    @Environment(\.heroNamespace) private var heroNamespace
     
     var body: some View {
-        NavigationLink(destination: MediaDetailView(searchResult: result)) {
+        NavigationLink(destination: MediaDetailView(searchResult: result)
+            .heroDestination(id: "media-\(result.id)", namespace: heroNamespace)
+        ) {
             VStack(alignment: .leading, spacing: 6) {
                 KFImage(URL(string: result.fullPosterURL ?? ""))
                     .placeholder {
@@ -410,9 +422,10 @@ struct MediaCard: View {
                     }, else: { view in
                         view
                             .frame(width: 120 * iPadScale, height: 180 * iPadScale)
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
-                            .shadow(color: .black.opacity(0.1), radius: 3, x: 0, y: 1)
+                            .clipShape(RoundedRectangle(cornerRadius: 16))
+                            .shadow(color: .black.opacity(0.25), radius: 8, x: 0, y: 4)
                     })
+                    .heroSource(id: "media-\(result.id)", namespace: heroNamespace)
                 
                 VStack(alignment: .leading, spacing: isTvOS ? 10 : 3) {
                     Text(result.displayTitle)
@@ -663,12 +676,12 @@ struct ContinueWatchingCard: View {
                 .padding(isTvOS ? 16 : 12)
             }
             .frame(width: cardWidth, height: cardHeight)
-            .clipShape(RoundedRectangle(cornerRadius: isTvOS ? 16 : 12))
+            .clipShape(RoundedRectangle(cornerRadius: 16))
             .overlay(
-                RoundedRectangle(cornerRadius: isTvOS ? 16 : 12)
-                    .stroke(Color.white.opacity(isHovering ? 0.5 : 0.2), lineWidth: isHovering ? 2 : 1)
+                RoundedRectangle(cornerRadius: 16)
+                    .stroke(Color.white.opacity(isHovering ? 0.5 : 0.15), lineWidth: isHovering ? 2 : 0.5)
             )
-            .shadow(color: .black.opacity(0.3), radius: isHovering ? 12 : 6, x: 0, y: isHovering ? 8 : 4)
+            .shadow(color: .black.opacity(0.35), radius: isHovering ? 12 : 8, x: 0, y: isHovering ? 8 : 4)
             .scaleEffect(isHovering ? 1.02 : 1.0)
             .animation(.easeInOut(duration: 0.2), value: isHovering)
             .modifier(ContinuousHoverModifier(isHovering: $isHovering))

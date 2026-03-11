@@ -53,8 +53,8 @@ struct KanzenGlobalSearchView: View {
                         }
                     }
                     .padding(8)
-                    .background(Color(.systemGray6))
-                    .cornerRadius(10)
+                    .background(LunaTheme.shared.cardBackground)
+                    .cornerRadius(12)
 
                     Button {
                         fetchRandomManga()
@@ -138,6 +138,7 @@ struct KanzenGlobalSearchView: View {
             }
             .navigationTitle("Search")
             .navigationBarTitleDisplayMode(.large)
+            .background(LunaTheme.shared.backgroundBase.ignoresSafeArea())
             .background(
                 NavigationLink(destination: Group {
                     if let manga = randomManga {

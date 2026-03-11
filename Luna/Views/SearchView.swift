@@ -346,6 +346,7 @@ struct SearchView: View {
             }
         }
         .navigationTitle("Search")
+        .background(LunaTheme.shared.backgroundBase.ignoresSafeArea())
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 serviceSelector
@@ -489,8 +490,8 @@ struct ServiceSearchResultCard: View {
                 .resizable()
                 .aspectRatio(2/3, contentMode: .fill)
                 .frame(height: 180 * iPadScale)
-                .clipShape(RoundedRectangle(cornerRadius: 12))
-                .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
+                .clipShape(RoundedRectangle(cornerRadius: 16))
+                .shadow(color: .black.opacity(0.25), radius: 8, x: 0, y: 4)
             
             Text(item.title)
                 .font(.caption)
@@ -517,7 +518,7 @@ struct SearchBarLuna: View {
 #if !os(tvOS)
                 .background(Color(.systemGray6))
 #endif
-                .cornerRadius(8)
+                .cornerRadius(12)
                 .contentShape(Rectangle())
                 .overlay(
                     HStack {

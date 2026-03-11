@@ -70,6 +70,9 @@ struct MediaDetailView: View {
     
     var body: some View {
         ZStack {
+            LunaTheme.shared.backgroundBase
+                .ignoresSafeArea(.all)
+            
             Group {
                 ambientColor
             }
@@ -299,7 +302,13 @@ struct MediaDetailView: View {
                 
                 Spacer(minLength: 50)
             }
-            .background(Color.clear)
+            .background(
+                LinearGradient(
+                    colors: [ambientColor, LunaTheme.shared.backgroundBase],
+                    startPoint: .top,
+                    endPoint: UnitPoint(x: 0.5, y: 0.35)
+                )
+            )
         }
     }
     
@@ -578,6 +587,7 @@ struct MediaDetailView: View {
                             self.logoURL = logo.fullURL
                         }
                         self.isLoading = false
+                        self.hasLoadedContent = true
                     }
                 } else {
                     async let detailTask = tmdbService.getTVShowWithSeasons(id: searchResult.id)

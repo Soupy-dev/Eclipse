@@ -85,103 +85,207 @@ struct SettingsView: View {
     }
 
     private var settingsContent: some View {
+        #if os(tvOS)
         List {
-            Section {
-                NavigationLink(destination: LanguageSelectionView(selectedLanguage: $selectedLanguage, languages: languages)) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Informations Language")
-                        }
-                        
-                        Spacer()
-                        
-                        Text(languages.first { $0.0 == selectedLanguage }?.1 ?? "English (US)")
-                            .foregroundColor(.secondary)
-                    }
-                }
-
-                NavigationLink(destination: TMDBFiltersView()) {
-                    Text("Content Filters")
-                }
-            } header: {
-                Text("TMDB Settings")
-            } footer: {
-                Text("Configure language preferences and content filtering options for TMDB data.")
-            }
-            
-            Section {
-                NavigationLink(destination: AlgorithmSelectionView()) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Matching Algorithm")
-                        }
-                        
-                        Spacer()
-                        
-                        Text(algorithmManager.selectedAlgorithm.displayName)
-                            .foregroundColor(.secondary)
-                    }
-                }
-            } header: {
-                Text("SEARCH SETTINGS")
-            } footer: {
-                Text("Choose the algorithm used to match and rank search results.")
-            }
-            
-            Section {
-                NavigationLink(destination: PlayerSettingsView()) {
-                    Text("Media Player")
-                }
-                
-                NavigationLink(destination: AlternativeUIView()) {
-                    Text("Appearance")
-                }
-                
-                NavigationLink(destination: CatalogsSettingsView()) {
-                    Text("Catalogs")
-                }
-                
-                NavigationLink(destination: ServicesView()) {
-                    Text("Services")
-                }
-                
-                NavigationLink(destination: TrackersSettingsView()) {
-                    Text("Trackers")
-                }
-            }
-
-            Section {
-                NavigationLink(destination: StorageView()) {
-                    Text("Storage")
-                }
-                
-                NavigationLink(destination: BackupManagementView()) {
-                    Text("Backup & Restore")
-                }
-                
-                NavigationLink(destination: LoggerView()) {
-                    Text("Logger")
-                }
-            } header: {
-                Text("MICS")
-            }
-            
-            Section{
-                Text("Switch to Reader Mode")
-                    .onTapGesture {
-                        showKanzen = true
-                    }
-            }
-            header:{
-                Text("Others")
-            }
+            settingsListContent
         }
-        #if !os(tvOS)
-            .navigationTitle("Settings")
+        .listStyle(.grouped)
+        .scrollClipDisabled()
         #else
-            .listStyle(.grouped)
-            .scrollClipDisabled()
+        ScrollView {
+            VStack(spacing: 28) {
+                // MARK: - Basic
+                GlassSection(header: "Basic") {
+                    VStack(spacing: 0) {
+                        NavigationLink(destination: LanguageSelectionView(selectedLanguage: $selectedLanguage, languages: languages)) {
+                            GlassSettingsRow(icon: "globe", iconColor: .blue, title: "Language") {
+                                HStack(spacing: 4) {
+                                    Text(languages.first { $0.0 == selectedLanguage }?.1 ?? "English (US)")
+                                        .font(.subheadline)
+                                        .foregroundColor(.white.opacity(0.5))
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundColor(.white.opacity(0.3))
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        
+                        GlassDivider()
+                        
+                        NavigationLink(destination: TMDBFiltersView()) {
+                            GlassSettingsRow(icon: "line.3.horizontal.decrease.circle", iconColor: .orange, title: "Content Filters")
+                        }
+                        .buttonStyle(.plain)
+                        
+                        GlassDivider()
+                        
+                        NavigationLink(destination: AlgorithmSelectionView()) {
+                            GlassSettingsRow(icon: "magnifyingglass", iconColor: .cyan, title: "Matching Algorithm") {
+                                HStack(spacing: 4) {
+                                    Text(algorithmManager.selectedAlgorithm.displayName)
+                                        .font(.subheadline)
+                                        .foregroundColor(.white.opacity(0.5))
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundColor(.white.opacity(0.3))
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        
+                        GlassDivider()
+                        
+                        NavigationLink(destination: PlayerSettingsView()) {
+                            GlassSettingsRow(icon: "play.fill", iconColor: .white, title: "Media Player")
+                        }
+                        .buttonStyle(.plain)
+                        
+                        GlassDivider()
+                        
+                        NavigationLink(destination: AlternativeUIView()) {
+                            GlassSettingsRow(icon: "paintbrush.fill", iconColor: .purple, title: "Appearance")
+                        }
+                        .buttonStyle(.plain)
+                        
+                        GlassDivider()
+                        
+                        NavigationLink(destination: CatalogsSettingsView()) {
+                            GlassSettingsRow(icon: "square.grid.2x2", iconColor: .green, title: "Catalogs")
+                        }
+                        .buttonStyle(.plain)
+                        
+                        GlassDivider()
+                        
+                        NavigationLink(destination: HomeSectionsView()) {
+                            GlassSettingsRow(icon: "rectangle.stack", iconColor: .mint, title: "Home Sections")
+                        }
+                        .buttonStyle(.plain)
+                        
+                        GlassDivider()
+                        
+                        NavigationLink(destination: ServicesView()) {
+                            GlassSettingsRow(icon: "server.rack", iconColor: .indigo, title: "Services")
+                        }
+                        .buttonStyle(.plain)
+                        
+                        GlassDivider()
+                        
+                        NavigationLink(destination: TrackersSettingsView()) {
+                            GlassSettingsRow(icon: "chart.bar.fill", iconColor: .pink, title: "Trackers")
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                
+                // MARK: - Data
+                GlassSection(header: "Data") {
+                    VStack(spacing: 0) {
+                        NavigationLink(destination: StorageView()) {
+                            GlassSettingsRow(icon: "internaldrive", iconColor: .gray, title: "Storage")
+                        }
+                        .buttonStyle(.plain)
+                        
+                        GlassDivider()
+                        
+                        NavigationLink(destination: BackupManagementView()) {
+                            GlassSettingsRow(icon: "arrow.triangle.2.circlepath", iconColor: .teal, title: "Backup & Restore")
+                        }
+                        .buttonStyle(.plain)
+                        
+                        GlassDivider()
+                        
+                        NavigationLink(destination: LoggerView()) {
+                            GlassSettingsRow(icon: "doc.text", iconColor: .yellow, title: "Logger")
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                
+                // MARK: - Others
+                GlassSection(header: "Others") {
+                    VStack(spacing: 0) {
+                        Button {
+                            showKanzen = true
+                        } label: {
+                            GlassSettingsRow(icon: "book.fill", iconColor: .orange, title: "Switch to Reader Mode")
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                
+                // MARK: - Version Info
+                VStack(spacing: 4) {
+                    Text("Luna v\(Bundle.main.appVersion) (\(Bundle.main.buildNumber))")
+                        .font(.footnote)
+                        .foregroundColor(.white.opacity(0.3))
+                }
+                .padding(.top, 8)
+                .padding(.bottom, 30)
+            }
+            .padding(.top, 16)
+        }
+        .navigationTitle("Settings")
+        .lunaGradientBackground()
+        .toolbarColorScheme(.dark, for: .navigationBar)
         #endif
+    }
+    
+    // Keep tvOS list-based layout as fallback
+    @ViewBuilder
+    private var settingsListContent: some View {
+        Section {
+            NavigationLink(destination: LanguageSelectionView(selectedLanguage: $selectedLanguage, languages: languages)) {
+                HStack {
+                    Text("Informations Language")
+                    Spacer()
+                    Text(languages.first { $0.0 == selectedLanguage }?.1 ?? "English (US)")
+                        .foregroundColor(.secondary)
+                }
+            }
+            NavigationLink(destination: TMDBFiltersView()) {
+                Text("Content Filters")
+            }
+        } header: {
+            Text("TMDB Settings")
+        }
+        
+        Section {
+            NavigationLink(destination: AlgorithmSelectionView()) {
+                HStack {
+                    Text("Matching Algorithm")
+                    Spacer()
+                    Text(algorithmManager.selectedAlgorithm.displayName)
+                        .foregroundColor(.secondary)
+                }
+            }
+        } header: {
+            Text("Search Settings")
+        }
+        
+        Section {
+            NavigationLink(destination: PlayerSettingsView()) { Text("Media Player") }
+            NavigationLink(destination: AlternativeUIView()) { Text("Appearance") }
+            NavigationLink(destination: CatalogsSettingsView()) { Text("Catalogs") }
+            NavigationLink(destination: HomeSectionsView()) { Text("Home Sections") }
+            NavigationLink(destination: ServicesView()) { Text("Services") }
+            NavigationLink(destination: TrackersSettingsView()) { Text("Trackers") }
+        }
+        
+        Section {
+            NavigationLink(destination: StorageView()) { Text("Storage") }
+            NavigationLink(destination: BackupManagementView()) { Text("Backup & Restore") }
+            NavigationLink(destination: LoggerView()) { Text("Logger") }
+        } header: {
+            Text("Data")
+        }
+        
+        Section {
+            Text("Switch to Reader Mode")
+                .onTapGesture { showKanzen = true }
+        } header: {
+            Text("Others")
+        }
     }
 }
 
@@ -191,22 +295,43 @@ struct LanguageSelectionView: View {
     let languages: [(String, String)]
     
     var body: some View {
-        List {
-            ForEach(languages, id: \.0) { language in
-                HStack {
-                    Text(language.1)
-                    Spacer()
-                    if selectedLanguage == language.0 {
-                        Image(systemName: "checkmark")
-                            .foregroundColor(accentColorManager.currentAccentColor)
+        ScrollView {
+            VStack(spacing: 20) {
+                GlassSection {
+                    VStack(spacing: 0) {
+                        ForEach(Array(languages.enumerated()), id: \.element.0) { index, language in
+                            Button {
+                                selectedLanguage = language.0
+                            } label: {
+                                HStack {
+                                    Text(language.1)
+                                        .foregroundColor(.white)
+                                    Spacer()
+                                    if selectedLanguage == language.0 {
+                                        Image(systemName: "checkmark")
+                                            .foregroundColor(accentColorManager.currentAccentColor)
+                                    }
+                                }
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 13)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            
+                            if index < languages.count - 1 {
+                                Rectangle()
+                                    .fill(LunaTheme.shared.separatorColor)
+                                    .frame(height: 0.5)
+                                    .padding(.leading, 16)
+                            }
+                        }
                     }
                 }
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    selectedLanguage = language.0
-                }
             }
+            .padding(.top, 16)
         }
         .navigationTitle("Language")
+        .lunaGradientBackground()
+        .toolbarColorScheme(.dark, for: .navigationBar)
     }
 }

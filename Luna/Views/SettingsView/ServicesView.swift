@@ -31,6 +31,7 @@ struct ServicesView: View {
                 }
             }
             .navigationTitle("Services")
+            .lunaSettingsStyle()
 #if !os(tvOS)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {

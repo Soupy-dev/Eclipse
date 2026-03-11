@@ -149,6 +149,7 @@ struct KanzenLibraryView: View {
             }
             .navigationTitle("Library")
             .navigationBarTitleDisplayMode(.inline)
+            .background(LunaTheme.shared.backgroundBase.ignoresSafeArea())
             .sheet(isPresented: $showCreateCollection) {
                 MangaCreateCollectionView()
                     .environmentObject(libraryManager)
@@ -167,7 +168,7 @@ struct KanzenLibraryView: View {
                 .scaledToFill()
                 .frame(width: 120, height: 180)
                 .clipped()
-                .cornerRadius(8)
+                .cornerRadius(16)
                 .overlay(alignment: .topTrailing) {
                     unreadBadge(for: item)
                 }
@@ -189,7 +190,7 @@ struct KanzenLibraryView: View {
                 .scaledToFill()
                 .frame(height: 180)
                 .clipped()
-                .cornerRadius(8)
+                .cornerRadius(16)
 
             Text(item.title)
                 .font(.caption)
@@ -204,8 +205,8 @@ struct KanzenLibraryView: View {
             // 2x2 preview grid
             let previews = Array(collection.items.prefix(4))
             ZStack {
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color.gray.opacity(0.1))
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(LunaTheme.shared.cardBackground)
                     .frame(width: 140, height: 140)
 
                 if previews.isEmpty {

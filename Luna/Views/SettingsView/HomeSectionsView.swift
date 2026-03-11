@@ -71,6 +71,7 @@ struct HomeSectionsView: View {
             }
         }
         .navigationTitle("Home Sections")
+        .lunaSettingsStyle()
         .onAppear {
             loadSections()
         }

@@ -12,6 +12,7 @@ struct AlternativeUIView: View {
     @AppStorage("horizontalEpisodeList") private var horizontalEpisodeList = false
     
     @StateObject private var accentColorManager = AccentColorManager.shared
+    @ObservedObject private var theme = LunaTheme.shared
     
     var body: some View {
         List {
@@ -36,6 +37,51 @@ struct AlternativeUIView: View {
                 }
             } header: {
                 Text("Interface")
+            }
+            
+            Section {
+                VStack(alignment: .leading, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Settings Theme Color")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        
+                        Text("Changes the gradient background color in Settings screens.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.leading)
+                    }
+                    
+                    HStack(spacing: 12) {
+                        ForEach(LunaTheme.gradientPresets, id: \.name) { preset in
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.3)) {
+                                    theme.settingsGradientColor = preset.color
+                                }
+                            } label: {
+                                Circle()
+                                    .fill(preset.color)
+                                    .frame(width: 32, height: 32)
+                                    .overlay(
+                                        Circle()
+                                            .strokeBorder(Color.white, lineWidth: colorsMatch(preset.color, theme.settingsGradientColor) ? 2.5 : 0)
+                                    )
+                                    .scaleEffect(colorsMatch(preset.color, theme.settingsGradientColor) ? 1.15 : 1.0)
+                                    .animation(.easeInOut(duration: 0.2), value: theme.settingsGradientColor)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        
+                        Spacer()
+                        
+#if !os(tvOS)
+                        ColorPicker("", selection: $theme.settingsGradientColor)
+                            .labelsHidden()
+#endif
+                    }
+                }
+            } header: {
+                Text("Theme")
             }
             
             Section {
@@ -81,5 +127,16 @@ struct AlternativeUIView: View {
             }
         }
         .navigationTitle("Appearance")
+        .lunaSettingsStyle()
+    }
+    
+    private func colorsMatch(_ a: Color, _ b: Color) -> Bool {
+        let uiA = UIColor(a)
+        let uiB = UIColor(b)
+        var rA: CGFloat = 0, gA: CGFloat = 0, bA: CGFloat = 0, aA: CGFloat = 0
+        var rB: CGFloat = 0, gB: CGFloat = 0, bB: CGFloat = 0, aB: CGFloat = 0
+        uiA.getRed(&rA, green: &gA, blue: &bA, alpha: &aA)
+        uiB.getRed(&rB, green: &gB, blue: &bB, alpha: &aB)
+        return abs(rA - rB) < 0.02 && abs(gA - gB) < 0.02 && abs(bA - bB) < 0.02
     }
 }

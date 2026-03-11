@@ -36,6 +36,7 @@ struct MangaCatalogSettingsView: View {
         }
         .navigationTitle("Home Catalogs")
         .navigationBarTitleDisplayMode(.inline)
+        .lunaSettingsStyle()
         .toolbar {
             EditButton()
         }

@@ -59,7 +59,7 @@ struct KanzenHomeView: View {
                     }
                 }
             }
-            .background(Color(UIColor.systemBackground).ignoresSafeArea())
+            .background(LunaTheme.shared.backgroundBase.ignoresSafeArea())
             .navigationTitle("Home")
             .navigationBarTitleDisplayMode(.large)
         }
