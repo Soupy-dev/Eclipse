@@ -149,7 +149,7 @@ struct KanzenLibraryView: View {
             }
             .navigationTitle("Library")
             .navigationBarTitleDisplayMode(.inline)
-            .background(LunaTheme.shared.backgroundBase.ignoresSafeArea())
+            .background(GlobalGradientBackground().ignoresSafeArea())
             .sheet(isPresented: $showCreateCollection) {
                 MangaCreateCollectionView()
                     .environmentObject(libraryManager)

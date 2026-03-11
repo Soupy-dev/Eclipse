@@ -454,6 +454,40 @@ class TMDBService: ObservableObject {
         }
         return logos.first
     }
+    
+    // MARK: - Get Movie Credits (Cast)
+    func getMovieCredits(id: Int) async throws -> TMDBCreditsResponse {
+        let urlString = "\(baseURL)/movie/\(id)/credits?api_key=\(apiKey)&language=\(currentLanguage)"
+        guard let url = URL(string: urlString) else { throw TMDBError.invalidURL }
+        let (data, _) = try await URLSession.shared.data(from: url)
+        return try JSONDecoder().decode(TMDBCreditsResponse.self, from: data)
+    }
+    
+    // MARK: - Get TV Show Credits (Cast)
+    func getTVCredits(id: Int) async throws -> TMDBCreditsResponse {
+        let urlString = "\(baseURL)/tv/\(id)/credits?api_key=\(apiKey)&language=\(currentLanguage)"
+        guard let url = URL(string: urlString) else { throw TMDBError.invalidURL }
+        let (data, _) = try await URLSession.shared.data(from: url)
+        return try JSONDecoder().decode(TMDBCreditsResponse.self, from: data)
+    }
+    
+    // MARK: - Get Movie Recommendations
+    func getMovieRecommendations(id: Int) async throws -> [TMDBMovie] {
+        let urlString = "\(baseURL)/movie/\(id)/recommendations?api_key=\(apiKey)&language=\(currentLanguage)&page=1"
+        guard let url = URL(string: urlString) else { throw TMDBError.invalidURL }
+        let (data, _) = try await URLSession.shared.data(from: url)
+        let response = try JSONDecoder().decode(TMDBMovieSearchResponse.self, from: data)
+        return response.results
+    }
+    
+    // MARK: - Get TV Show Recommendations
+    func getTVRecommendations(id: Int) async throws -> [TMDBTVShow] {
+        let urlString = "\(baseURL)/tv/\(id)/recommendations?api_key=\(apiKey)&language=\(currentLanguage)&page=1"
+        guard let url = URL(string: urlString) else { throw TMDBError.invalidURL }
+        let (data, _) = try await URLSession.shared.data(from: url)
+        let response = try JSONDecoder().decode(TMDBTVSearchResponse.self, from: data)
+        return response.results
+    }
 }
 
 // MARK: - Error Handling

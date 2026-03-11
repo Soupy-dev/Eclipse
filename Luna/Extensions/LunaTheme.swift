@@ -13,7 +13,15 @@ class LunaTheme: ObservableObject {
     // MARK: - Persisted Settings
     
     @Published var settingsGradientColor: Color {
-        didSet { saveGradientColor(settingsGradientColor) }
+        didSet { saveColor(settingsGradientColor, key: "lunaThemeGradientColor") }
+    }
+    
+    @Published var globalGradientEnabled: Bool {
+        didSet { UserDefaults.standard.set(globalGradientEnabled, forKey: "lunaGlobalGradientEnabled") }
+    }
+    
+    @Published var globalGradientColor: Color {
+        didSet { saveColor(globalGradientColor, key: "lunaGlobalGradientColor") }
     }
     
     // MARK: - Constants
@@ -38,22 +46,25 @@ class LunaTheme: ObservableObject {
     
     private init() {
         self.settingsGradientColor = Self.gradientPresets[0].color
-        self.settingsGradientColor = loadGradientColor() ?? Self.gradientPresets[0].color
+        self.globalGradientEnabled = UserDefaults.standard.bool(forKey: "lunaGlobalGradientEnabled")
+        self.globalGradientColor = Self.gradientPresets[0].color
+        self.settingsGradientColor = loadColor(key: "lunaThemeGradientColor") ?? Self.gradientPresets[0].color
+        self.globalGradientColor = loadColor(key: "lunaGlobalGradientColor") ?? Self.gradientPresets[0].color
     }
     
     // MARK: - Persistence
     
-    private func saveGradientColor(_ color: Color) {
+    private func saveColor(_ color: Color, key: String) {
         do {
             let data = try NSKeyedArchiver.archivedData(withRootObject: UIColor(color), requiringSecureCoding: true)
-            UserDefaults.standard.set(data, forKey: "lunaThemeGradientColor")
+            UserDefaults.standard.set(data, forKey: key)
         } catch {
             // Silently fail — default will be used next launch
         }
     }
     
-    private func loadGradientColor() -> Color? {
-        guard let data = UserDefaults.standard.data(forKey: "lunaThemeGradientColor"),
+    private func loadColor(key: String) -> Color? {
+        guard let data = UserDefaults.standard.data(forKey: key),
               !data.isEmpty else { return nil }
         do {
             if let uiColor = try NSKeyedUnarchiver.unarchivedObject(ofClass: UIColor.self, from: data) {

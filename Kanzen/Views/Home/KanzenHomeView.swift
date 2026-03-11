@@ -42,12 +42,23 @@ struct KanzenHomeView: View {
                 } else {
                     ScrollView {
                         LazyVStack(spacing: 0) {
-                            ForEach(enabledCatalogs) { catalog in
+                            let visibleCatalogs = enabledCatalogs.filter { catalog in
+                                if let items = homeViewModel.catalogResults[catalog.id], !items.isEmpty {
+                                    return true
+                                }
+                                return false
+                            }
+                            
+                            ForEach(Array(visibleCatalogs.enumerated()), id: \.element.id) { index, catalog in
                                 if let items = homeViewModel.catalogResults[catalog.id], !items.isEmpty {
                                     MangaCatalogSection(
                                         title: catalog.name,
                                         items: Array(items.prefix(15))
                                     )
+                                    
+                                    if index < visibleCatalogs.count - 1 {
+                                        SectionDivider()
+                                    }
                                 }
                             }
                         }
@@ -59,7 +70,7 @@ struct KanzenHomeView: View {
                     }
                 }
             }
-            .background(LunaTheme.shared.backgroundBase.ignoresSafeArea())
+            .background(GlobalGradientBackground().ignoresSafeArea())
             .navigationTitle("Home")
             .navigationBarTitleDisplayMode(.large)
         }

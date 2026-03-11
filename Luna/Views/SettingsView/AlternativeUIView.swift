@@ -81,7 +81,72 @@ struct AlternativeUIView: View {
                     }
                 }
             } header: {
-                Text("Theme")
+                Text("Settings Theme")
+            }
+            
+            Section {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Global Gradient")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        
+                        Text("Apply a subtle gradient tint across all screens.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.leading)
+                    }
+                    
+                    Spacer()
+                    
+                    Toggle("", isOn: Binding(
+                        get: { theme.globalGradientEnabled },
+                        set: { newValue in
+                            withAnimation(.easeInOut(duration: 0.3)) {
+                                theme.globalGradientEnabled = newValue
+                            }
+                        }
+                    ))
+                    .tint(accentColorManager.currentAccentColor)
+                }
+                
+                if theme.globalGradientEnabled {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text("Global Theme Color")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        
+                        HStack(spacing: 12) {
+                            ForEach(LunaTheme.gradientPresets, id: \.name) { preset in
+                                Button {
+                                    withAnimation(.easeInOut(duration: 0.3)) {
+                                        theme.globalGradientColor = preset.color
+                                    }
+                                } label: {
+                                    Circle()
+                                        .fill(preset.color)
+                                        .frame(width: 32, height: 32)
+                                        .overlay(
+                                            Circle()
+                                                .strokeBorder(Color.white, lineWidth: colorsMatch(preset.color, theme.globalGradientColor) ? 2.5 : 0)
+                                        )
+                                        .scaleEffect(colorsMatch(preset.color, theme.globalGradientColor) ? 1.15 : 1.0)
+                                        .animation(.easeInOut(duration: 0.2), value: theme.globalGradientColor)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            
+                            Spacer()
+                            
+#if !os(tvOS)
+                            ColorPicker("", selection: $theme.globalGradientColor)
+                                .labelsHidden()
+#endif
+                        }
+                    }
+                }
+            } header: {
+                Text("Global Theme")
             }
             
             Section {

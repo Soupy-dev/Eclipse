@@ -47,7 +47,7 @@ struct HomeView: View {
     
     private var homeContent: some View {
         ZStack {
-            LunaTheme.shared.backgroundBase
+            GlobalGradientBackground()
                 .ignoresSafeArea(.all)
             
             Group {
@@ -310,8 +310,14 @@ struct HomeView: View {
     @ViewBuilder
     private var contentSections: some View {
         VStack(spacing: 0) {
-            // Display all enabled catalogs
-            ForEach(enabledCatalogs) { catalog in
+            let catalogs = enabledCatalogs.filter { catalog in
+                if let items = homeViewModel.catalogResults[catalog.id], !items.isEmpty {
+                    return true
+                }
+                return false
+            }
+            
+            ForEach(Array(catalogs.enumerated()), id: \.element.id) { index, catalog in
                 if let items = homeViewModel.catalogResults[catalog.id], !items.isEmpty {
                     let limitedItems = Array(items.prefix(15))
                     let displayItems = catalog.id == "trending"
@@ -322,6 +328,10 @@ struct HomeView: View {
                         title: catalog.name,
                         items: displayItems
                     )
+                    
+                    if index < catalogs.count - 1 {
+                        SectionDivider()
+                    }
                 }
             }
             
@@ -329,7 +339,7 @@ struct HomeView: View {
         }
         .background(
             LinearGradient(
-                colors: [ambientColor, LunaTheme.shared.backgroundBase],
+                colors: [ambientColor, LunaTheme.shared.globalGradientEnabled ? LunaTheme.shared.globalGradientColor.opacity(0.15) : Color.clear, LunaTheme.shared.backgroundBase],
                 startPoint: .top,
                 endPoint: UnitPoint(x: 0.5, y: 0.3)
             )
@@ -390,6 +400,33 @@ struct ScrollClipModifier: ViewModifier {
         } else {
             content
         }
+    }
+}
+
+struct SectionDivider: View {
+    var body: some View {
+        HStack(spacing: 8) {
+            line
+            Image(systemName: "sparkle")
+                .font(.system(size: 8))
+                .foregroundColor(.white.opacity(0.2))
+            line
+        }
+        .padding(.horizontal, 60)
+        .padding(.top, 28)
+        .padding(.bottom, 4)
+    }
+    
+    private var line: some View {
+        Rectangle()
+            .fill(
+                LinearGradient(
+                    colors: [.clear, .white.opacity(0.12), .clear],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+            )
+            .frame(height: 0.5)
     }
 }
 

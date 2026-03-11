@@ -32,6 +32,9 @@ struct MediaDetailView: View {
     @State private var anilistEpisodes: [AniListEpisode]? = nil
     @State private var animeSeasonTitles: [Int: String]? = nil
     
+    @State private var castMembers: [TMDBCastMember] = []
+    @State private var relatedMedia: [TMDBSearchResult] = []
+    
     @State private var hasLoadedContent = false
     
     @StateObject private var serviceManager = ServiceManager.shared
@@ -300,14 +303,35 @@ struct MediaDetailView: View {
                     episodesSection
                 }
                 
+                if !castMembers.isEmpty {
+                    castSection
+                }
+                
+                if !relatedMedia.isEmpty {
+                    relatedSection
+                }
+                
                 Spacer(minLength: 50)
             }
             .background(
-                LinearGradient(
-                    colors: [ambientColor, LunaTheme.shared.backgroundBase],
-                    startPoint: .top,
-                    endPoint: UnitPoint(x: 0.5, y: 0.35)
-                )
+                ZStack {
+                    LinearGradient(
+                        colors: [ambientColor, LunaTheme.shared.backgroundBase],
+                        startPoint: .top,
+                        endPoint: UnitPoint(x: 0.5, y: 0.35)
+                    )
+                    if LunaTheme.shared.globalGradientEnabled {
+                        LinearGradient(
+                            stops: [
+                                .init(color: Color.clear, location: 0.0),
+                                .init(color: LunaTheme.shared.globalGradientColor.opacity(0.12), location: 0.3),
+                                .init(color: Color.clear, location: 0.7)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    }
+                }
             )
         }
     }
@@ -484,6 +508,144 @@ struct MediaDetailView: View {
         }
     }
     
+    // MARK: - Cast Section
+    
+    @ViewBuilder
+    private var castSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Cast")
+                .font(.title2)
+                .fontWeight(.bold)
+                .foregroundColor(.white)
+                .padding(.horizontal)
+            
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 16) {
+                    ForEach(castMembers.prefix(20)) { member in
+                        VStack(spacing: 8) {
+                            if let url = member.fullProfileURL {
+                                KFImage(URL(string: url))
+                                    .placeholder {
+                                        castPlaceholder
+                                    }
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fill)
+                                    .frame(width: 80, height: 80)
+                                    .clipShape(Circle())
+                            } else {
+                                castPlaceholder
+                            }
+                            
+                            Text(member.name)
+                                .font(.caption)
+                                .fontWeight(.medium)
+                                .foregroundColor(.white)
+                                .lineLimit(1)
+                            
+                            if let character = member.character, !character.isEmpty {
+                                Text(character)
+                                    .font(.caption2)
+                                    .foregroundColor(.white.opacity(0.5))
+                                    .lineLimit(1)
+                            }
+                        }
+                        .frame(width: 85)
+                    }
+                }
+                .padding(.horizontal)
+            }
+        }
+        .padding(.top, 8)
+    }
+    
+    private var castPlaceholder: some View {
+        Circle()
+            .fill(Color.white.opacity(0.08))
+            .frame(width: 80, height: 80)
+            .overlay(
+                Image(systemName: "person.fill")
+                    .font(.title2)
+                    .foregroundColor(.white.opacity(0.3))
+            )
+    }
+    
+    // MARK: - Related Section
+    
+    @ViewBuilder
+    private var relatedSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Related")
+                .font(.title2)
+                .fontWeight(.bold)
+                .foregroundColor(.white)
+                .padding(.horizontal)
+            
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 12) {
+                    ForEach(relatedMedia.prefix(15)) { item in
+                        NavigationLink(destination: MediaDetailView(searchResult: item)) {
+                            HStack(spacing: 12) {
+                                KFImage(URL(string: item.fullPosterURL ?? ""))
+                                    .placeholder {
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .fill(Color.white.opacity(0.08))
+                                            .frame(width: 90, height: 135)
+                                    }
+                                    .resizable()
+                                    .aspectRatio(2/3, contentMode: .fill)
+                                    .frame(width: 90, height: 135)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                                
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(item.displayTitle)
+                                        .font(.subheadline)
+                                        .fontWeight(.semibold)
+                                        .foregroundColor(.white)
+                                        .lineLimit(2)
+                                        .multilineTextAlignment(.leading)
+                                    
+                                    if let rating = item.voteAverage, rating > 0 {
+                                        HStack(spacing: 4) {
+                                            Image(systemName: "star.fill")
+                                                .font(.caption2)
+                                                .foregroundColor(.yellow)
+                                            Text(String(format: "%.1f", rating))
+                                                .font(.caption)
+                                                .foregroundColor(.white.opacity(0.7))
+                                        }
+                                    }
+                                    
+                                    if !item.displayDate.isEmpty {
+                                        Text(item.displayDate)
+                                            .font(.caption)
+                                            .foregroundColor(.white.opacity(0.5))
+                                    }
+                                    
+                                    if let overview = item.overview, !overview.isEmpty {
+                                        Text(overview)
+                                            .font(.caption2)
+                                            .foregroundColor(.white.opacity(0.5))
+                                            .lineLimit(3)
+                                            .multilineTextAlignment(.leading)
+                                    }
+                                }
+                                .frame(width: 170, alignment: .leading)
+                            }
+                            .padding(10)
+                            .background(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .fill(Color.white.opacity(0.06))
+                            )
+                        }
+                        .buttonStyle(PlainButtonStyle())
+                    }
+                }
+                .padding(.horizontal)
+            }
+        }
+        .padding(.top, 8)
+    }
+    
     private func updateBookmarkStatus() {
         isBookmarked = libraryManager.isBookmarked(searchResult)
     }
@@ -576,8 +738,12 @@ struct MediaDetailView: View {
                     async let detailTask = tmdbService.getMovieDetails(id: searchResult.id)
                     async let imagesTask = tmdbService.getMovieImages(id: searchResult.id, preferredLanguage: selectedLanguage)
                     async let romajiTask = tmdbService.getRomajiTitle(for: "movie", id: searchResult.id)
+                    async let creditsTask = tmdbService.getMovieCredits(id: searchResult.id)
+                    async let recommendationsTask = tmdbService.getMovieRecommendations(id: searchResult.id)
                     
                     let (detail, images, romaji) = try await (detailTask, imagesTask, romajiTask)
+                    let credits = try? await creditsTask
+                    let recommendations = try? await recommendationsTask
                     
                     await MainActor.run {
                         self.movieDetail = detail
@@ -586,6 +752,8 @@ struct MediaDetailView: View {
                         if let logo = tmdbService.getBestLogo(from: images, preferredLanguage: selectedLanguage) {
                             self.logoURL = logo.fullURL
                         }
+                        self.castMembers = credits?.cast ?? []
+                        self.relatedMedia = recommendations?.map { $0.asSearchResult } ?? []
                         self.isLoading = false
                         self.hasLoadedContent = true
                     }
@@ -593,8 +761,12 @@ struct MediaDetailView: View {
                     async let detailTask = tmdbService.getTVShowWithSeasons(id: searchResult.id)
                     async let imagesTask = tmdbService.getTVShowImages(id: searchResult.id, preferredLanguage: selectedLanguage)
                     async let romajiTask = tmdbService.getRomajiTitle(for: "tv", id: searchResult.id)
+                    async let creditsTask = tmdbService.getTVCredits(id: searchResult.id)
+                    async let recommendationsTask = tmdbService.getTVRecommendations(id: searchResult.id)
                     
                     let (detail, images, romaji) = try await (detailTask, imagesTask, romajiTask)
+                    let credits = try? await creditsTask
+                    let recommendations = try? await recommendationsTask
                     
                     // Detect anime/donghua for tracking/catalog — includes JP, CN, KR, TW animation
                     let asianAnimationCountries: Set<String> = ["JP", "CN", "KR", "TW"]
@@ -633,6 +805,8 @@ struct MediaDetailView: View {
                         self.synopsis = detail.overview ?? ""
                         self.romajiTitle = romaji
                         self.isAnimeShow = detectedAsAnime
+                        self.castMembers = credits?.cast ?? []
+                        self.relatedMedia = recommendations?.map { $0.asSearchResult } ?? []
                         
                         if let animeData = animeData {
                             Logger.shared.log("MediaDetailView: Using AniList structure — \(animeData.seasons.count) seasons", type: "AniList")

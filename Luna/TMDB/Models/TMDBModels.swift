@@ -626,3 +626,30 @@ struct TMDBImage: Codable {
     }
 }
 
+// MARK: - Credits / Cast
+struct TMDBCreditsResponse: Codable {
+    let id: Int
+    let cast: [TMDBCastMember]
+}
+
+struct TMDBCastMember: Codable, Identifiable {
+    let id: Int
+    let name: String
+    let character: String?
+    let profilePath: String?
+    let order: Int?
+    let knownForDepartment: String?
+    let popularity: Double?
+    
+    enum CodingKeys: String, CodingKey {
+        case id, name, character, order, popularity
+        case profilePath = "profile_path"
+        case knownForDepartment = "known_for_department"
+    }
+    
+    var fullProfileURL: String? {
+        guard let profilePath = profilePath else { return nil }
+        return "\(TMDBService.tmdbImageBaseURL)\(profilePath)"
+    }
+}
+

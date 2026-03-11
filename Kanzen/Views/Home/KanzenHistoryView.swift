@@ -74,7 +74,7 @@ struct KanzenHistoryView: View {
             }
             .navigationTitle("History")
             .navigationBarTitleDisplayMode(.large)
-            .background(LunaTheme.shared.backgroundBase.ignoresSafeArea())
+            .background(GlobalGradientBackground().ignoresSafeArea())
         }
     }
 
