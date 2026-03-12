@@ -18,6 +18,7 @@ struct DownloadedShowDetailView: View {
     @StateObject private var downloadManager = DownloadManager.shared
     @State private var showingDeleteConfirmation = false
     @State private var itemToDelete: DownloadItem?
+    @State private var scrollOffset: CGFloat = 0
     
     struct DownloadedSeasonGroup: Identifiable {
         var id: Int { seasonNumber }
@@ -41,16 +42,15 @@ struct DownloadedShowDetailView: View {
                 .padding(.top, 16)
                 .padding(.bottom, 32)
             }
+            .background(LunaScrollTracker())
         }
+        .coordinateSpace(name: "lunaGradientScroll")
+        .onPreferenceChange(ScrollOffsetPreferenceKey.self) { scrollOffset = $0 }
         .navigationTitle(showTitle)
 #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
 #endif
-        #if os(iOS)
-        .background(Color(.systemBackground))
-        #else
-        .background(Color.black)
-        #endif
+        .background(SettingsGradientBackground(scrollOffset: scrollOffset).ignoresSafeArea())
         .confirmationDialog(
             "Delete Episode",
             isPresented: $showingDeleteConfirmation,

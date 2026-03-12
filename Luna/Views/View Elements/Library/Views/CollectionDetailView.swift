@@ -11,6 +11,7 @@ import Kingfisher
 struct CollectionDetailView: View {
     @ObservedObject var collection: LibraryCollection
     @Environment(\.heroNamespace) private var heroNamespace
+    @State private var scrollOffset: CGFloat = 0
     
     var body: some View {
         ScrollView {
@@ -67,7 +68,11 @@ struct CollectionDetailView: View {
                 }
                 .padding()
             }
+            LunaScrollTracker()
         }
+        .coordinateSpace(name: "lunaGradientScroll")
+        .onPreferenceChange(ScrollOffsetPreferenceKey.self) { scrollOffset = $0 }
         .navigationTitle(collection.name)
+        .background(SettingsGradientBackground(scrollOffset: scrollOffset).ignoresSafeArea())
     }
 }
