@@ -14,6 +14,7 @@
 		CC1111102FC0000000CC1110 /* WidgetMetadata.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1111002FC0000000CC1100 /* WidgetMetadata.swift */; };
 		CC2222202FC0000000CC2220 /* HomeWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC2222002FC0000000CC2200 /* HomeWidgets.swift */; };
 		CC3333302FC0000000CC3330 /* DiscoverDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC3333002FC0000000CC3300 /* DiscoverDetailView.swift */; };
+		CC4444402FC0000000CC4440 /* SplashScreenView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC4444002FC0000000CC4400 /* SplashScreenView.swift */; };
 		12201F512EBE918D0033073C /* ServiceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12201F502EBE91870033073C /* ServiceStore.swift */; };
 		12201F542EBE922D0033073C /* ServiceModels.xcdatamodeld in Sources */ = {isa = PBXBuildFile; fileRef = 12201F522EBE922D0033073C /* ServiceModels.xcdatamodeld */; };
 		5E1111112F60000000AE1111 /* StremioModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E1111102F60000000AE1110 /* StremioModels.swift */; };
@@ -190,6 +191,7 @@
 		CC1111002FC0000000CC1100 /* WidgetMetadata.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetMetadata.swift; sourceTree = "<group>"; };
 		CC2222002FC0000000CC2200 /* HomeWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeWidgets.swift; sourceTree = "<group>"; };
 		CC3333002FC0000000CC3300 /* DiscoverDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiscoverDetailView.swift; sourceTree = "<group>"; };
+		CC4444002FC0000000CC4400 /* SplashScreenView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplashScreenView.swift; sourceTree = "<group>"; };
 		12201F502EBE91870033073C /* ServiceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceStore.swift; sourceTree = "<group>"; };
 		12201F532EBE922D0033073C /* ServiceModels.xcdatamodel */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcdatamodel; path = ServiceModels.xcdatamodel; sourceTree = "<group>"; };
 		5E1111102F60000000AE1110 /* StremioModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StremioModels.swift; sourceTree = "<group>"; };
@@ -716,6 +718,7 @@
 				DD2222202FB0000000DD2220 /* DownloadsView.swift */,
 				DD4444402FB0000000DD4440 /* DownloadedShowDetailView.swift */,
 				CC3333002FC0000000CC3300 /* DiscoverDetailView.swift */,
+				CC4444002FC0000000CC4400 /* SplashScreenView.swift */,
 				13F072C42E4B364B00EF90EB /* SettingsView */,
 				13F0727F2E4B2D9000EF90EB /* View Elements */,
 			);
@@ -1143,6 +1146,7 @@
 				CC1111102FC0000000CC1110 /* WidgetMetadata.swift in Sources */,
 				CC2222202FC0000000CC2220 /* HomeWidgets.swift in Sources */,
 				CC3333302FC0000000CC3330 /* DiscoverDetailView.swift in Sources */,
+				CC4444402FC0000000CC4440 /* SplashScreenView.swift in Sources */,
 				13F072B32E4B2D9200EF90EB /* ServicesResultsSheet.swift in Sources */,
 				13F072A52E4B2D9200EF90EB /* HomeView.swift in Sources */,
 				13E1EDDC2ED9E65F00087629 /* JavaScriptCore.swift in Sources */,
