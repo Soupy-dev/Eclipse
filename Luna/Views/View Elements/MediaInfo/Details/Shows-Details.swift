@@ -17,7 +17,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     var animeEpisodes: [AniListEpisode]? = nil
     var animeSeasonTitles: [Int: String]? = nil
     let tmdbService: TMDBService
-    let insertedContent: () -> InsertedContent
+    @ViewBuilder let insertedContent: () -> InsertedContent
     
     @State private var isLoadingSeason = false
     @State private var showingSearchResults = false
