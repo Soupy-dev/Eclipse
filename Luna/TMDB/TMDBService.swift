@@ -154,6 +154,11 @@ class TMDBService: ObservableObject {
     
     // MARK: - Get TV Show with Seasons
     func getTVShowWithSeasons(id: Int) async throws -> TMDBTVShowWithSeasons {
+        let cacheKey = "tvWithSeasons_\(id)"
+        if let cached: TMDBTVShowWithSeasons = detailCache.get(key: cacheKey) {
+            return cached
+        }
+
         let urlString = "\(baseURL)/tv/\(id)?api_key=\(apiKey)&language=\(currentLanguage)&append_to_response=content_ratings,external_ids"
         
         guard let url = URL(string: urlString) else {
@@ -163,6 +168,7 @@ class TMDBService: ObservableObject {
         do {
             let (data, _) = try await throttledData(from: url)
             let tvShowDetail = try JSONDecoder().decode(TMDBTVShowWithSeasons.self, from: data)
+            detailCache.set(key: cacheKey, value: tvShowDetail)
             return tvShowDetail
         } catch {
             throw TMDBError.networkError(error)
@@ -171,6 +177,11 @@ class TMDBService: ObservableObject {
     
     // MARK: - Get Season Details
     func getSeasonDetails(tvShowId: Int, seasonNumber: Int) async throws -> TMDBSeasonDetail {
+        let cacheKey = "season_\(tvShowId)_\(seasonNumber)"
+        if let cached: TMDBSeasonDetail = detailCache.get(key: cacheKey) {
+            return cached
+        }
+
         let urlString = "\(baseURL)/tv/\(tvShowId)/season/\(seasonNumber)?api_key=\(apiKey)&language=\(currentLanguage)"
         
         guard let url = URL(string: urlString) else {
@@ -180,6 +191,7 @@ class TMDBService: ObservableObject {
         do {
             let (data, _) = try await throttledData(from: url)
             let seasonDetail = try JSONDecoder().decode(TMDBSeasonDetail.self, from: data)
+            detailCache.set(key: cacheKey, value: seasonDetail)
             return seasonDetail
         } catch {
             throw TMDBError.networkError(error)
@@ -188,6 +200,11 @@ class TMDBService: ObservableObject {
     
     // MARK: - Get Movie Alternative Titles
     func getMovieAlternativeTitles(id: Int) async throws -> TMDBAlternativeTitles {
+        let cacheKey = "movieAltTitles_\(id)"
+        if let cached: TMDBAlternativeTitles = detailCache.get(key: cacheKey) {
+            return cached
+        }
+
         let urlString = "\(baseURL)/movie/\(id)/alternative_titles?api_key=\(apiKey)"
         
         guard let url = URL(string: urlString) else {
@@ -197,6 +214,7 @@ class TMDBService: ObservableObject {
         do {
             let (data, _) = try await throttledData(from: url)
             let alternativeTitles = try JSONDecoder().decode(TMDBAlternativeTitles.self, from: data)
+            detailCache.set(key: cacheKey, value: alternativeTitles)
             return alternativeTitles
         } catch {
             throw TMDBError.networkError(error)
@@ -205,6 +223,11 @@ class TMDBService: ObservableObject {
     
     // MARK: - Get TV Show Alternative Titles
     func getTVShowAlternativeTitles(id: Int) async throws -> TMDBTVAlternativeTitles {
+        let cacheKey = "tvAltTitles_\(id)"
+        if let cached: TMDBTVAlternativeTitles = detailCache.get(key: cacheKey) {
+            return cached
+        }
+
         let urlString = "\(baseURL)/tv/\(id)/alternative_titles?api_key=\(apiKey)"
         
         guard let url = URL(string: urlString) else {
@@ -214,6 +237,7 @@ class TMDBService: ObservableObject {
         do {
             let (data, _) = try await throttledData(from: url)
             let alternativeTitles = try JSONDecoder().decode(TMDBTVAlternativeTitles.self, from: data)
+            detailCache.set(key: cacheKey, value: alternativeTitles)
             return alternativeTitles
         } catch {
             throw TMDBError.networkError(error)
@@ -539,35 +563,57 @@ class TMDBService: ObservableObject {
     
     // MARK: - Get Movie Credits (Cast)
     func getMovieCredits(id: Int) async throws -> TMDBCreditsResponse {
+        let cacheKey = "movieCredits_\(id)"
+        if let cached: TMDBCreditsResponse = detailCache.get(key: cacheKey) {
+            return cached
+        }
         let urlString = "\(baseURL)/movie/\(id)/credits?api_key=\(apiKey)&language=\(currentLanguage)"
         guard let url = URL(string: urlString) else { throw TMDBError.invalidURL }
         let (data, _) = try await throttledData(from: url)
-        return try JSONDecoder().decode(TMDBCreditsResponse.self, from: data)
+        let result = try JSONDecoder().decode(TMDBCreditsResponse.self, from: data)
+        detailCache.set(key: cacheKey, value: result)
+        return result
     }
     
     // MARK: - Get TV Show Credits (Cast)
     func getTVCredits(id: Int) async throws -> TMDBCreditsResponse {
+        let cacheKey = "tvCredits_\(id)"
+        if let cached: TMDBCreditsResponse = detailCache.get(key: cacheKey) {
+            return cached
+        }
         let urlString = "\(baseURL)/tv/\(id)/credits?api_key=\(apiKey)&language=\(currentLanguage)"
         guard let url = URL(string: urlString) else { throw TMDBError.invalidURL }
         let (data, _) = try await throttledData(from: url)
-        return try JSONDecoder().decode(TMDBCreditsResponse.self, from: data)
+        let result = try JSONDecoder().decode(TMDBCreditsResponse.self, from: data)
+        detailCache.set(key: cacheKey, value: result)
+        return result
     }
     
     // MARK: - Get Movie Recommendations
     func getMovieRecommendations(id: Int) async throws -> [TMDBMovie] {
+        let cacheKey = "movieRecs_\(id)"
+        if let cached: [TMDBMovie] = detailCache.get(key: cacheKey) {
+            return cached
+        }
         let urlString = "\(baseURL)/movie/\(id)/recommendations?api_key=\(apiKey)&language=\(currentLanguage)&page=1"
         guard let url = URL(string: urlString) else { throw TMDBError.invalidURL }
         let (data, _) = try await throttledData(from: url)
         let response = try JSONDecoder().decode(TMDBMovieSearchResponse.self, from: data)
+        detailCache.set(key: cacheKey, value: response.results)
         return response.results
     }
     
     // MARK: - Get TV Show Recommendations
     func getTVRecommendations(id: Int) async throws -> [TMDBTVShow] {
+        let cacheKey = "tvRecs_\(id)"
+        if let cached: [TMDBTVShow] = detailCache.get(key: cacheKey) {
+            return cached
+        }
         let urlString = "\(baseURL)/tv/\(id)/recommendations?api_key=\(apiKey)&language=\(currentLanguage)&page=1"
         guard let url = URL(string: urlString) else { throw TMDBError.invalidURL }
         let (data, _) = try await throttledData(from: url)
         let response = try JSONDecoder().decode(TMDBTVSearchResponse.self, from: data)
+        detailCache.set(key: cacheKey, value: response.results)
         return response.results
     }
 }

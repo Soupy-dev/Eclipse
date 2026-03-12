@@ -8,6 +8,52 @@
 import SwiftUI
 import Kingfisher
 
+// MARK: - View-Level Detail Cache
+// Stores the fully-loaded state for a media detail screen so back-navigation is instant.
+private final class MediaDetailCacheStore {
+    static let shared = MediaDetailCacheStore()
+    
+    struct CachedDetail {
+        let movieDetail: TMDBMovieDetail?
+        let tvShowDetail: TMDBTVShowWithSeasons?
+        let selectedSeason: TMDBSeason?
+        let synopsis: String
+        let romajiTitle: String?
+        let logoURL: String?
+        let isAnimeShow: Bool
+        let anilistEpisodes: [AniListEpisode]?
+        let animeSeasonTitles: [Int: String]?
+        let castMembers: [TMDBCastMember]
+        let relatedMedia: [TMDBSearchResult]
+        let timestamp: Date
+    }
+    
+    private var cache: [Int: CachedDetail] = [:]
+    private let lock = NSLock()
+    private let ttl: TimeInterval = 300 // 5 minutes
+    
+    func get(id: Int) -> CachedDetail? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let entry = cache[id],
+              Date().timeIntervalSince(entry.timestamp) < ttl else {
+            return nil
+        }
+        return entry
+    }
+    
+    func set(id: Int, detail: CachedDetail) {
+        lock.lock()
+        defer { lock.unlock() }
+        cache[id] = detail
+        // Evict old entries if cache grows too large
+        if cache.count > 50 {
+            let cutoff = Date().addingTimeInterval(-ttl)
+            cache = cache.filter { $0.value.timestamp > cutoff }
+        }
+    }
+}
+
 struct MediaDetailView: View {
     let searchResult: TMDBSearchResult
     
@@ -718,6 +764,24 @@ struct MediaDetailView: View {
     }
     
     private func loadMediaDetails() {
+        // Check view-level cache first for instant back-navigation
+        if let cached = MediaDetailCacheStore.shared.get(id: searchResult.id) {
+            self.movieDetail = cached.movieDetail
+            self.tvShowDetail = cached.tvShowDetail
+            self.selectedSeason = cached.selectedSeason
+            self.synopsis = cached.synopsis
+            self.romajiTitle = cached.romajiTitle
+            self.logoURL = cached.logoURL
+            self.isAnimeShow = cached.isAnimeShow
+            self.anilistEpisodes = cached.anilistEpisodes
+            self.animeSeasonTitles = cached.animeSeasonTitles
+            self.castMembers = cached.castMembers
+            self.relatedMedia = cached.relatedMedia
+            self.isLoading = false
+            self.hasLoadedContent = true
+            return
+        }
+
         isLoading = true
         errorMessage = nil
         
@@ -745,6 +809,22 @@ struct MediaDetailView: View {
                         self.relatedMedia = recommendations?.map { $0.asSearchResult } ?? []
                         self.isLoading = false
                         self.hasLoadedContent = true
+                        
+                        // Store in view-level cache for instant back-navigation
+                        MediaDetailCacheStore.shared.set(id: searchResult.id, detail: .init(
+                            movieDetail: detail,
+                            tvShowDetail: nil,
+                            selectedSeason: nil,
+                            synopsis: self.synopsis,
+                            romajiTitle: self.romajiTitle,
+                            logoURL: self.logoURL,
+                            isAnimeShow: false,
+                            anilistEpisodes: nil,
+                            animeSeasonTitles: nil,
+                            castMembers: self.castMembers,
+                            relatedMedia: self.relatedMedia,
+                            timestamp: Date()
+                        ))
                     }
                 } else {
                     async let detailTask = tmdbService.getTVShowWithSeasons(id: searchResult.id)
@@ -883,6 +963,22 @@ struct MediaDetailView: View {
                         self.selectedEpisodeForSearch = nil
                         self.isLoading = false
                         self.hasLoadedContent = true
+                        
+                        // Store in view-level cache for instant back-navigation
+                        MediaDetailCacheStore.shared.set(id: searchResult.id, detail: .init(
+                            movieDetail: nil,
+                            tvShowDetail: self.tvShowDetail,
+                            selectedSeason: self.selectedSeason,
+                            synopsis: self.synopsis,
+                            romajiTitle: self.romajiTitle,
+                            logoURL: self.logoURL,
+                            isAnimeShow: self.isAnimeShow,
+                            anilistEpisodes: self.anilistEpisodes,
+                            animeSeasonTitles: self.animeSeasonTitles,
+                            castMembers: self.castMembers,
+                            relatedMedia: self.relatedMedia,
+                            timestamp: Date()
+                        ))
                     }
                 }
             } catch {

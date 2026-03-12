@@ -33,6 +33,20 @@ final class AniListService {
         return raw.split(separator: "-").first.map(String.init) ?? "en"
     }
 
+    // MARK: - In-Memory Cache for anime details (avoids re-fetching on back-navigation)
+    private let animeDetailsCache = NSCache<NSNumber, AniListAnimeWithSeasonsWrapper>()
+    private let animeCacheTTL: TimeInterval = 300 // 5 minutes
+
+    /// NSCache requires reference-type values, so wrap the struct
+    private final class AniListAnimeWithSeasonsWrapper {
+        let value: AniListAnimeWithSeasons
+        let timestamp: Date
+        init(_ value: AniListAnimeWithSeasons) {
+            self.value = value
+            self.timestamp = Date()
+        }
+    }
+
     enum AniListCatalogKind {
         case trending
         case popular
@@ -309,6 +323,14 @@ final class AniListService {
         tmdbShowPoster: String?,
         token: String?
     ) async throws -> AniListAnimeWithSeasons {
+        // Check in-memory cache first
+        let cacheKey = NSNumber(value: tmdbShowId)
+        if let cached = animeDetailsCache.object(forKey: cacheKey),
+           Date().timeIntervalSince(cached.timestamp) < animeCacheTTL {
+            Logger.shared.log("AniListService: Cache HIT for tmdbId=\(tmdbShowId)", type: "AniList")
+            return cached.value
+        }
+
         Logger.shared.log("AniListService: fetchAnimeDetailsWithEpisodes START for '\(title)' tmdbId=\(tmdbShowId)", type: "AniList")
         // Query AniList for anime structure + sequels + coverImage (multiple candidates for better matching)
         let query = """
@@ -841,13 +863,18 @@ final class AniListService {
             Logger.shared.log("  Season \(season.seasonNumber): \(season.episodes.count) episodes, poster: \(season.posterUrl ?? "none")", type: "AniList")
         }
         
-        return AniListAnimeWithSeasons(
+        let result = AniListAnimeWithSeasons(
             id: anime.id,
             title: title,
             seasons: seasons,
             totalEpisodes: totalEpisodes,
             status: anime.status ?? "UNKNOWN"
         )
+        
+        // Cache the result for fast back-navigation
+        animeDetailsCache.setObject(AniListAnimeWithSeasonsWrapper(result), forKey: NSNumber(value: tmdbShowId))
+        
+        return result
     }
 
     private func pickBestAniListMatch(from candidates: [AniListAnime], tmdbShow: TMDBTVShowWithSeasons?) -> AniListAnime {
