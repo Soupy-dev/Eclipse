@@ -863,7 +863,7 @@ final class AniListService {
             Logger.shared.log("  Season \(season.seasonNumber): \(season.episodes.count) episodes, poster: \(season.posterUrl ?? "none")", type: "AniList")
         }
         
-        let result = AniListAnimeWithSeasons(
+        let animeWithSeasons = AniListAnimeWithSeasons(
             id: anime.id,
             title: title,
             seasons: seasons,
@@ -872,9 +872,9 @@ final class AniListService {
         )
         
         // Cache the result for fast back-navigation
-        animeDetailsCache.setObject(AniListAnimeWithSeasonsWrapper(result), forKey: NSNumber(value: tmdbShowId))
+        animeDetailsCache.setObject(AniListAnimeWithSeasonsWrapper(animeWithSeasons), forKey: NSNumber(value: tmdbShowId))
         
-        return result
+        return animeWithSeasons
     }
 
     private func pickBestAniListMatch(from candidates: [AniListAnime], tmdbShow: TMDBTVShowWithSeasons?) -> AniListAnime {
