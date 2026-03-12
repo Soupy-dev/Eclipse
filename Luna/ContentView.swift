@@ -58,6 +58,7 @@ struct ContentView: View {
                 
                 if showingSettings {
                     settingsFullScreen
+                        .zIndex(1)
                         .transition(.asymmetric(
                             insertion: .move(edge: .trailing).combined(with: .opacity),
                             removal: .move(edge: .trailing).combined(with: .opacity).combined(with: .scale(scale: 0.95, anchor: .trailing))
@@ -83,6 +84,7 @@ struct ContentView: View {
                 
                 if showingSettings {
                     settingsFullScreen
+                        .zIndex(1)
                         .transition(.asymmetric(
                             insertion: .move(edge: .trailing).combined(with: .opacity),
                             removal: .move(edge: .trailing).combined(with: .opacity).combined(with: .scale(scale: 0.95, anchor: .trailing))
@@ -109,6 +111,7 @@ struct ContentView: View {
             
             if showingSettings {
                 settingsFullScreen
+                    .zIndex(1)
                     .transition(.asymmetric(
                         insertion: .move(edge: .trailing).combined(with: .opacity),
                         removal: .move(edge: .trailing).combined(with: .opacity).combined(with: .scale(scale: 0.95, anchor: .trailing))
@@ -159,7 +162,10 @@ struct ContentView: View {
 #endif
     
     private var settingsFullScreen: some View {
-        Group {
+        ZStack {
+            LunaTheme.shared.backgroundBase
+                .ignoresSafeArea()
+            
             if #available(iOS 16.0, *) {
                 NavigationStack {
                     SettingsView()
@@ -199,7 +205,6 @@ struct ContentView: View {
                 .navigationViewStyle(StackNavigationViewStyle())
             }
         }
-        .background(LunaTheme.shared.backgroundBase)
         .preferredColorScheme(.dark)
     }
     
