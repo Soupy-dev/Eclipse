@@ -766,19 +766,22 @@ struct MediaDetailView: View {
     private func loadMediaDetails() {
         // Check view-level cache first for instant back-navigation
         if let cached = MediaDetailCacheStore.shared.get(id: searchResult.id) {
-            self.movieDetail = cached.movieDetail
-            self.tvShowDetail = cached.tvShowDetail
-            self.selectedSeason = cached.selectedSeason
-            self.synopsis = cached.synopsis
-            self.romajiTitle = cached.romajiTitle
-            self.logoURL = cached.logoURL
-            self.isAnimeShow = cached.isAnimeShow
-            self.anilistEpisodes = cached.anilistEpisodes
-            self.animeSeasonTitles = cached.animeSeasonTitles
-            self.castMembers = cached.castMembers
-            self.relatedMedia = cached.relatedMedia
-            self.isLoading = false
-            self.hasLoadedContent = true
+            // Defer state update to next run loop tick so SwiftUI properly re-renders
+            Task { @MainActor in
+                self.movieDetail = cached.movieDetail
+                self.tvShowDetail = cached.tvShowDetail
+                self.selectedSeason = cached.selectedSeason
+                self.synopsis = cached.synopsis
+                self.romajiTitle = cached.romajiTitle
+                self.logoURL = cached.logoURL
+                self.isAnimeShow = cached.isAnimeShow
+                self.anilistEpisodes = cached.anilistEpisodes
+                self.animeSeasonTitles = cached.animeSeasonTitles
+                self.castMembers = cached.castMembers
+                self.relatedMedia = cached.relatedMedia
+                self.isLoading = false
+                self.hasLoadedContent = true
+            }
             return
         }
 
