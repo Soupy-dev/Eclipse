@@ -165,7 +165,11 @@ struct ContentView: View {
                     SettingsView()
                         .toolbar {
                             ToolbarItem(placement: .navigationBarLeading) {
-                                Button(action: { showingSettings = false }) {
+                                Button(action: {
+                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
+                                        showingSettings = false
+                                    }
+                                }) {
                                     HStack(spacing: 4) {
                                         Image(systemName: "chevron.left")
                                         Text("Back")
@@ -179,7 +183,11 @@ struct ContentView: View {
                     SettingsView()
                         .toolbar {
                             ToolbarItem(placement: .navigationBarLeading) {
-                                Button(action: { showingSettings = false }) {
+                                Button(action: {
+                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
+                                        showingSettings = false
+                                    }
+                                }) {
                                     HStack(spacing: 4) {
                                         Image(systemName: "chevron.left")
                                         Text("Back")

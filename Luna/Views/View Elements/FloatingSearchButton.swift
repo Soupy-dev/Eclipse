@@ -12,7 +12,9 @@ struct FloatingSettingsButton: View {
     
     var body: some View {
         Button(action: {
-            isPresented = true
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
+                isPresented = true
+            }
         }) {
             Image(systemName: "gear")
                 .font(.system(size: 18, weight: .semibold))
