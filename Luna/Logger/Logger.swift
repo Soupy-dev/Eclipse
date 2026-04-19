@@ -55,6 +55,32 @@ class Logger: @unchecked Sendable {
     func log(_ message: String, type: String = "General") {
         let normalizedMessage = message.replacingOccurrences(of: "\n", with: " ")
         let entry = LogEntry(message: normalizedMessage, type: type, timestamp: Date())
+
+        // Crash diagnostics must survive hard crashes immediately.
+        if type == "CrashProbe" {
+            appendToDisk(entry)
+
+            queue.async(flags: .barrier) {
+                self.logs.append(entry)
+                if self.logs.count > self.maxLogEntries {
+                    self.logs.removeFirst(self.logs.count - self.maxLogEntries)
+                }
+                self.debugLog(entry)
+
+                DispatchQueue.main.async {
+                    NotificationCenter.default.post(
+                        name: NSNotification.Name("LoggerNotification"),
+                        object: nil,
+                        userInfo: [
+                            "message": entry.message,
+                            "type": entry.type,
+                            "timestamp": entry.timestamp
+                        ]
+                    )
+                }
+            }
+            return
+        }
         
         queue.async(flags: .barrier) {
             let now = entry.timestamp
