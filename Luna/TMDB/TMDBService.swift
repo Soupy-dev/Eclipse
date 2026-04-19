@@ -544,15 +544,15 @@ class TMDBService: ObservableObject {
         
         do {
             probe("getMovieImages request id=\(id)")
-            let (data, response) = try await throttledData(from: url)
-            let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let (data, httpResponse) = try await throttledData(from: url)
+            let status = (httpResponse as? HTTPURLResponse)?.statusCode ?? -1
             probe("getMovieImages response id=\(id) status=\(status) bytes=\(data.count)")
             probe("getMovieImages decode start id=\(id)")
-            let response = try JSONDecoder().decode(TMDBImagesResponse.self, from: data)
-            probe("getMovieImages decode done id=\(id) logos=\(response.logos?.count ?? 0)")
-            detailCache.set(key: cacheKey, value: response)
+            let decodedResponse = try JSONDecoder().decode(TMDBImagesResponse.self, from: data)
+            probe("getMovieImages decode done id=\(id) logos=\(decodedResponse.logos?.count ?? 0)")
+            detailCache.set(key: cacheKey, value: decodedResponse)
             probe("getMovieImages cache store id=\(id) lang=\(langCode)")
-            return response
+            return decodedResponse
         } catch {
             probe("getMovieImages error id=\(id) error=\(error.localizedDescription)")
             throw TMDBError.networkError(error)
@@ -648,15 +648,15 @@ class TMDBService: ObservableObject {
         let urlString = "\(baseURL)/movie/\(id)/recommendations?api_key=\(apiKey)&language=\(currentLanguage)&page=1"
         guard let url = URL(string: urlString) else { throw TMDBError.invalidURL }
         probe("getMovieRecommendations request id=\(id)")
-        let (data, response) = try await throttledData(from: url)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? -1
+        let (data, httpResponse) = try await throttledData(from: url)
+        let status = (httpResponse as? HTTPURLResponse)?.statusCode ?? -1
         probe("getMovieRecommendations response id=\(id) status=\(status) bytes=\(data.count)")
         probe("getMovieRecommendations decode start id=\(id)")
-        let response = try JSONDecoder().decode(TMDBMovieSearchResponse.self, from: data)
-        probe("getMovieRecommendations decode done id=\(id) count=\(response.results.count)")
-        detailCache.set(key: cacheKey, value: response.results)
+        let decodedResponse = try JSONDecoder().decode(TMDBMovieSearchResponse.self, from: data)
+        probe("getMovieRecommendations decode done id=\(id) count=\(decodedResponse.results.count)")
+        detailCache.set(key: cacheKey, value: decodedResponse.results)
         probe("getMovieRecommendations cache store id=\(id)")
-        return response.results
+        return decodedResponse.results
     }
     
     // MARK: - Get TV Show Recommendations
