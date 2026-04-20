@@ -703,7 +703,8 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private func stremioStreamScore(_ stream: StremioStream) -> Double {
-        let title = [stream.name, stream.title, stream.description].compactMap { $0 }.joined(separator: " ")
+        let shortDescription = stream.description.map { String($0.prefix(120)) }
+        let title = [stream.name, stream.title, shortDescription].compactMap { $0 }.joined(separator: " ")
         let baseSimilarity = algorithmManager.calculateSimilarity(original: displayTitle, result: title)
         let lower = title.lowercased()
 
@@ -756,7 +757,7 @@ struct ModulesSearchResultsSheet: View {
         let orderedSelections = sortedResultItems.filter { configuredIds.contains(autoModeSourceId(for: $0)) }
 
         guard !orderedSelections.isEmpty else {
-            viewModel.streamError = "Auto Mode is enabled, but no active service/addon is selected in Services settings."
+            viewModel.streamError = "Auto Mode is enabled, but no active service/addon is selected. Please select at least one source in Services settings."
             viewModel.showingStreamError = true
             return
         }
@@ -776,7 +777,7 @@ struct ModulesSearchResultsSheet: View {
             }
         }
 
-        viewModel.streamError = "Auto Mode could not find a match above your quality threshold in the selected services/addons."
+        viewModel.streamError = "Auto Mode could not find a match above your quality threshold in the selected sources. Try lowering the quality threshold or selecting more services/addons."
         viewModel.showingStreamError = true
     }
     

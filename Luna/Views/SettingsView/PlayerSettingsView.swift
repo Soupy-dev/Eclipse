@@ -107,8 +107,6 @@ final class PlayerSettingsStore: ObservableObject {
         let inAppRaw = UserDefaults.standard.string(forKey: "inAppPlayer") ?? InAppPlayer.normal.rawValue
         self.inAppPlayer = InAppPlayer(rawValue: inAppRaw) ?? .normal
 
-        UserDefaults.standard.set(true, forKey: "enableVLCSubtitleEditMenu")
-
         self.aniSkipAutoSkip = UserDefaults.standard.bool(forKey: "aniSkipAutoSkip")
 
         if UserDefaults.standard.object(forKey: "aniSkipEnabled") == nil {
