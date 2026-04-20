@@ -170,13 +170,9 @@ struct MediaDetailView: View {
             if let episodes = seasonDetail?.episodes,
                let nextEp = episodes.first(where: { $0.seasonNumber == seasonNumber && $0.episodeNumber == episodeNumber }) {
                 selectedEpisodeForSearch = nextEp
-                let wasShowingSearchResults = showingSearchResults
-                if wasShowingSearchResults {
-                    showingSearchResults = false
-                }
+                showingSearchResults = false
                 // Delay to ensure the player is fully dismissed before presenting the sheet
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
-                    guard !showingSearchResults else { return }
                     showingSearchResults = true
                 }
             } else {
