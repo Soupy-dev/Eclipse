@@ -171,8 +171,9 @@ struct MediaDetailView: View {
                let nextEp = episodes.first(where: { $0.seasonNumber == seasonNumber && $0.episodeNumber == episodeNumber }) {
                 selectedEpisodeForSearch = nextEp
                 showingSearchResults = false
+                let playerDismissalDelay: TimeInterval = 1.2
                 // Delay to ensure the player is fully dismissed before presenting the sheet
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + playerDismissalDelay) {
                     showingSearchResults = true
                 }
             } else {
