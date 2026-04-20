@@ -73,13 +73,6 @@ struct ContentView: View {
                             ))
                     }
                 }
-                .animation(.spring(response: 0.35, dampingFraction: 0.86), value: showingSettings)
-                .task { await runBackgroundAutoChecks() }
-                .onChange(of: scenePhase) { newPhase in
-                    if newPhase == .active {
-                        Task { await runBackgroundAutoChecks() }
-                    }
-                }
             } else {
                 ZStack {
                     olderTabView
@@ -97,13 +90,6 @@ struct ContentView: View {
                                 insertion: .move(edge: .trailing).combined(with: .opacity),
                                 removal: .move(edge: .trailing).combined(with: .opacity).combined(with: .scale(scale: 0.95, anchor: .trailing))
                             ))
-                    }
-                }
-                .animation(.spring(response: 0.35, dampingFraction: 0.86), value: showingSettings)
-                .task { await runBackgroundAutoChecks() }
-                .onChange(of: scenePhase) { newPhase in
-                    if newPhase == .active {
-                        Task { await runBackgroundAutoChecks() }
                     }
                 }
             }
@@ -126,14 +112,14 @@ struct ContentView: View {
                         ))
                 }
             }
-            .animation(.spring(response: 0.35, dampingFraction: 0.86), value: showingSettings)
-            .task { await runBackgroundAutoChecks() }
-            .onChange(of: scenePhase) { newPhase in
-                if newPhase == .active {
-                    Task { await runBackgroundAutoChecks() }
-                }
-            }
 #endif
+        }
+        .animation(.spring(response: 0.35, dampingFraction: 0.86), value: showingSettings)
+        .task { await runBackgroundAutoChecks() }
+        .onChange(of: scenePhase) { newPhase in
+            if newPhase == .active {
+                Task { await runBackgroundAutoChecks() }
+            }
         }
         .onAppear {
             presentUpdateAlertIfNeeded()
