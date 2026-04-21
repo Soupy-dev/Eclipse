@@ -1045,7 +1045,7 @@ struct MediaDetailView: View {
                 continue
             }
 
-            let entryKey = "\(entry.format.lowercased())-\(query.lowercased())"
+            let entryKey = "\((entry.format ?? "unknown").lowercased())-\(query.lowercased())"
             guard seenEntryKeys.insert(entryKey).inserted else {
                 skippedDuplicateEntry += 1
                 continue
