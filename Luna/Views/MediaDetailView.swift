@@ -740,14 +740,10 @@ struct MediaDetailView: View {
         detailLoadTask = Task {
             Logger.shared.log("MediaDetail async task entered: id=\(searchResult.id)", type: "CrashProbe")
             defer {
-                let wasCancelled = Task.isCancelled
-                Task { @MainActor in
-                    if wasCancelled {
-                        Logger.shared.log("MediaDetail async task finished as cancelled: id=\(searchResult.id)", type: "CrashProbe")
-                    } else {
-                        Logger.shared.log("MediaDetail async task finished: id=\(searchResult.id)", type: "CrashProbe")
-                    }
-                    self.detailLoadTask = nil
+                if Task.isCancelled {
+                    Logger.shared.log("MediaDetail async task finished as cancelled: id=\(searchResult.id)", type: "CrashProbe")
+                } else {
+                    Logger.shared.log("MediaDetail async task finished: id=\(searchResult.id)", type: "CrashProbe")
                 }
             }
             do {
@@ -810,24 +806,24 @@ struct MediaDetailView: View {
                     Logger.shared.log("TV detail step: getTVCredits start id=\(searchResult.id)", type: "CrashProbe")
                     Logger.shared.log("TV detail step: getTVRecommendations start id=\(searchResult.id)", type: "CrashProbe")
                     async let detailTask = tmdbService.getTVShowWithSeasons(id: searchResult.id)
-                    async let imagesTask: TMDBImagesResponse? = try? await tmdbService.getTVShowImages(id: searchResult.id, preferredLanguage: selectedLanguage)
+                    async let imagesTask = tmdbService.getTVShowImages(id: searchResult.id, preferredLanguage: selectedLanguage)
                     async let romajiTask = tmdbService.getRomajiTitle(for: "tv", id: searchResult.id)
-                    async let creditsTask: TMDBCreditsResponse? = try? await tmdbService.getTVCredits(id: searchResult.id)
-                    async let recommendationsTask: [TMDBTVShow]? = try? await tmdbService.getTVRecommendations(id: searchResult.id)
+                    async let creditsTask = tmdbService.getTVCredits(id: searchResult.id)
+                    async let recommendationsTask = tmdbService.getTVRecommendations(id: searchResult.id)
 
                     let detail = try await detailTask
                     Logger.shared.log("TV detail step: getTVShowWithSeasons done id=\(searchResult.id) seasons=\(detail.seasons.count)", type: "CrashProbe")
 
-                    let images = await imagesTask
+                    let images = try? await imagesTask
                     Logger.shared.log("TV detail step: getTVShowImages done id=\(searchResult.id) hasImages=\(images != nil)", type: "CrashProbe")
 
                     let romaji = await romajiTask
                     Logger.shared.log("TV detail step: getRomajiTitle done id=\(searchResult.id)", type: "CrashProbe")
 
-                    let credits = await creditsTask
+                    let credits = try? await creditsTask
                     Logger.shared.log("TV detail step: getTVCredits done id=\(searchResult.id) cast=\(credits?.cast.count ?? 0)", type: "CrashProbe")
 
-                    let recommendations = await recommendationsTask
+                    let recommendations = try? await recommendationsTask
                     Logger.shared.log("TV detail step: getTVRecommendations done id=\(searchResult.id) recs=\(recommendations?.count ?? 0)", type: "CrashProbe")
                     let recommendationMedia = recommendations?.map { $0.asSearchResult } ?? []
                     
