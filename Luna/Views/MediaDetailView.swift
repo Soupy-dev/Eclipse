@@ -994,10 +994,11 @@ struct MediaDetailView: View {
     private func mergeRelatedMedia(primary: [TMDBSearchResult], fallback: [TMDBSearchResult]) -> [TMDBSearchResult] {
         var seen = Set<String>()
         var merged: [TMDBSearchResult] = []
+        let currentMediaKey = "\(searchResult.mediaType)-\(searchResult.id)"
 
         for item in (primary + fallback) {
             let key = "\(item.mediaType)-\(item.id)"
-            guard key != "\(searchResult.mediaType)-\(searchResult.id)" else { continue }
+            guard key != currentMediaKey else { continue }
             guard seen.insert(key).inserted else { continue }
             merged.append(item)
         }

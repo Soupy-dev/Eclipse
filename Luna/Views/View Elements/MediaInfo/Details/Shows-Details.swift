@@ -366,9 +366,11 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                                         .lineLimit(2)
                                         .multilineTextAlignment(.center)
                                         .frame(width: 86)
+                                        .accessibilityLabel(media.displayTitle)
                                 }
                             }
                             .buttonStyle(PlainButtonStyle())
+                            .accessibilityLabel("View details for \(media.displayTitle)")
                         }
                     }
                     .padding(.horizontal)

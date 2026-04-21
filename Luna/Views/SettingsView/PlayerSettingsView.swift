@@ -591,6 +591,7 @@ struct PlayerSettingsView: View {
         .navigationTitle("Media Player")
         .lunaSettingsStyle()
         .onAppear {
+            // Force these VLC flags on for first launch and for previously disabled states.
             if UserDefaults.standard.object(forKey: "enableVLCSubtitleEditMenu") as? Bool != true {
                 UserDefaults.standard.set(true, forKey: "enableVLCSubtitleEditMenu")
             }
