@@ -537,7 +537,6 @@ struct MediaDetailView: View {
                 selectedEpisodeForSearch: $selectedEpisodeForSearch,
                 animeEpisodes: anilistEpisodes,
                 animeSeasonTitles: animeSeasonTitles,
-                relatedMedia: relatedMedia,
                 tmdbService: tmdbService
             ) {
                 if !castMembers.isEmpty {
@@ -881,15 +880,6 @@ struct MediaDetailView: View {
                         Logger.shared.log("MediaDetailView: Skipping AniList fetch — not detected as anime", type: "AniList")
                     }
                     
-                    let anilistRelatedMedia: [TMDBSearchResult]
-                    if let animeData = animeData {
-                        Logger.shared.log("TV detail step: resolveAniListRelatedMedia start id=\(searchResult.id) entries=\(animeData.relatedEntries.count)", type: "CrashProbe")
-                        anilistRelatedMedia = await resolveAniListRelatedMedia(from: animeData.relatedEntries)
-                        Logger.shared.log("TV detail step: resolveAniListRelatedMedia done id=\(searchResult.id) resolved=\(anilistRelatedMedia.count)", type: "CrashProbe")
-                    } else {
-                        anilistRelatedMedia = []
-                    }
-
                     Logger.shared.log("TV detail step: apply state start id=\(searchResult.id)", type: "CrashProbe")
                     if Task.isCancelled { return }
                     await MainActor.run {
@@ -898,7 +888,7 @@ struct MediaDetailView: View {
                         self.romajiTitle = romaji
                         self.isAnimeShow = detectedAsAnime
                         self.castMembers = credits?.cast ?? []
-                        self.relatedMedia = mergeRelatedMedia(primary: anilistRelatedMedia, fallback: recommendationMedia)
+                        self.relatedMedia = recommendationMedia
                         
                         if let animeData = animeData {
                             Logger.shared.log("MediaDetailView: Using AniList structure — \(animeData.seasons.count) seasons", type: "AniList")
@@ -1018,143 +1008,4 @@ struct MediaDetailView: View {
         }
     }
 
-    private func resolveAniListRelatedMedia(from entries: [AniListRelatedEntry]) async -> [TMDBSearchResult] {
-        guard !entries.isEmpty else { return [] }
-        let maxLookups = 12
-        var output: [TMDBSearchResult] = []
-        var seenEntryKeys = Set<String>()
-        var seenMediaKeys = Set<String>()
-        var skippedEmptyTitle = 0
-        var skippedDuplicateEntry = 0
-        var skippedLookupNil = 0
-        var skippedCurrentMedia = 0
-        var skippedDuplicateMedia = 0
-        var cancelled = false
-
-        Logger.shared.log("MediaDetail related resolve start: current=\(searchResult.stableIdentity) entries=\(entries.count) maxLookups=\(maxLookups)", type: "CrashProbe")
-
-        for entry in entries {
-            if Task.isCancelled {
-                cancelled = true
-                break
-            }
-
-            let query = entry.title.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !query.isEmpty else {
-                skippedEmptyTitle += 1
-                continue
-            }
-
-            let entryKey = "\((entry.format ?? "unknown").lowercased())-\(query.lowercased())"
-            guard seenEntryKeys.insert(entryKey).inserted else {
-                skippedDuplicateEntry += 1
-                continue
-            }
-            if seenEntryKeys.count > maxLookups { break }
-
-            guard let resolved = await resolveAniListEntryToTMDB(entry) else {
-                skippedLookupNil += 1
-                continue
-            }
-            let mediaKey = resolved.stableIdentity
-            guard mediaKey != searchResult.stableIdentity else {
-                skippedCurrentMedia += 1
-                continue
-            }
-            guard seenMediaKeys.insert(mediaKey).inserted else {
-                skippedDuplicateMedia += 1
-                continue
-            }
-            output.append(resolved)
-        }
-
-        Logger.shared.log(
-            "MediaDetail related resolve done: current=\(searchResult.stableIdentity) resolved=\(output.count) seenEntries=\(seenEntryKeys.count) skippedEmpty=\(skippedEmptyTitle) skippedDuplicateEntry=\(skippedDuplicateEntry) skippedLookupNil=\(skippedLookupNil) skippedCurrent=\(skippedCurrentMedia) skippedDuplicateMedia=\(skippedDuplicateMedia) cancelled=\(cancelled)",
-            type: "CrashProbe"
-        )
-
-        return output
-    }
-
-    private func resolveAniListEntryToTMDB(_ entry: AniListRelatedEntry) async -> TMDBSearchResult? {
-        let query = entry.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return nil }
-
-        if entry.format == "MOVIE" {
-            let movieResults: [TMDBMovie]?
-            do {
-                movieResults = try await tmdbService.searchMovies(query: query)
-            } catch {
-                movieResults = nil
-                Logger.shared.log("MediaDetail related resolve movie search failed: query='\(query)' error=\(error.localizedDescription)", type: "CrashProbe")
-            }
-            if let movie = movieResults?.first {
-                return movie.asSearchResult
-            }
-
-            let tvResults: [TMDBTVShow]?
-            do {
-                tvResults = try await tmdbService.searchTVShows(query: query)
-            } catch {
-                tvResults = nil
-                Logger.shared.log("MediaDetail related resolve tv fallback search failed: query='\(query)' error=\(error.localizedDescription)", type: "CrashProbe")
-            }
-            if let tv = tvResults?.first {
-                return tv.asSearchResult
-            }
-        } else {
-            let tvResults: [TMDBTVShow]?
-            do {
-                tvResults = try await tmdbService.searchTVShows(query: query)
-            } catch {
-                tvResults = nil
-                Logger.shared.log("MediaDetail related resolve tv search failed: query='\(query)' error=\(error.localizedDescription)", type: "CrashProbe")
-            }
-            if let tv = tvResults?.first {
-                return tv.asSearchResult
-            }
-
-            let movieResults: [TMDBMovie]?
-            do {
-                movieResults = try await tmdbService.searchMovies(query: query)
-            } catch {
-                movieResults = nil
-                Logger.shared.log("MediaDetail related resolve movie fallback search failed: query='\(query)' error=\(error.localizedDescription)", type: "CrashProbe")
-            }
-            if let movie = movieResults?.first {
-                return movie.asSearchResult
-            }
-        }
-
-        Logger.shared.log("MediaDetail related resolve no TMDB match: query='\(query)' format=\(entry.format ?? "unknown") relation=\(entry.relationType)", type: "CrashProbe")
-        return nil
-    }
-
-    private func mergeRelatedMedia(primary: [TMDBSearchResult], fallback: [TMDBSearchResult]) -> [TMDBSearchResult] {
-        var seen = Set<String>()
-        var merged: [TMDBSearchResult] = []
-        let currentMediaKey = "\(searchResult.mediaType)-\(searchResult.id)"
-        var skippedCurrent = 0
-        var skippedDuplicate = 0
-
-        for item in (primary + fallback) {
-            let key = "\(item.mediaType)-\(item.id)"
-            guard key != currentMediaKey else {
-                skippedCurrent += 1
-                continue
-            }
-            guard seen.insert(key).inserted else {
-                skippedDuplicate += 1
-                continue
-            }
-            merged.append(item)
-        }
-
-        Logger.shared.log(
-            "MediaDetail mergeRelatedMedia: current=\(currentMediaKey) primary=\(primary.count) fallback=\(fallback.count) merged=\(merged.count) skippedCurrent=\(skippedCurrent) skippedDuplicate=\(skippedDuplicate)",
-            type: "CrashProbe"
-        )
-
-        return merged
-    }
 }

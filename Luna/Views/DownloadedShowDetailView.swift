@@ -332,6 +332,22 @@ struct DownloadedShowDetailView: View {
             )
             pvc.isAnimeHint = item.isAnime
             pvc.modalPresentationStyle = .fullScreen
+            if !item.isMovie {
+                pvc.onRequestNextEpisode = { seasonNumber, episodeNumber in
+                    guard let nextItem = nextDownloadedEpisode(
+                        for: item.tmdbId,
+                        requestedSeasonNumber: seasonNumber,
+                        requestedEpisodeNumber: episodeNumber,
+                        currentItemId: item.id
+                    ) else {
+                        Logger.shared.log("NextEpisode: No downloaded next episode found for tmdbId=\(item.tmdbId) after \(item.id)", type: "Player")
+                        return
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                        playDownloadedItem(nextItem)
+                    }
+                }
+            }
             
             if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
                let rootVC = windowScene.windows.first?.rootViewController,
@@ -353,6 +369,38 @@ struct DownloadedShowDetailView: View {
                 }
             }
         }
+    }
+
+    private func nextDownloadedEpisode(
+        for tmdbId: Int,
+        requestedSeasonNumber: Int,
+        requestedEpisodeNumber: Int,
+        currentItemId: String
+    ) -> DownloadItem? {
+        let episodes = downloadManager.completedDownloads
+            .filter {
+                !$0.isMovie &&
+                $0.tmdbId == tmdbId &&
+                $0.seasonNumber != nil &&
+                $0.episodeNumber != nil
+            }
+            .sorted {
+                if $0.seasonNumber == $1.seasonNumber {
+                    return ($0.episodeNumber ?? 0) < ($1.episodeNumber ?? 0)
+                }
+                return ($0.seasonNumber ?? 0) < ($1.seasonNumber ?? 0)
+            }
+
+        if let requested = episodes.first(where: {
+            $0.seasonNumber == requestedSeasonNumber && $0.episodeNumber == requestedEpisodeNumber
+        }) {
+            return requested
+        }
+
+        guard let currentIndex = episodes.firstIndex(where: { $0.id == currentItemId }) else { return nil }
+        let nextIndex = episodes.index(after: currentIndex)
+        guard nextIndex < episodes.endIndex else { return nil }
+        return episodes[nextIndex]
     }
     
     // MARK: - Share

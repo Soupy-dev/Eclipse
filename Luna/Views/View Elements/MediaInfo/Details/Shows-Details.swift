@@ -16,7 +16,6 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     @Binding var selectedEpisodeForSearch: TMDBEpisode?
     var animeEpisodes: [AniListEpisode]? = nil
     var animeSeasonTitles: [Int: String]? = nil
-    let relatedMedia: [TMDBSearchResult]
     let tmdbService: TMDBService
     @ViewBuilder let insertedContent: () -> InsertedContent
     
@@ -34,9 +33,6 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     
     @StateObject private var serviceManager = ServiceManager.shared
     @AppStorage("horizontalEpisodeList") private var horizontalEpisodeList: Bool = false
-    private let relatedPosterWidth: CGFloat = 86
-    private let relatedPosterHeight: CGFloat = 128
-    
     private var isGroupedBySeasons: Bool {
         return tvShow?.seasons.filter { $0.seasonNumber > 0 }.count ?? 0 > 1
     }
@@ -115,8 +111,6 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                         .padding(.top)
                         
                         seasonSelectorStyled
-                        relatedMediaSection
-                        
                         HStack {
                             Text("Episodes")
                                 .font(.title2)
@@ -138,7 +132,6 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                         .padding(.top)
                     } else {
                         episodesSectionHeader
-                        relatedMediaSection
                     }
                     
                     episodeListSection
@@ -336,59 +329,6 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         }
     }
 
-    @ViewBuilder
-    private var relatedMediaSection: some View {
-        if !relatedMedia.isEmpty {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Related Media")
-                    .font(.title3)
-                    .fontWeight(.bold)
-                    .foregroundColor(.white)
-                    .padding(.horizontal)
-
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
-                        ForEach(relatedMedia, id: \.stableIdentity) { media in
-                            NavigationLink(destination: MediaDetailView(searchResult: media)) {
-                                VStack(spacing: 6) {
-                                    if let posterURL = media.fullPosterURL, let url = URL(string: posterURL) {
-                                        KFImage(url)
-                                            .placeholder {
-                                                Rectangle()
-                                                    .fill(Color.gray.opacity(0.3))
-                                                    .frame(width: relatedPosterWidth, height: relatedPosterHeight)
-                                            }
-                                            .resizable()
-                                            .aspectRatio(2/3, contentMode: .fill)
-                                            .frame(width: relatedPosterWidth, height: relatedPosterHeight)
-                                            .clipShape(RoundedRectangle(cornerRadius: 10))
-                                    } else {
-                                        Rectangle()
-                                            .fill(Color.gray.opacity(0.3))
-                                            .frame(width: relatedPosterWidth, height: relatedPosterHeight)
-                                            .clipShape(RoundedRectangle(cornerRadius: 10))
-                                    }
-
-                                    Text(media.displayTitle)
-                                        .font(.caption2)
-                                        .foregroundColor(.white)
-                                        .lineLimit(2)
-                                        .multilineTextAlignment(.center)
-                                        .frame(width: relatedPosterWidth)
-                                        .accessibilityLabel(media.displayTitle)
-                                }
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                            .accessibilityLabel("View details for \(media.displayTitle)")
-                        }
-                    }
-                    .padding(.horizontal)
-                }
-            }
-            .padding(.top, 4)
-        }
-    }
-    
     @ViewBuilder
     private var episodeListSection: some View {
         Group {
