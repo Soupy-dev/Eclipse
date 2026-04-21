@@ -34,6 +34,8 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     
     @StateObject private var serviceManager = ServiceManager.shared
     @AppStorage("horizontalEpisodeList") private var horizontalEpisodeList: Bool = false
+    private let relatedPosterWidth: CGFloat = 86
+    private let relatedPosterHeight: CGFloat = 128
     
     private var isGroupedBySeasons: Bool {
         return tvShow?.seasons.filter { $0.seasonNumber > 0 }.count ?? 0 > 1
@@ -337,8 +339,6 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     @ViewBuilder
     private var relatedMediaSection: some View {
         if !relatedMedia.isEmpty {
-            let posterWidth: CGFloat = 86
-            let posterHeight: CGFloat = 128
             VStack(alignment: .leading, spacing: 10) {
                 Text("Related Media")
                     .font(.title3)
@@ -355,11 +355,11 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                                         .placeholder {
                                             Rectangle()
                                                 .fill(Color.gray.opacity(0.3))
-                                                .frame(width: posterWidth, height: posterHeight)
+                                                .frame(width: relatedPosterWidth, height: relatedPosterHeight)
                                         }
                                         .resizable()
                                         .aspectRatio(2/3, contentMode: .fill)
-                                        .frame(width: posterWidth, height: posterHeight)
+                                        .frame(width: relatedPosterWidth, height: relatedPosterHeight)
                                         .clipShape(RoundedRectangle(cornerRadius: 10))
 
                                     Text(media.displayTitle)
@@ -367,7 +367,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                                         .foregroundColor(.white)
                                         .lineLimit(2)
                                         .multilineTextAlignment(.center)
-                                        .frame(width: posterWidth)
+                                        .frame(width: relatedPosterWidth)
                                         .accessibilityLabel(media.displayTitle)
                                 }
                             }

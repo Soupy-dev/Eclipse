@@ -962,17 +962,21 @@ struct MediaDetailView: View {
                     guard !query.isEmpty else { return nil }
 
                     if entry.format == "MOVIE" {
-                        if let movie = try? await self.tmdbService.searchMovies(query: query).first {
+                        let movieResults = try? await self.tmdbService.searchMovies(query: query)
+                        if let movie = movieResults?.first {
                             return movie.asSearchResult
                         }
-                        if let tv = try? await self.tmdbService.searchTVShows(query: query).first {
+                        let tvResults = try? await self.tmdbService.searchTVShows(query: query)
+                        if let tv = tvResults?.first {
                             return tv.asSearchResult
                         }
                     } else {
-                        if let tv = try? await self.tmdbService.searchTVShows(query: query).first {
+                        let tvResults = try? await self.tmdbService.searchTVShows(query: query)
+                        if let tv = tvResults?.first {
                             return tv.asSearchResult
                         }
-                        if let movie = try? await self.tmdbService.searchMovies(query: query).first {
+                        let movieResults = try? await self.tmdbService.searchMovies(query: query)
+                        if let movie = movieResults?.first {
                             return movie.asSearchResult
                         }
                     }

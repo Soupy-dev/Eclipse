@@ -881,7 +881,8 @@ final class AniListService {
     }
 
     private func buildRelatedEntries(from anime: AniListAnime) -> [AniListRelatedEntry] {
-        // Exclude direct continuation relations because they already power the main season flow.
+        // Exclude direct continuation relations (SEQUEL, PREQUEL, SEASON in excludedRelatedMediaRelations)
+        // because they already power the main season flow.
         var seen = Set<Int>()
         var output: [AniListRelatedEntry] = []
 

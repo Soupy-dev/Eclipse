@@ -593,7 +593,7 @@ struct PlayerSettingsView: View {
         .onAppear {
             let subtitleEditMenuKey = "enableVLCSubtitleEditMenu"
             let headerProxyKey = "vlcHeaderProxyEnabled"
-            // Force these VLC flags on for first launch and for previously disabled states.
+            // Enforce these VLC flags on launch, including for previously disabled states.
             if UserDefaults.standard.object(forKey: subtitleEditMenuKey) as? Bool != true {
                 UserDefaults.standard.set(true, forKey: subtitleEditMenuKey)
             }
