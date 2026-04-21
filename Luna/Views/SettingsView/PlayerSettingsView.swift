@@ -591,12 +591,14 @@ struct PlayerSettingsView: View {
         .navigationTitle("Media Player")
         .lunaSettingsStyle()
         .onAppear {
+            let subtitleEditMenuKey = "enableVLCSubtitleEditMenu"
+            let headerProxyKey = "vlcHeaderProxyEnabled"
             // Force these VLC flags on for first launch and for previously disabled states.
-            if UserDefaults.standard.object(forKey: "enableVLCSubtitleEditMenu") as? Bool != true {
-                UserDefaults.standard.set(true, forKey: "enableVLCSubtitleEditMenu")
+            if UserDefaults.standard.object(forKey: subtitleEditMenuKey) as? Bool != true {
+                UserDefaults.standard.set(true, forKey: subtitleEditMenuKey)
             }
-            if UserDefaults.standard.object(forKey: "vlcHeaderProxyEnabled") as? Bool != true {
-                UserDefaults.standard.set(true, forKey: "vlcHeaderProxyEnabled")
+            if UserDefaults.standard.object(forKey: headerProxyKey) as? Bool != true {
+                UserDefaults.standard.set(true, forKey: headerProxyKey)
             }
             refreshVLCSubtitleStyleStateFromDefaults()
         }

@@ -24,6 +24,8 @@ private actor AniListRateLimiter {
     }
 }
 
+private let excludedRelatedMediaRelations: Set<String> = ["SEQUEL", "PREQUEL", "SEASON"]
+
 final class AniListService {
     static let shared = AniListService()
 
@@ -880,14 +882,13 @@ final class AniListService {
 
     private func buildRelatedEntries(from anime: AniListAnime) -> [AniListRelatedEntry] {
         // Exclude direct continuation relations because they already power the main season flow.
-        let excludedRelations: Set<String> = ["SEQUEL", "PREQUEL", "SEASON"]
         var seen = Set<Int>()
         var output: [AniListRelatedEntry] = []
 
         for edge in anime.relations?.edges ?? [] {
             guard edge.node.type == "ANIME" else { continue }
             guard edge.node.id != anime.id else { continue }
-            guard !excludedRelations.contains(edge.relationType) else { continue }
+            guard !excludedRelatedMediaRelations.contains(edge.relationType) else { continue }
             guard seen.insert(edge.node.id).inserted else { continue }
 
             let relatedTitle = AniListTitlePicker.title(from: edge.node.title, preferredLanguageCode: preferredLanguageCode)
