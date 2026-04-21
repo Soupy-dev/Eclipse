@@ -800,11 +800,11 @@ struct MediaDetailView: View {
                     }
                 } else {
                     Logger.shared.log("TV detail fetch begin: tmdbId=\(searchResult.id)", type: "CrashProbe")
-                    Logger.shared.log("TV detail step: getTVShowWithSeasons start id=\(searchResult.id)", type: "CrashProbe")
-                    Logger.shared.log("TV detail step: getTVShowImages start id=\(searchResult.id)", type: "CrashProbe")
-                    Logger.shared.log("TV detail step: getRomajiTitle start id=\(searchResult.id)", type: "CrashProbe")
-                    Logger.shared.log("TV detail step: getTVCredits start id=\(searchResult.id)", type: "CrashProbe")
-                    Logger.shared.log("TV detail step: getTVRecommendations start id=\(searchResult.id)", type: "CrashProbe")
+                    Logger.shared.log("TV detail step: queue getTVShowWithSeasons id=\(searchResult.id)", type: "CrashProbe")
+                    Logger.shared.log("TV detail step: queue getTVShowImages id=\(searchResult.id)", type: "CrashProbe")
+                    Logger.shared.log("TV detail step: queue getRomajiTitle id=\(searchResult.id)", type: "CrashProbe")
+                    Logger.shared.log("TV detail step: queue getTVCredits id=\(searchResult.id)", type: "CrashProbe")
+                    Logger.shared.log("TV detail step: queue getTVRecommendations id=\(searchResult.id)", type: "CrashProbe")
                     async let detailTask = tmdbService.getTVShowWithSeasons(id: searchResult.id)
                     async let imagesTask = tmdbService.getTVShowImages(id: searchResult.id, preferredLanguage: selectedLanguage)
                     async let romajiTask = tmdbService.getRomajiTitle(for: "tv", id: searchResult.id)
@@ -814,17 +814,35 @@ struct MediaDetailView: View {
                     let detail = try await detailTask
                     Logger.shared.log("TV detail step: getTVShowWithSeasons done id=\(searchResult.id) seasons=\(detail.seasons.count)", type: "CrashProbe")
 
-                    let images = try? await imagesTask
-                    Logger.shared.log("TV detail step: getTVShowImages done id=\(searchResult.id) hasImages=\(images != nil)", type: "CrashProbe")
+                    let images: TMDBImagesResponse?
+                    do {
+                        images = try await imagesTask
+                        Logger.shared.log("TV detail step: getTVShowImages done id=\(searchResult.id) hasImages=true", type: "CrashProbe")
+                    } catch {
+                        images = nil
+                        Logger.shared.log("TV detail step: getTVShowImages failed id=\(searchResult.id) error=\(error.localizedDescription)", type: "CrashProbe")
+                    }
 
                     let romaji = await romajiTask
                     Logger.shared.log("TV detail step: getRomajiTitle done id=\(searchResult.id)", type: "CrashProbe")
 
-                    let credits = try? await creditsTask
-                    Logger.shared.log("TV detail step: getTVCredits done id=\(searchResult.id) cast=\(credits?.cast.count ?? 0)", type: "CrashProbe")
+                    let credits: TMDBCreditsResponse?
+                    do {
+                        credits = try await creditsTask
+                        Logger.shared.log("TV detail step: getTVCredits done id=\(searchResult.id) cast=\(credits?.cast.count ?? 0)", type: "CrashProbe")
+                    } catch {
+                        credits = nil
+                        Logger.shared.log("TV detail step: getTVCredits failed id=\(searchResult.id) error=\(error.localizedDescription)", type: "CrashProbe")
+                    }
 
-                    let recommendations = try? await recommendationsTask
-                    Logger.shared.log("TV detail step: getTVRecommendations done id=\(searchResult.id) recs=\(recommendations?.count ?? 0)", type: "CrashProbe")
+                    let recommendations: [TMDBTVShow]?
+                    do {
+                        recommendations = try await recommendationsTask
+                        Logger.shared.log("TV detail step: getTVRecommendations done id=\(searchResult.id) recs=\(recommendations?.count ?? 0)", type: "CrashProbe")
+                    } catch {
+                        recommendations = nil
+                        Logger.shared.log("TV detail step: getTVRecommendations failed id=\(searchResult.id) error=\(error.localizedDescription)", type: "CrashProbe")
+                    }
                     let recommendationMedia = recommendations?.map { $0.asSearchResult } ?? []
                     
                     // Detect anime/donghua for tracking/catalog — includes JP, CN, KR, TW animation
