@@ -832,9 +832,6 @@ struct MediaDetailView: View {
                 self.hasLoadedContent = true
                 Logger.shared.log("MediaDetail cache state applied: key=\(detailCacheKey) tvSeasons=\(cached.tvShowDetail?.seasons.count ?? 0) selectedSeason=\(cached.selectedSeason?.seasonNumber.description ?? "nil") anilistEpisodes=\(cached.anilistEpisodes?.count ?? 0) related=\(cached.relatedAnimeEntries.count) initialRelated=\(cached.initialRelatedAniListId?.description ?? "nil")", type: "CrashProbe")
                 self.scheduleRelatedAnimeRendering(entries: cached.relatedAnimeEntries, initialRelatedId: cached.initialRelatedAniListId, reason: "cache")
-                DispatchQueue.main.async {
-                    Logger.shared.log("MediaDetailView: cache post-state next-runloop reached key=\(detailCacheKey) hasLoaded=\(self.hasLoadedContent) isLoading=\(self.isLoading) tvSeasons=\(self.tvShowDetail?.seasons.count ?? 0)", type: "CrashProbe")
-                }
             }
             return
         }
@@ -905,9 +902,6 @@ struct MediaDetailView: View {
                             timestamp: Date()
                         ))
                         Logger.shared.log("Movie detail apply state complete: tmdbId=\(searchResult.id) cast=\(self.castMembers.count) logo=\(self.logoURL != nil)", type: "CrashProbe")
-                    }
-                    DispatchQueue.main.async {
-                        Logger.shared.log("Movie detail post-state next-runloop reached: tmdbId=\(searchResult.id) hasLoaded=\(self.hasLoadedContent) isLoading=\(self.isLoading)", type: "CrashProbe")
                     }
                 } else {
                     Logger.shared.log("TV detail fetch begin: tmdbId=\(searchResult.id)", type: "CrashProbe")
@@ -1123,9 +1117,6 @@ struct MediaDetailView: View {
                         }
                     }
                     Logger.shared.log("TV detail fetch complete: tmdbId=\(searchResult.id)", type: "CrashProbe")
-                    DispatchQueue.main.async {
-                        Logger.shared.log("MediaDetailView: post-state next-runloop reached tmdbId=\(searchResult.id) hasLoaded=\(self.hasLoadedContent) isLoading=\(self.isLoading) relatedState=\(self.relatedAnimeEntries.count)", type: "CrashProbe")
-                    }
                 }
             } catch is CancellationError {
                 Logger.shared.log("MediaDetail load cancelled: id=\(searchResult.id) type=\(searchResult.mediaType)", type: "CrashProbe")
