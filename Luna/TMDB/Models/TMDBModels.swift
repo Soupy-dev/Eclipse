@@ -36,14 +36,6 @@ struct TMDBSearchResult: Codable, Identifiable {
     let popularity: Double
     let adult: Bool?
     let genreIds: [Int]?
-    let sourceAniListId: Int?
-    let sourceAniListTitle: String?
-    let sourceAniListFormat: String?
-    let sourceAniListEpisodeCount: Int?
-    let sourceAniListParentTMDBId: Int?
-    let sourceAniMapTVDBSeason: Int?
-    let sourceAniMapEpisodeOffset: Int?
-    let sourceAniMapTMDBSeason: Int?
     
     enum CodingKeys: String, CodingKey {
         case id, overview, popularity, adult
@@ -55,54 +47,6 @@ struct TMDBSearchResult: Codable, Identifiable {
         case firstAirDate = "first_air_date"
         case voteAverage = "vote_average"
         case genreIds = "genre_ids"
-        case sourceAniListId, sourceAniListTitle, sourceAniListFormat, sourceAniListEpisodeCount, sourceAniListParentTMDBId
-        case sourceAniMapTVDBSeason, sourceAniMapEpisodeOffset, sourceAniMapTMDBSeason
-    }
-
-    init(
-        id: Int,
-        mediaType: String,
-        title: String?,
-        name: String?,
-        overview: String?,
-        posterPath: String?,
-        backdropPath: String?,
-        releaseDate: String?,
-        firstAirDate: String?,
-        voteAverage: Double?,
-        popularity: Double,
-        adult: Bool?,
-        genreIds: [Int]?,
-        sourceAniListId: Int? = nil,
-        sourceAniListTitle: String? = nil,
-        sourceAniListFormat: String? = nil,
-        sourceAniListEpisodeCount: Int? = nil,
-        sourceAniListParentTMDBId: Int? = nil,
-        sourceAniMapTVDBSeason: Int? = nil,
-        sourceAniMapEpisodeOffset: Int? = nil,
-        sourceAniMapTMDBSeason: Int? = nil
-    ) {
-        self.id = id
-        self.mediaType = mediaType
-        self.title = title
-        self.name = name
-        self.overview = overview
-        self.posterPath = posterPath
-        self.backdropPath = backdropPath
-        self.releaseDate = releaseDate
-        self.firstAirDate = firstAirDate
-        self.voteAverage = voteAverage
-        self.popularity = popularity
-        self.adult = adult
-        self.genreIds = genreIds
-        self.sourceAniListId = sourceAniListId
-        self.sourceAniListTitle = sourceAniListTitle
-        self.sourceAniListFormat = sourceAniListFormat
-        self.sourceAniListEpisodeCount = sourceAniListEpisodeCount
-        self.sourceAniListParentTMDBId = sourceAniListParentTMDBId
-        self.sourceAniMapTVDBSeason = sourceAniMapTVDBSeason
-        self.sourceAniMapEpisodeOffset = sourceAniMapEpisodeOffset
-        self.sourceAniMapTMDBSeason = sourceAniMapTMDBSeason
     }
     
     var displayTitle: String {
@@ -133,45 +77,6 @@ struct TMDBSearchResult: Codable, Identifiable {
 
     var stableIdentity: String {
         "\(mediaType)-\(id)"
-    }
-
-    var hasAniListSpecialHint: Bool {
-        sourceAniListId != nil
-    }
-
-    func withAniListSource(
-        id sourceId: Int,
-        title sourceTitle: String,
-        format sourceFormat: String?,
-        episodeCount: Int?,
-        parentTMDBId: Int?,
-        tvdbSeason: Int?,
-        episodeOffset: Int?,
-        tmdbSeason: Int?
-    ) -> TMDBSearchResult {
-        TMDBSearchResult(
-            id: id,
-            mediaType: mediaType,
-            title: title,
-            name: name,
-            overview: overview,
-            posterPath: posterPath,
-            backdropPath: backdropPath,
-            releaseDate: releaseDate,
-            firstAirDate: firstAirDate,
-            voteAverage: voteAverage,
-            popularity: popularity,
-            adult: adult,
-            genreIds: genreIds,
-            sourceAniListId: sourceId,
-            sourceAniListTitle: sourceTitle,
-            sourceAniListFormat: sourceFormat,
-            sourceAniListEpisodeCount: episodeCount,
-            sourceAniListParentTMDBId: parentTMDBId,
-            sourceAniMapTVDBSeason: tvdbSeason,
-            sourceAniMapEpisodeOffset: episodeOffset,
-            sourceAniMapTMDBSeason: tmdbSeason
-        )
     }
 }
 

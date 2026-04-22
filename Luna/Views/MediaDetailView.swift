@@ -78,6 +78,9 @@ struct MediaDetailView: View {
     @State private var anilistEpisodes: [AniListEpisode]? = nil
     @State private var animeSeasonTitles: [Int: String]? = nil
     @State private var animeSpecialEntries: [AniListSpecialEntry] = []
+    @State private var selectedSpecialEntry: AniListSpecialEntry?
+    @State private var selectedSpecialEpisode: TMDBEpisode?
+    @State private var showingSpecialSearchResults = false
     
     @State private var castMembers: [TMDBCastMember] = []
     @State private var hasLoadedContent = false
@@ -292,6 +295,23 @@ struct MediaDetailView: View {
         .sheet(isPresented: $showingAddToCollection) {
             let _ = Logger.shared.log("MediaDetailView constructing add-to-collection sheet: id=\(searchResult.id)", type: "CrashProbe")
             AddToCollectionView(searchResult: searchResult)
+        }
+        .sheet(isPresented: $showingSpecialSearchResults) {
+            let _ = Logger.shared.log("MediaDetailView constructing special search sheet: id=\(searchResult.id) special=\(selectedSpecialEntry?.id.description ?? "nil") episode=\(selectedSpecialEpisode?.episodeNumber.description ?? "nil")", type: "CrashProbe")
+            ModulesSearchResultsSheet(
+                mediaTitle: selectedSpecialEntry?.title ?? searchResult.displayTitle,
+                seasonTitleOverride: selectedSpecialEntry?.title,
+                originalTitle: romajiTitle,
+                isMovie: false,
+                isAnimeContent: true,
+                selectedEpisode: selectedSpecialEpisode,
+                tmdbId: searchResult.id,
+                animeSeasonTitle: "anime",
+                posterPath: tvShowDetail?.posterPath,
+                imdbId: tvShowDetail?.externalIds?.imdbId,
+                specialTitleOnlySearch: selectedSpecialEntry?.episodeCount == 1,
+                autoModeOnly: UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled")
+            )
         }
     }
     
@@ -586,8 +606,6 @@ struct MediaDetailView: View {
                 selectedEpisodeForSearch: $selectedEpisodeForSearch,
                 animeEpisodes: anilistEpisodes,
                 animeSeasonTitles: animeSeasonTitles,
-                specialEntries: animeSpecialEntries,
-                initialSpecialAniListId: searchResult.sourceAniListId,
                 tmdbService: tmdbService
             ) {
                 if !castMembers.isEmpty {
@@ -595,11 +613,122 @@ struct MediaDetailView: View {
                 }
                 
                 StarRatingView(mediaId: searchResult.id)
+                animeSpecialsSection
             }
             .onAppear {
                 Logger.shared.log("MediaDetailView episodesSection appeared: tmdbId=\(searchResult.id) isAnime=\(isAnimeShow) tvSeasons=\(tvShowDetail?.seasons.count ?? 0) selectedSeason=\(selectedSeason?.seasonNumber.description ?? "nil") anilistEpisodes=\(anilistEpisodes?.count ?? 0)", type: "CrashProbe")
             }
         }
+    }
+
+    @ViewBuilder
+    private var animeSpecialsSection: some View {
+        if isAnimeShow && !animeSpecialEntries.isEmpty {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Specials & OVAs")
+                    .font(.title2)
+                    .fontWeight(.bold)
+                    .foregroundColor(.white)
+                    .padding(.horizontal)
+
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        ForEach(animeSpecialEntries) { entry in
+                            Button(action: {
+                                selectSpecial(entry)
+                            }) {
+                                VStack(spacing: 8) {
+                                    KFImage(URL(string: entry.posterUrl ?? tvShowDetail?.fullPosterURL ?? ""))
+                                        .placeholder {
+                                            Rectangle()
+                                                .fill(Color.gray.opacity(0.3))
+                                                .frame(width: 80, height: 120)
+                                                .overlay(
+                                                    VStack(spacing: 6) {
+                                                        Image(systemName: "sparkles")
+                                                            .font(.title2)
+                                                            .foregroundColor(.white.opacity(0.7))
+                                                        Text(entry.format ?? "Special")
+                                                            .font(.caption2)
+                                                            .fontWeight(.bold)
+                                                            .foregroundColor(.white.opacity(0.7))
+                                                    }
+                                                )
+                                        }
+                                        .resizable()
+                                        .aspectRatio(2/3, contentMode: .fill)
+                                        .frame(width: 80, height: 120)
+                                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 12)
+                                                .stroke(selectedSpecialEntry?.id == entry.id ? Color.accentColor : Color.clear, lineWidth: 2)
+                                        )
+
+                                    Text(entry.title)
+                                        .font(.caption)
+                                        .fontWeight(.medium)
+                                        .lineLimit(2)
+                                        .multilineTextAlignment(.center)
+                                        .frame(width: 90, height: 34)
+                                        .foregroundColor(selectedSpecialEntry?.id == entry.id ? .accentColor : .white)
+                                }
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                        }
+                    }
+                    .padding(.horizontal)
+                }
+
+                if let selectedSpecialEntry, selectedSpecialEntry.episodeCount > 1 {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(selectedSpecialEntry.episodes, id: \.number) { episode in
+                                Button(action: {
+                                    openSpecialEpisode(episode, in: selectedSpecialEntry)
+                                }) {
+                                    Text("E\(episode.number)")
+                                        .font(.caption)
+                                        .fontWeight(.semibold)
+                                        .foregroundColor(.white)
+                                        .frame(width: 54, height: 36)
+                                        .applyLiquidGlassBackground(cornerRadius: 10)
+                                }
+                                .buttonStyle(PlainButtonStyle())
+                                .disabled(!hasActiveSources)
+                            }
+                        }
+                        .padding(.horizontal)
+                    }
+                }
+            }
+            .padding(.top, 4)
+        }
+    }
+
+    private func selectSpecial(_ entry: AniListSpecialEntry) {
+        selectedSpecialEntry = entry
+        Logger.shared.log("MediaDetailView selectSpecial: tmdbId=\(searchResult.id) anilistId=\(entry.id) episodes=\(entry.episodeCount)", type: "CrashProbe")
+        if entry.episodeCount == 1, let first = entry.episodes.first, hasActiveSources {
+            openSpecialEpisode(first, in: entry)
+        }
+    }
+
+    private func openSpecialEpisode(_ episode: AniListEpisode, in entry: AniListSpecialEntry) {
+        selectedSpecialEntry = entry
+        selectedSpecialEpisode = TMDBEpisode(
+            id: entry.id * 1000 + episode.number,
+            name: episode.title,
+            overview: episode.description,
+            stillPath: episode.stillPath,
+            episodeNumber: episode.number,
+            seasonNumber: 0,
+            airDate: episode.airDate,
+            runtime: episode.runtime,
+            voteAverage: 0,
+            voteCount: 0
+        )
+        Logger.shared.log("MediaDetailView openSpecialEpisode: tmdbId=\(searchResult.id) anilistId=\(entry.id) episode=\(episode.number)", type: "CrashProbe")
+        showingSpecialSearchResults = true
     }
     
     private func toggleBookmark() {
@@ -1016,42 +1145,9 @@ struct MediaDetailView: View {
                             }
                             Logger.shared.log("MediaDetailView: AniList season conversion complete tmdbId=\(detail.id) aniSeasons=\(aniSeasons.count) summary=\(aniSeasons.prefix(8).map { "s\($0.seasonNumber):id\($0.id):eps\($0.episodeCount)" }.joined(separator: "|"))", type: "CrashProbe")
                             Logger.shared.log("MediaDetailView: anime state preassign tmdbId=\(detail.id) aniSeasons=\(aniSeasons.count) allEpisodes=\(allEpisodes.count) seasonTitles=\(seasonTitles.count)", type: "CrashProbe")
-                            var specialEntries = animeData.specialEntries
-                            if let sourceId = searchResult.sourceAniListId,
-                               !specialEntries.contains(where: { $0.id == sourceId }),
-                               let sourceTitle = searchResult.sourceAniListTitle {
-                                let episodeCount = max(1, searchResult.sourceAniListEpisodeCount ?? 1)
-                                let originalSeason = searchResult.sourceAniMapTMDBSeason ?? searchResult.sourceAniMapTVDBSeason
-                                let episodeOffset = searchResult.sourceAniMapEpisodeOffset ?? 0
-                                let episodes = (1...episodeCount).map { number in
-                                    AniListEpisode(
-                                        number: number,
-                                        title: episodeCount == 1 ? sourceTitle : "Episode \(number)",
-                                        description: nil,
-                                        seasonNumber: 0,
-                                        stillPath: nil,
-                                        airDate: nil,
-                                        runtime: nil,
-                                        tmdbSeasonNumber: originalSeason,
-                                        tmdbEpisodeNumber: originalSeason == nil ? nil : episodeOffset + number
-                                    )
-                                }
-                                specialEntries.append(AniListSpecialEntry(
-                                    id: sourceId,
-                                    title: sourceTitle,
-                                    format: searchResult.sourceAniListFormat,
-                                    episodeCount: episodeCount,
-                                    posterUrl: searchResult.fullPosterURL ?? detail.fullPosterURL,
-                                    episodes: episodes,
-                                    tmdbSeasonNumber: searchResult.sourceAniMapTMDBSeason,
-                                    tvdbSeasonNumber: searchResult.sourceAniMapTVDBSeason,
-                                    episodeOffset: searchResult.sourceAniMapEpisodeOffset,
-                                    imdbId: detail.externalIds?.imdbId
-                                ))
-                            }
                             self.animeSeasonTitles = seasonTitles
                             self.anilistEpisodes = allEpisodes
-                            self.animeSpecialEntries = specialEntries
+                            self.animeSpecialEntries = animeData.specialEntries
                             
                             if let firstSeason = aniSeasons.first {
                                 self.selectedSeason = firstSeason

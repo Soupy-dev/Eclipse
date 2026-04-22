@@ -16,8 +16,6 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     @Binding var selectedEpisodeForSearch: TMDBEpisode?
     var animeEpisodes: [AniListEpisode]? = nil
     var animeSeasonTitles: [Int: String]? = nil
-    var specialEntries: [AniListSpecialEntry] = []
-    var initialSpecialAniListId: Int? = nil
     let tmdbService: TMDBService
     @ViewBuilder let insertedContent: () -> InsertedContent
     
@@ -32,8 +30,6 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     @State private var showingNoServicesAlert = false
     @State private var romajiTitle: String?
     @State private var currentSeasonTitle: String?
-    @State private var activeSpecialEntry: AniListSpecialEntry?
-    @State private var didApplyInitialSpecialSelection = false
     
     @StateObject private var serviceManager = ServiceManager.shared
     @StateObject private var stremioManager = StremioAddonManager.shared
@@ -73,9 +69,6 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     }
     
     private func getSearchTitle() -> String {
-        if let activeSpecialEntry {
-            return activeSpecialEntry.title
-        }
         if isAnime, let currentSeasonTitle, !currentSeasonTitle.isEmpty {
             return currentSeasonTitle
         }
@@ -86,7 +79,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     }
     
     var body: some View {
-        let _ = Logger.shared.log("TVShowSeasonsSection body evaluate: showId=\(tvShow?.id ?? 0) hasTVShow=\(tvShow != nil) isAnime=\(isAnime) seasons=\(tvShow?.seasons.count ?? 0) specials=\(specialEntries.count) activeSpecial=\(activeSpecialEntry?.id.description ?? "nil") selectedSeason=\(selectedSeason?.seasonNumber.description ?? "nil") seasonDetailEpisodes=\(seasonDetail?.episodes.count ?? 0) isLoadingSeason=\(isLoadingSeason) selectedEpisode=\(selectedEpisodeForSearch.map { "S\($0.seasonNumber)E\($0.episodeNumber):id\($0.id)" } ?? "nil") sheets=play:\(showingSearchResults),download:\(showingDownloadSheet)", type: "CrashProbe")
+        let _ = Logger.shared.log("TVShowSeasonsSection body evaluate: showId=\(tvShow?.id ?? 0) hasTVShow=\(tvShow != nil) isAnime=\(isAnime) seasons=\(tvShow?.seasons.count ?? 0) selectedSeason=\(selectedSeason?.seasonNumber.description ?? "nil") seasonDetailEpisodes=\(seasonDetail?.episodes.count ?? 0) isLoadingSeason=\(isLoadingSeason) selectedEpisode=\(selectedEpisodeForSearch.map { "S\($0.seasonNumber)E\($0.episodeNumber):id\($0.id)" } ?? "nil") sheets=play:\(showingSearchResults),download:\(showingDownloadSheet)", type: "CrashProbe")
         VStack(alignment: .leading, spacing: 8) {
             if let tvShow = tvShow {
                 let _ = Logger.shared.log("TVShowSeasonsSection body branch tvShow: showId=\(tvShow.id) seasons=\(tvShow.seasons.count) grouped=\(isGroupedBySeasons) menu=\(useSeasonMenu)", type: "CrashProbe")
@@ -152,7 +145,6 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                         .padding(.top)
                         
                         seasonSelectorStyled
-                        specialsSelector
                         HStack {
                             Text("Episodes")
                                 .font(.title2)
@@ -174,7 +166,6 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                         .padding(.top)
                     } else {
                         let _ = Logger.shared.log("TVShowSeasonsSection body branch header/menu selector: showId=\(tvShow.id)", type: "CrashProbe")
-                        specialsSelector
                         episodesSectionHeader
                     }
                     
@@ -194,9 +185,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 type: "CrashProbe"
             )
             if let tvShow = tvShow, let selectedSeason = selectedSeason {
-                if !applyInitialSpecialSelectionIfNeeded(tvShowId: tvShow.id) {
-                    loadSeasonDetails(tvShowId: tvShow.id, season: selectedSeason)
-                }
+                loadSeasonDetails(tvShowId: tvShow.id, season: selectedSeason)
                 Task {
                     Logger.shared.log("TVShowSeasonsSection romaji fetch begin: showId=\(tvShow.id)", type: "CrashProbe")
                     let romaji = await tmdbService.getRomajiTitle(for: "tv", id: tvShow.id)
@@ -211,11 +200,6 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         }
         .onChangeComp(of: selectedSeason?.seasonNumber) { _, newValue in
             Logger.shared.log("TVShowSeasonsSection selectedSeason changed: showId=\(tvShow?.id ?? 0) season=\(newValue?.description ?? "nil")", type: "CrashProbe")
-        }
-        .onChangeComp(of: specialEntries.count) { _, _ in
-            if let tvShow = tvShow {
-                _ = applyInitialSpecialSelectionIfNeeded(tvShowId: tvShow.id)
-            }
         }
         .onChangeComp(of: seasonDetail?.episodes.count) { _, newValue in
             Logger.shared.log("TVShowSeasonsSection seasonDetail episodes changed: showId=\(tvShow?.id ?? 0) count=\(newValue?.description ?? "nil") season=\(seasonDetail?.seasonNumber.description ?? "nil")", type: "CrashProbe")
@@ -247,7 +231,6 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 imdbId: tvShow?.externalIds?.imdbId,
                 originalTMDBSeasonNumber: originalTMDBNumbers?.season,
                 originalTMDBEpisodeNumber: originalTMDBNumbers?.episode,
-                specialTitleOnlySearch: activeSpecialEntry?.episodeCount == 1,
                 autoModeOnly: UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled")
             )
         }
@@ -286,7 +269,6 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 imdbId: tvShow?.externalIds?.imdbId,
                 originalTMDBSeasonNumber: originalTMDBNumbers?.season,
                 originalTMDBEpisodeNumber: originalTMDBNumbers?.episode,
-                specialTitleOnlySearch: activeSpecialEntry?.episodeCount == 1,
                 downloadMode: true,
                 autoModeOnly: UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"),
                 onDownloadEnqueued: isDownloadingAll ? {
@@ -439,71 +421,6 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     }
 
     @ViewBuilder
-    private var specialsSelector: some View {
-        if isAnime, let tvShow = tvShow, !specialEntries.isEmpty {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Text("Specials & OVAs")
-                        .font(.title2)
-                        .fontWeight(.bold)
-                    Spacer()
-                }
-                .foregroundColor(.white)
-                .padding(.horizontal)
-
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 12) {
-                        ForEach(specialEntries) { entry in
-                            Button(action: {
-                                selectSpecial(entry, tvShowId: tvShow.id)
-                            }) {
-                                VStack(spacing: 8) {
-                                    KFImage(URL(string: entry.posterUrl ?? tvShow.fullPosterURL ?? ""))
-                                        .placeholder {
-                                            Rectangle()
-                                                .fill(Color.gray.opacity(0.3))
-                                                .frame(width: 80, height: 120)
-                                                .overlay(
-                                                    VStack(spacing: 6) {
-                                                        Image(systemName: "sparkles")
-                                                            .font(.title2)
-                                                            .foregroundColor(.white.opacity(0.7))
-                                                        Text(entry.format ?? "Special")
-                                                            .font(.caption2)
-                                                            .fontWeight(.bold)
-                                                            .foregroundColor(.white.opacity(0.7))
-                                                    }
-                                                )
-                                        }
-                                        .resizable()
-                                        .aspectRatio(2/3, contentMode: .fill)
-                                        .frame(width: 80, height: 120)
-                                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 12)
-                                                .stroke(activeSpecialEntry?.id == entry.id ? Color.accentColor : Color.clear, lineWidth: 2)
-                                        )
-
-                                    Text(entry.title)
-                                        .font(.caption)
-                                        .fontWeight(.medium)
-                                        .lineLimit(2)
-                                        .multilineTextAlignment(.center)
-                                        .frame(width: 80, height: 32)
-                                        .foregroundColor(activeSpecialEntry?.id == entry.id ? .accentColor : .white)
-                                }
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                        }
-                    }
-                    .padding(.horizontal)
-                }
-            }
-            .padding(.top, 4)
-        }
-    }
-
-    @ViewBuilder
     private var episodeListSection: some View {
         Group {
             if let seasonDetail = seasonDetail {
@@ -601,14 +518,6 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     /// Look up the original TMDB season/episode numbers for the currently selected episode.
     /// Returns nil for non-anime or when no AniList episode match is found.
     private var originalTMDBNumbers: (season: Int, episode: Int)? {
-        if let activeSpecialEntry,
-           let ep = selectedEpisodeForSearch,
-           let match = activeSpecialEntry.episodes.first(where: { $0.number == ep.episodeNumber }),
-           let s = match.tmdbSeasonNumber,
-           let e = match.tmdbEpisodeNumber {
-            return (s, e)
-        }
-
         guard isAnime,
               let ep = selectedEpisodeForSearch,
               let animeEps = animeEpisodes,
@@ -662,59 +571,8 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         )
     }
 
-    @discardableResult
-    private func applyInitialSpecialSelectionIfNeeded(tvShowId: Int) -> Bool {
-        guard !didApplyInitialSpecialSelection,
-              let initialSpecialAniListId,
-              let entry = specialEntries.first(where: { $0.id == initialSpecialAniListId }) else {
-            return false
-        }
-
-        didApplyInitialSpecialSelection = true
-        selectSpecial(entry, tvShowId: tvShowId)
-        return true
-    }
-
-    private func selectSpecial(_ entry: AniListSpecialEntry, tvShowId: Int) {
-        Logger.shared.log("TVShowSeasonsSection selectSpecial begin: showId=\(tvShowId) anilistId=\(entry.id) episodes=\(entry.episodes.count)", type: "CrashProbe")
-        activeSpecialEntry = entry
-        currentSeasonTitle = entry.title
-        isLoadingSeason = false
-
-        let displaySeasonNumber = entry.tmdbSeasonNumber ?? entry.tvdbSeasonNumber ?? 0
-        let episodes = entry.episodes.map { aniEp in
-            TMDBEpisode(
-                id: tvShowId * 1_000_000 + entry.id * 100 + aniEp.number,
-                name: aniEp.title,
-                overview: aniEp.description,
-                stillPath: aniEp.stillPath,
-                episodeNumber: aniEp.number,
-                seasonNumber: displaySeasonNumber,
-                airDate: aniEp.airDate,
-                runtime: aniEp.runtime,
-                voteAverage: 0,
-                voteCount: 0
-            )
-        }
-
-        let detail = TMDBSeasonDetail(
-            id: tvShowId * 1_000_000 + entry.id,
-            name: entry.title,
-            overview: "",
-            posterPath: entry.posterUrl,
-            seasonNumber: displaySeasonNumber,
-            airDate: nil,
-            episodes: episodes
-        )
-
-        seasonDetail = detail
-        selectedEpisodeForSearch = episodes.first
-        Logger.shared.log("TVShowSeasonsSection selectSpecial done: showId=\(tvShowId) anilistId=\(entry.id) mappedSeason=\(displaySeasonNumber) episodes=\(episodes.count)", type: "CrashProbe")
-    }
-
     private func selectSeason(_ season: TMDBSeason, tvShowId: Int) {
         Logger.shared.log("TVShowSeasonsSection selectSeason begin: showId=\(tvShowId) season=\(season.seasonNumber)", type: "CrashProbe")
-        activeSpecialEntry = nil
         selectedSeason = season
         currentSeasonTitle = isAnime ? (animeSeasonTitles?[season.seasonNumber] ?? season.name) : nil
         Logger.shared.log("TVShowSeasonsSection selected season: showId=\(tvShowId) season=\(season.seasonNumber)", type: "CrashProbe")
@@ -723,7 +581,6 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
 
     private func loadSeasonDetails(tvShowId: Int, season: TMDBSeason) {
         Logger.shared.log("TVShowSeasonsSection loadSeasonDetails start: showId=\(tvShowId) season=\(season.seasonNumber) seasonId=\(season.id) isAnime=\(isAnime) animeEpisodes=\(animeEpisodes?.count ?? 0)", type: "CrashProbe")
-        activeSpecialEntry = nil
         currentSeasonTitle = isAnime ? (animeSeasonTitles?[season.seasonNumber] ?? season.name) : nil
         isLoadingSeason = true
         seasonDetail = nil

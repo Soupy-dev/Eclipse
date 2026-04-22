@@ -110,7 +110,7 @@ struct ModulesSearchResultsSheet: View {
     /// Original TMDB season/episode numbers for anime (before AniList restructuring), used by TheIntroDB.
     var originalTMDBSeasonNumber: Int? = nil
     var originalTMDBEpisodeNumber: Int? = nil
-    /// One-episode specials should search by their exact title, without adding E1.
+    /// One-episode specials should search by exact title instead of appending E1.
     var specialTitleOnlySearch: Bool = false
     /// When true, selecting a stream downloads instead of playing
     var downloadMode: Bool = false
@@ -141,11 +141,10 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private var displayTitle: String {
-        if selectedEpisode != nil {
+        if let episode = selectedEpisode {
             if specialTitleOnlySearch {
                 return animeSeasonTitle != nil ? animeEffectiveTitle : effectiveTitle
             }
-            guard let episode = selectedEpisode else { return effectiveTitle }
             if isAnimeContent || animeSeasonTitle != nil {
                 return "\(animeEffectiveTitle) E\(episode.episodeNumber)"
             }
