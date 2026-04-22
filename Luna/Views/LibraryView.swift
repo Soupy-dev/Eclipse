@@ -82,11 +82,12 @@ struct LibraryView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 12) {
                         // Show oldest bookmarks first so order is predictable
-                        ForEach(bookmarksCollection.items.sorted(by: { $0.dateAdded < $1.dateAdded })) { item in
+                        ForEach(Array(bookmarksCollection.items.sorted(by: { $0.dateAdded < $1.dateAdded }).enumerated()), id: \.offset) { index, item in
+                            let heroID = "library-bookmark-\(index)-\(item.searchResult.stableIdentity)"
                             NavigationLink(destination: MediaDetailView(searchResult: item.searchResult)
-                                .heroDestination(id: "media-\(item.searchResult.stableIdentity)", namespace: heroNamespace)
+                                .heroDestination(id: heroID, namespace: heroNamespace)
                             ) {
-                                BookmarkItemCard(item: item)
+                                BookmarkItemCard(item: item, heroID: heroID)
                             }
                             .buttonStyle(PlainButtonStyle())
                         }
@@ -163,6 +164,7 @@ struct LibraryView: View {
 
 struct BookmarkItemCard: View {
     let item: LibraryItem
+    let heroID: String
     @Environment(\.heroNamespace) private var heroNamespace
     
     var body: some View {
@@ -182,7 +184,7 @@ struct BookmarkItemCard: View {
                 .frame(width: 120 * iPadScale, height: 180 * iPadScale)
                 .clipShape(RoundedRectangle(cornerRadius: 16))
                 .shadow(color: .black.opacity(0.25), radius: 8, x: 0, y: 4)
-                .heroSource(id: "media-\(item.searchResult.stableIdentity)", namespace: heroNamespace)
+                .heroSource(id: heroID, namespace: heroNamespace)
             
             Text(item.searchResult.displayTitle)
                 .font(.caption)

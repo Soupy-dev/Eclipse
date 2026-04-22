@@ -32,9 +32,10 @@ struct CollectionDetailView: View {
                 .padding(.top, 100)
             } else {
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: isIPad ? 160 : 120))], spacing: 16) {
-                    ForEach(collection.items) { item in
+                    ForEach(Array(collection.items.enumerated()), id: \.offset) { index, item in
+                        let heroID = "collection-\(collection.id)-\(index)-\(item.searchResult.stableIdentity)"
                         NavigationLink(destination: MediaDetailView(searchResult: item.searchResult)
-                            .heroDestination(id: "media-\(item.searchResult.stableIdentity)", namespace: heroNamespace)
+                            .heroDestination(id: heroID, namespace: heroNamespace)
                         ) {
                             VStack {
                                 if let url = item.searchResult.fullPosterURL {
@@ -48,7 +49,7 @@ struct CollectionDetailView: View {
                                         .frame(width: 120 * iPadScale, height: 180 * iPadScale)
                                         .clipShape(RoundedRectangle(cornerRadius: 10))
                                         .shadow(color: .black.opacity(0.1), radius: 3, x: 0, y: 1)
-                                        .heroSource(id: "media-\(item.searchResult.stableIdentity)", namespace: heroNamespace)
+                                        .heroSource(id: heroID, namespace: heroNamespace)
                                 }
                                 
                                 Text(item.searchResult.displayTitle)
