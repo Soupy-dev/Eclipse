@@ -17,7 +17,7 @@
       "developerName": "Soupy-dev",
       "subtitle": "Anime, manga, downloads, and playback tools.",
       "localizedDescription": "Eclipse is a fork of Luna with expanded anime handling, AniList and Trakt sync, catalogs, downloads, Stremio addon support, manga mode, light novel support, and playback improvements. The app does not include services or addons.",
-      "iconURL": "https://raw.githubusercontent.com/Soupy-dev/Luna/main/Luna/Assets.xcassets/AppIcon.appiconset/Default.png",
+      "iconURL": "https://raw.githubusercontent.com/Soupy-dev/Eclipse/main/Luna/Assets.xcassets/AppIcon.appiconset/Default.png",
       "tintColor": "#6D8CFF",
       "category": "entertainment",
       "versions": [
@@ -27,7 +27,7 @@
           "marketingVersion": "1.0.1",
           "date": "2026-04-21",
           "localizedDescription": "Release build with stabilized media details, Stremio backup support, and safe anime specials search.",
-          "downloadURL": "https://github.com/Soupy-dev/Luna/releases/download/v1.0.1/Luna.ipa",
+          "downloadURL": "https://github.com/Soupy-dev/Eclipse/releases/download/v1.0.1/Eclipse.ipa",
           "size": 63963136,
           "minOSVersion": "15.0"
         }
