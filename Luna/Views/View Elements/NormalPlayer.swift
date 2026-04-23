@@ -11,6 +11,7 @@ class NormalPlayer: AVPlayerViewController, AVPlayerViewControllerDelegate {
     private var originalRate: Float = 1.0
     private var timeObserverToken: Any?
     var mediaInfo: MediaInfo?
+    var episodePlaybackContext: EpisodePlaybackContext?
     
 #if os(iOS)
     private var holdGesture: UILongPressGestureRecognizer?
@@ -141,7 +142,11 @@ class NormalPlayer: AVPlayerViewController, AVPlayerViewControllerDelegate {
             return
         }
         
-        timeObserverToken = ProgressManager.shared.addPeriodicTimeObserver(to: player, for: mediaInfo)
+        timeObserverToken = ProgressManager.shared.addPeriodicTimeObserver(
+            to: player,
+            for: mediaInfo,
+            playbackContext: episodePlaybackContext
+        )
         seekToLastPosition(for: mediaInfo)
     }
     

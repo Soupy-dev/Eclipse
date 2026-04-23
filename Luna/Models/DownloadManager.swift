@@ -32,6 +32,7 @@ struct DownloadItem: Codable, Identifiable {
     let headers: [String: String]
     let subtitleURL: String?
     let serviceBaseURL: String
+    let episodePlaybackContext: EpisodePlaybackContext?
     var status: DownloadStatus
     var progress: Double
     var totalBytes: Int64
@@ -157,7 +158,8 @@ final class DownloadManager: NSObject, ObservableObject {
         headers: [String: String],
         subtitleURL: String?,
         serviceBaseURL: String,
-        isAnime: Bool
+        isAnime: Bool,
+        episodePlaybackContext: EpisodePlaybackContext? = nil
     ) {
         let id: String
         if isMovie {
@@ -190,6 +192,7 @@ final class DownloadManager: NSObject, ObservableObject {
             headers: headers,
             subtitleURL: subtitleURL,
             serviceBaseURL: serviceBaseURL,
+            episodePlaybackContext: episodePlaybackContext,
             status: .queued,
             progress: 0,
             totalBytes: 0,

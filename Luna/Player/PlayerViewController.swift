@@ -352,6 +352,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     /// Used by TheIntroDB which requires TMDB numbering, not AniList-restructured S/E.
     var originalTMDBSeasonNumber: Int?
     var originalTMDBEpisodeNumber: Int?
+    var episodePlaybackContext: EpisodePlaybackContext?
 
     // MARK: - Skip Segments & Next Episode
     /// Called when the user taps "Next Episode" — passes (seasonNumber, nextEpisodeNumber).
@@ -3235,7 +3236,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         case .movie(let id, let title, _, _):
             ProgressManager.shared.updateMovieProgress(movieId: id, title: title, currentTime: safePosition, totalDuration: safeDuration)
         case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, let showPosterURL, _):
-            ProgressManager.shared.updateEpisodeProgress(showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, currentTime: safePosition, totalDuration: safeDuration, showTitle: showTitle, showPosterURL: showPosterURL)
+            ProgressManager.shared.updateEpisodeProgress(
+                showId: showId,
+                seasonNumber: seasonNumber,
+                episodeNumber: episodeNumber,
+                currentTime: safePosition,
+                totalDuration: safeDuration,
+                showTitle: showTitle,
+                showPosterURL: showPosterURL,
+                playbackContext: episodePlaybackContext?.forEpisodeNumber(episodeNumber)
+            )
         }
     }
 }

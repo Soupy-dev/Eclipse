@@ -499,7 +499,7 @@ class BackupManager {
             let timestamp = Date()
             let formatter = DateFormatter()
             formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-            let filename = "Luna_Backup_\(formatter.string(from: timestamp)).json"
+            let filename = "Eclipse_Backup_\(formatter.string(from: timestamp)).json"
             
             // Use Documents directory instead of temporary
             let documentsDir = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]

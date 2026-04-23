@@ -5,7 +5,8 @@ set -e
 cd "$(dirname "$0")"
 
 WORKING_LOCATION="$(pwd)"
-APPLICATION_NAME="Luna"
+PROJECT_NAME="Luna"
+APPLICATION_NAME="Eclipse"
 
 PLATFORM=${1:-ios}
 
@@ -44,14 +45,14 @@ if [ -d "DerivedData$PLATFORM" ]; then
 fi
 
 # Build with Xcode project (no longer using CocoaPods workspace)
-XCODE_PROJECT="-project $WORKING_LOCATION/$APPLICATION_NAME.xcodeproj"
+XCODE_PROJECT="-project $WORKING_LOCATION/$PROJECT_NAME.xcodeproj"
 
 # Create archive (required for proper IPA structure)
 ARCHIVE_PATH="$WORKING_LOCATION/build/$APPLICATION_NAME$OUTPUT_SUFFIX.xcarchive"
 
 xcodebuild archive \
     $XCODE_PROJECT \
-    -scheme "$APPLICATION_NAME" \
+    -scheme "$PROJECT_NAME" \
     -configuration Release \
     -archivePath "$ARCHIVE_PATH" \
     -destination "$XCODE_DESTINATION" \
@@ -68,13 +69,16 @@ if [ ! -d "$ARCHIVE_PATH" ]; then
 fi
 
 # Extract app from archive (correct path: Products/Applications)
-APP_PATH="$ARCHIVE_PATH/Products/Applications/$APPLICATION_NAME.app"
+APP_PATH="$ARCHIVE_PATH/Products/Applications/$PROJECT_NAME.app"
 
 if [ ! -d "$APP_PATH" ]; then
-    echo "Error: App not found at $APP_PATH"
-    echo "Contents of archive:"
-    find "$ARCHIVE_PATH" -type d -name "*.app" 2>/dev/null || echo "No app bundles found"
-    exit 1
+    APP_PATH="$(find "$ARCHIVE_PATH/Products/Applications" -maxdepth 1 -type d -name "*.app" 2>/dev/null | head -n 1)"
+    if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
+        echo "Error: App not found at $ARCHIVE_PATH/Products/Applications"
+        echo "Contents of archive:"
+        find "$ARCHIVE_PATH" -type d -name "*.app" 2>/dev/null || echo "No app bundles found"
+        exit 1
+    fi
 fi
 
 # Create Payload directory and copy app
@@ -82,7 +86,9 @@ mkdir Payload
 cp -r "$APP_PATH" "Payload/$APPLICATION_NAME.app"
 
 # Strip binary to reduce size
-if [ -f "Payload/$APPLICATION_NAME.app/$APPLICATION_NAME" ]; then
+if [ -f "Payload/$APPLICATION_NAME.app/$PROJECT_NAME" ]; then
+    strip "Payload/$APPLICATION_NAME.app/$PROJECT_NAME" 2>/dev/null || true
+elif [ -f "Payload/$APPLICATION_NAME.app/$APPLICATION_NAME" ]; then
     strip "Payload/$APPLICATION_NAME.app/$APPLICATION_NAME" 2>/dev/null || true
 fi
 

@@ -1,8 +1,8 @@
-My fork of Luna. Has no affiliation with the parent repo. And user is responsible for what they do with the app. Does not come with services or addons. Use GitHub Issues for feature requests and bug reports
+Eclipse is my fork of Luna. Has no affiliation with the parent repo. And user is responsible for what they do with the app. Does not come with services or addons. Use GitHub Issues for feature requests and bug reports
 
 ## Overview
 
-This fork extends Luna with a broader feature set for anime, manga, light novels, downloads, and playback controls.
+Eclipse extends Luna with a broader feature set for anime, manga, light novels, downloads, and playback controls.
 
 ## Install
 

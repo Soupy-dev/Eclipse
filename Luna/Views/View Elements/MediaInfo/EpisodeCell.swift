@@ -19,6 +19,7 @@ struct EpisodeCell: View {
     let onMarkWatched: () -> Void
     let onResetProgress: () -> Void
     var onDownload: (() -> Void)? = nil
+    var playbackContext: EpisodePlaybackContext? = nil
     
     @State private var isWatched: Bool = false
     @State private var progressValue: Double = 0
@@ -326,7 +327,8 @@ struct EpisodeCell: View {
                     ProgressManager.shared.markPreviousEpisodesAsWatched(
                         showId: showId,
                         seasonNumber: episode.seasonNumber,
-                        episodeNumber: episode.episodeNumber
+                        episodeNumber: episode.episodeNumber,
+                        playbackContext: playbackContext
                     )
                     refreshProgressState()
                 }) {
@@ -363,7 +365,8 @@ struct EpisodeCell: View {
                     ProgressManager.shared.markEpisodeAsWatched(
                         showId: showId,
                         seasonNumber: episode.seasonNumber,
-                        episodeNumber: episode.episodeNumber
+                        episodeNumber: episode.episodeNumber,
+                        playbackContext: playbackContext
                     )
                     onMarkWatched()
                     isWatched = true

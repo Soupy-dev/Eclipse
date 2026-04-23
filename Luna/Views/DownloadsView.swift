@@ -835,6 +835,9 @@ struct DownloadsView: View {
                 mediaInfo: item.mediaInfo
             )
             pvc.isAnimeHint = item.isAnime
+            pvc.episodePlaybackContext = item.episodePlaybackContext
+            pvc.originalTMDBSeasonNumber = item.episodePlaybackContext?.resolvedTMDBSeasonNumber
+            pvc.originalTMDBEpisodeNumber = item.episodePlaybackContext?.resolvedTMDBEpisodeNumber
             pvc.modalPresentationStyle = .fullScreen
             if !item.isMovie {
                 pvc.onRequestNextEpisode = { seasonNumber, episodeNumber in
@@ -864,6 +867,7 @@ struct DownloadsView: View {
             let item2 = AVPlayerItem(url: fileURL)
             playerVC.player = AVPlayer(playerItem: item2)
             playerVC.mediaInfo = item.mediaInfo
+            playerVC.episodePlaybackContext = item.episodePlaybackContext
             playerVC.modalPresentationStyle = .fullScreen
             
             if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,

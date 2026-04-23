@@ -448,6 +448,7 @@ struct TMDBSeasonDetail: Codable, Identifiable {
     
     var fullPosterURL: String? {
         guard let posterPath = posterPath else { return nil }
+        if posterPath.hasPrefix("http") { return posterPath }
         return "\(TMDBService.tmdbImageBaseURL)\(posterPath)"
     }
 }

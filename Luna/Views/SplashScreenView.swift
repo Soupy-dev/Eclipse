@@ -76,7 +76,7 @@ struct SplashScreenView: View {
                 .opacity(moonOpacity)
 
                 // App title
-                Text("Luna")
+                Text("Eclipse")
                     .font(.system(size: 28, weight: .semibold, design: .rounded))
                     .foregroundStyle(
                         LinearGradient(

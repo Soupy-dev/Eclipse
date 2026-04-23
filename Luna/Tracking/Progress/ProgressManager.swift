@@ -352,7 +352,7 @@ final class ProgressManager: ObservableObject {
 
     // MARK: - Episode Progress
 
-    func updateEpisodeProgress(showId: Int, seasonNumber: Int, episodeNumber: Int, currentTime: Double, totalDuration: Double, showTitle: String? = nil, showPosterURL: String? = nil) {
+    func updateEpisodeProgress(showId: Int, seasonNumber: Int, episodeNumber: Int, currentTime: Double, totalDuration: Double, showTitle: String? = nil, showPosterURL: String? = nil, playbackContext: EpisodePlaybackContext? = nil) {
         guard currentTime >= 0 && totalDuration > 0 && currentTime <= totalDuration else {
             Logger.shared.log("Invalid progress values for episode S\(seasonNumber)E\(episodeNumber): currentTime=\(currentTime), totalDuration=\(totalDuration)", type: "Warning")       
             return
@@ -384,7 +384,13 @@ final class ProgressManager: ObservableObject {
             // Sync to trackers if just reached watched threshold
             if !previousWatchedState && entry.isWatched {
                 DispatchQueue.main.async {
-                    TrackerManager.shared.syncWatchProgress(showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, progress: entry.progress)
+                    TrackerManager.shared.syncWatchProgress(
+                        showId: showId,
+                        seasonNumber: seasonNumber,
+                        episodeNumber: episodeNumber,
+                        progress: entry.progress,
+                        playbackContext: playbackContext?.forEpisodeNumber(episodeNumber)
+                    )
                 }
             }
         }
@@ -417,7 +423,7 @@ final class ProgressManager: ObservableObject {
         return result
     }
 
-    func markEpisodeAsWatched(showId: Int, seasonNumber: Int, episodeNumber: Int) {
+    func markEpisodeAsWatched(showId: Int, seasonNumber: Int, episodeNumber: Int, playbackContext: EpisodePlaybackContext? = nil) {
         accessQueue.async(flags: .barrier) { [weak self] in
             guard let self = self else { return }
             var entry = self.progressData.findEpisode(showId: showId, season: seasonNumber, episode: episodeNumber)
@@ -433,7 +439,13 @@ final class ProgressManager: ObservableObject {
 
             // Sync to trackers
             DispatchQueue.main.async {
-                TrackerManager.shared.syncWatchProgress(showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, progress: 1.0)
+                TrackerManager.shared.syncWatchProgress(
+                    showId: showId,
+                    seasonNumber: seasonNumber,
+                    episodeNumber: episodeNumber,
+                    progress: 1.0,
+                    playbackContext: playbackContext?.forEpisodeNumber(episodeNumber)
+                )
             }
         }
         saveProgressData()
@@ -454,7 +466,7 @@ final class ProgressManager: ObservableObject {
         saveProgressData()
     }
 
-    func markPreviousEpisodesAsWatched(showId: Int, seasonNumber: Int, episodeNumber: Int) {
+    func markPreviousEpisodesAsWatched(showId: Int, seasonNumber: Int, episodeNumber: Int, playbackContext: EpisodePlaybackContext? = nil) {
         guard episodeNumber > 1 else { return }
 
         accessQueue.async(flags: .barrier) { [weak self] in
@@ -474,7 +486,14 @@ final class ProgressManager: ObservableObject {
 
             // Sync highest episode to trackers (AniList progress is cumulative, so one call suffices)
             DispatchQueue.main.async {
-                TrackerManager.shared.syncWatchProgress(showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber - 1, progress: 1.0)
+                let highestEpisode = episodeNumber - 1
+                TrackerManager.shared.syncWatchProgress(
+                    showId: showId,
+                    seasonNumber: seasonNumber,
+                    episodeNumber: highestEpisode,
+                    progress: 1.0,
+                    playbackContext: playbackContext?.forEpisodeNumber(highestEpisode)
+                )
             }
         }
         saveProgressData()
@@ -645,7 +664,7 @@ final class ProgressManager: ObservableObject {
 
     // MARK: - AVPlayer Extension
 
-    func addPeriodicTimeObserver(to player: AVPlayer, for mediaInfo: MediaInfo) -> Any? {
+    func addPeriodicTimeObserver(to player: AVPlayer, for mediaInfo: MediaInfo, playbackContext: EpisodePlaybackContext? = nil) -> Any? {
         let interval = CMTime(seconds: 1.0, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
 
         return player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
@@ -666,7 +685,16 @@ final class ProgressManager: ObservableObject {
                 self.updateMovieProgress(movieId: id, title: title, currentTime: currentTime, totalDuration: duration, posterURL: posterURL)
 
             case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, let showPosterURL, _):
-                self.updateEpisodeProgress(showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, currentTime: currentTime, totalDuration: duration, showTitle: showTitle, showPosterURL: showPosterURL)
+                self.updateEpisodeProgress(
+                    showId: showId,
+                    seasonNumber: seasonNumber,
+                    episodeNumber: episodeNumber,
+                    currentTime: currentTime,
+                    totalDuration: duration,
+                    showTitle: showTitle,
+                    showPosterURL: showPosterURL,
+                    playbackContext: playbackContext?.forEpisodeNumber(episodeNumber)
+                )
             }
         }
     }
@@ -674,6 +702,44 @@ final class ProgressManager: ObservableObject {
 
 
 // MARK: - MediaInfo Enum
+
+struct EpisodePlaybackContext: Codable, Equatable {
+    let localSeasonNumber: Int
+    let localEpisodeNumber: Int
+    let anilistMediaId: Int?
+    let tmdbSeasonNumber: Int?
+    let tmdbEpisodeNumber: Int?
+    let tmdbEpisodeOffset: Int?
+    let isSpecial: Bool
+    let titleOnlySearch: Bool
+
+    var resolvedTMDBSeasonNumber: Int? {
+        tmdbSeasonNumber
+    }
+
+    var resolvedTMDBEpisodeNumber: Int? {
+        if let tmdbEpisodeNumber {
+            return tmdbEpisodeNumber
+        }
+        guard tmdbSeasonNumber != nil, let tmdbEpisodeOffset else {
+            return nil
+        }
+        return tmdbEpisodeOffset + localEpisodeNumber
+    }
+
+    func forEpisodeNumber(_ episodeNumber: Int) -> EpisodePlaybackContext {
+        EpisodePlaybackContext(
+            localSeasonNumber: localSeasonNumber,
+            localEpisodeNumber: episodeNumber,
+            anilistMediaId: anilistMediaId,
+            tmdbSeasonNumber: tmdbSeasonNumber,
+            tmdbEpisodeNumber: tmdbEpisodeOffset.map { $0 + episodeNumber } ?? tmdbEpisodeNumber,
+            tmdbEpisodeOffset: tmdbEpisodeOffset,
+            isSpecial: isSpecial,
+            titleOnlySearch: titleOnlySearch
+        )
+    }
+}
 
 enum MediaInfo {
     case movie(id: Int, title: String, posterURL: String? = nil, isAnime: Bool = false)

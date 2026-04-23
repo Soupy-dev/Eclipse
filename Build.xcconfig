@@ -5,7 +5,7 @@
 //  Created by Dominic on 04.11.25.
 //
 
-APP_NAME = Luna
+APP_NAME = Eclipse
 DEVELOPMENT_TEAM = 399LMK6Q2Y
 BUNDLE_IDENTIFIER = me.cranci.solar
 ICLOUD_CONTAINER_ID = iCloud.me.cranci.sora

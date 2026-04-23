@@ -149,7 +149,7 @@ struct BackupManagementView: View {
                     // Prepare file for export and show file exporter
                     let dateFormatter = DateFormatter()
                     dateFormatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-                    backupFileName = "Luna_Backup_\(dateFormatter.string(from: Date())).json"
+                    backupFileName = "Eclipse_Backup_\(dateFormatter.string(from: Date())).json"
                     
                     if let fileData = try? Data(contentsOf: backupURL) {
                         backupFileToExport = fileData

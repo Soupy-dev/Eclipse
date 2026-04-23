@@ -886,6 +886,7 @@ final class AniListService {
         
         for (currentAnime, _, posterUrl) in allAnimeToProcess {
             // Get the full AniList title for this season/sequel
+            // Keep core anime season naming aligned with the user's preferred title language.
             let seasonTitle = AniListTitlePicker.title(from: currentAnime.title, preferredLanguageCode: preferredLanguageCode)
             
             // Use AniList episode count - this is authoritative
@@ -983,17 +984,26 @@ final class AniListService {
             let mapping = element.value
             let node = nodesById[anilistId]
             let title: String
+            let englishTitle: String?
+            let romajiTitle: String?
+            let nativeTitle: String?
             if let node {
-                title = AniListTitlePicker.title(from: node.title, preferredLanguageCode: preferredLanguageCode)
+                title = AniListTitlePicker.englishPreferredTitle(from: node.title)
+                englishTitle = node.title.english.map(AniListTitlePicker.cleanedTitle)
+                romajiTitle = node.title.romaji.map(AniListTitlePicker.cleanedTitle)
+                nativeTitle = node.title.native.map(AniListTitlePicker.cleanedTitle)
             } else {
                 title = "Special \(anilistId)"
+                englishTitle = nil
+                romajiTitle = nil
+                nativeTitle = nil
             }
 
             let cleanTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !cleanTitle.isEmpty else { return nil }
 
             let episodeCount = max(1, node?.episodes ?? 1)
-            let mappedSeason = mapping.tmdbSeason ?? mapping.tvdbSeason
+            let mappedSeason = mapping.tmdbSeason
             let episodeOffset = mapping.tvdbEpisodeOffset ?? 0
             let episodes = (1...episodeCount).map { number in
                 AniListEpisode(
@@ -1012,6 +1022,9 @@ final class AniListService {
             return AniListSpecialSearchEntry(
                 id: anilistId,
                 title: cleanTitle,
+                englishTitle: englishTitle,
+                romajiTitle: romajiTitle,
+                nativeTitle: nativeTitle,
                 format: mapping.mediaType?.uppercased() ?? node?.format,
                 episodeCount: episodeCount,
                 posterUrl: node?.coverImage?.large ?? node?.coverImage?.medium ?? fallbackPosterURL,
@@ -1810,6 +1823,9 @@ struct AniListSeasonWithPoster {
 struct AniListSpecialSearchEntry: Identifiable {
     let id: Int
     let title: String
+    let englishTitle: String?
+    let romajiTitle: String?
+    let nativeTitle: String?
     let format: String?
     let episodeCount: Int
     let posterUrl: String?
@@ -1917,6 +1933,26 @@ enum AniListTitlePicker {
             .trimmingCharacters(in: CharacterSet(charactersIn: "[]"))
             .trimmingCharacters(in: .whitespaces)
         return cleaned.isEmpty ? title : cleaned
+    }
+
+    static func cleanedTitle(_ title: String) -> String {
+        cleanTitle(title)
+    }
+
+    static func englishPreferredTitle(from title: AniListAnime.AniListTitle) -> String {
+        if let english = title.english, !english.isEmpty {
+            return cleanTitle(english)
+        }
+
+        if let romaji = title.romaji, !romaji.isEmpty {
+            return cleanTitle(romaji)
+        }
+
+        if let native = title.native, !native.isEmpty {
+            return cleanTitle(native)
+        }
+
+        return "Unknown"
     }
     
     static func title(from title: AniListAnime.AniListTitle, preferredLanguageCode: String) -> String {

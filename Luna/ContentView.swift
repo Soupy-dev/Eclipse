@@ -142,9 +142,9 @@ struct ContentView: View {
             }
         } message: {
             if githubReleaseLatestVersion.isEmpty {
-                Text("A new Luna release is available on GitHub.")
+                Text("A new Eclipse release is available on GitHub.")
             } else {
-                Text("A new Luna release (\(githubReleaseLatestVersion)) is available on GitHub.")
+                Text("A new Eclipse release (\(githubReleaseLatestVersion)) is available on GitHub.")
             }
         }
     }

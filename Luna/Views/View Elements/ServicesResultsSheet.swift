@@ -112,6 +112,7 @@ struct ModulesSearchResultsSheet: View {
     var originalTMDBEpisodeNumber: Int? = nil
     /// One-episode specials should search by exact title instead of appending E1.
     var specialTitleOnlySearch: Bool = false
+    var episodePlaybackContext: EpisodePlaybackContext? = nil
     /// When true, selecting a stream downloads instead of playing
     var downloadMode: Bool = false
     /// When true, show only the compact Auto Mode runner instead of the full results picker.
@@ -166,6 +167,39 @@ struct ModulesSearchResultsSheet: View {
     
     private var mediaTypeText: String { isMovie ? "Movie" : "TV Show" }
     private var mediaTypeColor: Color { isMovie ? .purple : .green }
+    private var resolvedPosterURL: String? {
+        posterPath.flatMap { path in
+            path.hasPrefix("http") ? path : "https://image.tmdb.org/t/p/w500\(path)"
+        }
+    }
+
+    private var effectivePlaybackContext: EpisodePlaybackContext? {
+        guard let selectedEpisode else { return episodePlaybackContext }
+        return episodePlaybackContext?.forEpisodeNumber(selectedEpisode.episodeNumber)
+    }
+
+    private var shouldSearchStremio: Bool {
+        guard !isMovie,
+              let context = effectivePlaybackContext,
+              context.isSpecial else {
+            return true
+        }
+        return context.resolvedTMDBSeasonNumber != nil && context.resolvedTMDBEpisodeNumber != nil
+    }
+
+    private var streamLookupSeasonNumber: Int? {
+        if let context = effectivePlaybackContext, context.isSpecial {
+            return context.resolvedTMDBSeasonNumber
+        }
+        return originalTMDBSeasonNumber ?? (specialTitleOnlySearch ? nil : selectedEpisode?.seasonNumber)
+    }
+
+    private var streamLookupEpisodeNumber: Int? {
+        if let context = effectivePlaybackContext, context.isSpecial {
+            return context.resolvedTMDBEpisodeNumber
+        }
+        return originalTMDBEpisodeNumber ?? (specialTitleOnlySearch ? nil : selectedEpisode?.episodeNumber)
+    }
     
     private var searchStatusText: String {
         let anySearching = viewModel.isSearching || viewModel.isSearchingStremio
@@ -981,10 +1015,17 @@ struct ModulesSearchResultsSheet: View {
 
     @MainActor
     private func findAutoModeStremioStream(_ addon: StremioAddon) async -> StremioStream? {
+        guard shouldSearchStremio else {
+            viewModel.stremioResults[addon.id] = []
+            viewModel.stremioSearchedAddons.insert(addon.id)
+            Logger.shared.log("Auto Mode Stremio skipped for special without TMDB episode mapping: \(addon.manifest.name)", type: "Stremio")
+            return nil
+        }
+
         let client = StremioClient.shared
         let type = isMovie ? "movie" : "series"
-        let season = originalTMDBSeasonNumber ?? (specialTitleOnlySearch ? nil : selectedEpisode?.seasonNumber)
-        let episode = originalTMDBEpisodeNumber ?? (specialTitleOnlySearch ? nil : selectedEpisode?.episodeNumber)
+        let season = streamLookupSeasonNumber
+        let episode = streamLookupEpisodeNumber
 
         guard let contentId = client.buildContentId(
             tmdbId: tmdbId,
@@ -1346,13 +1387,23 @@ struct ModulesSearchResultsSheet: View {
         let active = stremioManager.activeAddons
         guard !active.isEmpty else { return }
 
+        guard shouldSearchStremio else {
+            for addon in active {
+                viewModel.stremioResults[addon.id] = []
+                viewModel.stremioSearchedAddons.insert(addon.id)
+            }
+            viewModel.isSearchingStremio = false
+            Logger.shared.log("Stremio: skipping special without TMDB episode mapping for title='\(displayTitle)'", type: "Stremio")
+            return
+        }
+
         viewModel.isSearchingStremio = true
 
         let type = isMovie ? "movie" : "series"
         // For anime, AniList restructuring remaps season/episode numbers.
         // Stremio addons index by the original TMDB numbering, so prefer those.
-        let season = originalTMDBSeasonNumber ?? (specialTitleOnlySearch ? nil : selectedEpisode?.seasonNumber)
-        let episode = originalTMDBEpisodeNumber ?? (specialTitleOnlySearch ? nil : selectedEpisode?.episodeNumber)
+        let season = streamLookupSeasonNumber
+        let episode = streamLookupEpisodeNumber
 
         Task {
             await stremioManager.fetchStreamsFromAddons(
@@ -1458,7 +1509,7 @@ struct ModulesSearchResultsSheet: View {
             }
         }) {
             HStack(spacing: 12) {
-                KFImage(posterPath.flatMap { URL(string: "https://image.tmdb.org/t/p/w500\($0)") })
+                KFImage(resolvedPosterURL.flatMap { URL(string: $0) })
                     .placeholder {
                         RoundedRectangle(cornerRadius: 8)
                             .fill(Color.gray.opacity(0.2))
@@ -1743,7 +1794,7 @@ struct ModulesSearchResultsSheet: View {
             let inAppPlayer = inAppRaw
 
             var playerMediaInfo: MediaInfo? = nil
-            let posterURL = posterPath.flatMap { "https://image.tmdb.org/t/p/w500\($0)" }
+            let posterURL = resolvedPosterURL
             if isMovie {
                 playerMediaInfo = .movie(id: tmdbId, title: mediaTitle, posterURL: posterURL, isAnime: isAnimeContent)
             } else if let episode = selectedEpisode {
@@ -1764,8 +1815,9 @@ struct ModulesSearchResultsSheet: View {
                 )
                 let isAnimeHint = isAnimeContent || animeSeasonTitle != nil || TrackerManager.shared.cachedAniListId(for: tmdbId) != nil
                 pvc.isAnimeHint = isAnimeHint
-                pvc.originalTMDBSeasonNumber = originalTMDBSeasonNumber
-                pvc.originalTMDBEpisodeNumber = originalTMDBEpisodeNumber
+                pvc.originalTMDBSeasonNumber = effectivePlaybackContext?.resolvedTMDBSeasonNumber ?? originalTMDBSeasonNumber
+                pvc.originalTMDBEpisodeNumber = effectivePlaybackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBEpisodeNumber
+                pvc.episodePlaybackContext = effectivePlaybackContext
                 pvc.onRequestNextEpisode = { seasonNumber, nextEpisodeNumber in
                     NotificationCenter.default.post(
                         name: .requestNextEpisode,
@@ -1801,6 +1853,7 @@ struct ModulesSearchResultsSheet: View {
             } else if let episode = selectedEpisode {
                 playerVC.mediaInfo = .episode(showId: tmdbId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, showTitle: mediaTitle, showPosterURL: posterURL, isAnime: isAnimeContent)
             }
+            playerVC.episodePlaybackContext = effectivePlaybackContext
             playerVC.modalPresentationStyle = .fullScreen
 
             if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
@@ -1833,7 +1886,7 @@ struct ModulesSearchResultsSheet: View {
             }
         }
 
-        let posterURL = posterPath.flatMap { "https://image.tmdb.org/t/p/w500\($0)" }
+        let posterURL = resolvedPosterURL
 
         let displayTitle: String
         if isMovie {
@@ -1863,7 +1916,8 @@ struct ModulesSearchResultsSheet: View {
             headers: finalHeaders,
             subtitleURL: subtitle,
             serviceBaseURL: addon.configuredURL,
-            isAnime: isAnimeContent
+            isAnime: isAnimeContent,
+            episodePlaybackContext: effectivePlaybackContext
         )
 
         Logger.shared.log("Stremio: Download enqueued: \(displayTitle)", type: "Download")
@@ -2351,7 +2405,7 @@ struct ModulesSearchResultsSheet: View {
                 
                 // Prepare mediaInfo before creating player
                 var playerMediaInfo: MediaInfo? = nil
-                let posterURL = posterPath.flatMap { "https://image.tmdb.org/t/p/w500\($0)" }
+                let posterURL = resolvedPosterURL
                 if isMovie {
                     playerMediaInfo = .movie(id: tmdbId, title: mediaTitle, posterURL: posterURL, isAnime: isAnimeContent)
                 } else if let episode = selectedEpisode {
@@ -2367,8 +2421,9 @@ struct ModulesSearchResultsSheet: View {
                 )
                 let isAnimeHint = isAnimeContent || animeSeasonTitle != nil || TrackerManager.shared.cachedAniListId(for: tmdbId) != nil
                 pvc.isAnimeHint = isAnimeHint
-                pvc.originalTMDBSeasonNumber = originalTMDBSeasonNumber
-                pvc.originalTMDBEpisodeNumber = originalTMDBEpisodeNumber
+                pvc.originalTMDBSeasonNumber = effectivePlaybackContext?.resolvedTMDBSeasonNumber ?? originalTMDBSeasonNumber
+                pvc.originalTMDBEpisodeNumber = effectivePlaybackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBEpisodeNumber
+                pvc.episodePlaybackContext = effectivePlaybackContext
                 pvc.onRequestNextEpisode = { seasonNumber, nextEpisodeNumber in
                     NotificationCenter.default.post(
                         name: .requestNextEpisode,
@@ -2407,7 +2462,7 @@ struct ModulesSearchResultsSheet: View {
                 
                 // Prepare mediaInfo before creating player
                 var playerMediaInfo: MediaInfo? = nil
-                let posterURL = posterPath.flatMap { "https://image.tmdb.org/t/p/w500\($0)" }
+                let posterURL = resolvedPosterURL
                 if isMovie {
                     playerMediaInfo = .movie(id: tmdbId, title: mediaTitle, posterURL: posterURL, isAnime: isAnimeContent)
                 } else if let episode = selectedEpisode {
@@ -2423,8 +2478,9 @@ struct ModulesSearchResultsSheet: View {
                 )
                 let isAnimeHint = isAnimeContent || animeSeasonTitle != nil || TrackerManager.shared.cachedAniListId(for: tmdbId) != nil
                 pvc.isAnimeHint = isAnimeHint
-                pvc.originalTMDBSeasonNumber = originalTMDBSeasonNumber
-                pvc.originalTMDBEpisodeNumber = originalTMDBEpisodeNumber
+                pvc.originalTMDBSeasonNumber = effectivePlaybackContext?.resolvedTMDBSeasonNumber ?? originalTMDBSeasonNumber
+                pvc.originalTMDBEpisodeNumber = effectivePlaybackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBEpisodeNumber
+                pvc.episodePlaybackContext = effectivePlaybackContext
                 pvc.onRequestNextEpisode = { seasonNumber, nextEpisodeNumber in
                     NotificationCenter.default.post(
                         name: .requestNextEpisode,
@@ -2462,12 +2518,13 @@ struct ModulesSearchResultsSheet: View {
                 let item = AVPlayerItem(asset: asset)
                 playerVC.player = AVPlayer(playerItem: item)
                 if isMovie {
-                    let posterURL = posterPath.flatMap { "https://image.tmdb.org/t/p/w500\($0)" }
+                    let posterURL = resolvedPosterURL
                     playerVC.mediaInfo = .movie(id: tmdbId, title: mediaTitle, posterURL: posterURL, isAnime: isAnimeContent)
                 } else if let episode = selectedEpisode {
-                    let posterURL = posterPath.flatMap { "https://image.tmdb.org/t/p/w500\($0)" }
+                    let posterURL = resolvedPosterURL
                     playerVC.mediaInfo = .episode(showId: tmdbId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, showTitle: mediaTitle, showPosterURL: posterURL, isAnime: isAnimeContent)
                 }
+                playerVC.episodePlaybackContext = effectivePlaybackContext
                 playerVC.modalPresentationStyle = .fullScreen
                 
                 if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
@@ -2504,7 +2561,7 @@ struct ModulesSearchResultsSheet: View {
             }
         }
         
-        let posterURL = posterPath.flatMap { "https://image.tmdb.org/t/p/w500\($0)" }
+        let posterURL = resolvedPosterURL
         
         let displayTitle: String
         if isMovie {
@@ -2534,7 +2591,8 @@ struct ModulesSearchResultsSheet: View {
             headers: finalHeaders,
             subtitleURL: subtitle,
             serviceBaseURL: serviceURL,
-            isAnime: isAnimeContent
+            isAnime: isAnimeContent,
+            episodePlaybackContext: effectivePlaybackContext
         )
         
         Logger.shared.log("Download enqueued: \(displayTitle)", type: "Download")

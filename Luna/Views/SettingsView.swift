@@ -62,7 +62,7 @@ struct SettingsView: View {
                             .fontWeight(.regular)
                             .foregroundColor(.secondary)
 
-                        Text("Copyright © \(String(Calendar.current.component(.year, from: Date()))) Luna by Cranci")
+                        Text("Copyright © \(String(Calendar.current.component(.year, from: Date()))) Eclipse by Cranci")
                             .font(.footnote)
                             .fontWeight(.semibold)
                             .foregroundColor(.white)
@@ -262,7 +262,7 @@ struct SettingsView: View {
                 
                 // MARK: - Version Info
                 VStack(spacing: 4) {
-                    Text("Luna v\(Bundle.main.appVersion) (\(Bundle.main.buildNumber))")
+                    Text("Eclipse v\(Bundle.main.appVersion) (\(Bundle.main.buildNumber))")
                         .font(.footnote)
                         .foregroundColor(.white.opacity(0.3))
 

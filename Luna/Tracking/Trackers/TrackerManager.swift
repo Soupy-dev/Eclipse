@@ -633,7 +633,7 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    func syncWatchProgress(showId: Int, seasonNumber: Int, episodeNumber: Int, progress: Double, isMovie: Bool = false) {
+    func syncWatchProgress(showId: Int, seasonNumber: Int, episodeNumber: Int, progress: Double, isMovie: Bool = false, playbackContext: EpisodePlaybackContext? = nil) {
         guard !isBackupRestoreSyncSuppressed() else {
             Logger.shared.log("Skipping watch sync (backup restore in progress) for TMDB \(showId) S\(seasonNumber)E\(episodeNumber) \(Int(progress))%", type: "Tracker")
             return
@@ -657,11 +657,30 @@ final class TrackerManager: NSObject, ObservableObject {
                 Logger.shared.log("Syncing \(account.service) account \(account.username) for TMDB \(showId) S\(seasonNumber)E\(episodeNumber)", type: "Tracker")
                 switch account.service {
                 case .anilist:
-                    // Sync to AniList
-                    await syncToAniList(account: account, showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, progress: progress)
+                    if let playbackContext,
+                       let anilistMediaId = playbackContext.anilistMediaId {
+                        await syncToAniListMediaId(
+                            account: account,
+                            anilistId: anilistMediaId,
+                            showId: showId,
+                            seasonNumber: playbackContext.localSeasonNumber,
+                            episodeNumber: playbackContext.localEpisodeNumber,
+                            progress: progress
+                        )
+                    } else {
+                        await syncToAniList(account: account, showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, progress: progress)
+                    }
                 case .trakt:
-                    // Sync to Trakt
-                    await syncToTrakt(account: account, showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, progress: progress)
+                    if let playbackContext, playbackContext.isSpecial {
+                        if let tmdbSeason = playbackContext.resolvedTMDBSeasonNumber,
+                           let tmdbEpisode = playbackContext.resolvedTMDBEpisodeNumber {
+                            await syncToTrakt(account: account, showId: showId, seasonNumber: tmdbSeason, episodeNumber: tmdbEpisode, progress: progress)
+                        } else {
+                            Logger.shared.log("Skipping Trakt sync for special without TMDB episode mapping: TMDB \(showId) S\(seasonNumber)E\(episodeNumber)", type: "Tracker")
+                        }
+                    } else {
+                        await syncToTrakt(account: account, showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, progress: progress)
+                    }
                 }
             }
         }
@@ -681,6 +700,10 @@ final class TrackerManager: NSObject, ObservableObject {
             return
         }
 
+        await syncToAniListMediaId(account: account, anilistId: anilistId, showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, progress: progress)
+    }
+
+    private func syncToAniListMediaId(account: TrackerAccount, anilistId: Int, showId: Int, seasonNumber: Int, episodeNumber: Int, progress: Double) async {
         // AniList progress for anime is episode-based. Mark as COMPLETED only when we reach
         // the final known episode for this AniList entry; otherwise keep it CURRENT.
         let totalEpisodes = await getAniListEpisodeCount(mediaId: anilistId)
@@ -733,7 +756,7 @@ final class TrackerManager: NSObject, ObservableObject {
                     let errorMsg = (errors.first?["message"] as? String) ?? "Unknown error"
                     Logger.shared.log("AniList sync error: \(errorMsg)", type: "Tracker")
                 } else {
-                    Logger.shared.log("Synced to AniList: S\(seasonNumber)E\(episodeNumber) (\(status))", type: "Tracker")
+                    Logger.shared.log("Synced to AniList: mediaId=\(anilistId) S\(seasonNumber)E\(episodeNumber) (\(status))", type: "Tracker")
                 }
             } else {
                 Logger.shared.log("AniList sync returned status \((response as? HTTPURLResponse)?.statusCode ?? -1)", type: "Tracker")
@@ -751,10 +774,12 @@ final class TrackerManager: NSObject, ObservableObject {
             return
         }
 
+        let traktProgress = progress <= 1.0 ? progress * 100.0 : progress
+
         // Only mark as watched if progress >= 85% (following NuvioStreaming pattern)
-        guard progress >= 85 else {
+        guard traktProgress >= 85 else {
             // For progress < 85%, use scrobble pause instead
-            await scrobblePause(account: account, traktId: traktId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, progress: progress)
+            await scrobblePause(account: account, traktId: traktId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, progress: traktProgress)
             return
         }
 
