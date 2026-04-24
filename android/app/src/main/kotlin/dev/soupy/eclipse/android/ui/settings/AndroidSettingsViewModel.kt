@@ -7,9 +7,16 @@ import dev.soupy.eclipse.android.core.model.InAppPlayer
 import dev.soupy.eclipse.android.core.storage.SettingsStore
 import dev.soupy.eclipse.android.data.BackupRepository
 import dev.soupy.eclipse.android.data.BackupStatusSnapshot
+import dev.soupy.eclipse.android.data.CacheRepository
 import dev.soupy.eclipse.android.data.CatalogRepository
+import dev.soupy.eclipse.android.data.LoggerRepository
 import dev.soupy.eclipse.android.feature.settings.CatalogSettingsRow
+import dev.soupy.eclipse.android.feature.settings.LogSettingsRow
 import dev.soupy.eclipse.android.feature.settings.SettingsScreenState
+import dev.soupy.eclipse.android.feature.settings.StorageMetricRow
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -20,6 +27,8 @@ class AndroidSettingsViewModel(
     private val settingsStore: SettingsStore,
     private val backupRepository: BackupRepository,
     private val catalogRepository: CatalogRepository,
+    private val cacheRepository: CacheRepository,
+    private val loggerRepository: LoggerRepository,
 ) : ViewModel() {
     private val _state = MutableStateFlow(SettingsScreenState())
     val state: StateFlow<SettingsScreenState> = _state.asStateFlow()
@@ -36,11 +45,18 @@ class AndroidSettingsViewModel(
                     inAppPlayer = settings.inAppPlayer,
                     aniSkipAutoSkip = settings.aniSkipAutoSkip,
                     skip85sEnabled = settings.skip85sEnabled,
+                    readingMode = settings.readingMode,
+                    readerFontSize = settings.readerFontSize,
+                    readerLineSpacing = settings.readerLineSpacing,
+                    readerMargin = settings.readerMargin,
+                    readerTextAlignment = settings.readerTextAlignment,
                 )
             }
         }
         refreshBackupStatus()
         refreshCatalogs()
+        refreshStorage()
+        refreshLogs()
     }
 
     fun setAutoModeEnabled(enabled: Boolean) {
@@ -102,6 +118,79 @@ class AndroidSettingsViewModel(
         }
     }
 
+    fun setReadingMode(mode: Int) {
+        val current = _state.value
+        updateReader(
+            readingMode = mode,
+            readerFontSize = current.readerFontSize,
+            readerLineSpacing = current.readerLineSpacing,
+            readerMargin = current.readerMargin,
+            readerTextAlignment = current.readerTextAlignment,
+        )
+    }
+
+    fun setReaderFontSize(value: Double) {
+        val current = _state.value
+        updateReader(
+            readingMode = current.readingMode,
+            readerFontSize = value,
+            readerLineSpacing = current.readerLineSpacing,
+            readerMargin = current.readerMargin,
+            readerTextAlignment = current.readerTextAlignment,
+        )
+    }
+
+    fun setReaderLineSpacing(value: Double) {
+        val current = _state.value
+        updateReader(
+            readingMode = current.readingMode,
+            readerFontSize = current.readerFontSize,
+            readerLineSpacing = value,
+            readerMargin = current.readerMargin,
+            readerTextAlignment = current.readerTextAlignment,
+        )
+    }
+
+    fun setReaderMargin(value: Double) {
+        val current = _state.value
+        updateReader(
+            readingMode = current.readingMode,
+            readerFontSize = current.readerFontSize,
+            readerLineSpacing = current.readerLineSpacing,
+            readerMargin = value,
+            readerTextAlignment = current.readerTextAlignment,
+        )
+    }
+
+    fun setReaderTextAlignment(alignment: String) {
+        val current = _state.value
+        updateReader(
+            readingMode = current.readingMode,
+            readerFontSize = current.readerFontSize,
+            readerLineSpacing = current.readerLineSpacing,
+            readerMargin = current.readerMargin,
+            readerTextAlignment = alignment,
+        )
+    }
+
+    private fun updateReader(
+        readingMode: Int,
+        readerFontSize: Double,
+        readerLineSpacing: Double,
+        readerMargin: Double,
+        readerTextAlignment: String,
+    ) {
+        viewModelScope.launch {
+            settingsStore.updateReader(
+                readingMode = readingMode,
+                readerFontSize = readerFontSize,
+                readerLineSpacing = readerLineSpacing,
+                readerMargin = readerMargin,
+                readerTextAlignment = readerTextAlignment,
+            )
+        }
+    }
+
     fun exportBackup(uri: Uri) = runBackupMutation {
         backupRepository.exportToUri(uri)
     }
@@ -125,6 +214,93 @@ class AndroidSettingsViewModel(
 
     fun moveCatalogDown(id: String) {
         moveCatalog(id, direction = 1)
+    }
+
+    fun refreshStorage() {
+        viewModelScope.launch {
+            cacheRepository.loadMetrics()
+                .onSuccess { metrics ->
+                    _state.value = _state.value.copy(
+                        storageMetrics = listOf(
+                            StorageMetricRow("Cache", metrics.cacheBytes.toByteCountLabel()),
+                            StorageMetricRow("Files", metrics.filesBytes.toByteCountLabel()),
+                            StorageMetricRow("Downloads", metrics.downloadBytes.toByteCountLabel()),
+                        ),
+                        storageStatus = "Measured ${metrics.generatedAt.toReadableClock()}",
+                    )
+                }
+                .onFailure { error ->
+                    _state.value = _state.value.copy(
+                        storageStatus = error.message ?: "Android could not inspect storage yet.",
+                    )
+                }
+        }
+    }
+
+    fun clearCache() {
+        viewModelScope.launch {
+            loggerRepository.log("Storage", "User cleared app cache from Android settings.")
+            cacheRepository.clearCache()
+                .onSuccess { metrics ->
+                    _state.value = _state.value.copy(
+                        storageMetrics = listOf(
+                            StorageMetricRow("Cache", metrics.cacheBytes.toByteCountLabel()),
+                            StorageMetricRow("Files", metrics.filesBytes.toByteCountLabel()),
+                            StorageMetricRow("Downloads", metrics.downloadBytes.toByteCountLabel()),
+                        ),
+                        storageStatus = "Cache cleared ${metrics.generatedAt.toReadableClock()}",
+                    )
+                    refreshLogs()
+                }
+                .onFailure { error ->
+                    loggerRepository.log("Storage", error.message ?: "Cache clear failed.", level = "error")
+                    _state.value = _state.value.copy(
+                        storageStatus = error.message ?: "Android could not clear cache.",
+                    )
+                    refreshLogs()
+                }
+        }
+    }
+
+    fun refreshLogs() {
+        viewModelScope.launch {
+            loggerRepository.loadSnapshot()
+                .onSuccess { snapshot ->
+                    _state.value = _state.value.copy(
+                        logRows = snapshot.entries.take(8).map { entry ->
+                            LogSettingsRow(
+                                id = entry.id,
+                                timestamp = entry.timestamp.toReadableClock(),
+                                tag = entry.tag,
+                                message = entry.message,
+                                level = entry.level,
+                            )
+                        },
+                        loggerStatus = if (snapshot.entries.isEmpty()) {
+                            "No Android logs captured yet."
+                        } else {
+                            "${snapshot.entries.size} persistent log entries"
+                        },
+                    )
+                }
+                .onFailure { error ->
+                    _state.value = _state.value.copy(
+                        loggerStatus = error.message ?: "Android could not read persistent logs.",
+                    )
+                }
+        }
+    }
+
+    fun clearLogs() {
+        viewModelScope.launch {
+            loggerRepository.clear()
+                .onSuccess {
+                    _state.value = _state.value.copy(
+                        logRows = emptyList(),
+                        loggerStatus = "Logs cleared.",
+                    )
+                }
+        }
     }
 
     private fun moveCatalog(id: String, direction: Int) {
@@ -200,3 +376,25 @@ private fun List<dev.soupy.eclipse.android.core.model.BackupCatalog>.toUiRows():
             order = catalog.order,
         )
     }
+
+private fun Long.toByteCountLabel(): String {
+    val units = listOf("B", "KB", "MB", "GB")
+    var value = toDouble().coerceAtLeast(0.0)
+    var unitIndex = 0
+    while (value >= 1024.0 && unitIndex < units.lastIndex) {
+        value /= 1024.0
+        unitIndex += 1
+    }
+    return if (unitIndex == 0) {
+        "${value.toLong()} ${units[unitIndex]}"
+    } else {
+        "%.1f %s".format(value, units[unitIndex])
+    }
+}
+
+private fun Long.toReadableClock(): String =
+    runCatching {
+        Instant.ofEpochMilli(this)
+            .atZone(ZoneId.systemDefault())
+            .format(DateTimeFormatter.ofPattern("MMM d, h:mm a"))
+    }.getOrDefault("unknown time")

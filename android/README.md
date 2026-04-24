@@ -34,7 +34,7 @@ The Android namespace now uses `dev.soupy.eclipse.android` rather than the earli
 - Live TMDB/AniList-backed browse, search, detail, and airing schedule flows, including iOS-parity TMDB movie rows for now playing, upcoming, and top-rated movies
 - Persisted Android-side library and continue-watching state, with direct-player progress now syncing typed movie/episode progress and resume entries automatically
 - Android-owned parity stores for iOS backup sections including progress, catalogs, tracker state, ratings, recommendation cache, Kanzen modules, logs, cache metrics, and recent searches
-- A DataStore-backed settings screen with player selection, next-episode controls, auto-mode warning, and iOS-style catalog enable/reorder controls
+- A DataStore-backed settings screen with player selection, next-episode controls, auto-mode warning, reader defaults, storage diagnostics, logger controls, and iOS-style catalog enable/reorder controls
 - Settings backup import/export that restores and re-exports Android-owned backup sections while preserving unsupported/unknown Luna backup data
 - Home now respects the backed catalog order/visibility and includes iOS catalog IDs for Just For You, Because You Watched, networks, genres, companies, featured, ranked rows, TMDB rows, and AniList rows
 - Search now stores recent queries locally and fetches multiple TMDB pages alongside AniList anime results
@@ -51,7 +51,7 @@ The Android dependency versions in `gradle/libs.versions.toml` were chosen from 
 - The full feature set from the Apple app is not finished yet. Android now has a real shell, persistence, catalog controls, backup flow, and first-pass Stremio resolution, but it is still short of full parity.
 - Anime-specific source resolution now has an AniList-to-TMDB bridge, but it is still heuristic and not as complete as the Apple app's full AniList/TMDB episode reconstruction.
 - Torrent-style Stremio results are surfaced in the UI, but they are not playable yet because Android still needs its torrent engine or alternate-player handoff work.
-- Services, downloads, tracker auth/sync, manga/novel readers, and alternate player backends are still earlier-stage compared with the Apple app.
+- Services, tracker auth/sync, manga/novel readers, and alternate player backends are still earlier-stage compared with the Apple app.
 
 ## Running on Windows
 

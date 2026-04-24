@@ -113,6 +113,8 @@ fun EclipseAndroidApp() {
             settingsStore = appContainer.settingsStore,
             backupRepository = appContainer.backupRepository,
             catalogRepository = appContainer.catalogRepository,
+            cacheRepository = appContainer.cacheRepository,
+            loggerRepository = appContainer.loggerRepository,
         )
     }
     val mangaViewModel = rememberFeatureViewModel("manga") {
@@ -306,6 +308,15 @@ fun EclipseAndroidApp() {
                             onCatalogEnabledChanged = settingsViewModel::setCatalogEnabled,
                             onMoveCatalogUp = settingsViewModel::moveCatalogUp,
                             onMoveCatalogDown = settingsViewModel::moveCatalogDown,
+                            onRefreshStorage = settingsViewModel::refreshStorage,
+                            onClearCache = settingsViewModel::clearCache,
+                            onRefreshLogs = settingsViewModel::refreshLogs,
+                            onClearLogs = settingsViewModel::clearLogs,
+                            onReadingModeChanged = settingsViewModel::setReadingMode,
+                            onReaderFontSizeChanged = settingsViewModel::setReaderFontSize,
+                            onReaderLineSpacingChanged = settingsViewModel::setReaderLineSpacing,
+                            onReaderMarginChanged = settingsViewModel::setReaderMargin,
+                            onReaderAlignmentChanged = settingsViewModel::setReaderTextAlignment,
                             onExportBackup = settingsViewModel::exportBackup,
                             onImportBackup = settingsViewModel::importBackup,
                         )

@@ -102,6 +102,7 @@ struct MediaDetailView: View {
     @State private var selectedSpecialEpisodeContext: SpecialEpisodeListContext?
     @State private var specialSearchRequest: AnimeSpecialSearchRequest?
     @State private var nextEpisodePresentationToken = 0
+    @State private var playSheetRequestId = UUID()
     
     @State private var castMembers: [TMDBCastMember] = []
     @State private var hasLoadedContent = false
@@ -244,6 +245,7 @@ struct MediaDetailView: View {
                 showingSearchResults = false
                 scheduleNextEpisodePresentation {
                     Logger.shared.log("MediaDetailView nextEpisode presenting search sheet: id=\(searchResult.id) S\(seasonNumber)E\(episodeNumber)", type: "CrashProbe")
+                    playSheetRequestId = UUID()
                     showingSearchResults = true
                 }
             } else {
@@ -305,6 +307,7 @@ struct MediaDetailView: View {
                 imdbId: searchResult.isMovie ? movieDetail?.imdbId : tvShowDetail?.externalIds?.imdbId,
                 autoModeOnly: UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled")
             )
+            .id(playSheetRequestId)
         }
         .sheet(isPresented: $showingDownloadSheet) {
             let _ = Logger.shared.log("MediaDetailView constructing download sheet: id=\(searchResult.id) isAnime=\(isAnimeShow) selectedEpisode=\(selectedEpisodeForSearch.map { "S\($0.seasonNumber)E\($0.episodeNumber)" } ?? "nil") autoMode=\(UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"))", type: "CrashProbe")
@@ -953,6 +956,7 @@ struct MediaDetailView: View {
         }
         
         Logger.shared.log("MediaDetailView searchInServices presenting: id=\(searchResult.id) selectedEpisode=\(selectedEpisodeForSearch.map { "S\($0.seasonNumber)E\($0.episodeNumber)" } ?? "nil")", type: "CrashProbe")
+        playSheetRequestId = UUID()
         showingSearchResults = true
     }
     

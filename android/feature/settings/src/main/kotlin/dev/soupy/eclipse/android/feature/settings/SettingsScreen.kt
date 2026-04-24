@@ -39,11 +39,20 @@ data class SettingsScreenState(
     val inAppPlayer: InAppPlayer = InAppPlayer.NORMAL,
     val aniSkipAutoSkip: Boolean = false,
     val skip85sEnabled: Boolean = false,
+    val readingMode: Int = 2,
+    val readerFontSize: Double = 16.0,
+    val readerLineSpacing: Double = 1.6,
+    val readerMargin: Double = 4.0,
+    val readerTextAlignment: String = "left",
     val isBackupBusy: Boolean = false,
     val hasLocalBackup: Boolean = false,
     val backupStatusHeadline: String = "No local backup yet",
     val backupStatusMessage: String = "Export a JSON archive from Android Settings or import an existing Luna backup to stage one here.",
     val catalogs: List<CatalogSettingsRow> = emptyList(),
+    val storageMetrics: List<StorageMetricRow> = emptyList(),
+    val storageStatus: String = "Storage has not been measured yet.",
+    val logRows: List<LogSettingsRow> = emptyList(),
+    val loggerStatus: String = "No Android logs captured yet.",
 )
 
 data class CatalogSettingsRow(
@@ -53,6 +62,19 @@ data class CatalogSettingsRow(
     val displayStyle: String,
     val enabled: Boolean,
     val order: Int,
+)
+
+data class StorageMetricRow(
+    val label: String,
+    val value: String,
+)
+
+data class LogSettingsRow(
+    val id: String,
+    val timestamp: String,
+    val tag: String,
+    val message: String,
+    val level: String,
 )
 
 @Composable
@@ -67,6 +89,15 @@ fun SettingsRoute(
     onCatalogEnabledChanged: (String, Boolean) -> Unit,
     onMoveCatalogUp: (String) -> Unit,
     onMoveCatalogDown: (String) -> Unit,
+    onRefreshStorage: () -> Unit,
+    onClearCache: () -> Unit,
+    onRefreshLogs: () -> Unit,
+    onClearLogs: () -> Unit,
+    onReadingModeChanged: (Int) -> Unit,
+    onReaderFontSizeChanged: (Double) -> Unit,
+    onReaderLineSpacingChanged: (Double) -> Unit,
+    onReaderMarginChanged: (Double) -> Unit,
+    onReaderAlignmentChanged: (String) -> Unit,
     onExportBackup: (Uri) -> Unit,
     onImportBackup: (Uri) -> Unit,
 ) {
@@ -232,6 +263,24 @@ fun SettingsRoute(
 
         item {
             SectionHeading(
+                title = "Reader",
+                subtitle = "Manga and novel reader defaults restored from Luna backups and persisted on Android.",
+            )
+        }
+
+        item {
+            ReaderSettingsCard(
+                state = state,
+                onReadingModeChanged = onReadingModeChanged,
+                onReaderFontSizeChanged = onReaderFontSizeChanged,
+                onReaderLineSpacingChanged = onReaderLineSpacingChanged,
+                onReaderMarginChanged = onReaderMarginChanged,
+                onReaderAlignmentChanged = onReaderAlignmentChanged,
+            )
+        }
+
+        item {
+            SectionHeading(
                 title = "Catalogs",
                 subtitle = "Home rows follow the same enabled state and order that Luna stores in backups.",
             )
@@ -245,6 +294,38 @@ fun SettingsRoute(
                 onEnabledChanged = { enabled -> onCatalogEnabledChanged(catalog.id, enabled) },
                 onMoveUp = { onMoveCatalogUp(catalog.id) },
                 onMoveDown = { onMoveCatalogDown(catalog.id) },
+            )
+        }
+
+        item {
+            SectionHeading(
+                title = "Storage",
+                subtitle = "Cache and offline usage diagnostics backed by Android app storage.",
+            )
+        }
+
+        item {
+            StorageCard(
+                metrics = state.storageMetrics,
+                status = state.storageStatus,
+                onRefresh = onRefreshStorage,
+                onClearCache = onClearCache,
+            )
+        }
+
+        item {
+            SectionHeading(
+                title = "Logger",
+                subtitle = "Persistent diagnostics for player, backup, source, and storage flows.",
+            )
+        }
+
+        item {
+            LoggerCard(
+                rows = state.logRows,
+                status = state.loggerStatus,
+                onRefresh = onRefreshLogs,
+                onClear = onClearLogs,
             )
         }
 
@@ -265,6 +346,260 @@ fun SettingsRoute(
                     importLauncher.launch(arrayOf("application/json", "text/plain"))
                 },
             )
+        }
+    }
+}
+
+@Composable
+private fun ReaderSettingsCard(
+    state: SettingsScreenState,
+    onReadingModeChanged: (Int) -> Unit,
+    onReaderFontSizeChanged: (Double) -> Unit,
+    onReaderLineSpacingChanged: (Double) -> Unit,
+    onReaderMarginChanged: (Double) -> Unit,
+    onReaderAlignmentChanged: (String) -> Unit,
+) {
+    GlassPanel {
+        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Text(
+                text = "Reading Mode",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            ReaderModeButtons(
+                selected = state.readingMode,
+                onSelected = onReadingModeChanged,
+            )
+            ReaderValueSlider(
+                title = "Font Size",
+                valueLabel = "${state.readerFontSize.toInt()} pt",
+                value = state.readerFontSize.toFloat(),
+                valueRange = 12f..32f,
+                onValueChange = { onReaderFontSizeChanged(it.toDouble()) },
+            )
+            ReaderValueSlider(
+                title = "Line Spacing",
+                valueLabel = "%.1fx".format(state.readerLineSpacing),
+                value = state.readerLineSpacing.toFloat(),
+                valueRange = 1.0f..2.4f,
+                onValueChange = { onReaderLineSpacingChanged(it.toDouble()) },
+            )
+            ReaderValueSlider(
+                title = "Margin",
+                valueLabel = "${state.readerMargin.toInt()}",
+                value = state.readerMargin.toFloat(),
+                valueRange = 0f..12f,
+                onValueChange = { onReaderMarginChanged(it.toDouble()) },
+            )
+            Text(
+                text = "Text Alignment",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            ReaderAlignmentButtons(
+                selected = state.readerTextAlignment,
+                onSelected = onReaderAlignmentChanged,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ReaderModeButtons(
+    selected: Int,
+    onSelected: (Int) -> Unit,
+) {
+    val modes = listOf(
+        0 to "Paged",
+        1 to "Webtoon",
+        2 to "Auto",
+    )
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        modes.forEach { (mode, label) ->
+            if (mode == selected) {
+                Button(
+                    onClick = { onSelected(mode) },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(label)
+                }
+            } else {
+                OutlinedButton(
+                    onClick = { onSelected(mode) },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(label)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReaderAlignmentButtons(
+    selected: String,
+    onSelected: (String) -> Unit,
+) {
+    val values = listOf("left", "center", "justify")
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        values.forEach { value ->
+            val label = value.replaceFirstChar { it.uppercase() }
+            if (value == selected) {
+                Button(
+                    onClick = { onSelected(value) },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(label)
+                }
+            } else {
+                OutlinedButton(
+                    onClick = { onSelected(value) },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(label)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReaderValueSlider(
+    title: String,
+    valueLabel: String,
+    value: Float,
+    valueRange: ClosedFloatingPointRange<Float>,
+    onValueChange: (Float) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = valueLabel,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.tertiary,
+            )
+        }
+        Slider(
+            value = value,
+            onValueChange = onValueChange,
+            valueRange = valueRange,
+        )
+    }
+}
+
+@Composable
+private fun StorageCard(
+    metrics: List<StorageMetricRow>,
+    status: String,
+    onRefresh: () -> Unit,
+    onClearCache: () -> Unit,
+) {
+    GlassPanel {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(
+                text = status,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+            )
+            metrics.forEach { metric ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    Text(
+                        text = metric.label,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(
+                        text = metric.value,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.tertiary,
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Button(
+                    onClick = onRefresh,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Refresh")
+                }
+                OutlinedButton(
+                    onClick = onClearCache,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Clear Cache")
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LoggerCard(
+    rows: List<LogSettingsRow>,
+    status: String,
+    onRefresh: () -> Unit,
+    onClear: () -> Unit,
+) {
+    GlassPanel {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(
+                text = status,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+            )
+            rows.forEach { row ->
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        text = "${row.timestamp} | ${row.tag} | ${row.level}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.tertiary,
+                    )
+                    Text(
+                        text = row.message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Button(
+                    onClick = onRefresh,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Refresh")
+                }
+                OutlinedButton(
+                    onClick = onClear,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Clear Logs")
+                }
+            }
         }
     }
 }

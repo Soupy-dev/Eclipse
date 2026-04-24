@@ -19,6 +19,16 @@ class CacheRepository(
             )
         }
     }
+
+    suspend fun clearCache(): Result<CacheMetricsSnapshot> = runCatching {
+        withContext(Dispatchers.IO) {
+            val cacheRoot = context.cacheDir.canonicalFile
+            cacheRoot.listFiles().orEmpty().forEach { child ->
+                child.deleteInside(cacheRoot)
+            }
+        }
+        loadMetrics().getOrThrow()
+    }
 }
 
 private fun File.safeSize(): Long =
@@ -30,3 +40,13 @@ private fun File.safeSize(): Long =
         }
     }.getOrDefault(0L)
 
+private fun File.deleteInside(root: File) {
+    val target = canonicalFile
+    check(target.path.startsWith(root.path)) {
+        "Refusing to delete outside app cache."
+    }
+    if (target.isDirectory) {
+        target.listFiles().orEmpty().forEach { child -> child.deleteInside(root) }
+    }
+    target.delete()
+}

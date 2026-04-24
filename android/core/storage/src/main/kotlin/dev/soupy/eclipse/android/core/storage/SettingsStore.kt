@@ -101,6 +101,22 @@ class SettingsStore(
         }
     }
 
+    suspend fun updateReader(
+        readingMode: Int,
+        readerFontSize: Double,
+        readerLineSpacing: Double,
+        readerMargin: Double,
+        readerTextAlignment: String,
+    ) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.readingMode] = readingMode.coerceIn(0, 3)
+            prefs[Keys.readerFontSize] = readerFontSize.coerceIn(12.0, 32.0)
+            prefs[Keys.readerLineSpacing] = readerLineSpacing.coerceIn(1.0, 2.4)
+            prefs[Keys.readerMargin] = readerMargin.coerceIn(0.0, 12.0)
+            prefs[Keys.readerTextAlignment] = readerTextAlignment
+        }
+    }
+
     suspend fun setAutoModeEnabled(enabled: Boolean) {
         context.dataStore.edit { prefs ->
             prefs[Keys.autoModeEnabled] = enabled

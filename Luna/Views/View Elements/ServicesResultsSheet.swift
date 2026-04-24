@@ -1256,6 +1256,15 @@ struct ModulesSearchResultsSheet: View {
                 startStremioSearch()
             }
         }
+        .onChangeComp(of: requestToken) { _, _ in
+            Logger.shared.log("ServicesResultsSheet request token changed: \(requestToken)", type: "Stream")
+            autoModeDidRun = false
+            autoModeRunToken = nil
+            autoModeCancelled = false
+            if autoModeOnly && !showManualPicker {
+                startAutoModeIfNeeded()
+            }
+        }
         .onChangeComp(of: viewModel.isSearching) { _, _ in
             maybeRunAutoModeSelection()
         }
