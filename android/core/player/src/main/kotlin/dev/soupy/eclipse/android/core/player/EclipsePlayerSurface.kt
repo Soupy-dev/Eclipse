@@ -7,6 +7,7 @@ import android.os.Bundle
 import android.provider.Browser
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.Button
@@ -34,6 +35,7 @@ import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import dev.soupy.eclipse.android.core.design.GlassPanel
 import dev.soupy.eclipse.android.core.model.InAppPlayer
+import dev.soupy.eclipse.android.core.model.PlaybackSettingsSnapshot
 import dev.soupy.eclipse.android.core.model.PlayerSource
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -49,6 +51,7 @@ fun EclipsePlayerSurface(
     modifier: Modifier = Modifier,
     source: PlayerSource? = null,
     preferredPlayer: InAppPlayer = InAppPlayer.NORMAL,
+    settings: PlaybackSettingsSnapshot = PlaybackSettingsSnapshot(),
     onProgress: (PlaybackProgressSnapshot) -> Unit = {},
 ) {
     if (source == null) {
@@ -162,6 +165,27 @@ fun EclipsePlayerSurface(
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
                 )
+            }
+        }
+
+        if (settings.skip85sEnabled) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                Button(
+                    onClick = {
+                        val currentPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
+                        val duration = exoPlayer.duration.takeIf { it > 0 && it != C.TIME_UNSET }
+                        val targetPosition = duration?.let { durationMs ->
+                            (currentPosition + 85_000L).coerceAtMost((durationMs - 1_000L).coerceAtLeast(0L))
+                        } ?: (currentPosition + 85_000L)
+                        exoPlayer.seekTo(targetPosition)
+                        emitProgressSnapshot()
+                    },
+                ) {
+                    Text("Skip 85s")
+                }
             }
         }
 

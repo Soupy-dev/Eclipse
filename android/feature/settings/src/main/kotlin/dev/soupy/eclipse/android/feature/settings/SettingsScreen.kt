@@ -36,6 +36,8 @@ data class SettingsScreenState(
     val showNextEpisodeButton: Boolean = true,
     val nextEpisodeThreshold: Int = 90,
     val inAppPlayer: InAppPlayer = InAppPlayer.NORMAL,
+    val aniSkipAutoSkip: Boolean = false,
+    val skip85sEnabled: Boolean = false,
     val isBackupBusy: Boolean = false,
     val hasLocalBackup: Boolean = false,
     val backupStatusHeadline: String = "No local backup yet",
@@ -49,6 +51,8 @@ fun SettingsRoute(
     onShowNextEpisodeChanged: (Boolean) -> Unit,
     onNextEpisodeThresholdChanged: (Int) -> Unit,
     onPlayerSelected: (InAppPlayer) -> Unit,
+    onAniSkipAutoSkipChanged: (Boolean) -> Unit,
+    onSkip85sChanged: (Boolean) -> Unit,
     onExportBackup: (Uri) -> Unit,
     onImportBackup: (Uri) -> Unit,
 ) {
@@ -142,6 +146,24 @@ fun SettingsRoute(
                 description = "Keep the next-episode CTA visible near the end of playback when we have enough context to offer it.",
                 checked = state.showNextEpisodeButton,
                 onCheckedChange = onShowNextEpisodeChanged,
+            )
+        }
+
+        item {
+            SettingToggleCard(
+                title = "Auto Skip Segments",
+                description = "Use fetched AniSkip or TheIntroDB segments to skip intros, recaps, outros, and previews automatically.",
+                checked = state.aniSkipAutoSkip,
+                onCheckedChange = onAniSkipAutoSkipChanged,
+            )
+        }
+
+        item {
+            SettingToggleCard(
+                title = "85s Skip Fallback",
+                description = "Show a player control that jumps ahead 85 seconds when structured skip data is unavailable.",
+                checked = state.skip85sEnabled,
+                onCheckedChange = onSkip85sChanged,
             )
         }
 

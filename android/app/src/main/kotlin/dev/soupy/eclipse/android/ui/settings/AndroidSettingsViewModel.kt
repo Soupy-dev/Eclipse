@@ -31,6 +31,8 @@ class AndroidSettingsViewModel(
                     showNextEpisodeButton = settings.showNextEpisodeButton,
                     nextEpisodeThreshold = settings.nextEpisodeThreshold,
                     inAppPlayer = settings.inAppPlayer,
+                    aniSkipAutoSkip = settings.aniSkipAutoSkip,
+                    skip85sEnabled = settings.skip85sEnabled,
                 )
             }
         }
@@ -72,6 +74,26 @@ class AndroidSettingsViewModel(
                 inAppPlayer = player,
                 showNextEpisodeButton = current.showNextEpisodeButton,
                 nextEpisodeThreshold = current.nextEpisodeThreshold,
+            )
+        }
+    }
+
+    fun setAniSkipAutoSkip(enabled: Boolean) {
+        val current = _state.value
+        viewModelScope.launch {
+            settingsStore.updateSkipBehavior(
+                aniSkipAutoSkip = enabled,
+                skip85sEnabled = current.skip85sEnabled,
+            )
+        }
+    }
+
+    fun setSkip85sEnabled(enabled: Boolean) {
+        val current = _state.value
+        viewModelScope.launch {
+            settingsStore.updateSkipBehavior(
+                aniSkipAutoSkip = current.aniSkipAutoSkip,
+                skip85sEnabled = enabled,
             )
         }
     }

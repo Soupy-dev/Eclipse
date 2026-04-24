@@ -93,4 +93,50 @@ data class PlayerSource(
     val context: EpisodePlaybackContext? = null,
 )
 
+@Serializable
+enum class SkipType(
+    val id: String,
+    val displayLabel: String,
+) {
+    @SerialName("intro")
+    INTRO("intro", "Skip Intro"),
+
+    @SerialName("outro")
+    OUTRO("outro", "Skip Outro"),
+
+    @SerialName("recap")
+    RECAP("recap", "Skip Recap"),
+
+    @SerialName("preview")
+    PREVIEW("preview", "Skip Preview"),
+}
+
+@Serializable
+data class SkipSegment(
+    val startTime: Double,
+    val endTime: Double,
+    val type: SkipType,
+) {
+    val uniqueKey: String
+        get() = "${type.id}_${startTime.toInt()}"
+
+    val durationSeconds: Double
+        get() = (endTime - startTime).coerceAtLeast(0.0)
+
+    fun clamped(maxDurationSeconds: Double): SkipSegment? {
+        val maxDuration = if (maxDurationSeconds > 0) {
+            maxDurationSeconds
+        } else {
+            Double.MAX_VALUE
+        }
+        val clampedStart = startTime.coerceAtLeast(0.0)
+        val clampedEnd = endTime.coerceAtMost(maxDuration)
+        return if (clampedEnd > clampedStart) {
+            copy(startTime = clampedStart, endTime = clampedEnd)
+        } else {
+            null
+        }
+    }
+}
+
 

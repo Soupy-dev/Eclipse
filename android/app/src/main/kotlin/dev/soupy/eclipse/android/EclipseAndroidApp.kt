@@ -31,9 +31,10 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
-import dev.soupy.eclipse.android.core.model.DetailTarget
 import dev.soupy.eclipse.android.core.design.EclipseBackground
 import dev.soupy.eclipse.android.core.design.EclipseTheme
+import dev.soupy.eclipse.android.core.model.DetailTarget
+import dev.soupy.eclipse.android.core.model.PlaybackSettingsSnapshot
 import dev.soupy.eclipse.android.data.rememberAppContainer
 import dev.soupy.eclipse.android.feature.detail.DetailRoute
 import dev.soupy.eclipse.android.feature.downloads.DownloadsRoute
@@ -119,6 +120,12 @@ fun EclipseAndroidApp() {
     val servicesState by servicesViewModel.state.collectAsState()
     val downloadsState by downloadsViewModel.state.collectAsState()
     val settingsState by settingsViewModel.state.collectAsState()
+    val playbackSettings = PlaybackSettingsSnapshot(
+        aniSkipAutoSkip = settingsState.aniSkipAutoSkip,
+        skip85sEnabled = settingsState.skip85sEnabled,
+        showNextEpisodeButton = settingsState.showNextEpisodeButton,
+        nextEpisodeThreshold = settingsState.nextEpisodeThreshold,
+    )
 
     var selectedDetailTarget by remember { mutableStateOf<DetailTarget?>(null) }
 
@@ -216,6 +223,7 @@ fun EclipseAndroidApp() {
                                 )?.let(libraryViewModel::syncContinueWatching)
                             },
                             preferredPlayer = settingsState.inAppPlayer,
+                            playbackSettings = playbackSettings,
                         )
                     }
                     composable("schedule") {
@@ -279,6 +287,8 @@ fun EclipseAndroidApp() {
                             onShowNextEpisodeChanged = settingsViewModel::setShowNextEpisodeButton,
                             onNextEpisodeThresholdChanged = settingsViewModel::setNextEpisodeThreshold,
                             onPlayerSelected = settingsViewModel::setInAppPlayer,
+                            onAniSkipAutoSkipChanged = settingsViewModel::setAniSkipAutoSkip,
+                            onSkip85sChanged = settingsViewModel::setSkip85sEnabled,
                             onExportBackup = settingsViewModel::exportBackup,
                             onImportBackup = settingsViewModel::importBackup,
                         )

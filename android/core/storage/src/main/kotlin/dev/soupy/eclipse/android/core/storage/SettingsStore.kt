@@ -91,6 +91,16 @@ class SettingsStore(
         }
     }
 
+    suspend fun updateSkipBehavior(
+        aniSkipAutoSkip: Boolean,
+        skip85sEnabled: Boolean,
+    ) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.aniSkipAutoSkip] = aniSkipAutoSkip
+            prefs[Keys.skip85sEnabled] = skip85sEnabled
+        }
+    }
+
     suspend fun setAutoModeEnabled(enabled: Boolean) {
         context.dataStore.edit { prefs ->
             prefs[Keys.autoModeEnabled] = enabled

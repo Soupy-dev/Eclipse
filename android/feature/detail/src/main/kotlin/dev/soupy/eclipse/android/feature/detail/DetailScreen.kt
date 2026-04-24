@@ -26,6 +26,7 @@ import dev.soupy.eclipse.android.core.design.MetadataChips
 import dev.soupy.eclipse.android.core.design.PosterImage
 import dev.soupy.eclipse.android.core.design.SectionHeading
 import dev.soupy.eclipse.android.core.model.InAppPlayer
+import dev.soupy.eclipse.android.core.model.PlaybackSettingsSnapshot
 import dev.soupy.eclipse.android.core.model.PlayerSource
 import dev.soupy.eclipse.android.core.player.EclipsePlayerSurface
 import dev.soupy.eclipse.android.core.player.PlaybackProgressSnapshot
@@ -76,6 +77,7 @@ fun DetailRoute(
     onPlayStream: (String) -> Unit,
     onPlaybackProgress: (PlaybackProgressSnapshot) -> Unit,
     preferredPlayer: InAppPlayer = InAppPlayer.NORMAL,
+    playbackSettings: PlaybackSettingsSnapshot = PlaybackSettingsSnapshot(),
 ) {
     if (!state.hasSelection && !state.isLoading) {
         ErrorPanel(
@@ -232,6 +234,7 @@ fun DetailRoute(
             EclipsePlayerSurface(
                 source = state.playerSource,
                 preferredPlayer = preferredPlayer,
+                settings = playbackSettings,
                 onProgress = onPlaybackProgress,
             )
         }
