@@ -11,6 +11,7 @@ import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import dev.soupy.eclipse.android.core.model.BackupData
 import dev.soupy.eclipse.android.core.model.InAppPlayer
+import dev.soupy.eclipse.android.core.model.SimilarityAlgorithm
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -62,6 +63,8 @@ data class AppSettings(
     val autoClearCacheEnabled: Boolean = false,
     val autoClearCacheThresholdMB: Double = 500.0,
     val highQualityThreshold: Double = 0.9,
+    val filterHorrorContent: Boolean = false,
+    val selectedSimilarityAlgorithm: SimilarityAlgorithm = SimilarityAlgorithm.HYBRID,
 )
 
 class SettingsStore(
@@ -163,6 +166,34 @@ class SettingsStore(
         }
     }
 
+    suspend fun setHighQualityThreshold(threshold: Double) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.highQualityThreshold] = threshold.coerceIn(0.0, 1.0)
+        }
+    }
+
+    suspend fun setFilterHorrorContent(enabled: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.filterHorrorContent] = enabled
+        }
+    }
+
+    suspend fun setSimilarityAlgorithm(algorithm: SimilarityAlgorithm) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.selectedSimilarityAlgorithm] = algorithm.id
+        }
+    }
+
+    suspend fun updateAutoClearCache(
+        enabled: Boolean,
+        thresholdMB: Double,
+    ) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.autoClearCacheEnabled] = enabled
+            prefs[Keys.autoClearCacheThresholdMB] = thresholdMB.coerceIn(50.0, 5_000.0)
+        }
+    }
+
     suspend fun setAutoModeSourceEnabled(sourceId: String, enabled: Boolean) {
         context.dataStore.edit { prefs ->
             val current = prefs[Keys.autoModeSourceIds] ?: emptySet()
@@ -241,6 +272,10 @@ class SettingsStore(
             prefs[Keys.autoClearCacheEnabled] = payload.autoClearCacheEnabled
             prefs[Keys.autoClearCacheThresholdMB] = payload.autoClearCacheThresholdMB
             prefs[Keys.highQualityThreshold] = payload.highQualityThreshold
+            prefs[Keys.filterHorrorContent] = payload.filterHorrorContent
+            prefs[Keys.selectedSimilarityAlgorithm] = SimilarityAlgorithm
+                .fromId(payload.selectedSimilarityAlgorithm)
+                .id
         }
     }
 
@@ -288,6 +323,8 @@ class SettingsStore(
         autoClearCacheEnabled = preferences[Keys.autoClearCacheEnabled] ?: false,
         autoClearCacheThresholdMB = preferences[Keys.autoClearCacheThresholdMB] ?: 500.0,
         highQualityThreshold = preferences[Keys.highQualityThreshold] ?: 0.9,
+        filterHorrorContent = preferences[Keys.filterHorrorContent] ?: false,
+        selectedSimilarityAlgorithm = SimilarityAlgorithm.fromId(preferences[Keys.selectedSimilarityAlgorithm]),
     )
 
     private object Keys {
@@ -334,6 +371,8 @@ class SettingsStore(
         val autoClearCacheEnabled = booleanPreferencesKey("auto_clear_cache_enabled")
         val autoClearCacheThresholdMB = doublePreferencesKey("auto_clear_cache_threshold_mb")
         val highQualityThreshold = doublePreferencesKey("high_quality_threshold")
+        val filterHorrorContent = booleanPreferencesKey("filter_horror_content")
+        val selectedSimilarityAlgorithm = stringPreferencesKey("selected_similarity_algorithm")
     }
 }
 

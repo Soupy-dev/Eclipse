@@ -92,6 +92,9 @@ fun EclipseAndroidApp() {
             streamResolutionRepository = appContainer.streamResolutionRepository,
             progressRepository = appContainer.progressRepository,
             ratingsRepository = appContainer.ratingsRepository,
+            trackerRepository = appContainer.trackerRepository,
+            aniSkipService = appContainer.aniSkipService,
+            introDbService = appContainer.introDbService,
         )
     }
     val scheduleViewModel = rememberFeatureViewModel("schedule") {
@@ -317,9 +320,15 @@ fun EclipseAndroidApp() {
                             },
                             onPause = downloadsViewModel::pause,
                             onResume = downloadsViewModel::resume,
+                            onPlayOffline = downloadsViewModel::playOffline,
                             onMarkComplete = downloadsViewModel::markComplete,
                             onRemove = downloadsViewModel::remove,
                             onClearCompleted = downloadsViewModel::clearCompleted,
+                            onClearTarget = downloadsViewModel::clearTarget,
+                            onClearAll = downloadsViewModel::clearAll,
+                            onCleanupOrphans = downloadsViewModel::cleanupOrphans,
+                            preferredPlayer = settingsState.inAppPlayer,
+                            playbackSettings = playbackSettings,
                         )
                     }
                     composable("settings") {
@@ -348,6 +357,8 @@ fun EclipseAndroidApp() {
                             onMoveCatalogDown = settingsViewModel::moveCatalogDown,
                             onRefreshStorage = settingsViewModel::refreshStorage,
                             onClearCache = settingsViewModel::clearCache,
+                            onAutoClearCacheEnabledChanged = settingsViewModel::setAutoClearCacheEnabled,
+                            onAutoClearCacheThresholdChanged = settingsViewModel::setAutoClearCacheThreshold,
                             onRefreshLogs = settingsViewModel::refreshLogs,
                             onClearLogs = settingsViewModel::clearLogs,
                             onReadingModeChanged = settingsViewModel::setReadingMode,
@@ -358,8 +369,12 @@ fun EclipseAndroidApp() {
                             onTrackerManualConnect = settingsViewModel::saveTrackerAccount,
                             onTrackerSyncEnabledChanged = settingsViewModel::setTrackerSyncEnabled,
                             onTrackerDisconnect = settingsViewModel::disconnectTracker,
+                            onTrackerSyncNow = settingsViewModel::syncTrackersNow,
                             onExportBackup = settingsViewModel::exportBackup,
                             onImportBackup = settingsViewModel::importBackup,
+                            onHighQualityThresholdChanged = settingsViewModel::setHighQualityThreshold,
+                            onFilterHorrorContentChanged = settingsViewModel::setFilterHorrorContent,
+                            onSimilarityAlgorithmChanged = settingsViewModel::setSimilarityAlgorithm,
                         )
                     }
                     composable("manga") {

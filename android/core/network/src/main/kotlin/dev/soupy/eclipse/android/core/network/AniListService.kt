@@ -379,6 +379,7 @@ class AniListService(
                 status
                 bannerImage
                 isAdult
+                type
                 synonyms
                 genres
                 title {
@@ -397,6 +398,44 @@ class AniListService(
                   episode
                   timeUntilAiring
                   airingAt
+                }
+                relations {
+                  edges {
+                    relationType
+                    node {
+                      id
+                      idMal
+                      description(asHtml: false)
+                      format
+                      season
+                      seasonYear
+                      episodes
+                      duration
+                      status
+                      bannerImage
+                      isAdult
+                      type
+                      synonyms
+                      genres
+                      title {
+                        romaji
+                        english
+                        native
+                        userPreferred
+                      }
+                      coverImage {
+                        extraLarge
+                        large
+                        medium
+                        color
+                      }
+                      nextAiringEpisode {
+                        episode
+                        timeUntilAiring
+                        airingAt
+                      }
+                    }
+                  }
                 }
               }
             }

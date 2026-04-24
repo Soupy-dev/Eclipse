@@ -1,5 +1,4 @@
 package dev.soupy.eclipse.android.core.model
-
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
@@ -103,6 +102,12 @@ data class StremioContentIdRequest(
 
 val StremioStream.isDirectHttp: Boolean
     get() = url?.startsWith("http://") == true || url?.startsWith("https://") == true
+
+val StremioStream.isTorrentLike: Boolean
+    get() = !infoHash.isNullOrBlank() ||
+        url?.startsWith("magnet:", ignoreCase = true) == true ||
+        url?.contains("btih:", ignoreCase = true) == true ||
+        url?.endsWith(".torrent", ignoreCase = true) == true
 
 fun StremioManifest.buildContentId(request: StremioContentIdRequest): String? {
     val prefixes = idPrefixes.ifEmpty {

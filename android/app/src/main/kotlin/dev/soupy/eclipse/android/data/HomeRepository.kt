@@ -5,10 +5,15 @@ import kotlinx.coroutines.coroutineScope
 import dev.soupy.eclipse.android.core.model.BackupCatalog
 import dev.soupy.eclipse.android.core.model.ExploreMediaCard
 import dev.soupy.eclipse.android.core.model.MediaCarouselSection
+import dev.soupy.eclipse.android.core.model.TMDBSearchResult
 import dev.soupy.eclipse.android.core.model.isMovie
 import dev.soupy.eclipse.android.core.model.isTVShow
 import dev.soupy.eclipse.android.core.network.AniListService
 import dev.soupy.eclipse.android.core.network.TmdbService
+import dev.soupy.eclipse.android.core.storage.SettingsStore
+import kotlinx.coroutines.flow.first
+
+private const val HorrorGenreId = 27
 
 data class HomeContent(
     val hero: ExploreMediaCard? = null,
@@ -20,10 +25,12 @@ class HomeRepository(
     private val aniListService: AniListService,
     private val catalogRepository: CatalogRepository,
     private val recommendationRepository: RecommendationRepository,
+    private val settingsStore: SettingsStore,
     private val tmdbEnabled: Boolean,
 ) {
     suspend fun loadHome(): Result<HomeContent> = runCatching {
         coroutineScope {
+            val settingsDeferred = async { settingsStore.settings.first() }
             val enabledCatalogsDeferred = async { catalogRepository.enabledCatalogs() }
             val trendingDeferred = async {
                 if (tmdbEnabled) tmdbService.trendingAll()
@@ -63,20 +70,46 @@ class HomeRepository(
             }
             val animeCatalogsDeferred = async { aniListService.fetchHomeCatalogs() }
 
+            val settings = settingsDeferred.await()
             val enabledCatalogs = enabledCatalogsDeferred.await()
             val sections = run {
                 val trending = trendingDeferred.await().orEmptyList()
+                    .withoutFilteredHorror(settings.filterHorrorContent)
                     .filter { it.isMovie || it.isTVShow }
                     .take(12)
                     .map { it.toExploreMediaCard("Trending") }
-                val popularMovies = popularMoviesDeferred.await().orEmptyList().take(12).map { it.toExploreMediaCard("Movie") }
-                val nowPlayingMovies = nowPlayingMoviesDeferred.await().orEmptyList().take(12).map { it.toExploreMediaCard("Now playing") }
-                val upcomingMovies = upcomingMoviesDeferred.await().orEmptyList().take(12).map { it.toExploreMediaCard("Upcoming") }
-                val popularTv = popularTvDeferred.await().orEmptyList().take(12).map { it.toExploreMediaCard("Series") }
-                val airingToday = airingTodayDeferred.await().orEmptyList().take(12).map { it.toExploreMediaCard("Airing today") }
-                val onTheAir = onTheAirDeferred.await().orEmptyList().take(12).map { it.toExploreMediaCard("On the air") }
-                val topRatedTv = topRatedTvDeferred.await().orEmptyList().take(12).map { it.toExploreMediaCard("Top rated") }
-                val topRatedMovies = topRatedMoviesDeferred.await().orEmptyList().take(12).map { it.toExploreMediaCard("Top rated") }
+                val popularMovies = popularMoviesDeferred.await().orEmptyList()
+                    .withoutFilteredHorror(settings.filterHorrorContent)
+                    .take(12)
+                    .map { it.toExploreMediaCard("Movie") }
+                val nowPlayingMovies = nowPlayingMoviesDeferred.await().orEmptyList()
+                    .withoutFilteredHorror(settings.filterHorrorContent)
+                    .take(12)
+                    .map { it.toExploreMediaCard("Now playing") }
+                val upcomingMovies = upcomingMoviesDeferred.await().orEmptyList()
+                    .withoutFilteredHorror(settings.filterHorrorContent)
+                    .take(12)
+                    .map { it.toExploreMediaCard("Upcoming") }
+                val popularTv = popularTvDeferred.await().orEmptyList()
+                    .withoutFilteredHorror(settings.filterHorrorContent)
+                    .take(12)
+                    .map { it.toExploreMediaCard("Series") }
+                val airingToday = airingTodayDeferred.await().orEmptyList()
+                    .withoutFilteredHorror(settings.filterHorrorContent)
+                    .take(12)
+                    .map { it.toExploreMediaCard("Airing today") }
+                val onTheAir = onTheAirDeferred.await().orEmptyList()
+                    .withoutFilteredHorror(settings.filterHorrorContent)
+                    .take(12)
+                    .map { it.toExploreMediaCard("On the air") }
+                val topRatedTv = topRatedTvDeferred.await().orEmptyList()
+                    .withoutFilteredHorror(settings.filterHorrorContent)
+                    .take(12)
+                    .map { it.toExploreMediaCard("Top rated") }
+                val topRatedMovies = topRatedMoviesDeferred.await().orEmptyList()
+                    .withoutFilteredHorror(settings.filterHorrorContent)
+                    .take(12)
+                    .map { it.toExploreMediaCard("Top rated") }
                 val animeCatalogs = animeCatalogsDeferred.await().orThrow()
                 val animeTrending = animeCatalogs.trending.take(12).map { it.toExploreMediaCard("Anime") }
                 val animePopular = animeCatalogs.popular.take(12).map { it.toExploreMediaCard("Anime") }
@@ -143,4 +176,11 @@ private fun MediaCarouselSection.forCatalog(catalog: BackupCatalog): MediaCarous
         else -> subtitle
     },
 )
+
+private fun List<TMDBSearchResult>.withoutFilteredHorror(enabled: Boolean): List<TMDBSearchResult> =
+    if (enabled) {
+        filterNot { result -> HorrorGenreId in result.genreIds }
+    } else {
+        this
+    }
 

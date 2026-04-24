@@ -1,5 +1,6 @@
 package dev.soupy.eclipse.android.core.player
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
@@ -12,6 +13,8 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.Browser
 import android.util.TypedValue
+import android.view.GestureDetector
+import android.view.MotionEvent
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -50,9 +53,12 @@ import dev.soupy.eclipse.android.core.design.GlassPanel
 import dev.soupy.eclipse.android.core.model.InAppPlayer
 import dev.soupy.eclipse.android.core.model.PlaybackSettingsSnapshot
 import dev.soupy.eclipse.android.core.model.PlayerSource
+import dev.soupy.eclipse.android.core.model.SkipSegment
 import dev.soupy.eclipse.android.core.model.SubtitleTrack
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+
+private const val DoubleTapSeekDeltaMs = 10_000L
 
 data class PlaybackProgressSnapshot(
     val positionMs: Long,
@@ -66,6 +72,7 @@ fun EclipsePlayerSurface(
     source: PlayerSource? = null,
     preferredPlayer: InAppPlayer = InAppPlayer.NORMAL,
     settings: PlaybackSettingsSnapshot = PlaybackSettingsSnapshot(),
+    skipSegments: List<SkipSegment> = emptyList(),
     nextEpisodeLabel: String? = null,
     onNextEpisode: () -> Unit = {},
     onProgress: (PlaybackProgressSnapshot) -> Unit = {},
@@ -94,8 +101,33 @@ fun EclipsePlayerSurface(
 
     val context = LocalContext.current
     val onProgressState = rememberUpdatedState(onProgress)
+    val settingsState = rememberUpdatedState(settings)
+    val skipSegmentsState = rememberUpdatedState(skipSegments)
     var progressPercent by remember(source.uri) { mutableStateOf(0f) }
+    var currentPositionSeconds by remember(source.uri) { mutableStateOf(0.0) }
     LockLandscapeWhenRequested(settings.alwaysLandscape)
+
+    if (source.uri.isTorrentLikeUri()) {
+        GlassPanel(
+            modifier = modifier
+                .fillMaxWidth()
+                .aspectRatio(16 / 9f),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "Source Blocked",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                Text(
+                    text = "Android only accepts direct HTTP(S) media streams. Torrent, magnet, BTIH, and .torrent sources are rejected before playback.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                )
+            }
+        }
+        return
+    }
 
     if (preferredPlayer == InAppPlayer.EXTERNAL) {
         ExternalPlayerPanel(
@@ -152,10 +184,10 @@ fun EclipsePlayerSurface(
         exoPlayer.trackSelectionParameters = parameters
     }
 
-    fun emitProgressSnapshot(forceFinished: Boolean = false) {
+    fun progressSnapshot(forceFinished: Boolean = false): PlaybackProgressSnapshot? {
         val durationMs = exoPlayer.duration
         if (durationMs <= 0L || durationMs == C.TIME_UNSET) {
-            return
+            return null
         }
 
         val positionMs = exoPlayer.currentPosition
@@ -166,20 +198,45 @@ fun EclipsePlayerSurface(
         } else {
             (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
         }
-        onProgressState.value(
-            PlaybackProgressSnapshot(
-                positionMs = positionMs,
-                durationMs = durationMs,
-                isFinished = forceFinished || positionMs >= durationMs - 1_500L,
-            ),
+        currentPositionSeconds = positionMs / 1_000.0
+        return PlaybackProgressSnapshot(
+            positionMs = positionMs,
+            durationMs = durationMs,
+            isFinished = forceFinished || positionMs >= durationMs - 1_500L,
         )
     }
 
+    fun emitProgressSnapshot(forceFinished: Boolean = false) {
+        progressSnapshot(forceFinished)?.let(onProgressState.value)
+    }
+
     LaunchedEffect(exoPlayer) {
+        var secondsSinceProgressEmit = 0
         while (isActive) {
-            delay(15_000L)
-            if (exoPlayer.isPlaying) {
+            delay(1_000L)
+            val snapshot = progressSnapshot() ?: continue
+            if (!exoPlayer.isPlaying) {
+                secondsSinceProgressEmit = 0
+                continue
+            }
+
+            val currentSettings = settingsState.value
+            val activeSegment = if (currentSettings.aniSkipAutoSkip) {
+                skipSegmentsState.value.activeAt(snapshot.positionMs / 1_000.0)
+            } else {
+                null
+            }
+            if (activeSegment != null) {
+                exoPlayer.seekTo((activeSegment.endTime * 1_000.0).toLong())
                 emitProgressSnapshot()
+                secondsSinceProgressEmit = 0
+                continue
+            }
+
+            secondsSinceProgressEmit += 1
+            if (secondsSinceProgressEmit >= 15) {
+                onProgressState.value(snapshot)
+                secondsSinceProgressEmit = 0
             }
         }
     }
@@ -225,6 +282,8 @@ fun EclipsePlayerSurface(
             exoPlayer = exoPlayer,
             settings = settings,
             progressPercent = progressPercent,
+            currentPositionSeconds = currentPositionSeconds,
+            skipSegments = skipSegments,
             nextEpisodeLabel = nextEpisodeLabel,
             onNextEpisode = onNextEpisode,
             onProgressChanged = { emitProgressSnapshot() },
@@ -239,11 +298,19 @@ fun EclipsePlayerSurface(
                     player = exoPlayer
                     useController = true
                     applySubtitleStyle(settings)
+                    installDoubleTapSeek(
+                        exoPlayer = exoPlayer,
+                        onSeek = { emitProgressSnapshot() },
+                    )
                 }
             },
             update = { playerView ->
                 playerView.player = exoPlayer
                 playerView.applySubtitleStyle(settings)
+                playerView.installDoubleTapSeek(
+                    exoPlayer = exoPlayer,
+                    onSeek = { emitProgressSnapshot() },
+                )
             },
         )
     }
@@ -270,6 +337,8 @@ private fun PlaybackShortcutRow(
     exoPlayer: ExoPlayer,
     settings: PlaybackSettingsSnapshot,
     progressPercent: Float,
+    currentPositionSeconds: Double,
+    skipSegments: List<SkipSegment>,
     nextEpisodeLabel: String?,
     onNextEpisode: () -> Unit,
     onProgressChanged: () -> Unit,
@@ -277,11 +346,24 @@ private fun PlaybackShortcutRow(
     val showNextEpisode = settings.showNextEpisodeButton &&
         nextEpisodeLabel != null &&
         progressPercent * 100f >= settings.nextEpisodeThreshold
+    val manualSkipSegment = skipSegments.nextManualSkip(currentPositionSeconds)
 
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.End,
     ) {
+        if (manualSkipSegment != null) {
+            Button(
+                onClick = {
+                    exoPlayer.seekTo((manualSkipSegment.endTime * 1_000.0).toLong())
+                    onProgressChanged()
+                },
+                modifier = Modifier.padding(end = 10.dp),
+            ) {
+                Text(manualSkipSegment.type.displayLabel)
+            }
+        }
+
         if (showNextEpisode) {
             Button(onClick = onNextEpisode) {
                 Text(nextEpisodeLabel)
@@ -299,12 +381,7 @@ private fun PlaybackShortcutRow(
         if (settings.skip85sEnabled) {
             Button(
                 onClick = {
-                    val currentPosition = exoPlayer.currentPosition.coerceAtLeast(0L)
-                    val duration = exoPlayer.duration.takeIf { it > 0 && it != C.TIME_UNSET }
-                    val targetPosition = duration?.let { durationMs ->
-                        (currentPosition + 85_000L).coerceAtMost((durationMs - 1_000L).coerceAtLeast(0L))
-                    } ?: (currentPosition + 85_000L)
-                    exoPlayer.seekTo(targetPosition)
+                    exoPlayer.seekBy(85_000L)
                     onProgressChanged()
                 },
                 modifier = Modifier.padding(start = 10.dp),
@@ -314,6 +391,16 @@ private fun PlaybackShortcutRow(
         }
     }
 }
+
+private fun List<SkipSegment>.activeAt(positionSeconds: Double): SkipSegment? =
+    firstOrNull { segment ->
+        positionSeconds >= segment.startTime && positionSeconds < segment.endTime
+    }
+
+private fun List<SkipSegment>.nextManualSkip(positionSeconds: Double): SkipSegment? =
+    firstOrNull { segment ->
+        positionSeconds >= segment.startTime - 8.0 && positionSeconds < segment.endTime
+    }
 
 @Composable
 private fun HoldSpeedSurface(
@@ -344,6 +431,43 @@ private fun HoldSpeedSurface(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
         )
     }
+}
+
+@SuppressLint("ClickableViewAccessibility")
+private fun PlayerView.installDoubleTapSeek(
+    exoPlayer: ExoPlayer,
+    onSeek: () -> Unit,
+) {
+    val detector = GestureDetector(
+        context,
+        object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                val viewWidth = width.takeIf { it > 0 } ?: return false
+                val deltaMs = if (e.x < viewWidth / 2f) {
+                    -DoubleTapSeekDeltaMs
+                } else {
+                    DoubleTapSeekDeltaMs
+                }
+                exoPlayer.seekBy(deltaMs)
+                onSeek()
+                return true
+            }
+        },
+    )
+
+    setOnTouchListener { _, event ->
+        detector.onTouchEvent(event)
+        false
+    }
+}
+
+private fun ExoPlayer.seekBy(deltaMs: Long) {
+    val currentPosition = currentPosition.coerceAtLeast(0L)
+    val duration = duration.takeIf { it > 0L && it != C.TIME_UNSET }
+    val targetPosition = duration?.let { durationMs ->
+        (currentPosition + deltaMs).coerceIn(0L, (durationMs - 1_000L).coerceAtLeast(0L))
+    } ?: (currentPosition + deltaMs).coerceAtLeast(0L)
+    seekTo(targetPosition)
 }
 
 @Composable
@@ -524,6 +648,13 @@ private fun String.normalizedLanguageCode(): String =
 
 private fun String.matchesLanguage(other: String): Boolean =
     this == other || substringBefore('-') == other.substringBefore('-')
+
+private fun String.isTorrentLikeUri(): Boolean {
+    val clean = trim()
+    return clean.startsWith("magnet:", ignoreCase = true) ||
+        clean.contains("btih:", ignoreCase = true) ||
+        clean.substringBefore('?').substringBefore('#').endsWith(".torrent", ignoreCase = true)
+}
 
 private fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this

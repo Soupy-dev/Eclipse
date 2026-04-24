@@ -2,6 +2,8 @@ package dev.soupy.eclipse.android.feature.downloads
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -29,6 +31,10 @@ import dev.soupy.eclipse.android.core.design.LoadingPanel
 import dev.soupy.eclipse.android.core.design.PosterImage
 import dev.soupy.eclipse.android.core.design.SectionHeading
 import dev.soupy.eclipse.android.core.model.DetailTarget
+import dev.soupy.eclipse.android.core.model.InAppPlayer
+import dev.soupy.eclipse.android.core.model.PlaybackSettingsSnapshot
+import dev.soupy.eclipse.android.core.model.PlayerSource
+import dev.soupy.eclipse.android.core.player.EclipsePlayerSurface
 
 data class DownloadMetric(
     val label: String,
@@ -53,6 +59,8 @@ data class DownloadRow(
     val canPause: Boolean = false,
     val canResume: Boolean = false,
     val canMarkComplete: Boolean = false,
+    val canPlayOffline: Boolean = false,
+    val removeTargetLabel: String? = null,
 )
 
 data class DownloadsScreenState(
@@ -65,8 +73,10 @@ data class DownloadsScreenState(
     val heroSupportingText: String? = null,
     val metrics: List<DownloadMetric> = emptyList(),
     val items: List<DownloadRow> = emptyList(),
+    val playerSource: PlayerSource? = null,
 )
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DownloadsRoute(
     state: DownloadsScreenState,
@@ -74,9 +84,15 @@ fun DownloadsRoute(
     onSelect: (DetailTarget) -> Unit,
     onPause: (String) -> Unit,
     onResume: (String) -> Unit,
+    onPlayOffline: (String) -> Unit,
     onMarkComplete: (String) -> Unit,
     onRemove: (String) -> Unit,
     onClearCompleted: () -> Unit,
+    onClearTarget: (DetailTarget) -> Unit,
+    onClearAll: () -> Unit,
+    onCleanupOrphans: () -> Unit,
+    preferredPlayer: InAppPlayer = InAppPlayer.NORMAL,
+    playbackSettings: PlaybackSettingsSnapshot = PlaybackSettingsSnapshot(),
 ) {
     LazyColumn(
         modifier = Modifier
@@ -132,18 +148,45 @@ fun DownloadsRoute(
             }
         }
 
+        state.playerSource?.let { source ->
+            item {
+                SectionHeading(
+                    title = "Offline Player",
+                    subtitle = source.title ?: "Local download",
+                )
+            }
+            item {
+                EclipsePlayerSurface(
+                    source = source,
+                    preferredPlayer = preferredPlayer,
+                    settings = playbackSettings,
+                )
+            }
+        }
+
         if (state.items.isNotEmpty()) {
             item {
-                Row(
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     SectionHeading(
                         title = "Queue",
                         subtitle = "Direct streams can download into app storage; unsupported sources stay visible for retry.",
                     )
-                    OutlinedButton(onClick = onClearCompleted) {
-                        Text("Clear Completed")
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        OutlinedButton(onClick = onClearCompleted) {
+                            Text("Clear Completed")
+                        }
+                        OutlinedButton(onClick = onClearAll) {
+                            Text("Clear All")
+                        }
+                        OutlinedButton(onClick = onCleanupOrphans) {
+                            Text("Clean Orphans")
+                        }
                     }
                 }
             }
@@ -153,8 +196,10 @@ fun DownloadsRoute(
                     onOpen = { onSelect(item.detailTarget) },
                     onPause = { onPause(item.id) },
                     onResume = { onResume(item.id) },
+                    onPlayOffline = { onPlayOffline(item.id) },
                     onMarkComplete = { onMarkComplete(item.id) },
                     onRemove = { onRemove(item.id) },
+                    onClearTarget = { onClearTarget(item.detailTarget) },
                 )
             }
         }
@@ -219,14 +264,17 @@ private fun DownloadMetrics(
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun DownloadCard(
     item: DownloadRow,
     onOpen: () -> Unit,
     onPause: () -> Unit,
     onResume: () -> Unit,
+    onPlayOffline: () -> Unit,
     onMarkComplete: () -> Unit,
     onRemove: () -> Unit,
+    onClearTarget: () -> Unit,
 ) {
     GlassPanel {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -306,7 +354,10 @@ private fun DownloadCard(
                 )
             }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
                 Button(onClick = onOpen) {
                     Text("Open")
                 }
@@ -320,6 +371,11 @@ private fun DownloadCard(
                         Text("Resume")
                     }
                 }
+                if (item.canPlayOffline) {
+                    Button(onClick = onPlayOffline) {
+                        Text("Play Offline")
+                    }
+                }
                 if (item.canMarkComplete) {
                     OutlinedButton(onClick = onMarkComplete) {
                         Text("Complete")
@@ -327,6 +383,11 @@ private fun DownloadCard(
                 }
                 OutlinedButton(onClick = onRemove) {
                     Text("Remove")
+                }
+                item.removeTargetLabel?.let { label ->
+                    OutlinedButton(onClick = onClearTarget) {
+                        Text(label)
+                    }
                 }
             }
         }

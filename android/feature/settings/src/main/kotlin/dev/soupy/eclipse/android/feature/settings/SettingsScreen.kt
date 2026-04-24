@@ -32,6 +32,7 @@ import dev.soupy.eclipse.android.core.design.GlassPanel
 import dev.soupy.eclipse.android.core.design.HeroBackdrop
 import dev.soupy.eclipse.android.core.design.SectionHeading
 import dev.soupy.eclipse.android.core.model.InAppPlayer
+import dev.soupy.eclipse.android.core.model.SimilarityAlgorithm
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
@@ -39,6 +40,9 @@ data class SettingsScreenState(
     val accentColor: String = "#6D8CFF",
     val tmdbLanguage: String = "en-US",
     val autoModeEnabled: Boolean = true,
+    val highQualityThreshold: Double = 0.9,
+    val filterHorrorContent: Boolean = false,
+    val selectedSimilarityAlgorithm: SimilarityAlgorithm = SimilarityAlgorithm.HYBRID,
     val showNextEpisodeButton: Boolean = true,
     val nextEpisodeThreshold: Int = 90,
     val inAppPlayer: InAppPlayer = InAppPlayer.NORMAL,
@@ -68,6 +72,8 @@ data class SettingsScreenState(
     val catalogs: List<CatalogSettingsRow> = emptyList(),
     val storageMetrics: List<StorageMetricRow> = emptyList(),
     val storageStatus: String = "Storage has not been measured yet.",
+    val autoClearCacheEnabled: Boolean = false,
+    val autoClearCacheThresholdMB: Double = 500.0,
     val logRows: List<LogSettingsRow> = emptyList(),
     val loggerStatus: String = "No Android logs captured yet.",
     val trackerSyncEnabled: Boolean = true,
@@ -130,6 +136,8 @@ fun SettingsRoute(
     onMoveCatalogDown: (String) -> Unit,
     onRefreshStorage: () -> Unit,
     onClearCache: () -> Unit,
+    onAutoClearCacheEnabledChanged: (Boolean) -> Unit,
+    onAutoClearCacheThresholdChanged: (Double) -> Unit,
     onRefreshLogs: () -> Unit,
     onClearLogs: () -> Unit,
     onReadingModeChanged: (Int) -> Unit,
@@ -140,8 +148,12 @@ fun SettingsRoute(
     onTrackerManualConnect: (String, String, String) -> Unit,
     onTrackerSyncEnabledChanged: (Boolean) -> Unit,
     onTrackerDisconnect: (String) -> Unit,
+    onTrackerSyncNow: () -> Unit,
     onExportBackup: (Uri) -> Unit,
     onImportBackup: (Uri) -> Unit,
+    onHighQualityThresholdChanged: (Double) -> Unit,
+    onFilterHorrorContentChanged: (Boolean) -> Unit,
+    onSimilarityAlgorithmChanged: (SimilarityAlgorithm) -> Unit,
 ) {
     val exportLauncher = rememberLauncherForActivityResult(CreateDocument("application/json")) { uri ->
         uri?.let(onExportBackup)
@@ -182,6 +194,49 @@ fun SettingsRoute(
                 description = "Let Eclipse choose the best provider order automatically. This may not always be accurate.",
                 checked = state.autoModeEnabled,
                 onCheckedChange = onAutoModeChanged,
+            )
+        }
+
+        item {
+            SettingToggleCard(
+                title = "Filter Horror Content",
+                description = "Hide TMDB movies and TV shows tagged with the horror genre from Home and Search rows.",
+                checked = state.filterHorrorContent,
+                onCheckedChange = onFilterHorrorContentChanged,
+            )
+        }
+
+        item {
+            GlassPanel {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "High Quality Threshold",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = "${(state.highQualityThreshold * 100).toInt()}% match",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.tertiary,
+                    )
+                    Slider(
+                        value = state.highQualityThreshold.toFloat(),
+                        onValueChange = { onHighQualityThresholdChanged(it.toDouble()) },
+                        valueRange = 0f..1f,
+                    )
+                    Text(
+                        text = "Auto Mode uses this backed threshold before starting a resolved direct stream automatically.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.74f),
+                    )
+                }
+            }
+        }
+
+        item {
+            SimilarityAlgorithmCard(
+                selected = state.selectedSimilarityAlgorithm,
+                onSelected = onSimilarityAlgorithmChanged,
             )
         }
 
@@ -370,6 +425,7 @@ fun SettingsRoute(
                 },
                 onSyncEnabledChanged = onTrackerSyncEnabledChanged,
                 onDisconnect = onTrackerDisconnect,
+                onSyncNow = onTrackerSyncNow,
             )
         }
 
@@ -400,10 +456,13 @@ fun SettingsRoute(
 
         item {
             StorageCard(
+                state = state,
                 metrics = state.storageMetrics,
                 status = state.storageStatus,
                 onRefresh = onRefreshStorage,
                 onClearCache = onClearCache,
+                onAutoClearCacheEnabledChanged = onAutoClearCacheEnabledChanged,
+                onAutoClearCacheThresholdChanged = onAutoClearCacheThresholdChanged,
             )
         }
 
@@ -440,6 +499,44 @@ fun SettingsRoute(
                     importLauncher.launch(arrayOf("application/json", "text/plain"))
                 },
             )
+        }
+    }
+}
+
+@Composable
+private fun SimilarityAlgorithmCard(
+    selected: SimilarityAlgorithm,
+    onSelected: (SimilarityAlgorithm) -> Unit,
+) {
+    GlassPanel {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(
+                text = "Matching Algorithm",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            SimilarityAlgorithm.entries.forEach { algorithm ->
+                if (algorithm == selected) {
+                    Button(
+                        onClick = { onSelected(algorithm) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(algorithm.displayName)
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = { onSelected(algorithm) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(algorithm.displayName)
+                    }
+                }
+                Text(
+                    text = algorithm.description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+                )
+            }
         }
     }
 }
@@ -630,6 +727,7 @@ private fun TrackerSettingsCard(
     onConnect: () -> Unit,
     onSyncEnabledChanged: (Boolean) -> Unit,
     onDisconnect: (String) -> Unit,
+    onSyncNow: () -> Unit,
 ) {
     GlassPanel {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -685,6 +783,13 @@ private fun TrackerSettingsCard(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("Save Tracker")
+            }
+            OutlinedButton(
+                onClick = onSyncNow,
+                enabled = state.trackerSyncEnabled && state.trackerRows.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Sync Now")
             }
 
             state.trackerRows.forEach { row ->
@@ -833,13 +938,28 @@ private fun ReaderValueSlider(
 
 @Composable
 private fun StorageCard(
+    state: SettingsScreenState,
     metrics: List<StorageMetricRow>,
     status: String,
     onRefresh: () -> Unit,
     onClearCache: () -> Unit,
+    onAutoClearCacheEnabledChanged: (Boolean) -> Unit,
+    onAutoClearCacheThresholdChanged: (Double) -> Unit,
 ) {
     GlassPanel {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            SettingInlineToggle(
+                title = "Auto Clear Cache",
+                checked = state.autoClearCacheEnabled,
+                onCheckedChange = onAutoClearCacheEnabledChanged,
+            )
+            ReaderValueSlider(
+                title = "Cache Limit",
+                valueLabel = "${state.autoClearCacheThresholdMB.toInt()} MB",
+                value = state.autoClearCacheThresholdMB.toFloat(),
+                valueRange = 50f..5_000f,
+                onValueChange = { onAutoClearCacheThresholdChanged(it.toDouble()) },
+            )
             Text(
                 text = status,
                 style = MaterialTheme.typography.bodyMedium,

@@ -4,6 +4,7 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.soupy.eclipse.android.core.model.InAppPlayer
+import dev.soupy.eclipse.android.core.model.SimilarityAlgorithm
 import dev.soupy.eclipse.android.core.storage.SettingsStore
 import dev.soupy.eclipse.android.data.BackupRepository
 import dev.soupy.eclipse.android.data.BackupStatusSnapshot
@@ -24,6 +25,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class AndroidSettingsViewModel(
@@ -44,6 +46,9 @@ class AndroidSettingsViewModel(
                     accentColor = settings.accentColor,
                     tmdbLanguage = settings.tmdbLanguage,
                     autoModeEnabled = settings.autoModeEnabled,
+                    highQualityThreshold = settings.highQualityThreshold,
+                    filterHorrorContent = settings.filterHorrorContent,
+                    selectedSimilarityAlgorithm = settings.selectedSimilarityAlgorithm,
                     showNextEpisodeButton = settings.showNextEpisodeButton,
                     nextEpisodeThreshold = settings.nextEpisodeThreshold,
                     inAppPlayer = settings.inAppPlayer,
@@ -66,6 +71,8 @@ class AndroidSettingsViewModel(
                     readerLineSpacing = settings.readerLineSpacing,
                     readerMargin = settings.readerMargin,
                     readerTextAlignment = settings.readerTextAlignment,
+                    autoClearCacheEnabled = settings.autoClearCacheEnabled,
+                    autoClearCacheThresholdMB = settings.autoClearCacheThresholdMB,
                 )
             }
         }
@@ -74,12 +81,47 @@ class AndroidSettingsViewModel(
         refreshStorage()
         refreshLogs()
         refreshTrackers()
+        runStartupCacheMaintenance()
     }
 
     fun setAutoModeEnabled(enabled: Boolean) {
         viewModelScope.launch {
             settingsStore.setAutoModeEnabled(enabled)
         }
+    }
+
+    fun setHighQualityThreshold(threshold: Double) {
+        viewModelScope.launch {
+            settingsStore.setHighQualityThreshold(threshold)
+        }
+    }
+
+    fun setFilterHorrorContent(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsStore.setFilterHorrorContent(enabled)
+        }
+    }
+
+    fun setSimilarityAlgorithm(algorithm: SimilarityAlgorithm) {
+        viewModelScope.launch {
+            settingsStore.setSimilarityAlgorithm(algorithm)
+        }
+    }
+
+    fun setAutoClearCacheEnabled(enabled: Boolean) {
+        val current = _state.value
+        updateAutoClearCache(
+            enabled = enabled,
+            thresholdMB = current.autoClearCacheThresholdMB,
+        )
+    }
+
+    fun setAutoClearCacheThreshold(value: Double) {
+        val current = _state.value
+        updateAutoClearCache(
+            enabled = current.autoClearCacheEnabled,
+            thresholdMB = value,
+        )
     }
 
     fun setShowNextEpisodeButton(enabled: Boolean) {
@@ -394,6 +436,18 @@ class AndroidSettingsViewModel(
         }
     }
 
+    private fun updateAutoClearCache(
+        enabled: Boolean,
+        thresholdMB: Double,
+    ) {
+        viewModelScope.launch {
+            settingsStore.updateAutoClearCache(
+                enabled = enabled,
+                thresholdMB = thresholdMB,
+            )
+        }
+    }
+
     fun exportBackup(uri: Uri) = runBackupMutation {
         backupRepository.exportToUri(uri)
     }
@@ -459,6 +513,42 @@ class AndroidSettingsViewModel(
                     loggerRepository.log("Storage", error.message ?: "Cache clear failed.", level = "error")
                     _state.value = _state.value.copy(
                         storageStatus = error.message ?: "Android could not clear cache.",
+                    )
+                    refreshLogs()
+                }
+        }
+    }
+
+    private fun runStartupCacheMaintenance() {
+        viewModelScope.launch {
+            val settings = settingsStore.settings.first()
+            if (!settings.autoClearCacheEnabled) return@launch
+
+            val thresholdBytes = (settings.autoClearCacheThresholdMB * 1_000_000).toLong()
+            val metrics = cacheRepository.loadMetrics().getOrNull() ?: return@launch
+            if (metrics.cacheBytes <= thresholdBytes) return@launch
+
+            loggerRepository.log(
+                tag = "Storage",
+                message = "Auto-clearing cache because ${metrics.cacheBytes.toByteCountLabel()} exceeds ${settings.autoClearCacheThresholdMB.toInt()} MB.",
+            )
+            cacheRepository.clearCache()
+                .onSuccess { updated ->
+                    _state.value = _state.value.copy(
+                        storageMetrics = listOf(
+                            StorageMetricRow("Cache", updated.cacheBytes.toByteCountLabel()),
+                            StorageMetricRow("Files", updated.filesBytes.toByteCountLabel()),
+                            StorageMetricRow("Downloads", updated.downloadBytes.toByteCountLabel()),
+                        ),
+                        storageStatus = "Auto-cleared cache ${updated.generatedAt.toReadableClock()}",
+                    )
+                    refreshLogs()
+                }
+                .onFailure { error ->
+                    loggerRepository.log(
+                        tag = "Storage",
+                        message = error.message ?: "Auto-clear cache failed.",
+                        level = "error",
                     )
                     refreshLogs()
                 }
@@ -564,6 +654,26 @@ class AndroidSettingsViewModel(
                 .onFailure { error ->
                     _state.value = _state.value.copy(
                         trackerStatus = error.message ?: "Android could not disconnect tracker.",
+                    )
+                }
+        }
+    }
+
+    fun syncTrackersNow() {
+        viewModelScope.launch {
+            _state.value = _state.value.copy(trackerStatus = "Syncing watched progress to trackers...")
+            trackerRepository.syncStoredProgress()
+                .onSuccess { summary ->
+                    _state.value = _state.value.withTrackerState(
+                        snapshot = summary.state,
+                        status = summary.statusMessage,
+                    )
+                    loggerRepository.log("Trackers", summary.statusMessage)
+                    refreshLogs()
+                }
+                .onFailure { error ->
+                    _state.value = _state.value.copy(
+                        trackerStatus = error.message ?: "Android tracker sync failed.",
                     )
                 }
         }

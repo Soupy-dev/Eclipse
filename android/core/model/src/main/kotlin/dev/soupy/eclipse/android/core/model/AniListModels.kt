@@ -39,6 +39,11 @@ data class AniListRelatedMedia(
 )
 
 @Serializable
+data class AniListRelations(
+    val edges: List<AniListRelatedMedia> = emptyList(),
+)
+
+@Serializable
 data class AniListMedia(
     val id: Int = 0,
     @SerialName("idMal") val idMal: Int? = null,
@@ -58,7 +63,8 @@ data class AniListMedia(
     @SerialName("nextAiringEpisode") val nextAiringEpisode: AniListAiringEpisode? = null,
     val synonyms: List<String> = emptyList(),
     val genres: List<String> = emptyList(),
-    val relations: List<AniListRelatedMedia> = emptyList(),
+    val type: String? = null,
+    val relations: AniListRelations = AniListRelations(),
 )
 
 val AniListMedia.posterUrl: String?
@@ -66,6 +72,9 @@ val AniListMedia.posterUrl: String?
 
 val AniListMedia.displayTitle: String
     get() = title.primary.ifBlank { "Unknown" }
+
+val AniListMedia.relationEdges: List<AniListRelatedMedia>
+    get() = relations.edges
 
 @Serializable
 data class AniListEpisode(

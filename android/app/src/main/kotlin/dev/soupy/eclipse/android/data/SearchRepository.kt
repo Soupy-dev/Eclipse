@@ -3,12 +3,17 @@ package dev.soupy.eclipse.android.data
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import dev.soupy.eclipse.android.core.model.MediaCarouselSection
+import dev.soupy.eclipse.android.core.model.TMDBSearchResult
 import dev.soupy.eclipse.android.core.model.isMovie
 import dev.soupy.eclipse.android.core.model.isTVShow
 import dev.soupy.eclipse.android.core.network.AniListService
 import dev.soupy.eclipse.android.core.network.NetworkResult
 import dev.soupy.eclipse.android.core.network.TmdbService
 import dev.soupy.eclipse.android.core.storage.SearchHistoryStore
+import dev.soupy.eclipse.android.core.storage.SettingsStore
+import kotlinx.coroutines.flow.first
+
+private const val HorrorGenreId = 27
 
 data class SearchContent(
     val sections: List<MediaCarouselSection> = emptyList(),
@@ -19,6 +24,7 @@ class SearchRepository(
     private val tmdbService: TmdbService,
     private val aniListService: AniListService,
     private val searchHistoryStore: SearchHistoryStore,
+    private val settingsStore: SettingsStore,
     private val tmdbEnabled: Boolean,
 ) {
     suspend fun recentQueries(): List<String> = searchHistoryStore.read().queries
@@ -27,6 +33,7 @@ class SearchRepository(
         require(query.isNotBlank()) { "Search query cannot be blank." }
 
         coroutineScope {
+            val settingsDeferred = async { settingsStore.settings.first() }
             val tmdbDeferred = async {
                 if (tmdbEnabled) tmdbService.searchMulti(query = query, page = 1) else NetworkResult.Success(
                     dev.soupy.eclipse.android.core.model.TMDBSearchResponse(results = emptyList()),
@@ -34,6 +41,7 @@ class SearchRepository(
             }
             val animeDeferred = async { aniListService.searchAnime(query = query, page = 1, perPage = 18) }
 
+            val settings = settingsDeferred.await()
             val firstTmdbPage = tmdbDeferred.await().orThrow()
             val extraTmdbPages = if (tmdbEnabled && firstTmdbPage.totalPages > 1) {
                 (2..minOf(firstTmdbPage.totalPages, 3))
@@ -44,6 +52,7 @@ class SearchRepository(
             }
             val tmdbResults = (firstTmdbPage.results + extraTmdbPages)
                 .filter { it.isMovie || it.isTVShow }
+                .withoutFilteredHorror(settings.filterHorrorContent)
                 .distinctBy { "${it.mediaType}:${it.id}" }
                 .take(36)
                 .map { it.toExploreMediaCard() }
@@ -73,3 +82,9 @@ private fun NetworkResult<dev.soupy.eclipse.android.core.model.TMDBSearchRespons
         is NetworkResult.Failure -> dev.soupy.eclipse.android.core.model.TMDBSearchResponse(results = emptyList())
     }
 
+private fun List<TMDBSearchResult>.withoutFilteredHorror(enabled: Boolean): List<TMDBSearchResult> =
+    if (enabled) {
+        filterNot { result -> HorrorGenreId in result.genreIds }
+    } else {
+        this
+    }

@@ -32,6 +32,7 @@ import dev.soupy.eclipse.android.core.model.ExploreMediaCard
 import dev.soupy.eclipse.android.core.model.InAppPlayer
 import dev.soupy.eclipse.android.core.model.PlaybackSettingsSnapshot
 import dev.soupy.eclipse.android.core.model.PlayerSource
+import dev.soupy.eclipse.android.core.model.SkipSegment
 import dev.soupy.eclipse.android.core.player.EclipsePlayerSurface
 import dev.soupy.eclipse.android.core.player.PlaybackProgressSnapshot
 
@@ -44,6 +45,8 @@ data class DetailEpisodeRow(
     val seasonNumber: Int? = null,
     val episodeNumber: Int? = null,
     val runtimeMinutes: Int? = null,
+    val tmdbSeasonNumber: Int? = null,
+    val tmdbEpisodeNumber: Int? = null,
 )
 
 data class DetailCastRow(
@@ -82,6 +85,8 @@ data class DetailScreenState(
     val streamStatusMessage: String? = null,
     val streamCandidates: List<DetailStreamRow> = emptyList(),
     val playerSource: PlayerSource? = null,
+    val skipSegments: List<SkipSegment> = emptyList(),
+    val skipStatusMessage: String? = null,
     val selectedEpisodeId: String? = null,
     val selectedEpisodeLabel: String? = null,
 )
@@ -348,7 +353,7 @@ fun DetailRoute(
                             }
                         } else {
                             Text(
-                                text = "Playback for this source type is still pending Android torrent or alternate-player support.",
+                                text = "Only direct HTTP(S) stream URLs are accepted for playback.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
                             )
@@ -363,10 +368,23 @@ fun DetailRoute(
                 source = state.playerSource,
                 preferredPlayer = preferredPlayer,
                 settings = playbackSettings,
+                skipSegments = state.skipSegments,
                 nextEpisodeLabel = state.nextEpisodeLabel(),
                 onNextEpisode = onPlayNextEpisode,
                 onProgress = onPlaybackProgress,
             )
+        }
+
+        state.skipStatusMessage?.let { message ->
+            item {
+                GlassPanel {
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                    )
+                }
+            }
         }
 
         if (!state.overview.isNullOrBlank()) {

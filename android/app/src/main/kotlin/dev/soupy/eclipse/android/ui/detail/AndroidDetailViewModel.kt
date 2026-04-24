@@ -14,15 +14,23 @@ import dev.soupy.eclipse.android.data.DownloadDraft
 import dev.soupy.eclipse.android.data.EpisodeProgressDraft
 import dev.soupy.eclipse.android.data.LibraryItemDraft
 import dev.soupy.eclipse.android.data.MovieProgressDraft
+import dev.soupy.eclipse.android.data.orNull
 import dev.soupy.eclipse.android.data.ProgressRepository
 import dev.soupy.eclipse.android.data.RatingsRepository
 import dev.soupy.eclipse.android.data.StreamResolutionRepository
 import dev.soupy.eclipse.android.data.StreamEpisodeSelection
+import dev.soupy.eclipse.android.data.TrackerPlaybackProgressDraft
+import dev.soupy.eclipse.android.data.TrackerRepository
 import dev.soupy.eclipse.android.core.model.DetailTarget
+import dev.soupy.eclipse.android.core.model.EpisodePlaybackContext
+import dev.soupy.eclipse.android.core.model.PlayerSource
+import dev.soupy.eclipse.android.core.model.SkipSegment
 import dev.soupy.eclipse.android.feature.detail.DetailCastRow
 import dev.soupy.eclipse.android.feature.detail.DetailEpisodeRow
 import dev.soupy.eclipse.android.feature.detail.DetailScreenState
 import dev.soupy.eclipse.android.feature.detail.DetailStreamRow
+import dev.soupy.eclipse.android.core.network.AniSkipService
+import dev.soupy.eclipse.android.core.network.IntroDbService
 import kotlin.math.roundToInt
 
 class AndroidDetailViewModel(
@@ -30,6 +38,9 @@ class AndroidDetailViewModel(
     private val streamResolutionRepository: StreamResolutionRepository,
     private val progressRepository: ProgressRepository,
     private val ratingsRepository: RatingsRepository,
+    private val trackerRepository: TrackerRepository,
+    private val aniSkipService: AniSkipService,
+    private val introDbService: IntroDbService,
 ) : ViewModel() {
     private val _state = MutableStateFlow(DetailScreenState())
     val state: StateFlow<DetailScreenState> = _state.asStateFlow()
@@ -37,6 +48,7 @@ class AndroidDetailViewModel(
     private var currentTarget: DetailTarget? = null
     private var currentProgressTarget: DetailTarget? = null
     private var currentRatingTmdbId: Int? = null
+    private val syncedTrackerProgressKeys = mutableSetOf<String>()
 
     fun load(target: DetailTarget?) {
         if (target == null) {
@@ -133,27 +145,41 @@ class AndroidDetailViewModel(
 
     fun markPreviousEpisodesWatched(episodeId: String) {
         val target = currentProgressTarget as? DetailTarget.TmdbShow ?: return markUnsupportedProgress()
-        val episode = state.value.episodes.firstOrNull { it.id == episodeId } ?: return
-        val seasonNumber = episode.seasonNumber ?: return
-        val episodeNumber = episode.episodeNumber ?: return
-        if (episodeNumber <= 1) {
+        val episodes = state.value.episodes
+        val episodeIndex = episodes.indexOfFirst { it.id == episodeId }
+        if (episodeIndex < 0) return
+        val episode = episodes[episodeIndex]
+        val localSeasonNumber = episode.seasonNumber ?: return
+        val localEpisodeNumber = episode.episodeNumber ?: return
+        val previousEpisodes = episodes
+            .take(episodeIndex)
+            .filter { previous ->
+                previous.seasonNumber == localSeasonNumber &&
+                    previous.sourceSeasonNumber != null &&
+                    previous.sourceEpisodeNumber != null
+            }
+        if (localEpisodeNumber <= 1 || previousEpisodes.isEmpty()) {
             _state.update { it.copy(streamStatusMessage = "There are no previous episodes in this season.") }
             return
         }
         viewModelScope.launch {
-            progressRepository.markPreviousEpisodesWatched(
-                showId = target.id,
-                seasonNumber = seasonNumber,
-                throughEpisodeExclusive = episodeNumber,
-                watched = true,
-            ).onSuccess {
-                _state.update {
-                    it.copy(streamStatusMessage = "Marked previous episodes watched through S${seasonNumber}E${episodeNumber - 1}.")
+            var failureMessage: String? = null
+            previousEpisodes.forEach { previous ->
+                progressRepository.markEpisodeWatched(
+                    showId = target.id,
+                    seasonNumber = previous.sourceSeasonNumber ?: return@forEach,
+                    episodeNumber = previous.sourceEpisodeNumber ?: return@forEach,
+                    watched = true,
+                ).onFailure { error ->
+                    failureMessage = error.message ?: "Could not mark previous episodes watched."
                 }
-            }.onFailure { error ->
+            }
+            if (failureMessage == null) {
                 _state.update {
-                    it.copy(streamStatusMessage = error.message ?: "Could not mark previous episodes watched.")
+                    it.copy(streamStatusMessage = "Marked ${previousEpisodes.size} previous episode${if (previousEpisodes.size == 1) "" else "s"} watched.")
                 }
+            } else {
+                _state.update { it.copy(streamStatusMessage = failureMessage) }
             }
         }
     }
@@ -187,9 +213,7 @@ class AndroidDetailViewModel(
                         "Resolving addon streams for ${selected.label}..."
                     } ?: "Resolving addon streams...",
                     selectedEpisodeId = episode?.let { selected ->
-                        _state.value.episodes.firstOrNull {
-                            it.seasonNumber == selected.seasonNumber && it.episodeNumber == selected.episodeNumber
-                        }?.id
+                        _state.value.episodes.firstOrNull { it.matchesSelection(selected) }?.id
                     } ?: it.selectedEpisodeId,
                     selectedEpisodeLabel = episode?.label ?: it.selectedEpisodeLabel,
                 )
@@ -211,8 +235,15 @@ class AndroidDetailViewModel(
                                 )
                             },
                             playerSource = result.selectedSource ?: state.playerSource,
+                            skipSegments = if (result.selectedSource != null) emptyList() else state.skipSegments,
+                            skipStatusMessage = if (result.selectedSource != null) {
+                                "Loading skip segments..."
+                            } else {
+                                state.skipStatusMessage
+                            },
                         )
                     }
+                    result.selectedSource?.let(::loadSkipSegmentsFor)
                 }
                 .onFailure { error ->
                     _state.update {
@@ -227,12 +258,15 @@ class AndroidDetailViewModel(
     }
 
     fun playResolvedStream(streamId: String) {
+        val selectedSource = state.value.streamCandidates.firstOrNull { it.id == streamId }?.playerSource
         _state.update { state ->
             state.copy(
-                playerSource = state.streamCandidates.firstOrNull { it.id == streamId }?.playerSource
-                    ?: state.playerSource,
+                playerSource = selectedSource ?: state.playerSource,
+                skipSegments = if (selectedSource != null) emptyList() else state.skipSegments,
+                skipStatusMessage = if (selectedSource != null) "Loading skip segments..." else state.skipStatusMessage,
             )
         }
+        selectedSource?.let(::loadSkipSegmentsFor)
     }
 
     fun playNextEpisode() {
@@ -276,6 +310,13 @@ class AndroidDetailViewModel(
             selectedEpisode = selectedEpisode,
             positionMs = positionMs,
             durationMs = durationMs,
+            isFinished = isFinished,
+        )
+        syncTrackersIfNeeded(
+            target = target,
+            snapshot = snapshot,
+            selectedEpisode = selectedEpisode,
+            progressPercent = progressPercent.toDouble(),
             isFinished = isFinished,
         )
 
@@ -338,21 +379,27 @@ class AndroidDetailViewModel(
         val snapshot = state.value
         if (snapshot.title.isBlank()) return null
 
-        val firstEpisode = snapshot.episodes.firstOrNull()
+        val selectedEpisode = snapshot.selectedEpisodeId
+            ?.let { id -> snapshot.episodes.firstOrNull { it.id == id } }
+            ?: snapshot.episodes.firstOrNull()
+        val playbackContext = snapshot.playerSource?.context
+        val isEpisodeDraft = selectedEpisode != null || playbackContext != null
         return DownloadDraft(
             detailTarget = target,
             title = snapshot.title,
-            subtitle = firstEpisode?.title ?: snapshot.subtitle,
+            subtitle = selectedEpisode?.title ?: snapshot.subtitle,
             imageUrl = snapshot.posterUrl,
             backdropUrl = snapshot.backdropUrl,
             mediaLabel = snapshot.metadataChips.firstOrNull(),
-            progressLabel = firstEpisode?.subtitle?.let { "Preparing offline draft near $it" }
+            progressLabel = selectedEpisode?.subtitle?.let { "Preparing offline draft near $it" }
                 ?: "Preparing an offline draft while Android source resolution lands.",
-            sourceLabel = snapshot.playerSource?.title ?: if (firstEpisode == null) {
-                "Movie download draft"
-            } else {
+            sourceLabel = snapshot.playerSource?.title ?: if (isEpisodeDraft) {
                 "Episode download draft"
+            } else {
+                "Movie download draft"
             },
+            downloadKeySuffix = selectedEpisode?.downloadKeySuffix()
+                ?: playbackContext?.downloadKeySuffix(),
             playerSource = snapshot.playerSource,
         )
     }
@@ -378,14 +425,16 @@ class AndroidDetailViewModel(
                             currentTimeSeconds = currentSeconds,
                             totalDurationSeconds = durationSeconds,
                             isFinished = isFinished,
+                            lastServiceId = snapshot.playerSource?.serviceId,
+                            lastHref = snapshot.playerSource?.serviceHref,
                         ),
                     )
                 }
             }
             is DetailTarget.TmdbShow -> {
                 val episode = selectedEpisode ?: return
-                val seasonNumber = episode.seasonNumber ?: return
-                val episodeNumber = episode.episodeNumber ?: return
+                val seasonNumber = episode.sourceSeasonNumber ?: return
+                val episodeNumber = episode.sourceEpisodeNumber ?: return
                 viewModelScope.launch {
                     progressRepository.recordEpisodeProgress(
                         EpisodeProgressDraft(
@@ -394,14 +443,54 @@ class AndroidDetailViewModel(
                             episodeNumber = episodeNumber,
                             showTitle = snapshot.title,
                             showPosterUrl = snapshot.posterUrl,
+                            anilistMediaId = snapshot.playerSource?.context?.anilistMediaId,
                             currentTimeSeconds = currentSeconds,
                             totalDurationSeconds = durationSeconds,
                             isFinished = isFinished,
+                            lastServiceId = snapshot.playerSource?.serviceId,
+                            lastHref = snapshot.playerSource?.serviceHref,
                         ),
                     )
                 }
             }
             is DetailTarget.AniListMediaTarget -> Unit
+        }
+    }
+
+    private fun syncTrackersIfNeeded(
+        target: DetailTarget,
+        snapshot: DetailScreenState,
+        selectedEpisode: DetailEpisodeRow?,
+        progressPercent: Double,
+        isFinished: Boolean,
+    ) {
+        if (!isFinished && progressPercent < TrackerSyncProgressThreshold) return
+
+        val syncKey = when (target) {
+            is DetailTarget.TmdbMovie -> "movie:${target.id}"
+            is DetailTarget.TmdbShow -> {
+                val episode = selectedEpisode ?: return
+                val seasonNumber = episode.sourceSeasonNumber ?: return
+                val episodeNumber = episode.sourceEpisodeNumber ?: return
+                "show:${target.id}:$seasonNumber:$episodeNumber"
+            }
+            is DetailTarget.AniListMediaTarget -> return
+        }
+        if (!syncedTrackerProgressKeys.add(syncKey)) return
+
+        viewModelScope.launch {
+            trackerRepository.syncPlaybackProgress(
+                TrackerPlaybackProgressDraft(
+                    target = target,
+                    title = snapshot.title,
+                    seasonNumber = selectedEpisode?.sourceSeasonNumber,
+                    episodeNumber = selectedEpisode?.sourceEpisodeNumber,
+                    anilistMediaId = snapshot.playerSource?.context?.anilistMediaId,
+                    progressPercent = progressPercent,
+                    isFinished = isFinished,
+                    playbackContext = snapshot.playerSource?.context,
+                ),
+            )
         }
     }
 
@@ -430,7 +519,7 @@ class AndroidDetailViewModel(
 
     private fun markLoadedShowEpisodes(showId: Int, watched: Boolean) {
         val episodes = state.value.episodes.filter {
-            it.seasonNumber != null && it.episodeNumber != null
+            it.sourceSeasonNumber != null && it.sourceEpisodeNumber != null
         }
         if (episodes.isEmpty()) {
             markUnsupportedProgress()
@@ -440,8 +529,8 @@ class AndroidDetailViewModel(
             episodes.forEach { episode ->
                 progressRepository.markEpisodeWatched(
                     showId = showId,
-                    seasonNumber = episode.seasonNumber ?: return@forEach,
-                    episodeNumber = episode.episodeNumber ?: return@forEach,
+                    seasonNumber = episode.sourceSeasonNumber ?: return@forEach,
+                    episodeNumber = episode.sourceEpisodeNumber ?: return@forEach,
                     watched = watched,
                 )
             }
@@ -460,8 +549,8 @@ class AndroidDetailViewModel(
     private fun markEpisode(episodeId: String, watched: Boolean) {
         val target = currentProgressTarget as? DetailTarget.TmdbShow ?: return markUnsupportedProgress()
         val episode = state.value.episodes.firstOrNull { it.id == episodeId } ?: return
-        val seasonNumber = episode.seasonNumber ?: return
-        val episodeNumber = episode.episodeNumber ?: return
+        val seasonNumber = episode.sourceSeasonNumber ?: return
+        val episodeNumber = episode.sourceEpisodeNumber ?: return
         viewModelScope.launch {
             progressRepository.markEpisodeWatched(
                 showId = target.id,
@@ -500,7 +589,7 @@ class AndroidDetailViewModel(
 
     private fun nextEpisodeAfterCurrent(): DetailEpisodeRow? {
         val playableEpisodes = state.value.episodes.filter {
-            it.seasonNumber != null && it.episodeNumber != null
+            it.sourceSeasonNumber != null && it.sourceEpisodeNumber != null
         }
         if (playableEpisodes.size < 2) return null
         val currentIndex = state.value.selectedEpisodeId
@@ -508,6 +597,42 @@ class AndroidDetailViewModel(
             ?.takeIf { it >= 0 }
             ?: 0
         return playableEpisodes.getOrNull(currentIndex + 1)
+    }
+
+    private fun loadSkipSegmentsFor(source: PlayerSource) {
+        val target = currentProgressTarget ?: currentTarget ?: return
+        val context = source.context
+        viewModelScope.launch {
+            val introSegments = when (target) {
+                is DetailTarget.TmdbMovie -> introDbService.fetchSkipTimes(
+                    tmdbId = target.id,
+                ).orNull().orEmpty()
+                is DetailTarget.TmdbShow -> introDbService.fetchSkipTimes(
+                    tmdbId = target.id,
+                    seasonNumber = context?.resolvedTMDBSeasonNumber,
+                    episodeNumber = context?.resolvedTMDBEpisodeNumber,
+                ).orNull().orEmpty()
+                is DetailTarget.AniListMediaTarget -> emptyList()
+            }
+            val aniSkipSegments = context?.anilistMediaId?.let { anilistId ->
+                aniSkipService.fetchSkipTimes(
+                    anilistId = anilistId,
+                    episodeNumber = context.localEpisodeNumber,
+                    episodeDurationSeconds = 0.0,
+                ).orNull().orEmpty()
+            }.orEmpty()
+
+            val merged = (introSegments + aniSkipSegments).mergeSkipSegments()
+            _state.update {
+                it.copy(
+                    skipSegments = merged,
+                    skipStatusMessage = when {
+                        merged.isEmpty() -> "No skip segments found yet for this source."
+                        else -> "Loaded ${merged.size} skip segment${if (merged.size == 1) "" else "s"} for manual${if (merged.isNotEmpty()) "/auto" else ""} skipping."
+                    },
+                )
+            }
+        }
     }
 }
 
@@ -542,6 +667,8 @@ private fun DetailContent.toUiState(userRating: Int?): DetailScreenState = Detai
             seasonNumber = it.seasonNumber,
             episodeNumber = it.episodeNumber,
             runtimeMinutes = it.runtimeMinutes,
+            tmdbSeasonNumber = it.tmdbSeasonNumber,
+            tmdbEpisodeNumber = it.tmdbEpisodeNumber,
         )
     },
 )
@@ -553,13 +680,50 @@ private fun DetailTarget.tmdbRatingId(): Int? = when (this) {
 }
 
 private fun DetailEpisodeRow.toStreamEpisodeSelection(): StreamEpisodeSelection? {
-    val season = seasonNumber ?: return null
-    val episode = episodeNumber ?: return null
+    val localSeason = seasonNumber ?: tmdbSeasonNumber ?: return null
+    val localEpisode = episodeNumber ?: tmdbEpisodeNumber ?: return null
+    val season = tmdbSeasonNumber ?: localSeason
+    val episode = tmdbEpisodeNumber ?: localEpisode
     return StreamEpisodeSelection(
         seasonNumber = season,
         episodeNumber = episode,
-        label = "S${season}E${episode}",
+        label = "S${localSeason}E${localEpisode}",
+        localSeasonNumber = localSeason,
+        localEpisodeNumber = localEpisode,
     )
 }
+
+private val DetailEpisodeRow.sourceSeasonNumber: Int?
+    get() = tmdbSeasonNumber ?: seasonNumber
+
+private val DetailEpisodeRow.sourceEpisodeNumber: Int?
+    get() = tmdbEpisodeNumber ?: episodeNumber
+
+private fun DetailEpisodeRow.downloadKeySuffix(): String? {
+    val season = sourceSeasonNumber ?: return null
+    val episode = sourceEpisodeNumber ?: return null
+    return "s${season}_e${episode}"
+}
+
+private fun EpisodePlaybackContext.downloadKeySuffix(): String =
+    "s${resolvedTMDBSeasonNumber}_e${resolvedTMDBEpisodeNumber}"
+
+private fun DetailEpisodeRow.matchesSelection(selection: StreamEpisodeSelection): Boolean =
+    sourceSeasonNumber == selection.seasonNumber &&
+        sourceEpisodeNumber == selection.episodeNumber &&
+        (seasonNumber ?: sourceSeasonNumber) == selection.localSeasonNumber &&
+        (episodeNumber ?: sourceEpisodeNumber) == selection.localEpisodeNumber
+
+private fun List<SkipSegment>.mergeSkipSegments(): List<SkipSegment> =
+    sortedWith(
+        compareBy<SkipSegment> { it.startTime }
+            .thenBy { it.endTime }
+            .thenBy { it.type.id },
+    )
+        .distinctBy { segment ->
+            "${segment.type.id}:${segment.startTime.toInt()}:${segment.endTime.toInt()}"
+        }
+
+private const val TrackerSyncProgressThreshold = 0.85
 
 

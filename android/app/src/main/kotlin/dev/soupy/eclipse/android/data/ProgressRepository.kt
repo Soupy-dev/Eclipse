@@ -36,6 +36,7 @@ data class EpisodeProgressDraft(
     val episodeNumber: Int,
     val showTitle: String,
     val showPosterUrl: String? = null,
+    val anilistMediaId: Int? = null,
     val currentTimeSeconds: Double,
     val totalDurationSeconds: Double,
     val isFinished: Boolean = false,
@@ -101,6 +102,7 @@ class ProgressRepository(
             showId = draft.showId,
             seasonNumber = draft.seasonNumber,
             episodeNumber = draft.episodeNumber,
+            anilistMediaId = draft.anilistMediaId,
             currentTime = if (draft.isFinished) draft.totalDurationSeconds else draft.currentTimeSeconds.coerceIn(0.0, draft.totalDurationSeconds),
             totalDuration = draft.totalDurationSeconds,
             isWatched = draft.isFinished,
@@ -282,4 +284,3 @@ private fun remainingLabel(currentTime: Double, totalDuration: Double): String {
 
 private fun String?.toEpochMillisOrZero(): Long =
     this?.let { runCatching { Instant.parse(it).toEpochMilli() }.getOrDefault(0L) } ?: 0L
-

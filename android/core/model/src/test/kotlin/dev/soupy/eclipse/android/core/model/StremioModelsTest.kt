@@ -80,4 +80,25 @@ class StremioModelsTest {
         assertTrue(remux.qualityScore() > cam.qualityScore())
         assertTrue(remux.qualityScore() > 0.9)
     }
+
+    @Test
+    fun identifiesTorrentLikeStreamsSoCallersCanRejectThem() {
+        val infoHashStream = StremioStream(
+            title = "Movie 1080p",
+            infoHash = "ABC123",
+            behaviorHints = StremioStreamBehaviorHints(filename = "Movie File.mkv"),
+        )
+        val magnetStream = StremioStream(
+            title = "Movie 1080p",
+            url = "magnet:?xt=urn:btih:ABC123",
+        )
+        val directStream = StremioStream(
+            title = "Movie 1080p",
+            url = "https://cdn.example/movie.mkv",
+        )
+
+        assertTrue(infoHashStream.isTorrentLike)
+        assertTrue(magnetStream.isTorrentLike)
+        assertTrue(!directStream.isTorrentLike)
+    }
 }

@@ -90,6 +90,8 @@ data class PlayerSource(
     val subtitles: List<SubtitleTrack> = emptyList(),
     val audioTracks: List<AudioTrack> = emptyList(),
     val isDownloaded: Boolean = false,
+    val serviceId: String? = null,
+    val serviceHref: String? = null,
     val context: EpisodePlaybackContext? = null,
 )
 

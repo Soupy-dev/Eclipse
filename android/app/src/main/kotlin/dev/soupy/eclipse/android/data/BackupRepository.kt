@@ -144,6 +144,8 @@ class BackupRepository(
                 autoClearCacheEnabled = settings.autoClearCacheEnabled,
                 autoClearCacheThresholdMB = settings.autoClearCacheThresholdMB,
                 highQualityThreshold = settings.highQualityThreshold,
+                filterHorrorContent = settings.filterHorrorContent,
+                selectedSimilarityAlgorithm = settings.selectedSimilarityAlgorithm.id,
                 collections = payload?.collections.orEmpty(),
                 progressData = exportedProgress,
                 trackerState = exportedTrackerState,

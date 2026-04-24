@@ -32,6 +32,8 @@ data class DetailEpisodeEntry(
     val seasonNumber: Int? = null,
     val episodeNumber: Int? = null,
     val runtimeMinutes: Int? = null,
+    val tmdbSeasonNumber: Int? = null,
+    val tmdbEpisodeNumber: Int? = null,
 )
 
 data class DetailCastEntry(
@@ -157,13 +159,17 @@ private fun TMDBEpisode.toDetailEpisodeEntry(): DetailEpisodeEntry = DetailEpiso
     seasonNumber = seasonNumber,
     episodeNumber = episodeNumber,
     runtimeMinutes = runtime,
+    tmdbSeasonNumber = seasonNumber,
+    tmdbEpisodeNumber = episodeNumber,
 )
 
 private suspend fun AniListMedia.toDetailContent(
     tmdbMatch: AnimeTmdbMatch?,
     tmdbService: TmdbService,
 ): DetailContent {
-    val tmdbShowMetadata = (tmdbMatch?.target as? DetailTarget.TmdbShow)?.let { target ->
+    val tmdbShowMatch = tmdbMatch?.takeIf { it.target is DetailTarget.TmdbShow }
+    val tmdbShowMetadata = tmdbShowMatch?.let { match ->
+        val target = match.target as DetailTarget.TmdbShow
         runCatching {
             coroutineScope {
                 val showDeferred = async { tmdbService.tvShowDetail(target.id).orThrow() }
@@ -174,10 +180,18 @@ private suspend fun AniListMedia.toDetailContent(
                 val seasons = tmdbService.playableSeasonDetails(
                     showId = target.id,
                     seasons = show.seasons,
+                    preferredSeasonNumber = match.tmdbSeasonNumber,
+                )
+                val animeEpisodes = toAnimeDetailEpisodeEntries(
+                    tmdbMatch = match,
+                    seasonDetails = seasons,
                 )
                 HydratedTmdbShowMetadata(
-                    episodesTitle = seasons.title(show.name),
-                    episodes = seasons.flatMap { seasonDetail ->
+                    episodesTitle = animeEpisodes
+                        ?.takeIf { it.isNotEmpty() }
+                        ?.let { displayTitle }
+                        ?: seasons.title(show.name),
+                    episodes = animeEpisodes ?: seasons.flatMap { seasonDetail ->
                         seasonDetail.episodes.map { it.toDetailEpisodeEntry() }
                     },
                     cast = creditsDeferred.await().toDetailCastEntries(),
@@ -207,6 +221,7 @@ private suspend fun AniListMedia.toDetailContent(
             status?.replace('_', ' ')?.let(::add)
             tmdbShowMetadata?.contentRating?.let { add("Rated $it") }
             tmdbMatch?.let { add("TMDB match ${(it.confidence * 100).toInt()}%") }
+            tmdbMatch?.tmdbSeasonNumber?.let { add("TMDB S$it") }
             addAll(genres.take(3))
         },
         contentRating = tmdbShowMetadata?.contentRating,
@@ -229,10 +244,17 @@ private data class HydratedTmdbShowMetadata(
 private suspend fun TmdbService.playableSeasonDetails(
     showId: Int,
     seasons: List<TMDBSeason>,
+    preferredSeasonNumber: Int? = null,
 ): List<TMDBSeasonDetail> = coroutineScope {
-    seasons
+    val selectedSeasons = preferredSeasonNumber
+        ?.let { preferred -> seasons.filter { season -> season.seasonNumber == preferred && season.episodeCount > 0 } }
+        .orEmpty()
+    val fallbackSeasons = seasons
         .filter { season -> season.seasonNumber > 0 && season.episodeCount > 0 }
         .take(8)
+    val seasonsToLoad = selectedSeasons.ifEmpty { fallbackSeasons }
+
+    seasonsToLoad
         .map { season ->
             async { seasonDetail(showId, season.seasonNumber).orNull() }
         }
@@ -291,4 +313,48 @@ private fun AniListMedia.syntheticAnimeEpisodes(): List<DetailEpisodeEntry> {
         )
     }
 }
+
+private fun AniListMedia.toAnimeDetailEpisodeEntries(
+    tmdbMatch: AnimeTmdbMatch,
+    seasonDetails: List<TMDBSeasonDetail>,
+): List<DetailEpisodeEntry>? {
+    val tmdbSeasonNumber = tmdbMatch.tmdbSeasonNumber ?: return null
+    val seasonDetail = seasonDetails.firstOrNull { it.seasonNumber == tmdbSeasonNumber } ?: return null
+    val tmdbEpisodes = seasonDetail.episodes
+        .filter { it.episodeNumber > 0 }
+        .sortedBy(TMDBEpisode::episodeNumber)
+    val expectedCount = effectiveEpisodeCount() ?: tmdbEpisodes.size
+    if (expectedCount <= 0) return null
+
+    val localSeasonNumber = tmdbSeasonNumber
+    val offset = tmdbMatch.tmdbEpisodeOffset.coerceAtLeast(0)
+    return (1..expectedCount.coerceAtMost(200)).map { localEpisodeNumber ->
+        val tmdbEpisode = tmdbEpisodes.getOrNull(localEpisodeNumber - 1 + offset)
+        val resolvedTmdbEpisodeNumber = tmdbEpisode?.episodeNumber ?: (localEpisodeNumber + offset)
+        DetailEpisodeEntry(
+            id = "anilist-$id-s$localSeasonNumber-e$localEpisodeNumber-tmdb-$tmdbSeasonNumber-$resolvedTmdbEpisodeNumber",
+            title = tmdbEpisode?.name?.takeIf { it.isNotBlank() } ?: "Episode $localEpisodeNumber",
+            subtitle = buildList {
+                add("S$localSeasonNumber")
+                add("E$localEpisodeNumber")
+                if (tmdbSeasonNumber != localSeasonNumber || resolvedTmdbEpisodeNumber != localEpisodeNumber) {
+                    add("TMDB S${tmdbSeasonNumber}E${resolvedTmdbEpisodeNumber}")
+                }
+                tmdbEpisode?.runtime?.takeIf { it > 0 }?.let { add(formatRuntime(it)) }
+                tmdbEpisode?.airDate?.takeIf { it.isNotBlank() }?.let(::add)
+            }.joinToString(" | "),
+            imageUrl = tmdbEpisode?.fullStillUrl,
+            overview = tmdbEpisode?.overview,
+            seasonNumber = localSeasonNumber,
+            episodeNumber = localEpisodeNumber,
+            runtimeMinutes = tmdbEpisode?.runtime,
+            tmdbSeasonNumber = tmdbSeasonNumber,
+            tmdbEpisodeNumber = resolvedTmdbEpisodeNumber,
+        )
+    }
+}
+
+private fun AniListMedia.effectiveEpisodeCount(): Int? =
+    episodes?.takeIf { it > 0 }
+        ?: nextAiringEpisode?.episode?.minus(1)?.takeIf { it > 0 }
 

@@ -28,7 +28,14 @@ data class DownloadDraft(
     val mediaLabel: String? = null,
     val progressLabel: String? = null,
     val sourceLabel: String? = null,
+    val downloadKeySuffix: String? = null,
     val playerSource: PlayerSource? = null,
+)
+
+data class DownloadCleanupResult(
+    val snapshot: DownloadSnapshot,
+    val deletedFiles: Int,
+    val deletedBytes: Long,
 )
 
 class DownloadsRepository(
@@ -42,7 +49,7 @@ class DownloadsRepository(
 
     suspend fun queueDownload(draft: DownloadDraft): Result<DownloadSnapshot> = runCatching {
         val snapshot = downloadsStore.read()
-        val key = draft.detailTarget.downloadKey()
+        val key = draft.detailTarget.downloadKey(draft.downloadKeySuffix)
         val existing = snapshot.items.firstOrNull { it.id == key }
         val queued = draft.toRecord(
             id = key,
@@ -57,6 +64,13 @@ class DownloadsRepository(
         val sourceUri = queued.sourceUri
         when {
             sourceUri == null -> withQueued
+            sourceUri.isTorrentLikeUri() -> writeRecord(
+                queued.copy(
+                    status = DownloadStatus.FAILED,
+                    progressLabel = "Torrent and magnet sources are blocked on Android.",
+                    error = "Rejected torrent-like source URI: $sourceUri",
+                ),
+            )
             !sourceUri.isDirectHttpUrl() -> writeRecord(
                 queued.copy(
                     status = DownloadStatus.FAILED,
@@ -127,6 +141,46 @@ class DownloadsRepository(
         writeSnapshot(snapshot.copy(items = snapshot.items.filterNot { it.status == DownloadStatus.COMPLETED }))
     }
 
+    suspend fun clearTarget(target: DetailTarget): Result<DownloadSnapshot> = runCatching {
+        val snapshot = downloadsStore.read()
+        val removed = snapshot.items.filter { it.detailTarget == target }
+        removed.forEach(::deleteDownloadedFiles)
+        writeSnapshot(snapshot.copy(items = snapshot.items - removed.toSet()))
+    }
+
+    suspend fun clearAll(): Result<DownloadSnapshot> = runCatching {
+        val snapshot = downloadsStore.read()
+        snapshot.items.forEach(::deleteDownloadedFiles)
+        writeSnapshot(snapshot.copy(items = emptyList()))
+    }
+
+    suspend fun cleanupOrphanFiles(): Result<DownloadCleanupResult> = runCatching {
+        val snapshot = downloadsStore.read()
+        val directory = downloadsStore.downloadsDirectory().canonicalFile
+        val referencedFileNames = snapshot.items
+            .flatMap { record -> listOfNotNull(record.localFileName) + record.subtitleFileNames }
+            .toSet()
+        var deletedFiles = 0
+        var deletedBytes = 0L
+
+        directory.listFiles().orEmpty()
+            .filter { file -> file.isFile && file.name != "downloads.json" && file.name !in referencedFileNames }
+            .forEach { file ->
+                val target = file.canonicalFile
+                val byteCount = target.length()
+                if (target.isInside(directory) && target.delete()) {
+                    deletedFiles += 1
+                    deletedBytes += byteCount
+                }
+            }
+
+        DownloadCleanupResult(
+            snapshot = writeSnapshot(snapshot),
+            deletedFiles = deletedFiles,
+            deletedBytes = deletedBytes,
+        )
+    }
+
     private suspend fun update(
         id: String,
         transform: (DownloadRecord) -> DownloadRecord,
@@ -159,11 +213,14 @@ class DownloadsRepository(
     }
 
     private fun deleteDownloadedFiles(record: DownloadRecord) {
-        val directory = downloadsStore.downloadsDirectory()
+        val directory = downloadsStore.downloadsDirectory().canonicalFile
         listOfNotNull(record.localFileName)
             .plus(record.subtitleFileNames)
             .forEach { name ->
-                File(directory, name).takeIf { file -> file.exists() }?.delete()
+                File(directory, name)
+                    .canonicalFile
+                    .takeIf { file -> file.isInside(directory) && file.exists() }
+                    ?.delete()
             }
     }
 }
@@ -563,14 +620,31 @@ private fun DownloadRecord.outputFileName(sourceUri: String): String {
     return "${id.safeFileStem()}.$extension"
 }
 
-private fun DetailTarget.downloadKey(): String = when (this) {
-    is DetailTarget.AniListMediaTarget -> "download:anilist:$id"
-    is DetailTarget.TmdbMovie -> "download:tmdb_movie:$id"
-    is DetailTarget.TmdbShow -> "download:tmdb_show:$id"
+private fun DetailTarget.downloadKey(suffix: String?): String {
+    val base = when (this) {
+        is DetailTarget.AniListMediaTarget -> "download:anilist:$id"
+        is DetailTarget.TmdbMovie -> "download:tmdb_movie:$id"
+        is DetailTarget.TmdbShow -> "download:tmdb_show:$id"
+    }
+    val cleanSuffix = suffix
+        ?.trim()
+        ?.takeIf { it.isNotBlank() }
+        ?.safeFileStem()
+    return cleanSuffix?.let { "$base:$it" } ?: base
 }
+
+private fun File.isInside(root: File): Boolean =
+    path == root.path || path.startsWith(root.path + File.separator)
 
 private fun String.isDirectHttpUrl(): Boolean =
     startsWith("http://", ignoreCase = true) || startsWith("https://", ignoreCase = true)
+
+private fun String.isTorrentLikeUri(): Boolean {
+    val clean = trim()
+    return clean.startsWith("magnet:", ignoreCase = true) ||
+        clean.contains("btih:", ignoreCase = true) ||
+        clean.substringBefore('?').substringBefore('#').endsWith(".torrent", ignoreCase = true)
+}
 
 private fun String.isHlsPlaylist(): Boolean =
     substringBefore('?').endsWith(".m3u8", ignoreCase = true)
