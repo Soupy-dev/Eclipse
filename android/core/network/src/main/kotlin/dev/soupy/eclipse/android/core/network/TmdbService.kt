@@ -64,6 +64,9 @@ class TmdbService(
     suspend fun airingTodayTv(page: Int = 1): NetworkResult<List<TMDBSearchResult>> =
         decodeResults("$baseUrl/tv/airing_today?api_key=$apiKey&language=$language&page=$page&include_adult=false")
 
+    suspend fun onTheAirTv(page: Int = 1): NetworkResult<List<TMDBSearchResult>> =
+        decodeResults("$baseUrl/tv/on_the_air?api_key=$apiKey&language=$language&page=$page&include_adult=false")
+
     private suspend fun decodeResults(url: String): NetworkResult<List<TMDBSearchResult>> =
         when (val result = httpClient.get(url)) {
             is NetworkResult.Success -> try {

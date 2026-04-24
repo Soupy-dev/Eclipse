@@ -31,6 +31,7 @@ data class SearchScreenState(
     val query: String = "",
     val isSearching: Boolean = false,
     val errorMessage: String? = null,
+    val recentQueries: List<String> = emptyList(),
     val sections: List<MediaCarouselSection> = emptyList(),
 )
 
@@ -39,6 +40,7 @@ fun SearchRoute(
     state: SearchScreenState,
     onQueryChange: (String) -> Unit,
     onSearch: () -> Unit,
+    onRecentQuery: (String) -> Unit,
     onSelect: (DetailTarget) -> Unit,
 ) {
     LazyColumn(
@@ -83,6 +85,24 @@ fun SearchRoute(
             }
         }
 
+        if (state.query.isBlank() && state.recentQueries.isNotEmpty()) {
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    SectionHeading(
+                        title = "Recent Searches",
+                        subtitle = "Saved locally on Android so repeated searches feel closer to Luna.",
+                    )
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        items(state.recentQueries, key = { it }) { query ->
+                            Button(onClick = { onRecentQuery(query) }) {
+                                Text(query)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if (state.isSearching) {
             item {
                 LoadingPanel(
@@ -107,7 +127,7 @@ fun SearchRoute(
             item {
                 ErrorPanel(
                     title = "Start with a title",
-                    message = "This screen is now wired for live TMDB and AniList queries. Search for a sequel season, movie, or anime title to inspect the Android flow.",
+                    message = "This screen is wired for multi-page TMDB search, AniList queries, and local recent searches.",
                 )
             }
         }

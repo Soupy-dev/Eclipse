@@ -16,6 +16,12 @@ class AndroidSearchViewModel(
     private val _state = MutableStateFlow(SearchScreenState())
     val state: StateFlow<SearchScreenState> = _state.asStateFlow()
 
+    init {
+        viewModelScope.launch {
+            _state.update { it.copy(recentQueries = repository.recentQueries()) }
+        }
+    }
+
     fun updateQuery(query: String) {
         _state.update {
             it.copy(
@@ -24,6 +30,11 @@ class AndroidSearchViewModel(
                 sections = if (query.isBlank()) emptyList() else it.sections,
             )
         }
+    }
+
+    fun selectRecentQuery(query: String) {
+        _state.update { it.copy(query = query) }
+        search()
     }
 
     fun search() {
@@ -41,6 +52,7 @@ class AndroidSearchViewModel(
                         it.copy(
                             isSearching = false,
                             sections = result.sections,
+                            recentQueries = result.recentQueries,
                         )
                     }
                 }

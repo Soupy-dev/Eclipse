@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -42,6 +43,16 @@ data class SettingsScreenState(
     val hasLocalBackup: Boolean = false,
     val backupStatusHeadline: String = "No local backup yet",
     val backupStatusMessage: String = "Export a JSON archive from Android Settings or import an existing Luna backup to stage one here.",
+    val catalogs: List<CatalogSettingsRow> = emptyList(),
+)
+
+data class CatalogSettingsRow(
+    val id: String,
+    val name: String,
+    val source: String,
+    val displayStyle: String,
+    val enabled: Boolean,
+    val order: Int,
 )
 
 @Composable
@@ -53,6 +64,9 @@ fun SettingsRoute(
     onPlayerSelected: (InAppPlayer) -> Unit,
     onAniSkipAutoSkipChanged: (Boolean) -> Unit,
     onSkip85sChanged: (Boolean) -> Unit,
+    onCatalogEnabledChanged: (String, Boolean) -> Unit,
+    onMoveCatalogUp: (String) -> Unit,
+    onMoveCatalogDown: (String) -> Unit,
     onExportBackup: (Uri) -> Unit,
     onImportBackup: (Uri) -> Unit,
 ) {
@@ -218,6 +232,24 @@ fun SettingsRoute(
 
         item {
             SectionHeading(
+                title = "Catalogs",
+                subtitle = "Home rows follow the same enabled state and order that Luna stores in backups.",
+            )
+        }
+
+        items(state.catalogs, key = { it.id }) { catalog ->
+            CatalogSettingsCard(
+                catalog = catalog,
+                canMoveUp = catalog.order > 0,
+                canMoveDown = catalog.order < state.catalogs.lastIndex,
+                onEnabledChanged = { enabled -> onCatalogEnabledChanged(catalog.id, enabled) },
+                onMoveUp = { onMoveCatalogUp(catalog.id) },
+                onMoveDown = { onMoveCatalogDown(catalog.id) },
+            )
+        }
+
+        item {
+            SectionHeading(
                 title = "Backup",
                 subtitle = "Export and restore Luna-compatible JSON archives. Android restores the settings and source state it owns today while preserving the rest for later parity.",
             )
@@ -233,6 +265,64 @@ fun SettingsRoute(
                     importLauncher.launch(arrayOf("application/json", "text/plain"))
                 },
             )
+        }
+    }
+}
+
+@Composable
+private fun CatalogSettingsCard(
+    catalog: CatalogSettingsRow,
+    canMoveUp: Boolean,
+    canMoveDown: Boolean,
+    onEnabledChanged: (Boolean) -> Unit,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
+) {
+    GlassPanel {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = catalog.name,
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = "${catalog.source} | ${catalog.displayStyle}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.tertiary,
+                    )
+                }
+                Switch(
+                    checked = catalog.enabled,
+                    onCheckedChange = onEnabledChanged,
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                OutlinedButton(
+                    onClick = onMoveUp,
+                    enabled = canMoveUp,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Move Up")
+                }
+                OutlinedButton(
+                    onClick = onMoveDown,
+                    enabled = canMoveDown,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Move Down")
+                }
+            }
         }
     }
 }

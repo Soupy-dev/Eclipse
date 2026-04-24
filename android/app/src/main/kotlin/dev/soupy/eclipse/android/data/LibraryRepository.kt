@@ -28,9 +28,10 @@ data class ContinueWatchingDraft(
 
 class LibraryRepository(
     private val libraryStore: LibraryStore,
+    private val progressRepository: ProgressRepository,
 ) {
     suspend fun loadSnapshot(): Result<LibrarySnapshot> = runCatching {
-        libraryStore.read().normalized()
+        libraryStore.read().withProgressContinueWatching().normalized()
     }
 
     suspend fun toggleSaved(draft: LibraryItemDraft): Result<LibrarySnapshot> = runCatching {
@@ -74,6 +75,9 @@ class LibraryRepository(
 
     suspend fun removeContinueWatching(id: String): Result<LibrarySnapshot> = runCatching {
         val snapshot = libraryStore.read()
+        if (id.startsWith("progress:")) {
+            progressRepository.removeContinueWatching(id).getOrThrow()
+        }
         writeSnapshot(
             snapshot.copy(
                 continueWatching = snapshot.continueWatching.filterNot { it.id == id },
@@ -82,9 +86,20 @@ class LibraryRepository(
     }
 
     private suspend fun writeSnapshot(snapshot: LibrarySnapshot): LibrarySnapshot {
-        val normalized = snapshot.normalized()
+        val normalized = snapshot.withProgressContinueWatching().normalized()
         libraryStore.write(normalized)
         return normalized
+    }
+
+    private suspend fun LibrarySnapshot.withProgressContinueWatching(): LibrarySnapshot {
+        val progressRecords = progressRepository.continueWatching()
+        val manualRecords = continueWatching.filterNot { it.id.startsWith("progress:") }
+        return copy(
+            continueWatching = (progressRecords + manualRecords)
+                .distinctBy { it.id }
+                .sortedByDescending { it.updatedAt }
+                .take(20),
+        )
     }
 }
 

@@ -90,6 +90,7 @@ fun EclipseAndroidApp() {
         AndroidDetailViewModel(
             repository = appContainer.detailRepository,
             streamResolutionRepository = appContainer.streamResolutionRepository,
+            progressRepository = appContainer.progressRepository,
         )
     }
     val scheduleViewModel = rememberFeatureViewModel("schedule") {
@@ -111,6 +112,7 @@ fun EclipseAndroidApp() {
         AndroidSettingsViewModel(
             settingsStore = appContainer.settingsStore,
             backupRepository = appContainer.backupRepository,
+            catalogRepository = appContainer.catalogRepository,
         )
     }
     val mangaViewModel = rememberFeatureViewModel("manga") {
@@ -202,6 +204,7 @@ fun EclipseAndroidApp() {
                             state = searchState,
                             onQueryChange = searchViewModel::updateQuery,
                             onSearch = searchViewModel::search,
+                            onRecentQuery = searchViewModel::selectRecentQuery,
                             onSelect = { target ->
                                 selectedDetailTarget = target
                                 navController.navigate("detail")
@@ -300,6 +303,9 @@ fun EclipseAndroidApp() {
                             onPlayerSelected = settingsViewModel::setInAppPlayer,
                             onAniSkipAutoSkipChanged = settingsViewModel::setAniSkipAutoSkip,
                             onSkip85sChanged = settingsViewModel::setSkip85sEnabled,
+                            onCatalogEnabledChanged = settingsViewModel::setCatalogEnabled,
+                            onMoveCatalogUp = settingsViewModel::moveCatalogUp,
+                            onMoveCatalogDown = settingsViewModel::moveCatalogDown,
                             onExportBackup = settingsViewModel::exportBackup,
                             onImportBackup = settingsViewModel::importBackup,
                         )

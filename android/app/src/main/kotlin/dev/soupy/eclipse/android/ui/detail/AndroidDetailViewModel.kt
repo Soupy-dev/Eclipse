@@ -11,7 +11,10 @@ import dev.soupy.eclipse.android.data.ContinueWatchingDraft
 import dev.soupy.eclipse.android.data.DetailContent
 import dev.soupy.eclipse.android.data.DetailRepository
 import dev.soupy.eclipse.android.data.DownloadDraft
+import dev.soupy.eclipse.android.data.EpisodeProgressDraft
 import dev.soupy.eclipse.android.data.LibraryItemDraft
+import dev.soupy.eclipse.android.data.MovieProgressDraft
+import dev.soupy.eclipse.android.data.ProgressRepository
 import dev.soupy.eclipse.android.data.StreamResolutionRepository
 import dev.soupy.eclipse.android.data.StreamEpisodeSelection
 import dev.soupy.eclipse.android.core.model.DetailTarget
@@ -23,6 +26,7 @@ import kotlin.math.roundToInt
 class AndroidDetailViewModel(
     private val repository: DetailRepository,
     private val streamResolutionRepository: StreamResolutionRepository,
+    private val progressRepository: ProgressRepository,
 ) : ViewModel() {
     private val _state = MutableStateFlow(DetailScreenState())
     val state: StateFlow<DetailScreenState> = _state.asStateFlow()
@@ -154,10 +158,21 @@ class AndroidDetailViewModel(
             return null
         }
 
-        val firstEpisode = snapshot.episodes.firstOrNull()
-        val subtitle = firstEpisode?.title ?: snapshot.subtitle ?: snapshot.playerSource?.title
+        val selectedEpisode = snapshot.selectedEpisodeId
+            ?.let { id -> snapshot.episodes.firstOrNull { it.id == id } }
+            ?: snapshot.episodes.firstOrNull()
+        recordTypedProgress(
+            target = target,
+            snapshot = snapshot,
+            selectedEpisode = selectedEpisode,
+            positionMs = positionMs,
+            durationMs = durationMs,
+            isFinished = isFinished,
+        )
+
+        val subtitle = selectedEpisode?.title ?: snapshot.subtitle ?: snapshot.playerSource?.title
         val progressLabel = listOfNotNull(
-            firstEpisode?.subtitle,
+            selectedEpisode?.subtitle,
             "${(progressPercent * 100f).roundToInt()}% watched",
         ).joinToString(" | ").ifBlank {
             "${(progressPercent * 100f).roundToInt()}% watched"
@@ -231,6 +246,54 @@ class AndroidDetailViewModel(
             },
             playerSource = snapshot.playerSource,
         )
+    }
+
+    private fun recordTypedProgress(
+        target: DetailTarget,
+        snapshot: DetailScreenState,
+        selectedEpisode: DetailEpisodeRow?,
+        positionMs: Long,
+        durationMs: Long,
+        isFinished: Boolean,
+    ) {
+        val currentSeconds = positionMs.toDouble() / 1000.0
+        val durationSeconds = durationMs.toDouble() / 1000.0
+        when (target) {
+            is DetailTarget.TmdbMovie -> {
+                viewModelScope.launch {
+                    progressRepository.recordMovieProgress(
+                        MovieProgressDraft(
+                            movieId = target.id,
+                            title = snapshot.title,
+                            posterUrl = snapshot.posterUrl,
+                            currentTimeSeconds = currentSeconds,
+                            totalDurationSeconds = durationSeconds,
+                            isFinished = isFinished,
+                        ),
+                    )
+                }
+            }
+            is DetailTarget.TmdbShow -> {
+                val episode = selectedEpisode ?: return
+                val seasonNumber = episode.seasonNumber ?: return
+                val episodeNumber = episode.episodeNumber ?: return
+                viewModelScope.launch {
+                    progressRepository.recordEpisodeProgress(
+                        EpisodeProgressDraft(
+                            showId = target.id,
+                            seasonNumber = seasonNumber,
+                            episodeNumber = episodeNumber,
+                            showTitle = snapshot.title,
+                            showPosterUrl = snapshot.posterUrl,
+                            currentTimeSeconds = currentSeconds,
+                            totalDurationSeconds = durationSeconds,
+                            isFinished = isFinished,
+                        ),
+                    )
+                }
+            }
+            is DetailTarget.AniListMediaTarget -> Unit
+        }
     }
 }
 
