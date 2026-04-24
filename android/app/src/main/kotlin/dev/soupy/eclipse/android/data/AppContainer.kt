@@ -178,6 +178,7 @@ class EclipseAppContainer(
         mangaStore = mangaStore,
         backupFileStore = backupFileStore,
         aniListService = aniListService,
+        settingsStore = settingsStore,
     )
 }
 

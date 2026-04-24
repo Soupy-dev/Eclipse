@@ -29,6 +29,15 @@ class AniListService(
         val recentlyUpdated: List<AniListMedia> = emptyList(),
     )
 
+    data class LibraryEntry(
+        val media: AniListMedia,
+        val status: String? = null,
+        val progress: Int = 0,
+        val progressVolumes: Int = 0,
+        val score: Double = 0.0,
+        val updatedAtEpochSeconds: Long? = null,
+    )
+
     suspend fun searchAnime(
         query: String,
         page: Int = 1,
@@ -210,6 +219,80 @@ class AniListService(
         }
     }
 
+    suspend fun fetchAnimeLibrary(
+        accessToken: String,
+        username: String? = null,
+    ): NetworkResult<List<LibraryEntry>> =
+        fetchLibrary(
+            accessToken = accessToken,
+            username = username,
+            query = ANIME_LIBRARY_QUERY,
+        )
+
+    suspend fun fetchMangaLibrary(
+        accessToken: String,
+        username: String? = null,
+    ): NetworkResult<List<LibraryEntry>> =
+        fetchLibrary(
+            accessToken = accessToken,
+            username = username,
+            query = MANGA_LIBRARY_QUERY,
+        )
+
+    private suspend fun fetchLibrary(
+        accessToken: String,
+        username: String?,
+        query: String,
+    ): NetworkResult<List<LibraryEntry>> {
+        val token = accessToken.trim()
+        if (token.isBlank()) {
+            return NetworkResult.Failure.Http(401, "AniList access token is required.")
+        }
+
+        val resolvedUsername = username
+            ?.trim()
+            ?.takeIf(String::isNotBlank)
+            ?: when (val viewer = fetchViewer(token)) {
+                is NetworkResult.Success -> viewer.value.name.takeIf(String::isNotBlank)
+                is NetworkResult.Failure -> return viewer
+            }
+            ?: return NetworkResult.Failure.Http(401, "AniList username could not be resolved from this token.")
+
+        val body = EclipseJson.encodeToString(
+            AniListRequest.serializer(),
+            AniListRequest(
+                query = query,
+                variables = AniListVariables(userName = resolvedUsername),
+            ),
+        )
+
+        return when (val result = httpClient.postJson(baseUrl, body, token.authorizationHeaders())) {
+            is NetworkResult.Success -> try {
+                val response = EclipseJson.decodeFromString(MediaListCollectionEnvelope.serializer(), result.value)
+                NetworkResult.Success(
+                    response.data.collection.lists.flatMap { list ->
+                        list.entries.mapNotNull { entry ->
+                            entry.media?.let { media ->
+                                LibraryEntry(
+                                    media = media,
+                                    status = entry.status ?: list.status ?: list.name,
+                                    progress = entry.progress,
+                                    progressVolumes = entry.progressVolumes,
+                                    score = entry.score,
+                                    updatedAtEpochSeconds = entry.updatedAt,
+                                )
+                            }
+                        }
+                    }.distinctBy { it.media.id },
+                )
+            } catch (error: SerializationException) {
+                NetworkResult.Failure.Serialization(error)
+            }
+
+            is NetworkResult.Failure -> result
+        }
+    }
+
     suspend fun fetchAiringSchedule(
         daysAhead: Int = 7,
         perPage: Int = 100,
@@ -241,6 +324,27 @@ class AniListService(
         }
     }
 
+    private suspend fun fetchViewer(accessToken: String): NetworkResult<AniListViewer> {
+        val body = EclipseJson.encodeToString(
+            AniListRequest.serializer(),
+            AniListRequest(
+                query = VIEWER_QUERY,
+                variables = AniListVariables(),
+            ),
+        )
+
+        return when (val result = httpClient.postJson(baseUrl, body, accessToken.authorizationHeaders())) {
+            is NetworkResult.Success -> try {
+                val response = EclipseJson.decodeFromString(ViewerEnvelope.serializer(), result.value)
+                NetworkResult.Success(response.data.viewer)
+            } catch (error: SerializationException) {
+                NetworkResult.Failure.Serialization(error)
+            }
+
+            is NetworkResult.Failure -> result
+        }
+    }
+
     @Serializable
     private data class AniListRequest(
         val query: String,
@@ -253,6 +357,7 @@ class AniListService(
         val page: Int = 1,
         val perPage: Int = 20,
         val id: Int? = null,
+        val userName: String? = null,
         val airingAtGreater: Int? = null,
         val airingAtLesser: Int? = null,
     )
@@ -319,7 +424,158 @@ class AniListService(
         @SerialName("airingSchedules") val airingSchedules: List<AniListAiringScheduleEntry> = emptyList(),
     )
 
+    @Serializable
+    private data class ViewerEnvelope(
+        val data: ViewerData,
+    )
+
+    @Serializable
+    private data class ViewerData(
+        @SerialName("Viewer") val viewer: AniListViewer,
+    )
+
+    @Serializable
+    private data class AniListViewer(
+        val id: Int = 0,
+        val name: String = "",
+    )
+
+    @Serializable
+    private data class MediaListCollectionEnvelope(
+        val data: MediaListCollectionData,
+    )
+
+    @Serializable
+    private data class MediaListCollectionData(
+        @SerialName("MediaListCollection") val collection: MediaListCollection,
+    )
+
+    @Serializable
+    private data class MediaListCollection(
+        val lists: List<MediaListGroup> = emptyList(),
+    )
+
+    @Serializable
+    private data class MediaListGroup(
+        val name: String = "",
+        val status: String? = null,
+        val entries: List<MediaListEntry> = emptyList(),
+    )
+
+    @Serializable
+    private data class MediaListEntry(
+        val status: String? = null,
+        val progress: Int = 0,
+        val progressVolumes: Int = 0,
+        val score: Double = 0.0,
+        val updatedAt: Long? = null,
+        val media: AniListMedia? = null,
+    )
+
     private companion object {
+        const val VIEWER_QUERY = """
+            query Viewer {
+              Viewer {
+                id
+                name
+              }
+            }
+        """
+
+        const val ANIME_LIBRARY_QUERY = """
+            query AnimeLibrary(${'$'}userName: String) {
+              MediaListCollection(userName: ${'$'}userName, type: ANIME) {
+                lists {
+                  name
+                  status
+                  entries {
+                    status
+                    progress
+                    score(format: POINT_10)
+                    updatedAt
+                    media {
+                      id
+                      idMal
+                      description(asHtml: false)
+                      format
+                      season
+                      seasonYear
+                      episodes
+                      duration
+                      status
+                      bannerImage
+                      isAdult
+                      type
+                      synonyms
+                      genres
+                      title {
+                        romaji
+                        english
+                        native
+                        userPreferred
+                      }
+                      coverImage {
+                        extraLarge
+                        large
+                        medium
+                        color
+                      }
+                      nextAiringEpisode {
+                        episode
+                        timeUntilAiring
+                        airingAt
+                      }
+                    }
+                  }
+                }
+              }
+            }
+        """
+
+        const val MANGA_LIBRARY_QUERY = """
+            query MangaLibrary(${'$'}userName: String) {
+              MediaListCollection(userName: ${'$'}userName, type: MANGA) {
+                lists {
+                  name
+                  status
+                  entries {
+                    status
+                    progress
+                    progressVolumes
+                    score(format: POINT_10)
+                    updatedAt
+                    media {
+                      id
+                      idMal
+                      description(asHtml: false)
+                      format
+                      chapters
+                      volumes
+                      status
+                      bannerImage
+                      isAdult
+                      type
+                      synonyms
+                      genres
+                      title {
+                        romaji
+                        english
+                        native
+                        userPreferred
+                      }
+                      coverImage {
+                        extraLarge
+                        large
+                        medium
+                        color
+                      }
+                    }
+                  }
+                }
+              }
+            }
+        """
+
         const val SEARCH_QUERY = """
             query SearchAnime(${'$'}search: String, ${'$'}page: Int, ${'$'}perPage: Int) {
               Page(page: ${'$'}page, perPage: ${'$'}perPage) {
@@ -952,3 +1208,5 @@ class AniListService(
     }
 }
 
+private fun String.authorizationHeaders(): Map<String, String> =
+    mapOf("Authorization" to "Bearer ${trim()}")

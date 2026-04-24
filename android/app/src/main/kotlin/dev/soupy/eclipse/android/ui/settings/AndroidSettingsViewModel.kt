@@ -5,12 +5,20 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.soupy.eclipse.android.core.model.InAppPlayer
 import dev.soupy.eclipse.android.core.model.SimilarityAlgorithm
+import dev.soupy.eclipse.android.core.model.TrackerAccountSnapshot
+import dev.soupy.eclipse.android.core.model.TrackerStateSnapshot
+import dev.soupy.eclipse.android.core.network.AniListService
+import dev.soupy.eclipse.android.core.network.NetworkResult
 import dev.soupy.eclipse.android.core.storage.SettingsStore
+import dev.soupy.eclipse.android.data.AniListLibraryImportDraft
+import dev.soupy.eclipse.android.data.AniListMangaLibraryImportDraft
 import dev.soupy.eclipse.android.data.BackupRepository
 import dev.soupy.eclipse.android.data.BackupStatusSnapshot
 import dev.soupy.eclipse.android.data.CacheRepository
 import dev.soupy.eclipse.android.data.CatalogRepository
+import dev.soupy.eclipse.android.data.LibraryRepository
 import dev.soupy.eclipse.android.data.LoggerRepository
+import dev.soupy.eclipse.android.data.MangaRepository
 import dev.soupy.eclipse.android.data.TrackerAccountDraft
 import dev.soupy.eclipse.android.data.TrackerRepository
 import dev.soupy.eclipse.android.feature.settings.CatalogSettingsRow
@@ -35,6 +43,9 @@ class AndroidSettingsViewModel(
     private val cacheRepository: CacheRepository,
     private val loggerRepository: LoggerRepository,
     private val trackerRepository: TrackerRepository,
+    private val libraryRepository: LibraryRepository,
+    private val mangaRepository: MangaRepository,
+    private val aniListService: AniListService,
 ) : ViewModel() {
     private val _state = MutableStateFlow(SettingsScreenState())
     val state: StateFlow<SettingsScreenState> = _state.asStateFlow()
@@ -71,6 +82,7 @@ class AndroidSettingsViewModel(
                     readerLineSpacing = settings.readerLineSpacing,
                     readerMargin = settings.readerMargin,
                     readerTextAlignment = settings.readerTextAlignment,
+                    kanzenAutoUpdateModules = settings.kanzenAutoUpdateModules,
                     autoClearCacheEnabled = settings.autoClearCacheEnabled,
                     autoClearCacheThresholdMB = settings.autoClearCacheThresholdMB,
                 )
@@ -418,6 +430,12 @@ class AndroidSettingsViewModel(
         )
     }
 
+    fun setKanzenAutoUpdateModules(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsStore.setKanzenAutoUpdateModules(enabled)
+        }
+    }
+
     private fun updateReader(
         readingMode: Int,
         readerFontSize: Double,
@@ -679,6 +697,116 @@ class AndroidSettingsViewModel(
         }
     }
 
+    fun importAniListLibrary(onImported: () -> Unit = {}) {
+        viewModelScope.launch {
+            val account = trackerRepository.loadSnapshot()
+                .getOrNull()
+                ?.aniListAccount()
+            if (account == null) {
+                _state.value = _state.value.copy(
+                    trackerStatus = "Connect an AniList tracker account before importing your AniList library.",
+                )
+                return@launch
+            }
+
+            _state.value = _state.value.copy(trackerStatus = "Importing AniList anime library...")
+            when (
+                val result = aniListService.fetchAnimeLibrary(
+                    accessToken = account.accessToken,
+                    username = account.username.takeIf(String::isNotBlank),
+                )
+            ) {
+                is NetworkResult.Success -> {
+                    libraryRepository.importAniListAnime(
+                        result.value.map { entry ->
+                            AniListLibraryImportDraft(
+                                media = entry.media,
+                                status = entry.status,
+                                progress = entry.progress,
+                                score = entry.score,
+                                updatedAtEpochSeconds = entry.updatedAtEpochSeconds,
+                            )
+                        },
+                    ).onSuccess { summary ->
+                        _state.value = _state.value.copy(
+                            trackerStatus = "Imported ${summary.importedItems} AniList anime item${if (summary.importedItems == 1) "" else "s"} into Library, including ${summary.importedContinueWatching} resume entr${if (summary.importedContinueWatching == 1) "y" else "ies"}.",
+                        )
+                        loggerRepository.log("Trackers", "Imported AniList anime library into Android Library.")
+                        refreshLogs()
+                        onImported()
+                    }.onFailure { error ->
+                        _state.value = _state.value.copy(
+                            trackerStatus = error.message ?: "Android could not import AniList library.",
+                        )
+                    }
+                }
+                is NetworkResult.Failure -> {
+                    _state.value = _state.value.copy(
+                        trackerStatus = result.toStatusMessage("AniList library import failed."),
+                    )
+                }
+            }
+        }
+    }
+
+    fun importAniListMangaLibrary(onImported: () -> Unit = {}) {
+        viewModelScope.launch {
+            val account = trackerRepository.loadSnapshot()
+                .getOrNull()
+                ?.aniListAccount()
+            if (account == null) {
+                _state.value = _state.value.copy(
+                    trackerStatus = "Connect an AniList tracker account before importing your manga library.",
+                )
+                return@launch
+            }
+
+            _state.value = _state.value.copy(trackerStatus = "Importing AniList manga library...")
+            when (
+                val result = aniListService.fetchMangaLibrary(
+                    accessToken = account.accessToken,
+                    username = account.username.takeIf(String::isNotBlank),
+                )
+            ) {
+                is NetworkResult.Success -> {
+                    mangaRepository.importAniListManga(
+                        result.value.map { entry ->
+                            AniListMangaLibraryImportDraft(
+                                media = entry.media,
+                                status = entry.status,
+                                progress = entry.progress,
+                                progressVolumes = entry.progressVolumes,
+                                score = entry.score,
+                                updatedAtEpochSeconds = entry.updatedAtEpochSeconds,
+                            )
+                        },
+                    ).onSuccess { summary ->
+                        val progressLabel = if (summary.importedProgress == 1) {
+                            "progress entry"
+                        } else {
+                            "progress entries"
+                        }
+                        _state.value = _state.value.copy(
+                            trackerStatus = "Imported ${summary.importedItems} AniList manga item${if (summary.importedItems == 1) "" else "s"} into Manga/Novel, including ${summary.importedProgress} $progressLabel and ${summary.importedNovels} novel item${if (summary.importedNovels == 1) "" else "s"}.",
+                        )
+                        loggerRepository.log("Trackers", "Imported AniList manga library into Android Manga/Novel.")
+                        refreshLogs()
+                        onImported()
+                    }.onFailure { error ->
+                        _state.value = _state.value.copy(
+                            trackerStatus = error.message ?: "Android could not import AniList manga library.",
+                        )
+                    }
+                }
+                is NetworkResult.Failure -> {
+                    _state.value = _state.value.copy(
+                        trackerStatus = result.toStatusMessage("AniList manga import failed."),
+                    )
+                }
+            }
+        }
+    }
+
     private fun moveCatalog(id: String, direction: Int) {
         viewModelScope.launch {
             catalogRepository.moveCatalog(id, direction)
@@ -805,6 +933,35 @@ private fun SettingsScreenState.withTrackerState(
         trackerRows = rows,
         trackerStatus = trackerStatus,
     )
+}
+
+private fun TrackerStateSnapshot.aniListAccount(): TrackerAccountSnapshot? {
+    val modern = accounts.firstOrNull { account ->
+        account.isConnected &&
+            account.accessToken.isNotBlank() &&
+            account.service.equals("AniList", ignoreCase = true)
+    }
+    if (modern != null) return modern
+
+    val provider = provider ?: return null
+    val token = accessToken ?: return null
+    return if (provider.equals("AniList", ignoreCase = true) && token.isNotBlank()) {
+        TrackerAccountSnapshot(
+            service = provider,
+            username = userName.orEmpty(),
+            accessToken = token,
+            refreshToken = refreshToken,
+            isConnected = true,
+        )
+    } else {
+        null
+    }
+}
+
+private fun NetworkResult.Failure.toStatusMessage(prefix: String): String = when (this) {
+    is NetworkResult.Failure.Http -> "$prefix HTTP $code${body?.takeIf { it.isNotBlank() }?.let { ": $it" }.orEmpty()}"
+    is NetworkResult.Failure.Connectivity -> "$prefix ${throwable.message ?: "network unavailable"}"
+    is NetworkResult.Failure.Serialization -> "$prefix ${throwable.message ?: "unexpected AniList response"}"
 }
 
 private fun String.toTokenPreview(): String =

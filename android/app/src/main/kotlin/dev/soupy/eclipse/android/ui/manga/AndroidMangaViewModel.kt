@@ -2,6 +2,7 @@ package dev.soupy.eclipse.android.ui.manga
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import dev.soupy.eclipse.android.core.model.MangaProgress
 import dev.soupy.eclipse.android.data.KanzenModuleDraft
 import dev.soupy.eclipse.android.data.MangaCatalogItemSnapshot
 import dev.soupy.eclipse.android.data.MangaLibraryItemDraft
@@ -114,6 +115,48 @@ class AndroidMangaViewModel(
         }
     }
 
+    fun readNextChapter(aniListId: Int) {
+        viewModelScope.launch {
+            repository.markNextChapterRead(aniListId)
+                .onSuccess {
+                    reloadAfterModuleMutation("Marked the next manga chapter as read.")
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(errorMessage = error.message ?: "Could not update reading progress.")
+                    }
+                }
+        }
+    }
+
+    fun unreadLastChapter(aniListId: Int) {
+        viewModelScope.launch {
+            repository.markPreviousChapterUnread(aniListId)
+                .onSuccess {
+                    reloadAfterModuleMutation("Marked the latest manga chapter unread.")
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(errorMessage = error.message ?: "Could not update reading progress.")
+                    }
+                }
+        }
+    }
+
+    fun toggleFavorite(aniListId: Int) {
+        viewModelScope.launch {
+            repository.toggleFavorite(aniListId)
+                .onSuccess {
+                    reloadAfterModuleMutation("Updated manga favorites.")
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(errorMessage = error.message ?: "Could not update favorite manga.")
+                    }
+                }
+        }
+    }
+
     fun clearReadingProgress(progressId: String) {
         viewModelScope.launch {
             repository.clearReadingProgress(progressId)
@@ -190,6 +233,20 @@ class AndroidMangaViewModel(
         }
     }
 
+    fun updateAllModules() {
+        viewModelScope.launch {
+            repository.updateModules(isNovel = false)
+                .onSuccess { summary ->
+                    reloadAfterModuleMutation(summary.toNotice("Kanzen manga modules"))
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(errorMessage = error.message ?: "Could not update Kanzen modules.")
+                    }
+                }
+        }
+    }
+
     private suspend fun reloadAfterLibraryMutation(
         notice: String,
         aniListId: Int,
@@ -241,6 +298,8 @@ class AndroidMangaViewModel(
                 .flatMap { collection -> collection.items }
                 .distinctBy { item -> item.aniListId }
                 .map { item ->
+                    val progress = snapshot.progressByAniListId[item.aniListId]
+                    val readCount = progress?.readChapterNumbers?.size ?: 0
                     MangaCatalogItemRow(
                         id = "saved-manga-${item.aniListId}",
                         aniListId = item.aniListId,
@@ -254,6 +313,10 @@ class AndroidMangaViewModel(
                         format = item.format,
                         totalChapters = item.totalChapters,
                         isSaved = true,
+                        isFavorite = item.aniListId in snapshot.favoriteAniListIds,
+                        readChapterCount = readCount,
+                        unreadChapterCount = item.totalChapters?.let { (it - readCount).coerceAtLeast(0) },
+                        lastReadChapter = progress?.lastReadChapter,
                     )
                 },
             catalogs = snapshot.catalogs.map { section ->
@@ -274,14 +337,19 @@ class AndroidMangaViewModel(
                 )
             },
             recent = snapshot.recentProgress.map { (id, progress) ->
+                val aniListId = progress.aniListIdFromProgressId(id)
+                val readCount = progress.readChapterNumbers.size
                 MangaProgressRow(
                     id = id,
+                    aniListId = aniListId,
                     title = progress.title ?: "Manga $id",
                     subtitle = listOfNotNull(
                         progress.lastReadChapter?.let { "Chapter $it" },
                         progress.format,
                     ).joinToString(" - "),
                     coverUrl = progress.coverUrl,
+                    readChapterCount = readCount,
+                    unreadChapterCount = progress.totalChapters?.let { (it - readCount).coerceAtLeast(0) },
                 )
             },
             modules = snapshot.modules.map { module ->
@@ -310,6 +378,10 @@ private fun MangaCatalogItemSnapshot.toRow(): MangaCatalogItemRow = MangaCatalog
     format = format,
     totalChapters = totalChapters,
     isSaved = isSaved,
+    isFavorite = isFavorite,
+    readChapterCount = readChapterCount,
+    unreadChapterCount = unreadChapterCount,
+    lastReadChapter = lastReadChapter,
 )
 
 private fun MangaCatalogItemRow.toDraft(): MangaLibraryItemDraft = MangaLibraryItemDraft(
@@ -319,6 +391,11 @@ private fun MangaCatalogItemRow.toDraft(): MangaLibraryItemDraft = MangaLibraryI
     format = format,
     totalChapters = totalChapters,
 )
+
+private fun MangaProgress.aniListIdFromProgressId(id: String): Int? =
+    contentParams?.substringAfter("anilist:", missingDelimiterValue = "")?.toIntOrNull()
+        ?: id.substringAfter("anilist-manga:", missingDelimiterValue = "").toIntOrNull()
+        ?: id.toIntOrNull()
 
 private fun MangaScreenState.findCatalogItem(itemId: String): MangaCatalogItemRow? =
     searchResults.firstOrNull { it.id == itemId }
@@ -341,3 +418,10 @@ private fun MangaScreenState.withSavedFlag(
         )
     },
 )
+
+private fun dev.soupy.eclipse.android.data.KanzenModuleUpdateSummary.toNotice(label: String): String =
+    if (checkedModules == 0) {
+        "No $label had update URLs ready."
+    } else {
+        "Updated $updatedModules of $checkedModules $label${if (failedModules > 0) "; $failedModules failed validation or fetch." else "."}"
+    }

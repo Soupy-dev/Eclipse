@@ -13,10 +13,13 @@ import dev.soupy.eclipse.android.core.network.EclipseHttpClient
 import dev.soupy.eclipse.android.core.network.EclipseJson
 import dev.soupy.eclipse.android.core.storage.BackupFileStore
 import dev.soupy.eclipse.android.core.storage.MangaStore
+import dev.soupy.eclipse.android.core.storage.SettingsStore
 import java.net.URI
+import java.time.Duration
 import java.time.Instant
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -27,6 +30,9 @@ import kotlinx.serialization.json.jsonObject
 
 private const val DefaultMangaCollectionId = "android-library"
 private const val DefaultMangaCollectionName = "Library"
+private const val FavoritesCollectionId = "android-favorites"
+private const val FavoritesCollectionName = "Favorites"
+private val ModuleAutoUpdateInterval: Duration = Duration.ofHours(24)
 
 data class MangaCatalogSectionSnapshot(
     val id: String,
@@ -44,6 +50,10 @@ data class MangaCatalogItemSnapshot(
     val format: String? = null,
     val totalChapters: Int? = null,
     val isSaved: Boolean = false,
+    val isFavorite: Boolean = false,
+    val readChapterCount: Int = 0,
+    val unreadChapterCount: Int? = null,
+    val lastReadChapter: String? = null,
 )
 
 data class MangaLibraryItemDraft(
@@ -52,6 +62,39 @@ data class MangaLibraryItemDraft(
     val coverUrl: String? = null,
     val format: String? = null,
     val totalChapters: Int? = null,
+)
+
+data class MangaReadingProgressDraft(
+    val aniListId: Int,
+    val title: String,
+    val coverUrl: String? = null,
+    val format: String? = null,
+    val totalChapters: Int? = null,
+    val chapterNumber: Int,
+    val isNovel: Boolean = false,
+)
+
+data class AniListMangaLibraryImportDraft(
+    val media: AniListMedia,
+    val status: String? = null,
+    val progress: Int = 0,
+    val progressVolumes: Int = 0,
+    val score: Double = 0.0,
+    val updatedAtEpochSeconds: Long? = null,
+)
+
+data class MangaImportSummary(
+    val snapshot: MangaLibrarySnapshot,
+    val importedItems: Int,
+    val importedProgress: Int,
+    val importedNovels: Int,
+)
+
+data class KanzenModuleUpdateSummary(
+    val snapshot: MangaLibrarySnapshot,
+    val checkedModules: Int,
+    val updatedModules: Int,
+    val failedModules: Int,
 )
 
 data class KanzenModuleDraft(
@@ -81,6 +124,8 @@ data class MangaOverviewSnapshot(
     val readChapterCount: Int,
     val novelCount: Int,
     val novelReadChapterCount: Int,
+    val progressByAniListId: Map<Int, MangaProgress>,
+    val favoriteAniListIds: Set<Int>,
     val importedFromBackup: Boolean,
 )
 
@@ -88,17 +133,21 @@ class MangaRepository(
     private val mangaStore: MangaStore,
     private val backupFileStore: BackupFileStore,
     private val aniListService: AniListService,
+    private val settingsStore: SettingsStore? = null,
     private val httpClient: EclipseHttpClient = EclipseHttpClient(),
 ) {
     suspend fun loadOverview(): Result<MangaOverviewSnapshot> = runCatching {
         coroutineScope {
             val backupDeferred = async { seedFromBackupIfNeeded() }
             val catalogsDeferred = async { aniListService.fetchMangaCatalogs(perPage = 12).orNull() }
-            val (snapshot, importedFromBackup) = backupDeferred.await()
+            val (seededSnapshot, importedFromBackup) = backupDeferred.await()
+            val snapshot = seededSnapshot.autoUpdateModulesIfEnabled(isNovel = false)
             snapshot.toOverview(
                 importedFromBackup = importedFromBackup,
                 catalogs = catalogsDeferred.await().toCatalogSections(
                     savedAniListIds = snapshot.savedAniListIds(),
+                    progressByAniListId = snapshot.progressByAniListId(),
+                    favoriteAniListIds = snapshot.favoriteAniListIds(),
                     label = "Manga",
                 ),
             )
@@ -109,11 +158,14 @@ class MangaRepository(
         coroutineScope {
             val backupDeferred = async { seedFromBackupIfNeeded() }
             val catalogsDeferred = async { aniListService.fetchNovelCatalogs(perPage = 12).orNull() }
-            val (snapshot, importedFromBackup) = backupDeferred.await()
+            val (seededSnapshot, importedFromBackup) = backupDeferred.await()
+            val snapshot = seededSnapshot.autoUpdateModulesIfEnabled(isNovel = true)
             snapshot.toOverview(
                 importedFromBackup = importedFromBackup,
                 catalogs = catalogsDeferred.await().toCatalogSections(
                     savedAniListIds = snapshot.savedAniListIds(),
+                    progressByAniListId = snapshot.progressByAniListId(),
+                    favoriteAniListIds = snapshot.favoriteAniListIds(),
                     label = "Novels",
                 ),
             )
@@ -123,23 +175,31 @@ class MangaRepository(
     suspend fun searchManga(query: String): Result<List<MangaCatalogItemSnapshot>> = runCatching {
         val trimmed = query.trim()
         if (trimmed.isBlank()) return@runCatching emptyList()
-        val savedIds = mangaStore.read().savedAniListIds()
+        val snapshot = mangaStore.read()
         aniListService.searchManga(
             query = trimmed,
             page = 1,
             perPage = 24,
-        ).orThrow().media.toCatalogItems(savedIds)
+        ).orThrow().media.toCatalogItems(
+            savedAniListIds = snapshot.savedAniListIds(),
+            progressByAniListId = snapshot.progressByAniListId(),
+            favoriteAniListIds = snapshot.favoriteAniListIds(),
+        )
     }
 
     suspend fun searchNovels(query: String): Result<List<MangaCatalogItemSnapshot>> = runCatching {
         val trimmed = query.trim()
         if (trimmed.isBlank()) return@runCatching emptyList()
-        val savedIds = mangaStore.read().savedAniListIds()
+        val snapshot = mangaStore.read()
         aniListService.searchNovels(
             query = trimmed,
             page = 1,
             perPage = 24,
-        ).orThrow().media.toCatalogItems(savedIds)
+        ).orThrow().media.toCatalogItems(
+            savedAniListIds = snapshot.savedAniListIds(),
+            progressByAniListId = snapshot.progressByAniListId(),
+            favoriteAniListIds = snapshot.favoriteAniListIds(),
+        )
     }
 
     suspend fun saveToLibrary(draft: MangaLibraryItemDraft): Result<MangaLibrarySnapshot> = runCatching {
@@ -173,6 +233,112 @@ class MangaRepository(
         )
         mangaStore.write(updated)
         updated
+    }
+
+    suspend fun markNextChapterRead(aniListId: Int): Result<MangaLibrarySnapshot> = runCatching {
+        require(aniListId > 0) { "Reading progress requires an AniList id." }
+        val snapshot = seedFromBackupIfNeeded().first
+        val item = snapshot.findMangaItem(aniListId)
+            ?: error("Save this title before tracking chapter progress.")
+        val existing = snapshot.progressByAniListId()[aniListId]
+        val nextChapter = ((existing?.lastReadChapterNumber() ?: 0) + 1)
+            .coerceAtMost(item.totalChapters ?: Int.MAX_VALUE)
+        require(nextChapter > 0) { "No readable chapter was found." }
+        val updated = snapshot.writeProgressSnapshot(
+            MangaReadingProgressDraft(
+                aniListId = item.aniListId,
+                title = item.title,
+                coverUrl = item.coverUrl,
+                format = item.format,
+                totalChapters = item.totalChapters,
+                chapterNumber = nextChapter,
+                isNovel = item.isNovelItem,
+            ),
+        )
+        mangaStore.write(updated)
+        updated
+    }
+
+    suspend fun markPreviousChapterUnread(aniListId: Int): Result<MangaLibrarySnapshot> = runCatching {
+        require(aniListId > 0) { "Reading progress requires an AniList id." }
+        val snapshot = seedFromBackupIfNeeded().first
+        val item = snapshot.findMangaItem(aniListId)
+        val existing = snapshot.progressByAniListId()[aniListId]
+            ?: return@runCatching snapshot
+        val previousChapter = (existing.lastReadChapterNumber() - 1).coerceAtLeast(0)
+        val updated = if (previousChapter <= 0) {
+            snapshot.copy(readingProgress = snapshot.readingProgress - aniListId.mangaProgressId())
+        } else {
+            snapshot.writeProgressSnapshot(
+                MangaReadingProgressDraft(
+                    aniListId = aniListId,
+                    title = existing.title ?: item?.title ?: "Manga $aniListId",
+                    coverUrl = existing.coverUrl ?: item?.coverUrl,
+                    format = existing.format ?: item?.format,
+                    totalChapters = existing.totalChapters ?: item?.totalChapters,
+                    chapterNumber = previousChapter,
+                    isNovel = existing.isNovel == true || item?.isNovelItem == true,
+                ),
+            )
+        }
+        mangaStore.write(updated)
+        updated
+    }
+
+    suspend fun recordReadingProgress(draft: MangaReadingProgressDraft): Result<MangaLibrarySnapshot> = runCatching {
+        require(draft.aniListId > 0) { "Reading progress requires an AniList id." }
+        require(draft.chapterNumber > 0) { "Chapter number must be greater than zero." }
+        val snapshot = seedFromBackupIfNeeded().first
+        val updated = snapshot.writeProgressSnapshot(draft)
+        mangaStore.write(updated)
+        updated
+    }
+
+    suspend fun toggleFavorite(aniListId: Int): Result<MangaLibrarySnapshot> = runCatching {
+        require(aniListId > 0) { "Favorites require an AniList id." }
+        val snapshot = seedFromBackupIfNeeded().first
+        val item = snapshot.findMangaItem(aniListId)
+            ?: error("Save this title before favoriting it.")
+        val favoriteIds = snapshot.favoriteAniListIds()
+        val updatedCollections = if (aniListId in favoriteIds) {
+            snapshot.collections.map { collection ->
+                if (collection.id == FavoritesCollectionId) {
+                    collection.copy(items = collection.items.filterNot { it.aniListId == aniListId })
+                } else {
+                    collection
+                }
+            }.filterNot { collection ->
+                collection.id == FavoritesCollectionId && collection.items.isEmpty()
+            }
+        } else {
+            snapshot.collections.withFavoriteManga(item)
+        }
+        val updated = snapshot.copy(collections = updatedCollections)
+        mangaStore.write(updated)
+        updated
+    }
+
+    suspend fun importAniListManga(drafts: List<AniListMangaLibraryImportDraft>): Result<MangaImportSummary> = runCatching {
+        val snapshot = seedFromBackupIfNeeded().first
+        val uniqueDrafts = drafts
+            .filter { draft -> draft.media.id > 0 }
+            .distinctBy { draft -> draft.media.id }
+        val importedItems = uniqueDrafts.map(AniListMangaLibraryImportDraft::toMangaLibraryItem)
+        val importedProgress = uniqueDrafts.mapNotNull(AniListMangaLibraryImportDraft::toReadingProgressEntry)
+        val updatedProgress = snapshot.readingProgress
+            .filterKeys { key -> importedProgress.none { (id, _) -> id == key } } +
+            importedProgress.toMap()
+        val updated = snapshot.copy(
+            collections = snapshot.collections.withImportedManga(importedItems),
+            readingProgress = updatedProgress,
+        )
+        mangaStore.write(updated)
+        MangaImportSummary(
+            snapshot = updated,
+            importedItems = importedItems.size,
+            importedProgress = importedProgress.size,
+            importedNovels = importedItems.count(MangaLibraryItem::isNovelItem),
+        )
     }
 
     suspend fun clearReadingProgress(progressId: String): Result<MangaLibrarySnapshot> = runCatching {
@@ -254,33 +420,19 @@ class MangaRepository(
         val snapshot = seedFromBackupIfNeeded().first
         val existing = snapshot.modules.firstOrNull { module -> module.id == moduleId }
             ?: error("Kanzen module was not found.")
-        val moduleUrl = existing.moduleUrl
-            ?: existing.moduleData.jsonObjectOrNull()?.string("moduleURL")
-            ?: existing.moduleData.jsonObjectOrNull()?.string("moduleUrl")
-            ?: error("Kanzen module does not have an update URL.")
-        val normalizedUrl = moduleUrl.normalizedKanzenModuleUrl()
-        val manifest = fetchAndValidateKanzenModule(
-            httpClient = httpClient,
-            moduleUrl = normalizedUrl,
-            requestedNovel = existing.isNovel,
-            displayNameOverride = null,
-        )
-        val refreshed = existing.copy(
-            sourceName = manifest.sourceName,
-            authorName = manifest.authorName,
-            iconUrl = manifest.iconUrl,
-            version = manifest.version,
-            language = manifest.language,
-            scriptUrl = manifest.scriptUrl,
-            isNovel = manifest.isNovel,
-            moduleUrl = normalizedUrl,
-            moduleData = manifest.moduleData,
-        )
+        val refreshed = existing.refreshedModule()
         val updated = snapshot.copy(
             modules = listOf(refreshed) + snapshot.modules.filterNot { module -> module.id == moduleId },
         )
         mangaStore.write(updated)
         updated
+    }
+
+    suspend fun updateModules(isNovel: Boolean? = null): Result<KanzenModuleUpdateSummary> = runCatching {
+        seedFromBackupIfNeeded().first.updateModules(
+            isNovel = isNovel,
+            onlyDue = false,
+        )
     }
 
     private suspend fun seedFromBackupIfNeeded(): Pair<MangaLibrarySnapshot, Boolean> {
@@ -297,6 +449,81 @@ class MangaRepository(
 
         mangaStore.write(imported)
         return imported to true
+    }
+
+    private suspend fun MangaLibrarySnapshot.autoUpdateModulesIfEnabled(isNovel: Boolean): MangaLibrarySnapshot {
+        val enabled = settingsStore?.settings?.first()?.kanzenAutoUpdateModules ?: false
+        if (!enabled) return this
+        return runCatching {
+            updateModules(isNovel = isNovel, onlyDue = true).snapshot
+        }.getOrDefault(this)
+    }
+
+    private suspend fun MangaLibrarySnapshot.updateModules(
+        isNovel: Boolean?,
+        onlyDue: Boolean,
+    ): KanzenModuleUpdateSummary {
+        val candidates = modules.filter { module ->
+            (isNovel == null || module.isNovel == isNovel) &&
+                module.updateUrlOrNull() != null &&
+                (!onlyDue || module.isDueForAutoUpdate())
+        }
+        if (candidates.isEmpty()) {
+            return KanzenModuleUpdateSummary(
+                snapshot = this,
+                checkedModules = 0,
+                updatedModules = 0,
+                failedModules = 0,
+            )
+        }
+
+        var updatedModules = modules
+        var updatedCount = 0
+        var failedCount = 0
+        candidates.forEach { module ->
+            runCatching { module.refreshedModule() }
+                .onSuccess { refreshed ->
+                    updatedCount += 1
+                    updatedModules = updatedModules.map { current ->
+                        if (current.id == module.id) refreshed else current
+                    }
+                }
+                .onFailure {
+                    failedCount += 1
+                }
+        }
+
+        val updated = copy(modules = updatedModules)
+        mangaStore.write(updated)
+        return KanzenModuleUpdateSummary(
+            snapshot = updated,
+            checkedModules = candidates.size,
+            updatedModules = updatedCount,
+            failedModules = failedCount,
+        )
+    }
+
+    private suspend fun KanzenModuleRecord.refreshedModule(): KanzenModuleRecord {
+        val moduleUrl = updateUrlOrNull() ?: error("Kanzen module does not have an update URL.")
+        val normalizedUrl = moduleUrl.normalizedKanzenModuleUrl()
+        val manifest = fetchAndValidateKanzenModule(
+            httpClient = httpClient,
+            moduleUrl = normalizedUrl,
+            requestedNovel = isNovel,
+            displayNameOverride = null,
+        )
+        val now = Instant.now().toString()
+        return copy(
+            sourceName = manifest.sourceName,
+            authorName = manifest.authorName,
+            iconUrl = manifest.iconUrl,
+            version = manifest.version,
+            language = manifest.language,
+            scriptUrl = manifest.scriptUrl,
+            isNovel = manifest.isNovel,
+            moduleUrl = normalizedUrl,
+            moduleData = manifest.moduleData.withAndroidUpdateMetadata(now),
+        )
     }
 }
 
@@ -356,6 +583,8 @@ private fun MangaLibrarySnapshot.toOverview(
         .sortedByDescending { (_, progress) -> progress.lastReadDate.orEmpty() }
         .take(8)
     val allNovelProgress = readingProgress.values.filter(MangaProgress::isNovelProgress)
+    val progressByAniListId = progressByAniListId()
+    val favoriteAniListIds = favoriteAniListIds()
 
     return MangaOverviewSnapshot(
         collections = collections,
@@ -369,6 +598,8 @@ private fun MangaLibrarySnapshot.toOverview(
         readChapterCount = readingProgress.values.sumOf { progress -> progress.readChapterNumbers.size },
         novelCount = allNovelProgress.size,
         novelReadChapterCount = allNovelProgress.sumOf { progress -> progress.readChapterNumbers.size },
+        progressByAniListId = progressByAniListId,
+        favoriteAniListIds = favoriteAniListIds,
         importedFromBackup = importedFromBackup,
     )
 }
@@ -376,31 +607,52 @@ private fun MangaLibrarySnapshot.toOverview(
 private val MangaProgress.isNovelProgress: Boolean
     get() = isNovel == true || format.equals("NOVEL", ignoreCase = true) || format.equals("LIGHT_NOVEL", ignoreCase = true)
 
+private fun KanzenModuleRecord.updateUrlOrNull(): String? =
+    moduleUrl
+        ?: moduleData.jsonObjectOrNull()?.string("moduleURL")
+        ?: moduleData.jsonObjectOrNull()?.string("moduleUrl")
+
+private fun KanzenModuleRecord.isDueForAutoUpdate(now: Instant = Instant.now()): Boolean {
+    val lastChecked = moduleData.jsonObjectOrNull()
+        ?.string("androidLastCheckedAt")
+        ?.let { value -> runCatching { Instant.parse(value) }.getOrNull() }
+        ?: return true
+    return lastChecked.plus(ModuleAutoUpdateInterval).isBefore(now)
+}
+
 private fun AniListService.MangaCatalogs?.toCatalogSections(
     savedAniListIds: Set<Int>,
+    progressByAniListId: Map<Int, MangaProgress> = emptyMap(),
+    favoriteAniListIds: Set<Int> = emptySet(),
     label: String,
 ): List<MangaCatalogSectionSnapshot> =
     listOfNotNull(
-        this?.trending?.toCatalogSection("trending", "Trending $label", savedAniListIds),
-        this?.popular?.toCatalogSection("popular", "Popular $label", savedAniListIds),
-        this?.topRated?.toCatalogSection("top-rated", "Top Rated $label", savedAniListIds),
-        this?.recentlyUpdated?.toCatalogSection("updated", "Recently Updated", savedAniListIds),
+        this?.trending?.toCatalogSection("trending", "Trending $label", savedAniListIds, progressByAniListId, favoriteAniListIds),
+        this?.popular?.toCatalogSection("popular", "Popular $label", savedAniListIds, progressByAniListId, favoriteAniListIds),
+        this?.topRated?.toCatalogSection("top-rated", "Top Rated $label", savedAniListIds, progressByAniListId, favoriteAniListIds),
+        this?.recentlyUpdated?.toCatalogSection("updated", "Recently Updated", savedAniListIds, progressByAniListId, favoriteAniListIds),
     ).filter { it.items.isNotEmpty() }
 
 private fun List<AniListMedia>.toCatalogSection(
     id: String,
     title: String,
     savedAniListIds: Set<Int>,
+    progressByAniListId: Map<Int, MangaProgress>,
+    favoriteAniListIds: Set<Int>,
 ): MangaCatalogSectionSnapshot = MangaCatalogSectionSnapshot(
     id = id,
     title = title,
-    items = take(12).toCatalogItems(savedAniListIds),
+    items = take(12).toCatalogItems(savedAniListIds, progressByAniListId, favoriteAniListIds),
 )
 
 private fun List<AniListMedia>.toCatalogItems(
     savedAniListIds: Set<Int>,
+    progressByAniListId: Map<Int, MangaProgress> = emptyMap(),
+    favoriteAniListIds: Set<Int> = emptySet(),
 ): List<MangaCatalogItemSnapshot> =
     map { media ->
+        val progress = progressByAniListId[media.id]
+        val readCount = progress?.readChapterNumbers?.size ?: 0
         MangaCatalogItemSnapshot(
             id = "anilist-manga-${media.id}",
             aniListId = media.id,
@@ -416,6 +668,10 @@ private fun List<AniListMedia>.toCatalogItems(
             format = media.format,
             totalChapters = media.chapters,
             isSaved = media.id in savedAniListIds,
+            isFavorite = media.id in favoriteAniListIds,
+            readChapterCount = readCount,
+            unreadChapterCount = media.chapters?.let { (it - readCount).coerceAtLeast(0) },
+            lastReadChapter = progress?.lastReadChapter,
         )
     }
 
@@ -423,6 +679,161 @@ private fun MangaLibrarySnapshot.savedAniListIds(): Set<Int> =
     collections.flatMap(MangaLibraryCollection::items)
         .map(MangaLibraryItem::aniListId)
         .toSet()
+
+private fun MangaLibrarySnapshot.favoriteAniListIds(): Set<Int> =
+    collections.firstOrNull { collection ->
+        collection.id == FavoritesCollectionId || collection.name.equals(FavoritesCollectionName, ignoreCase = true)
+    }?.items.orEmpty()
+        .map(MangaLibraryItem::aniListId)
+        .toSet()
+
+private fun MangaLibrarySnapshot.progressByAniListId(): Map<Int, MangaProgress> =
+    readingProgress.mapNotNull { (id, progress) ->
+        val aniListId = progress.contentParams?.substringAfter("anilist:", missingDelimiterValue = "")
+            ?.toIntOrNull()
+            ?: id.substringAfter("anilist-manga:", missingDelimiterValue = "").toIntOrNull()
+            ?: id.toIntOrNull()
+        aniListId?.let { it to progress }
+    }.toMap()
+
+private fun MangaLibrarySnapshot.findMangaItem(aniListId: Int): MangaLibraryItem? =
+    collections.asSequence()
+        .flatMap { collection -> collection.items.asSequence() }
+        .firstOrNull { item -> item.aniListId == aniListId }
+
+private fun MangaLibrarySnapshot.writeProgressSnapshot(draft: MangaReadingProgressDraft): MangaLibrarySnapshot {
+    val chapterNumber = draft.chapterNumber.coerceAtLeast(1)
+    val chapters = (1..chapterNumber.coerceAtMost(20_000)).map(Int::toString).toSet()
+    val now = Instant.now().toString()
+    val progress = MangaProgress(
+        readChapterNumbers = chapters,
+        lastReadChapter = chapterNumber.toString(),
+        lastReadDate = now,
+        title = draft.title,
+        coverUrl = draft.coverUrl,
+        format = draft.format,
+        totalChapters = draft.totalChapters,
+        moduleUUID = "anilist",
+        contentParams = "anilist:${draft.aniListId}",
+        isNovel = draft.isNovel,
+    )
+    return copy(readingProgress = readingProgress + (draft.aniListId.mangaProgressId() to progress))
+}
+
+private fun MangaProgress.lastReadChapterNumber(): Int =
+    lastReadChapter?.toIntOrNull()
+        ?: readChapterNumbers.mapNotNull(String::toIntOrNull).maxOrNull()
+        ?: 0
+
+private fun Int.mangaProgressId(): String = "anilist-manga:$this"
+
+private fun AniListMangaLibraryImportDraft.toMangaLibraryItem(): MangaLibraryItem {
+    val updatedAt = updatedAtEpochSeconds?.takeIf { it > 0 }?.let { Instant.ofEpochSecond(it).toString() }
+        ?: Instant.now().toString()
+    return MangaLibraryItem(
+        aniListId = media.id,
+        title = media.displayTitle,
+        coverUrl = media.posterUrl,
+        format = media.format,
+        totalChapters = media.chapters,
+        dateAdded = updatedAt,
+    )
+}
+
+private fun AniListMangaLibraryImportDraft.toReadingProgressEntry(): Pair<String, MangaProgress>? {
+    val readChapter = progress.takeIf { it > 0 } ?: return null
+    val totalChapters = media.chapters
+    val updatedAt = updatedAtEpochSeconds?.takeIf { it > 0 }?.let { Instant.ofEpochSecond(it).toString() }
+        ?: Instant.now().toString()
+    val chapters = (1..readChapter.coerceAtMost(20_000)).map(Int::toString).toSet()
+    val progress = MangaProgress(
+        readChapterNumbers = chapters,
+        lastReadChapter = readChapter.toString(),
+        lastReadDate = updatedAt,
+        title = media.displayTitle,
+        coverUrl = media.posterUrl,
+        format = media.format,
+        totalChapters = totalChapters,
+        moduleUUID = "anilist",
+        contentParams = "anilist:${media.id}",
+        isNovel = media.isNovelMedia,
+    )
+    return media.mangaProgressId to progress
+}
+
+private val AniListMedia.mangaProgressId: String
+    get() = "anilist-manga:$id"
+
+private val AniListMedia.isNovelMedia: Boolean
+    get() = format.equals("NOVEL", ignoreCase = true) ||
+        format.equals("LIGHT_NOVEL", ignoreCase = true)
+
+private val MangaLibraryItem.isNovelItem: Boolean
+    get() = format.equals("NOVEL", ignoreCase = true) ||
+        format.equals("LIGHT_NOVEL", ignoreCase = true)
+
+private fun List<MangaLibraryCollection>.withImportedManga(
+    items: List<MangaLibraryItem>,
+): List<MangaLibraryCollection> {
+    if (items.isEmpty()) return this
+    val importedIds = items.map(MangaLibraryItem::aniListId).toSet()
+    val targetIndex = indexOfFirst { collection ->
+        collection.id == DefaultMangaCollectionId ||
+            collection.name.equals(DefaultMangaCollectionName, ignoreCase = true)
+    }
+    val target = if (targetIndex >= 0) {
+        this[targetIndex].copy(
+            id = this[targetIndex].id.ifBlank { DefaultMangaCollectionId },
+            items = items + this[targetIndex].items.filterNot { existing -> existing.aniListId in importedIds },
+        )
+    } else {
+        MangaLibraryCollection(
+            id = DefaultMangaCollectionId,
+            name = DefaultMangaCollectionName,
+            description = "Imported from AniList on Android",
+            items = items,
+        )
+    }
+
+    return if (targetIndex >= 0) {
+        mapIndexed { index, collection ->
+            if (index == targetIndex) target else collection
+        }
+    } else {
+        listOf(target) + this
+    }
+}
+
+private fun List<MangaLibraryCollection>.withFavoriteManga(
+    item: MangaLibraryItem,
+): List<MangaLibraryCollection> {
+    val existingIndex = indexOfFirst { collection ->
+        collection.id == FavoritesCollectionId ||
+            collection.name.equals(FavoritesCollectionName, ignoreCase = true)
+    }
+    val favoriteCollection = if (existingIndex >= 0) {
+        this[existingIndex].copy(
+            id = FavoritesCollectionId,
+            name = FavoritesCollectionName,
+            items = listOf(item) + this[existingIndex].items.filterNot { existing -> existing.aniListId == item.aniListId },
+        )
+    } else {
+        MangaLibraryCollection(
+            id = FavoritesCollectionId,
+            name = FavoritesCollectionName,
+            description = "Bookmarked on Android",
+            items = listOf(item),
+        )
+    }
+
+    return if (existingIndex >= 0) {
+        mapIndexed { index, collection ->
+            if (index == existingIndex) favoriteCollection else collection
+        }
+    } else {
+        listOf(favoriteCollection) + this
+    }
+}
 
 private fun List<MangaLibraryCollection>.withSavedManga(
     item: MangaLibraryItem,
@@ -496,6 +907,16 @@ private fun JsonElement?.withModuleMetadata(
             "moduleUrl" to JsonPrimitive(moduleUrl),
             "scriptURL" to JsonPrimitive(preservedScriptUrl ?: scriptUrl.orEmpty()),
             "novel" to JsonPrimitive(isNovel),
+        ),
+    )
+}
+
+private fun JsonElement.withAndroidUpdateMetadata(timestamp: String): JsonObject {
+    val current = this as? JsonObject ?: JsonObject(emptyMap())
+    return JsonObject(
+        current + mapOf(
+            "androidLastCheckedAt" to JsonPrimitive(timestamp),
+            "androidLastUpdatedAt" to JsonPrimitive(timestamp),
         ),
     )
 }

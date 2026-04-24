@@ -160,6 +160,12 @@ class SettingsStore(
         }
     }
 
+    suspend fun setKanzenAutoUpdateModules(enabled: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.kanzenAutoUpdateModules] = enabled
+        }
+    }
+
     suspend fun setAutoModeEnabled(enabled: Boolean) {
         context.dataStore.edit { prefs ->
             prefs[Keys.autoModeEnabled] = enabled

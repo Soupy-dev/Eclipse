@@ -120,6 +120,9 @@ fun EclipseAndroidApp() {
             cacheRepository = appContainer.cacheRepository,
             loggerRepository = appContainer.loggerRepository,
             trackerRepository = appContainer.trackerRepository,
+            libraryRepository = appContainer.libraryRepository,
+            mangaRepository = appContainer.mangaRepository,
+            aniListService = appContainer.aniListService,
         )
     }
     val mangaViewModel = rememberFeatureViewModel("manga") {
@@ -366,10 +369,20 @@ fun EclipseAndroidApp() {
                             onReaderLineSpacingChanged = settingsViewModel::setReaderLineSpacing,
                             onReaderMarginChanged = settingsViewModel::setReaderMargin,
                             onReaderAlignmentChanged = settingsViewModel::setReaderTextAlignment,
+                            onKanzenAutoUpdateModulesChanged = settingsViewModel::setKanzenAutoUpdateModules,
                             onTrackerManualConnect = settingsViewModel::saveTrackerAccount,
                             onTrackerSyncEnabledChanged = settingsViewModel::setTrackerSyncEnabled,
                             onTrackerDisconnect = settingsViewModel::disconnectTracker,
                             onTrackerSyncNow = settingsViewModel::syncTrackersNow,
+                            onAniListImportLibrary = {
+                                settingsViewModel.importAniListLibrary(libraryViewModel::refresh)
+                            },
+                            onAniListImportMangaLibrary = {
+                                settingsViewModel.importAniListMangaLibrary {
+                                    mangaViewModel.refresh()
+                                    novelViewModel.refresh()
+                                }
+                            },
                             onExportBackup = settingsViewModel::exportBackup,
                             onImportBackup = settingsViewModel::importBackup,
                             onHighQualityThresholdChanged = settingsViewModel::setHighQualityThreshold,
@@ -385,10 +398,14 @@ fun EclipseAndroidApp() {
                             onSearch = mangaViewModel::search,
                             onSaveItem = mangaViewModel::saveItem,
                             onRemoveItem = mangaViewModel::removeItem,
+                            onReadNext = mangaViewModel::readNextChapter,
+                            onUnreadLast = mangaViewModel::unreadLastChapter,
+                            onToggleFavorite = mangaViewModel::toggleFavorite,
                             onClearProgress = mangaViewModel::clearReadingProgress,
                             onAddModule = mangaViewModel::addModule,
                             onSetModuleActive = mangaViewModel::setModuleActive,
                             onUpdateModule = mangaViewModel::updateModule,
+                            onUpdateAllModules = mangaViewModel::updateAllModules,
                             onRemoveModule = mangaViewModel::removeModule,
                         )
                     }
@@ -400,10 +417,14 @@ fun EclipseAndroidApp() {
                             onSearch = novelViewModel::search,
                             onSaveItem = novelViewModel::saveItem,
                             onRemoveItem = novelViewModel::removeItem,
+                            onReadNext = novelViewModel::readNextChapter,
+                            onUnreadLast = novelViewModel::unreadLastChapter,
+                            onToggleFavorite = novelViewModel::toggleFavorite,
                             onClearProgress = novelViewModel::clearReadingProgress,
                             onAddModule = novelViewModel::addModule,
                             onSetModuleActive = novelViewModel::setModuleActive,
                             onUpdateModule = novelViewModel::updateModule,
+                            onUpdateAllModules = novelViewModel::updateAllModules,
                             onRemoveModule = novelViewModel::removeModule,
                         )
                     }

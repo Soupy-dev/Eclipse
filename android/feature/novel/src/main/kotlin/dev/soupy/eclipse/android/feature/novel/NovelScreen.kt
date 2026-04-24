@@ -66,13 +66,20 @@ data class NovelCatalogItemRow(
     val format: String? = null,
     val totalChapters: Int? = null,
     val isSaved: Boolean = false,
+    val isFavorite: Boolean = false,
+    val readChapterCount: Int = 0,
+    val unreadChapterCount: Int? = null,
+    val lastReadChapter: String? = null,
 )
 
 data class NovelProgressRow(
     val id: String,
+    val aniListId: Int? = null,
     val title: String,
     val subtitle: String,
     val coverUrl: String? = null,
+    val readChapterCount: Int = 0,
+    val unreadChapterCount: Int? = null,
 )
 
 data class NovelModuleRow(
@@ -90,10 +97,14 @@ fun NovelRoute(
     onSearch: () -> Unit,
     onSaveItem: (String) -> Unit,
     onRemoveItem: (Int) -> Unit,
+    onReadNext: (Int) -> Unit,
+    onUnreadLast: (Int) -> Unit,
+    onToggleFavorite: (Int) -> Unit,
     onClearProgress: (String) -> Unit,
     onAddModule: (String) -> Unit,
     onSetModuleActive: (String, Boolean) -> Unit,
     onUpdateModule: (String) -> Unit,
+    onUpdateAllModules: () -> Unit,
     onRemoveModule: (String) -> Unit,
 ) {
     var moduleUrl by rememberSaveable { mutableStateOf("") }
@@ -207,6 +218,13 @@ fun NovelRoute(
                     ) {
                         Text("Save Module")
                     }
+                    OutlinedButton(
+                        onClick = onUpdateAllModules,
+                        enabled = state.modules.isNotEmpty(),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Update All Modules")
+                    }
                 }
             }
         }
@@ -233,6 +251,9 @@ fun NovelRoute(
                     item = item,
                     onSave = { onSaveItem(item.id) },
                     onRemove = { onRemoveItem(item.aniListId) },
+                    onReadNext = { onReadNext(item.aniListId) },
+                    onUnreadLast = { onUnreadLast(item.aniListId) },
+                    onToggleFavorite = { onToggleFavorite(item.aniListId) },
                 )
             }
         }
@@ -249,6 +270,9 @@ fun NovelRoute(
                     item = item,
                     onSave = { onSaveItem(item.id) },
                     onRemove = { onRemoveItem(item.aniListId) },
+                    onReadNext = { onReadNext(item.aniListId) },
+                    onUnreadLast = { onUnreadLast(item.aniListId) },
+                    onToggleFavorite = { onToggleFavorite(item.aniListId) },
                 )
             }
         }
@@ -266,6 +290,9 @@ fun NovelRoute(
                                 item = item,
                                 onSave = { onSaveItem(item.id) },
                                 onRemove = { onRemoveItem(item.aniListId) },
+                                onReadNext = { onReadNext(item.aniListId) },
+                                onUnreadLast = { onUnreadLast(item.aniListId) },
+                                onToggleFavorite = { onToggleFavorite(item.aniListId) },
                                 modifier = Modifier.width(170.dp),
                             )
                         }
@@ -284,6 +311,8 @@ fun NovelRoute(
             items(state.recent, key = { it.id }) { row ->
                 NovelProgressCard(
                     row = row,
+                    onReadNext = { row.aniListId?.let(onReadNext) },
+                    onUnreadLast = { row.aniListId?.let(onUnreadLast) },
                     onClearProgress = { onClearProgress(row.id) },
                 )
             }
@@ -335,6 +364,9 @@ private fun NovelCatalogCard(
     item: NovelCatalogItemRow,
     onSave: () -> Unit,
     onRemove: () -> Unit,
+    onReadNext: () -> Unit,
+    onUnreadLast: () -> Unit,
+    onToggleFavorite: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     GlassPanel(modifier = modifier) {
@@ -362,6 +394,7 @@ private fun NovelCatalogCard(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            ProgressSummary(item)
             item.description?.takeIf { it.isNotBlank() }?.let {
                 Text(
                     text = it,
@@ -377,6 +410,25 @@ private fun NovelCatalogCard(
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("Remove")
+                }
+                Button(
+                    onClick = onReadNext,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Read Next")
+                }
+                OutlinedButton(
+                    onClick = onUnreadLast,
+                    enabled = item.readChapterCount > 0,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Unread Last")
+                }
+                OutlinedButton(
+                    onClick = onToggleFavorite,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(if (item.isFavorite) "Unfavorite" else "Favorite")
                 }
             } else {
                 Button(
@@ -395,6 +447,9 @@ private fun NovelItemCard(
     item: NovelCatalogItemRow,
     onSave: () -> Unit,
     onRemove: () -> Unit,
+    onReadNext: () -> Unit,
+    onUnreadLast: () -> Unit,
+    onToggleFavorite: () -> Unit,
 ) {
     GlassPanel {
         Row(
@@ -426,6 +481,7 @@ private fun NovelItemCard(
                         color = MaterialTheme.colorScheme.tertiary,
                     )
                 }
+                ProgressSummary(item)
                 item.description?.takeIf { it.isNotBlank() }?.let {
                     Text(
                         text = it,
@@ -436,8 +492,24 @@ private fun NovelItemCard(
                     )
                 }
                 if (item.isSaved) {
-                    OutlinedButton(onClick = onRemove) {
-                        Text("Remove from Library")
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(onClick = onReadNext) {
+                            Text("Read Next")
+                        }
+                        OutlinedButton(
+                            onClick = onUnreadLast,
+                            enabled = item.readChapterCount > 0,
+                        ) {
+                            Text("Unread Last")
+                        }
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        OutlinedButton(onClick = onToggleFavorite) {
+                            Text(if (item.isFavorite) "Unfavorite" else "Favorite")
+                        }
+                        OutlinedButton(onClick = onRemove) {
+                            Text("Remove")
+                        }
                     }
                 } else {
                     Button(onClick = onSave) {
@@ -446,6 +518,26 @@ private fun NovelItemCard(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ProgressSummary(item: NovelCatalogItemRow) {
+    val progress = listOfNotNull(
+        item.lastReadChapter?.let { "Chapter $it" },
+        item.totalChapters?.takeIf { it > 0 }?.let { "${item.readChapterCount}/$it read" }
+            ?: item.readChapterCount.takeIf { it > 0 }?.let { "$it read" },
+        item.unreadChapterCount?.takeIf { it > 0 }?.let { "$it unread" },
+        if (item.isFavorite) "Favorite" else null,
+    ).joinToString(" - ")
+    if (progress.isNotBlank()) {
+        Text(
+            text = progress,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
@@ -474,6 +566,8 @@ private fun StatPanel(
 @Composable
 private fun NovelProgressCard(
     row: NovelProgressRow,
+    onReadNext: () -> Unit,
+    onUnreadLast: () -> Unit,
     onClearProgress: () -> Unit,
 ) {
     GlassPanel {
@@ -507,10 +601,35 @@ private fun NovelProgressCard(
                             color = MaterialTheme.colorScheme.tertiary,
                         )
                     }
+                    val progress = listOfNotNull(
+                        row.readChapterCount.takeIf { it > 0 }?.let { "$it read" },
+                        row.unreadChapterCount?.takeIf { it > 0 }?.let { "$it unread" },
+                    ).joinToString(" - ")
+                    if (progress.isNotBlank()) {
+                        Text(
+                            text = progress,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
                 }
             }
-            OutlinedButton(onClick = onClearProgress) {
-                Text("Reset Progress")
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Button(
+                    onClick = onReadNext,
+                    enabled = row.aniListId != null,
+                ) {
+                    Text("Read Next")
+                }
+                OutlinedButton(
+                    onClick = onUnreadLast,
+                    enabled = row.aniListId != null && row.readChapterCount > 0,
+                ) {
+                    Text("Unread Last")
+                }
+                OutlinedButton(onClick = onClearProgress) {
+                    Text("Reset")
+                }
             }
         }
     }

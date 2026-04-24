@@ -3,6 +3,7 @@ package dev.soupy.eclipse.android.ui.novel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.soupy.eclipse.android.core.model.MangaLibraryItem
+import dev.soupy.eclipse.android.core.model.MangaProgress
 import dev.soupy.eclipse.android.data.KanzenModuleDraft
 import dev.soupy.eclipse.android.data.MangaCatalogItemSnapshot
 import dev.soupy.eclipse.android.data.MangaLibraryItemDraft
@@ -114,6 +115,48 @@ class AndroidNovelViewModel(
         }
     }
 
+    fun readNextChapter(aniListId: Int) {
+        viewModelScope.launch {
+            repository.markNextChapterRead(aniListId)
+                .onSuccess {
+                    reloadAfterModuleMutation("Marked the next novel chapter as read.")
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(errorMessage = error.message ?: "Could not update novel progress.")
+                    }
+                }
+        }
+    }
+
+    fun unreadLastChapter(aniListId: Int) {
+        viewModelScope.launch {
+            repository.markPreviousChapterUnread(aniListId)
+                .onSuccess {
+                    reloadAfterModuleMutation("Marked the latest novel chapter unread.")
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(errorMessage = error.message ?: "Could not update novel progress.")
+                    }
+                }
+        }
+    }
+
+    fun toggleFavorite(aniListId: Int) {
+        viewModelScope.launch {
+            repository.toggleFavorite(aniListId)
+                .onSuccess {
+                    reloadAfterModuleMutation("Updated novel favorites.")
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(errorMessage = error.message ?: "Could not update favorite novel.")
+                    }
+                }
+        }
+    }
+
     fun clearReadingProgress(progressId: String) {
         viewModelScope.launch {
             repository.clearReadingProgress(progressId)
@@ -190,6 +233,20 @@ class AndroidNovelViewModel(
         }
     }
 
+    fun updateAllModules() {
+        viewModelScope.launch {
+            repository.updateModules(isNovel = true)
+                .onSuccess { summary ->
+                    reloadAfterModuleMutation(summary.toNotice("Kanzen novel modules"))
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(errorMessage = error.message ?: "Could not update Kanzen novel modules.")
+                    }
+                }
+        }
+    }
+
     private suspend fun reloadAfterLibraryMutation(
         notice: String,
         aniListId: Int,
@@ -241,6 +298,8 @@ class AndroidNovelViewModel(
                 row.copy(isSaved = row.aniListId in savedNovelIds)
             },
             savedItems = savedNovelItems.map { item ->
+                val progress = snapshot.progressByAniListId[item.aniListId]
+                val readCount = progress?.readChapterNumbers?.size ?: 0
                 NovelCatalogItemRow(
                     id = "saved-novel-${item.aniListId}",
                     aniListId = item.aniListId,
@@ -254,6 +313,10 @@ class AndroidNovelViewModel(
                     format = item.format,
                     totalChapters = item.totalChapters,
                     isSaved = true,
+                    isFavorite = item.aniListId in snapshot.favoriteAniListIds,
+                    readChapterCount = readCount,
+                    unreadChapterCount = item.totalChapters?.let { (it - readCount).coerceAtLeast(0) },
+                    lastReadChapter = progress?.lastReadChapter,
                 )
             },
             catalogs = snapshot.catalogs.map { section ->
@@ -264,14 +327,19 @@ class AndroidNovelViewModel(
                 )
             },
             recent = snapshot.recentNovelProgress.map { (id, progress) ->
+                val aniListId = progress.aniListIdFromProgressId(id)
+                val readCount = progress.readChapterNumbers.size
                 NovelProgressRow(
                     id = id,
+                    aniListId = aniListId,
                     title = progress.title ?: "Novel $id",
                     subtitle = listOfNotNull(
                         progress.lastReadChapter?.let { "Chapter $it" },
                         progress.format,
                     ).joinToString(" - "),
                     coverUrl = progress.coverUrl,
+                    readChapterCount = readCount,
+                    unreadChapterCount = progress.totalChapters?.let { (it - readCount).coerceAtLeast(0) },
                 )
             },
             modules = snapshot.modules
@@ -301,6 +369,10 @@ private fun MangaCatalogItemSnapshot.toRow(): NovelCatalogItemRow = NovelCatalog
     format = format,
     totalChapters = totalChapters,
     isSaved = isSaved,
+    isFavorite = isFavorite,
+    readChapterCount = readChapterCount,
+    unreadChapterCount = unreadChapterCount,
+    lastReadChapter = lastReadChapter,
 )
 
 private fun NovelCatalogItemRow.toDraft(): MangaLibraryItemDraft = MangaLibraryItemDraft(
@@ -310,6 +382,11 @@ private fun NovelCatalogItemRow.toDraft(): MangaLibraryItemDraft = MangaLibraryI
     format = format ?: "NOVEL",
     totalChapters = totalChapters,
 )
+
+private fun MangaProgress.aniListIdFromProgressId(id: String): Int? =
+    contentParams?.substringAfter("anilist:", missingDelimiterValue = "")?.toIntOrNull()
+        ?: id.substringAfter("anilist-manga:", missingDelimiterValue = "").toIntOrNull()
+        ?: id.toIntOrNull()
 
 private fun NovelScreenState.findCatalogItem(itemId: String): NovelCatalogItemRow? =
     searchResults.firstOrNull { it.id == itemId }
@@ -336,3 +413,10 @@ private fun NovelScreenState.withSavedFlag(
 private val MangaLibraryItem.isNovelItem: Boolean
     get() = format.equals("NOVEL", ignoreCase = true) ||
         format.equals("LIGHT_NOVEL", ignoreCase = true)
+
+private fun dev.soupy.eclipse.android.data.KanzenModuleUpdateSummary.toNotice(label: String): String =
+    if (checkedModules == 0) {
+        "No $label had update URLs ready."
+    } else {
+        "Updated $updatedModules of $checkedModules $label${if (failedModules > 0) "; $failedModules failed validation or fetch." else "."}"
+    }

@@ -65,6 +65,7 @@ data class SettingsScreenState(
     val readerLineSpacing: Double = 1.6,
     val readerMargin: Double = 4.0,
     val readerTextAlignment: String = "left",
+    val kanzenAutoUpdateModules: Boolean = true,
     val isBackupBusy: Boolean = false,
     val hasLocalBackup: Boolean = false,
     val backupStatusHeadline: String = "No local backup yet",
@@ -145,10 +146,13 @@ fun SettingsRoute(
     onReaderLineSpacingChanged: (Double) -> Unit,
     onReaderMarginChanged: (Double) -> Unit,
     onReaderAlignmentChanged: (String) -> Unit,
+    onKanzenAutoUpdateModulesChanged: (Boolean) -> Unit,
     onTrackerManualConnect: (String, String, String) -> Unit,
     onTrackerSyncEnabledChanged: (Boolean) -> Unit,
     onTrackerDisconnect: (String) -> Unit,
     onTrackerSyncNow: () -> Unit,
+    onAniListImportLibrary: () -> Unit,
+    onAniListImportMangaLibrary: () -> Unit,
     onExportBackup: (Uri) -> Unit,
     onImportBackup: (Uri) -> Unit,
     onHighQualityThresholdChanged: (Double) -> Unit,
@@ -400,6 +404,7 @@ fun SettingsRoute(
                 onReaderLineSpacingChanged = onReaderLineSpacingChanged,
                 onReaderMarginChanged = onReaderMarginChanged,
                 onReaderAlignmentChanged = onReaderAlignmentChanged,
+                onKanzenAutoUpdateModulesChanged = onKanzenAutoUpdateModulesChanged,
             )
         }
 
@@ -426,6 +431,8 @@ fun SettingsRoute(
                 onSyncEnabledChanged = onTrackerSyncEnabledChanged,
                 onDisconnect = onTrackerDisconnect,
                 onSyncNow = onTrackerSyncNow,
+                onAniListImportLibrary = onAniListImportLibrary,
+                onAniListImportMangaLibrary = onAniListImportMangaLibrary,
             )
         }
 
@@ -669,6 +676,7 @@ private fun ReaderSettingsCard(
     onReaderLineSpacingChanged: (Double) -> Unit,
     onReaderMarginChanged: (Double) -> Unit,
     onReaderAlignmentChanged: (String) -> Unit,
+    onKanzenAutoUpdateModulesChanged: (Boolean) -> Unit,
 ) {
     GlassPanel {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -711,6 +719,11 @@ private fun ReaderSettingsCard(
                 selected = state.readerTextAlignment,
                 onSelected = onReaderAlignmentChanged,
             )
+            SettingInlineToggle(
+                title = "Auto-Update Kanzen Modules",
+                checked = state.kanzenAutoUpdateModules,
+                onCheckedChange = onKanzenAutoUpdateModulesChanged,
+            )
         }
     }
 }
@@ -728,7 +741,12 @@ private fun TrackerSettingsCard(
     onSyncEnabledChanged: (Boolean) -> Unit,
     onDisconnect: (String) -> Unit,
     onSyncNow: () -> Unit,
+    onAniListImportLibrary: () -> Unit,
+    onAniListImportMangaLibrary: () -> Unit,
 ) {
+    val hasAniListAccount = state.trackerRows.any { row ->
+        row.isConnected && row.service.equals("AniList", ignoreCase = true)
+    }
     GlassPanel {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(
@@ -790,6 +808,20 @@ private fun TrackerSettingsCard(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("Sync Now")
+            }
+            OutlinedButton(
+                onClick = onAniListImportLibrary,
+                enabled = hasAniListAccount,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Import AniList Anime Library")
+            }
+            OutlinedButton(
+                onClick = onAniListImportMangaLibrary,
+                enabled = hasAniListAccount,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Import AniList Manga Library")
             }
 
             state.trackerRows.forEach { row ->

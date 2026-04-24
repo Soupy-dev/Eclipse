@@ -46,8 +46,10 @@ The Android namespace now uses `dev.soupy.eclipse.android` rather than the earli
 - Torrent-style Stremio results, download URIs, and player sources are rejected before playback/download; direct HTTP(S) media streams remain the only accepted Stremio stream shape
 - Offline downloads can capture resolved direct HTTP streams, keep separate episode-specific queue entries, package basic HLS playlists with AES-128 keys, download subtitle files, persist local file metadata, clean up completed/title/all queue files plus orphaned app-private files, and play completed local files through the Android player surface
 - Settings can display restored AniList/Trakt tracker state, save manual token/PIN fallback accounts, toggle tracker sync, run manual watched-progress sync, disconnect accounts, and export that state through the Luna backup shape
-- Backup-backed manga and novel overview surfaces for restored Kanzen library/progress/module data, plus live AniList manga/novel browse/search, Android library save/remove actions, resettable reading progress, and Kanzen module URL add/update/toggle/remove controls on the Manga and Novel tabs
-- Kanzen module adds and updates now fetch Luna-compatible manifests, resolve and validate `scriptURL`, preserve real source metadata, and keep the edited module list in the iOS-compatible backup path
+- Connected/manual AniList tracker accounts can import the user's AniList anime library into Android Library, including resume entries when AniList episode progress can be converted into a percentage
+- Connected/manual AniList tracker accounts can also import the user's AniList manga library into Android Manga/Novel storage, including chapter progress entries and novel-format items
+- Backup-backed manga and novel overview surfaces for restored Kanzen library/progress/module data, plus live AniList manga/novel browse/search, Android library save/remove actions, chapter read/unread controls, unread counts, favorite/bookmark collection support, resettable reading progress, and Kanzen module URL add/update/toggle/remove controls on the Manga and Novel tabs
+- Kanzen module adds and updates now fetch Luna-compatible manifests, resolve and validate `scriptURL`, preserve real source metadata, support manual update-all actions, run backed due auto-update checks, and keep the edited module list in the iOS-compatible backup path
 
 ## Version choices
 

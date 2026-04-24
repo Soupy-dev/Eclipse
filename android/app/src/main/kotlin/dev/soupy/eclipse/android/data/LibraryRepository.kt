@@ -4,6 +4,9 @@ import dev.soupy.eclipse.android.core.model.ContinueWatchingRecord
 import dev.soupy.eclipse.android.core.model.DetailTarget
 import dev.soupy.eclipse.android.core.model.LibraryItemRecord
 import dev.soupy.eclipse.android.core.model.LibrarySnapshot
+import dev.soupy.eclipse.android.core.model.AniListMedia
+import dev.soupy.eclipse.android.core.model.displayTitle
+import dev.soupy.eclipse.android.core.model.posterUrl
 import dev.soupy.eclipse.android.core.storage.LibraryStore
 
 data class LibraryItemDraft(
@@ -24,6 +27,20 @@ data class ContinueWatchingDraft(
     val backdropUrl: String? = null,
     val progressPercent: Float = 0f,
     val progressLabel: String? = null,
+)
+
+data class AniListLibraryImportDraft(
+    val media: AniListMedia,
+    val status: String? = null,
+    val progress: Int = 0,
+    val score: Double = 0.0,
+    val updatedAtEpochSeconds: Long? = null,
+)
+
+data class LibraryImportSummary(
+    val snapshot: LibrarySnapshot,
+    val importedItems: Int,
+    val importedContinueWatching: Int,
 )
 
 class LibraryRepository(
@@ -49,6 +66,33 @@ class LibraryRepository(
 
     suspend fun recordContinueWatching(draft: ContinueWatchingDraft): Result<LibrarySnapshot> =
         syncContinueWatching(draft)
+
+    suspend fun importAniListAnime(drafts: List<AniListLibraryImportDraft>): Result<LibraryImportSummary> = runCatching {
+        val snapshot = libraryStore.read()
+        val uniqueDrafts = drafts
+            .filter { it.media.id > 0 }
+            .distinctBy { it.media.id }
+        val importedSaved = uniqueDrafts.map { draft ->
+            draft.toLibraryRecord(id = DetailTarget.AniListMediaTarget(draft.media.id).storageKey())
+        }
+        val importedContinueWatching = uniqueDrafts.mapNotNull(AniListLibraryImportDraft::toContinueWatchingRecord)
+        val importedSavedIds = importedSaved.map(LibraryItemRecord::id).toSet()
+        val importedContinueWatchingIds = importedContinueWatching.map(ContinueWatchingRecord::id).toSet()
+
+        val updated = writeSnapshot(
+            snapshot.copy(
+                savedItems = importedSaved + snapshot.savedItems.filterNot { it.id in importedSavedIds },
+                continueWatching = importedContinueWatching +
+                    snapshot.continueWatching.filterNot { it.id in importedContinueWatchingIds },
+            ),
+        )
+
+        LibraryImportSummary(
+            snapshot = updated,
+            importedItems = importedSaved.size,
+            importedContinueWatching = importedContinueWatching.size,
+        )
+    }
 
     suspend fun syncContinueWatching(draft: ContinueWatchingDraft): Result<LibrarySnapshot> = runCatching {
         val snapshot = libraryStore.read()
@@ -131,6 +175,54 @@ private fun ContinueWatchingDraft.toRecord(id: String): ContinueWatchingRecord =
     progressPercent = progressPercent.coerceIn(0f, 1f),
     progressLabel = progressLabel,
 )
+
+private fun AniListLibraryImportDraft.toLibraryRecord(id: String): LibraryItemRecord {
+    val updatedAtMillis = updatedAtEpochSeconds?.takeIf { it > 0 }?.let { it * 1_000L } ?: System.currentTimeMillis()
+    return LibraryItemRecord(
+        id = id,
+        detailTarget = DetailTarget.AniListMediaTarget(media.id),
+        title = media.displayTitle,
+        subtitle = importSubtitle(),
+        overview = media.description,
+        imageUrl = media.posterUrl,
+        backdropUrl = media.bannerImage,
+        mediaLabel = listOfNotNull("AniList", status.toDisplayStatus()).joinToString(" - "),
+        addedAt = updatedAtMillis,
+        updatedAt = updatedAtMillis,
+    )
+}
+
+private fun AniListLibraryImportDraft.toContinueWatchingRecord(): ContinueWatchingRecord? {
+    val episodeCount = media.episodes?.takeIf { it > 0 } ?: return null
+    if (progress <= 0 || progress >= episodeCount) return null
+    val updatedAtMillis = updatedAtEpochSeconds?.takeIf { it > 0 }?.let { it * 1_000L } ?: System.currentTimeMillis()
+    return ContinueWatchingRecord(
+        id = DetailTarget.AniListMediaTarget(media.id).storageKey(),
+        detailTarget = DetailTarget.AniListMediaTarget(media.id),
+        title = media.displayTitle,
+        subtitle = "Episode ${progress + 1}",
+        imageUrl = media.posterUrl,
+        backdropUrl = media.bannerImage,
+        progressPercent = (progress.toFloat() / episodeCount.toFloat()).coerceIn(0f, 0.96f),
+        progressLabel = "AniList progress $progress/$episodeCount",
+        updatedAt = updatedAtMillis,
+    )
+}
+
+private fun AniListLibraryImportDraft.importSubtitle(): String? =
+    listOfNotNull(
+        status.toDisplayStatus(),
+        media.format?.replace('_', ' '),
+        media.episodes?.takeIf { it > 0 }?.let { episodes -> "$episodes episodes" },
+        progress.takeIf { it > 0 }?.let { "Progress $it" },
+    ).joinToString(" - ").takeIf { it.isNotBlank() }
+
+private fun String?.toDisplayStatus(): String? =
+    this?.trim()
+        ?.takeIf(String::isNotBlank)
+        ?.lowercase()
+        ?.split('_', ' ')
+        ?.joinToString(" ") { token -> token.replaceFirstChar { it.uppercase() } }
 
 private fun DetailTarget.storageKey(): String = when (this) {
     is DetailTarget.AniListMediaTarget -> "anilist:$id"
