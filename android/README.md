@@ -58,10 +58,10 @@ The Android dependency versions in `gradle/libs.versions.toml` were chosen from 
 
 ## Current limitations
 
-- The full feature set from the Apple app is not finished yet. Android is now roughly 80% of the way to iOS parity: it has a real shell, persistence, catalog controls, backup flow, richer detail/progress actions, first-pass Stremio resolution, and working manga/novel module detail and reader flows, but it is still short of full parity.
+- The full feature set from the Apple app is not finished yet. Android is now roughly 85% of the way to iOS parity: it has a real shell, persistence, catalog controls, backup flow, richer detail/progress actions, first-pass Stremio resolution, working manga/novel module detail and reader flows, and backed reader settings applied to Android reader rendering, but it is still short of full parity.
 - Anime-specific source resolution now has a relation-aware AniList-to-TMDB bridge with season metadata, but it still does not yet reconstruct full sequel graphs, orphaned seasons, or AniMap specials to the same depth as the Apple app.
 - Torrent-style Stremio results are intentionally rejected to match the iOS safety guardrails. Android does not accept magnet/infoHash streams or torrent handoff.
-- OAuth tracker login, polished full-reader behavior for Kanzen content, and native VLC/mpv backends are still earlier-stage compared with the Apple app. Android now has first-pass Kanzen module search/chapter/content extraction, native reader-progress shells for manga/novels, Media3 owns the parity-backed playback implementation for direct streams, and manual tracker sync now covers watched local progress for connected AniList/Trakt accounts.
+- OAuth tracker login, advanced reader overlays/preloading/caching, and native VLC/mpv backends are still earlier-stage compared with the Apple app. Android now has first-pass Kanzen module search/chapter/content extraction, native reader-progress shells for manga/novels with backed mode/font/spacing/margin/alignment settings, Media3 owns the parity-backed playback implementation for direct streams, and manual tracker sync now covers watched local progress for connected AniList/Trakt accounts.
 
 ## Running on Windows
 
@@ -85,5 +85,5 @@ The debug APK will land under `android/app/build/outputs/apk/debug/`.
 1. Continue hardening the anime-specific AniList/TMDB hybrid flow with full sequel/orphan season reconstruction and AniMap special/OVA mapping.
 2. Broaden Stremio support only for safe direct URL streams, subtitles, headers, and addon configuration while continuing to reject torrents.
 3. Expand tracker OAuth, AniList import, and manga progress sync on top of the new watched-progress sync path.
-4. Continue expanding Kanzen reader parity with richer HTML/image rendering, chapter preloading/caching, reader overlays, and reader settings.
+4. Continue expanding Kanzen reader parity with richer HTML/image rendering, chapter preloading/caching, reader overlays, and offline reader cache behavior.
 5. Keep hardening downloads with true background pause/resume behavior, richer transfer progress, and more offline playback edge cases.

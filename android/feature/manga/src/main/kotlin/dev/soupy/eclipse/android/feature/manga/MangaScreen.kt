@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -56,6 +58,7 @@ data class MangaScreenState(
     val selectedDetail: MangaCatalogItemRow? = null,
     val isDetailLoading: Boolean = false,
     val detailError: String? = null,
+    val readerSettings: MangaReaderSettingsRow = MangaReaderSettingsRow(),
     val reader: MangaReaderPanelRow? = null,
 )
 
@@ -140,6 +143,14 @@ data class MangaReaderChapterRow(
     val sourceName: String? = null,
     val isRead: Boolean,
     val isCurrent: Boolean,
+)
+
+data class MangaReaderSettingsRow(
+    val readingMode: Int = 2,
+    val readerFontSize: Double = 16.0,
+    val readerLineSpacing: Double = 1.6,
+    val readerMargin: Double = 4.0,
+    val readerTextAlignment: String = "left",
 )
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -260,6 +271,7 @@ fun MangaRoute(
             item {
                 MangaReaderPanel(
                     reader = reader,
+                    readerSettings = state.readerSettings,
                     onClose = onCloseReader,
                     onReadChapter = { chapter -> onReadChapter(reader.aniListId, chapter) },
                     onReadNext = { onReadNext(reader.aniListId) },
@@ -990,6 +1002,7 @@ private fun MangaProgressCard(
 @Composable
 private fun MangaReaderPanel(
     reader: MangaReaderPanelRow,
+    readerSettings: MangaReaderSettingsRow,
     onClose: () -> Unit,
     onReadChapter: (Int) -> Unit,
     onReadNext: () -> Unit,
@@ -1002,6 +1015,10 @@ private fun MangaReaderPanel(
     val targetChapter = chapterInput.toIntOrNull()
         ?.coerceAtLeast(1)
         ?.let { chapter -> reader.totalChapters?.let { chapter.coerceAtMost(it) } ?: chapter }
+    var pageIndex by rememberSaveable(reader.aniListId, reader.currentChapter, reader.pageImageUrls.size) {
+        mutableStateOf(0)
+    }
+    val safePageIndex = pageIndex.coerceIn(0, (reader.pageImageUrls.size - 1).coerceAtLeast(0))
 
     GlassPanel {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -1040,7 +1057,7 @@ private fun MangaReaderPanel(
                         color = MaterialTheme.colorScheme.tertiary,
                     )
                     Text(
-                        text = "Current chapter ${reader.currentChapter}",
+                        text = "Current chapter ${reader.currentChapter} - ${readerSettings.modeLabel()}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.primary,
                     )
@@ -1133,13 +1150,55 @@ private fun MangaReaderPanel(
                 )
             }
             if (reader.pageImageUrls.isNotEmpty()) {
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    reader.pageImageUrls.forEachIndexed { index, imageUrl ->
+                if (readerSettings.usesPagedImages()) {
+                    Column(
+                        modifier = Modifier.padding(horizontal = readerSettings.horizontalPadding()),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
                         ContentImage(
-                            imageUrl = imageUrl,
-                            contentDescription = "${reader.title} page ${index + 1}",
-                            modifier = Modifier.fillMaxWidth(),
+                            imageUrl = reader.pageImageUrls[safePageIndex],
+                            contentDescription = "${reader.title} page ${safePageIndex + 1}",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 360.dp),
                         )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            OutlinedButton(
+                                onClick = { pageIndex = (safePageIndex - 1).coerceAtLeast(0) },
+                                enabled = safePageIndex > 0,
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text("Previous Page")
+                            }
+                            Button(
+                                onClick = { pageIndex = (safePageIndex + 1).coerceAtMost(reader.pageImageUrls.lastIndex) },
+                                enabled = safePageIndex < reader.pageImageUrls.lastIndex,
+                                modifier = Modifier.weight(1f),
+                            ) {
+                                Text("Next Page")
+                            }
+                        }
+                        Text(
+                            text = "Page ${safePageIndex + 1}/${reader.pageImageUrls.size}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.tertiary,
+                        )
+                    }
+                } else {
+                    Column(
+                        modifier = Modifier.padding(horizontal = readerSettings.horizontalPadding()),
+                        verticalArrangement = Arrangement.spacedBy(readerSettings.imageSpacing()),
+                    ) {
+                        reader.pageImageUrls.forEachIndexed { index, imageUrl ->
+                            ContentImage(
+                                imageUrl = imageUrl,
+                                contentDescription = "${reader.title} page ${index + 1}",
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
                     }
                 }
             }
@@ -1151,6 +1210,22 @@ private fun MangaReaderChapterRow.buttonLabel(): String =
     title?.takeIf { it.isNotBlank() }?.let { value ->
         if (value.length <= 12) value else "Ch $number"
     } ?: "Ch $number"
+
+private fun MangaReaderSettingsRow.modeLabel(): String =
+    when (readingMode) {
+        0 -> "Paged"
+        1 -> "Webtoon"
+        else -> "Auto"
+    }
+
+private fun MangaReaderSettingsRow.usesPagedImages(): Boolean =
+    readingMode == 0
+
+private fun MangaReaderSettingsRow.horizontalPadding() =
+    readerMargin.coerceIn(0.0, 12.0).dp
+
+private fun MangaReaderSettingsRow.imageSpacing() =
+    if (readingMode == 1) 4.dp else 12.dp
 
 @Composable
 private fun MangaCollectionCard(

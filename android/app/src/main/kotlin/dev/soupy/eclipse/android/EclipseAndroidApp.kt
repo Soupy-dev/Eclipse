@@ -41,7 +41,9 @@ import dev.soupy.eclipse.android.feature.downloads.DownloadsRoute
 import dev.soupy.eclipse.android.feature.home.HomeRoute
 import dev.soupy.eclipse.android.feature.library.LibraryRoute
 import dev.soupy.eclipse.android.feature.manga.MangaRoute
+import dev.soupy.eclipse.android.feature.manga.MangaReaderSettingsRow
 import dev.soupy.eclipse.android.feature.novel.NovelRoute
+import dev.soupy.eclipse.android.feature.novel.NovelReaderSettingsRow
 import dev.soupy.eclipse.android.feature.schedule.ScheduleRoute
 import dev.soupy.eclipse.android.feature.search.SearchRoute
 import dev.soupy.eclipse.android.feature.services.ServicesRoute
@@ -159,6 +161,20 @@ fun EclipseAndroidApp() {
         skip85sEnabled = settingsState.skip85sEnabled,
         showNextEpisodeButton = settingsState.showNextEpisodeButton,
         nextEpisodeThreshold = settingsState.nextEpisodeThreshold,
+    )
+    val mangaReaderSettings = MangaReaderSettingsRow(
+        readingMode = settingsState.readingMode,
+        readerFontSize = settingsState.readerFontSize,
+        readerLineSpacing = settingsState.readerLineSpacing,
+        readerMargin = settingsState.readerMargin,
+        readerTextAlignment = settingsState.readerTextAlignment,
+    )
+    val novelReaderSettings = NovelReaderSettingsRow(
+        readingMode = settingsState.readingMode,
+        readerFontSize = settingsState.readerFontSize,
+        readerLineSpacing = settingsState.readerLineSpacing,
+        readerMargin = settingsState.readerMargin,
+        readerTextAlignment = settingsState.readerTextAlignment,
     )
 
     var selectedDetailTarget by remember { mutableStateOf<DetailTarget?>(null) }
@@ -394,7 +410,7 @@ fun EclipseAndroidApp() {
                     }
                     composable("manga") {
                         MangaRoute(
-                            state = mangaState,
+                            state = mangaState.copy(readerSettings = mangaReaderSettings),
                             onRefresh = mangaViewModel::refresh,
                             onQueryChange = mangaViewModel::updateQuery,
                             onSearch = mangaViewModel::search,
@@ -423,7 +439,7 @@ fun EclipseAndroidApp() {
                     }
                     composable("novel") {
                         NovelRoute(
-                            state = novelState,
+                            state = novelState.copy(readerSettings = novelReaderSettings),
                             onRefresh = novelViewModel::refresh,
                             onQueryChange = novelViewModel::updateQuery,
                             onSearch = novelViewModel::search,

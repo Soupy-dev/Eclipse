@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
@@ -29,8 +30,10 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.soupy.eclipse.android.core.design.GlassPanel
 import dev.soupy.eclipse.android.core.design.HeroBackdrop
 import dev.soupy.eclipse.android.core.design.PosterImage
@@ -53,6 +56,7 @@ data class NovelScreenState(
     val selectedDetail: NovelCatalogItemRow? = null,
     val isDetailLoading: Boolean = false,
     val detailError: String? = null,
+    val readerSettings: NovelReaderSettingsRow = NovelReaderSettingsRow(),
     val reader: NovelReaderPanelRow? = null,
 )
 
@@ -129,6 +133,14 @@ data class NovelReaderChapterRow(
     val sourceName: String? = null,
     val isRead: Boolean,
     val isCurrent: Boolean,
+)
+
+data class NovelReaderSettingsRow(
+    val readingMode: Int = 2,
+    val readerFontSize: Double = 16.0,
+    val readerLineSpacing: Double = 1.6,
+    val readerMargin: Double = 4.0,
+    val readerTextAlignment: String = "left",
 )
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -236,6 +248,7 @@ fun NovelRoute(
             item {
                 NovelReaderPanel(
                     reader = reader,
+                    readerSettings = state.readerSettings,
                     onClose = onCloseReader,
                     onReadChapter = { chapter -> onReadChapter(reader.aniListId, chapter) },
                     onReadNext = { onReadNext(reader.aniListId) },
@@ -866,6 +879,7 @@ private fun NovelProgressCard(
 @Composable
 private fun NovelReaderPanel(
     reader: NovelReaderPanelRow,
+    readerSettings: NovelReaderSettingsRow,
     onClose: () -> Unit,
     onReadChapter: (Int) -> Unit,
     onReadNext: () -> Unit,
@@ -878,6 +892,12 @@ private fun NovelReaderPanel(
     val targetChapter = chapterInput.toIntOrNull()
         ?.coerceAtLeast(1)
         ?.let { chapter -> reader.totalChapters?.let { chapter.coerceAtMost(it) } ?: chapter }
+    val readerTextStyle = MaterialTheme.typography.bodyLarge.copy(
+        fontSize = readerSettings.readerFontSize.coerceIn(12.0, 32.0).sp,
+        lineHeight = (readerSettings.readerFontSize.coerceIn(12.0, 32.0) *
+            readerSettings.readerLineSpacing.coerceIn(1.0, 2.4)).sp,
+        textAlign = readerSettings.textAlign(),
+    )
 
     GlassPanel {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -916,7 +936,7 @@ private fun NovelReaderPanel(
                         color = MaterialTheme.colorScheme.tertiary,
                     )
                     Text(
-                        text = "Current chapter ${reader.currentChapter}",
+                        text = "Current chapter ${reader.currentChapter} - ${readerSettings.modeLabel()}",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.primary,
                     )
@@ -1009,11 +1029,18 @@ private fun NovelReaderPanel(
                 )
             }
             reader.textContent?.takeIf { it.isNotBlank() }?.let { content ->
-                Text(
-                    text = content,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.82f),
-                )
+                Column(
+                    modifier = Modifier.padding(horizontal = readerSettings.horizontalPadding()),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    content.readerParagraphs().forEach { paragraph ->
+                        Text(
+                            text = paragraph,
+                            style = readerTextStyle,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.84f),
+                        )
+                    }
+                }
             }
         }
     }
@@ -1023,6 +1050,36 @@ private fun NovelReaderChapterRow.buttonLabel(): String =
     title?.takeIf { it.isNotBlank() }?.let { value ->
         if (value.length <= 12) value else "Ch $number"
     } ?: "Ch $number"
+
+private fun NovelReaderSettingsRow.modeLabel(): String =
+    when (readingMode) {
+        0 -> "Paged"
+        1 -> "Webtoon"
+        else -> "Auto"
+    }
+
+private fun NovelReaderSettingsRow.horizontalPadding() =
+    readerMargin.coerceIn(0.0, 12.0).dp
+
+private fun NovelReaderSettingsRow.textAlign(): TextAlign =
+    when (readerTextAlignment.lowercase()) {
+        "center" -> TextAlign.Center
+        "justify" -> TextAlign.Justify
+        else -> TextAlign.Start
+    }
+
+private fun String.readerParagraphs(): List<String> =
+    replace(Regex("""(?i)<br\s*/?>"""), "\n")
+        .replace(Regex("""(?i)</p>"""), "\n\n")
+        .replace(Regex("""<[^>]+>"""), "")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .split(Regex("""\n{2,}"""))
+        .map { paragraph -> paragraph.trim() }
+        .filter(String::isNotBlank)
+        .ifEmpty { listOf(trim()) }
 
 @Composable
 private fun NovelModuleCard(
