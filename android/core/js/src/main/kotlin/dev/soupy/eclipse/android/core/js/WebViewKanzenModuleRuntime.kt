@@ -319,7 +319,7 @@ private fun fetchBootstrap(): String = """
         if (!callback) return;
         delete window.__androidKanzenFetchCallbacks[id];
         if (!payload || payload.ok === false) {
-          callback.reject(new Error((payload && payload.error) || "Android fetch failed."));
+          callback.reject(new Error((payload && payload.error) || "Fetch failed."));
           return;
         }
         const headers = payload.headers || {};

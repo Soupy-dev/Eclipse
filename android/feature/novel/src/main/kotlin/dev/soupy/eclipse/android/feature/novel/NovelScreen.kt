@@ -202,7 +202,7 @@ fun NovelRoute(
                 title = "Novels",
                 subtitle = "${state.novelCount} saved - ${state.readChapterCount} chapters read",
                 imageUrl = state.recent.firstOrNull()?.coverUrl,
-                supportingText = "Light novel progress, reader history, and novel-capable Kanzen modules now hydrate from Android storage and Luna backups.",
+                supportingText = "Light novel progress, reader history, and novel-capable Kanzen modules load from Luna backups.",
             )
         }
 
@@ -378,7 +378,7 @@ fun NovelRoute(
             item {
                 SectionHeading(
                     title = "Search Results",
-                    subtitle = "Save AniList novels directly into the Android library.",
+                    subtitle = "Save AniList novels directly into your library.",
                 )
             }
             items(state.searchResults, key = { it.id }) { item ->
@@ -399,7 +399,7 @@ fun NovelRoute(
             item {
                 SectionHeading(
                     title = "Saved Novels",
-                    subtitle = "Library items persisted in Android storage and backup export.",
+                    subtitle = "Library items persisted for backup export.",
                 )
             }
             items(state.savedItems, key = { it.id }) { item ->
@@ -446,7 +446,7 @@ fun NovelRoute(
             item {
                 SectionHeading(
                     title = "Reading",
-                    subtitle = "Recent novel progress restored on Android.",
+                    subtitle = "Recent novel progress.",
                 )
             }
             items(state.recent, key = { it.id }) { row ->

@@ -516,7 +516,7 @@ class SettingsStore(
 
 private fun String.toInAppPlayer(): InAppPlayer = when (trim().lowercase()) {
     "vlc" -> InAppPlayer.VLC
-    "mpv" -> InAppPlayer.MPV
+    "mpv" -> InAppPlayer.EXTERNAL
     "external", "outplayer", "outside" -> InAppPlayer.EXTERNAL
     "normal", "default", "media3", "exoplayer" -> InAppPlayer.NORMAL
     else -> runCatching { InAppPlayer.valueOf(this) }.getOrDefault(InAppPlayer.NORMAL)

@@ -19,6 +19,7 @@ import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -28,7 +29,10 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.Dp
 import coil3.compose.AsyncImage
 import dev.soupy.eclipse.android.core.model.ExploreMediaCard
 
@@ -69,7 +73,7 @@ fun MediaPosterCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(2f / 3f)
-                .clip(RoundedCornerShape(12.dp)),
+                .clip(RoundedCornerShape(16.dp)),
         ) {
             PosterImage(
                 imageUrl = item.imageUrl ?: item.backdropUrl,
@@ -93,18 +97,23 @@ fun MediaPosterCard(
         }
         Text(
             text = item.title,
-            style = MaterialTheme.typography.bodyLarge,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.Medium,
             color = MaterialTheme.colorScheme.onBackground,
-            maxLines = 2,
+            textAlign = TextAlign.Center,
+            maxLines = 1,
             overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth(),
         )
         item.subtitle?.takeIf { it.isNotBlank() }?.let {
             Text(
                 text = it,
-                style = MaterialTheme.typography.bodyMedium,
+                style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.64f),
+                textAlign = TextAlign.Center,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth(),
             )
         }
     }
@@ -249,11 +258,16 @@ fun HeroBackdrop(
     imageUrl: String?,
     modifier: Modifier = Modifier,
     supportingText: String? = null,
+    height: Dp = 360.dp,
+    primaryActionLabel: String? = null,
+    onPrimaryAction: (() -> Unit)? = null,
+    secondaryActionLabel: String? = null,
+    onSecondaryAction: (() -> Unit)? = null,
 ) {
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(360.dp)
+            .height(height)
             .clip(RoundedCornerShape(0.dp)),
     ) {
         if (imageUrl.isNullOrBlank()) {
@@ -288,8 +302,9 @@ fun HeroBackdrop(
         )
         Column(
             modifier = Modifier
-                .align(Alignment.BottomStart)
+                .align(Alignment.BottomCenter)
                 .padding(20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             subtitle?.takeIf { it.isNotBlank() }?.let {
@@ -297,12 +312,14 @@ fun HeroBackdrop(
                     text = it.uppercase(),
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.tertiary,
+                    textAlign = TextAlign.Center,
                 )
             }
             Text(
                 text = title,
                 style = MaterialTheme.typography.displayMedium,
                 color = MaterialTheme.colorScheme.onBackground,
+                textAlign = TextAlign.Center,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -312,9 +329,29 @@ fun HeroBackdrop(
                     text = it,
                     style = MaterialTheme.typography.bodyLarge,
                     color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.82f),
+                    textAlign = TextAlign.Center,
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                 )
+            }
+            if (primaryActionLabel != null && onPrimaryAction != null ||
+                secondaryActionLabel != null && onSecondaryAction != null
+            ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.padding(top = 8.dp),
+                ) {
+                    if (primaryActionLabel != null && onPrimaryAction != null) {
+                        Button(onClick = onPrimaryAction) {
+                            Text(primaryActionLabel)
+                        }
+                    }
+                    if (secondaryActionLabel != null && onSecondaryAction != null) {
+                        OutlinedButton(onClick = onSecondaryAction) {
+                            Text(secondaryActionLabel)
+                        }
+                    }
+                }
             }
         }
     }

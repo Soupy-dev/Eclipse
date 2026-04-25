@@ -284,7 +284,9 @@ data class BackupData(
     @SerialName("userRatings") val userRatings: Map<String, Int> = emptyMap(),
 ) {
     val resolvedInAppPlayer: InAppPlayer
-        get() = legacyPlayerChoice ?: inAppPlayer
+        get() = (legacyPlayerChoice ?: inAppPlayer).let { player ->
+            if (player == InAppPlayer.MPV) InAppPlayer.EXTERNAL else player
+        }
 
     fun nextEpisodeThresholdPercent(): Int {
         val percent = if (nextEpisodeThreshold <= 1.0) {
@@ -365,7 +367,7 @@ object InAppPlayerBackupSerializer : KSerializer<InAppPlayer> {
 
         return when (raw.trim().lowercase()) {
             "vlc" -> InAppPlayer.VLC
-            "mpv" -> InAppPlayer.MPV
+            "mpv" -> InAppPlayer.EXTERNAL
             "external", "outplayer", "outside" -> InAppPlayer.EXTERNAL
             "normal", "default", "media3", "exoplayer" -> InAppPlayer.NORMAL
             else -> InAppPlayer.VLC
@@ -377,7 +379,7 @@ object InAppPlayerBackupSerializer : KSerializer<InAppPlayer> {
         val encoded = when (value) {
             InAppPlayer.NORMAL -> "Normal"
             InAppPlayer.VLC -> "VLC"
-            InAppPlayer.MPV -> "MPV"
+            InAppPlayer.MPV -> "External"
             InAppPlayer.EXTERNAL -> "External"
         }
         if (jsonEncoder != null) {

@@ -52,7 +52,7 @@ class AndroidDownloadsViewModel(
     }
 
     fun queueDownload(draft: DownloadDraft) = mutate(
-        successMessage = "Queued download on Android.",
+        successMessage = "Queued download.",
     ) {
         repository.queueDownload(draft)
     }
@@ -109,7 +109,7 @@ class AndroidDownloadsViewModel(
                 .onSuccess { result ->
                     if (result.resumedTransfers == 0) return@onSuccess
                     _state.value = result.snapshot.toUiState(
-                        noticeMessage = "Resumed ${result.resumedTransfers} queued Android transfer${if (result.resumedTransfers == 1) "" else "s"} after startup.",
+                        noticeMessage = "Resumed ${result.resumedTransfers} queued transfer${if (result.resumedTransfers == 1) "" else "s"} after startup.",
                         playerSource = _state.value.playerSource,
                     )
                 }
@@ -132,7 +132,7 @@ class AndroidDownloadsViewModel(
                     }
                     _state.value = if (source != null) {
                         snapshot.toUiState(
-                            noticeMessage = "Playing ${record.title} from Android app storage.",
+                            noticeMessage = "Playing ${record.title} from app storage.",
                             playerSource = source,
                         )
                     } else {
@@ -181,7 +181,7 @@ class AndroidDownloadsViewModel(
     }
 
     fun clearAll() = mutate(
-        successMessage = "Cleared the full Android download queue.",
+        successMessage = "Cleared the full download queue.",
     ) {
         repository.clearAll()
     }
@@ -306,13 +306,13 @@ private fun DownloadSnapshot.toUiState(
         heroImageUrl = first?.backdropUrl ?: first?.imageUrl,
         heroSupportingText = when {
             items.isEmpty() ->
-                "Android persists offline queue metadata and can save direct streams once a playable source is resolved."
+                "Eclipse saves direct streams once a playable source is resolved."
             downloadingCount > 0 ->
-                "Android is saving direct streams or packaging HLS segments into app-private storage."
+                "Eclipse is saving direct streams or packaging HLS segments into app storage."
             completedCount > 0 ->
                 "Completed direct downloads now survive app restarts with local file metadata."
             else ->
-                "These entries keep offline flow state real while unsupported source types are rejected before download."
+                "Unsupported source types are rejected before download."
         },
         metrics = listOf(
             DownloadMetric(
@@ -384,6 +384,7 @@ private fun DownloadSnapshot.toUiState(
 
 private fun DetailTarget.removeTargetLabel(): String = when (this) {
     is DetailTarget.AniListMediaTarget -> "Remove Anime"
+    is DetailTarget.ServiceMedia -> "Remove Source"
     is DetailTarget.TmdbMovie -> "Remove Movie"
     is DetailTarget.TmdbShow -> "Remove Show"
 }

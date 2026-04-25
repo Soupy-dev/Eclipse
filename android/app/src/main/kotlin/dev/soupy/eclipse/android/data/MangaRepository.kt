@@ -35,7 +35,7 @@ private const val DefaultMangaCollectionId = "android-library"
 private const val DefaultMangaCollectionName = "Library"
 private const val FavoritesCollectionId = "android-favorites"
 private const val FavoritesCollectionName = "Favorites"
-private val ModuleAutoUpdateInterval: Duration = Duration.ofHours(24)
+private val ModuleAutoUpdateInterval: Duration = Duration.ofHours(1)
 
 data class MangaCatalogSectionSnapshot(
     val id: String,
@@ -296,7 +296,7 @@ class MangaRepository(
         val collection = MangaLibraryCollection(
             id = "android-collection-${trimmed.hashCode().toUInt().toString(16)}",
             name = trimmed,
-            description = "Created on Android",
+            description = "Created in Eclipse",
             items = emptyList(),
         )
         val updated = snapshot.copy(collections = snapshot.collections + collection)
@@ -570,7 +570,7 @@ class MangaRepository(
         isNovel: Boolean,
     ): Result<KanzenCatalogDetailSnapshot> = runCatching {
         val runtime = kanzenRuntime ?: error("Kanzen runtime is not available on this device.")
-        require(!moduleId.isNullOrBlank() && moduleId != "anilist") { "This title is not backed by a Kanzen module." }
+        require(!moduleId.isNullOrBlank() && moduleId != "anilist") { "This title does not have a Kanzen module source." }
         require(!contentParams.isNullOrBlank()) { "This title does not have module content parameters." }
         val module = mangaStore.read().modules.firstOrNull { record ->
             record.id == moduleId && record.isActive && record.isNovel == isNovel
@@ -603,7 +603,7 @@ class MangaRepository(
         isNovel: Boolean,
     ): Result<List<KanzenReaderChapterSnapshot>> = runCatching {
         val runtime = kanzenRuntime ?: error("Kanzen runtime is not available on this device.")
-        require(!moduleId.isNullOrBlank() && moduleId != "anilist") { "This title is not backed by a Kanzen module." }
+        require(!moduleId.isNullOrBlank() && moduleId != "anilist") { "This title does not have a Kanzen module source." }
         require(!contentParams.isNullOrBlank()) { "This title does not have module content parameters." }
         val module = mangaStore.read().modules.firstOrNull { record ->
             record.id == moduleId && record.isActive && record.isNovel == isNovel
@@ -632,7 +632,7 @@ class MangaRepository(
         isNovel: Boolean,
     ): Result<KanzenReaderContentSnapshot> = runCatching {
         val runtime = kanzenRuntime ?: error("Kanzen runtime is not available on this device.")
-        require(!moduleId.isNullOrBlank() && moduleId != "anilist") { "This title is not backed by a Kanzen module." }
+        require(!moduleId.isNullOrBlank() && moduleId != "anilist") { "This title does not have a Kanzen module source." }
         require(!chapterParams.isNullOrBlank()) { "Choose a module chapter first." }
         val module = mangaStore.read().modules.firstOrNull { record ->
             record.id == moduleId && record.isActive && record.isNovel == isNovel
@@ -1117,7 +1117,7 @@ private fun List<MangaLibraryCollection>.withImportedManga(
         MangaLibraryCollection(
             id = DefaultMangaCollectionId,
             name = DefaultMangaCollectionName,
-            description = "Imported from AniList on Android",
+            description = "Imported from AniList",
             items = items,
         )
     }
@@ -1148,7 +1148,7 @@ private fun List<MangaLibraryCollection>.withFavoriteManga(
         MangaLibraryCollection(
             id = FavoritesCollectionId,
             name = FavoritesCollectionName,
-            description = "Bookmarked on Android",
+            description = "Bookmarked in Eclipse",
             items = listOf(item),
         )
     }
@@ -1180,7 +1180,7 @@ private fun List<MangaLibraryCollection>.withSavedManga(
         MangaLibraryCollection(
             id = DefaultMangaCollectionId,
             name = DefaultMangaCollectionName,
-            description = "Saved on Android",
+            description = "Saved in Eclipse",
             items = listOf(item),
         )
     }

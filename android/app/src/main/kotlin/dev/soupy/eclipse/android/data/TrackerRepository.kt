@@ -58,7 +58,7 @@ class TrackerRepository(
         val provider = OAuthProvider.entries.firstOrNull { candidate ->
             uri.scheme.equals("luna", ignoreCase = true) &&
                 uri.host.equals(candidate.callbackHost, ignoreCase = true)
-        } ?: error("Android received an unsupported tracker callback.")
+        } ?: error("Eclipse received an unsupported tracker callback.")
 
         uri.getQueryParameter("error")
             ?.takeIf { it.isNotBlank() }

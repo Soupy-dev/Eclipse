@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -111,6 +112,12 @@ fun EclipsePlayerSurface(
     val skipSegmentsState = rememberUpdatedState(skipSegments)
     var progressPercent by remember(source.uri) { mutableStateOf(0f) }
     var currentPositionSeconds by remember(source.uri) { mutableStateOf(0.0) }
+    var subtitlesEnabled by remember(source.uri, settings.enableSubtitlesByDefault) {
+        mutableStateOf(settings.enableSubtitlesByDefault)
+    }
+    var selectedSubtitleLanguage by remember(source.uri, settings.defaultSubtitleLanguage) {
+        mutableStateOf(settings.defaultSubtitleLanguage)
+    }
     LockLandscapeWhenRequested(settings.alwaysLandscape)
 
     if (source.uri.isTorrentLikeUri()) {
@@ -126,7 +133,7 @@ fun EclipsePlayerSurface(
                     color = MaterialTheme.colorScheme.error,
                 )
                 Text(
-                    text = "Android only accepts direct HTTP(S) media streams. Torrent, magnet, BTIH, and .torrent sources are rejected before playback.",
+                    text = "Only direct HTTP(S) media streams are accepted. Torrent, magnet, BTIH, and .torrent sources are rejected before playback.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
                 )
@@ -155,10 +162,10 @@ fun EclipsePlayerSurface(
         return
     }
 
-    val mediaItem = remember(source, settings.defaultSubtitleLanguage, settings.enableSubtitlesByDefault) {
+    val mediaItem = remember(source, selectedSubtitleLanguage, subtitlesEnabled) {
         source.toMediaItem(
-            defaultSubtitleLanguage = settings.defaultSubtitleLanguage,
-            enableSubtitlesByDefault = settings.enableSubtitlesByDefault,
+            defaultSubtitleLanguage = selectedSubtitleLanguage,
+            enableSubtitlesByDefault = subtitlesEnabled,
         )
     }
 
@@ -181,19 +188,19 @@ fun EclipsePlayerSurface(
 
     LaunchedEffect(
         exoPlayer,
-        settings.enableSubtitlesByDefault,
-        settings.defaultSubtitleLanguage,
+        subtitlesEnabled,
+        selectedSubtitleLanguage,
         settings.preferredAnimeAudioLanguage,
     ) {
-        val textLanguage = settings.defaultSubtitleLanguage.normalizedLanguageCode()
+        val textLanguage = selectedSubtitleLanguage.normalizedLanguageCode()
         val audioLanguage = settings.preferredAnimeAudioLanguage.normalizedLanguageCode()
         val parameters = exoPlayer.trackSelectionParameters
             .buildUpon()
             .setPreferredAudioLanguage(audioLanguage)
-            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !settings.enableSubtitlesByDefault)
-            .setSelectUndeterminedTextLanguage(settings.enableSubtitlesByDefault)
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !subtitlesEnabled)
+            .setSelectUndeterminedTextLanguage(subtitlesEnabled)
             .apply {
-                if (settings.enableSubtitlesByDefault) {
+                if (subtitlesEnabled) {
                     setPreferredTextLanguage(textLanguage)
                 }
             }
@@ -296,6 +303,18 @@ fun EclipsePlayerSurface(
             onProgressChanged = { emitProgressSnapshot() },
         )
 
+        PlaybackTrackControls(
+            source = source,
+            preferredAudioLanguage = settings.preferredAnimeAudioLanguage,
+            subtitlesEnabled = subtitlesEnabled,
+            selectedSubtitleLanguage = selectedSubtitleLanguage,
+            onSubtitlesEnabledChanged = { subtitlesEnabled = it },
+            onSubtitleLanguageChanged = {
+                selectedSubtitleLanguage = it
+                subtitlesEnabled = true
+            },
+        )
+
         AndroidView(
             modifier = Modifier
                 .fillMaxWidth()
@@ -320,6 +339,59 @@ fun EclipsePlayerSurface(
                 )
             },
         )
+    }
+}
+
+@Composable
+private fun PlaybackTrackControls(
+    source: PlayerSource,
+    preferredAudioLanguage: String,
+    subtitlesEnabled: Boolean,
+    selectedSubtitleLanguage: String,
+    onSubtitlesEnabledChanged: (Boolean) -> Unit,
+    onSubtitleLanguageChanged: (String) -> Unit,
+) {
+    GlassPanel(
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text(
+                text = "Audio: ${preferredAudioLanguage.ifBlank { "Auto" }}",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (subtitlesEnabled) {
+                    Button(onClick = { onSubtitlesEnabledChanged(false) }) {
+                        Text("Subtitles On")
+                    }
+                } else {
+                    OutlinedButton(onClick = { onSubtitlesEnabledChanged(true) }) {
+                        Text("Subtitles Off")
+                    }
+                }
+                source.subtitles.take(4).forEach { subtitle ->
+                    val language = subtitle.language ?: subtitle.label
+                    val selected = subtitlesEnabled &&
+                        language.normalizedLanguageCode().matchesLanguage(selectedSubtitleLanguage.normalizedLanguageCode())
+                    if (selected) {
+                        Button(onClick = { onSubtitleLanguageChanged(language) }) {
+                            Text(subtitle.label)
+                        }
+                    } else {
+                        OutlinedButton(onClick = { onSubtitleLanguageChanged(language) }) {
+                            Text(subtitle.label)
+                        }
+                    }
+                }
+            }
+            Text(
+                text = "Subtitle style follows Settings and updates this player immediately.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+            )
+        }
     }
 }
 
@@ -677,7 +749,7 @@ private fun PlayerSource.externalPlayerIntent(externalPlayer: String): Intent {
 
 private fun InAppPlayer.nativePackageName(): String? = when (this) {
     InAppPlayer.VLC -> "org.videolan.vlc"
-    InAppPlayer.MPV -> "is.xyz.mpv"
+    InAppPlayer.MPV -> null
     InAppPlayer.NORMAL,
     InAppPlayer.EXTERNAL -> null
 }

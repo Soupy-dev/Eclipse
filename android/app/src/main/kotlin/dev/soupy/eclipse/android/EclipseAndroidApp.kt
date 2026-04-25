@@ -34,6 +34,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavDestination.Companion.hierarchy
+import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -86,7 +87,7 @@ private val lunaDestinations = listOf(
 private val kanzenDestinations = listOf(
     AppDestination("manga", "Home", Icons.Rounded.Home),
     AppDestination("kanzen-library", "Library", Icons.AutoMirrored.Rounded.MenuBook),
-    AppDestination("novel", "Search", Icons.Rounded.Search),
+    AppDestination("kanzen-search", "Search", Icons.Rounded.Search),
     AppDestination("kanzen-history", "History", Icons.Rounded.History),
     AppDestination("settings", "Settings", Icons.Rounded.Settings),
 )
@@ -212,6 +213,7 @@ fun EclipseAndroidApp(
     )
 
     var selectedDetailTarget by remember { mutableStateOf<DetailTarget?>(null) }
+    var settingsReturnRoute by remember { mutableStateOf("home") }
 
     LaunchedEffect(selectedDetailTarget) {
         detailViewModel.load(selectedDetailTarget)
@@ -284,9 +286,14 @@ fun EclipseAndroidApp(
                 containerColor = androidx.compose.ui.graphics.Color.Transparent,
                 contentWindowInsets = WindowInsets(0.dp),
                 floatingActionButton = {
-                    if (!settingsState.showKanzen && currentRoute in setOf("home", "schedule")) {
+                    if (!settingsState.showKanzen && currentRoute in lunaDestinations.map { it.route }) {
                         FloatingActionButton(
-                            onClick = { navController.navigate("settings") },
+                            onClick = {
+                                settingsReturnRoute = currentRoute ?: "home"
+                                navController.navigate("settings") {
+                                    launchSingleTop = true
+                                }
+                            },
                             containerColor = androidx.compose.ui.graphics.Color(0xEE1F2433),
                         ) {
                             Icon(
@@ -297,32 +304,34 @@ fun EclipseAndroidApp(
                     }
                 },
                 bottomBar = {
-                    NavigationBar(
-                        containerColor = androidx.compose.ui.graphics.Color(0xCC11111A),
-                    ) {
-                        visibleDestinations.forEach { destination ->
-                            val selected = currentDestination
-                                ?.hierarchy
-                                ?.any { it.route == destination.route } == true
-                            NavigationBarItem(
-                                selected = selected,
-                                onClick = {
-                                    navController.navigate(destination.route) {
-                                        launchSingleTop = true
-                                        popUpTo(navController.graph.startDestinationId) {
-                                            saveState = false
+                    if (currentRoute != "settings") {
+                        NavigationBar(
+                            containerColor = androidx.compose.ui.graphics.Color(0xCC11111A),
+                        ) {
+                            visibleDestinations.forEach { destination ->
+                                val selected = currentDestination
+                                    ?.hierarchy
+                                    ?.any { it.route == destination.route } == true
+                                NavigationBarItem(
+                                    selected = selected,
+                                    onClick = {
+                                        navController.navigate(destination.route) {
+                                            launchSingleTop = true
+                                            restoreState = true
+                                            popUpTo(navController.graph.findStartDestination().id) {
+                                                saveState = true
+                                            }
                                         }
-                                        restoreState = false
-                                    }
-                                },
-                                icon = {
-                                    Icon(
-                                        imageVector = destination.icon,
-                                        contentDescription = destination.label,
-                                    )
-                                },
-                                label = { Text(destination.label) },
-                            )
+                                    },
+                                    icon = {
+                                        Icon(
+                                            imageVector = destination.icon,
+                                            contentDescription = destination.label,
+                                        )
+                                    },
+                                    label = { Text(destination.label) },
+                                )
+                            }
                         }
                     }
                 },
@@ -348,6 +357,7 @@ fun EclipseAndroidApp(
                             onQueryChange = searchViewModel::updateQuery,
                             onSearch = searchViewModel::search,
                             onRecentQuery = searchViewModel::selectRecentQuery,
+                            onSourceSelected = searchViewModel::selectSource,
                             onSelect = { target ->
                                 selectedDetailTarget = target
                                 navController.navigate("detail")
@@ -397,10 +407,6 @@ fun EclipseAndroidApp(
                             onMarkPreviousEpisodesWatched = detailViewModel::markPreviousEpisodesWatched,
                             onPlayStream = detailViewModel::playResolvedStream,
                             onPlayNextEpisode = detailViewModel::playNextEpisode,
-                            onSelectRecommendation = { item ->
-                                selectedDetailTarget = item.detailTarget
-                                navController.navigate("detail")
-                            },
                             onPlaybackProgress = { progress ->
                                 detailViewModel.currentPlaybackProgressDraft(
                                     positionMs = progress.positionMs,
@@ -488,10 +494,13 @@ fun EclipseAndroidApp(
                         SettingsRoute(
                             state = settingsState,
                             onClose = {
-                                navController.navigate(if (settingsState.showKanzen) "manga" else "home") {
-                                    launchSingleTop = true
-                                    popUpTo(navController.graph.startDestinationId) {
-                                        saveState = false
+                                if (!navController.popBackStack()) {
+                                    navController.navigate(if (settingsState.showKanzen) "manga" else settingsReturnRoute) {
+                                        launchSingleTop = true
+                                        restoreState = true
+                                        popUpTo(navController.graph.findStartDestination().id) {
+                                            saveState = true
+                                        }
                                     }
                                 }
                             },
@@ -603,6 +612,37 @@ fun EclipseAndroidApp(
                         MangaRoute(
                             state = mangaState.copy(readerSettings = mangaReaderSettings),
                             surfaceMode = MangaSurfaceMode.LIBRARY,
+                            onRefresh = mangaViewModel::refresh,
+                            onQueryChange = mangaViewModel::updateQuery,
+                            onSearch = mangaViewModel::search,
+                            onSaveItem = mangaViewModel::saveItem,
+                            onRemoveItem = mangaViewModel::removeItem,
+                            onOpenDetail = mangaViewModel::openDetail,
+                            onCloseDetail = mangaViewModel::closeDetail,
+                            onReadNext = mangaViewModel::readNextChapter,
+                            onUnreadLast = mangaViewModel::unreadLastChapter,
+                            onReadPrevious = mangaViewModel::readPreviousChapter,
+                            onOpenReader = mangaViewModel::openReader,
+                            onCloseReader = mangaViewModel::closeReader,
+                            onReadChapter = mangaViewModel::readChapter,
+                            onToggleFavorite = mangaViewModel::toggleFavorite,
+                            onClearProgress = mangaViewModel::clearReadingProgress,
+                            onAddModule = mangaViewModel::addModule,
+                            onSetModuleActive = mangaViewModel::setModuleActive,
+                            onUpdateModule = mangaViewModel::updateModule,
+                            onUpdateAllModules = mangaViewModel::updateAllModules,
+                            onRemoveModule = mangaViewModel::removeModule,
+                            onClearReaderCache = mangaViewModel::clearReaderCache,
+                            onCreateCollection = mangaViewModel::createCollection,
+                            onDeleteCollection = mangaViewModel::deleteCollection,
+                            onAddItemToCollection = mangaViewModel::addItemToCollection,
+                            onRemoveItemFromCollection = mangaViewModel::removeItemFromCollection,
+                        )
+                    }
+                    composable("kanzen-search") {
+                        MangaRoute(
+                            state = mangaState.copy(readerSettings = mangaReaderSettings),
+                            surfaceMode = MangaSurfaceMode.SEARCH,
                             onRefresh = mangaViewModel::refresh,
                             onQueryChange = mangaViewModel::updateQuery,
                             onSearch = mangaViewModel::search,

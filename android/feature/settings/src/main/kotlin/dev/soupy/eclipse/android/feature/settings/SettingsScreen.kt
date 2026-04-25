@@ -2,9 +2,11 @@ package dev.soupy.eclipse.android.feature.settings
 
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts.CreateDocument
 import androidx.activity.result.contract.ActivityResultContracts.OpenDocument
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -14,7 +16,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
@@ -86,14 +87,14 @@ data class SettingsScreenState(
     val isBackupBusy: Boolean = false,
     val hasLocalBackup: Boolean = false,
     val backupStatusHeadline: String = "No local backup yet",
-    val backupStatusMessage: String = "Export a JSON archive from Android Settings or import an existing Luna backup to stage one here.",
+    val backupStatusMessage: String = "Export a JSON archive or import an existing Luna backup.",
     val catalogs: List<CatalogSettingsRow> = emptyList(),
     val storageMetrics: List<StorageMetricRow> = emptyList(),
     val storageStatus: String = "Storage has not been measured yet.",
     val autoClearCacheEnabled: Boolean = false,
     val autoClearCacheThresholdMB: Double = 500.0,
     val logRows: List<LogSettingsRow> = emptyList(),
-    val loggerStatus: String = "No Android logs captured yet.",
+    val loggerStatus: String = "No logs captured yet.",
     val trackerSyncEnabled: Boolean = true,
     val trackerRows: List<TrackerSettingsRow> = emptyList(),
     val trackerStatus: String = "No tracker accounts connected yet.",
@@ -176,6 +177,7 @@ private enum class SettingsSection(val label: String) {
     TRACKERS("Trackers"),
     CATALOGS("Catalogs"),
     DATA("Data"),
+    UPDATES("Updates"),
 }
 
 @Composable
@@ -256,7 +258,16 @@ fun SettingsRoute(
     var trackerService by rememberSaveable { mutableStateOf("AniList") }
     var trackerUsername by rememberSaveable { mutableStateOf("") }
     var trackerToken by rememberSaveable { mutableStateOf("") }
-    var selectedSection by rememberSaveable { mutableStateOf(SettingsSection.BASIC) }
+    var selectedSection by rememberSaveable { mutableStateOf<SettingsSection?>(null) }
+    val visibleSection = selectedSection
+
+    BackHandler {
+        if (visibleSection == null) {
+            onClose()
+        } else {
+            selectedSection = null
+        }
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -278,22 +289,34 @@ fun SettingsRoute(
                         color = MaterialTheme.colorScheme.onSurface,
                     )
                     Text(
-                        text = selectedSection.label,
+                        text = visibleSection?.label ?: "Eclipse",
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.tertiary,
                     )
                 }
-                Button(onClick = onClose) {
-                    Text("Done")
+                Button(
+                    onClick = {
+                        if (visibleSection == null) {
+                            onClose()
+                        } else {
+                            selectedSection = null
+                        }
+                    },
+                ) {
+                    Text(if (visibleSection == null) "Done" else "Back")
                 }
             }
         }
 
-        item {
-            SettingsSectionPicker(
-                selected = selectedSection,
-                onSelected = { selectedSection = it },
-            )
+        if (selectedSection == null) {
+            item {
+                SettingsOverview(
+                    state = state,
+                    onSelected = { selectedSection = it },
+                    onOpenServices = onOpenServices,
+                    onShowKanzenChanged = onShowKanzenChanged,
+                )
+            }
         }
 
         if (selectedSection == SettingsSection.BASIC) {
@@ -323,6 +346,16 @@ fun SettingsRoute(
                 onMediaColumnsPortraitChanged = onMediaColumnsPortraitChanged,
                 onMediaColumnsLandscapeChanged = onMediaColumnsLandscapeChanged,
                 onOpenServices = onOpenServices,
+            )
+        }
+
+        }
+
+        if (selectedSection == SettingsSection.UPDATES) {
+        item {
+            SectionHeading(
+                title = "Updates",
+                subtitle = "GitHub releases and provider service update checks.",
             )
         }
 
@@ -381,7 +414,7 @@ fun SettingsRoute(
                         valueRange = 0f..1f,
                     )
                     Text(
-                        text = "Auto Mode uses this backed threshold before starting a resolved direct stream automatically.",
+                        text = "Auto Mode uses this threshold before starting a resolved direct stream automatically.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.74f),
                     )
@@ -511,7 +544,7 @@ fun SettingsRoute(
         item {
             SectionHeading(
                 title = "Reader",
-                subtitle = "Manga and novel reader defaults restored from Luna backups and persisted on Android.",
+                subtitle = "Manga and novel reader defaults.",
             )
         }
 
@@ -535,7 +568,7 @@ fun SettingsRoute(
         item {
             SectionHeading(
                 title = "Trackers",
-                subtitle = "AniList and Trakt account state restored from backups and persisted on Android.",
+                subtitle = "AniList and Trakt account state.",
             )
         }
 
@@ -586,7 +619,7 @@ fun SettingsRoute(
         item {
             SectionHeading(
                 title = "Storage",
-                subtitle = "Cache and offline usage diagnostics backed by Android app storage.",
+                subtitle = "Cache and offline usage diagnostics.",
             )
         }
 
@@ -621,7 +654,7 @@ fun SettingsRoute(
         item {
             SectionHeading(
                 title = "Backup",
-                subtitle = "Export and restore Luna-compatible JSON archives. Android restores the settings and source state it owns today while preserving the rest for later parity.",
+                subtitle = "Export and restore Luna-compatible JSON archives.",
             )
         }
 
@@ -641,22 +674,183 @@ fun SettingsRoute(
 }
 
 @Composable
-private fun SettingsSectionPicker(
-    selected: SettingsSection,
+private fun SettingsOverview(
+    state: SettingsScreenState,
     onSelected: (SettingsSection) -> Unit,
+    onOpenServices: () -> Unit,
+    onShowKanzenChanged: (Boolean) -> Unit,
 ) {
-    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        items(SettingsSection.entries, key = { it.name }) { section ->
-            if (section == selected) {
-                Button(onClick = { onSelected(section) }) {
-                    Text(section.label)
-                }
-            } else {
-                OutlinedButton(onClick = { onSelected(section) }) {
-                    Text(section.label)
-                }
+    Column(verticalArrangement = Arrangement.spacedBy(18.dp)) {
+        SettingsOverviewGroup(title = "Basic") {
+            SettingsMenuRow(
+                title = "Language",
+                subtitle = state.tmdbLanguage,
+                onClick = { onSelected(SettingsSection.BASIC) },
+            )
+            SettingsMenuRow(
+                title = "Content Filters",
+                subtitle = if (state.filterHorrorContent) "Horror hidden" else "All enabled",
+                onClick = { onSelected(SettingsSection.DISCOVERY) },
+            )
+            SettingsMenuRow(
+                title = "Matching Algorithm",
+                subtitle = state.selectedSimilarityAlgorithm.name.lowercase().replaceFirstChar { it.titlecase() },
+                onClick = { onSelected(SettingsSection.DISCOVERY) },
+            )
+            SettingsMenuRow(
+                title = "Media Player",
+                subtitle = state.inAppPlayer.name.lowercase().replaceFirstChar { it.titlecase() },
+                onClick = { onSelected(SettingsSection.PLAYBACK) },
+            )
+            SettingsMenuRow(
+                title = "Appearance",
+                subtitle = state.selectedAppearance.replaceFirstChar { it.titlecase() },
+                onClick = { onSelected(SettingsSection.BASIC) },
+            )
+            SettingsMenuRow(
+                title = "Catalogs",
+                subtitle = "${state.catalogs.count { it.enabled }} enabled",
+                onClick = { onSelected(SettingsSection.CATALOGS) },
+            )
+            SettingsMenuRow(
+                title = "Services",
+                subtitle = if (state.autoUpdateServicesEnabled) "Auto update on" else "Auto update off",
+                onClick = onOpenServices,
+            )
+            SettingsMenuRow(
+                title = "Trackers",
+                subtitle = "${state.trackerRows.count { it.isConnected }} connected",
+                onClick = { onSelected(SettingsSection.TRACKERS) },
+            )
+        }
+
+        SettingsOverviewGroup(title = "Data") {
+            SettingsMenuRow(
+                title = "Storage",
+                subtitle = state.storageStatus,
+                onClick = { onSelected(SettingsSection.DATA) },
+            )
+            SettingsMenuRow(
+                title = "Backup & Restore",
+                subtitle = state.backupStatusHeadline,
+                onClick = { onSelected(SettingsSection.DATA) },
+            )
+            SettingsMenuRow(
+                title = "Logger",
+                subtitle = state.loggerStatus,
+                onClick = { onSelected(SettingsSection.DATA) },
+            )
+        }
+
+        SettingsOverviewGroup(title = "Others") {
+            SettingInlineToggle(
+                title = "Switch to Reader Mode",
+                checked = state.showKanzen,
+                onCheckedChange = onShowKanzenChanged,
+            )
+            SettingsMenuRow(
+                title = "Reader",
+                subtitle = ReaderModeLabel(state.readingMode),
+                onClick = { onSelected(SettingsSection.READER) },
+            )
+        }
+
+        SettingsOverviewGroup(title = "Updates") {
+            SettingsMenuRow(
+                title = "GitHub Releases",
+                subtitle = state.githubReleaseStatus,
+                onClick = { onSelected(SettingsSection.UPDATES) },
+            )
+            SettingsMenuRow(
+                title = "Service Auto Update",
+                subtitle = if (state.autoUpdateServicesEnabled) "Hourly checks enabled" else "Manual checks only",
+                onClick = { onSelected(SettingsSection.UPDATES) },
+            )
+            SettingsStaticRow(
+                title = "Version Info",
+                subtitle = state.githubReleaseLatestVersion.ifBlank { "No release check yet" },
+            )
+        }
+    }
+}
+
+@Composable
+private fun SettingsOverviewGroup(
+    title: String,
+    content: @Composable () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.tertiary,
+        )
+        GlassPanel {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                content()
             }
         }
+    }
+}
+
+@Composable
+private fun SettingsMenuRow(
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(3.dp),
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+            )
+        }
+        Text(
+            text = ">",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.tertiary,
+        )
+    }
+}
+
+@Composable
+private fun SettingsStaticRow(
+    title: String,
+    subtitle: String,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        Text(
+            text = title,
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Text(
+            text = subtitle,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+        )
     }
 }
 
@@ -843,7 +1037,7 @@ private fun NextEpisodeThresholdCard(
                 valueRange = 70f..98f,
             )
             Text(
-                text = "Android uses this threshold to surface next-episode actions during playback.",
+                text = "Eclipse uses this threshold to surface next-episode actions during playback.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.74f),
             )
@@ -1259,6 +1453,13 @@ private fun TrackerAccountRow(
     }
 }
 
+private fun ReaderModeLabel(mode: Int): String = when (mode) {
+    0 -> "Paged"
+    1 -> "Webtoon"
+    2 -> "Auto"
+    else -> "Mode $mode"
+}
+
 @Composable
 private fun ReaderModeButtons(
     selected: Int,
@@ -1600,7 +1801,7 @@ private fun LoggerCard(
                 onClick = {
                     val shareIntent = Intent(Intent.ACTION_SEND)
                         .setType("text/plain")
-                        .putExtra(Intent.EXTRA_SUBJECT, "Eclipse Android logs")
+                        .putExtra(Intent.EXTRA_SUBJECT, "Eclipse logs")
                         .putExtra(Intent.EXTRA_TEXT, rows.toShareText(status))
                     context.startActivity(Intent.createChooser(shareIntent, "Share Logs"))
                 },
@@ -1615,7 +1816,7 @@ private fun LoggerCard(
 
 private fun List<LogSettingsRow>.toShareText(status: String): String =
     buildString {
-        appendLine("Eclipse Android Logs")
+        appendLine("Eclipse Logs")
         appendLine(status)
         appendLine()
         this@toShareText.forEach { row ->
@@ -1866,9 +2067,9 @@ private fun BackupCard(
             }
             Text(
                 text = if (state.hasLocalBackup) {
-                    "Android also keeps a staged local copy of the archive so later exports can preserve sections that still don't have full UI/runtime parity."
+                    "Eclipse keeps a staged local copy so later exports preserve every section."
                 } else {
-                    "Once you export or import here, Android will keep a staged local copy so unsupported backup sections survive later re-exports."
+                    "Once you export or import here, Eclipse will keep a staged local copy for later re-exports."
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.tertiary,

@@ -1,8 +1,10 @@
 package dev.soupy.eclipse.android.feature.detail
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,7 +14,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -22,14 +23,22 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Bookmark
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material.icons.rounded.StarBorder
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -47,10 +56,8 @@ import androidx.compose.ui.unit.dp
 import dev.soupy.eclipse.android.core.design.ErrorPanel
 import dev.soupy.eclipse.android.core.design.GlassPanel
 import dev.soupy.eclipse.android.core.design.LoadingPanel
-import dev.soupy.eclipse.android.core.design.MediaPosterCard
 import dev.soupy.eclipse.android.core.design.PosterImage
 import dev.soupy.eclipse.android.core.design.SectionHeading
-import dev.soupy.eclipse.android.core.model.ExploreMediaCard
 import dev.soupy.eclipse.android.core.model.InAppPlayer
 import dev.soupy.eclipse.android.core.model.PlaybackSettingsSnapshot
 import dev.soupy.eclipse.android.core.model.PlayerSource
@@ -69,6 +76,10 @@ data class DetailEpisodeRow(
     val runtimeMinutes: Int? = null,
     val tmdbSeasonNumber: Int? = null,
     val tmdbEpisodeNumber: Int? = null,
+    val isSpecial: Boolean = false,
+    val titleOnlySearch: Boolean = false,
+    val searchTitle: String? = null,
+    val serviceHref: String? = null,
 )
 
 data class DetailCastRow(
@@ -98,6 +109,14 @@ data class DetailCollectionRow(
     val isSelected: Boolean = false,
 )
 
+private data class SpecialEpisodeGroup(
+    val key: String,
+    val title: String,
+    val subtitle: String,
+    val imageUrl: String?,
+    val episodes: List<DetailEpisodeRow>,
+)
+
 data class DetailScreenState(
     val hasSelection: Boolean = false,
     val isLoading: Boolean = false,
@@ -112,9 +131,9 @@ data class DetailScreenState(
     val contentRating: String? = null,
     val userRating: Int? = null,
     val cast: List<DetailCastRow> = emptyList(),
-    val recommendations: List<ExploreMediaCard> = emptyList(),
     val episodesTitle: String? = null,
     val episodes: List<DetailEpisodeRow> = emptyList(),
+    val isMovie: Boolean = false,
     val isResolvingStreams: Boolean = false,
     val streamStatusMessage: String? = null,
     val streamCandidates: List<DetailStreamRow> = emptyList(),
@@ -147,25 +166,47 @@ fun DetailRoute(
     onMarkPreviousEpisodesWatched: (String) -> Unit,
     onPlayStream: (String) -> Unit,
     onPlayNextEpisode: () -> Unit,
-    onSelectRecommendation: (ExploreMediaCard) -> Unit,
     onPlaybackProgress: (PlaybackProgressSnapshot) -> Unit,
     preferredPlayer: InAppPlayer = InAppPlayer.NORMAL,
     playbackSettings: PlaybackSettingsSnapshot = PlaybackSettingsSnapshot(),
 ) {
-    val episodeSeasons = state.episodes
+    val regularEpisodes = state.episodes.filterNot { it.isSpecial }
+    val specialEpisodeGroups = state.episodes
+        .filter { it.isSpecial }
+        .groupBy { it.specialGroupKey() }
+        .map { (key, episodes) ->
+            val first = episodes.first()
+            val title = first.searchTitle?.takeIf { it.isNotBlank() } ?: first.title
+            val formatLabel = first.subtitle?.substringBefore("|")?.trim()?.takeIf { it.isNotBlank() } ?: "Special"
+            SpecialEpisodeGroup(
+                key = key,
+                title = title,
+                subtitle = if (episodes.size == 1) formatLabel else "$formatLabel - ${episodes.size} eps",
+                imageUrl = first.imageUrl,
+                episodes = episodes,
+            )
+        }
+    val specialGroupKeys = specialEpisodeGroups.map { it.key }
+    var selectedSpecialGroupKey by remember(state.title, specialGroupKeys) {
+        mutableStateOf<String?>(null)
+    }
+    val activeSpecialGroup = specialEpisodeGroups.firstOrNull {
+        it.key == (selectedSpecialGroupKey ?: if (regularEpisodes.isEmpty()) specialEpisodeGroups.firstOrNull()?.key else null)
+    }
+    val episodeSeasons = regularEpisodes
         .mapNotNull { it.seasonNumber ?: it.tmdbSeasonNumber }
         .distinct()
         .sorted()
     var selectedSeason by remember(state.title, episodeSeasons) {
-        mutableStateOf(episodeSeasons.firstOrNull())
+        mutableStateOf(episodeSeasons.firstOrNull { it > 0 } ?: episodeSeasons.firstOrNull())
     }
     val isSeasonedShow = episodeSeasons.size > 1
-    val visibleEpisodes = if (isSeasonedShow && selectedSeason != null) {
-        state.episodes.filter { episode ->
+    val visibleEpisodes = activeSpecialGroup?.episodes ?: if (isSeasonedShow && selectedSeason != null) {
+        regularEpisodes.filter { episode ->
             (episode.seasonNumber ?: episode.tmdbSeasonNumber) == selectedSeason
         }
     } else {
-        state.episodes
+        regularEpisodes
     }
 
     if (!state.hasSelection && !state.isLoading) {
@@ -230,40 +271,18 @@ fun DetailRoute(
             }
         }
 
-        if (state.metadataChips.isNotEmpty()) {
-            item {
-                MetadataStrip(
-                    values = state.metadataChips,
-                    modifier = Modifier.padding(horizontal = 20.dp),
-                )
-            }
-        }
-
         if (state.title.isNotBlank()) {
             item {
                 DetailActions(
                     isResolvingStreams = state.isResolvingStreams,
                     selectedEpisodeLabel = state.selectedEpisodeLabel,
-                    userRating = state.userRating,
+                    isMovie = state.isMovie,
+                    collections = state.collections,
                     onResolveStreams = onResolveStreams,
                     onSaveToLibrary = onSaveToLibrary,
-                    onQueueResume = onQueueResume,
                     onQueueDownload = onQueueDownload,
-                    onMarkWatched = onMarkWatched,
-                    onMarkUnwatched = onMarkUnwatched,
-                    onSetRating = onSetRating,
-                    onClearRating = onClearRating,
-                    modifier = Modifier.padding(horizontal = 16.dp),
-                )
-            }
-        }
-
-        if (state.collections.isNotEmpty()) {
-            item {
-                CollectionRow(
-                    collections = state.collections,
                     onAddToCollection = onAddToCollection,
-                    modifier = Modifier.padding(horizontal = 20.dp),
+                    modifier = Modifier.padding(horizontal = 16.dp),
                 )
             }
         }
@@ -355,28 +374,62 @@ fun DetailRoute(
             }
         }
 
+        if (state.title.isNotBlank()) {
+            item {
+                StarRatingSection(
+                    rating = state.userRating,
+                    onSetRating = onSetRating,
+                    onClearRating = onClearRating,
+                    modifier = Modifier.padding(horizontal = 20.dp),
+                )
+            }
+        }
+
         state.episodesTitle?.let { title ->
             if (state.episodes.isNotEmpty()) {
-                item {
-                    EpisodesHeader(
-                        title = title,
-                        isSeasonedShow = isSeasonedShow,
-                        seasonMenu = state.seasonMenu,
-                        episodeSeasons = episodeSeasons,
-                        selectedSeason = selectedSeason,
-                        onSelectSeason = { selectedSeason = it },
-                        modifier = Modifier.padding(horizontal = 20.dp),
-                    )
-                }
-
                 if (isSeasonedShow && !state.seasonMenu) {
+                    item {
+                        SectionHeading(
+                            title = "Seasons",
+                            modifier = Modifier.padding(horizontal = 20.dp),
+                        )
+                    }
                     item {
                         StyledSeasonSelector(
                             episodeSeasons = episodeSeasons,
                             selectedSeason = selectedSeason,
-                            onSelectSeason = { selectedSeason = it },
+                            onSelectSeason = {
+                                selectedSpecialGroupKey = null
+                                selectedSeason = it
+                            },
                         )
                     }
+                }
+
+                if (specialEpisodeGroups.isNotEmpty()) {
+                    item {
+                        SpecialsOvaSection(
+                            groups = specialEpisodeGroups,
+                            selectedKey = activeSpecialGroup?.key,
+                            onSelectGroup = { selectedSpecialGroupKey = it },
+                            modifier = Modifier.padding(top = 2.dp),
+                        )
+                    }
+                }
+
+                item {
+                    EpisodesHeader(
+                        title = activeSpecialGroup?.title ?: title,
+                        isSeasonedShow = isSeasonedShow,
+                        seasonMenu = state.seasonMenu,
+                        episodeSeasons = episodeSeasons,
+                        selectedSeason = selectedSeason,
+                        onSelectSeason = {
+                            selectedSpecialGroupKey = null
+                            selectedSeason = it
+                        },
+                        modifier = Modifier.padding(horizontal = 20.dp),
+                    )
                 }
 
                 if (state.horizontalEpisodeList) {
@@ -412,28 +465,6 @@ fun DetailRoute(
             }
         }
 
-        if (state.recommendations.isNotEmpty()) {
-            item {
-                SectionHeading(
-                    title = "Recommendations",
-                    modifier = Modifier.padding(horizontal = 20.dp),
-                )
-            }
-            item {
-                LazyRow(
-                    horizontalArrangement = Arrangement.spacedBy(14.dp),
-                    contentPadding = PaddingValues(horizontal = 20.dp),
-                ) {
-                    items(state.recommendations, key = { it.id }) { item ->
-                        MediaPosterCard(
-                            item = item,
-                            onClick = onSelectRecommendation,
-                            modifier = Modifier.width(150.dp),
-                        )
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -547,165 +578,162 @@ private fun MetadataStrip(
 private fun DetailActions(
     isResolvingStreams: Boolean,
     selectedEpisodeLabel: String?,
-    userRating: Int?,
+    isMovie: Boolean,
+    collections: List<DetailCollectionRow>,
     onResolveStreams: () -> Unit,
     onSaveToLibrary: () -> Unit,
-    onQueueResume: () -> Unit,
     onQueueDownload: () -> Unit,
-    onMarkWatched: () -> Unit,
-    onMarkUnwatched: () -> Unit,
-    onSetRating: (Int) -> Unit,
-    onClearRating: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    GlassPanel(
-        modifier = modifier,
-        contentPadding = PaddingValues(14.dp),
-    ) {
-        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Button(
-                    onClick = onResolveStreams,
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(46.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = Color.White,
-                        contentColor = Color(0xFF160A21),
-                    ),
-                ) {
-                    Text(
-                        text = when {
-                            isResolvingStreams -> "Resolving"
-                            selectedEpisodeLabel != null -> "Play $selectedEpisodeLabel"
-                            else -> "Play"
-                        },
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                OutlinedButton(
-                    onClick = onSaveToLibrary,
-                    modifier = Modifier.height(46.dp),
-                ) {
-                    Text("Save")
-                }
-                OutlinedButton(
-                    onClick = onQueueDownload,
-                    modifier = Modifier.height(46.dp),
-                ) {
-                    Text("Download")
-                }
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                OutlinedButton(
-                    onClick = onQueueResume,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("Resume")
-                }
-                OutlinedButton(
-                    onClick = onMarkWatched,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("Watched")
-                }
-                OutlinedButton(
-                    onClick = onMarkUnwatched,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Text("Reset")
-                }
-            }
-            RatingRow(
-                rating = userRating,
-                onSetRating = onSetRating,
-                onClearRating = onClearRating,
-            )
-        }
-    }
-}
-
-@Composable
-private fun RatingRow(
-    rating: Int?,
-    onSetRating: (Int) -> Unit,
-    onClearRating: () -> Unit,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = "Rating",
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
-            modifier = Modifier.width(52.dp),
-        )
-        (1..5).forEach { value ->
-            if (rating == value) {
-                Button(
-                    onClick = { onSetRating(value) },
-                    contentPadding = PaddingValues(horizontal = 0.dp),
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(38.dp),
-                ) {
-                    Text(value.toString())
-                }
-            } else {
-                OutlinedButton(
-                    onClick = { onSetRating(value) },
-                    contentPadding = PaddingValues(horizontal = 0.dp),
-                    modifier = Modifier
-                        .weight(1f)
-                        .height(38.dp),
-                ) {
-                    Text(value.toString())
-                }
-            }
-        }
-        if (rating != null) {
-            TextButton(onClick = onClearRating) {
-                Text("Clear")
-            }
-        }
-    }
-}
-
-@Composable
-private fun CollectionRow(
-    collections: List<DetailCollectionRow>,
     onAddToCollection: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Column(
-        modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+    var collectionsExpanded by remember(collections) { mutableStateOf(false) }
+
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text(
-            text = "Collections",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onBackground,
+        Button(
+            onClick = onResolveStreams,
+            modifier = Modifier
+                .weight(1f)
+                .height(48.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Color.White.copy(alpha = 0.20f),
+                contentColor = Color.White,
+            ),
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.PlayArrow,
+                contentDescription = null,
+            )
+            Spacer(modifier = Modifier.width(6.dp))
+            Text(
+                text = when {
+                    isResolvingStreams -> "Resolving"
+                    selectedEpisodeLabel != null -> "Play $selectedEpisodeLabel"
+                    else -> "Play"
+                },
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        DetailIconButton(
+            icon = Icons.Rounded.Bookmark,
+            contentDescription = "Bookmark",
+            onClick = onSaveToLibrary,
         )
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(collections, key = { it.id }) { collection ->
-                if (collection.isSelected) {
-                    Button(onClick = { onAddToCollection(collection.id) }) {
-                        Text(collection.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    }
+        if (isMovie) {
+            DetailIconButton(
+                icon = Icons.Rounded.Download,
+                contentDescription = "Download",
+                onClick = onQueueDownload,
+            )
+        }
+        Box {
+            DetailIconButton(
+                icon = Icons.Rounded.Add,
+                contentDescription = "Add to collection",
+                onClick = { collectionsExpanded = true },
+            )
+            DropdownMenu(
+                expanded = collectionsExpanded,
+                onDismissRequest = { collectionsExpanded = false },
+            ) {
+                if (collections.isEmpty()) {
+                    DropdownMenuItem(
+                        text = { Text("No collections yet") },
+                        onClick = { collectionsExpanded = false },
+                    )
                 } else {
-                    OutlinedButton(onClick = { onAddToCollection(collection.id) }) {
-                        Text(collection.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    collections.forEach { collection ->
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    if (collection.isSelected) {
+                                        "${collection.name} (added)"
+                                    } else {
+                                        collection.name
+                                    },
+                                )
+                            },
+                            onClick = {
+                                onAddToCollection(collection.id)
+                                collectionsExpanded = false
+                            },
+                        )
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DetailIconButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+) {
+    IconButton(
+        onClick = onClick,
+        modifier = Modifier
+            .size(48.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color.White.copy(alpha = 0.12f)),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = Color.White,
+        )
+    }
+}
+
+@Composable
+private fun StarRatingSection(
+    rating: Int?,
+    onSetRating: (Int) -> Unit,
+    onClearRating: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(
+            text = "Your Rating",
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = FontWeight.SemiBold,
+            color = Color.White.copy(alpha = 0.7f),
+        )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            (1..5).forEach { value ->
+                Icon(
+                    imageVector = if ((rating ?: 0) >= value) Icons.Rounded.Star else Icons.Rounded.StarBorder,
+                    contentDescription = "Rate $value",
+                    tint = if ((rating ?: 0) >= value) Color(0xFFFFD54F) else Color.White.copy(alpha = 0.32f),
+                    modifier = Modifier
+                        .size(30.dp)
+                        .clickable {
+                            if (rating == value) {
+                                onClearRating()
+                            } else {
+                                onSetRating(value)
+                            }
+                        },
+                )
+            }
+            rating?.let {
+                Text(
+                    text = "$it/5",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = Color.White.copy(alpha = 0.5f),
+                    modifier = Modifier.padding(start = 4.dp),
+                )
             }
         }
     }
@@ -873,7 +901,7 @@ private fun SeasonDropdown(
     var expanded by remember(episodeSeasons, selectedSeason) { mutableStateOf(false) }
     Box {
         OutlinedButton(onClick = { expanded = true }) {
-            Text("Season ${selectedSeason ?: episodeSeasons.firstOrNull() ?: 1}")
+            Text(seasonLabel(selectedSeason ?: episodeSeasons.firstOrNull() ?: 1))
         }
         DropdownMenu(
             expanded = expanded,
@@ -881,7 +909,7 @@ private fun SeasonDropdown(
         ) {
             episodeSeasons.forEach { season ->
                 DropdownMenuItem(
-                    text = { Text("Season $season") },
+                    text = { Text(seasonLabel(season)) },
                     onClick = {
                         onSelectSeason(season)
                         expanded = false
@@ -932,14 +960,14 @@ private fun StyledSeasonSelector(
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        text = "S$season",
+                        text = if (season == 0) "OVA" else "S$season",
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
                         color = Color.White,
                     )
                 }
                 Text(
-                    text = "Season $season",
+                    text = seasonLabel(season),
                     style = MaterialTheme.typography.labelMedium,
                     color = if (selected) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onBackground,
                     maxLines = 1,
@@ -952,6 +980,73 @@ private fun StyledSeasonSelector(
 }
 
 @Composable
+private fun SpecialsOvaSection(
+    groups: List<SpecialEpisodeGroup>,
+    selectedKey: String?,
+    onSelectGroup: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        SectionHeading(
+            title = "Specials & OVAs",
+            modifier = Modifier.padding(horizontal = 20.dp),
+        )
+        LazyRow(
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            contentPadding = PaddingValues(horizontal = 20.dp),
+        ) {
+            items(groups, key = { it.key }) { group ->
+                val selected = group.key == selectedKey
+                Column(
+                    modifier = Modifier
+                        .width(86.dp)
+                        .clickable { onSelectGroup(group.key) },
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    PosterImage(
+                        imageUrl = group.imageUrl,
+                        contentDescription = group.title,
+                        modifier = Modifier
+                            .size(width = 80.dp, height = 120.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .border(
+                                width = if (selected) 2.dp else 0.dp,
+                                color = if (selected) MaterialTheme.colorScheme.tertiary else Color.Transparent,
+                                shape = RoundedCornerShape(12.dp),
+                            ),
+                    )
+                    Text(
+                        text = group.title,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = if (selected) MaterialTheme.colorScheme.tertiary else Color.White,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center,
+                    )
+                    Text(
+                        text = group.subtitle,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Color.White.copy(alpha = 0.65f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center,
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun seasonLabel(season: Int): String =
+    if (season == 0) "Specials & OVAs" else "Season $season"
+
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
 private fun EpisodeCard(
     episode: DetailEpisodeRow,
     onResolveEpisodeStreams: (String) -> Unit,
@@ -960,104 +1055,91 @@ private fun EpisodeCard(
     onMarkPreviousEpisodesWatched: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var menuExpanded by remember(episode.id) { mutableStateOf(false) }
     GlassPanel(
-        modifier = modifier,
+        modifier = modifier.combinedClickable(
+            onClick = { onResolveEpisodeStreams(episode.id) },
+            onLongClick = { menuExpanded = true },
+        ),
         contentPadding = PaddingValues(12.dp),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            PosterImage(
-                imageUrl = episode.imageUrl,
-                contentDescription = episode.title,
-                modifier = Modifier
-                    .width(126.dp)
-                    .height(74.dp)
-                    .clip(RoundedCornerShape(10.dp)),
-            )
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+        Box {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text(
-                    text = episode.title,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
+                PosterImage(
+                    imageUrl = episode.imageUrl,
+                    contentDescription = episode.title,
+                    modifier = Modifier
+                        .width(126.dp)
+                        .height(74.dp)
+                        .clip(RoundedCornerShape(10.dp)),
                 )
-                episode.subtitle?.let {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
                     Text(
-                        text = it,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.tertiary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                episode.overview?.takeIf { it.isNotBlank() }?.let {
-                    Text(
-                        text = it,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
+                        text = episode.title,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )
-                }
-                if (episode.seasonNumber != null && episode.episodeNumber != null) {
-                    EpisodeActionRow(
-                        episode = episode,
-                        onResolveEpisodeStreams = onResolveEpisodeStreams,
-                        onMarkEpisodeWatched = onMarkEpisodeWatched,
-                        onMarkEpisodeUnwatched = onMarkEpisodeUnwatched,
-                        onMarkPreviousEpisodesWatched = onMarkPreviousEpisodesWatched,
-                    )
+                    episode.subtitle?.let {
+                        Text(
+                            text = it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.tertiary,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    episode.overview?.takeIf { it.isNotBlank() }?.let {
+                        Text(
+                            text = it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun EpisodeActionRow(
-    episode: DetailEpisodeRow,
-    onResolveEpisodeStreams: (String) -> Unit,
-    onMarkEpisodeWatched: (String) -> Unit,
-    onMarkEpisodeUnwatched: (String) -> Unit,
-    onMarkPreviousEpisodesWatched: (String) -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(min = 36.dp),
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        TextButton(
-            onClick = { onResolveEpisodeStreams(episode.id) },
-            contentPadding = PaddingValues(horizontal = 8.dp),
-        ) {
-            Text("Play")
-        }
-        TextButton(
-            onClick = { onMarkEpisodeWatched(episode.id) },
-            contentPadding = PaddingValues(horizontal = 8.dp),
-        ) {
-            Text("Watched")
-        }
-        TextButton(
-            onClick = { onMarkEpisodeUnwatched(episode.id) },
-            contentPadding = PaddingValues(horizontal = 8.dp),
-        ) {
-            Text("Reset")
-        }
-        Spacer(modifier = Modifier.weight(1f))
-        TextButton(
-            onClick = { onMarkPreviousEpisodesWatched(episode.id) },
-            contentPadding = PaddingValues(horizontal = 8.dp),
-        ) {
-            Text("Previous")
+            DropdownMenu(
+                expanded = menuExpanded,
+                onDismissRequest = { menuExpanded = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text("Play") },
+                    onClick = {
+                        menuExpanded = false
+                        onResolveEpisodeStreams(episode.id)
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Mark Watched") },
+                    onClick = {
+                        menuExpanded = false
+                        onMarkEpisodeWatched(episode.id)
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Mark Unwatched") },
+                    onClick = {
+                        menuExpanded = false
+                        onMarkEpisodeUnwatched(episode.id)
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Mark Previous Watched") },
+                    onClick = {
+                        menuExpanded = false
+                        onMarkPreviousEpisodesWatched(episode.id)
+                    },
+                )
+            }
         }
     }
 }
@@ -1074,3 +1156,10 @@ private fun DetailScreenState.nextEpisodeLabel(): String? {
     val nextEpisode = playableEpisodes.getOrNull(currentIndex + 1) ?: return null
     return nextEpisode.subtitle?.let { "Next $it" } ?: "Next Episode"
 }
+
+private fun DetailEpisodeRow.specialGroupKey(): String =
+    searchTitle
+        ?.trim()
+        ?.takeIf { it.isNotBlank() }
+        ?.lowercase()
+        ?: id.substringBeforeLast('-', id)

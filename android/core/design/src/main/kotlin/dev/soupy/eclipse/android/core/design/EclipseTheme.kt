@@ -18,6 +18,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Shapes
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -34,14 +35,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 private val EclipseDarkColors = darkColorScheme(
-    primary = Color(0xFFB5B8FF),
-    onPrimary = Color(0xFF11111A),
-    secondary = Color(0xFF79D4FF),
-    tertiary = Color(0xFF5BE2C8),
-    background = Color(0xFF141418),
-    surface = Color(0xFF1A1A21),
-    onBackground = Color(0xFFF4F1FF),
-    onSurface = Color(0xFFE6E0F0),
+    primary = Color(0xFFE7D7FF),
+    onPrimary = Color(0xFF151017),
+    secondary = Color(0xFFD7C4FF),
+    tertiary = Color(0xFFE6D7FF),
+    background = Color(0xFF141414),
+    surface = Color(0xFF202020),
+    onBackground = Color.White,
+    onSurface = Color.White,
 )
 
 private val EclipseLightColors = lightColorScheme(
@@ -57,16 +58,16 @@ private val EclipseLightColors = lightColorScheme(
 
 private val EclipseTypography = androidx.compose.material3.Typography(
     displayMedium = TextStyle(
-        fontFamily = FontFamily.Serif,
-        fontWeight = FontWeight.SemiBold,
-        fontSize = 38.sp,
-        lineHeight = 42.sp,
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Bold,
+        fontSize = 30.sp,
+        lineHeight = 34.sp,
     ),
     headlineSmall = TextStyle(
-        fontFamily = FontFamily.Serif,
-        fontWeight = FontWeight.SemiBold,
-        fontSize = 26.sp,
-        lineHeight = 30.sp,
+        fontFamily = FontFamily.SansSerif,
+        fontWeight = FontWeight.Bold,
+        fontSize = 22.sp,
+        lineHeight = 26.sp,
     ),
     titleLarge = TextStyle(
         fontFamily = FontFamily.SansSerif,
@@ -87,12 +88,20 @@ private val EclipseTypography = androidx.compose.material3.Typography(
         lineHeight = 20.sp,
     ),
     labelLarge = TextStyle(
-        fontFamily = FontFamily.Monospace,
+        fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Medium,
         fontSize = 12.sp,
         lineHeight = 16.sp,
-        letterSpacing = 1.2.sp,
+        letterSpacing = 0.sp,
     ),
+)
+
+private val EclipseShapes = Shapes(
+    extraSmall = RoundedCornerShape(8.dp),
+    small = RoundedCornerShape(10.dp),
+    medium = RoundedCornerShape(12.dp),
+    large = RoundedCornerShape(16.dp),
+    extraLarge = RoundedCornerShape(16.dp),
 )
 
 @Composable
@@ -114,6 +123,7 @@ fun EclipseTheme(
             tertiary = accent,
         ),
         typography = EclipseTypography,
+        shapes = EclipseShapes,
         content = content,
     )
 }
@@ -131,10 +141,10 @@ fun EclipseBackground(
     }
     val baseColors = if (dark) {
         listOf(
-            Color(0xFF08070D),
-            Color(0xFF171020),
-            Color(0xFF2A1744),
-            Color(0xFF120C1A),
+            Color(0xFF141414),
+            Color(0xFF241536),
+            Color(0xFF3F1F73),
+            Color(0xFF141414),
         )
     } else {
         listOf(
@@ -144,28 +154,15 @@ fun EclipseBackground(
             Color(0xFFFBF8FF),
         )
     }
-    val glow = if (dark) Color(0x775B2DFF) else Color(0x55A276FF)
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(
-                brush = Brush.linearGradient(
+                brush = Brush.verticalGradient(
                     colors = baseColors,
                 ),
             ),
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.radialGradient(
-                        colors = listOf(
-                            glow,
-                            Color.Transparent,
-                        ),
-                    ),
-                ),
-        )
         content()
     }
 }
@@ -192,9 +189,9 @@ fun GlassPanel(
 ) {
     Card(
         modifier = modifier,
-        shape = RoundedCornerShape(28.dp),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(
-            containerColor = Color(0x22FFFFFF),
+            containerColor = Color.White.copy(alpha = 0.08f),
         ),
     ) {
         Box(modifier = Modifier.padding(contentPadding)) {
@@ -263,7 +260,7 @@ fun FeaturePlaceholderScreen(
             contentAlignment = Alignment.CenterStart,
         ) {
             Text(
-                text = "Android routes are wired into the shared Luna-style shell, persistence, playback, and backup flow.",
+                text = "Eclipse routes are connected to the Luna-style shell, persistence, playback, and backup flow.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f),
             )

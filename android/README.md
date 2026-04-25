@@ -39,7 +39,7 @@ The Android namespace uses `dev.soupy.eclipse.android`.
 - Settings backup import/export that restores and re-exports Android-owned backup sections while preserving unsupported/unknown Luna backup data
 - Home now respects the backed catalog order/visibility and includes iOS catalog IDs for Just For You, Because You Watched, networks, genres, companies, featured, ranked rows, TMDB rows, and AniList rows, with the backed TMDB horror filter applied to Home rows
 - Search now stores recent queries locally, fetches multiple TMDB pages alongside AniList anime results, and applies the backed TMDB horror filter to TMDB matches
-- Detail pages now hydrate richer TMDB metadata including content ratings, cast, recommendations, episode stills/runtimes/descriptions, and broader season coverage
+- Detail pages now hydrate richer TMDB metadata including content ratings, cast, episode stills/runtimes/descriptions, and broader season coverage
 - Detail pages now expose watched/unwatched actions, mark-previous-episodes support, and backed user ratings that feed the recommendation cache/user-ratings backup path
 - First-pass Stremio addon stream resolution on TMDB movie and series detail pages, with addon manifest diagnostics/configuration-required handling/refresh/embedded configure actions, custom JS provider configuration forms, Auto Mode now respecting backed high-quality threshold and selected similarity algorithm settings, plus a richer AniList-to-TMDB anime bridge with recursive relation-aware matching, episode-count/year scoring, special-season scoring, relation-graph episode reconstruction, and mapped TMDB season metadata for anime episode rows
 - Episode-aware stream resolution from detail episode rows instead of only resolving the first series episode

@@ -81,7 +81,8 @@ class RecommendationRepository(
 private fun ExploreMediaCard.tmdbKey(): String? = when (val target = detailTarget) {
     is DetailTarget.TmdbMovie -> "movie:${target.id}"
     is DetailTarget.TmdbShow -> "tv:${target.id}"
-    is DetailTarget.AniListMediaTarget -> null
+    is DetailTarget.AniListMediaTarget,
+    is DetailTarget.ServiceMedia -> null
 }
 
 private fun Int?.orZero(): Int = this ?: 0

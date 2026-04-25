@@ -447,6 +447,7 @@ private fun String.slugified(): String =
 
 private fun DetailTarget.storageKey(): String = when (this) {
     is DetailTarget.AniListMediaTarget -> "anilist:$id"
+    is DetailTarget.ServiceMedia -> "service:$serviceId:${href.hashCode()}"
     is DetailTarget.TmdbMovie -> "tmdb_movie:$id"
     is DetailTarget.TmdbShow -> "tmdb_show:$id"
 }

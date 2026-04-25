@@ -1,5 +1,11 @@
 package dev.soupy.eclipse.android.data
 
+import dev.soupy.eclipse.android.core.js.ServiceEpisodeLink
+import dev.soupy.eclipse.android.core.js.ServiceRuntime
+import dev.soupy.eclipse.android.core.js.ServiceRuntimeSource
+import dev.soupy.eclipse.android.core.js.ServiceSearchRequest
+import dev.soupy.eclipse.android.core.js.ServiceSearchResult
+import dev.soupy.eclipse.android.core.js.ServiceStreamResult
 import dev.soupy.eclipse.android.core.model.StremioManifest
 import dev.soupy.eclipse.android.core.network.EclipseJson
 import dev.soupy.eclipse.android.core.network.StremioService
@@ -7,12 +13,19 @@ import dev.soupy.eclipse.android.core.storage.ServiceDao
 import dev.soupy.eclipse.android.core.storage.ServiceEntity
 import dev.soupy.eclipse.android.core.storage.StremioAddonDao
 import dev.soupy.eclipse.android.core.storage.StremioAddonEntity
+import java.net.HttpURLConnection
+import java.net.URL
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 
 data class ServiceDraft(
     val name: String,
@@ -58,20 +71,37 @@ data class ServicesSnapshot(
 data class ServicesUpdateSummary(
     val refreshedAddons: Int,
     val failedAddons: Int,
+    val refreshedServices: Int = 0,
+    val failedServices: Int = 0,
 ) {
     val statusMessage: String
         get() = when {
-            refreshedAddons == 0 && failedAddons == 0 -> "No Stremio addons needed refresh."
-            failedAddons == 0 -> "Refreshed $refreshedAddons Stremio addon${refreshedAddons.pluralSuffix()}."
-            refreshedAddons == 0 -> "Could not refresh $failedAddons Stremio addon${failedAddons.pluralSuffix()}."
-            else -> "Refreshed $refreshedAddons Stremio addon${refreshedAddons.pluralSuffix()} with $failedAddons issue${failedAddons.pluralSuffix()}."
+            refreshedAddons == 0 && failedAddons == 0 && refreshedServices == 0 && failedServices == 0 ->
+                "No services or Stremio addons needed refresh."
+            failedAddons == 0 && failedServices == 0 ->
+                "Refreshed $refreshedServices service${refreshedServices.pluralSuffix()} and $refreshedAddons Stremio addon${refreshedAddons.pluralSuffix()}."
+            else ->
+                "Refreshed $refreshedServices service${refreshedServices.pluralSuffix()} and $refreshedAddons addon${refreshedAddons.pluralSuffix()} with ${failedServices + failedAddons} issue${(failedServices + failedAddons).pluralSuffix()}."
         }
 }
+
+data class ServiceResolvedDetail(
+    val serviceId: String,
+    val serviceName: String,
+    val href: String,
+    val title: String,
+    val imageUrl: String? = null,
+    val description: String? = null,
+    val aliases: String? = null,
+    val airdate: String? = null,
+    val episodes: List<ServiceEpisodeLink> = emptyList(),
+)
 
 class ServicesRepository(
     private val serviceDao: ServiceDao,
     private val stremioAddonDao: StremioAddonDao,
     private val stremioService: StremioService,
+    private val serviceRuntime: ServiceRuntime,
 ) {
     fun observeSnapshot(): Flow<ServicesSnapshot> = combine(
         serviceDao.observeAll(),
@@ -205,6 +235,96 @@ class ServicesRepository(
         )
     }
 
+    suspend fun refreshAllSources(): Result<ServicesUpdateSummary> = runCatching {
+        val services = serviceDao.observeAll().first()
+        var refreshedServices = 0
+        var failedServices = 0
+        services.forEach { service ->
+            refreshService(service.id)
+                .onSuccess { refreshedServices += 1 }
+                .onFailure { failedServices += 1 }
+        }
+        val addonSummary = refreshAllAddons().getOrElse {
+            ServicesUpdateSummary(refreshedAddons = 0, failedAddons = stremioAddonDao.observeAll().first().size)
+        }
+        addonSummary.copy(
+            refreshedServices = refreshedServices,
+            failedServices = failedServices,
+        )
+    }
+
+    suspend fun refreshService(id: String): Result<Unit> = runCatching {
+        val service = serviceDao.observeAll().first().firstOrNull { it.id == id }
+            ?: error("Service was not found.")
+        val script = service.fetchScript()
+        serviceRuntime.load(service.toRuntimeSource(script)).getOrThrow()
+        serviceDao.upsert(service.copy(updatedAt = System.currentTimeMillis()))
+    }
+
+    suspend fun activeSearchSources(): List<ServiceSourceRecord> =
+        observeSnapshot().first().services
+            .filter(ServiceSourceRecord::enabled)
+            .sortedBy(ServiceSourceRecord::sortIndex)
+
+    suspend fun searchService(
+        id: String,
+        query: String,
+    ): Result<List<ServiceSearchResult>> = runCatching {
+        require(query.isNotBlank()) { "Search query cannot be blank." }
+        val service = serviceDao.observeAll().first().firstOrNull { it.id == id && it.enabled }
+            ?: error("Service is disabled or was not found.")
+        val script = service.fetchScript()
+        serviceRuntime.search(
+            ServiceSearchRequest(
+                source = service.toRuntimeSource(script),
+                query = query,
+            ),
+        ).getOrThrow()
+    }
+
+    suspend fun loadServiceDetail(
+        id: String,
+        href: String,
+        fallbackTitle: String,
+        fallbackImageUrl: String?,
+    ): Result<ServiceResolvedDetail> = runCatching {
+        val service = serviceDao.observeAll().first().firstOrNull { it.id == id && it.enabled }
+            ?: error("Service is disabled or was not found.")
+        val script = service.fetchScript()
+        val source = service.toRuntimeSource(script)
+        val details = serviceRuntime.details(source, href).getOrElse { JsonObject(emptyMap()) }
+        val episodes = serviceRuntime.episodes(source, href).getOrElse { emptyList() }
+        val detailItems = details["items"] as? JsonArray
+        val firstDetail = detailItems?.firstOrNull() as? JsonObject ?: details
+
+        ServiceResolvedDetail(
+            serviceId = service.id,
+            serviceName = service.name,
+            href = href,
+            title = fallbackTitle,
+            imageUrl = fallbackImageUrl,
+            description = firstDetail.stringValue("description"),
+            aliases = firstDetail.stringValue("aliases"),
+            airdate = firstDetail.stringValue("airdate") ?: firstDetail.stringValue("releaseDate"),
+            episodes = episodes,
+        )
+    }
+
+    suspend fun resolveServiceStream(
+        id: String,
+        href: String,
+        softSub: Boolean = false,
+    ): Result<ServiceStreamResult> = runCatching {
+        val service = serviceDao.observeAll().first().firstOrNull { it.id == id && it.enabled }
+            ?: error("Service is disabled or was not found.")
+        val script = service.fetchScript()
+        serviceRuntime.stream(
+            source = service.toRuntimeSource(script),
+            href = href,
+            softSub = softSub,
+        ).getOrThrow()
+    }
+
     suspend fun setServiceEnabled(id: String, enabled: Boolean): Result<Unit> = updateService(id) { service ->
         service.copy(enabled = enabled, updatedAt = System.currentTimeMillis())
     }
@@ -299,6 +419,47 @@ class ServicesRepository(
         stremioAddonDao.upsert(transform(current))
     }
 }
+
+private suspend fun ServiceEntity.fetchScript(): String {
+    val candidate = scriptUrl?.trim().orEmpty()
+    require(candidate.isNotBlank()) { "Service ${name} does not have a script URL." }
+    if (candidate.contains('\n') || candidate.contains("function ") || candidate.contains("searchResults")) {
+        return candidate
+    }
+    return withContext(Dispatchers.IO) {
+        val connection = (URL(candidate).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 15_000
+            readTimeout = 20_000
+            requestMethod = "GET"
+            setRequestProperty("User-Agent", "Eclipse-Android")
+        }
+        try {
+            require(connection.responseCode in 200..299) {
+                "Could not download ${name}'s script (${connection.responseCode})."
+            }
+            connection.inputStream.bufferedReader().use { it.readText() }
+        } finally {
+            connection.disconnect()
+        }
+    }
+}
+
+private fun ServiceEntity.toRuntimeSource(script: String): ServiceRuntimeSource {
+    val settings = configurationJson
+        ?.takeIf { it.isNotBlank() }
+        ?.let { raw -> runCatching { EclipseJson.decodeFromString<JsonObject>(raw) }.getOrNull() }
+        ?: JsonObject(emptyMap())
+    return ServiceRuntimeSource(
+        id = id,
+        name = name,
+        script = script,
+        baseUrl = scriptUrl?.substringBeforeLast('/', missingDelimiterValue = scriptUrl ?: ""),
+        settings = settings,
+    )
+}
+
+private fun JsonObject.stringValue(key: String): String? =
+    this[key]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
 
 private val ServiceEntity.autoModeId: String
     get() = "service:$id"

@@ -67,7 +67,7 @@ class AndroidServicesViewModel(
         scriptUrl: String,
         manifestUrl: String?,
     ) = mutate(
-        successMessage = "Saved service '$name' on Android.",
+        successMessage = "Saved service '$name'.",
     ) {
         repository.addService(
             ServiceDraft(
@@ -130,9 +130,9 @@ class AndroidServicesViewModel(
     }
 
     fun refreshAllAddons() = mutate(
-        successMessage = "Updated addon manifests.",
+        successMessage = "Updated service sources.",
     ) {
-        val summary = repository.refreshAllAddons().getOrThrow()
+        val summary = repository.refreshAllSources().getOrThrow()
         noticeMessage.value = summary.statusMessage
     }
 
@@ -140,7 +140,7 @@ class AndroidServicesViewModel(
         id: String,
         autoModeId: String,
     ) = mutate(
-        successMessage = "Removed service from Android storage.",
+        successMessage = "Removed service.",
     ) {
         repository.removeService(id).getOrThrow()
         settingsStore.removeAutoModeSource(autoModeId)
@@ -150,7 +150,7 @@ class AndroidServicesViewModel(
         transportUrl: String,
         autoModeId: String,
     ) = mutate(
-        successMessage = "Removed addon from Android storage.",
+        successMessage = "Removed addon.",
     ) {
         repository.removeAddon(transportUrl).getOrThrow()
         settingsStore.removeAutoModeSource(autoModeId)

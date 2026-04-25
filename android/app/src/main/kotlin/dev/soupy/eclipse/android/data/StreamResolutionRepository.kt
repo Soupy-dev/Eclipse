@@ -4,6 +4,7 @@ import dev.soupy.eclipse.android.core.model.DetailTarget
 import dev.soupy.eclipse.android.core.model.EpisodePlaybackContext
 import dev.soupy.eclipse.android.core.model.PlayerSource
 import dev.soupy.eclipse.android.core.model.SimilarityAlgorithm
+import dev.soupy.eclipse.android.core.js.ServiceStreamResult
 import dev.soupy.eclipse.android.core.model.StremioContentIdRequest
 import dev.soupy.eclipse.android.core.model.StremioManifest
 import dev.soupy.eclipse.android.core.model.StremioStream
@@ -22,6 +23,11 @@ import dev.soupy.eclipse.android.core.storage.StremioAddonDao
 import dev.soupy.eclipse.android.core.storage.StremioAddonEntity
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 
 private const val ExactStremioContentMatchFloor = 0.90
 
@@ -44,12 +50,16 @@ data class StreamResolutionResult(
 )
 
 data class StreamEpisodeSelection(
-    val seasonNumber: Int,
-    val episodeNumber: Int,
+    val seasonNumber: Int?,
+    val episodeNumber: Int?,
     val label: String,
-    val localSeasonNumber: Int = seasonNumber,
-    val localEpisodeNumber: Int = episodeNumber,
+    val localSeasonNumber: Int = seasonNumber ?: 0,
+    val localEpisodeNumber: Int = episodeNumber ?: 1,
     val anilistMediaId: Int? = null,
+    val searchTitle: String? = null,
+    val isSpecial: Boolean = false,
+    val titleOnlySearch: Boolean = false,
+    val serviceHref: String? = null,
 )
 
 class StreamResolutionRepository(
@@ -59,11 +69,15 @@ class StreamResolutionRepository(
     private val stremioService: StremioService,
     private val stremioAddonDao: StremioAddonDao,
     private val settingsStore: SettingsStore,
+    private val servicesRepository: ServicesRepository,
 ) {
     suspend fun resolve(
         target: DetailTarget,
         episode: StreamEpisodeSelection? = null,
     ): Result<StreamResolutionResult> = runCatching {
+        if (target is DetailTarget.ServiceMedia) {
+            return@runCatching resolveServiceMedia(target, episode)
+        }
         val request = buildRequest(target, episode)
         val settings = settingsStore.settings.first()
         val addons = stremioAddonDao.observeAll().first()
@@ -85,7 +99,7 @@ class StreamResolutionRepository(
 
         if (addons.isEmpty()) {
             return@runCatching StreamResolutionResult(
-                statusMessage = "No enabled Stremio addons are ready for ${request.type}. Import one in Services first, or include it in Auto Mode if you want Android to prefer selected addons.",
+                statusMessage = "No enabled Stremio addons are ready for ${request.type}. Import one in Services first, or include it in Auto Mode.",
             )
         }
 
@@ -137,7 +151,7 @@ class StreamResolutionRepository(
         if (candidates.isEmpty()) {
             return@runCatching StreamResolutionResult(
                 statusMessage = if (rejectedTorrentCount > 0) {
-                    "Android rejected $rejectedTorrentCount torrent or magnet result${if (rejectedTorrentCount == 1) "" else "s"} for ${request.summary}. No safe direct HTTP(S) streams were returned."
+                    "Rejected $rejectedTorrentCount torrent or magnet result${if (rejectedTorrentCount == 1) "" else "s"} for ${request.summary}. No safe direct HTTP(S) streams were returned."
                 } else {
                     "The enabled addons didn't return any safe direct HTTP(S) streams for ${request.summary} yet."
                 },
@@ -165,10 +179,35 @@ class StreamResolutionRepository(
                 playable != null ->
                     "Resolved $playableCount direct HTTP(S) stream${if (playableCount == 1) "" else "s"} for ${request.summary}.${rejectedTorrentCount.rejectionSuffix()}"
                 else ->
-                    "Found ${candidates.size} non-torrent stream result${if (candidates.size == 1) "" else "s"} for ${request.summary}, but Android only accepts direct HTTP(S) playback URLs.${rejectedTorrentCount.rejectionSuffix()}"
+                    "Found ${candidates.size} non-torrent stream result${if (candidates.size == 1) "" else "s"} for ${request.summary}, but Eclipse only accepts direct HTTP(S) playback URLs.${rejectedTorrentCount.rejectionSuffix()}"
             },
             candidates = candidates,
             selectedSource = playable,
+        )
+    }
+
+    private suspend fun resolveServiceMedia(
+        target: DetailTarget.ServiceMedia,
+        episode: StreamEpisodeSelection?,
+    ): StreamResolutionResult {
+        val href = episode?.serviceHref ?: target.href
+        val streamResult = servicesRepository.resolveServiceStream(
+            id = target.serviceId,
+            href = href,
+        ).getOrThrow()
+        val candidates = streamResult.toServiceCandidates(
+            target = target,
+            href = href,
+            episode = episode,
+        )
+        return StreamResolutionResult(
+            statusMessage = if (candidates.isEmpty()) {
+                "The selected service did not return a safe direct HTTP(S) stream."
+            } else {
+                "Resolved ${candidates.size} service stream${if (candidates.size == 1) "" else "s"}."
+            },
+            candidates = candidates,
+            selectedSource = candidates.firstOrNull(ResolvedStreamCandidate::isPlayable)?.playerSource,
         )
     }
 
@@ -198,10 +237,10 @@ class StreamResolutionRepository(
                 type = "series",
                 tmdbId = target.id,
                 imdbId = imdbId,
-                season = selectedEpisode.seasonNumber,
-                episode = selectedEpisode.episodeNumber,
-                summary = "${show.name} ${selectedEpisode.label}",
-                matchTitles = listOf(show.name),
+                season = selectedEpisode.seasonNumber.takeUnless { selectedEpisode.titleOnlySearch },
+                episode = selectedEpisode.episodeNumber.takeUnless { selectedEpisode.titleOnlySearch },
+                summary = listOfNotNull(selectedEpisode.searchTitle ?: show.name, selectedEpisode.label).joinToString(" "),
+                matchTitles = listOfNotNull(selectedEpisode.searchTitle, show.name),
                 playbackContext = selectedEpisode.toPlaybackContext(),
             )
         }
@@ -209,7 +248,7 @@ class StreamResolutionRepository(
         is DetailTarget.AniListMediaTarget -> {
             val media = aniListService.mediaById(target.id).orThrow()
             val match = animeTmdbMapper.findBestMatch(media)
-                ?: error("Android couldn't match this AniList anime to TMDB yet, so Stremio episode IDs could not be built.")
+                ?: error("Eclipse couldn't match this AniList anime to TMDB yet, so Stremio episode IDs could not be built.")
 
             when (val tmdbTarget = match.target) {
                 is DetailTarget.TmdbMovie -> {
@@ -234,10 +273,10 @@ class StreamResolutionRepository(
                         type = "series",
                         tmdbId = tmdbTarget.id,
                         imdbId = show.externalIds?.imdbId?.takeIf { it.isNotBlank() },
-                        season = selectedEpisode.seasonNumber,
-                        episode = selectedEpisode.episodeNumber,
-                        summary = "${media.displayTitle} ${selectedEpisode.label} via ${match.title}",
-                        matchTitles = listOf(media.displayTitle, match.title, show.name),
+                        season = selectedEpisode.seasonNumber.takeUnless { selectedEpisode.titleOnlySearch },
+                        episode = selectedEpisode.episodeNumber.takeUnless { selectedEpisode.titleOnlySearch },
+                        summary = "${selectedEpisode.searchTitle ?: media.displayTitle} ${selectedEpisode.label} via ${match.title}",
+                        matchTitles = listOfNotNull(selectedEpisode.searchTitle, media.displayTitle, match.title, show.name),
                         playbackContext = selectedEpisode
                             .copy(anilistMediaId = selectedEpisode.anilistMediaId ?: media.id)
                             .toPlaybackContext(),
@@ -245,8 +284,11 @@ class StreamResolutionRepository(
                 }
 
                 is DetailTarget.AniListMediaTarget -> error("AniList-to-AniList stream mapping is not supported.")
+                is DetailTarget.ServiceMedia -> error("Service-backed anime stream mapping is not supported.")
             }
         }
+
+        is DetailTarget.ServiceMedia -> error("Service-backed media streams use the service runtime.")
     }
 
     private suspend fun firstPlayableEpisode(
@@ -258,10 +300,10 @@ class StreamResolutionRepository(
             ?.let { preferred -> show.seasons.firstOrNull { it.seasonNumber == preferred && it.episodeCount > 0 } }
             ?: show.seasons.firstOrNull { it.seasonNumber > 0 && it.episodeCount > 0 }
             ?: show.seasons.firstOrNull { it.episodeCount > 0 }
-            ?: error("This series doesn't expose any seasons yet, so Android can't resolve Stremio episode streams.")
+            ?: error("This series doesn't expose any seasons yet, so Eclipse can't resolve Stremio episode streams.")
         val seasonDetail = tmdbService.seasonDetail(showId, firstSeason.seasonNumber).orThrow()
         val firstEpisode = seasonDetail.episodes.firstOrNull { it.episodeNumber > 0 }
-            ?: error("This series doesn't expose a playable episode yet for Android stream resolution.")
+            ?: error("This series doesn't expose a playable episode yet for stream resolution.")
 
         return StreamEpisodeSelection(
             seasonNumber = firstSeason.seasonNumber,
@@ -373,6 +415,56 @@ private fun StremioStream.toResolvedCandidate(
     )
 }
 
+private fun ServiceStreamResult.toServiceCandidates(
+    target: DetailTarget.ServiceMedia,
+    href: String,
+    episode: StreamEpisodeSelection?,
+): List<ResolvedStreamCandidate> {
+    val directStreams = streams.filter(String::isDirectHttpUrl)
+    val sourceStreams = sources.mapNotNull { source ->
+        val url = source["url"]?.jsonPrimitive?.contentOrNull
+            ?: source["stream"]?.jsonPrimitive?.contentOrNull
+            ?: source["file"]?.jsonPrimitive?.contentOrNull
+        val headers = source["headers"]?.jsonObjectOrNull()?.mapValues { (_, value) ->
+            value.jsonPrimitive.contentOrNull.orEmpty()
+        }.orEmpty()
+        url?.takeIf(String::isDirectHttpUrl)?.let { url to headers }
+    }
+    val allStreams = directStreams.map { it to headers } + sourceStreams
+    return allStreams.distinctBy { it.first }.mapIndexed { index, (url, streamHeaders) ->
+        val title = if (episode != null) {
+            "${target.title} ${episode.label}"
+        } else {
+            target.title
+        }
+        ResolvedStreamCandidate(
+            id = "service:${target.serviceId}:$index",
+            title = title,
+            subtitle = "Service source",
+            supportingText = "Direct HTTP(S) stream from ${target.serviceId}",
+            addonName = target.serviceId,
+            isPlayable = true,
+            qualityScore = 1.0,
+            matchScore = 1.0,
+            playerSource = PlayerSource(
+                uri = url,
+                title = title,
+                headers = streamHeaders,
+                subtitles = subtitles.mapIndexed { subtitleIndex, subtitle ->
+                    SubtitleTrack(
+                        id = "service-subtitle-${subtitleIndex + 1}",
+                        label = "Subtitle ${subtitleIndex + 1}",
+                        uri = subtitle,
+                    )
+                },
+                serviceId = "service:${target.serviceId}",
+                serviceHref = href,
+                context = episode?.toPlaybackContext(),
+            ),
+        )
+    }
+}
+
 private fun StremioAddonEntity.manifest(): StremioManifest? = manifestJson?.runCatching {
     EclipseJson.decodeFromString<StremioManifest>(this)
 }?.getOrNull()
@@ -381,8 +473,10 @@ private fun StreamEpisodeSelection.toPlaybackContext(): EpisodePlaybackContext =
     localSeasonNumber = localSeasonNumber,
     localEpisodeNumber = localEpisodeNumber,
     anilistMediaId = anilistMediaId,
-    tmdbSeasonNumber = seasonNumber,
-    tmdbEpisodeNumber = episodeNumber,
+    tmdbSeasonNumber = seasonNumber.takeUnless { titleOnlySearch },
+    tmdbEpisodeNumber = episodeNumber.takeUnless { titleOnlySearch },
+    isSpecial = isSpecial,
+    titleOnlySearch = titleOnlySearch,
 )
 
 private fun Int.rejectionSuffix(): String =
@@ -391,3 +485,9 @@ private fun Int.rejectionSuffix(): String =
     } else {
         ""
     }
+
+private fun JsonElement.jsonObjectOrNull(): JsonObject? =
+    this as? JsonObject
+
+private fun String.isDirectHttpUrl(): Boolean =
+    startsWith("http://", ignoreCase = true) || startsWith("https://", ignoreCase = true)

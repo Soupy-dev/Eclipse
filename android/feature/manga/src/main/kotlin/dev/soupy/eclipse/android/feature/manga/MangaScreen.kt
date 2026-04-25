@@ -247,7 +247,7 @@ fun MangaRoute(
                 imageUrl = state.recent.firstOrNull()?.coverUrl,
                 supportingText = when {
                     surfaceMode == MangaSurfaceMode.LIBRARY ->
-                        "Saved manga, bookmarks, favorites, and custom Kanzen collections from Android storage and Luna backups."
+                        "Saved manga, bookmarks, favorites, and custom Kanzen collections from Luna backups."
                     surfaceMode == MangaSurfaceMode.SEARCH ->
                         "Search AniList manga and installed Kanzen modules from the dedicated Kanzen shell."
                     surfaceMode == MangaSurfaceMode.HISTORY ->
@@ -255,7 +255,7 @@ fun MangaRoute(
                     state.novelCount > 0 ->
                         "${state.novelCount} novel progress ${if (state.novelCount == 1) "entry" else "entries"} restored with manga history."
                     else ->
-                        "Kanzen library, progress, module, and catalog data now load from Android storage and Luna backups."
+                        "Kanzen library, progress, module, and catalog data load from Luna backups."
                 },
             )
         }
@@ -472,7 +472,7 @@ fun MangaRoute(
             item {
                 SectionHeading(
                     title = "Search Results",
-                    subtitle = "Save AniList manga directly into the Android library.",
+                    subtitle = "Save AniList manga directly into your library.",
                 )
             }
             items(state.searchResults, key = { it.id }) { item ->
@@ -496,7 +496,7 @@ fun MangaRoute(
             item {
                 SectionHeading(
                     title = "Saved Manga",
-                    subtitle = "Library items persisted in Android storage and backup export.",
+                    subtitle = "Library items persisted for backup export.",
                 )
             }
             items(state.savedItems, key = { it.id }) { item ->
@@ -546,7 +546,7 @@ fun MangaRoute(
             item {
                 SectionHeading(
                     title = "Reading",
-                    subtitle = "Recent manga and novel progress restored on Android.",
+                    subtitle = "Recent manga and novel progress.",
                 )
             }
             items(state.recent, key = { it.id }) { row ->
@@ -564,7 +564,7 @@ fun MangaRoute(
             item {
                 SectionHeading(
                     title = "Collections",
-                    subtitle = "Kanzen library collections from Android storage.",
+                    subtitle = "Kanzen library collections.",
                 )
             }
             items(state.collections, key = { it.id }) { row ->
@@ -602,7 +602,7 @@ fun MangaRoute(
                             color = MaterialTheme.colorScheme.onSurface,
                         )
                         Text(
-                            text = "Import a Luna backup or add Kanzen modules to populate your Android reader library.",
+                            text = "Import a Luna backup or add Kanzen modules to populate your reader library.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.74f),
                         )

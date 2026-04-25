@@ -215,7 +215,8 @@ internal fun TrackerSyncItem.toTraktHistoryPayload(watchedAt: String): JsonObjec
             )
         }
     }
-    is DetailTarget.AniListMediaTarget -> null
+    is DetailTarget.AniListMediaTarget,
+    is DetailTarget.ServiceMedia -> null
 }
 
 internal fun aniListSaveMediaListMutation(

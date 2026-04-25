@@ -265,7 +265,7 @@ class AndroidDetailViewModel(
                     _state.update {
                         it.copy(
                             isResolvingStreams = false,
-                            streamStatusMessage = error.message ?: "Android stream resolution failed.",
+                            streamStatusMessage = error.message ?: "Stream resolution failed.",
                             streamCandidates = emptyList(),
                         )
                     }
@@ -386,7 +386,7 @@ class AndroidDetailViewModel(
             progressPercent = if (firstEpisode == null) 0.42f else 0.08f,
             progressLabel = firstEpisode?.let { episode ->
                 episode.subtitle?.let { "Resume near $it" } ?: "Resume from ${episode.title}"
-            } ?: "Resume from the last saved movie position once playback reporting is wired.",
+            } ?: "Resume from the last saved movie position.",
         )
     }
 
@@ -408,7 +408,7 @@ class AndroidDetailViewModel(
             backdropUrl = snapshot.backdropUrl,
             mediaLabel = snapshot.metadataChips.firstOrNull(),
             progressLabel = selectedEpisode?.subtitle?.let { "Preparing offline draft near $it" }
-                ?: "Preparing an offline draft from the current Android source.",
+                ?: "Preparing an offline draft from the current source.",
             sourceLabel = snapshot.playerSource?.title ?: if (isEpisodeDraft) {
                 "Episode download draft"
             } else {
@@ -469,7 +469,8 @@ class AndroidDetailViewModel(
                     )
                 }
             }
-            is DetailTarget.AniListMediaTarget -> Unit
+            is DetailTarget.AniListMediaTarget,
+            is DetailTarget.ServiceMedia -> Unit
         }
     }
 
@@ -490,7 +491,8 @@ class AndroidDetailViewModel(
                 val episodeNumber = episode.sourceEpisodeNumber ?: return
                 "show:${target.id}:$seasonNumber:$episodeNumber"
             }
-            is DetailTarget.AniListMediaTarget -> return
+            is DetailTarget.AniListMediaTarget,
+            is DetailTarget.ServiceMedia -> return
         }
         if (!syncedTrackerProgressKeys.add(syncKey)) return
 
@@ -529,6 +531,7 @@ class AndroidDetailViewModel(
             }
             is DetailTarget.TmdbShow -> markLoadedShowEpisodes(target.id, watched)
             is DetailTarget.AniListMediaTarget,
+            is DetailTarget.ServiceMedia,
             null -> markUnsupportedProgress()
         }
     }
@@ -640,7 +643,8 @@ class AndroidDetailViewModel(
                         seasonNumber = context?.resolvedTMDBSeasonNumber,
                         episodeNumber = context?.resolvedTMDBEpisodeNumber,
                     ).orNull().orEmpty()
-                    is DetailTarget.AniListMediaTarget -> emptyList()
+                    is DetailTarget.AniListMediaTarget,
+                    is DetailTarget.ServiceMedia -> emptyList()
                 }
             } else {
                 emptyList()
@@ -697,7 +701,6 @@ private fun DetailContent.toUiState(userRating: Int?): DetailScreenState = Detai
             imageUrl = it.imageUrl,
         )
     },
-    recommendations = recommendations,
     episodesTitle = episodesTitle,
     episodes = episodes.map {
         DetailEpisodeRow(
@@ -711,27 +714,38 @@ private fun DetailContent.toUiState(userRating: Int?): DetailScreenState = Detai
             runtimeMinutes = it.runtimeMinutes,
             tmdbSeasonNumber = it.tmdbSeasonNumber,
             tmdbEpisodeNumber = it.tmdbEpisodeNumber,
+            isSpecial = it.isSpecial,
+            titleOnlySearch = it.titleOnlySearch,
+            searchTitle = it.searchTitle,
+            serviceHref = it.serviceHref,
         )
     },
+    isMovie = isMovie,
 )
 
 private fun DetailTarget.tmdbRatingId(): Int? = when (this) {
     is DetailTarget.TmdbMovie -> id
     is DetailTarget.TmdbShow -> id
     is DetailTarget.AniListMediaTarget -> null
+    is DetailTarget.ServiceMedia -> null
 }
 
 private fun DetailEpisodeRow.toStreamEpisodeSelection(): StreamEpisodeSelection? {
     val localSeason = seasonNumber ?: tmdbSeasonNumber ?: return null
     val localEpisode = episodeNumber ?: tmdbEpisodeNumber ?: return null
-    val season = tmdbSeasonNumber ?: localSeason
-    val episode = tmdbEpisodeNumber ?: localEpisode
+    val useTitleOnly = titleOnlySearch || (isSpecial && (tmdbSeasonNumber == null || tmdbEpisodeNumber == null))
+    val season = if (useTitleOnly) null else tmdbSeasonNumber ?: localSeason
+    val episode = if (useTitleOnly) null else tmdbEpisodeNumber ?: localEpisode
     return StreamEpisodeSelection(
         seasonNumber = season,
         episodeNumber = episode,
-        label = "S${localSeason}E${localEpisode}",
+        label = if (isSpecial) "Special E$localEpisode" else "S${localSeason}E${localEpisode}",
         localSeasonNumber = localSeason,
         localEpisodeNumber = localEpisode,
+        searchTitle = searchTitle ?: title,
+        isSpecial = isSpecial,
+        titleOnlySearch = useTitleOnly,
+        serviceHref = serviceHref,
     )
 }
 

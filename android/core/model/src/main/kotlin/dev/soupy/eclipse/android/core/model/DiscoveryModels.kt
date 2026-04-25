@@ -16,6 +16,15 @@ sealed interface DetailTarget {
     @Serializable
     @SerialName("anilist_media")
     data class AniListMediaTarget(val id: Int) : DetailTarget
+
+    @Serializable
+    @SerialName("service_media")
+    data class ServiceMedia(
+        val serviceId: String,
+        val href: String,
+        val title: String,
+        val imageUrl: String? = null,
+    ) : DetailTarget
 }
 
 data class ExploreMediaCard(

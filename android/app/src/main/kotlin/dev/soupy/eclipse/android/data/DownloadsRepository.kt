@@ -146,7 +146,7 @@ class DownloadsRepository(
             val queued = record.copy(
                 status = DownloadStatus.QUEUED,
                 progressPercent = 0f,
-                progressLabel = "Resuming interrupted Android background transfer.",
+                progressLabel = "Resuming interrupted background transfer.",
                 error = null,
             )
             latest = writeRecord(queued)
@@ -166,7 +166,7 @@ class DownloadsRepository(
             current.copy(
                 status = DownloadStatus.COMPLETED,
                 progressPercent = 1f,
-                progressLabel = current.localUri?.let { "Offline file is available in Android app storage." }
+                progressLabel = current.localUri?.let { "Offline file is available in app storage." }
                     ?: "Marked complete manually.",
                 error = null,
             )
@@ -196,7 +196,7 @@ class DownloadsRepository(
                 progressLabel = when {
                     canRetrySource -> "Removed local files. The captured source can be retried."
                     sourceKind == DownloadSourceKind.BLOCKED_TORRENT ->
-                        "Removed local files. Torrent and magnet sources are blocked on Android."
+                        "Removed local files. Torrent and magnet sources are blocked."
                     else -> "Removed local files. Resolve this title again to capture a new direct source."
                 },
                 downloadedBytes = 0,
@@ -284,7 +284,7 @@ class DownloadsRepository(
                     record.copy(
                         status = DownloadStatus.FAILED,
                         progressPercent = 0f,
-                        progressLabel = "Offline file is missing from Android app storage.",
+                        progressLabel = "Offline file is missing from app storage.",
                         localFileName = null,
                         localUri = null,
                         subtitleFileNames = emptyList(),
@@ -341,7 +341,7 @@ class DownloadsRepository(
         processQueuedRecord(
             current.copy(
                 status = DownloadStatus.QUEUED,
-                progressLabel = current.progressLabel ?: "Running Android background transfer.",
+                progressLabel = current.progressLabel ?: "Running background transfer.",
                 error = null,
             ),
         )
@@ -399,14 +399,14 @@ class DownloadsRepository(
             DownloadSourceKind.BLOCKED_TORRENT -> writeRecord(
                 record.copy(
                     status = DownloadStatus.FAILED,
-                    progressLabel = "Torrent and magnet sources are blocked on Android.",
+                    progressLabel = "Torrent and magnet sources are blocked.",
                     error = "Rejected torrent-like source URI: $sourceUri",
                 ),
             )
             DownloadSourceKind.UNSUPPORTED_SOURCE -> writeRecord(
                 record.copy(
                     status = DownloadStatus.FAILED,
-                    progressLabel = "Only direct HTTP(S) streams can be downloaded by Android right now.",
+                    progressLabel = "Only direct HTTP(S) streams can be downloaded.",
                     error = "Unsupported source URI: $sourceUri",
                 ),
             )
@@ -423,7 +423,7 @@ class DownloadsRepository(
                 writeRecord(
                     record.copy(
                         status = DownloadStatus.DOWNLOADING,
-                        progressLabel = "Downloading direct stream into Android app storage.",
+                        progressLabel = "Downloading direct stream into app storage.",
                     ),
                 )
                 writeRecord(downloadEngine.download(record))
@@ -459,7 +459,7 @@ class DownloadsRepository(
         return copy(
             status = DownloadStatus.COMPLETED,
             progressPercent = 1f,
-            progressLabel = "Verified offline file (${byteCount.toByteCountLabel()}) in Android app storage.",
+            progressLabel = "Verified offline file (${byteCount.toByteCountLabel()}) in app storage.",
             downloadedBytes = byteCount,
             totalBytes = totalBytes.takeIf { it > 0 } ?: byteCount,
             localFileName = canonical.name,
@@ -540,7 +540,7 @@ private class DirectFileDownloadEngine(
                         append(" with ${subtitleFiles.size} subtitle file")
                         if (subtitleFiles.size != 1) append("s")
                     }
-                    append(" into Android app storage.")
+                    append(" into app storage.")
                 },
                 downloadedBytes = downloadedBytes,
                 totalBytes = totalBytes.takeIf { it > 0 } ?: downloadedBytes,
@@ -580,7 +580,7 @@ private class DirectFileDownloadEngine(
                 progressLabel = buildString {
                     append("Packaged ${result.segmentCount} HLS segment")
                     if (result.segmentCount != 1) append("s")
-                    append(" (${result.downloadedBytes.toByteCountLabel()}) into Android app storage.")
+                    append(" (${result.downloadedBytes.toByteCountLabel()}) into app storage.")
                     if (subtitleFiles.isNotEmpty()) {
                         append(" Added ${subtitleFiles.size} subtitle file")
                         if (subtitleFiles.size != 1) append("s")
@@ -823,9 +823,9 @@ private fun DownloadDraft.toRecord(
         status = DownloadStatus.QUEUED,
         progressPercent = existing?.takeIf { it.status != DownloadStatus.COMPLETED }?.progressPercent ?: 0f,
         progressLabel = progressLabel ?: if (resolvedSource != null) {
-            "Direct stream captured. Android will attempt an offline file transfer now."
+            "Direct stream captured. Eclipse will attempt an offline file transfer now."
         } else {
-            "Queued for offline preparation while Android waits for source resolution."
+            "Queued for offline preparation while Eclipse waits for source resolution."
         },
         sourceLabel = sourceLabel
             ?: resolvedSource?.title
@@ -883,6 +883,7 @@ private fun DownloadRecord.outputFileName(sourceUri: String): String {
 private fun DetailTarget.downloadKey(suffix: String?): String {
     val base = when (this) {
         is DetailTarget.AniListMediaTarget -> "download:anilist:$id"
+        is DetailTarget.ServiceMedia -> "download:service:$serviceId:${href.hashCode()}"
         is DetailTarget.TmdbMovie -> "download:tmdb_movie:$id"
         is DetailTarget.TmdbShow -> "download:tmdb_show:$id"
     }

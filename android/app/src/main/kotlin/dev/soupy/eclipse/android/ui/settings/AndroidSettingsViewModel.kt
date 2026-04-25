@@ -821,7 +821,7 @@ class AndroidSettingsViewModel(
                 }
                 .onFailure { error ->
                     _state.value = _state.value.copy(
-                        storageStatus = error.message ?: "Android could not inspect storage yet.",
+                        storageStatus = error.message ?: "Could not inspect storage yet.",
                     )
                 }
         }
@@ -829,7 +829,7 @@ class AndroidSettingsViewModel(
 
     fun clearCache() {
         viewModelScope.launch {
-            loggerRepository.log("Storage", "User cleared app cache from Android settings.")
+            loggerRepository.log("Storage", "User cleared app cache from settings.")
             cacheRepository.clearCache()
                 .onSuccess { metrics ->
                     _state.value = _state.value.copy(
@@ -845,7 +845,7 @@ class AndroidSettingsViewModel(
                 .onFailure { error ->
                     loggerRepository.log("Storage", error.message ?: "Cache clear failed.", level = "error")
                     _state.value = _state.value.copy(
-                        storageStatus = error.message ?: "Android could not clear cache.",
+                        storageStatus = error.message ?: "Could not clear cache.",
                     )
                     refreshLogs()
                 }
@@ -903,7 +903,7 @@ class AndroidSettingsViewModel(
                             )
                         },
                         loggerStatus = if (snapshot.entries.isEmpty()) {
-                            "No Android logs captured yet."
+                            "No logs captured yet."
                         } else {
                             "${snapshot.entries.size} persistent log entries"
                         },
@@ -911,7 +911,7 @@ class AndroidSettingsViewModel(
                 }
                 .onFailure { error ->
                     _state.value = _state.value.copy(
-                        loggerStatus = error.message ?: "Android could not read persistent logs.",
+                        loggerStatus = error.message ?: "Could not read persistent logs.",
                     )
                 }
         }
@@ -950,7 +950,7 @@ class AndroidSettingsViewModel(
                 refreshLogs()
             }.onFailure { error ->
                 _state.value = _state.value.copy(
-                    trackerStatus = error.message ?: "Android could not save tracker account.",
+                    trackerStatus = error.message ?: "Could not save tracker account.",
                 )
             }
         }
@@ -975,7 +975,7 @@ class AndroidSettingsViewModel(
                         level = "error",
                     )
                     _state.value = _state.value.copy(
-                        trackerStatus = error.message ?: "Android could not finish tracker authorization.",
+                        trackerStatus = error.message ?: "Could not finish tracker authorization.",
                     )
                     refreshLogs()
                 }
@@ -993,7 +993,7 @@ class AndroidSettingsViewModel(
                 }
                 .onFailure { error ->
                     _state.value = _state.value.copy(
-                        trackerStatus = error.message ?: "Android could not update tracker sync.",
+                        trackerStatus = error.message ?: "Could not update tracker sync.",
                     )
                 }
         }
@@ -1012,7 +1012,7 @@ class AndroidSettingsViewModel(
                 }
                 .onFailure { error ->
                     _state.value = _state.value.copy(
-                        trackerStatus = error.message ?: "Android could not disconnect tracker.",
+                        trackerStatus = error.message ?: "Could not disconnect tracker.",
                     )
                 }
         }
@@ -1032,7 +1032,7 @@ class AndroidSettingsViewModel(
                 }
                 .onFailure { error ->
                     _state.value = _state.value.copy(
-                        trackerStatus = error.message ?: "Android tracker sync failed.",
+                        trackerStatus = error.message ?: "Tracker sync failed.",
                     )
                 }
         }
@@ -1043,7 +1043,7 @@ class AndroidSettingsViewModel(
             _state.value = _state.value.copy(trackerStatus = "Syncing manga progress to AniList...")
             val mangaSnapshot = mangaRepository.loadSnapshot()
                 .getOrElse { error ->
-                    val message = error.message ?: "Android could not load local manga progress."
+                    val message = error.message ?: "Could not load local manga progress."
                     _state.value = _state.value.copy(trackerStatus = message)
                     loggerRepository.log("Trackers", message, level = "error")
                     refreshLogs()
@@ -1060,7 +1060,7 @@ class AndroidSettingsViewModel(
                     refreshLogs()
                 }
                 .onFailure { error ->
-                    val message = error.message ?: "Android manga tracker sync failed."
+                    val message = error.message ?: "Manga tracker sync failed."
                     _state.value = _state.value.copy(trackerStatus = message)
                     loggerRepository.log("Trackers", message, level = "error")
                     refreshLogs()
@@ -1102,12 +1102,12 @@ class AndroidSettingsViewModel(
                         _state.value = _state.value.copy(
                             trackerStatus = "Imported ${summary.importedItems} AniList anime item${if (summary.importedItems == 1) "" else "s"} into Library, including ${summary.importedContinueWatching} resume entr${if (summary.importedContinueWatching == 1) "y" else "ies"}.",
                         )
-                        loggerRepository.log("Trackers", "Imported AniList anime library into Android Library.")
+                        loggerRepository.log("Trackers", "Imported AniList anime library into Library.")
                         refreshLogs()
                         onImported()
                     }.onFailure { error ->
                         _state.value = _state.value.copy(
-                            trackerStatus = error.message ?: "Android could not import AniList library.",
+                            trackerStatus = error.message ?: "Could not import AniList library.",
                         )
                     }
                 }
@@ -1160,12 +1160,12 @@ class AndroidSettingsViewModel(
                         _state.value = _state.value.copy(
                             trackerStatus = "Imported ${summary.importedItems} AniList manga item${if (summary.importedItems == 1) "" else "s"} into Manga/Novel, including ${summary.importedProgress} $progressLabel and ${summary.importedNovels} novel item${if (summary.importedNovels == 1) "" else "s"}.",
                         )
-                        loggerRepository.log("Trackers", "Imported AniList manga library into Android Manga/Novel.")
+                        loggerRepository.log("Trackers", "Imported AniList manga library into Manga/Novel.")
                         refreshLogs()
                         onImported()
                     }.onFailure { error ->
                         _state.value = _state.value.copy(
-                            trackerStatus = error.message ?: "Android could not import AniList manga library.",
+                            trackerStatus = error.message ?: "Could not import AniList manga library.",
                         )
                     }
                 }
@@ -1195,7 +1195,7 @@ class AndroidSettingsViewModel(
                     _state.value = _state.value.copy(
                         hasLocalBackup = false,
                         backupStatusHeadline = "Backup status unavailable",
-                        backupStatusMessage = error.message ?: "Android couldn't inspect the staged backup yet.",
+                        backupStatusMessage = error.message ?: "Could not inspect the staged backup yet.",
                     )
                 }
         }
@@ -1218,7 +1218,7 @@ class AndroidSettingsViewModel(
                 }
                 .onFailure { error ->
                     _state.value = _state.value.copy(
-                        trackerStatus = error.message ?: "Android could not load tracker state.",
+                        trackerStatus = error.message ?: "Could not load tracker state.",
                     )
                 }
         }
@@ -1240,7 +1240,7 @@ class AndroidSettingsViewModel(
                     _state.value = _state.value.copy(
                         isBackupBusy = false,
                         backupStatusHeadline = "Backup failed",
-                        backupStatusMessage = error.message ?: "Android couldn't finish the backup operation.",
+                        backupStatusMessage = error.message ?: "Could not finish the backup operation.",
                     )
                 }
         }
@@ -1283,10 +1283,15 @@ class AndroidSettingsViewModel(
             val now = System.currentTimeMillis()
             val elapsed = now - settings.lastServiceAutoUpdateTimestamp
             if (elapsed in 0 until ServiceAutoUpdateIntervalMillis) return@launch
-            servicesRepository.refreshAllAddons()
+            servicesRepository.refreshAllSources()
                 .onSuccess { summary ->
                     settingsStore.markServiceAutoUpdateChecked(now)
-                    if (summary.refreshedAddons > 0 || summary.failedAddons > 0) {
+                    if (
+                        summary.refreshedAddons > 0 ||
+                        summary.failedAddons > 0 ||
+                        summary.refreshedServices > 0 ||
+                        summary.failedServices > 0
+                    ) {
                         loggerRepository.log("Services", summary.statusMessage)
                         refreshLogs()
                     }
@@ -1393,7 +1398,7 @@ private fun NetworkResult.Failure.toStatusMessage(prefix: String): String = when
 
 private fun TrackerSyncSummary.toMangaSyncStatusMessage(): String = when {
     attemptedAccounts == 0 -> "No connected AniList account is ready to sync manga progress."
-    attemptedItems == 0 -> "No AniList-backed manga progress is ready to sync yet."
+    attemptedItems == 0 -> "No AniList manga progress is ready to sync yet."
     failures.isNotEmpty() && syncedItems == 0 -> "Manga progress sync failed: ${failures.first()}"
     failures.isNotEmpty() -> "Synced $syncedItems manga item${syncedItems.pluralSuffix()} with ${failures.size} issue${failures.size.pluralSuffix()}."
     syncedItems > 0 -> "Synced $syncedItems manga item${syncedItems.pluralSuffix()} to AniList."

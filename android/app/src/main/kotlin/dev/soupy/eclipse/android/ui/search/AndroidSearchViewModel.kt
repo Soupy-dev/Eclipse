@@ -8,7 +8,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import dev.soupy.eclipse.android.data.SearchRepository
+import dev.soupy.eclipse.android.data.TmdbSearchSourceId
 import dev.soupy.eclipse.android.core.storage.SettingsStore
+import dev.soupy.eclipse.android.feature.search.SearchSourceRow
 import dev.soupy.eclipse.android.feature.search.SearchScreenState
 
 class AndroidSearchViewModel(
@@ -23,6 +25,26 @@ class AndroidSearchViewModel(
             _state.update { it.copy(recentQueries = repository.recentQueries()) }
         }
         viewModelScope.launch {
+            repository.observeSearchSources().collect { sources ->
+                _state.update { state ->
+                    val rows = sources.map { source ->
+                        SearchSourceRow(
+                            id = source.id,
+                            label = source.label,
+                            subtitle = source.subtitle,
+                            isTmdb = source.isTmdb,
+                        )
+                    }
+                    state.copy(
+                        sourceOptions = rows,
+                        selectedSourceId = state.selectedSourceId.takeIf { selected ->
+                            rows.any { it.id == selected }
+                        } ?: TmdbSearchSourceId,
+                    )
+                }
+            }
+        }
+        viewModelScope.launch {
             settingsStore.settings.collect { settings ->
                 _state.update {
                     it.copy(
@@ -31,6 +53,16 @@ class AndroidSearchViewModel(
                     )
                 }
             }
+        }
+    }
+
+    fun selectSource(sourceId: String) {
+        _state.update {
+            it.copy(
+                selectedSourceId = sourceId,
+                sections = emptyList(),
+                errorMessage = null,
+            )
         }
     }
 
@@ -58,7 +90,7 @@ class AndroidSearchViewModel(
 
         viewModelScope.launch {
             _state.update { it.copy(isSearching = true, errorMessage = null) }
-            repository.search(query)
+            repository.search(query, sourceId = _state.value.selectedSourceId)
                 .onSuccess { result ->
                     _state.update {
                         it.copy(

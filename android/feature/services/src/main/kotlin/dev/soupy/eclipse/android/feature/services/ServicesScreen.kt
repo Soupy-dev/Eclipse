@@ -119,7 +119,7 @@ fun ServicesRoute(
                 title = "Services",
                 subtitle = "Runtime sources and addons",
                 imageUrl = null,
-                supportingText = "Manage sources, addon imports, ordering, and Auto Mode source selection.",
+                supportingText = "Manage sources, addon imports, ordering, and Auto Mode.",
             )
         }
 
@@ -199,7 +199,7 @@ fun ServicesRoute(
                             color = MaterialTheme.colorScheme.onSurface,
                         )
                         Text(
-                            text = "Let Eclipse pick from the sources you marked below. This may not always be accurate, especially until parity search heuristics and stream scoring are fully ported.",
+                            text = "Let Eclipse pick from the sources you include below.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f),
                         )
@@ -265,7 +265,7 @@ fun ServicesRoute(
                             Text("Save Service")
                         }
                         Text(
-                            text = "Use this for JS-backed provider definitions until the manifest/runtime bridge is fully wired.",
+                            text = "Use this for JS provider definitions.",
                             modifier = Modifier.weight(1f),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
@@ -301,7 +301,7 @@ fun ServicesRoute(
                             Text("Import Addon")
                         }
                         Text(
-                            text = "The Android app now fetches and persists the addon manifest immediately so this screen can reflect real Stremio state.",
+                            text = "Eclipse fetches the addon manifest when you import it.",
                             modifier = Modifier.weight(1f),
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
@@ -322,7 +322,7 @@ fun ServicesRoute(
             item {
                 EmptyStatePanel(
                     title = "No custom services yet",
-                    message = "Add a JS service above and it will persist here. Ordering and Auto Mode selection already work on Android for these saved entries.",
+                    message = "Add a JS service above and it will appear here.",
                 )
             }
         } else {
@@ -353,17 +353,17 @@ fun ServicesRoute(
         item {
             SectionHeading(
                 title = "Stremio Addons (${state.addonCount})",
-                subtitle = "Imported addon manifests, sorted and ready for later stream resolution.",
+                subtitle = "Imported addon manifests, sorted with custom services for Auto Mode.",
             )
         }
 
         item {
             OutlinedButton(
                 onClick = onRefreshAllAddons,
-                enabled = state.stremioAddons.isNotEmpty() && !state.isMutating,
+                enabled = (state.stremioAddons.isNotEmpty() || state.services.isNotEmpty()) && !state.isMutating,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Update All Addons")
+                Text("Update All Sources")
             }
         }
 

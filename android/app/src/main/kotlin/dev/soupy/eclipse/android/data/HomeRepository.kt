@@ -1,11 +1,17 @@
 package dev.soupy.eclipse.android.data
 
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import dev.soupy.eclipse.android.core.model.AniListMedia
 import dev.soupy.eclipse.android.core.model.BackupCatalog
+import dev.soupy.eclipse.android.core.model.DetailTarget
 import dev.soupy.eclipse.android.core.model.ExploreMediaCard
 import dev.soupy.eclipse.android.core.model.MediaCarouselSection
 import dev.soupy.eclipse.android.core.model.TMDBSearchResult
+import dev.soupy.eclipse.android.core.model.displayTitle
+import dev.soupy.eclipse.android.core.model.fullBackdropUrl
+import dev.soupy.eclipse.android.core.model.fullPosterUrl
 import dev.soupy.eclipse.android.core.model.isMovie
 import dev.soupy.eclipse.android.core.model.isTVShow
 import dev.soupy.eclipse.android.core.network.AniListService
@@ -23,8 +29,10 @@ data class HomeContent(
 class HomeRepository(
     private val tmdbService: TmdbService,
     private val aniListService: AniListService,
+    private val animeTmdbMapper: AnimeTmdbMapper,
     private val catalogRepository: CatalogRepository,
     private val recommendationRepository: RecommendationRepository,
+    private val progressRepository: ProgressRepository,
     private val settingsStore: SettingsStore,
     private val tmdbEnabled: Boolean,
 ) {
@@ -32,6 +40,7 @@ class HomeRepository(
         coroutineScope {
             val settingsDeferred = async { settingsStore.settings.first() }
             val enabledCatalogsDeferred = async { catalogRepository.enabledCatalogs() }
+            val continueWatchingDeferred = async { progressRepository.continueWatching(limit = 12) }
             val trendingDeferred = async {
                 if (tmdbEnabled) tmdbService.trendingAll()
                 else dev.soupy.eclipse.android.core.network.NetworkResult.Success(emptyList<dev.soupy.eclipse.android.core.model.TMDBSearchResult>())
@@ -111,17 +120,29 @@ class HomeRepository(
                     .take(12)
                     .map { it.toExploreMediaCard("Top rated") }
                 val animeCatalogs = animeCatalogsDeferred.await().orThrow()
-                val animeTrending = animeCatalogs.trending.take(12).map { it.toExploreMediaCard("Anime") }
-                val animePopular = animeCatalogs.popular.take(12).map { it.toExploreMediaCard("Anime") }
-                val animeAiring = animeCatalogs.airing.take(12).map { it.toExploreMediaCard("Airing") }
-                val animeUpcoming = animeCatalogs.upcoming.take(12).map { it.toExploreMediaCard("Upcoming") }
-                val animeTop = animeCatalogs.topRated.take(12).map { it.toExploreMediaCard("Top rated") }
+                val animeTrending = animeCatalogs.trending.toMappedAnimeCards("Anime")
+                val animePopular = animeCatalogs.popular.toMappedAnimeCards("Anime")
+                val animeAiring = animeCatalogs.airing.toMappedAnimeCards("Airing")
+                val animeUpcoming = animeCatalogs.upcoming.toMappedAnimeCards("Upcoming")
+                val animeTop = animeCatalogs.topRated.toMappedAnimeCards("Top rated")
                 val tmdbPool = (trending + popularMovies + nowPlayingMovies + upcomingMovies + popularTv + airingToday + onTheAir + topRatedTv + topRatedMovies)
                     .distinctBy { it.id }
                 val justForYou = recommendationRepository.justForYou(tmdbPool)
                 val becauseYouWatched = recommendationRepository.becauseYouWatched(tmdbPool)
+                val continueWatching = continueWatchingDeferred.await().map { record ->
+                    ExploreMediaCard(
+                        id = record.id,
+                        title = record.title,
+                        subtitle = record.progressLabel ?: record.subtitle,
+                        imageUrl = record.imageUrl,
+                        backdropUrl = record.backdropUrl ?: record.imageUrl,
+                        badge = "Continue",
+                        detailTarget = record.detailTarget,
+                    )
+                }
 
                 val sectionByCatalogId = buildMap {
+                    put("continueWatching", MediaCarouselSection("local-continue-watching", "Continue Watching", "Resume from playback progress", continueWatching))
                     put("forYou", MediaCarouselSection("local-for-you", "Just For You", "Picked from your progress, ratings, and recommendations", justForYou))
                     put("becauseYouWatched", MediaCarouselSection("local-because-you-watched", "Because You Watched", "More picks shaped by your watched and resume history", becauseYouWatched))
                     put("trending", MediaCarouselSection("tmdb-trending", "Trending This Week", "Popular right now", trending))
@@ -147,9 +168,10 @@ class HomeRepository(
                     put("bestAnime", MediaCarouselSection("anime-best", "Best Anime", "Ranked anime", animeTop))
                 }
 
-                enabledCatalogs
+                (listOfNotNull(sectionByCatalogId["continueWatching"]?.takeIf { it.items.isNotEmpty() }) +
+                    enabledCatalogs
                     .mapNotNull { catalog -> sectionByCatalogId[catalog.id]?.forCatalog(catalog) }
-                    .filter { it.items.isNotEmpty() }
+                    .filter { it.items.isNotEmpty() })
             }
 
             if (sections.isEmpty()) {
@@ -160,6 +182,57 @@ class HomeRepository(
                 hero = sections.firstNotNullOfOrNull { it.items.firstOrNull() },
                 sections = sections,
             )
+        }
+    }
+
+    private suspend fun List<AniListMedia>.toMappedAnimeCards(
+        badge: String,
+    ): List<ExploreMediaCard> = coroutineScope {
+        take(12)
+            .map { anime ->
+                async { anime.toMappedAnimeCard(badge) }
+            }
+            .awaitAll()
+            .filterNotNull()
+    }
+
+    private suspend fun AniListMedia.toMappedAnimeCard(badge: String): ExploreMediaCard? {
+        if (!tmdbEnabled) return toExploreMediaCard(badge)
+        val match = runCatching { animeTmdbMapper.findBestMatch(this) }.getOrNull()
+        return when (val target = match?.target) {
+            is DetailTarget.TmdbMovie -> {
+                val movie = tmdbService.movieDetail(target.id).orNull()
+                movie?.let {
+                    ExploreMediaCard(
+                        id = "anilist-$id-tmdb-movie-${it.id}",
+                        title = displayTitle,
+                        subtitle = it.releaseDate?.take(4),
+                        overview = it.overview,
+                        imageUrl = it.fullPosterUrl,
+                        backdropUrl = it.fullBackdropUrl,
+                        badge = badge,
+                        detailTarget = DetailTarget.AniListMediaTarget(id),
+                    )
+                } ?: toExploreMediaCard(badge)
+            }
+
+            is DetailTarget.TmdbShow -> {
+                val show = tmdbService.tvShowDetail(target.id).orNull()
+                show?.let {
+                    ExploreMediaCard(
+                        id = "anilist-$id-tmdb-tv-${it.id}",
+                        title = displayTitle,
+                        subtitle = it.firstAirDate?.take(4),
+                        overview = it.overview,
+                        imageUrl = it.fullPosterUrl,
+                        backdropUrl = it.fullBackdropUrl,
+                        badge = badge,
+                        detailTarget = DetailTarget.AniListMediaTarget(id),
+                    )
+                } ?: toExploreMediaCard(badge)
+            }
+
+            else -> toExploreMediaCard(badge)
         }
     }
 }

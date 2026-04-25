@@ -141,7 +141,7 @@ fun DownloadsRoute(
             item {
                 LoadingPanel(
                     title = "Loading downloads",
-                    message = "Reading the Android offline queue, direct downloads, and packaged HLS entries.",
+                    message = "Reading the offline queue.",
                 )
             }
         }
@@ -199,7 +199,7 @@ fun DownloadsRoute(
                 ) {
                     SectionHeading(
                         title = "Queue",
-                        subtitle = "Direct streams can download into app storage; unsupported sources stay visible for retry.",
+                        subtitle = "Active, completed, and failed downloads.",
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         DownloadsTab.entries.forEach { tab ->
@@ -255,19 +255,45 @@ fun DownloadsRoute(
                         )
                     }
                 }
-            }
-            items(visibleItems, key = { it.id }) { item ->
-                DownloadCard(
-                    item = item,
-                    onOpen = { onSelect(item.detailTarget) },
-                    onPause = { onPause(item.id) },
-                    onResume = { onResume(item.id) },
-                    onPlayOffline = { onPlayOffline(item.id) },
-                    onMarkComplete = { onMarkComplete(item.id) },
-                    onRemoveLocalFile = { onRemoveLocalFile(item.id) },
-                    onRemove = { onRemove(item.id) },
-                    onClearTarget = { onClearTarget(item.detailTarget) },
-                )
+            } else if (selectedTab == DownloadsTab.Completed) {
+                visibleItems
+                    .groupBy { it.detailTarget }
+                    .forEach { (_, groupItems) ->
+                        val first = groupItems.first()
+                        item("downloaded-group-${first.id}") {
+                            SectionHeading(
+                                title = first.title,
+                                subtitle = "${groupItems.size} offline item${if (groupItems.size == 1) "" else "s"}",
+                            )
+                        }
+                        items(groupItems, key = { it.id }) { item ->
+                            DownloadCard(
+                                item = item,
+                                onOpen = { onSelect(item.detailTarget) },
+                                onPause = { onPause(item.id) },
+                                onResume = { onResume(item.id) },
+                                onPlayOffline = { onPlayOffline(item.id) },
+                                onMarkComplete = { onMarkComplete(item.id) },
+                                onRemoveLocalFile = { onRemoveLocalFile(item.id) },
+                                onRemove = { onRemove(item.id) },
+                                onClearTarget = { onClearTarget(item.detailTarget) },
+                            )
+                        }
+                    }
+            } else {
+                items(visibleItems, key = { it.id }) { item ->
+                    DownloadCard(
+                        item = item,
+                        onOpen = { onSelect(item.detailTarget) },
+                        onPause = { onPause(item.id) },
+                        onResume = { onResume(item.id) },
+                        onPlayOffline = { onPlayOffline(item.id) },
+                        onMarkComplete = { onMarkComplete(item.id) },
+                        onRemoveLocalFile = { onRemoveLocalFile(item.id) },
+                        onRemove = { onRemove(item.id) },
+                        onClearTarget = { onClearTarget(item.detailTarget) },
+                    )
+                }
             }
         }
 

@@ -64,7 +64,7 @@ class BackupRepository(
         backupFileStore.write(document)
         document.toStatus(
             headline = "Backup imported",
-            supportingPrefix = "Restored Android-owned settings plus ${document.payload.services.size} services and ${document.payload.stremioAddons.orEmpty().size} addons from the selected archive.",
+            supportingPrefix = "Restored settings plus ${document.payload.services.size} services and ${document.payload.stremioAddons.orEmpty().size} addons from the selected archive.",
         )
     }
 
@@ -305,12 +305,12 @@ private fun BackupDocument?.toStatus(): BackupStatusSnapshot = if (this == null)
     BackupStatusSnapshot(
         hasLocalBackup = false,
         headline = "No local backup yet",
-        supportingText = "Export a JSON archive from Settings or import an existing Luna backup to stage one on Android.",
+        supportingText = "Export a JSON archive from Settings or import an existing Luna backup.",
     )
 } else {
     toStatus(
         headline = "Local backup ready",
-        supportingPrefix = "A Luna-compatible JSON archive is staged locally for re-export and future parity work.",
+        supportingPrefix = "A Luna-compatible JSON archive is staged locally for re-export.",
     )
 }
 
@@ -328,9 +328,9 @@ private fun BackupDocument.toStatus(
         if (payload.recommendationCache.hasBackupData() || payload.userRatings.isNotEmpty()) add("personalization")
     }
     val preservationText = if (preservedSections.isEmpty()) {
-        " The rest of the archive is ready for later Android parity work."
+        " The rest of the archive is preserved for later export."
     } else {
-        " Preserving ${preservedSections.joinToString()} data so a later export won't drop it while those Android flows are still being built."
+        " Preserving ${preservedSections.joinToString()} data so a later export won't drop it."
     }
 
     return BackupStatusSnapshot(

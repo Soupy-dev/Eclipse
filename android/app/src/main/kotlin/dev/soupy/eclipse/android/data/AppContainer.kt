@@ -6,6 +6,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import dev.soupy.eclipse.android.BuildConfig
+import dev.soupy.eclipse.android.core.js.WebViewServiceRuntime
 import dev.soupy.eclipse.android.core.js.WebViewKanzenModuleRuntime
 import dev.soupy.eclipse.android.core.network.EclipseJson
 import dev.soupy.eclipse.android.core.network.AniListService
@@ -39,6 +40,7 @@ class EclipseAppContainer(
     val aniSkipService: AniSkipService = AniSkipService()
     val introDbService: IntroDbService = IntroDbService()
     val stremioService: StremioService = StremioService()
+    val serviceRuntime: WebViewServiceRuntime = WebViewServiceRuntime(context)
     val kanzenModuleRuntime: WebViewKanzenModuleRuntime = WebViewKanzenModuleRuntime(context)
     val settingsStore: SettingsStore = SettingsStore(context)
     val releaseRepository: ReleaseRepository = ReleaseRepository(
@@ -121,20 +123,29 @@ class EclipseAppContainer(
     val cacheRepository: CacheRepository = CacheRepository(
         context = context,
     )
+    private val animeTmdbMapper: AnimeTmdbMapper = AnimeTmdbMapper(
+        tmdbService = tmdbService,
+    )
     val homeRepository: HomeRepository = HomeRepository(
         tmdbService = tmdbService,
         aniListService = aniListService,
+        animeTmdbMapper = animeTmdbMapper,
         catalogRepository = catalogRepository,
         recommendationRepository = recommendationRepository,
+        progressRepository = progressRepository,
         settingsStore = settingsStore,
         tmdbEnabled = tmdbApiKey.isNotBlank(),
     )
-    private val animeTmdbMapper: AnimeTmdbMapper = AnimeTmdbMapper(
-        tmdbService = tmdbService,
+    val servicesRepository: ServicesRepository = ServicesRepository(
+        serviceDao = database.serviceDao(),
+        stremioAddonDao = database.stremioAddonDao(),
+        stremioService = stremioService,
+        serviceRuntime = serviceRuntime,
     )
     val searchRepository: SearchRepository = SearchRepository(
         tmdbService = tmdbService,
         aniListService = aniListService,
+        servicesRepository = servicesRepository,
         searchHistoryStore = searchHistoryStore,
         settingsStore = settingsStore,
         tmdbEnabled = tmdbApiKey.isNotBlank(),
@@ -143,6 +154,7 @@ class EclipseAppContainer(
         tmdbService = tmdbService,
         aniListService = aniListService,
         animeTmdbMapper = animeTmdbMapper,
+        servicesRepository = servicesRepository,
     )
     val streamResolutionRepository: StreamResolutionRepository = StreamResolutionRepository(
         tmdbService = tmdbService,
@@ -151,6 +163,7 @@ class EclipseAppContainer(
         stremioService = stremioService,
         stremioAddonDao = database.stremioAddonDao(),
         settingsStore = settingsStore,
+        servicesRepository = servicesRepository,
     )
     val scheduleRepository: ScheduleRepository = ScheduleRepository(
         aniListService = aniListService,
@@ -158,11 +171,6 @@ class EclipseAppContainer(
     val libraryRepository: LibraryRepository = LibraryRepository(
         libraryStore = libraryStore,
         progressRepository = progressRepository,
-    )
-    val servicesRepository: ServicesRepository = ServicesRepository(
-        serviceDao = database.serviceDao(),
-        stremioAddonDao = database.stremioAddonDao(),
-        stremioService = stremioService,
     )
     val backupRepository: BackupRepository = BackupRepository(
         context = context,

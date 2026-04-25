@@ -4,24 +4,21 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import dev.soupy.eclipse.android.core.model.AniListMedia
 import dev.soupy.eclipse.android.core.model.DetailTarget
-import dev.soupy.eclipse.android.core.model.ExploreMediaCard
 import dev.soupy.eclipse.android.core.model.TMDBCastMember
 import dev.soupy.eclipse.android.core.model.displayTitle
 import dev.soupy.eclipse.android.core.model.fullBackdropUrl
 import dev.soupy.eclipse.android.core.model.fullProfileUrl
 import dev.soupy.eclipse.android.core.model.fullPosterUrl
 import dev.soupy.eclipse.android.core.model.fullStillUrl
-import dev.soupy.eclipse.android.core.model.isMovie
-import dev.soupy.eclipse.android.core.model.isTVShow
 import dev.soupy.eclipse.android.core.model.posterUrl
 import dev.soupy.eclipse.android.core.model.relationEdges
 import dev.soupy.eclipse.android.core.model.TMDBEpisode
-import dev.soupy.eclipse.android.core.model.TMDBSearchResult
 import dev.soupy.eclipse.android.core.model.TMDBSeason
 import dev.soupy.eclipse.android.core.model.TMDBSeasonDetail
 import dev.soupy.eclipse.android.core.model.usCertification
 import dev.soupy.eclipse.android.core.model.usRating
 import dev.soupy.eclipse.android.core.model.TMDBTVShowDetail
+import dev.soupy.eclipse.android.core.network.AniListService.AniMapSpecialMapping
 import dev.soupy.eclipse.android.core.network.AniListService
 import dev.soupy.eclipse.android.core.network.TmdbService
 import kotlin.math.abs
@@ -37,6 +34,10 @@ data class DetailEpisodeEntry(
     val runtimeMinutes: Int? = null,
     val tmdbSeasonNumber: Int? = null,
     val tmdbEpisodeNumber: Int? = null,
+    val isSpecial: Boolean = false,
+    val titleOnlySearch: Boolean = false,
+    val searchTitle: String? = null,
+    val serviceHref: String? = null,
 )
 
 data class DetailCastEntry(
@@ -61,9 +62,9 @@ data class DetailContent(
     val detailFacts: List<DetailFactEntry> = emptyList(),
     val contentRating: String? = null,
     val cast: List<DetailCastEntry> = emptyList(),
-    val recommendations: List<ExploreMediaCard> = emptyList(),
     val episodesTitle: String? = null,
     val episodes: List<DetailEpisodeEntry> = emptyList(),
+    val isMovie: Boolean = false,
     val progressTarget: DetailTarget? = null,
 )
 
@@ -71,6 +72,7 @@ class DetailRepository(
     private val tmdbService: TmdbService,
     private val aniListService: AniListService,
     private val animeTmdbMapper: AnimeTmdbMapper,
+    private val servicesRepository: ServicesRepository,
 ) {
     suspend fun load(target: DetailTarget): Result<DetailContent> = runCatching {
         when (target) {
@@ -94,13 +96,21 @@ class DetailRepository(
                     )
                 }
             }
+
+            is DetailTarget.ServiceMedia -> {
+                servicesRepository.loadServiceDetail(
+                    id = target.serviceId,
+                    href = target.href,
+                    fallbackTitle = target.title,
+                    fallbackImageUrl = target.imageUrl,
+                ).getOrThrow().toDetailContent()
+            }
         }
     }
 
     private suspend fun loadMovieContent(movieId: Int): DetailContent = coroutineScope {
         val movieDeferred = async { tmdbService.movieDetail(movieId).orThrow() }
         val creditsDeferred = async { tmdbService.movieCredits(movieId).orNull() }
-        val recommendationsDeferred = async { tmdbService.movieRecommendations(movieId).orEmptyList() }
         val releaseDatesDeferred = async { tmdbService.movieReleaseDates(movieId).orNull() }
 
         val movie = movieDeferred.await()
@@ -128,7 +138,7 @@ class DetailRepository(
             },
             contentRating = certification,
             cast = creditsDeferred.await().toDetailCastEntries(),
-            recommendations = recommendationsDeferred.await().toRecommendationCards(),
+            isMovie = true,
             progressTarget = DetailTarget.TmdbMovie(movieId),
         )
     }
@@ -139,7 +149,6 @@ class DetailRepository(
     ): DetailContent = coroutineScope {
         val showDeferred = async { tmdbService.tvShowDetail(showId).orThrow() }
         val creditsDeferred = async { tmdbService.tvCredits(showId).orNull() }
-        val recommendationsDeferred = async { tmdbService.tvRecommendations(showId).orEmptyList() }
         val ratingsDeferred = async { tmdbService.tvContentRatings(showId).orNull() }
 
         val show = showDeferred.await()
@@ -195,7 +204,6 @@ class DetailRepository(
             },
             contentRating = contentRating,
             cast = creditsDeferred.await().toDetailCastEntries(),
-            recommendations = recommendationsDeferred.await().toRecommendationCards(),
             episodesTitle = animeBundle?.episodesTitle ?: seasonDetails.title(show.name),
             episodes = animeBundle?.episodes ?: seasonDetails.flatMap { seasonDetail ->
                 seasonDetail.episodes.map { it.toDetailEpisodeEntry() }
@@ -213,12 +221,16 @@ class DetailRepository(
             ?: selectAniListRootForShow(show)
             ?: return@coroutineScope null
 
-        val animeSeasons = collectAniListSeasonEntries(rootAnime, show)
-            .ifEmpty { listOf(rootAnime) }
-            .sortedWith(
-                compareBy<AniListMedia> { it.seasonYear ?: Int.MAX_VALUE }
-                    .thenBy { it.id },
-            )
+        val animeSeasons = if (sourceAnime != null) {
+            listOf(rootAnime)
+        } else {
+            collectAniListSeasonEntries(rootAnime, show)
+                .ifEmpty { listOf(rootAnime) }
+                .sortedWith(
+                    compareBy<AniListMedia> { it.seasonYear ?: Int.MAX_VALUE }
+                        .thenBy { it.id },
+                )
+        }
 
         val tmdbEpisodesByAbsolute = tmdbService.allRealSeasonEpisodes(show.id, show.seasons)
             .flatMap { it.episodes.sortedBy(TMDBEpisode::episodeNumber) }
@@ -257,13 +269,92 @@ class DetailRepository(
                 absoluteEpisode += 1
             }
         }
+        val specialEpisodes = loadAnimeSpecialEpisodes(show)
 
         AnimeSeasonBundle(
             episodesTitle = "Episodes",
             seasonCount = animeSeasons.size,
-            totalEpisodes = episodes.size,
-            episodes = episodes,
+            totalEpisodes = episodes.size + specialEpisodes.size,
+            episodes = episodes + specialEpisodes,
         )
+    }
+
+    private suspend fun loadAnimeSpecialEpisodes(show: TMDBTVShowDetail): List<DetailEpisodeEntry> = coroutineScope {
+        val mappings = aniListService.specialMappingsForTmdbShow(show.id)
+            .orNull()
+            .orEmpty()
+            .filter { mapping -> mapping.anilistId != null }
+            .distinctBy { mapping -> mapping.anilistId }
+        if (mappings.isEmpty()) return@coroutineScope emptyList()
+
+        val mediaById = mappings
+            .mapNotNull { mapping -> mapping.anilistId }
+            .associateWith { anilistId ->
+                async { aniListService.mediaById(anilistId).orNull() }
+            }
+            .mapValues { (_, deferred) -> deferred.await() }
+
+        val seasonDetailsByNumber = mappings
+            .mapNotNull { mapping -> mapping.tmdbSeason ?: mapping.tvdbSeason }
+            .distinct()
+            .associateWith { seasonNumber ->
+                async { tmdbService.seasonDetail(show.id, seasonNumber).orNull() }
+            }
+            .mapValues { (_, deferred) -> deferred.await() }
+
+        mappings
+            .sortedWith(
+                compareBy<AniMapSpecialMapping> { it.tmdbSeason ?: it.tvdbSeason ?: 0 }
+                    .thenBy { it.mediaType.orEmpty() }
+                    .thenBy { it.anilistId ?: 0 },
+            )
+            .flatMap { mapping ->
+                val anilistId = mapping.anilistId ?: return@flatMap emptyList()
+                val media = mediaById[anilistId]
+                val title = media?.displayTitle
+                    ?.takeIf { it.isNotBlank() }
+                    ?: "Special $anilistId"
+                val episodeCount = (media?.effectiveEpisodeCount() ?: 1).coerceIn(1, 200)
+                val mappedSeason = mapping.tmdbSeason
+                val metadataSeason = mapping.tmdbSeason ?: mapping.tvdbSeason
+                val episodeOffset = mapping.tvdbEpisodeOffset ?: 0
+                val seasonDetail = metadataSeason?.let { seasonDetailsByNumber[it] }
+                val formatLabel = mapping.mediaType.specialFormatLabel()
+                (1..episodeCount).map { number ->
+                    val mappedEpisodeNumber = mappedSeason?.let { episodeOffset + number }
+                    val metadataEpisodeNumber = metadataSeason?.let { episodeOffset + number }
+                    val tmdbEpisode = metadataEpisodeNumber?.let { episodeNumber ->
+                        seasonDetail?.episodes?.firstOrNull { episode -> episode.episodeNumber == episodeNumber }
+                    }
+                    DetailEpisodeEntry(
+                        id = "animap-special-${show.id}-$anilistId-$number",
+                        title = tmdbEpisode?.name?.takeIf { it.isNotBlank() }
+                            ?: if (episodeCount == 1) title else "Episode $number",
+                        subtitle = buildList {
+                            add(formatLabel)
+                            add("E$number")
+                            if (mappedSeason != null && mappedEpisodeNumber != null) {
+                                add("TMDB S${mappedSeason}E$mappedEpisodeNumber")
+                            }
+                            tmdbEpisode?.runtime?.takeIf { it > 0 }?.let { add(formatRuntime(it)) }
+                            tmdbEpisode?.airDate?.takeIf { it.isNotBlank() }?.let(::add)
+                        }.joinToString(" | "),
+                        imageUrl = tmdbEpisode?.fullStillUrl
+                            ?: media?.posterUrl
+                            ?: seasonDetail?.posterPath?.let(::tmdbPosterUrl)
+                            ?: show.fullPosterUrl,
+                        overview = tmdbEpisode?.overview ?: media?.description?.stripHtmlTags(),
+                        seasonNumber = 0,
+                        episodeNumber = number,
+                        runtimeMinutes = tmdbEpisode?.runtime,
+                        tmdbSeasonNumber = mappedSeason,
+                        tmdbEpisodeNumber = mappedEpisodeNumber,
+                        isSpecial = true,
+                        titleOnlySearch = mappedSeason == null || mappedEpisodeNumber == null,
+                        searchTitle = title,
+                    )
+                }
+            }
     }
 
     private suspend fun selectAniListRootForShow(show: TMDBTVShowDetail): AniListMedia? {
@@ -347,6 +438,49 @@ class DetailRepository(
     }
 }
 
+private fun ServiceResolvedDetail.toDetailContent(): DetailContent = DetailContent(
+    title = title,
+    subtitle = serviceName,
+    overview = description,
+    posterUrl = imageUrl,
+    backdropUrl = imageUrl,
+    metadataChips = buildList {
+        add("Service")
+        airdate?.takeIf { it.isNotBlank() }?.let(::add)
+        if (episodes.isNotEmpty()) add("${episodes.size} eps")
+    },
+    detailFacts = buildList {
+        add(DetailFactEntry("Source", serviceName))
+        airdate?.takeIf { it.isNotBlank() }?.let { add(DetailFactEntry("Airdate", it)) }
+        aliases?.takeIf { it.isNotBlank() }?.let { add(DetailFactEntry("Aliases", it)) }
+    },
+    episodesTitle = episodes.takeIf { it.isNotEmpty() }?.let { "Episodes" },
+    episodes = episodes.mapIndexed { index, episode ->
+        val episodeNumber = episode.episodeNumber ?: index + 1
+        DetailEpisodeEntry(
+            id = "service-$serviceId-${episode.href.hashCode()}-$index",
+            title = episode.title.ifBlank { "Episode $episodeNumber" },
+            subtitle = buildList {
+                episode.seasonNumber?.let { add("S$it") }
+                add("E$episodeNumber")
+            }.joinToString(" | "),
+            seasonNumber = episode.seasonNumber ?: 1,
+            episodeNumber = episodeNumber,
+            tmdbSeasonNumber = null,
+            tmdbEpisodeNumber = null,
+            searchTitle = title,
+            serviceHref = episode.href,
+        )
+    },
+    isMovie = episodes.isEmpty(),
+    progressTarget = DetailTarget.ServiceMedia(
+        serviceId = serviceId,
+        href = href,
+        title = title,
+        imageUrl = imageUrl,
+    ),
+)
+
 private data class AnimeSeasonBundle(
     val episodesTitle: String,
     val seasonCount: Int,
@@ -390,7 +524,6 @@ private suspend fun AniListMedia.toDetailContent(
             coroutineScope {
                 val showDeferred = async { tmdbService.tvShowDetail(target.id).orThrow() }
                 val creditsDeferred = async { tmdbService.tvCredits(target.id).orNull() }
-                val recommendationsDeferred = async { tmdbService.tvRecommendations(target.id).orEmptyList() }
                 val ratingsDeferred = async { tmdbService.tvContentRatings(target.id).orNull() }
                 val show = showDeferred.await()
                 val preferredSeasonNumber = match.tmdbSeasonNumber
@@ -413,7 +546,6 @@ private suspend fun AniListMedia.toDetailContent(
                         seasonDetail.episodes.map { it.toDetailEpisodeEntry() }
                     },
                     cast = creditsDeferred.await().toDetailCastEntries(),
-                    recommendations = recommendationsDeferred.await().toRecommendationCards(),
                     contentRating = ratingsDeferred.await()?.usRating,
                 )
             }
@@ -452,7 +584,6 @@ private suspend fun AniListMedia.toDetailContent(
         },
         contentRating = tmdbShowMetadata?.contentRating,
         cast = tmdbShowMetadata?.cast.orEmpty(),
-        recommendations = tmdbShowMetadata?.recommendations.orEmpty(),
         episodesTitle = tmdbShowMetadata?.episodesTitle ?: syntheticEpisodes.takeIf { it.isNotEmpty() }?.let { "Episodes" },
         episodes = tmdbShowMetadata?.episodes ?: syntheticEpisodes,
         progressTarget = tmdbMatch?.target,
@@ -463,7 +594,6 @@ private data class HydratedTmdbShowMetadata(
     val episodesTitle: String?,
     val episodes: List<DetailEpisodeEntry>,
     val cast: List<DetailCastEntry>,
-    val recommendations: List<ExploreMediaCard>,
     val contentRating: String?,
 )
 
@@ -519,15 +649,6 @@ private fun dev.soupy.eclipse.android.core.model.TMDBCreditsResponse?.toDetailCa
                 imageUrl = member.fullProfileUrl,
             )
         }
-
-private fun List<TMDBSearchResult>.toRecommendationCards(): List<ExploreMediaCard> =
-    asSequence()
-        .filter { it.isMovie || it.isTVShow }
-        .mapNotNull { result ->
-            runCatching { result.toExploreMediaCard("Recommended") }.getOrNull()
-        }
-        .take(12)
-        .toList()
 
 private fun formatRuntime(minutes: Int): String =
     if (minutes < 60) {
@@ -607,6 +728,15 @@ private fun AniListMedia.toAnimeDetailEpisodeEntries(
 private fun AniListMedia.effectiveEpisodeCount(): Int? =
     episodes?.takeIf { it > 0 }
         ?: nextAiringEpisode?.episode?.minus(1)?.takeIf { it > 0 }
+
+private fun String?.specialFormatLabel(): String =
+    this
+        ?.replace('_', ' ')
+        ?.lowercase()
+        ?.replaceFirstChar { char -> if (char.isLowerCase()) char.titlecase() else char.toString() }
+        ?: "Special"
+
+private fun tmdbPosterUrl(path: String): String = "https://image.tmdb.org/t/p/w780$path"
 
 private fun animeYearAlignmentScore(animeYear: Int?, tmdbYear: Int?): Double {
     if (animeYear == null || tmdbYear == null) return 0.0

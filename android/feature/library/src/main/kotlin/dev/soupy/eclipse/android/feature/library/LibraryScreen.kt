@@ -1,6 +1,8 @@
 package dev.soupy.eclipse.android.feature.library
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -12,7 +14,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -25,6 +29,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.soupy.eclipse.android.core.design.ErrorPanel
@@ -97,6 +102,9 @@ fun LibraryRoute(
     onRemoveFromCollection: (String, String) -> Unit,
 ) {
     var collectionName by rememberSaveable { mutableStateOf("") }
+    val bookmarks = state.collections.firstOrNull { it.name.equals("Bookmarks", ignoreCase = true) }
+    val bookmarkItems = bookmarks?.items?.takeIf { it.isNotEmpty() } ?: state.savedItems
+    val visibleCollections = state.collections.filterNot { it.name.equals("Bookmarks", ignoreCase = true) }
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -124,21 +132,6 @@ fun LibraryRoute(
             }
         }
 
-        item {
-            HeroBackdrop(
-                title = state.heroTitle,
-                subtitle = state.heroSubtitle,
-                imageUrl = state.heroImageUrl,
-                supportingText = state.heroSupportingText,
-            )
-        }
-
-        if (state.metrics.isNotEmpty()) {
-            item {
-                LibraryMetrics(metrics = state.metrics)
-            }
-        }
-
         if (state.continueWatching.isNotEmpty()) {
             item {
                 SectionHeading(
@@ -157,8 +150,39 @@ fun LibraryRoute(
 
         item {
             SectionHeading(
+                title = "Bookmarks",
+                subtitle = "${bookmarkItems.size} saved title${if (bookmarkItems.size == 1) "" else "s"}.",
+            )
+        }
+
+        if (bookmarkItems.isEmpty()) {
+            item {
+                GlassPanel {
+                    Text(
+                        text = "No bookmarked media yet.",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                    )
+                }
+            }
+        } else {
+            item {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    items(bookmarkItems, key = { it.id }) { item ->
+                        LibraryPosterTile(
+                            item = item,
+                            onOpen = { onSelect(item.detailTarget) },
+                            modifier = Modifier.width(108.dp),
+                        )
+                    }
+                }
+            }
+        }
+
+        item {
+            SectionHeading(
                 title = "Collections",
-                subtitle = "${state.collections.size} media collection${if (state.collections.size == 1) "" else "s"} including Bookmarks.",
+                subtitle = "${visibleCollections.size} custom collection${if (visibleCollections.size == 1) "" else "s"}.",
             )
         }
 
@@ -190,14 +214,19 @@ fun LibraryRoute(
             }
         }
 
-        if (state.collections.isNotEmpty()) {
-            items(state.collections, key = { it.id }) { collection ->
-                CollectionCard(
-                    row = collection,
-                    onSelect = onSelect,
-                    onDelete = { onDeleteCollection(collection.id) },
-                    onRemoveItem = { itemId -> onRemoveFromCollection(collection.id, itemId) },
-                )
+        if (visibleCollections.isNotEmpty()) {
+            item {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    items(visibleCollections, key = { it.id }) { collection ->
+                        CollectionPreviewCard(
+                            row = collection,
+                            onOpen = {
+                                collection.items.firstOrNull()?.detailTarget?.let(onSelect)
+                            },
+                            onDelete = { onDeleteCollection(collection.id) },
+                        )
+                    }
+                }
             }
         }
 
@@ -229,12 +258,97 @@ fun LibraryRoute(
                             color = MaterialTheme.colorScheme.onSurface,
                         )
                         Text(
-                            text = "Open a detail page, then use Save to Library or Queue Resume. Those actions are persisted on Android and included in backup export.",
+                            text = "Open a detail page, then bookmark it or start watching to build your library.",
                             style = MaterialTheme.typography.bodyLarge,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
                         )
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LibraryPosterTile(
+    item: LibrarySavedItemRow,
+    onOpen: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier.clickable(onClick = onOpen),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        PosterImage(
+            imageUrl = item.imageUrl ?: item.backdropUrl,
+            contentDescription = item.title,
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(2f / 3f)
+                .clip(RoundedCornerShape(14.dp)),
+        )
+        Text(
+            text = item.title,
+            style = MaterialTheme.typography.labelLarge,
+            color = MaterialTheme.colorScheme.onBackground,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+@Composable
+private fun CollectionPreviewCard(
+    row: LibraryCollectionRow,
+    onOpen: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    GlassPanel(
+        modifier = Modifier
+            .width(250.dp)
+            .clickable(enabled = row.items.isNotEmpty(), onClick = onOpen),
+        contentPadding = PaddingValues(12.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                val preview = row.items.take(3)
+                if (preview.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .width(132.dp)
+                            .aspectRatio(16 / 9f),
+                    )
+                } else {
+                    preview.forEach { item ->
+                        PosterImage(
+                            imageUrl = item.imageUrl ?: item.backdropUrl,
+                            contentDescription = item.title,
+                            modifier = Modifier
+                                .width(64.dp)
+                                .aspectRatio(2f / 3f)
+                                .clip(RoundedCornerShape(10.dp)),
+                        )
+                    }
+                }
+            }
+            Text(
+                text = row.name,
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = "${row.itemCount} item${if (row.itemCount == 1) "" else "s"}",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
+            )
+            OutlinedButton(
+                onClick = onDelete,
+                enabled = row.canDelete,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Delete")
             }
         }
     }

@@ -9,11 +9,16 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.decodeFromJsonElement
 
 class AniListService(
     private val baseUrl: String = "https://graphql.anilist.co",
     private val httpClient: EclipseHttpClient = EclipseHttpClient(),
 ) {
+    private val aniMapSpecialCacheByTmdbShowId = mutableMapOf<Int, List<AniMapSpecialMapping>>()
+
     data class HomeCatalogs(
         val trending: List<AniListMedia> = emptyList(),
         val popular: List<AniListMedia> = emptyList(),
@@ -36,6 +41,18 @@ class AniListService(
         val progressVolumes: Int = 0,
         val score: Double = 0.0,
         val updatedAtEpochSeconds: Long? = null,
+    )
+
+    @Serializable
+    data class AniMapSpecialMapping(
+        @SerialName("anilist_id") val anilistId: Int? = null,
+        @SerialName("tmdb_show_id") val tmdbShowId: Int? = null,
+        @SerialName("tmdb_movie_id") val tmdbMovieId: Int? = null,
+        @SerialName("tmdb_season") val tmdbSeason: Int? = null,
+        @SerialName("tvdb_season") val tvdbSeason: Int? = null,
+        @SerialName("tvdb_epoffset") val tvdbEpisodeOffset: Int? = null,
+        @SerialName("imdb_id") val imdbId: String? = null,
+        @SerialName("media_type") val mediaType: String? = null,
     )
 
     suspend fun searchAnime(
@@ -128,6 +145,35 @@ class AniListService(
                 NetworkResult.Success(response.data.media)
             } catch (error: SerializationException) {
                 NetworkResult.Failure.Serialization(error)
+            }
+
+            is NetworkResult.Failure -> result
+        }
+    }
+
+    suspend fun specialMappingsForTmdbShow(tmdbShowId: Int): NetworkResult<List<AniMapSpecialMapping>> {
+        aniMapSpecialCacheByTmdbShowId[tmdbShowId]?.let { return NetworkResult.Success(it) }
+
+        val url = "https://animap.s0n1c.ca/mappings/$tmdbShowId?mapping_key=tmdb_show"
+        return when (val result = httpClient.get(url)) {
+            is NetworkResult.Success -> try {
+                val element = EclipseJson.parseToJsonElement(result.value)
+                val mappings = when (element) {
+                    is JsonArray -> element.mapNotNull { item ->
+                        runCatching { EclipseJson.decodeFromJsonElement<AniMapSpecialMapping>(item) }.getOrNull()
+                    }
+                    is JsonObject -> listOf(EclipseJson.decodeFromJsonElement<AniMapSpecialMapping>(element))
+                    else -> emptyList()
+                }.filter { mapping ->
+                    mapping.tmdbShowId == tmdbShowId &&
+                        mapping.mediaType?.uppercase() in setOf("SPECIAL", "OVA")
+                }
+                aniMapSpecialCacheByTmdbShowId[tmdbShowId] = mappings
+                NetworkResult.Success(mappings)
+            } catch (error: SerializationException) {
+                NetworkResult.Failure.Serialization(error)
+            } catch (error: IllegalArgumentException) {
+                NetworkResult.Failure.Serialization(SerializationException(error.message ?: "AniMap response could not be decoded.", error))
             }
 
             is NetworkResult.Failure -> result

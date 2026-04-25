@@ -131,7 +131,7 @@ fun ScheduleRoute(
             item {
                 ErrorPanel(
                     title = "No airings landed",
-                    message = "The Android schedule route is live, but AniList did not return any upcoming items for this window.",
+                    message = "AniList did not return any upcoming items for this window.",
                     actionLabel = "Refresh",
                     onAction = onRefresh,
                 )
