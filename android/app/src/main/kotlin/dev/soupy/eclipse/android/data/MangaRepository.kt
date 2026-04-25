@@ -121,6 +121,14 @@ data class KanzenReaderContentSnapshot(
     val text: String? = null,
 )
 
+data class KanzenCatalogDetailSnapshot(
+    val title: String? = null,
+    val subtitle: String? = null,
+    val coverUrl: String? = null,
+    val description: String? = null,
+    val totalChapters: Int? = null,
+)
+
 data class KanzenModuleDraft(
     val moduleUrl: String,
     val displayName: String? = null,
@@ -547,6 +555,39 @@ class MangaRepository(
         seedFromBackupIfNeeded().first.updateModules(
             isNovel = isNovel,
             onlyDue = false,
+        )
+    }
+
+    suspend fun loadKanzenCatalogDetails(
+        moduleId: String?,
+        contentParams: String?,
+        isNovel: Boolean,
+    ): Result<KanzenCatalogDetailSnapshot> = runCatching {
+        val runtime = kanzenRuntime ?: error("Kanzen runtime is not available on this device.")
+        require(!moduleId.isNullOrBlank() && moduleId != "anilist") { "This title is not backed by a Kanzen module." }
+        require(!contentParams.isNullOrBlank()) { "This title does not have module content parameters." }
+        val module = mangaStore.read().modules.firstOrNull { record ->
+            record.id == moduleId && record.isActive && record.isNovel == isNovel
+        } ?: error("Kanzen module is not installed or active.")
+        val manifest = module.loadIntoRuntime(runtime)
+        val details = runtime.details(
+            module = manifest,
+            params = JsonPrimitive(contentParams),
+        ).getOrThrow().detailsPayload()
+        KanzenCatalogDetailSnapshot(
+            title = details.firstString("title", "name", "englishTitle", "romajiTitle"),
+            subtitle = details.firstString("subtitle", "author", "artist", "status", "year"),
+            coverUrl = details.firstString(
+                "imageURL",
+                "imageUrl",
+                "image",
+                "coverURL",
+                "coverUrl",
+                "cover",
+                "thumbnail",
+            ),
+            description = details.firstString("description", "synopsis", "summary", "plot"),
+            totalChapters = details.firstInt("totalChapters", "chapterCount", "chapters", "episodes"),
         )
     }
 
@@ -1209,8 +1250,26 @@ private fun JsonObject.boolean(key: String): Boolean? =
         primitive.booleanOrNull ?: primitive.contentOrNull?.toBooleanStrictOrNull()
     }
 
+private fun JsonObject.firstString(vararg keys: String): String? =
+    keys.firstNotNullOfOrNull { key ->
+        string(key)?.trim()?.takeIf(String::isNotBlank)
+    }
+
+private fun JsonObject.firstInt(vararg keys: String): Int? =
+    keys.firstNotNullOfOrNull { key ->
+        val value = (this[key] as? JsonPrimitive)?.contentOrNull?.trim() ?: return@firstNotNullOfOrNull null
+        (value.toIntOrNull() ?: Regex("""\d+""").find(value)?.value?.toIntOrNull())
+            ?.takeIf { it > 0 }
+    }
+
 private fun JsonObject.getObject(key: String): JsonObject? =
     this[key] as? JsonObject
+
+private fun JsonObject.detailsPayload(): JsonObject =
+    getObject("details")
+        ?: getObject("data")
+        ?: getObject("result")
+        ?: this
 
 private fun JsonElement.jsonObjectOrNull(): JsonObject? =
     this as? JsonObject

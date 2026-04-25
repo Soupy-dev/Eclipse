@@ -53,6 +53,9 @@ data class MangaScreenState(
     val collections: List<MangaCollectionRow> = emptyList(),
     val recent: List<MangaProgressRow> = emptyList(),
     val modules: List<MangaModuleRow> = emptyList(),
+    val selectedDetail: MangaCatalogItemRow? = null,
+    val isDetailLoading: Boolean = false,
+    val detailError: String? = null,
     val reader: MangaReaderPanelRow? = null,
 )
 
@@ -148,6 +151,8 @@ fun MangaRoute(
     onSearch: () -> Unit,
     onSaveItem: (String) -> Unit,
     onRemoveItem: (Int) -> Unit,
+    onOpenDetail: (String) -> Unit,
+    onCloseDetail: () -> Unit,
     onReadNext: (Int) -> Unit,
     onUnreadLast: (Int) -> Unit,
     onReadPrevious: (Int) -> Unit,
@@ -228,6 +233,26 @@ fun MangaRoute(
                         }
                     }
                 }
+            }
+        }
+
+        state.selectedDetail?.let { detail ->
+            item {
+                MangaDetailPanel(
+                    item = detail,
+                    isLoading = state.isDetailLoading,
+                    errorMessage = state.detailError,
+                    onClose = onCloseDetail,
+                    onSave = { onSaveItem(detail.id) },
+                    onRemove = { onRemoveItem(detail.aniListId) },
+                    onOpenReader = { onOpenReader(detail.aniListId) },
+                    onReadNext = { onReadNext(detail.aniListId) },
+                    onUnreadLast = { onUnreadLast(detail.aniListId) },
+                    onToggleFavorite = { onToggleFavorite(detail.aniListId) },
+                    collections = editableCollections,
+                    onAddToCollection = { collectionId -> onAddItemToCollection(collectionId, detail.aniListId) },
+                    onRemoveFromCollection = { collectionId -> onRemoveItemFromCollection(collectionId, detail.aniListId) },
+                )
             }
         }
 
@@ -358,6 +383,7 @@ fun MangaRoute(
                     item = item,
                     onSave = { onSaveItem(item.id) },
                     onRemove = { onRemoveItem(item.aniListId) },
+                    onOpenDetail = { onOpenDetail(item.id) },
                     onOpenReader = { onOpenReader(item.aniListId) },
                     onReadNext = { onReadNext(item.aniListId) },
                     onUnreadLast = { onUnreadLast(item.aniListId) },
@@ -381,6 +407,7 @@ fun MangaRoute(
                     item = item,
                     onSave = { onSaveItem(item.id) },
                     onRemove = { onRemoveItem(item.aniListId) },
+                    onOpenDetail = { onOpenDetail(item.id) },
                     onOpenReader = { onOpenReader(item.aniListId) },
                     onReadNext = { onReadNext(item.aniListId) },
                     onUnreadLast = { onUnreadLast(item.aniListId) },
@@ -405,6 +432,7 @@ fun MangaRoute(
                                 item = item,
                                 onSave = { onSaveItem(item.id) },
                                 onRemove = { onRemoveItem(item.aniListId) },
+                                onOpenDetail = { onOpenDetail(item.id) },
                                 onOpenReader = { onOpenReader(item.aniListId) },
                                 onReadNext = { onReadNext(item.aniListId) },
                                 onUnreadLast = { onUnreadLast(item.aniListId) },
@@ -492,10 +520,136 @@ fun MangaRoute(
 }
 
 @Composable
+private fun MangaDetailPanel(
+    item: MangaCatalogItemRow,
+    isLoading: Boolean,
+    errorMessage: String?,
+    onClose: () -> Unit,
+    onSave: () -> Unit,
+    onRemove: () -> Unit,
+    onOpenReader: () -> Unit,
+    onReadNext: () -> Unit,
+    onUnreadLast: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    collections: List<MangaCollectionRow>,
+    onAddToCollection: (String) -> Unit,
+    onRemoveFromCollection: (String) -> Unit,
+) {
+    GlassPanel {
+        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+            ) {
+                PosterImage(
+                    imageUrl = item.coverUrl,
+                    contentDescription = item.title,
+                    modifier = Modifier
+                        .width(112.dp)
+                        .aspectRatio(2f / 3f),
+                )
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        text = item.title,
+                        style = MaterialTheme.typography.headlineSmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (item.subtitle.isNotBlank()) {
+                        Text(
+                            text = item.subtitle,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.tertiary,
+                        )
+                    }
+                    ProgressSummary(item)
+                    item.sourceName?.takeIf { it.isNotBlank() }?.let { source ->
+                        Text(
+                            text = "Source: $source",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+                        )
+                    }
+                    if (isLoading) {
+                        Text(
+                            text = "Loading module details...",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    errorMessage?.let { message ->
+                        Text(
+                            text = message,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                    }
+                }
+            }
+
+            item.description?.takeIf { it.isNotBlank() }?.let { description ->
+                Text(
+                    text = description,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                )
+            }
+
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                if (item.isSaved) {
+                    Button(onClick = onOpenReader) {
+                        Text("Reader")
+                    }
+                    Button(onClick = onReadNext) {
+                        Text("Read Next")
+                    }
+                    OutlinedButton(
+                        onClick = onUnreadLast,
+                        enabled = item.readChapterCount > 0,
+                    ) {
+                        Text("Unread Last")
+                    }
+                    OutlinedButton(onClick = onToggleFavorite) {
+                        Text(if (item.isFavorite) "Unfavorite" else "Favorite")
+                    }
+                    OutlinedButton(onClick = onRemove) {
+                        Text("Remove")
+                    }
+                } else {
+                    Button(onClick = onSave) {
+                        Text("Save to Library")
+                    }
+                }
+                OutlinedButton(onClick = onClose) {
+                    Text("Close")
+                }
+            }
+
+            if (item.isSaved) {
+                CollectionActions(
+                    item = item,
+                    collections = collections,
+                    onAddToCollection = onAddToCollection,
+                    onRemoveFromCollection = onRemoveFromCollection,
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun MangaCatalogCard(
     item: MangaCatalogItemRow,
     onSave: () -> Unit,
     onRemove: () -> Unit,
+    onOpenDetail: () -> Unit,
     onOpenReader: () -> Unit,
     onReadNext: () -> Unit,
     onUnreadLast: () -> Unit,
@@ -536,6 +690,12 @@ private fun MangaCatalogCard(
                     maxLines = 3,
                     overflow = TextOverflow.Ellipsis,
                 )
+            }
+            OutlinedButton(
+                onClick = onOpenDetail,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Details")
             }
             if (item.isSaved) {
                 OutlinedButton(
@@ -586,6 +746,7 @@ private fun MangaSearchResultCard(
     item: MangaCatalogItemRow,
     onSave: () -> Unit,
     onRemove: () -> Unit,
+    onOpenDetail: () -> Unit,
     onOpenReader: () -> Unit,
     onReadNext: () -> Unit,
     onUnreadLast: () -> Unit,
@@ -633,6 +794,9 @@ private fun MangaSearchResultCard(
                         maxLines = 3,
                         overflow = TextOverflow.Ellipsis,
                     )
+                }
+                OutlinedButton(onClick = onOpenDetail) {
+                    Text("Details")
                 }
                 if (item.isSaved) {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {

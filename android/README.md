@@ -50,7 +50,7 @@ The Android namespace now uses `dev.soupy.eclipse.android` rather than the earli
 - Connected/manual AniList tracker accounts can also import the user's AniList manga library into Android Manga/Novel storage, including chapter progress entries and novel-format items
 - Backup-backed manga and novel overview surfaces for restored Kanzen library/progress/module data, plus live AniList manga/novel browse/search, active Kanzen module-backed search, Android library save/remove actions, native reader-progress panels with exact chapter marking, jump, next/previous controls, chapter read/unread controls, unread counts, favorite/bookmark collection support, custom manga collection create/delete/add/remove controls, resettable reading progress, and Kanzen module URL add/update/toggle/remove controls on the Manga and Novel tabs
 - Kanzen module adds and updates now fetch Luna-compatible manifests, resolve and validate `scriptURL`, preserve real source metadata, support manual update-all actions, run backed due auto-update checks, and keep the edited module list in the iOS-compatible backup path
-- Module-backed manga/novel rows now preserve source IDs through save/progress, load module chapter lists in the Android reader panels, can navigate next/previous runtime chapters, and can request manga page images or novel text through the Kanzen runtime
+- Module-backed manga/novel rows now preserve source IDs through save/progress, hydrate richer detail panels through Kanzen `extractDetails`, load module chapter lists in the Android reader panels, can navigate next/previous runtime chapters, and can request manga page images or novel text through the Kanzen runtime
 
 ## Version choices
 
@@ -58,7 +58,7 @@ The Android dependency versions in `gradle/libs.versions.toml` were chosen from 
 
 ## Current limitations
 
-- The full feature set from the Apple app is not finished yet. Android now has a real shell, persistence, catalog controls, backup flow, richer detail/progress actions, and first-pass Stremio resolution, but it is still short of full parity.
+- The full feature set from the Apple app is not finished yet. Android is now roughly 80% of the way to iOS parity: it has a real shell, persistence, catalog controls, backup flow, richer detail/progress actions, first-pass Stremio resolution, and working manga/novel module detail and reader flows, but it is still short of full parity.
 - Anime-specific source resolution now has a relation-aware AniList-to-TMDB bridge with season metadata, but it still does not yet reconstruct full sequel graphs, orphaned seasons, or AniMap specials to the same depth as the Apple app.
 - Torrent-style Stremio results are intentionally rejected to match the iOS safety guardrails. Android does not accept magnet/infoHash streams or torrent handoff.
 - OAuth tracker login, polished full-reader behavior for Kanzen content, and native VLC/mpv backends are still earlier-stage compared with the Apple app. Android now has first-pass Kanzen module search/chapter/content extraction, native reader-progress shells for manga/novels, Media3 owns the parity-backed playback implementation for direct streams, and manual tracker sync now covers watched local progress for connected AniList/Trakt accounts.
@@ -85,5 +85,5 @@ The debug APK will land under `android/app/build/outputs/apk/debug/`.
 1. Continue hardening the anime-specific AniList/TMDB hybrid flow with full sequel/orphan season reconstruction and AniMap special/OVA mapping.
 2. Broaden Stremio support only for safe direct URL streams, subtitles, headers, and addon configuration while continuing to reject torrents.
 3. Expand tracker OAuth, AniList import, and manga progress sync on top of the new watched-progress sync path.
-4. Continue expanding Kanzen reader parity with detail screens, richer HTML/image rendering, chapter navigation, caching, and reader settings.
+4. Continue expanding Kanzen reader parity with richer HTML/image rendering, chapter preloading/caching, reader overlays, and reader settings.
 5. Keep hardening downloads with true background pause/resume behavior, richer transfer progress, and more offline playback edge cases.

@@ -3,6 +3,7 @@ package dev.soupy.eclipse.android.ui.manga
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dev.soupy.eclipse.android.core.model.MangaProgress
+import dev.soupy.eclipse.android.data.KanzenCatalogDetailSnapshot
 import dev.soupy.eclipse.android.data.KanzenModuleDraft
 import dev.soupy.eclipse.android.data.KanzenReaderChapterSnapshot
 import dev.soupy.eclipse.android.data.KanzenReaderContentSnapshot
@@ -117,6 +118,32 @@ class AndroidMangaViewModel(
                         it.copy(errorMessage = error.message ?: "Could not remove manga.")
                     }
                 }
+        }
+    }
+
+    fun openDetail(itemId: String) {
+        val item = _state.value.findCatalogItem(itemId) ?: return
+        _state.update {
+            it.copy(
+                selectedDetail = item,
+                isDetailLoading = item.isKanzenBacked,
+                detailError = null,
+                noticeMessage = null,
+                errorMessage = null,
+            )
+        }
+        if (item.isKanzenBacked) {
+            loadKanzenCatalogDetails(item)
+        }
+    }
+
+    fun closeDetail() {
+        _state.update {
+            it.copy(
+                selectedDetail = null,
+                isDetailLoading = false,
+                detailError = null,
+            )
         }
     }
 
@@ -568,11 +595,54 @@ class AndroidMangaViewModel(
                 )
             },
         )
+        val selectedDetail = previous.selectedDetail?.let { detail ->
+            nextState.findCatalogItem(detail.id)
+                ?.withDetailFieldsFrom(detail)
+                ?: nextState.findCatalogItemByAniListId(detail.aniListId)
+                    ?.withDetailFieldsFrom(detail)
+                ?: detail.copy(isSaved = detail.aniListId in savedIds)
+        }
         _state.value = nextState.copy(
+            selectedDetail = selectedDetail,
+            isDetailLoading = previous.isDetailLoading,
+            detailError = previous.detailError,
             reader = previous.reader?.let { reader ->
                 nextState.readerPanelFor(reader.aniListId)?.mergeRuntimeState(reader)
             },
         )
+    }
+
+    private fun loadKanzenCatalogDetails(item: MangaCatalogItemRow) {
+        viewModelScope.launch {
+            repository.loadKanzenCatalogDetails(
+                moduleId = item.moduleId,
+                contentParams = item.contentParams,
+                isNovel = false,
+            ).onSuccess { details ->
+                _state.update { state ->
+                    val current = state.findCatalogItem(item.id) ?: item
+                    val enriched = current.withKanzenDetails(details)
+                    state.withUpdatedCatalogItem(item.id, enriched).copy(
+                        selectedDetail = state.selectedDetail?.let { detail ->
+                            if (detail.id == item.id || detail.aniListId == item.aniListId) {
+                                detail.withKanzenDetails(details)
+                            } else {
+                                detail
+                            }
+                        },
+                        isDetailLoading = false,
+                        detailError = null,
+                    )
+                }
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(
+                        isDetailLoading = false,
+                        detailError = error.message ?: "Could not load module details.",
+                    )
+                }
+            }
+        }
     }
 
     private fun loadKanzenReaderChapters(reader: MangaReaderPanelRow) {
@@ -690,6 +760,75 @@ private fun MangaScreenState.findCatalogItem(itemId: String): MangaCatalogItemRo
             .flatMap { section -> section.items.asSequence() }
             .firstOrNull { it.id == itemId }
         ?: savedItems.firstOrNull { it.id == itemId }
+        ?: selectedDetail?.takeIf { it.id == itemId }
+
+private fun MangaScreenState.findCatalogItemByAniListId(aniListId: Int): MangaCatalogItemRow? =
+    savedItems.firstOrNull { it.aniListId == aniListId }
+        ?: searchResults.firstOrNull { it.aniListId == aniListId }
+        ?: catalogs.asSequence()
+            .flatMap { section -> section.items.asSequence() }
+            .firstOrNull { it.aniListId == aniListId }
+        ?: selectedDetail?.takeIf { it.aniListId == aniListId }
+
+private val MangaCatalogItemRow.isKanzenBacked: Boolean
+    get() = !moduleId.isNullOrBlank() && moduleId != "anilist" && !contentParams.isNullOrBlank()
+
+private fun MangaCatalogItemRow.withKanzenDetails(details: KanzenCatalogDetailSnapshot): MangaCatalogItemRow {
+    val detailSubtitle = details.subtitle?.trim()?.takeIf(String::isNotBlank)
+    return copy(
+        title = details.title?.trim()?.takeIf(String::isNotBlank) ?: title,
+        subtitle = detailSubtitle?.let { subtitle ->
+            listOfNotNull(sourceName?.takeIf(String::isNotBlank), subtitle)
+                .distinct()
+                .joinToString(" - ")
+        } ?: subtitle,
+        coverUrl = details.coverUrl?.trim()?.takeIf(String::isNotBlank) ?: coverUrl,
+        description = details.description?.trim()?.takeIf(String::isNotBlank) ?: description,
+        totalChapters = details.totalChapters ?: totalChapters,
+    )
+}
+
+private fun MangaCatalogItemRow.withDetailFieldsFrom(detail: MangaCatalogItemRow): MangaCatalogItemRow = copy(
+    title = detail.title.takeIf(String::isNotBlank) ?: title,
+    subtitle = detail.subtitle.takeIf(String::isNotBlank) ?: subtitle,
+    coverUrl = detail.coverUrl ?: coverUrl,
+    description = detail.description ?: description,
+    totalChapters = detail.totalChapters ?: totalChapters,
+    moduleId = detail.moduleId ?: moduleId,
+    contentParams = detail.contentParams ?: contentParams,
+    sourceName = detail.sourceName ?: sourceName,
+)
+
+private fun MangaScreenState.withUpdatedCatalogItem(
+    itemId: String,
+    replacement: MangaCatalogItemRow,
+): MangaScreenState = copy(
+    searchResults = searchResults.map { row ->
+        if (row.id == itemId || row.aniListId == replacement.aniListId) {
+            row.withDetailFieldsFrom(replacement)
+        } else {
+            row
+        }
+    },
+    savedItems = savedItems.map { row ->
+        if (row.id == itemId || row.aniListId == replacement.aniListId) {
+            row.withDetailFieldsFrom(replacement)
+        } else {
+            row
+        }
+    },
+    catalogs = catalogs.map { section ->
+        section.copy(
+            items = section.items.map { row ->
+                if (row.id == itemId || row.aniListId == replacement.aniListId) {
+                    row.withDetailFieldsFrom(replacement)
+                } else {
+                    row
+                }
+            },
+        )
+    },
+)
 
 private fun MangaScreenState.activeReaderPanelFor(aniListId: Int): MangaReaderPanelRow? =
     reader?.takeIf { it.aniListId == aniListId }
@@ -703,6 +842,8 @@ private fun MangaScreenState.readerPanelFor(aniListId: Int): MangaReaderPanelRow
         ?: catalogs.asSequence()
             .flatMap { section -> section.items.asSequence() }
             .firstOrNull { it.aniListId == aniListId && it.isSaved }
+            ?.toReaderPanel()
+        ?: selectedDetail?.takeIf { it.aniListId == aniListId && it.isSaved }
             ?.toReaderPanel()
         ?: recent.firstOrNull { it.aniListId == aniListId }
             ?.toReaderPanel()
@@ -877,6 +1018,9 @@ private fun MangaScreenState.withSavedFlag(
                 if (row.aniListId == aniListId) row.copy(isSaved = isSaved) else row
             },
         )
+    },
+    selectedDetail = selectedDetail?.let { row ->
+        if (row.aniListId == aniListId) row.copy(isSaved = isSaved) else row
     },
 )
 
