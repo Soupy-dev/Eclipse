@@ -36,6 +36,7 @@ class BackupRepository(
     private val serviceDao: ServiceDao,
     private val stremioAddonDao: StremioAddonDao,
     private val progressRepository: ProgressRepository,
+    private val libraryRepository: LibraryRepository,
     private val catalogRepository: CatalogRepository,
     private val trackerRepository: TrackerRepository,
     private val ratingsRepository: RatingsRepository,
@@ -89,6 +90,9 @@ class BackupRepository(
         val exportedRatings = ratingsRepository.exportRatings()
             .takeIf { it.isNotEmpty() }
             ?: payload?.userRatings.orEmpty()
+        val exportedCollections = libraryRepository.exportCollections()
+            .takeIf { it.isNotEmpty() }
+            ?: payload?.collections.orEmpty()
         val exportedMangaCollections = manga.takeIf { it.hasUserData }?.toBackupCollections()
             ?: payload?.mangaCollections.orEmpty()
         val exportedMangaProgress = manga.takeIf { it.hasUserData }?.toBackupProgress()
@@ -129,6 +133,11 @@ class BackupRepository(
                 showKanzen = settings.showKanzen,
                 kanzenAutoMode = settings.kanzenAutoMode,
                 kanzenAutoUpdateModules = settings.kanzenAutoUpdateModules,
+                autoUpdateServicesEnabled = settings.autoUpdateServicesEnabled,
+                githubReleaseAutoCheckEnabled = settings.githubReleaseAutoCheckEnabled,
+                githubReleaseUpdateAvailable = settings.githubReleaseUpdateAvailable,
+                githubReleaseLatestVersion = settings.githubReleaseLatestVersion,
+                githubReleaseURL = settings.githubReleaseUrl,
                 seasonMenu = settings.seasonMenu,
                 horizontalEpisodeList = settings.horizontalEpisodeList,
                 mediaColumnsPortrait = settings.mediaColumnsPortrait,
@@ -146,7 +155,7 @@ class BackupRepository(
                 highQualityThreshold = settings.highQualityThreshold,
                 filterHorrorContent = settings.filterHorrorContent,
                 selectedSimilarityAlgorithm = settings.selectedSimilarityAlgorithm.id,
-                collections = payload?.collections.orEmpty(),
+                collections = exportedCollections,
                 progressData = exportedProgress,
                 trackerState = exportedTrackerState,
                 catalogs = exportedCatalogs,
@@ -166,6 +175,7 @@ class BackupRepository(
 
     private suspend fun applyPayload(payload: BackupData) {
         settingsStore.restoreFromBackup(payload)
+        libraryRepository.restoreCollectionsFromBackup(payload.collections).getOrThrow()
         progressRepository.restoreFromBackup(payload.progressData).getOrThrow()
         catalogRepository.restoreFromBackup(payload.catalogs).getOrThrow()
         trackerRepository.restoreFromBackup(payload.trackerState).getOrThrow()

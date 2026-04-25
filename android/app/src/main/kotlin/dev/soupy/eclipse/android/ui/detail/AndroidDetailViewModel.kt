@@ -407,7 +407,7 @@ class AndroidDetailViewModel(
             backdropUrl = snapshot.backdropUrl,
             mediaLabel = snapshot.metadataChips.firstOrNull(),
             progressLabel = selectedEpisode?.subtitle?.let { "Preparing offline draft near $it" }
-                ?: "Preparing an offline draft while Android source resolution lands.",
+                ?: "Preparing an offline draft from the current Android source.",
             sourceLabel = snapshot.playerSource?.title ?: if (isEpisodeDraft) {
                 "Episode download draft"
             } else {

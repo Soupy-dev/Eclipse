@@ -487,7 +487,7 @@ fun NovelRoute(
                             color = MaterialTheme.colorScheme.onSurface,
                         )
                         Text(
-                            text = "Import a Luna backup with novel progress or install novel-capable Kanzen modules as the Android reader runtime lands.",
+                            text = "Import a Luna backup with novel progress or install novel-capable Kanzen modules to populate this library.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.74f),
                         )

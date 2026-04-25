@@ -166,10 +166,18 @@ data class MangaReaderSettingsRow(
     val readerTextAlignment: String = "left",
 )
 
+enum class MangaSurfaceMode {
+    HOME,
+    LIBRARY,
+    SEARCH,
+    HISTORY,
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun MangaRoute(
     state: MangaScreenState,
+    surfaceMode: MangaSurfaceMode = MangaSurfaceMode.HOME,
     onRefresh: () -> Unit,
     onQueryChange: (String) -> Unit,
     onSearch: () -> Unit,
@@ -199,6 +207,21 @@ fun MangaRoute(
     var moduleUrl by rememberSaveable { mutableStateOf("") }
     var collectionName by rememberSaveable { mutableStateOf("") }
     val editableCollections = state.collections.filter { collection -> collection.isEditable }
+    val showSearchPanels = surfaceMode == MangaSurfaceMode.HOME || surfaceMode == MangaSurfaceMode.SEARCH
+    val showLibraryPanels = surfaceMode == MangaSurfaceMode.HOME || surfaceMode == MangaSurfaceMode.LIBRARY
+    val showHistoryPanels = surfaceMode == MangaSurfaceMode.HOME || surfaceMode == MangaSurfaceMode.HISTORY
+    val showCatalogPanels = surfaceMode == MangaSurfaceMode.HOME || surfaceMode == MangaSurfaceMode.SEARCH
+    val showManagementPanels = surfaceMode == MangaSurfaceMode.HOME || surfaceMode == MangaSurfaceMode.LIBRARY
+    val hasVisibleData = when (surfaceMode) {
+        MangaSurfaceMode.LIBRARY -> state.savedItems.isNotEmpty() || state.collections.isNotEmpty()
+        MangaSurfaceMode.SEARCH -> state.searchResults.isNotEmpty() || state.catalogs.isNotEmpty()
+        MangaSurfaceMode.HISTORY -> state.recent.isNotEmpty()
+        MangaSurfaceMode.HOME -> state.catalogs.isNotEmpty() ||
+            state.collections.isNotEmpty() ||
+            state.recent.isNotEmpty() ||
+            state.modules.isNotEmpty() ||
+            state.savedItems.isNotEmpty()
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -209,13 +232,30 @@ fun MangaRoute(
     ) {
         item {
             HeroBackdrop(
-                title = "Manga",
-                subtitle = "${state.savedCount} saved - ${state.readChapterCount} chapters read",
+                title = when (surfaceMode) {
+                    MangaSurfaceMode.LIBRARY -> "Kanzen Library"
+                    MangaSurfaceMode.SEARCH -> "Kanzen Search"
+                    MangaSurfaceMode.HISTORY -> "Kanzen History"
+                    MangaSurfaceMode.HOME -> "Kanzen"
+                },
+                subtitle = when (surfaceMode) {
+                    MangaSurfaceMode.LIBRARY -> "${state.savedCount} saved - ${state.collections.size} collections"
+                    MangaSurfaceMode.SEARCH -> "${state.catalogs.size} catalog rows - ${state.modules.size} modules"
+                    MangaSurfaceMode.HISTORY -> "${state.readChapterCount} chapters read"
+                    MangaSurfaceMode.HOME -> "${state.savedCount} saved - ${state.readChapterCount} chapters read"
+                },
                 imageUrl = state.recent.firstOrNull()?.coverUrl,
-                supportingText = if (state.novelCount > 0) {
-                    "${state.novelCount} novel progress ${if (state.novelCount == 1) "entry" else "entries"} restored with manga history."
-                } else {
-                    "Kanzen library, progress, module, and catalog data now load from Android storage and Luna backups."
+                supportingText = when {
+                    surfaceMode == MangaSurfaceMode.LIBRARY ->
+                        "Saved manga, bookmarks, favorites, and custom Kanzen collections from Android storage and Luna backups."
+                    surfaceMode == MangaSurfaceMode.SEARCH ->
+                        "Search AniList manga and installed Kanzen modules from the dedicated Kanzen shell."
+                    surfaceMode == MangaSurfaceMode.HISTORY ->
+                        "Recent manga and light-novel reading progress restored into one Kanzen history surface."
+                    state.novelCount > 0 ->
+                        "${state.novelCount} novel progress ${if (state.novelCount == 1) "entry" else "entries"} restored with manga history."
+                    else ->
+                        "Kanzen library, progress, module, and catalog data now load from Android storage and Luna backups."
                 },
             )
         }
@@ -295,7 +335,8 @@ fun MangaRoute(
             }
         }
 
-        item {
+        if (showSearchPanels) {
+            item {
             GlassPanel {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
@@ -321,9 +362,11 @@ fun MangaRoute(
                     }
                 }
             }
+            }
         }
 
-        item {
+        if (showManagementPanels) {
+            item {
             GlassPanel {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
@@ -356,6 +399,7 @@ fun MangaRoute(
                     }
                 }
             }
+            }
         }
 
         item {
@@ -368,7 +412,8 @@ fun MangaRoute(
             }
         }
 
-        item {
+        if (showManagementPanels) {
+            item {
             GlassPanel {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
@@ -389,9 +434,11 @@ fun MangaRoute(
                     }
                 }
             }
+            }
         }
 
-        item {
+        if (showLibraryPanels) {
+            item {
             GlassPanel {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
@@ -418,9 +465,10 @@ fun MangaRoute(
                     }
                 }
             }
+            }
         }
 
-        if (state.searchResults.isNotEmpty()) {
+        if (showSearchPanels && state.searchResults.isNotEmpty()) {
             item {
                 SectionHeading(
                     title = "Search Results",
@@ -444,7 +492,7 @@ fun MangaRoute(
             }
         }
 
-        if (state.savedItems.isNotEmpty()) {
+        if (showLibraryPanels && state.savedItems.isNotEmpty()) {
             item {
                 SectionHeading(
                     title = "Saved Manga",
@@ -468,7 +516,7 @@ fun MangaRoute(
             }
         }
 
-        if (state.catalogs.isNotEmpty()) {
+        if (showCatalogPanels && state.catalogs.isNotEmpty()) {
             items(state.catalogs, key = { it.id }) { section ->
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     SectionHeading(
@@ -494,7 +542,7 @@ fun MangaRoute(
             }
         }
 
-        if (state.recent.isNotEmpty()) {
+        if (showHistoryPanels && state.recent.isNotEmpty()) {
             item {
                 SectionHeading(
                     title = "Reading",
@@ -512,7 +560,7 @@ fun MangaRoute(
             }
         }
 
-        if (state.collections.isNotEmpty()) {
+        if (showLibraryPanels && state.collections.isNotEmpty()) {
             item {
                 SectionHeading(
                     title = "Collections",
@@ -527,7 +575,7 @@ fun MangaRoute(
             }
         }
 
-        if (state.modules.isNotEmpty()) {
+        if (showManagementPanels && state.modules.isNotEmpty()) {
             item {
                 SectionHeading(
                     title = "Modules",
@@ -544,7 +592,7 @@ fun MangaRoute(
             }
         }
 
-        if (!state.isLoading && state.errorMessage == null && state.catalogs.isEmpty() && state.collections.isEmpty() && state.recent.isEmpty() && state.modules.isEmpty()) {
+        if (!state.isLoading && state.errorMessage == null && !hasVisibleData) {
             item {
                 GlassPanel {
                     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -554,7 +602,7 @@ fun MangaRoute(
                             color = MaterialTheme.colorScheme.onSurface,
                         )
                         Text(
-                            text = "Import a Luna backup or add Kanzen modules as the Android reader runtime lands.",
+                            text = "Import a Luna backup or add Kanzen modules to populate your Android reader library.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.74f),
                         )

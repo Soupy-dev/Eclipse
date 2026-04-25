@@ -69,6 +69,40 @@ class AndroidDownloadsViewModel(
         repository.resume(id)
     }
 
+    fun pauseAll() {
+        val ids = _state.value.items.filter { it.canPause }.map { it.id }
+        bulkMutate(
+            ids = ids,
+            successMessage = "Paused ${ids.size} active download${ids.size.pluralSuffix()}.",
+        ) { id -> repository.pause(id) }
+    }
+
+    fun resumeAll() {
+        val ids = _state.value.items.filter { it.statusLabel == "Paused" }.map { it.id }
+        bulkMutate(
+            ids = ids,
+            successMessage = "Resumed ${ids.size} paused download${ids.size.pluralSuffix()}.",
+        ) { id -> repository.resume(id) }
+    }
+
+    fun retryFailed() {
+        val ids = _state.value.items.filter { it.statusLabel == "Failed" }.map { it.id }
+        bulkMutate(
+            ids = ids,
+            successMessage = "Retried ${ids.size} failed download${ids.size.pluralSuffix()}.",
+        ) { id -> repository.resume(id) }
+    }
+
+    fun cancelActive() {
+        val ids = _state.value.items
+            .filter { it.statusLabel in setOf("Queued", "Downloading", "Paused") }
+            .map { it.id }
+        bulkMutate(
+            ids = ids,
+            successMessage = "Cancelled ${ids.size} active download${ids.size.pluralSuffix()}.",
+        ) { id -> repository.remove(id) }
+    }
+
     private fun resumeInterruptedTransfers() {
         viewModelScope.launch {
             repository.resumeInterruptedTransfers()
@@ -209,6 +243,35 @@ class AndroidDownloadsViewModel(
                         errorMessage = error.message ?: "Unknown downloads error.",
                     )
                 }
+        }
+    }
+
+    private fun bulkMutate(
+        ids: List<String>,
+        successMessage: String,
+        action: suspend (String) -> Result<DownloadSnapshot>,
+    ) {
+        if (ids.isEmpty()) {
+            _state.value = _state.value.copy(noticeMessage = "No matching downloads.")
+            return
+        }
+        viewModelScope.launch {
+            var latest: DownloadSnapshot? = null
+            ids.forEach { id ->
+                action(id)
+                    .onSuccess { snapshot -> latest = snapshot }
+                    .onFailure { error ->
+                        _state.value = _state.value.copy(
+                            errorMessage = error.message ?: "A bulk download action failed.",
+                        )
+                    }
+            }
+            latest?.let { snapshot ->
+                _state.value = snapshot.toUiState(
+                    noticeMessage = successMessage,
+                    playerSource = _state.value.playerSource,
+                )
+            }
         }
     }
 }
@@ -373,3 +436,5 @@ private fun Long.toByteCountLabel(): String {
     }
     return "%.1f %s".format(value, unit)
 }
+
+private fun Int.pluralSuffix(): String = if (this == 1) "" else "s"

@@ -55,6 +55,19 @@ data class ServicesSnapshot(
     val stremioAddons: List<StremioAddonRecord> = emptyList(),
 )
 
+data class ServicesUpdateSummary(
+    val refreshedAddons: Int,
+    val failedAddons: Int,
+) {
+    val statusMessage: String
+        get() = when {
+            refreshedAddons == 0 && failedAddons == 0 -> "No Stremio addons needed refresh."
+            failedAddons == 0 -> "Refreshed $refreshedAddons Stremio addon${refreshedAddons.pluralSuffix()}."
+            refreshedAddons == 0 -> "Could not refresh $failedAddons Stremio addon${failedAddons.pluralSuffix()}."
+            else -> "Refreshed $refreshedAddons Stremio addon${refreshedAddons.pluralSuffix()} with $failedAddons issue${failedAddons.pluralSuffix()}."
+        }
+}
+
 class ServicesRepository(
     private val serviceDao: ServiceDao,
     private val stremioAddonDao: StremioAddonDao,
@@ -174,6 +187,21 @@ class ServicesRepository(
                 manifestJson = EclipseJson.encodeToString(manifest),
                 updatedAt = System.currentTimeMillis(),
             ),
+        )
+    }
+
+    suspend fun refreshAllAddons(): Result<ServicesUpdateSummary> = runCatching {
+        val addons = stremioAddonDao.observeAll().first()
+        var refreshed = 0
+        var failed = 0
+        addons.forEach { addon ->
+            refreshStremioAddon(addon.transportUrl)
+                .onSuccess { refreshed += 1 }
+                .onFailure { failed += 1 }
+        }
+        ServicesUpdateSummary(
+            refreshedAddons = refreshed,
+            failedAddons = failed,
         )
     }
 
@@ -319,3 +347,5 @@ private fun String.configurationUrl(): String =
         .let { base ->
             if (base.endsWith("/configure", ignoreCase = true)) base else "$base/configure"
         }
+
+private fun Int.pluralSuffix(): String = if (this == 1) "" else "s"

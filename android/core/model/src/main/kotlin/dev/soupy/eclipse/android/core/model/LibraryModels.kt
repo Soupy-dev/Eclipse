@@ -30,7 +30,18 @@ data class ContinueWatchingRecord(
 )
 
 @Serializable
+data class MediaLibraryCollection(
+    val id: String,
+    val name: String,
+    val description: String? = null,
+    val itemIds: List<String> = emptyList(),
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis(),
+)
+
+@Serializable
 data class LibrarySnapshot(
     val savedItems: List<LibraryItemRecord> = emptyList(),
     val continueWatching: List<ContinueWatchingRecord> = emptyList(),
+    val collections: List<MediaLibraryCollection> = emptyList(),
 )

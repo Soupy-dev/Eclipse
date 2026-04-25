@@ -8,10 +8,12 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import dev.soupy.eclipse.android.data.SearchRepository
+import dev.soupy.eclipse.android.core.storage.SettingsStore
 import dev.soupy.eclipse.android.feature.search.SearchScreenState
 
 class AndroidSearchViewModel(
     private val repository: SearchRepository,
+    private val settingsStore: SettingsStore,
 ) : ViewModel() {
     private val _state = MutableStateFlow(SearchScreenState())
     val state: StateFlow<SearchScreenState> = _state.asStateFlow()
@@ -19,6 +21,16 @@ class AndroidSearchViewModel(
     init {
         viewModelScope.launch {
             _state.update { it.copy(recentQueries = repository.recentQueries()) }
+        }
+        viewModelScope.launch {
+            settingsStore.settings.collect { settings ->
+                _state.update {
+                    it.copy(
+                        mediaColumnsPortrait = settings.mediaColumnsPortrait,
+                        mediaColumnsLandscape = settings.mediaColumnsLandscape,
+                    )
+                }
+            }
         }
     }
 

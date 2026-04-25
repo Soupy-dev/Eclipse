@@ -51,6 +51,15 @@ data class AppSettings(
     val showKanzen: Boolean = false,
     val kanzenAutoMode: Boolean = false,
     val kanzenAutoUpdateModules: Boolean = true,
+    val autoUpdateServicesEnabled: Boolean = true,
+    val lastServiceAutoUpdateTimestamp: Long = 0L,
+    val githubReleaseAutoCheckEnabled: Boolean = true,
+    val githubReleaseLastCheckTimestamp: Long = 0L,
+    val githubReleaseUpdateAvailable: Boolean = false,
+    val githubReleaseLatestVersion: String = "",
+    val githubReleaseUrl: String = "",
+    val githubReleaseShowAlertPending: Boolean = false,
+    val githubReleaseLastPromptedVersion: String = "",
     val seasonMenu: Boolean = false,
     val horizontalEpisodeList: Boolean = false,
     val mediaColumnsPortrait: Int = 3,
@@ -197,9 +206,63 @@ class SettingsStore(
         }
     }
 
+    suspend fun updateMediaColumns(
+        portrait: Int,
+        landscape: Int,
+    ) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.mediaColumnsPortrait] = portrait.coerceIn(2, 6)
+            prefs[Keys.mediaColumnsLandscape] = landscape.coerceIn(3, 8)
+        }
+    }
+
     suspend fun setKanzenAutoUpdateModules(enabled: Boolean) {
         context.dataStore.edit { prefs ->
             prefs[Keys.kanzenAutoUpdateModules] = enabled
+        }
+    }
+
+    suspend fun setAutoUpdateServicesEnabled(enabled: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.autoUpdateServicesEnabled] = enabled
+        }
+    }
+
+    suspend fun markServiceAutoUpdateChecked(timestampMillis: Long = System.currentTimeMillis()) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.lastServiceAutoUpdateTimestamp] = timestampMillis
+        }
+    }
+
+    suspend fun setGitHubReleaseAutoCheckEnabled(enabled: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.githubReleaseAutoCheckEnabled] = enabled
+        }
+    }
+
+    suspend fun saveGitHubReleaseCheck(
+        latestVersion: String,
+        releaseUrl: String,
+        updateAvailable: Boolean,
+        prompt: Boolean,
+        checkedAtMillis: Long = System.currentTimeMillis(),
+    ) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.githubReleaseLastCheckTimestamp] = checkedAtMillis
+            prefs[Keys.githubReleaseLatestVersion] = latestVersion
+            prefs[Keys.githubReleaseUrl] = releaseUrl
+            prefs[Keys.githubReleaseUpdateAvailable] = updateAvailable
+            prefs[Keys.githubReleaseShowAlertPending] = prompt
+        }
+    }
+
+    suspend fun consumeGitHubReleasePrompt() {
+        context.dataStore.edit { prefs ->
+            val latestVersion = prefs[Keys.githubReleaseLatestVersion].orEmpty()
+            prefs[Keys.githubReleaseShowAlertPending] = false
+            if (latestVersion.isNotBlank()) {
+                prefs[Keys.githubReleaseLastPromptedVersion] = latestVersion
+            }
         }
     }
 
@@ -303,6 +366,11 @@ class SettingsStore(
             prefs[Keys.showKanzen] = payload.showKanzen
             prefs[Keys.kanzenAutoMode] = payload.kanzenAutoMode
             prefs[Keys.kanzenAutoUpdateModules] = payload.kanzenAutoUpdateModules
+            prefs[Keys.autoUpdateServicesEnabled] = payload.autoUpdateServicesEnabled
+            prefs[Keys.githubReleaseAutoCheckEnabled] = payload.githubReleaseAutoCheckEnabled
+            prefs[Keys.githubReleaseUpdateAvailable] = payload.githubReleaseUpdateAvailable
+            prefs[Keys.githubReleaseLatestVersion] = payload.githubReleaseLatestVersion
+            prefs[Keys.githubReleaseUrl] = payload.githubReleaseURL
             prefs[Keys.seasonMenu] = payload.seasonMenu
             prefs[Keys.horizontalEpisodeList] = payload.horizontalEpisodeList
             prefs[Keys.mediaColumnsPortrait] = payload.mediaColumnsPortrait
@@ -357,6 +425,15 @@ class SettingsStore(
         showKanzen = preferences[Keys.showKanzen] ?: false,
         kanzenAutoMode = preferences[Keys.kanzenAutoMode] ?: false,
         kanzenAutoUpdateModules = preferences[Keys.kanzenAutoUpdateModules] ?: true,
+        autoUpdateServicesEnabled = preferences[Keys.autoUpdateServicesEnabled] ?: true,
+        lastServiceAutoUpdateTimestamp = preferences[Keys.lastServiceAutoUpdateTimestamp] ?: 0L,
+        githubReleaseAutoCheckEnabled = preferences[Keys.githubReleaseAutoCheckEnabled] ?: true,
+        githubReleaseLastCheckTimestamp = preferences[Keys.githubReleaseLastCheckTimestamp] ?: 0L,
+        githubReleaseUpdateAvailable = preferences[Keys.githubReleaseUpdateAvailable] ?: false,
+        githubReleaseLatestVersion = preferences[Keys.githubReleaseLatestVersion] ?: "",
+        githubReleaseUrl = preferences[Keys.githubReleaseUrl] ?: "",
+        githubReleaseShowAlertPending = preferences[Keys.githubReleaseShowAlertPending] ?: false,
+        githubReleaseLastPromptedVersion = preferences[Keys.githubReleaseLastPromptedVersion] ?: "",
         seasonMenu = preferences[Keys.seasonMenu] ?: false,
         horizontalEpisodeList = preferences[Keys.horizontalEpisodeList] ?: false,
         mediaColumnsPortrait = preferences[Keys.mediaColumnsPortrait] ?: 3,
@@ -408,6 +485,15 @@ class SettingsStore(
         val showKanzen = booleanPreferencesKey("show_kanzen")
         val kanzenAutoMode = booleanPreferencesKey("kanzen_auto_mode")
         val kanzenAutoUpdateModules = booleanPreferencesKey("kanzen_auto_update_modules")
+        val autoUpdateServicesEnabled = booleanPreferencesKey("auto_update_services_enabled")
+        val lastServiceAutoUpdateTimestamp = androidx.datastore.preferences.core.longPreferencesKey("last_service_auto_update_timestamp")
+        val githubReleaseAutoCheckEnabled = booleanPreferencesKey("github_release_auto_check_enabled")
+        val githubReleaseLastCheckTimestamp = androidx.datastore.preferences.core.longPreferencesKey("github_release_last_check_timestamp")
+        val githubReleaseUpdateAvailable = booleanPreferencesKey("github_release_update_available")
+        val githubReleaseLatestVersion = stringPreferencesKey("github_release_latest_version")
+        val githubReleaseUrl = stringPreferencesKey("github_release_url")
+        val githubReleaseShowAlertPending = booleanPreferencesKey("github_release_show_alert_pending")
+        val githubReleaseLastPromptedVersion = stringPreferencesKey("github_release_last_prompted_version")
         val seasonMenu = booleanPreferencesKey("season_menu")
         val horizontalEpisodeList = booleanPreferencesKey("horizontal_episode_list")
         val mediaColumnsPortrait = intPreferencesKey("media_columns_portrait")

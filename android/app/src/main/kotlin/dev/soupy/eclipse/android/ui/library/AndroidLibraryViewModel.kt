@@ -12,6 +12,7 @@ import dev.soupy.eclipse.android.data.LibraryItemDraft
 import dev.soupy.eclipse.android.data.LibraryRepository
 import dev.soupy.eclipse.android.core.model.LibrarySnapshot
 import dev.soupy.eclipse.android.feature.library.ContinueWatchingRow
+import dev.soupy.eclipse.android.feature.library.LibraryCollectionRow
 import dev.soupy.eclipse.android.feature.library.LibraryMetric
 import dev.soupy.eclipse.android.feature.library.LibrarySavedItemRow
 import dev.soupy.eclipse.android.feature.library.LibraryScreenState
@@ -75,9 +76,71 @@ class AndroidLibraryViewModel(
                 .onSuccess { snapshot -> _state.value = snapshot.toUiState() }
         }
     }
+
+    fun createCollection(name: String) {
+        viewModelScope.launch {
+            repository.createCollection(name)
+                .onSuccess { snapshot -> _state.value = snapshot.toUiState() }
+                .onFailure { error ->
+                    _state.update { it.copy(errorMessage = error.message ?: "Could not create collection.") }
+                }
+        }
+    }
+
+    fun deleteCollection(id: String) {
+        viewModelScope.launch {
+            repository.deleteCollection(id)
+                .onSuccess { snapshot -> _state.value = snapshot.toUiState() }
+                .onFailure { error ->
+                    _state.update { it.copy(errorMessage = error.message ?: "Could not delete collection.") }
+                }
+        }
+    }
+
+    fun addToCollection(collectionId: String, itemId: String) {
+        viewModelScope.launch {
+            repository.addToCollection(collectionId, itemId)
+                .onSuccess { snapshot -> _state.value = snapshot.toUiState() }
+                .onFailure { error ->
+                    _state.update { it.copy(errorMessage = error.message ?: "Could not add to collection.") }
+                }
+        }
+    }
+
+    fun saveToCollection(collectionId: String, draft: LibraryItemDraft) {
+        viewModelScope.launch {
+            repository.saveToCollection(collectionId, draft)
+                .onSuccess { snapshot -> _state.value = snapshot.toUiState() }
+                .onFailure { error ->
+                    _state.update { it.copy(errorMessage = error.message ?: "Could not add to collection.") }
+                }
+        }
+    }
+
+    fun removeFromCollection(collectionId: String, itemId: String) {
+        viewModelScope.launch {
+            repository.removeFromCollection(collectionId, itemId)
+                .onSuccess { snapshot -> _state.value = snapshot.toUiState() }
+                .onFailure { error ->
+                    _state.update { it.copy(errorMessage = error.message ?: "Could not remove from collection.") }
+                }
+        }
+    }
 }
 
 private fun LibrarySnapshot.toUiState(): LibraryScreenState {
+    val savedRowsById = savedItems.associate { record ->
+        record.id to LibrarySavedItemRow(
+            id = record.id,
+            title = record.title,
+            subtitle = record.subtitle,
+            overview = record.overview,
+            imageUrl = record.imageUrl,
+            backdropUrl = record.backdropUrl,
+            mediaLabel = record.mediaLabel,
+            detailTarget = record.detailTarget,
+        )
+    }
     val heroTitle = continueWatching.firstOrNull()?.title
         ?: savedItems.firstOrNull()?.title
         ?: "Library"
@@ -91,7 +154,7 @@ private fun LibrarySnapshot.toUiState(): LibraryScreenState {
         savedItems.isNotEmpty() ->
             "Saved titles now survive app restarts and are ready to become part of full backup parity."
         else ->
-            "Saved titles and continue watching are now backed by Android-side storage instead of placeholder UI."
+            "Saved titles, collections, and continue watching are backed by Android-side storage."
     }
 
     return LibraryScreenState(
@@ -100,7 +163,7 @@ private fun LibrarySnapshot.toUiState(): LibraryScreenState {
         heroSubtitle = when {
             continueWatching.isNotEmpty() -> "Continue Watching"
             savedItems.isNotEmpty() -> "Saved titles"
-            else -> "Milestone 2"
+            else -> "Saved media"
         },
         heroImageUrl = heroImageUrl,
         heroSupportingText = heroSupportingText,
@@ -109,6 +172,11 @@ private fun LibrarySnapshot.toUiState(): LibraryScreenState {
                 label = "Saved",
                 value = savedItems.size.toString(),
                 supportingText = "Pinned titles that stay outside resume state.",
+            ),
+            LibraryMetric(
+                label = "Collections",
+                value = collections.size.toString(),
+                supportingText = "Bookmarks and custom media groups restored through Android storage.",
             ),
             LibraryMetric(
                 label = "Resume",
@@ -128,16 +196,15 @@ private fun LibrarySnapshot.toUiState(): LibraryScreenState {
                 detailTarget = record.detailTarget,
             )
         },
-        savedItems = savedItems.map { record ->
-            LibrarySavedItemRow(
-                id = record.id,
-                title = record.title,
-                subtitle = record.subtitle,
-                overview = record.overview,
-                imageUrl = record.imageUrl,
-                backdropUrl = record.backdropUrl,
-                mediaLabel = record.mediaLabel,
-                detailTarget = record.detailTarget,
+        savedItems = savedRowsById.values.toList(),
+        collections = collections.map { collection ->
+            LibraryCollectionRow(
+                id = collection.id,
+                name = collection.name,
+                description = collection.description,
+                itemCount = collection.itemIds.size,
+                items = collection.itemIds.mapNotNull(savedRowsById::get),
+                canDelete = !collection.name.equals("Bookmarks", ignoreCase = true),
             )
         },
     )

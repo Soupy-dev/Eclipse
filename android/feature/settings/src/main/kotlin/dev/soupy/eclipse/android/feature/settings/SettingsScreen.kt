@@ -71,6 +71,8 @@ data class SettingsScreenState(
     val showKanzen: Boolean = false,
     val seasonMenu: Boolean = false,
     val horizontalEpisodeList: Boolean = false,
+    val mediaColumnsPortrait: Int = 3,
+    val mediaColumnsLandscape: Int = 5,
     val readingMode: Int = 2,
     val readerFontSize: Double = 16.0,
     val readerFontFamily: String = "-apple-system",
@@ -96,6 +98,14 @@ data class SettingsScreenState(
     val trackerStatus: String = "No tracker accounts connected yet.",
     val aniListOAuthUrl: String = "",
     val traktOAuthUrl: String = "",
+    val autoUpdateServicesEnabled: Boolean = true,
+    val githubReleaseAutoCheckEnabled: Boolean = true,
+    val githubReleaseUpdateAvailable: Boolean = false,
+    val githubReleaseLatestVersion: String = "",
+    val githubReleaseUrl: String = "",
+    val githubReleaseShowAlertPending: Boolean = false,
+    val githubReleaseStatus: String = "Release checks have not run yet.",
+    val isCheckingGitHubRelease: Boolean = false,
 )
 
 data class CatalogSettingsRow(
@@ -167,7 +177,12 @@ fun SettingsRoute(
     onShowKanzenChanged: (Boolean) -> Unit,
     onSeasonMenuChanged: (Boolean) -> Unit,
     onHorizontalEpisodeListChanged: (Boolean) -> Unit,
+    onMediaColumnsPortraitChanged: (Int) -> Unit,
+    onMediaColumnsLandscapeChanged: (Int) -> Unit,
     onOpenServices: () -> Unit,
+    onAutoUpdateServicesChanged: (Boolean) -> Unit,
+    onCheckGitHubRelease: () -> Unit,
+    onGitHubReleaseAutoCheckChanged: (Boolean) -> Unit,
     onAutoModeChanged: (Boolean) -> Unit,
     onShowNextEpisodeChanged: (Boolean) -> Unit,
     onNextEpisodeThresholdChanged: (Int) -> Unit,
@@ -269,7 +284,25 @@ fun SettingsRoute(
                 onShowKanzenChanged = onShowKanzenChanged,
                 onSeasonMenuChanged = onSeasonMenuChanged,
                 onHorizontalEpisodeListChanged = onHorizontalEpisodeListChanged,
+                onMediaColumnsPortraitChanged = onMediaColumnsPortraitChanged,
+                onMediaColumnsLandscapeChanged = onMediaColumnsLandscapeChanged,
                 onOpenServices = onOpenServices,
+            )
+        }
+
+        item {
+            SectionHeading(
+                title = "Updates",
+                subtitle = "GitHub release checks and service refresh cadence.",
+            )
+        }
+
+        item {
+            UpdatesCard(
+                state = state,
+                onAutoUpdateServicesChanged = onAutoUpdateServicesChanged,
+                onGitHubReleaseAutoCheckChanged = onGitHubReleaseAutoCheckChanged,
+                onCheckGitHubRelease = onCheckGitHubRelease,
             )
         }
 
@@ -610,6 +643,8 @@ private fun DisplayOptionsCard(
     onShowKanzenChanged: (Boolean) -> Unit,
     onSeasonMenuChanged: (Boolean) -> Unit,
     onHorizontalEpisodeListChanged: (Boolean) -> Unit,
+    onMediaColumnsPortraitChanged: (Int) -> Unit,
+    onMediaColumnsLandscapeChanged: (Int) -> Unit,
     onOpenServices: () -> Unit,
 ) {
     GlassPanel {
@@ -625,7 +660,7 @@ private fun DisplayOptionsCard(
                 onCheckedChange = onShowScheduleTabChanged,
             )
             SettingInlineToggle(
-                title = "Show Manga and Novel Tabs",
+                title = "Kanzen Mode",
                 checked = state.showKanzen,
                 onCheckedChange = onShowKanzenChanged,
             )
@@ -639,11 +674,85 @@ private fun DisplayOptionsCard(
                 checked = state.horizontalEpisodeList,
                 onCheckedChange = onHorizontalEpisodeListChanged,
             )
+            ReaderValueSlider(
+                title = "Portrait Search Columns",
+                valueLabel = state.mediaColumnsPortrait.toString(),
+                value = state.mediaColumnsPortrait.toFloat(),
+                valueRange = 2f..6f,
+                onValueChange = { onMediaColumnsPortraitChanged(it.toInt()) },
+            )
+            ReaderValueSlider(
+                title = "Landscape Search Columns",
+                valueLabel = state.mediaColumnsLandscape.toString(),
+                value = state.mediaColumnsLandscape.toFloat(),
+                valueRange = 3f..8f,
+                onValueChange = { onMediaColumnsLandscapeChanged(it.toInt()) },
+            )
             OutlinedButton(
                 onClick = onOpenServices,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("Open Provider Services")
+            }
+        }
+    }
+}
+
+@Composable
+private fun UpdatesCard(
+    state: SettingsScreenState,
+    onAutoUpdateServicesChanged: (Boolean) -> Unit,
+    onGitHubReleaseAutoCheckChanged: (Boolean) -> Unit,
+    onCheckGitHubRelease: () -> Unit,
+) {
+    val uriHandler = LocalUriHandler.current
+    GlassPanel {
+        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Text(
+                text = "Updates",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            SettingInlineToggle(
+                title = "Auto-Update Services",
+                checked = state.autoUpdateServicesEnabled,
+                onCheckedChange = onAutoUpdateServicesChanged,
+            )
+            SettingInlineToggle(
+                title = "Auto-check GitHub Releases",
+                checked = state.githubReleaseAutoCheckEnabled,
+                onCheckedChange = onGitHubReleaseAutoCheckChanged,
+            )
+            Text(
+                text = state.githubReleaseStatus,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+            )
+            if (state.githubReleaseUpdateAvailable) {
+                Text(
+                    text = state.githubReleaseLatestVersion.ifBlank { "Update available" },
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = MaterialTheme.colorScheme.tertiary,
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Button(
+                    onClick = onCheckGitHubRelease,
+                    enabled = !state.isCheckingGitHubRelease,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(if (state.isCheckingGitHubRelease) "Checking..." else "Check")
+                }
+                OutlinedButton(
+                    onClick = { uriHandler.openUri(state.githubReleaseUrl) },
+                    enabled = state.githubReleaseUrl.isNotBlank(),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Open Release")
+                }
             }
         }
     }

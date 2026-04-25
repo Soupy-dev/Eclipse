@@ -91,7 +91,7 @@ fun EclipsePlayerSurface(
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    text = "Normal player foundation",
+                    text = "Ready to play",
                     style = MaterialTheme.typography.titleLarge,
                     color = MaterialTheme.colorScheme.onSurface,
                 )

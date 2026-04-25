@@ -1,8 +1,8 @@
 # Eclipse Android Port
 
-This directory is the Android foundation for the Luna/Eclipse port. It lives beside the existing Apple app and does not change the current iOS target.
+This directory contains the Android implementation for the Luna/Eclipse app. It lives beside the existing Apple app and does not change the current iOS target.
 
-The Android namespace now uses `dev.soupy.eclipse.android` rather than the earlier `cranci`-based placeholder naming.
+The Android namespace uses `dev.soupy.eclipse.android`.
 
 ## What is implemented here
 
@@ -25,13 +25,13 @@ The Android namespace now uses `dev.soupy.eclipse.android` rather than the earli
   - `feature:settings`
   - `feature:manga`
   - `feature:novel`
-- A Luna-inspired Jetpack Compose shell with navigation across Home, Search, Detail, Schedule, Library, Settings, and the remaining planned feature routes
+- A Luna-inspired Jetpack Compose shell with Luna tabs for Home, Schedule, Downloads, Library, and Search, plus a Kanzen shell for Home, Library, Search, History, and Settings
 - Parity-minded core models for TMDB, AniList, Stremio, playback context, and backup data
-- Network foundations using OkHttp plus Kotlin serialization
-- Room/DataStore/file-backed persistence foundations
+- Network access using OkHttp plus Kotlin serialization
+- Room/DataStore/file-backed persistence for settings, library, downloads, providers, backups, and reader data
 - A working Media3 normal-player boundary with subtitle track import, subtitle styling, language defaults, hold-to-speed, double-tap seek, 85s skip, embedded LibVLC playback for the VLC player option, targeted mpv/custom external-player Android handoff, and landscape-lock settings
 - Playback can now hydrate AniSkip/TheIntroDB skip segments for resolved sources and exposes manual or auto-skip behavior through the Android player surface
-- JS runtime and WebView helper interfaces for the sideload-first provider ecosystem, including a first-pass WebView-backed Kanzen module runtime with fetch bridging
+- JS runtime and WebView helper interfaces for the sideload-first provider ecosystem, including a WebView-backed Kanzen module runtime with fetch bridging
 - Live TMDB/AniList-backed browse, search, detail, and airing schedule flows, including iOS-parity TMDB movie rows for now playing, upcoming, and top-rated movies
 - Persisted Android-side library and continue-watching state, with direct-player progress now syncing typed movie/episode progress, last-source metadata, and resume entries automatically
 - Android-owned parity stores for iOS backup sections including progress, catalogs, tracker state, ratings, recommendation cache, Kanzen modules, logs, cache metrics, and recent searches

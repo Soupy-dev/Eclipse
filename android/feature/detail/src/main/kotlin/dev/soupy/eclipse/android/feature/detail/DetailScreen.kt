@@ -18,6 +18,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import dev.soupy.eclipse.android.core.design.ErrorPanel
@@ -65,6 +69,12 @@ data class DetailStreamRow(
     val playerSource: PlayerSource? = null,
 )
 
+data class DetailCollectionRow(
+    val id: String,
+    val name: String,
+    val isSelected: Boolean = false,
+)
+
 data class DetailScreenState(
     val hasSelection: Boolean = false,
     val isLoading: Boolean = false,
@@ -89,6 +99,9 @@ data class DetailScreenState(
     val skipStatusMessage: String? = null,
     val selectedEpisodeId: String? = null,
     val selectedEpisodeLabel: String? = null,
+    val seasonMenu: Boolean = false,
+    val horizontalEpisodeList: Boolean = false,
+    val collections: List<DetailCollectionRow> = emptyList(),
 )
 
 @Composable
@@ -96,6 +109,7 @@ fun DetailRoute(
     state: DetailScreenState,
     onRetry: () -> Unit,
     onSaveToLibrary: () -> Unit,
+    onAddToCollection: (String) -> Unit,
     onQueueResume: () -> Unit,
     onQueueDownload: () -> Unit,
     onSetRating: (Int) -> Unit,
@@ -114,6 +128,21 @@ fun DetailRoute(
     preferredPlayer: InAppPlayer = InAppPlayer.NORMAL,
     playbackSettings: PlaybackSettingsSnapshot = PlaybackSettingsSnapshot(),
 ) {
+    val episodeSeasons = state.episodes
+        .mapNotNull { it.seasonNumber ?: it.tmdbSeasonNumber }
+        .distinct()
+        .sorted()
+    var selectedSeason by remember(state.title, episodeSeasons) {
+        mutableStateOf(episodeSeasons.firstOrNull())
+    }
+    val visibleEpisodes = if (state.seasonMenu && selectedSeason != null) {
+        state.episodes.filter { episode ->
+            (episode.seasonNumber ?: episode.tmdbSeasonNumber) == selectedSeason
+        }
+    } else {
+        state.episodes
+    }
+
     if (!state.hasSelection && !state.isLoading) {
         ErrorPanel(
             title = "Open something first",
@@ -199,6 +228,28 @@ fun DetailRoute(
                                 modifier = Modifier.weight(1f),
                             ) {
                                 Text("Queue Resume")
+                            }
+                        }
+                        if (state.collections.isNotEmpty()) {
+                            Text(
+                                text = "Add to collection",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                items(state.collections, key = { it.id }) { collection ->
+                                    OutlinedButton(
+                                        onClick = { onAddToCollection(collection.id) },
+                                    ) {
+                                        Text(
+                                            if (collection.isSelected) {
+                                                "${collection.name} (added)"
+                                            } else {
+                                                collection.name
+                                            },
+                                        )
+                                    }
+                                }
                             }
                         }
                         Row(
@@ -452,74 +503,47 @@ fun DetailRoute(
                         subtitle = "TMDB episode stills, runtimes, descriptions, and progress actions.",
                     )
                 }
-                items(state.episodes, key = { it.id }) { episode ->
-                    GlassPanel {
-                        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                            if (episode.imageUrl != null) {
-                                PosterImage(
-                                    imageUrl = episode.imageUrl,
-                                    contentDescription = episode.title,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .width(220.dp),
-                                )
-                            }
-                            Text(
-                                text = episode.title,
-                                style = MaterialTheme.typography.titleLarge,
-                                color = MaterialTheme.colorScheme.onSurface,
-                            )
-                            episode.subtitle?.let {
-                                Text(
-                                    text = it,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.tertiary,
-                                )
-                            }
-                            episode.overview?.takeIf { it.isNotBlank() }?.let {
-                                Text(
-                                    text = it,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
-                                )
-                            }
-                            if (episode.seasonNumber != null && episode.episodeNumber != null) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                ) {
-                                    Button(
-                                        onClick = { onResolveEpisodeStreams(episode.id) },
-                                        modifier = Modifier.weight(1f),
-                                    ) {
-                                        Text("Resolve")
+                if (state.seasonMenu && episodeSeasons.size > 1) {
+                    item {
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            items(episodeSeasons, key = { it }) { season ->
+                                if (season == selectedSeason) {
+                                    Button(onClick = { selectedSeason = season }) {
+                                        Text("Season $season")
                                     }
-                                    OutlinedButton(
-                                        onClick = { onMarkEpisodeWatched(episode.id) },
-                                        modifier = Modifier.weight(1f),
-                                    ) {
-                                        Text("Watched")
-                                    }
-                                }
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                                ) {
-                                    OutlinedButton(
-                                        onClick = { onMarkEpisodeUnwatched(episode.id) },
-                                        modifier = Modifier.weight(1f),
-                                    ) {
-                                        Text("Unwatched")
-                                    }
-                                    OutlinedButton(
-                                        onClick = { onMarkPreviousEpisodesWatched(episode.id) },
-                                        modifier = Modifier.weight(1f),
-                                    ) {
-                                        Text("Mark Previous")
+                                } else {
+                                    OutlinedButton(onClick = { selectedSeason = season }) {
+                                        Text("Season $season")
                                     }
                                 }
                             }
                         }
+                    }
+                }
+                if (state.horizontalEpisodeList) {
+                    item {
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                            items(visibleEpisodes, key = { it.id }) { episode ->
+                                EpisodeCard(
+                                    episode = episode,
+                                    onResolveEpisodeStreams = onResolveEpisodeStreams,
+                                    onMarkEpisodeWatched = onMarkEpisodeWatched,
+                                    onMarkEpisodeUnwatched = onMarkEpisodeUnwatched,
+                                    onMarkPreviousEpisodesWatched = onMarkPreviousEpisodesWatched,
+                                    modifier = Modifier.width(320.dp),
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    items(visibleEpisodes, key = { it.id }) { episode ->
+                        EpisodeCard(
+                            episode = episode,
+                            onResolveEpisodeStreams = onResolveEpisodeStreams,
+                            onMarkEpisodeWatched = onMarkEpisodeWatched,
+                            onMarkEpisodeUnwatched = onMarkEpisodeUnwatched,
+                            onMarkPreviousEpisodesWatched = onMarkPreviousEpisodesWatched,
+                        )
                     }
                 }
             }
@@ -540,6 +564,85 @@ fun DetailRoute(
                             onClick = onSelectRecommendation,
                             modifier = Modifier.width(180.dp),
                         )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EpisodeCard(
+    episode: DetailEpisodeRow,
+    onResolveEpisodeStreams: (String) -> Unit,
+    onMarkEpisodeWatched: (String) -> Unit,
+    onMarkEpisodeUnwatched: (String) -> Unit,
+    onMarkPreviousEpisodesWatched: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    GlassPanel(modifier = modifier) {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            if (episode.imageUrl != null) {
+                PosterImage(
+                    imageUrl = episode.imageUrl,
+                    contentDescription = episode.title,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .width(220.dp),
+                )
+            }
+            Text(
+                text = episode.title,
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            episode.subtitle?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.tertiary,
+                )
+            }
+            episode.overview?.takeIf { it.isNotBlank() }?.let {
+                Text(
+                    text = it,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                )
+            }
+            if (episode.seasonNumber != null && episode.episodeNumber != null) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Button(
+                        onClick = { onResolveEpisodeStreams(episode.id) },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Resolve")
+                    }
+                    OutlinedButton(
+                        onClick = { onMarkEpisodeWatched(episode.id) },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Watched")
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = { onMarkEpisodeUnwatched(episode.id) },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Unwatched")
+                    }
+                    OutlinedButton(
+                        onClick = { onMarkPreviousEpisodesWatched(episode.id) },
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Mark Previous")
                     }
                 }
             }

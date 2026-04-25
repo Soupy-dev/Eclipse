@@ -94,6 +94,7 @@ fun ServicesRoute(
     onMoveAddonUp: (String) -> Unit,
     onMoveAddonDown: (String) -> Unit,
     onRefreshAddon: (String) -> Unit,
+    onRefreshAllAddons: () -> Unit,
     onRemoveService: (String, String) -> Unit,
     onRemoveAddon: (String, String) -> Unit,
 ) {
@@ -354,6 +355,16 @@ fun ServicesRoute(
                 title = "Stremio Addons (${state.addonCount})",
                 subtitle = "Imported addon manifests, sorted and ready for later stream resolution.",
             )
+        }
+
+        item {
+            OutlinedButton(
+                onClick = onRefreshAllAddons,
+                enabled = state.stremioAddons.isNotEmpty() && !state.isMutating,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Update All Addons")
+            }
         }
 
         if (state.stremioAddons.isEmpty()) {

@@ -1,12 +1,13 @@
 package dev.soupy.eclipse.android.feature.search
 
+import android.content.res.Configuration
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -18,6 +19,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import dev.soupy.eclipse.android.core.design.ErrorPanel
@@ -33,6 +35,8 @@ data class SearchScreenState(
     val errorMessage: String? = null,
     val recentQueries: List<String> = emptyList(),
     val sections: List<MediaCarouselSection> = emptyList(),
+    val mediaColumnsPortrait: Int = 3,
+    val mediaColumnsLandscape: Int = 5,
 )
 
 @Composable
@@ -43,6 +47,13 @@ fun SearchRoute(
     onRecentQuery: (String) -> Unit,
     onSelect: (DetailTarget) -> Unit,
 ) {
+    val configuration = LocalConfiguration.current
+    val columnCount = if (configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
+        state.mediaColumnsLandscape
+    } else {
+        state.mediaColumnsPortrait
+    }.coerceIn(2, 8)
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -138,13 +149,21 @@ fun SearchRoute(
                     title = section.title,
                     subtitle = section.subtitle,
                 )
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                    items(section.items, key = { it.id }) { item ->
-                        MediaPosterCard(
-                            item = item,
-                            onClick = { onSelect(it.detailTarget) },
-                            modifier = Modifier.width(208.dp),
-                        )
+                section.items.chunked(columnCount).forEach { rowItems ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        rowItems.forEach { item ->
+                            MediaPosterCard(
+                                item = item,
+                                onClick = { onSelect(item.detailTarget) },
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                        repeat(columnCount - rowItems.size) {
+                            Column(modifier = Modifier.weight(1f)) {}
+                        }
                     }
                 }
             }

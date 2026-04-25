@@ -5,6 +5,7 @@ import androidx.compose.material.icons.automirrored.rounded.MenuBook
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesomeMotion
 import androidx.compose.material.icons.rounded.DownloadForOffline
+import androidx.compose.material.icons.rounded.History
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.ImportContacts
 import androidx.compose.material.icons.rounded.Schedule
@@ -12,11 +13,14 @@ import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stream
 import androidx.compose.material.icons.rounded.VideoLibrary
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -26,6 +30,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -37,10 +42,12 @@ import dev.soupy.eclipse.android.core.model.DetailTarget
 import dev.soupy.eclipse.android.core.model.PlaybackSettingsSnapshot
 import dev.soupy.eclipse.android.data.rememberAppContainer
 import dev.soupy.eclipse.android.feature.detail.DetailRoute
+import dev.soupy.eclipse.android.feature.detail.DetailCollectionRow
 import dev.soupy.eclipse.android.feature.downloads.DownloadsRoute
 import dev.soupy.eclipse.android.feature.home.HomeRoute
 import dev.soupy.eclipse.android.feature.library.LibraryRoute
 import dev.soupy.eclipse.android.feature.manga.MangaRoute
+import dev.soupy.eclipse.android.feature.manga.MangaSurfaceMode
 import dev.soupy.eclipse.android.feature.manga.MangaReaderSettingsRow
 import dev.soupy.eclipse.android.feature.novel.NovelRoute
 import dev.soupy.eclipse.android.feature.novel.NovelReaderSettingsRow
@@ -66,17 +73,20 @@ private data class AppDestination(
     val icon: ImageVector,
 )
 
-private val destinations = listOf(
+private val lunaDestinations = listOf(
     AppDestination("home", "Home", Icons.Rounded.Home),
-    AppDestination("search", "Search", Icons.Rounded.Search),
-    AppDestination("detail", "Detail", Icons.Rounded.AutoAwesomeMotion),
     AppDestination("schedule", "Schedule", Icons.Rounded.Schedule),
-    AppDestination("services", "Services", Icons.Rounded.Stream),
-    AppDestination("library", "Library", Icons.Rounded.VideoLibrary),
     AppDestination("downloads", "Downloads", Icons.Rounded.DownloadForOffline),
+    AppDestination("library", "Library", Icons.Rounded.VideoLibrary),
+    AppDestination("search", "Search", Icons.Rounded.Search),
+)
+
+private val kanzenDestinations = listOf(
+    AppDestination("manga", "Home", Icons.Rounded.Home),
+    AppDestination("kanzen-library", "Library", Icons.AutoMirrored.Rounded.MenuBook),
+    AppDestination("novel", "Search", Icons.Rounded.Search),
+    AppDestination("kanzen-history", "History", Icons.Rounded.History),
     AppDestination("settings", "Settings", Icons.Rounded.Settings),
-    AppDestination("manga", "Manga", Icons.AutoMirrored.Rounded.MenuBook),
-    AppDestination("novel", "Novel", Icons.Rounded.ImportContacts),
 )
 
 @Composable
@@ -89,7 +99,10 @@ fun EclipseAndroidApp(
         AndroidHomeViewModel(appContainer.homeRepository)
     }
     val searchViewModel = rememberFeatureViewModel("search") {
-        AndroidSearchViewModel(appContainer.searchRepository)
+        AndroidSearchViewModel(
+            repository = appContainer.searchRepository,
+            settingsStore = appContainer.settingsStore,
+        )
     }
     val detailViewModel = rememberFeatureViewModel("detail") {
         AndroidDetailViewModel(
@@ -129,6 +142,8 @@ fun EclipseAndroidApp(
             libraryRepository = appContainer.libraryRepository,
             mangaRepository = appContainer.mangaRepository,
             aniListService = appContainer.aniListService,
+            releaseRepository = appContainer.releaseRepository,
+            servicesRepository = appContainer.servicesRepository,
         )
     }
     val mangaViewModel = rememberFeatureViewModel("manga") {
@@ -207,14 +222,11 @@ fun EclipseAndroidApp(
     }
 
     val visibleDestinations = remember(settingsState.showScheduleTab, settingsState.showKanzen) {
-        destinations.filter { destination ->
-            when (destination.route) {
-                "detail",
-                "services" -> false
-                "schedule" -> settingsState.showScheduleTab
-                "manga",
-                "novel" -> settingsState.showKanzen
-                else -> true
+        if (settingsState.showKanzen) {
+            kanzenDestinations
+        } else {
+            lunaDestinations.filter { destination ->
+                destination.route != "schedule" || settingsState.showScheduleTab
             }
         }
     }
@@ -224,12 +236,63 @@ fun EclipseAndroidApp(
         appearance = settingsState.selectedAppearance,
     ) {
         EclipseBackground(appearance = settingsState.selectedAppearance) {
+            val uriHandler = LocalUriHandler.current
             val navController = rememberNavController()
             val navBackStackEntry by navController.currentBackStackEntryAsState()
             val currentDestination = navBackStackEntry?.destination
+            val currentRoute = currentDestination?.route
+
+            LaunchedEffect(settingsState.showKanzen) {
+                navController.navigate(if (settingsState.showKanzen) "manga" else "home") {
+                    launchSingleTop = true
+                }
+            }
+
+            if (settingsState.githubReleaseShowAlertPending) {
+                AlertDialog(
+                    onDismissRequest = settingsViewModel::consumeGitHubReleasePrompt,
+                    title = { Text("Update Available") },
+                    text = {
+                        Text(
+                            settingsState.githubReleaseLatestVersion
+                                .takeIf { it.isNotBlank() }
+                                ?.let { "A new Eclipse release ($it) is available on GitHub." }
+                                ?: "A new Eclipse release is available on GitHub.",
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(
+                            onClick = {
+                                settingsViewModel.consumeGitHubReleasePrompt()
+                                settingsState.githubReleaseUrl.takeIf { it.isNotBlank() }?.let(uriHandler::openUri)
+                            },
+                        ) {
+                            Text("Open Release")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = settingsViewModel::consumeGitHubReleasePrompt) {
+                            Text("Later")
+                        }
+                    },
+                )
+            }
 
             Scaffold(
                 containerColor = androidx.compose.ui.graphics.Color.Transparent,
+                floatingActionButton = {
+                    if (!settingsState.showKanzen && currentRoute in setOf("home", "schedule")) {
+                        FloatingActionButton(
+                            onClick = { navController.navigate("settings") },
+                            containerColor = androidx.compose.ui.graphics.Color(0xEE1F2433),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Settings,
+                                contentDescription = "Settings",
+                            )
+                        }
+                    }
+                },
                 bottomBar = {
                     NavigationBar(
                         containerColor = androidx.compose.ui.graphics.Color(0xCC11111A),
@@ -289,11 +352,28 @@ fun EclipseAndroidApp(
                         )
                     }
                     composable("detail") {
+                        val currentLibraryDraft = detailViewModel.currentLibraryItemDraft()
                         DetailRoute(
-                            state = detailState,
+                            state = detailState.copy(
+                                seasonMenu = settingsState.seasonMenu,
+                                horizontalEpisodeList = settingsState.horizontalEpisodeList,
+                                collections = libraryState.collections.map { collection ->
+                                    DetailCollectionRow(
+                                        id = collection.id,
+                                        name = collection.name,
+                                        isSelected = currentLibraryDraft?.let { draft ->
+                                            collection.items.any { item -> item.detailTarget == draft.detailTarget }
+                                        } == true,
+                                    )
+                                },
+                            ),
                             onRetry = detailViewModel::retry,
                             onSaveToLibrary = {
                                 detailViewModel.currentLibraryItemDraft()?.let(libraryViewModel::toggleSaved)
+                            },
+                            onAddToCollection = { collectionId ->
+                                detailViewModel.currentLibraryItemDraft()
+                                    ?.let { draft -> libraryViewModel.saveToCollection(collectionId, draft) }
                             },
                             onQueueResume = {
                                 detailViewModel.currentContinueWatchingDraft()
@@ -354,6 +434,7 @@ fun EclipseAndroidApp(
                             onMoveAddonUp = servicesViewModel::moveAddonUp,
                             onMoveAddonDown = servicesViewModel::moveAddonDown,
                             onRefreshAddon = servicesViewModel::refreshAddon,
+                            onRefreshAllAddons = servicesViewModel::refreshAllAddons,
                             onRemoveService = servicesViewModel::removeService,
                             onRemoveAddon = servicesViewModel::removeAddon,
                         )
@@ -368,6 +449,9 @@ fun EclipseAndroidApp(
                             },
                             onRemoveSaved = libraryViewModel::removeSaved,
                             onRemoveContinueWatching = libraryViewModel::removeContinueWatching,
+                            onCreateCollection = libraryViewModel::createCollection,
+                            onDeleteCollection = libraryViewModel::deleteCollection,
+                            onRemoveFromCollection = libraryViewModel::removeFromCollection,
                         )
                     }
                     composable("downloads") {
@@ -384,6 +468,10 @@ fun EclipseAndroidApp(
                             onMarkComplete = downloadsViewModel::markComplete,
                             onRemoveLocalFile = downloadsViewModel::removeLocalFile,
                             onRemove = downloadsViewModel::remove,
+                            onPauseAll = downloadsViewModel::pauseAll,
+                            onResumeAll = downloadsViewModel::resumeAll,
+                            onRetryFailed = downloadsViewModel::retryFailed,
+                            onCancelActive = downloadsViewModel::cancelActive,
                             onClearCompleted = downloadsViewModel::clearCompleted,
                             onClearTarget = downloadsViewModel::clearTarget,
                             onClearAll = downloadsViewModel::clearAll,
@@ -403,7 +491,12 @@ fun EclipseAndroidApp(
                             onShowKanzenChanged = settingsViewModel::setShowKanzen,
                             onSeasonMenuChanged = settingsViewModel::setSeasonMenu,
                             onHorizontalEpisodeListChanged = settingsViewModel::setHorizontalEpisodeList,
+                            onMediaColumnsPortraitChanged = settingsViewModel::setMediaColumnsPortrait,
+                            onMediaColumnsLandscapeChanged = settingsViewModel::setMediaColumnsLandscape,
                             onOpenServices = { navController.navigate("services") },
+                            onAutoUpdateServicesChanged = settingsViewModel::setAutoUpdateServicesEnabled,
+                            onCheckGitHubRelease = settingsViewModel::checkGitHubReleaseNow,
+                            onGitHubReleaseAutoCheckChanged = settingsViewModel::setGitHubReleaseAutoCheckEnabled,
                             onAutoModeChanged = settingsViewModel::setAutoModeEnabled,
                             onShowNextEpisodeChanged = settingsViewModel::setShowNextEpisodeButton,
                             onNextEpisodeThresholdChanged = settingsViewModel::setNextEpisodeThreshold,
@@ -467,6 +560,69 @@ fun EclipseAndroidApp(
                     composable("manga") {
                         MangaRoute(
                             state = mangaState.copy(readerSettings = mangaReaderSettings),
+                            surfaceMode = MangaSurfaceMode.HOME,
+                            onRefresh = mangaViewModel::refresh,
+                            onQueryChange = mangaViewModel::updateQuery,
+                            onSearch = mangaViewModel::search,
+                            onSaveItem = mangaViewModel::saveItem,
+                            onRemoveItem = mangaViewModel::removeItem,
+                            onOpenDetail = mangaViewModel::openDetail,
+                            onCloseDetail = mangaViewModel::closeDetail,
+                            onReadNext = mangaViewModel::readNextChapter,
+                            onUnreadLast = mangaViewModel::unreadLastChapter,
+                            onReadPrevious = mangaViewModel::readPreviousChapter,
+                            onOpenReader = mangaViewModel::openReader,
+                            onCloseReader = mangaViewModel::closeReader,
+                            onReadChapter = mangaViewModel::readChapter,
+                            onToggleFavorite = mangaViewModel::toggleFavorite,
+                            onClearProgress = mangaViewModel::clearReadingProgress,
+                            onAddModule = mangaViewModel::addModule,
+                            onSetModuleActive = mangaViewModel::setModuleActive,
+                            onUpdateModule = mangaViewModel::updateModule,
+                            onUpdateAllModules = mangaViewModel::updateAllModules,
+                            onRemoveModule = mangaViewModel::removeModule,
+                            onClearReaderCache = mangaViewModel::clearReaderCache,
+                            onCreateCollection = mangaViewModel::createCollection,
+                            onDeleteCollection = mangaViewModel::deleteCollection,
+                            onAddItemToCollection = mangaViewModel::addItemToCollection,
+                            onRemoveItemFromCollection = mangaViewModel::removeItemFromCollection,
+                        )
+                    }
+                    composable("kanzen-library") {
+                        MangaRoute(
+                            state = mangaState.copy(readerSettings = mangaReaderSettings),
+                            surfaceMode = MangaSurfaceMode.LIBRARY,
+                            onRefresh = mangaViewModel::refresh,
+                            onQueryChange = mangaViewModel::updateQuery,
+                            onSearch = mangaViewModel::search,
+                            onSaveItem = mangaViewModel::saveItem,
+                            onRemoveItem = mangaViewModel::removeItem,
+                            onOpenDetail = mangaViewModel::openDetail,
+                            onCloseDetail = mangaViewModel::closeDetail,
+                            onReadNext = mangaViewModel::readNextChapter,
+                            onUnreadLast = mangaViewModel::unreadLastChapter,
+                            onReadPrevious = mangaViewModel::readPreviousChapter,
+                            onOpenReader = mangaViewModel::openReader,
+                            onCloseReader = mangaViewModel::closeReader,
+                            onReadChapter = mangaViewModel::readChapter,
+                            onToggleFavorite = mangaViewModel::toggleFavorite,
+                            onClearProgress = mangaViewModel::clearReadingProgress,
+                            onAddModule = mangaViewModel::addModule,
+                            onSetModuleActive = mangaViewModel::setModuleActive,
+                            onUpdateModule = mangaViewModel::updateModule,
+                            onUpdateAllModules = mangaViewModel::updateAllModules,
+                            onRemoveModule = mangaViewModel::removeModule,
+                            onClearReaderCache = mangaViewModel::clearReaderCache,
+                            onCreateCollection = mangaViewModel::createCollection,
+                            onDeleteCollection = mangaViewModel::deleteCollection,
+                            onAddItemToCollection = mangaViewModel::addItemToCollection,
+                            onRemoveItemFromCollection = mangaViewModel::removeItemFromCollection,
+                        )
+                    }
+                    composable("kanzen-history") {
+                        MangaRoute(
+                            state = mangaState.copy(readerSettings = mangaReaderSettings),
+                            surfaceMode = MangaSurfaceMode.HISTORY,
                             onRefresh = mangaViewModel::refresh,
                             onQueryChange = mangaViewModel::updateQuery,
                             onSearch = mangaViewModel::search,

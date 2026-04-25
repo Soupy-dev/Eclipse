@@ -21,6 +21,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -78,6 +82,12 @@ data class DownloadsScreenState(
     val playerSource: PlayerSource? = null,
 )
 
+private enum class DownloadsTab(val label: String) {
+    Active("Downloads"),
+    Completed("Library"),
+    Failed("Failed"),
+}
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun DownloadsRoute(
@@ -90,6 +100,10 @@ fun DownloadsRoute(
     onMarkComplete: (String) -> Unit,
     onRemoveLocalFile: (String) -> Unit,
     onRemove: (String) -> Unit,
+    onPauseAll: () -> Unit,
+    onResumeAll: () -> Unit,
+    onRetryFailed: () -> Unit,
+    onCancelActive: () -> Unit,
     onClearCompleted: () -> Unit,
     onClearTarget: (DetailTarget) -> Unit,
     onClearAll: () -> Unit,
@@ -98,6 +112,15 @@ fun DownloadsRoute(
     preferredPlayer: InAppPlayer = InAppPlayer.NORMAL,
     playbackSettings: PlaybackSettingsSnapshot = PlaybackSettingsSnapshot(),
 ) {
+    var selectedTab by rememberSaveable { mutableStateOf(DownloadsTab.Active) }
+    val visibleItems = state.items.filter { item ->
+        when (selectedTab) {
+            DownloadsTab.Active -> item.statusLabel in setOf("Queued", "Downloading", "Paused")
+            DownloadsTab.Completed -> item.statusLabel == "Completed"
+            DownloadsTab.Failed -> item.statusLabel == "Failed"
+        }
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -178,10 +201,35 @@ fun DownloadsRoute(
                         title = "Queue",
                         subtitle = "Direct streams can download into app storage; unsupported sources stay visible for retry.",
                     )
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        DownloadsTab.entries.forEach { tab ->
+                            if (selectedTab == tab) {
+                                Button(onClick = { selectedTab = tab }) {
+                                    Text(tab.label)
+                                }
+                            } else {
+                                OutlinedButton(onClick = { selectedTab = tab }) {
+                                    Text(tab.label)
+                                }
+                            }
+                        }
+                    }
                     FlowRow(
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                         verticalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
+                        OutlinedButton(onClick = onPauseAll) {
+                            Text("Pause All")
+                        }
+                        OutlinedButton(onClick = onResumeAll) {
+                            Text("Resume All")
+                        }
+                        OutlinedButton(onClick = onRetryFailed) {
+                            Text("Retry Failed")
+                        }
+                        OutlinedButton(onClick = onCancelActive) {
+                            Text("Cancel Active")
+                        }
                         OutlinedButton(onClick = onClearCompleted) {
                             Text("Clear Completed")
                         }
@@ -197,7 +245,18 @@ fun DownloadsRoute(
                     }
                 }
             }
-            items(state.items, key = { it.id }) { item ->
+            if (visibleItems.isEmpty()) {
+                item {
+                    GlassPanel {
+                        Text(
+                            text = "No ${selectedTab.label.lowercase()} entries.",
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                }
+            }
+            items(visibleItems, key = { it.id }) { item ->
                 DownloadCard(
                     item = item,
                     onOpen = { onSelect(item.detailTarget) },

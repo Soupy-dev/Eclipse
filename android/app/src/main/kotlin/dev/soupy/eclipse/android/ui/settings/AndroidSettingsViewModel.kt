@@ -9,6 +9,7 @@ import dev.soupy.eclipse.android.core.model.TrackerAccountSnapshot
 import dev.soupy.eclipse.android.core.model.TrackerStateSnapshot
 import dev.soupy.eclipse.android.core.network.AniListService
 import dev.soupy.eclipse.android.core.network.NetworkResult
+import dev.soupy.eclipse.android.core.storage.AppSettings
 import dev.soupy.eclipse.android.core.storage.SettingsStore
 import dev.soupy.eclipse.android.data.AniListLibraryImportDraft
 import dev.soupy.eclipse.android.data.AniListMangaLibraryImportDraft
@@ -19,6 +20,8 @@ import dev.soupy.eclipse.android.data.CatalogRepository
 import dev.soupy.eclipse.android.data.LibraryRepository
 import dev.soupy.eclipse.android.data.LoggerRepository
 import dev.soupy.eclipse.android.data.MangaRepository
+import dev.soupy.eclipse.android.data.ReleaseRepository
+import dev.soupy.eclipse.android.data.ServicesRepository
 import dev.soupy.eclipse.android.data.TrackerAccountDraft
 import dev.soupy.eclipse.android.data.TrackerRepository
 import dev.soupy.eclipse.android.data.TrackerSyncSummary
@@ -47,6 +50,8 @@ class AndroidSettingsViewModel(
     private val libraryRepository: LibraryRepository,
     private val mangaRepository: MangaRepository,
     private val aniListService: AniListService,
+    private val releaseRepository: ReleaseRepository,
+    private val servicesRepository: ServicesRepository,
 ) : ViewModel() {
     private val _state = MutableStateFlow(
         SettingsScreenState(
@@ -91,6 +96,8 @@ class AndroidSettingsViewModel(
                     showKanzen = settings.showKanzen,
                     seasonMenu = settings.seasonMenu,
                     horizontalEpisodeList = settings.horizontalEpisodeList,
+                    mediaColumnsPortrait = settings.mediaColumnsPortrait,
+                    mediaColumnsLandscape = settings.mediaColumnsLandscape,
                     readingMode = settings.readingMode,
                     readerFontSize = settings.readerFontSize,
                     readerFontFamily = settings.readerFontFamily,
@@ -102,6 +109,13 @@ class AndroidSettingsViewModel(
                     kanzenAutoUpdateModules = settings.kanzenAutoUpdateModules,
                     autoClearCacheEnabled = settings.autoClearCacheEnabled,
                     autoClearCacheThresholdMB = settings.autoClearCacheThresholdMB,
+                    autoUpdateServicesEnabled = settings.autoUpdateServicesEnabled,
+                    githubReleaseAutoCheckEnabled = settings.githubReleaseAutoCheckEnabled,
+                    githubReleaseUpdateAvailable = settings.githubReleaseUpdateAvailable,
+                    githubReleaseLatestVersion = settings.githubReleaseLatestVersion,
+                    githubReleaseUrl = settings.githubReleaseUrl,
+                    githubReleaseShowAlertPending = settings.githubReleaseShowAlertPending,
+                    githubReleaseStatus = settings.toGitHubReleaseStatus(),
                 )
             }
         }
@@ -111,6 +125,8 @@ class AndroidSettingsViewModel(
         refreshLogs()
         refreshTrackers()
         runStartupCacheMaintenance()
+        checkGitHubReleaseIfNeeded()
+        autoUpdateServicesIfNeeded()
     }
 
     fun setAccentColor(value: String) {
@@ -170,6 +186,75 @@ class AndroidSettingsViewModel(
             seasonMenu = current.seasonMenu,
             horizontalEpisodeList = enabled,
         )
+    }
+
+    fun setMediaColumnsPortrait(value: Int) {
+        val current = _state.value
+        viewModelScope.launch {
+            settingsStore.updateMediaColumns(
+                portrait = value,
+                landscape = current.mediaColumnsLandscape,
+            )
+        }
+    }
+
+    fun setMediaColumnsLandscape(value: Int) {
+        val current = _state.value
+        viewModelScope.launch {
+            settingsStore.updateMediaColumns(
+                portrait = current.mediaColumnsPortrait,
+                landscape = value,
+            )
+        }
+    }
+
+    fun setAutoUpdateServicesEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsStore.setAutoUpdateServicesEnabled(enabled)
+        }
+    }
+
+    fun setGitHubReleaseAutoCheckEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsStore.setGitHubReleaseAutoCheckEnabled(enabled)
+        }
+    }
+
+    fun checkGitHubReleaseNow() {
+        viewModelScope.launch {
+            _state.value = _state.value.copy(
+                isCheckingGitHubRelease = true,
+                githubReleaseStatus = "Checking GitHub releases...",
+            )
+            releaseRepository.checkForUpdates(forcePrompt = true)
+                .onSuccess { summary ->
+                    _state.value = _state.value.copy(
+                        isCheckingGitHubRelease = false,
+                        githubReleaseStatus = if (summary.updateAvailable) {
+                            "Update available: ${summary.latestVersion}"
+                        } else {
+                            "App is up to date: ${summary.latestVersion}"
+                        },
+                    )
+                    loggerRepository.log("Updates", _state.value.githubReleaseStatus)
+                    refreshLogs()
+                }
+                .onFailure { error ->
+                    val message = error.message ?: "GitHub release check failed."
+                    _state.value = _state.value.copy(
+                        isCheckingGitHubRelease = false,
+                        githubReleaseStatus = message,
+                    )
+                    loggerRepository.log("Updates", message, level = "error")
+                    refreshLogs()
+                }
+        }
+    }
+
+    fun consumeGitHubReleasePrompt() {
+        viewModelScope.launch {
+            releaseRepository.consumePendingPrompt()
+        }
     }
 
     fun setAutoModeEnabled(enabled: Boolean) {
@@ -1168,6 +1253,62 @@ class AndroidSettingsViewModel(
             backupStatusMessage = status.supportingText,
         )
     }
+
+    private fun checkGitHubReleaseIfNeeded() {
+        viewModelScope.launch {
+            releaseRepository.checkForUpdatesIfNeeded()
+                .onSuccess { summary ->
+                    if (summary != null) {
+                        val message = if (summary.updateAvailable) {
+                            "Update available: ${summary.latestVersion}"
+                        } else {
+                            "App is up to date: ${summary.latestVersion}"
+                        }
+                        _state.value = _state.value.copy(githubReleaseStatus = message)
+                        loggerRepository.log("Updates", message)
+                        refreshLogs()
+                    }
+                }
+                .onFailure { error ->
+                    loggerRepository.log("Updates", error.message ?: "GitHub release check failed.", level = "error")
+                    refreshLogs()
+                }
+        }
+    }
+
+    private fun autoUpdateServicesIfNeeded() {
+        viewModelScope.launch {
+            val settings = settingsStore.settings.first()
+            if (!settings.autoUpdateServicesEnabled) return@launch
+            val now = System.currentTimeMillis()
+            val elapsed = now - settings.lastServiceAutoUpdateTimestamp
+            if (elapsed in 0 until ServiceAutoUpdateIntervalMillis) return@launch
+            servicesRepository.refreshAllAddons()
+                .onSuccess { summary ->
+                    settingsStore.markServiceAutoUpdateChecked(now)
+                    if (summary.refreshedAddons > 0 || summary.failedAddons > 0) {
+                        loggerRepository.log("Services", summary.statusMessage)
+                        refreshLogs()
+                    }
+                }
+                .onFailure { error ->
+                    settingsStore.markServiceAutoUpdateChecked(now)
+                    loggerRepository.log("Services", error.message ?: "Service auto-update failed.", level = "error")
+                    refreshLogs()
+                }
+        }
+    }
+}
+
+private const val ServiceAutoUpdateIntervalMillis = 60L * 60L * 1_000L
+
+private fun AppSettings.toGitHubReleaseStatus(): String = when {
+    githubReleaseUpdateAvailable && githubReleaseLatestVersion.isNotBlank() ->
+        "Update available: $githubReleaseLatestVersion"
+    githubReleaseUpdateAvailable -> "Update available on GitHub."
+    githubReleaseLatestVersion.isNotBlank() -> "App is up to date: $githubReleaseLatestVersion"
+    githubReleaseLastCheckTimestamp > 0L -> "Last GitHub release check did not find a release."
+    else -> "Release checks have not run yet."
 }
 
 private fun List<dev.soupy.eclipse.android.core.model.BackupCatalog>.toUiRows(): List<CatalogSettingsRow> =

@@ -41,6 +41,10 @@ class EclipseAppContainer(
     val stremioService: StremioService = StremioService()
     val kanzenModuleRuntime: WebViewKanzenModuleRuntime = WebViewKanzenModuleRuntime(context)
     val settingsStore: SettingsStore = SettingsStore(context)
+    val releaseRepository: ReleaseRepository = ReleaseRepository(
+        settingsStore = settingsStore,
+        currentVersion = BuildConfig.VERSION_NAME,
+    )
     private val libraryStore: LibraryStore = LibraryStore(
         context = context,
         json = EclipseJson,
@@ -168,6 +172,7 @@ class EclipseAppContainer(
         serviceDao = database.serviceDao(),
         stremioAddonDao = database.stremioAddonDao(),
         progressRepository = progressRepository,
+        libraryRepository = libraryRepository,
         catalogRepository = catalogRepository,
         trackerRepository = trackerRepository,
         ratingsRepository = ratingsRepository,

@@ -129,6 +129,13 @@ class AndroidServicesViewModel(
         repository.refreshStremioAddon(transportUrl).getOrThrow()
     }
 
+    fun refreshAllAddons() = mutate(
+        successMessage = "Updated addon manifests.",
+    ) {
+        val summary = repository.refreshAllAddons().getOrThrow()
+        noticeMessage.value = summary.statusMessage
+    }
+
     fun removeService(
         id: String,
         autoModeId: String,
@@ -177,7 +184,11 @@ class AndroidServicesViewModel(
             noticeMessage.value = null
 
             runCatching { block() }
-                .onSuccess { noticeMessage.value = successMessage }
+                .onSuccess {
+                    if (noticeMessage.value == null) {
+                        noticeMessage.value = successMessage
+                    }
+                }
                 .onFailure { errorMessage.value = it.message ?: "Unknown services error." }
 
             isMutating.value = false
