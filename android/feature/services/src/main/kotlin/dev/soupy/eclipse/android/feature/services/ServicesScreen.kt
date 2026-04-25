@@ -23,6 +23,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import dev.soupy.eclipse.android.core.design.ErrorPanel
@@ -49,7 +50,12 @@ data class StremioAddonRow(
     val selectedInAutoMode: Boolean = false,
     val configured: Boolean = true,
     val configurable: Boolean = false,
+    val configurationRequired: Boolean = false,
+    val configurationUrl: String? = null,
     val types: List<String> = emptyList(),
+    val resources: List<String> = emptyList(),
+    val idPrefixes: List<String> = emptyList(),
+    val catalogCount: Int = 0,
 )
 
 data class ServicesScreenState(
@@ -78,6 +84,7 @@ fun ServicesRoute(
     onMoveServiceDown: (String) -> Unit,
     onMoveAddonUp: (String) -> Unit,
     onMoveAddonDown: (String) -> Unit,
+    onRefreshAddon: (String) -> Unit,
     onRemoveService: (String, String) -> Unit,
     onRemoveAddon: (String, String) -> Unit,
 ) {
@@ -85,6 +92,7 @@ fun ServicesRoute(
     var serviceScriptUrl by rememberSaveable { mutableStateOf("") }
     var serviceManifestUrl by rememberSaveable { mutableStateOf("") }
     var addonTransportUrl by rememberSaveable { mutableStateOf("") }
+    val uriHandler = LocalUriHandler.current
 
     LazyColumn(
         modifier = Modifier
@@ -323,7 +331,12 @@ fun ServicesRoute(
                     subtitle = listOfNotNull(
                         addon.subtitle,
                         addon.types.takeIf { it.isNotEmpty() }?.joinToString(prefix = "Types: "),
+                        addon.resources.takeIf { it.isNotEmpty() }?.joinToString(prefix = "Resources: "),
+                        addon.idPrefixes.takeIf { it.isNotEmpty() }?.take(5)?.joinToString(prefix = "IDs: "),
+                        addon.catalogCount.takeIf { it > 0 }?.let { "$it catalog${if (it == 1) "" else "s"}" },
+                        addon.configurationUrl?.let { "Configure: $it" },
                         when {
+                            addon.configurationRequired -> "Configuration required before streams are usable"
                             addon.configurable -> "Configurable addon"
                             addon.configured -> "Configured import"
                             else -> null
@@ -340,6 +353,10 @@ fun ServicesRoute(
                     },
                     onMoveUp = { onMoveAddonUp(addon.transportUrl) },
                     onMoveDown = { onMoveAddonDown(addon.transportUrl) },
+                    onConfigure = addon.configurationUrl?.let { configurationUrl ->
+                        { uriHandler.openUri(configurationUrl) }
+                    },
+                    onRefresh = { onRefreshAddon(addon.transportUrl) },
                     onRemove = { onRemoveAddon(addon.transportUrl, addon.autoModeId) },
                 )
             }
@@ -358,6 +375,8 @@ private fun ServiceCard(
     onAutoModeChanged: (Boolean) -> Unit,
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
+    onConfigure: (() -> Unit)? = null,
+    onRefresh: (() -> Unit)? = null,
     onRemove: () -> Unit,
 ) {
     GlassPanel {
@@ -408,6 +427,16 @@ private fun ServiceCard(
                 }
                 OutlinedButton(onClick = onMoveDown) {
                     Text("Down")
+                }
+                onRefresh?.let { refresh ->
+                    OutlinedButton(onClick = refresh) {
+                        Text("Refresh")
+                    }
+                }
+                onConfigure?.let { configure ->
+                    Button(onClick = configure) {
+                        Text("Configure")
+                    }
                 }
                 OutlinedButton(onClick = onRemove) {
                     Text("Remove")

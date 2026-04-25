@@ -119,6 +119,8 @@ data class KanzenReaderContentSnapshot(
     val chapterParams: String,
     val imageUrls: List<String> = emptyList(),
     val text: String? = null,
+    val isCached: Boolean = false,
+    val cacheMessage: String? = null,
 )
 
 data class KanzenCatalogDetailSnapshot(

@@ -1,5 +1,6 @@
 package dev.soupy.eclipse.android.feature.settings
 
+import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts.CreateDocument
@@ -27,6 +28,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import dev.soupy.eclipse.android.core.design.GlassPanel
 import dev.soupy.eclipse.android.core.design.HeroBackdrop
@@ -1043,6 +1045,7 @@ private fun LoggerCard(
     onRefresh: () -> Unit,
     onClear: () -> Unit,
 ) {
+    val context = LocalContext.current
     GlassPanel {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text(
@@ -1081,9 +1084,38 @@ private fun LoggerCard(
                     Text("Clear Logs")
                 }
             }
+            OutlinedButton(
+                onClick = {
+                    val shareIntent = Intent(Intent.ACTION_SEND)
+                        .setType("text/plain")
+                        .putExtra(Intent.EXTRA_SUBJECT, "Eclipse Android logs")
+                        .putExtra(Intent.EXTRA_TEXT, rows.toShareText(status))
+                    context.startActivity(Intent.createChooser(shareIntent, "Share Logs"))
+                },
+                enabled = rows.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Share Logs")
+            }
         }
     }
 }
+
+private fun List<LogSettingsRow>.toShareText(status: String): String =
+    buildString {
+        appendLine("Eclipse Android Logs")
+        appendLine(status)
+        appendLine()
+        this@toShareText.forEach { row ->
+            append(row.timestamp)
+            append(" | ")
+            append(row.tag)
+            append(" | ")
+            append(row.level)
+            append(" | ")
+            appendLine(row.message)
+        }
+    }
 
 @Composable
 private fun CatalogSettingsCard(

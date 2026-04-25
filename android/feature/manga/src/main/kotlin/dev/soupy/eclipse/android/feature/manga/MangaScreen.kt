@@ -1,5 +1,9 @@
 package dev.soupy.eclipse.android.feature.manga
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.ActivityInfo
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -13,6 +17,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -23,6 +29,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -30,6 +37,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.input.ImeAction
@@ -59,6 +68,7 @@ data class MangaScreenState(
     val isDetailLoading: Boolean = false,
     val detailError: String? = null,
     val readerSettings: MangaReaderSettingsRow = MangaReaderSettingsRow(),
+    val readerCacheSummary: String = "Reader cache empty.",
     val reader: MangaReaderPanelRow? = null,
 )
 
@@ -177,6 +187,7 @@ fun MangaRoute(
     onUpdateModule: (String) -> Unit,
     onUpdateAllModules: () -> Unit,
     onRemoveModule: (String) -> Unit,
+    onClearReaderCache: () -> Unit,
     onCreateCollection: (String) -> Unit,
     onDeleteCollection: (String) -> Unit,
     onAddItemToCollection: (String, Int) -> Unit,
@@ -351,6 +362,29 @@ fun MangaRoute(
             ) {
                 StatPanel("Collections", state.collections.size.toString(), Modifier.weight(1f))
                 StatPanel("Modules", state.modules.size.toString(), Modifier.weight(1f))
+            }
+        }
+
+        item {
+            GlassPanel {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "Reader Cache",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = state.readerCacheSummary,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.tertiary,
+                    )
+                    OutlinedButton(
+                        onClick = onClearReaderCache,
+                        enabled = state.readerCacheSummary != "Reader cache empty.",
+                    ) {
+                        Text("Clear Reader Cache")
+                    }
+                }
             }
         }
 
@@ -1019,6 +1053,25 @@ private fun MangaReaderPanel(
         mutableStateOf(0)
     }
     val safePageIndex = pageIndex.coerceIn(0, (reader.pageImageUrls.size - 1).coerceAtLeast(0))
+    var controlsVisible by rememberSaveable(reader.aniListId) { mutableStateOf(true) }
+    var zoom by rememberSaveable(reader.aniListId, reader.currentChapter) { mutableStateOf(1f) }
+    val zoomState = rememberTransformableState { zoomChange, _, _ ->
+        zoom = (zoom * zoomChange).coerceIn(1f, 3f)
+    }
+    var orientationLocked by rememberSaveable(reader.aniListId) { mutableStateOf(false) }
+    val activity = LocalContext.current.findActivity()
+
+    DisposableEffect(activity, orientationLocked) {
+        val previousOrientation = activity?.requestedOrientation
+        if (orientationLocked) {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        }
+        onDispose {
+            if (orientationLocked && previousOrientation != null) {
+                activity.requestedOrientation = previousOrientation
+            }
+        }
+    }
 
     GlassPanel {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -1075,63 +1128,95 @@ private fun MangaReaderPanel(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                reader.chapters.forEach { chapter ->
-                    if (chapter.isCurrent) {
-                        Button(onClick = { onReadChapter(chapter.number) }) {
-                            Text(chapter.buttonLabel())
-                        }
-                    } else {
-                        OutlinedButton(onClick = { onReadChapter(chapter.number) }) {
-                            Text(if (chapter.isRead) "Read ${chapter.number}" else chapter.buttonLabel())
+                OutlinedButton(onClick = { controlsVisible = !controlsVisible }) {
+                    Text(if (controlsVisible) "Hide Controls" else "Show Controls")
+                }
+                OutlinedButton(onClick = { orientationLocked = !orientationLocked }) {
+                    Text(if (orientationLocked) "Unlock Orientation" else "Lock Landscape")
+                }
+                OutlinedButton(
+                    onClick = { zoom = (zoom - 0.25f).coerceAtLeast(1f) },
+                    enabled = zoom > 1f,
+                ) {
+                    Text("Zoom Out")
+                }
+                Button(
+                    onClick = { zoom = (zoom + 0.25f).coerceAtMost(3f) },
+                    enabled = zoom < 3f,
+                ) {
+                    Text("Zoom In")
+                }
+                OutlinedButton(
+                    onClick = { zoom = 1f },
+                    enabled = zoom > 1f,
+                ) {
+                    Text("${(zoom * 100).toInt()}%")
+                }
+            }
+
+            if (controlsVisible) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    reader.chapters.forEach { chapter ->
+                        if (chapter.isCurrent) {
+                            Button(onClick = { onReadChapter(chapter.number) }) {
+                                Text(chapter.buttonLabel())
+                            }
+                        } else {
+                            OutlinedButton(onClick = { onReadChapter(chapter.number) }) {
+                                Text(if (chapter.isRead) "Read ${chapter.number}" else chapter.buttonLabel())
+                            }
                         }
                     }
                 }
-            }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                OutlinedTextField(
-                    value = chapterInput,
-                    onValueChange = { value -> chapterInput = value.filter(Char::isDigit).take(5) },
-                    label = { Text("Chapter") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                )
-                Button(
-                    onClick = { targetChapter?.let(onReadChapter) },
-                    enabled = targetChapter != null,
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Text("Mark Read")
+                    OutlinedTextField(
+                        value = chapterInput,
+                        onValueChange = { value -> chapterInput = value.filter(Char::isDigit).take(5) },
+                        label = { Text("Chapter") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    )
+                    Button(
+                        onClick = { targetChapter?.let(onReadChapter) },
+                        enabled = targetChapter != null,
+                    ) {
+                        Text("Mark Read")
+                    }
                 }
-            }
 
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Button(onClick = { onReadChapter(reader.currentChapter) }) {
-                    Text("Mark Current Read")
-                }
-                OutlinedButton(onClick = onReadNext) {
-                    Text("Next Chapter")
-                }
-                OutlinedButton(
-                    onClick = onReadPrevious,
-                    enabled = reader.currentChapter > 1,
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Text("Previous")
-                }
-                OutlinedButton(
-                    onClick = onUnreadLast,
-                    enabled = reader.readChapterCount > 0,
-                ) {
-                    Text("Unread Last")
-                }
-                OutlinedButton(onClick = onClose) {
-                    Text("Close")
+                    Button(onClick = { onReadChapter(reader.currentChapter) }) {
+                        Text("Mark Current Read")
+                    }
+                    OutlinedButton(onClick = onReadNext) {
+                        Text("Next Chapter")
+                    }
+                    OutlinedButton(
+                        onClick = onReadPrevious,
+                        enabled = reader.currentChapter > 1,
+                    ) {
+                        Text("Previous")
+                    }
+                    OutlinedButton(
+                        onClick = onUnreadLast,
+                        enabled = reader.readChapterCount > 0,
+                    ) {
+                        Text("Unread Last")
+                    }
+                    OutlinedButton(onClick = onClose) {
+                        Text("Close")
+                    }
                 }
             }
 
@@ -1160,7 +1245,9 @@ private fun MangaReaderPanel(
                             contentDescription = "${reader.title} page ${safePageIndex + 1}",
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .heightIn(min = 360.dp),
+                                .heightIn(min = 360.dp)
+                                .graphicsLayer(scaleX = zoom, scaleY = zoom)
+                                .transformable(zoomState),
                         )
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -1196,7 +1283,10 @@ private fun MangaReaderPanel(
                             ContentImage(
                                 imageUrl = imageUrl,
                                 contentDescription = "${reader.title} page ${index + 1}",
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .graphicsLayer(scaleX = zoom, scaleY = zoom)
+                                    .transformable(zoomState),
                             )
                         }
                     }
@@ -1226,6 +1316,12 @@ private fun MangaReaderSettingsRow.horizontalPadding() =
 
 private fun MangaReaderSettingsRow.imageSpacing() =
     if (readingMode == 1) 4.dp else 12.dp
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
 
 @Composable
 private fun MangaCollectionCard(

@@ -39,7 +39,12 @@ data class StremioAddonRecord(
     val sortIndex: Int = 0,
     val configured: Boolean = true,
     val configurable: Boolean = false,
+    val configurationRequired: Boolean = false,
+    val configurationUrl: String? = null,
     val types: List<String> = emptyList(),
+    val resources: List<String> = emptyList(),
+    val idPrefixes: List<String> = emptyList(),
+    val catalogCount: Int = 0,
 )
 
 data class ServicesSnapshot(
@@ -80,7 +85,14 @@ class ServicesRepository(
                     sortIndex = entity.sortIndex,
                     configured = entity.configured,
                     configurable = manifest?.behaviorHints?.configurable == true,
+                    configurationRequired = manifest?.behaviorHints?.configurationRequired == true,
+                    configurationUrl = manifest?.takeIf { it.behaviorHints.configurable }?.let { entity.transportUrl.configurationUrl() },
                     types = manifest?.types.orEmpty(),
+                    resources = manifest?.resources.orEmpty().mapNotNull { resource -> resource.name.takeIf(String::isNotBlank) },
+                    idPrefixes = manifest?.idPrefixes.orEmpty().ifEmpty {
+                        manifest?.resources.orEmpty().flatMap { resource -> resource.idPrefixes }
+                    },
+                    catalogCount = manifest?.catalogs.orEmpty().size,
                 )
             },
         )
@@ -125,18 +137,37 @@ class ServicesRepository(
         val current = stremioAddonDao.observeAll().first()
         val existing = current.firstOrNull { it.transportUrl.equals(transportUrl, ignoreCase = true) }
         val now = System.currentTimeMillis()
+        val configured = !manifest.behaviorHints.configurationRequired
 
         stremioAddonDao.upsert(
             StremioAddonEntity(
                 transportUrl = transportUrl,
                 manifestId = manifest.id.ifBlank { transportUrl },
                 name = manifest.name.ifBlank { transportUrl },
-                enabled = existing?.enabled ?: true,
+                enabled = existing?.enabled ?: configured,
                 sortIndex = existing?.sortIndex ?: current.maxOfOrNull(StremioAddonEntity::sortIndex)?.plus(1) ?: 0,
-                configured = true,
+                configured = configured,
                 manifestJson = EclipseJson.encodeToString(manifest),
                 createdAt = existing?.createdAt ?: now,
                 updatedAt = now,
+            ),
+        )
+    }
+
+    suspend fun refreshStremioAddon(transportUrl: String): Result<Unit> = runCatching {
+        val current = stremioAddonDao.observeAll().first()
+            .firstOrNull { it.transportUrl == transportUrl }
+            ?: error("Stremio addon was not found.")
+        val manifest = stremioService.fetchManifest(current.transportUrl).orThrow()
+        val configured = !manifest.behaviorHints.configurationRequired
+        stremioAddonDao.upsert(
+            current.copy(
+                manifestId = manifest.id.ifBlank { current.transportUrl },
+                name = manifest.name.ifBlank { current.name },
+                configured = configured,
+                enabled = if (configured) current.enabled else false,
+                manifestJson = EclipseJson.encodeToString(manifest),
+                updatedAt = System.currentTimeMillis(),
             ),
         )
     }
@@ -245,3 +276,11 @@ private fun String.slugified(): String = trim()
 private fun String.normalizedTransportUrl(): String = trim()
     .removeSuffix("/manifest.json")
     .removeSuffix("/")
+
+private fun String.configurationUrl(): String =
+    trim()
+        .removeSuffix("/manifest.json")
+        .removeSuffix("/")
+        .let { base ->
+            if (base.endsWith("/configure", ignoreCase = true)) base else "$base/configure"
+        }

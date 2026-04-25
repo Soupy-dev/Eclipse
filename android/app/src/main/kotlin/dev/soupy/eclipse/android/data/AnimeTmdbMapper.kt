@@ -63,6 +63,7 @@ class AnimeTmdbMapper(
                             sourceMedia = media,
                             searchMedia = seed.media,
                             sourceRelationType = seed.relationType,
+                            sourceRelationDepth = seed.depth,
                             preferredMediaType = preferredMediaType,
                         )
                     }
@@ -122,34 +123,47 @@ class AnimeTmdbMapper(
 private data class AnimeSearchSeed(
     val media: AniListMedia,
     val relationType: String?,
+    val depth: Int,
 )
 
 private fun AniListMedia.matchSearchSeeds(): List<AnimeSearchSeed> {
-    val seeds = mutableListOf(AnimeSearchSeed(this, null))
+    val seeds = mutableListOf(AnimeSearchSeed(this, null, depth = 0))
+    val visitedIds = mutableSetOf(id)
     val relationPriority = mapOf(
         "PARENT" to 0,
         "SOURCE" to 1,
         "PREQUEL" to 2,
         "SEQUEL" to 3,
         "SEASON" to 4,
+        "ALTERNATIVE" to 5,
+        "SIDE_STORY" to 6,
+        "SPIN_OFF" to 7,
+        "OTHER" to 8,
     )
     val allowedRelationTypes = relationPriority.keys
 
-    relationEdges
-        .asSequence()
-        .filter { edge -> edge.relationType in allowedRelationTypes }
-        .sortedBy { edge -> relationPriority[edge.relationType] ?: Int.MAX_VALUE }
-        .mapNotNull { edge ->
-            val node = edge.node ?: return@mapNotNull null
-            if (!node.type.equals("ANIME", ignoreCase = true) && node.type != null) {
-                return@mapNotNull null
+    fun collect(media: AniListMedia, depth: Int) {
+        if (depth >= 2 || seeds.size >= 14) return
+        media.relationEdges
+            .asSequence()
+            .filter { edge -> edge.relationType in allowedRelationTypes }
+            .sortedBy { edge -> relationPriority[edge.relationType] ?: Int.MAX_VALUE }
+            .forEach { edge ->
+                val node = edge.node ?: return@forEach
+                if (!node.type.equals("ANIME", ignoreCase = true) && node.type != null) {
+                    return@forEach
+                }
+                if (!visitedIds.add(node.id)) return@forEach
+                seeds.add(AnimeSearchSeed(node, edge.relationType, depth = depth + 1))
+                if (edge.relationType in setOf("PARENT", "SOURCE", "PREQUEL", "SEQUEL", "SEASON")) {
+                    collect(node, depth + 1)
+                }
             }
-            AnimeSearchSeed(node, edge.relationType)
-        }
-        .take(8)
-        .forEach(seeds::add)
+    }
 
-    return seeds.distinctBy { "${it.relationType}:${it.media.id}" }
+    collect(this, depth = 0)
+
+    return seeds.distinctBy { it.media.id }
 }
 
 private fun TMDBSearchResult.toAnimeTmdbMatch(
@@ -157,6 +171,7 @@ private fun TMDBSearchResult.toAnimeTmdbMatch(
     sourceMedia: AniListMedia,
     searchMedia: AniListMedia,
     sourceRelationType: String?,
+    sourceRelationDepth: Int,
     preferredMediaType: String,
 ): AnimeTmdbMatch? {
     val resultMediaType = when {
@@ -185,7 +200,8 @@ private fun TMDBSearchResult.toAnimeTmdbMatch(
         sourceMedia = sourceMedia,
         relatedMedia = searchMedia,
     )
-    val confidence = (titleScore + yearScore + formatScore + animationHint + relationScore).coerceIn(0.0, 1.0)
+    val depthPenalty = sourceRelationDepth.coerceAtLeast(0) * 0.015
+    val confidence = (titleScore + yearScore + formatScore + animationHint + relationScore - depthPenalty).coerceIn(0.0, 1.0)
 
     return AnimeTmdbMatch(
         target = if (resultMediaType == "movie") {
@@ -205,8 +221,9 @@ private fun TMDBSearchResult.toAnimeTmdbMatch(
 }
 
 internal fun AniListMedia.bestTmdbSeasonMatch(show: TMDBTVShowDetail): AnimeTmdbSeasonMatch? {
+    val isSpecial = isLikelySpecialEntry()
     val playableSeasons = show.seasons
-        .filter { season -> season.seasonNumber > 0 && season.episodeCount > 0 }
+        .filter { season -> (season.seasonNumber > 0 || isSpecial) && season.episodeCount > 0 }
         .sortedBy(TMDBSeason::seasonNumber)
     if (playableSeasons.isEmpty()) return null
 
@@ -224,7 +241,12 @@ internal fun AniListMedia.bestTmdbSeasonMatch(show: TMDBTVShowDetail): AnimeTmdb
         }
         val singleSeasonScore = if (playableSeasons.size == 1) 0.08 else 0.0
         val firstSeasonScore = if (hintedSeason == null && season.seasonNumber == 1 && expectedYear == null) 0.03 else 0.0
-        val total = episodeScore + yearScore + hintScore + singleSeasonScore + firstSeasonScore
+        val specialSeasonScore = when {
+            isSpecial && season.seasonNumber == 0 -> 0.18
+            !isSpecial && season.seasonNumber == 0 -> -0.12
+            else -> 0.0
+        }
+        val total = episodeScore + yearScore + hintScore + singleSeasonScore + firstSeasonScore + specialSeasonScore
         season to total
     }
 
@@ -260,6 +282,7 @@ internal fun AniListMedia.titleCandidates(): List<String> {
             listOf(
                 title,
                 title.withoutSeasonSuffix(),
+                title.withoutSpecialSuffix(),
                 title.substringBefore(':').trim(),
             )
         }
@@ -428,10 +451,16 @@ private fun String.withoutSeasonSuffix(): String = replace(
     "",
 ).trim()
 
+private fun String.withoutSpecialSuffix(): String = replace(
+    Regex("\\s+(ova|ona|specials?|side story|spin[- ]off)$", RegexOption.IGNORE_CASE),
+    "",
+).trim()
+
 private fun String.extractSeasonNumberHint(): Int? {
     val patterns = listOf(
         Regex("\\bseason\\s+([0-9]+|[ivx]+)\\b", RegexOption.IGNORE_CASE),
         Regex("\\b([0-9]+|[ivx]+)(st|nd|rd|th)?\\s+season\\b", RegexOption.IGNORE_CASE),
+        Regex("\\bs([0-9]+)\\b", RegexOption.IGNORE_CASE),
     )
     return patterns
         .asSequence()

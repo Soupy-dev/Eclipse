@@ -13,6 +13,7 @@ import dev.soupy.eclipse.android.data.MangaLibraryItemDraft
 import dev.soupy.eclipse.android.data.MangaOverviewSnapshot
 import dev.soupy.eclipse.android.data.MangaReadingProgressDraft
 import dev.soupy.eclipse.android.data.MangaRepository
+import dev.soupy.eclipse.android.data.ReaderCacheRepository
 import dev.soupy.eclipse.android.feature.novel.NovelCatalogItemRow
 import dev.soupy.eclipse.android.feature.novel.NovelCatalogSectionRow
 import dev.soupy.eclipse.android.feature.novel.NovelModuleRow
@@ -28,6 +29,7 @@ import kotlinx.coroutines.launch
 
 class AndroidNovelViewModel(
     private val repository: MangaRepository,
+    private val readerCacheRepository: ReaderCacheRepository? = null,
 ) : ViewModel() {
     private val _state = MutableStateFlow(NovelScreenState(isLoading = true))
     val state: StateFlow<NovelScreenState> = _state.asStateFlow()
@@ -40,12 +42,41 @@ class AndroidNovelViewModel(
         viewModelScope.launch {
             _state.value = _state.value.copy(isLoading = true, errorMessage = null)
             repository.loadNovelOverview()
-                .onSuccess(::applyOverview)
+                .onSuccess { snapshot ->
+                    applyOverview(snapshot)
+                    updateReaderCacheStats()
+                }
                 .onFailure { error ->
                     _state.value = _state.value.copy(
                         isLoading = false,
                         errorMessage = error.message ?: "Novel reading data could not be loaded.",
                     )
+                }
+        }
+    }
+
+    fun clearReaderCache() {
+        val cache = readerCacheRepository ?: return
+        viewModelScope.launch {
+            cache.clear()
+                .onSuccess { previousStats ->
+                    val notice = if (previousStats.fileCount == 0) {
+                        "Reader cache was already empty."
+                    } else {
+                        "Cleared reader cache (${previousStats.displayText.removeSuffix(".")})."
+                    }
+                    _state.update {
+                        it.copy(
+                            noticeMessage = notice,
+                            errorMessage = null,
+                            readerCacheSummary = "Reader cache empty.",
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(errorMessage = error.message ?: "Could not clear reader cache.")
+                    }
                 }
         }
     }
@@ -254,7 +285,12 @@ class AndroidNovelViewModel(
                         )
                     }
                 }
-                repository.loadKanzenReaderContent(
+                val cached = readerCacheRepository?.load(
+                    moduleId = item.moduleId,
+                    chapterParams = selectedChapter.params,
+                    isNovel = true,
+                )?.getOrNull()
+                cached ?: repository.loadKanzenReaderContent(
                     moduleId = item.moduleId,
                     chapterParams = selectedChapter.params,
                     isNovel = true,
@@ -300,6 +336,19 @@ class AndroidNovelViewModel(
                 _state.update {
                     it.copy(errorMessage = error.message ?: "Could not update novel reader progress.")
                 }
+            }
+            content?.let { loaded ->
+                if (!loaded.isCached && !selectedChapter?.params.isNullOrBlank()) {
+                    cacheKanzenChapter(
+                        moduleId = item.moduleId,
+                        chapterParams = selectedChapter.params,
+                        content = loaded,
+                    )
+                }
+                preloadNextKanzenChapter(
+                    reader = item,
+                    currentChapterNumber = chapterNumber,
+                )
             }
         }
     }
@@ -455,6 +504,7 @@ class AndroidNovelViewModel(
                 ).toSet().size,
             readChapterCount = snapshot.novelReadChapterCount,
             importedFromBackup = snapshot.importedFromBackup,
+            readerCacheSummary = previous.readerCacheSummary,
             searchResults = previous.searchResults.map { row ->
                 row.copy(isSaved = row.aniListId in savedNovelIds)
             },
@@ -572,6 +622,66 @@ class AndroidNovelViewModel(
         }
     }
 
+    private fun cacheKanzenChapter(
+        moduleId: String?,
+        chapterParams: String?,
+        content: KanzenReaderContentSnapshot,
+    ) {
+        val cache = readerCacheRepository ?: return
+        viewModelScope.launch {
+            cache.save(
+                moduleId = moduleId,
+                chapterParams = chapterParams,
+                isNovel = true,
+                content = content,
+            ).onSuccess {
+                updateReaderCacheStats()
+            }
+        }
+    }
+
+    private fun preloadNextKanzenChapter(
+        reader: NovelReaderPanelRow,
+        currentChapterNumber: Int,
+    ) {
+        val cache = readerCacheRepository ?: return
+        if (!reader.isKanzenBacked) return
+        val nextChapter = reader.chapters
+            .filter { chapter -> chapter.number > currentChapterNumber }
+            .minByOrNull { chapter -> chapter.number }
+            ?: return
+        val nextParams = nextChapter.params?.takeIf(String::isNotBlank) ?: return
+        viewModelScope.launch {
+            val cached = cache.load(
+                moduleId = reader.moduleId,
+                chapterParams = nextParams,
+                isNovel = true,
+            ).getOrNull()
+            if (cached != null) return@launch
+            repository.loadKanzenReaderContent(
+                moduleId = reader.moduleId,
+                chapterParams = nextParams,
+                isNovel = true,
+            ).onSuccess { content ->
+                cache.save(
+                    moduleId = reader.moduleId,
+                    chapterParams = nextParams,
+                    isNovel = true,
+                    content = content,
+                ).onSuccess {
+                    updateReaderCacheStats()
+                }
+            }
+        }
+    }
+
+    private suspend fun updateReaderCacheStats() {
+        readerCacheRepository?.stats()
+            ?.onSuccess { stats ->
+                _state.update { it.copy(readerCacheSummary = stats.displayText) }
+            }
+    }
+
     private fun loadKanzenReaderChapters(reader: NovelReaderPanelRow) {
         viewModelScope.launch {
             repository.loadKanzenReaderChapters(
@@ -618,11 +728,17 @@ class AndroidNovelViewModel(
                 }
             }
             val moduleId = _state.value.reader?.moduleId
-            repository.loadKanzenReaderContent(
+            val cached = readerCacheRepository?.load(
                 moduleId = moduleId,
                 chapterParams = chapterParams,
                 isNovel = true,
-            ).onSuccess { content ->
+            )?.getOrNull()
+            val result = cached?.let(Result.Companion::success) ?: repository.loadKanzenReaderContent(
+                moduleId = moduleId,
+                chapterParams = chapterParams,
+                isNovel = true,
+            )
+            result.onSuccess { content ->
                 _state.update {
                     it.updateReader(aniListId) { reader ->
                         reader.withKanzenContent(
@@ -631,6 +747,13 @@ class AndroidNovelViewModel(
                             markRead = false,
                         )
                     }
+                }
+                if (!content.isCached) {
+                    cacheKanzenChapter(
+                        moduleId = moduleId,
+                        chapterParams = chapterParams,
+                        content = content,
+                    )
                 }
             }.onFailure { error ->
                 _state.update {
@@ -888,7 +1011,8 @@ private fun NovelReaderPanelRow.withKanzenContent(
 ): NovelReaderPanelRow = copy(
     currentChapter = chapterNumber,
     isLoadingContent = false,
-    contentMessage = content.text?.takeIf { it.isNotBlank() }?.let { "Chapter text loaded." },
+    contentMessage = content.cacheMessage
+        ?: content.text?.takeIf { it.isNotBlank() }?.let { "Chapter text loaded." },
     contentError = if (content.text.isNullOrBlank()) "No text was returned for this chapter." else null,
     textContent = content.text,
     chapters = chapters.map { chapter ->

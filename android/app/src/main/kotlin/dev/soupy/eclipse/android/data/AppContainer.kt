@@ -176,6 +176,7 @@ class EclipseAppContainer(
     val downloadsRepository: DownloadsRepository = DownloadsRepository(
         downloadsStore = downloadsStore,
     )
+    val readerCacheRepository: ReaderCacheRepository = ReaderCacheRepository(context)
     val mangaRepository: MangaRepository = MangaRepository(
         mangaStore = mangaStore,
         backupFileStore = backupFileStore,

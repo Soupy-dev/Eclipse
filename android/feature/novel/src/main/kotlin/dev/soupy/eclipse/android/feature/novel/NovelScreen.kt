@@ -1,5 +1,9 @@
 package dev.soupy.eclipse.android.feature.novel
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.pm.ActivityInfo
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -9,14 +13,17 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -24,11 +31,14 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -38,6 +48,7 @@ import dev.soupy.eclipse.android.core.design.GlassPanel
 import dev.soupy.eclipse.android.core.design.HeroBackdrop
 import dev.soupy.eclipse.android.core.design.PosterImage
 import dev.soupy.eclipse.android.core.design.SectionHeading
+import kotlinx.coroutines.delay
 
 data class NovelScreenState(
     val isLoading: Boolean = false,
@@ -57,6 +68,7 @@ data class NovelScreenState(
     val isDetailLoading: Boolean = false,
     val detailError: String? = null,
     val readerSettings: NovelReaderSettingsRow = NovelReaderSettingsRow(),
+    val readerCacheSummary: String = "Reader cache empty.",
     val reader: NovelReaderPanelRow? = null,
 )
 
@@ -167,6 +179,7 @@ fun NovelRoute(
     onUpdateModule: (String) -> Unit,
     onUpdateAllModules: () -> Unit,
     onRemoveModule: (String) -> Unit,
+    onClearReaderCache: () -> Unit,
 ) {
     var moduleUrl by rememberSaveable { mutableStateOf("") }
 
@@ -328,6 +341,29 @@ fun NovelRoute(
             ) {
                 StatPanel("Novels", state.novelCount.toString(), Modifier.weight(1f))
                 StatPanel("Modules", state.modules.size.toString(), Modifier.weight(1f))
+            }
+        }
+
+        item {
+            GlassPanel {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(
+                        text = "Reader Cache",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = state.readerCacheSummary,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.tertiary,
+                    )
+                    OutlinedButton(
+                        onClick = onClearReaderCache,
+                        enabled = state.readerCacheSummary != "Reader cache empty.",
+                    ) {
+                        Text("Clear Reader Cache")
+                    }
+                }
             }
         }
 
@@ -898,6 +934,36 @@ private fun NovelReaderPanel(
             readerSettings.readerLineSpacing.coerceIn(1.0, 2.4)).sp,
         textAlign = readerSettings.textAlign(),
     )
+    var controlsVisible by rememberSaveable(reader.aniListId) { mutableStateOf(true) }
+    var autoScrollEnabled by rememberSaveable(reader.aniListId, reader.currentChapter) { mutableStateOf(false) }
+    var autoScrollSpeed by rememberSaveable(reader.aniListId) { mutableStateOf(2) }
+    var orientationLocked by rememberSaveable(reader.aniListId) { mutableStateOf(false) }
+    val textScrollState = rememberScrollState()
+    val activity = LocalContext.current.findActivity()
+
+    DisposableEffect(activity, orientationLocked) {
+        val previousOrientation = activity?.requestedOrientation
+        if (orientationLocked) {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        }
+        onDispose {
+            if (orientationLocked && previousOrientation != null) {
+                activity.requestedOrientation = previousOrientation
+            }
+        }
+    }
+
+    LaunchedEffect(autoScrollEnabled, autoScrollSpeed, reader.textContent) {
+        while (autoScrollEnabled) {
+            delay(90L)
+            if (textScrollState.maxValue <= 0) continue
+            val next = (textScrollState.value + autoScrollSpeed).coerceAtMost(textScrollState.maxValue)
+            textScrollState.scrollTo(next)
+            if (next >= textScrollState.maxValue) {
+                autoScrollEnabled = false
+            }
+        }
+    }
 
     GlassPanel {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -954,63 +1020,95 @@ private fun NovelReaderPanel(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                reader.chapters.forEach { chapter ->
-                    if (chapter.isCurrent) {
-                        Button(onClick = { onReadChapter(chapter.number) }) {
-                            Text(chapter.buttonLabel())
-                        }
-                    } else {
-                        OutlinedButton(onClick = { onReadChapter(chapter.number) }) {
-                            Text(if (chapter.isRead) "Read ${chapter.number}" else chapter.buttonLabel())
+                OutlinedButton(onClick = { controlsVisible = !controlsVisible }) {
+                    Text(if (controlsVisible) "Hide Controls" else "Show Controls")
+                }
+                OutlinedButton(onClick = { orientationLocked = !orientationLocked }) {
+                    Text(if (orientationLocked) "Unlock Orientation" else "Lock Landscape")
+                }
+                Button(
+                    onClick = { autoScrollEnabled = !autoScrollEnabled },
+                    enabled = !reader.textContent.isNullOrBlank(),
+                ) {
+                    Text(if (autoScrollEnabled) "Stop Scroll" else "Auto Scroll")
+                }
+                OutlinedButton(
+                    onClick = { autoScrollSpeed = (autoScrollSpeed - 1).coerceAtLeast(1) },
+                    enabled = autoScrollSpeed > 1,
+                ) {
+                    Text("Slower")
+                }
+                OutlinedButton(
+                    onClick = { autoScrollSpeed = (autoScrollSpeed + 1).coerceAtMost(8) },
+                    enabled = autoScrollSpeed < 8,
+                ) {
+                    Text("Faster ${autoScrollSpeed}x")
+                }
+            }
+
+            if (controlsVisible) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    reader.chapters.forEach { chapter ->
+                        if (chapter.isCurrent) {
+                            Button(onClick = { onReadChapter(chapter.number) }) {
+                                Text(chapter.buttonLabel())
+                            }
+                        } else {
+                            OutlinedButton(onClick = { onReadChapter(chapter.number) }) {
+                                Text(if (chapter.isRead) "Read ${chapter.number}" else chapter.buttonLabel())
+                            }
                         }
                     }
                 }
-            }
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                OutlinedTextField(
-                    value = chapterInput,
-                    onValueChange = { value -> chapterInput = value.filter(Char::isDigit).take(5) },
-                    label = { Text("Chapter") },
-                    singleLine = true,
-                    modifier = Modifier.weight(1f),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                )
-                Button(
-                    onClick = { targetChapter?.let(onReadChapter) },
-                    enabled = targetChapter != null,
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Text("Mark Read")
+                    OutlinedTextField(
+                        value = chapterInput,
+                        onValueChange = { value -> chapterInput = value.filter(Char::isDigit).take(5) },
+                        label = { Text("Chapter") },
+                        singleLine = true,
+                        modifier = Modifier.weight(1f),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    )
+                    Button(
+                        onClick = { targetChapter?.let(onReadChapter) },
+                        enabled = targetChapter != null,
+                    ) {
+                        Text("Mark Read")
+                    }
                 }
-            }
 
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Button(onClick = { onReadChapter(reader.currentChapter) }) {
-                    Text("Mark Current Read")
-                }
-                OutlinedButton(onClick = onReadNext) {
-                    Text("Next Chapter")
-                }
-                OutlinedButton(
-                    onClick = onReadPrevious,
-                    enabled = reader.currentChapter > 1,
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Text("Previous")
-                }
-                OutlinedButton(
-                    onClick = onUnreadLast,
-                    enabled = reader.readChapterCount > 0,
-                ) {
-                    Text("Unread Last")
-                }
-                OutlinedButton(onClick = onClose) {
-                    Text("Close")
+                    Button(onClick = { onReadChapter(reader.currentChapter) }) {
+                        Text("Mark Current Read")
+                    }
+                    OutlinedButton(onClick = onReadNext) {
+                        Text("Next Chapter")
+                    }
+                    OutlinedButton(
+                        onClick = onReadPrevious,
+                        enabled = reader.currentChapter > 1,
+                    ) {
+                        Text("Previous")
+                    }
+                    OutlinedButton(
+                        onClick = onUnreadLast,
+                        enabled = reader.readChapterCount > 0,
+                    ) {
+                        Text("Unread Last")
+                    }
+                    OutlinedButton(onClick = onClose) {
+                        Text("Close")
+                    }
                 }
             }
 
@@ -1030,7 +1128,10 @@ private fun NovelReaderPanel(
             }
             reader.textContent?.takeIf { it.isNotBlank() }?.let { content ->
                 Column(
-                    modifier = Modifier.padding(horizontal = readerSettings.horizontalPadding()),
+                    modifier = Modifier
+                        .heightIn(max = 680.dp)
+                        .verticalScroll(textScrollState)
+                        .padding(horizontal = readerSettings.horizontalPadding()),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     content.readerParagraphs().forEach { paragraph ->
@@ -1067,6 +1168,12 @@ private fun NovelReaderSettingsRow.textAlign(): TextAlign =
         "justify" -> TextAlign.Justify
         else -> TextAlign.Start
     }
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
 
 private fun String.readerParagraphs(): List<String> =
     replace(Regex("""(?i)<br\s*/?>"""), "\n")

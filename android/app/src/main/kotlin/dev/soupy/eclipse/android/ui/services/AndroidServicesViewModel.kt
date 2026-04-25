@@ -114,6 +114,12 @@ class AndroidServicesViewModel(
 
     fun moveAddonDown(transportUrl: String) = moveAddon(transportUrl, ServicesRepository.MoveDirection.DOWN)
 
+    fun refreshAddon(transportUrl: String) = mutate(
+        successMessage = "Refreshed Stremio addon manifest.",
+    ) {
+        repository.refreshStremioAddon(transportUrl).getOrThrow()
+    }
+
     fun removeService(
         id: String,
         autoModeId: String,
@@ -214,5 +220,10 @@ private fun StremioAddonRecord.toUiRow(selectedSourceIds: Set<String>): StremioA
     selectedInAutoMode = autoModeId in selectedSourceIds,
     configured = configured,
     configurable = configurable,
+    configurationRequired = configurationRequired,
+    configurationUrl = configurationUrl,
     types = types,
+    resources = resources,
+    idPrefixes = idPrefixes,
+    catalogCount = catalogCount,
 )

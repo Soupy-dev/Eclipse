@@ -128,10 +128,16 @@ fun EclipseAndroidApp() {
         )
     }
     val mangaViewModel = rememberFeatureViewModel("manga") {
-        AndroidMangaViewModel(appContainer.mangaRepository)
+        AndroidMangaViewModel(
+            repository = appContainer.mangaRepository,
+            readerCacheRepository = appContainer.readerCacheRepository,
+        )
     }
     val novelViewModel = rememberFeatureViewModel("novel") {
-        AndroidNovelViewModel(appContainer.mangaRepository)
+        AndroidNovelViewModel(
+            repository = appContainer.mangaRepository,
+            readerCacheRepository = appContainer.readerCacheRepository,
+        )
     }
 
     val homeState by homeViewModel.state.collectAsState()
@@ -313,6 +319,7 @@ fun EclipseAndroidApp() {
                             onMoveServiceDown = servicesViewModel::moveServiceDown,
                             onMoveAddonUp = servicesViewModel::moveAddonUp,
                             onMoveAddonDown = servicesViewModel::moveAddonDown,
+                            onRefreshAddon = servicesViewModel::refreshAddon,
                             onRemoveService = servicesViewModel::removeService,
                             onRemoveAddon = servicesViewModel::removeAddon,
                         )
@@ -431,6 +438,7 @@ fun EclipseAndroidApp() {
                             onUpdateModule = mangaViewModel::updateModule,
                             onUpdateAllModules = mangaViewModel::updateAllModules,
                             onRemoveModule = mangaViewModel::removeModule,
+                            onClearReaderCache = mangaViewModel::clearReaderCache,
                             onCreateCollection = mangaViewModel::createCollection,
                             onDeleteCollection = mangaViewModel::deleteCollection,
                             onAddItemToCollection = mangaViewModel::addItemToCollection,
@@ -460,6 +468,7 @@ fun EclipseAndroidApp() {
                             onUpdateModule = novelViewModel::updateModule,
                             onUpdateAllModules = novelViewModel::updateAllModules,
                             onRemoveModule = novelViewModel::removeModule,
+                            onClearReaderCache = novelViewModel::clearReaderCache,
                         )
                     }
                 }
