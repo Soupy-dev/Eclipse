@@ -1549,8 +1549,8 @@ final class TrackerManager: NSObject, ObservableObject {
                 struct MediaData: Codable { let id: Int }
             }
 
-            let response = try JSONDecoder().decode(Response.self, from: data)
-            return response.data.Media?.id
+            let decoded = try JSONDecoder().decode(Response.self, from: data)
+            return decoded.data.Media?.id
         } catch {
             Logger.shared.log("Failed to resolve AniList manga ID: \(error.localizedDescription)", type: "Error")
             return nil

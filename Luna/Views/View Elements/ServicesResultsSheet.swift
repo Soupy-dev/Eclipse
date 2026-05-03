@@ -2547,7 +2547,7 @@ struct ModulesSearchResultsSheet: View {
                     case .movie(let id, let title, _, let isAnime):
                         return "movie id=\(id) title=\(title) isAnime=\(isAnime)"
                     case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, _, let isAnime):
-                        return "episode showId=\(showId) s=\(seasonNumber) e=\(episodeNumber) title=\(showTitle) isAnime=\(isAnime)"
+                        return "episode showId=\(showId) s=\(seasonNumber) e=\(episodeNumber) title=\(String(describing: showTitle)) isAnime=\(isAnime)"
                     }
                 }()
                 Logger.shared.log("ServicesResultsSheet: presenting MPV isAnimeHint=\(isAnimeHint) isAnimeContent=\(isAnimeContent) mediaInfo=\(mediaInfoLabel)", type: "Stream")

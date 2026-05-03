@@ -682,7 +682,7 @@ struct NovelHTMLView: UIViewRepresentable {
             progressTimer = nil
             if let wv = webView {
                 wv.configuration.userContentController.removeAllUserScripts()
-                try? { wv.configuration.userContentController.removeScriptMessageHandler(forName: "novelScrollHandler") }()
+                wv.configuration.userContentController.removeScriptMessageHandler(forName: "novelScrollHandler")
             }
         }
 

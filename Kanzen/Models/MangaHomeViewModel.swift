@@ -31,8 +31,9 @@ final class MangaHomeViewModel: ObservableObject {
                     allCatalogs.merge(lnCatalogs) { _, new in new }
                 }
 
+                let catalogSnapshot = allCatalogs
                 await MainActor.run {
-                    self.catalogResults = allCatalogs
+                    self.catalogResults = catalogSnapshot
                     self.isLoading = false
                     self.hasLoadedContent = true
                 }
