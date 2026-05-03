@@ -76,6 +76,14 @@ extension View {
     func lunaGradientBackground() -> some View {
         self.modifier(LunaAutoGradientModifier())
     }
+
+    /// Apply the app-wide gradient used by Reader Mode/Kanzen shell screens.
+    func kanzenGradientBackground(scrollOffset: CGFloat = 0) -> some View {
+        self.background(
+            GlobalGradientBackground(scrollOffset: scrollOffset)
+                .ignoresSafeArea()
+        )
+    }
     
     /// Hide list/scroll-view chrome (iOS 16+, unavailable on tvOS)
     @ViewBuilder

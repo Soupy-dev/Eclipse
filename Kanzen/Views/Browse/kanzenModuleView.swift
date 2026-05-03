@@ -32,7 +32,7 @@ struct KanzenModuleView: View {
     var body: some View {
         
         ZStack{
-            LunaTheme.shared.backgroundBase
+            GlobalGradientBackground()
                 .ignoresSafeArea()
                  Form
                  {
@@ -142,7 +142,7 @@ struct KanzenModuleView: View {
                  
                  // Remove default list styling
                  .lunaHideScrollBackground()
-                 .background(LunaTheme.shared.backgroundBase)
+                 .background(Color.clear)
              .navigationTitle("Modules")
              .navigationBarTitleDisplayMode(.inline)
              .frame(maxWidth: .infinity,alignment: .center)

@@ -92,7 +92,7 @@ private data class GitHubRelease(
     @SerialName("html_url") val htmlUrl: String,
 )
 
-private const val GitHubLatestReleaseUrl = "https://api.github.com/repos/Soupy-dev/Luna/releases/latest"
+private const val GitHubLatestReleaseUrl = "https://api.github.com/repos/Soupy-dev/Eclipse/releases/latest"
 private const val AutoCheckIntervalMillis = 6L * 60L * 60L * 1_000L
 
 private fun normalizedVersion(raw: String): String =

@@ -136,6 +136,26 @@ final class MangaReadingProgressManager: ObservableObject {
         }
     }
 
+    /// Import chapters without syncing back to trackers. Existing local reads are only advanced.
+    func bulkMarkChaptersReadForImport(mangaId: Int, throughChapter: Int, mangaTitle: String? = nil, coverURL: String? = nil, totalChapters: Int? = nil) {
+        guard throughChapter >= 1 else { return }
+
+        var progress = progressMap[mangaId] ?? MangaProgress()
+        for chapter in 1...throughChapter {
+            progress.readChapterNumbers.insert(String(chapter))
+        }
+
+        let highest = progress.readChapterNumbers.compactMap { extractChapterNumber(from: $0) }.max() ?? throughChapter
+        progress.lastReadChapter = String(highest)
+        progress.lastReadDate = Date()
+        if let mangaTitle { progress.title = mangaTitle }
+        if let coverURL { progress.coverURL = coverURL }
+        if let totalChapters { progress.totalChapters = totalChapters }
+
+        progressMap[mangaId] = progress
+        save()
+    }
+
     /// Mark all chapters as unread.
     func markAllUnread(mangaId: Int) {
         guard var progress = progressMap[mangaId] else { return }

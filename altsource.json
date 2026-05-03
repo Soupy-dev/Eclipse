@@ -22,12 +22,12 @@
       "category": "entertainment",
       "versions": [
         {
-          "version": "1.0.1",
-          "buildVersion": "2",
-          "marketingVersion": "1.0.1",
-          "date": "2026-04-21",
-          "localizedDescription": "Release build with stabilized media details, Stremio backup support, and safe anime specials search.",
-          "downloadURL": "https://github.com/Soupy-dev/Eclipse/releases/download/v1.0.1/Eclipse.ipa",
+          "version": "1.0.2",
+          "buildVersion": "3",
+          "marketingVersion": "1.0.2",
+          "date": "2026-05-03",
+          "localizedDescription": "Release build with MAL tracker sync tools, safer HLS download handling, reader-mode gradient fixes, and update metadata refresh.",
+          "downloadURL": "https://github.com/Soupy-dev/Eclipse/releases/download/v1.0.2/Eclipse.ipa",
           "size": 63963136,
           "minOSVersion": "15.0"
         }

@@ -298,7 +298,7 @@ struct DownloadsView: View {
                             .foregroundColor(.secondary)
                     }
                 } else if item.status == .queued {
-                    Text("Queued")
+                    Text(item.error ?? "Queued")
                         .font(.caption)
                         .foregroundColor(.orange)
                 } else if item.status == .paused {

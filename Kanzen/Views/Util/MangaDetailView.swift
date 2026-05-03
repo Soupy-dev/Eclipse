@@ -29,6 +29,7 @@ struct MangaDetailView: View {
     // UI state
     @State private var expandedDescription: Bool = false
     @State private var showAddToCollection: Bool = false
+    @State private var scrollOffset: CGFloat = 0
 
     // Source / chapter state
     @State private var selectedSource: SourceMatch?
@@ -80,10 +81,20 @@ struct MangaDetailView: View {
             }
             .padding(.horizontal, 16)
             .padding(.top, 8)
+            .background(
+                GeometryReader { geo in
+                    Color.clear.preference(
+                        key: ScrollOffsetPreferenceKey.self,
+                        value: -geo.frame(in: .named("mangaDetailScroll")).origin.y
+                    )
+                }
+            )
         }
+        .coordinateSpace(name: "mangaDetailScroll")
+        .onPreferenceChange(ScrollOffsetPreferenceKey.self) { scrollOffset = $0 }
         .navigationTitle(manga.displayTitle)
         .navigationBarTitleDisplayMode(.inline)
-        .background(LunaTheme.shared.backgroundBase.ignoresSafeArea())
+        .kanzenGradientBackground(scrollOffset: scrollOffset)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {

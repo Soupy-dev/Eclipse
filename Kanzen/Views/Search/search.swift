@@ -116,6 +116,7 @@ struct KanzenSearchView: View {
             }
             
         }.frame(maxHeight: .infinity, alignment: .top)
+            .kanzenGradientBackground()
             .onAppear{
                 do {
                     if let module = module {

@@ -2,6 +2,17 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>me.cranci.solar.oauth</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>luna</string>
+			</array>
+		</dict>
+	</array>
 	<key>LSApplicationQueriesSchemes</key>
 	<array>
 		<string>tracy</string>
@@ -17,6 +28,12 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>MALClientID</key>
+	<string>$(MAL_CLIENT_ID)</string>
+	<key>MALClientSecret</key>
+	<string>$(MAL_CLIENT_SECRET)</string>
+	<key>MALRedirectUri</key>
+	<string>$(MAL_REDIRECT_URI)</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

@@ -138,7 +138,7 @@ struct KanzenGlobalSearchView: View {
             }
             .navigationTitle("Search")
             .navigationBarTitleDisplayMode(.large)
-            .background(LunaTheme.shared.backgroundBase.ignoresSafeArea())
+            .kanzenGradientBackground()
             .background(
                 NavigationLink(destination: Group {
                     if let manga = randomManga {

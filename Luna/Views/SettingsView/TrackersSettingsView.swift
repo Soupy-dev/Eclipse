@@ -10,8 +10,8 @@ import Kingfisher
 
 struct TrackersSettingsView: View {
     @StateObject private var trackerManager = TrackerManager.shared
-    @State private var selectedTracker: TrackerService?
     @State private var showImportConfirmation = false
+    @State private var showSyncTools = false
 
     @State private var scrollOffset: CGFloat = 0
 
@@ -32,6 +32,34 @@ struct TrackersSettingsView: View {
                         .background(Color.gray.opacity(0.2))
                         .cornerRadius(12)
 
+                    Button(action: { showSyncTools = true }) {
+                        HStack(spacing: 12) {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .foregroundColor(.blue)
+                                .frame(width: 32, height: 32)
+
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("Sync Tools")
+                                    .font(.headline)
+                                    .foregroundColor(.white)
+
+                                Text("Preview imports, pushes, and AniList/MAL ports")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+
+                            Spacer()
+
+                            Image(systemName: "chevron.right")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding()
+                        .background(Color.gray.opacity(0.1))
+                        .cornerRadius(12)
+                    }
+                    .buttonStyle(.plain)
+
                     // AniList Section
                     trackerRow(
                         service: .anilist,
@@ -45,6 +73,15 @@ struct TrackersSettingsView: View {
                     if trackerManager.trackerState.getAccount(for: .anilist) != nil {
                         aniListImportSection
                     }
+
+                    // MyAnimeList Section
+                    trackerRow(
+                        service: .myAnimeList,
+                        isConnected: trackerManager.trackerState.getAccount(for: .myAnimeList) != nil,
+                        username: trackerManager.trackerState.getAccount(for: .myAnimeList)?.username,
+                        onConnect: { trackerManager.startMALAuth() },
+                        onDisconnect: { trackerManager.disconnectTracker(.myAnimeList) }
+                    )
 
                     // Trakt Section
                     trackerRow(
@@ -101,6 +138,9 @@ struct TrackersSettingsView: View {
             Button("Cancel", role: .cancel) { }
         } message: {
             Text("This will import your AniList Watching, Planning, and Completed lists as collections in your library. Existing items won't be duplicated.")
+        }
+        .sheet(isPresented: $showSyncTools) {
+            TrackerSyncToolsSheet(trackerManager: trackerManager)
         }
     }
 
@@ -215,5 +255,146 @@ struct TrackersSettingsView: View {
         .padding()
         .background(Color.gray.opacity(0.1))
         .cornerRadius(12)
+    }
+}
+
+private struct TrackerSyncToolsSheet: View {
+    @ObservedObject var trackerManager: TrackerManager
+    @Environment(\.dismiss) private var dismiss
+    @State private var confirmationAction: TrackerSyncToolAction?
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if let status = trackerManager.syncToolStatus {
+                        HStack(spacing: 8) {
+                            if trackerManager.isRunningSyncTool {
+                                ProgressView()
+                                    .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                            }
+
+                            Text(status)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            Spacer()
+                        }
+                        .padding()
+                        .background(Color.gray.opacity(0.12))
+                        .cornerRadius(12)
+                    }
+
+                    ForEach(TrackerSyncToolAction.allCases) { action in
+                        syncToolCard(action)
+                    }
+                }
+                .padding()
+            }
+            .background(SettingsGradientBackground(scrollOffset: 0).ignoresSafeArea())
+            .navigationTitle("Sync Tools")
+            #if !os(tvOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+            .alert("Run Sync Tool?", isPresented: Binding(
+                get: { confirmationAction != nil },
+                set: { if !$0 { confirmationAction = nil } }
+            )) {
+                Button("Run", role: .none) {
+                    if let action = confirmationAction {
+                        trackerManager.runSyncTool(action)
+                    }
+                    confirmationAction = nil
+                }
+                Button("Cancel", role: .cancel) {
+                    confirmationAction = nil
+                }
+            } message: {
+                Text("This writes progress to the selected destination but never deletes entries or downgrades progress.")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func syncToolCard(_ action: TrackerSyncToolAction) -> some View {
+        let preview = trackerManager.syncToolPreview?.action == action ? trackerManager.syncToolPreview : nil
+
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: action.isProviderPort ? "arrow.left.arrow.right.circle.fill" : "tray.and.arrow.down.fill")
+                    .foregroundColor(action.isProviderPort ? .orange : .blue)
+                    .frame(width: 28, height: 28)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(action.title)
+                        .font(.headline)
+                        .foregroundColor(.white)
+
+                    Text(action.subtitle)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+            }
+
+            if let preview {
+                VStack(alignment: .leading, spacing: 6) {
+                    previewMetric("Add", preview.itemsToAdd)
+                    previewMetric("Advance", preview.itemsToAdvance)
+                    previewMetric("Skipped", preview.skipped)
+                    previewMetric("Unmapped", preview.unmapped)
+                    previewMetric("API calls", preview.estimatedAPICalls)
+
+                    ForEach(preview.notes, id: \.self) { note in
+                        Text(note)
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                .padding(10)
+                .background(Color.black.opacity(0.18))
+                .cornerRadius(8)
+            }
+
+            HStack {
+                Button("Preview") {
+                    trackerManager.previewSyncTool(action)
+                }
+                .disabled(trackerManager.isRunningSyncTool)
+
+                Spacer()
+
+                Button(action.isProviderPort ? "Confirm & Run" : "Run") {
+                    if action.isProviderPort {
+                        confirmationAction = action
+                    } else {
+                        trackerManager.runSyncTool(action)
+                    }
+                }
+                .disabled(trackerManager.isRunningSyncTool || preview == nil)
+            }
+            .font(.caption.weight(.medium))
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(12)
+    }
+
+    @ViewBuilder
+    private func previewMetric(_ title: String, _ value: Int) -> some View {
+        HStack {
+            Text(title)
+                .foregroundColor(.secondary)
+            Spacer()
+            Text("\(value)")
+                .foregroundColor(.white)
+        }
+        .font(.caption2)
     }
 }

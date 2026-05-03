@@ -9,12 +9,15 @@ import Foundation
 
 enum TrackerService: String, Codable, CaseIterable {
     case anilist
+    case myAnimeList
     case trakt
 
     var displayName: String {
         switch self {
         case .anilist:
             return "AniList"
+        case .myAnimeList:
+            return "MyAnimeList"
         case .trakt:
             return "Trakt"
         }
@@ -24,6 +27,8 @@ enum TrackerService: String, Codable, CaseIterable {
         switch self {
         case .anilist:
             return "https://anilist.co"
+        case .myAnimeList:
+            return "https://myanimelist.net"
         case .trakt:
             return "https://trakt.tv"
         }
@@ -33,6 +38,8 @@ enum TrackerService: String, Codable, CaseIterable {
         switch self {
         case .anilist:
             return URL(string: "https://anilist.co/img/icons/android-chrome-512x512.png")
+        case .myAnimeList:
+            return URL(string: "https://cdn.myanimelist.net/images/favicon.ico")
         case .trakt:
             return URL(string: "https://walter.trakt.tv/hotlink-ok/public/apple-touch-icon.png")
         }
@@ -171,6 +178,26 @@ struct AniListAiringSchedule: Codable {
     let airingAt: Int
 }
 
+// MyAnimeList Models
+struct MALAuthResponse: Codable {
+    let accessToken: String
+    let tokenType: String?
+    let expiresIn: Int?
+    let refreshToken: String?
+
+    enum CodingKeys: String, CodingKey {
+        case accessToken = "access_token"
+        case tokenType = "token_type"
+        case expiresIn = "expires_in"
+        case refreshToken = "refresh_token"
+    }
+}
+
+struct MALUser: Codable {
+    let id: Int
+    let name: String
+}
+
 // Trakt Models
 struct TraktAuthResponse: Codable {
     let accessToken: String
@@ -196,4 +223,74 @@ struct TraktIds: Codable {
     let slug: String
     let imdb: String?
     let tmdb: Int?
+}
+
+enum TrackerSyncToolAction: String, CaseIterable, Identifiable {
+    case fillEclipseFromAniList
+    case fillEclipseFromMAL
+    case pushEclipseToAniList
+    case pushEclipseToMAL
+    case portAniListToMAL
+    case portMALToAniList
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .fillEclipseFromAniList:
+            return "Fill Eclipse From AniList"
+        case .fillEclipseFromMAL:
+            return "Fill Eclipse From MAL"
+        case .pushEclipseToAniList:
+            return "Push Eclipse To AniList"
+        case .pushEclipseToMAL:
+            return "Push Eclipse To MAL"
+        case .portAniListToMAL:
+            return "Port AniList To MAL"
+        case .portMALToAniList:
+            return "Port MAL To AniList"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .fillEclipseFromAniList:
+            return "Add missing shows and advance local watched progress."
+        case .fillEclipseFromMAL:
+            return "Use MAL list progress to fill local Eclipse progress."
+        case .pushEclipseToAniList:
+            return "Send completed local episodes and chapters to AniList."
+        case .pushEclipseToMAL:
+            return "Send completed local episodes and chapters to MAL."
+        case .portAniListToMAL:
+            return "Copy AniList watch/read progress into MAL after preview."
+        case .portMALToAniList:
+            return "Copy MAL watch/read progress into AniList after preview."
+        }
+    }
+
+    var isProviderPort: Bool {
+        switch self {
+        case .portAniListToMAL, .portMALToAniList:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+struct TrackerSyncPreview: Identifiable {
+    let id = UUID()
+    let action: TrackerSyncToolAction
+    var itemsToAdd: Int
+    var itemsToAdvance: Int
+    var skipped: Int
+    var unmapped: Int
+    var estimatedAPICalls: Int
+    var notes: [String]
+    var conflicts: [String] = []
+
+    var requiresConfirmation: Bool {
+        action.isProviderPort || itemsToAdd > 0 || itemsToAdvance > 0
+    }
 }

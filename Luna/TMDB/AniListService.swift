@@ -1,12 +1,12 @@
 ﻿import Foundation
 
-/// Ensures AniList API calls are spaced out to stay under the 90 req/min rate limit.
+/// Ensures AniList API calls are spaced out and adapts to AniList response headers.
 /// Uses a slot-reservation pattern: each caller claims a future time slot BEFORE sleeping,
 /// so concurrent callers queue up instead of bunching together.
 private actor AniListRateLimiter {
     static let shared = AniListRateLimiter()
     
-    private let minInterval: TimeInterval = 0.5 // ~120 req/min max, safely under AniList's 90 req/min (batched queries reduce actual call count)
+    private var minInterval: TimeInterval = 0.8
     private var nextAvailableTime: Date = .distantPast
     
     func waitForSlot() async {
@@ -21,6 +21,38 @@ private actor AniListRateLimiter {
         if delay > 0.001 {
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         }
+    }
+
+    func recordResponse(_ response: HTTPURLResponse) {
+        if let limitValue = response.value(forHTTPHeaderField: "X-RateLimit-Limit"),
+           let limit = Double(limitValue),
+           limit > 0 {
+            minInterval = max(60.0 / limit, 0.8)
+        }
+
+        if response.statusCode == 429 {
+            pauseUntilRetryAfter(response)
+            return
+        }
+
+        guard let remainingValue = response.value(forHTTPHeaderField: "X-RateLimit-Remaining"),
+              let remaining = Int(remainingValue),
+              remaining <= 1,
+              let resetValue = response.value(forHTTPHeaderField: "X-RateLimit-Reset"),
+              let reset = TimeInterval(resetValue) else {
+            return
+        }
+
+        let resetDate = Date(timeIntervalSince1970: reset)
+        if resetDate > Date() {
+            nextAvailableTime = max(nextAvailableTime, resetDate)
+        }
+    }
+
+    func pauseUntilRetryAfter(_ response: HTTPURLResponse) {
+        let retryAfter = response.value(forHTTPHeaderField: "Retry-After")
+            .flatMap(TimeInterval.init) ?? 5
+        nextAvailableTime = max(nextAvailableTime, Date().addingTimeInterval(min(max(retryAfter, 1), 120)))
     }
 }
 
@@ -1553,6 +1585,7 @@ final class AniListService {
                             progress
                             media {
                                 id
+                                idMal
                                 title { romaji english native }
                                 episodes
                                 status
@@ -1653,6 +1686,18 @@ final class AniListService {
         return result
     }
 
+    /// Exposes the existing AniList -> TMDB import mapper for tracker sync tools.
+    func mapAniListAnimeIdsToTMDBForImport(
+        _ ids: [Int],
+        tmdbService: TMDBService
+    ) async -> [Int: TMDBSearchResult] {
+        let uniqueIds = Array(Set(ids))
+        guard !uniqueIds.isEmpty else { return [:] }
+
+        let nodes = await batchFetchAniListNodes(ids: uniqueIds)
+        return await batchMapAniListToTMDB(Array(nodes.values), tmdbService: tmdbService)
+    }
+
     // MARK: - Private Helpers
     
     private func executeGraphQLQuery(_ query: String, token: String?, maxRetries: Int = 3) async throws -> Data {
@@ -1676,6 +1721,8 @@ final class AniListService {
             let (data, response) = try await URLSession.shared.data(for: request)
             
             if let httpResponse = response as? HTTPURLResponse {
+                await AniListRateLimiter.shared.recordResponse(httpResponse)
+
                 if httpResponse.statusCode == 200 {
                     return data
                 }
@@ -1708,6 +1755,7 @@ final class AniListService {
 
         let fragment = """
             id
+            idMal
             title { romaji english native }
             episodes
             status
@@ -1959,6 +2007,7 @@ struct AniListAnimeWithSeasons {
 
 struct AniListAnime: Codable {
     let id: Int
+    let idMal: Int?
     let title: AniListTitle
     let episodes: Int?
     let status: String?
@@ -2010,6 +2059,7 @@ struct AniListAnime: Codable {
         func asAnime() -> AniListAnime {
             return AniListAnime(
                 id: id,
+                idMal: nil,
                 title: title,
                 episodes: episodes,
                 status: status,

@@ -318,16 +318,29 @@ final class HLSDownloader: @unchecked Sendable {
         keyData: Data?,
         to outputURL: URL
     ) async throws {
-        // Remove existing file if present
-        try? FileManager.default.removeItem(at: outputURL)
-        
-        // Create the output file
-        FileManager.default.createFile(atPath: outputURL.path, contents: nil)
-        let fileHandle = try FileHandle(forWritingTo: outputURL)
-        defer { try? fileHandle.close() }
+        try checkSystemBackoff()
+
+        let partialURL = outputURL
+            .deletingLastPathComponent()
+            .appendingPathComponent(".\(outputURL.lastPathComponent).partial")
+        var completed = false
+
+        try? FileManager.default.removeItem(at: partialURL)
+        guard FileManager.default.createFile(atPath: partialURL.path, contents: nil) else {
+            throw HLSError.couldNotCreateOutput
+        }
+
+        let fileHandle = try FileHandle(forWritingTo: partialURL)
+        defer {
+            try? fileHandle.close()
+            if !completed {
+                try? FileManager.default.removeItem(at: partialURL)
+            }
+        }
         
         // Write initialization segment first if present
         if let initURL = initSegmentURL {
+            try checkSystemBackoff()
             let initData = try await fetchData(url: initURL)
             let decrypted = try decryptIfNeeded(data: initData, key: encryptionKey, keyData: keyData, segmentIndex: -1)
             fileHandle.write(decrypted)
@@ -340,6 +353,8 @@ final class HLSDownloader: @unchecked Sendable {
             guard !isCancelled else {
                 throw HLSError.cancelled
             }
+
+            try checkSystemBackoff()
             
             let segmentData = try await fetchSegmentWithRetry(url: segmentURL, maxRetries: 3)
             let decrypted = try decryptIfNeeded(data: segmentData, key: encryptionKey, keyData: keyData, segmentIndex: index)
@@ -352,6 +367,10 @@ final class HLSDownloader: @unchecked Sendable {
                 self?.onProgress?(progress)
             }
         }
+
+        try? FileManager.default.removeItem(at: outputURL)
+        try FileManager.default.moveItem(at: partialURL, to: outputURL)
+        completed = true
     }
     
     private func fetchSegmentWithRetry(url: URL, maxRetries: Int) async throws -> Data {
@@ -466,6 +485,15 @@ final class HLSDownloader: @unchecked Sendable {
         let baseDir = baseURL.deletingLastPathComponent()
         return baseDir.appendingPathComponent(urlString)
     }
+
+    private func checkSystemBackoff() throws {
+        #if canImport(UIKit)
+        let thermalState = ProcessInfo.processInfo.thermalState
+        if thermalState == .serious || thermalState == .critical {
+            throw HLSError.systemBackoff(reason: "Paused for thermal state")
+        }
+        #endif
+    }
     
     private func hexStringToData(_ hex: String) -> Data? {
         var hexStr = hex
@@ -496,6 +524,8 @@ enum HLSError: LocalizedError {
     case httpError(statusCode: Int)
     case decryptionFailed(status: Int)
     case cancelled
+    case couldNotCreateOutput
+    case systemBackoff(reason: String)
     case unknownError
     
     var errorDescription: String? {
@@ -512,6 +542,10 @@ enum HLSError: LocalizedError {
             return "AES-128 decryption failed (status: \(status))"
         case .cancelled:
             return "Download was cancelled"
+        case .couldNotCreateOutput:
+            return "Could not create HLS output file"
+        case .systemBackoff(let reason):
+            return reason
         case .unknownError:
             return "An unknown error occurred"
         }

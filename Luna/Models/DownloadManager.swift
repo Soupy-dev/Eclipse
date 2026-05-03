@@ -7,6 +7,9 @@
 
 import Foundation
 import Combine
+#if canImport(UIKit)
+import UIKit
+#endif
 
 // MARK: - Download Item Model
 
@@ -89,8 +92,13 @@ final class DownloadManager: NSObject, ObservableObject {
     private var activeHLSDownloaders: [String: HLSDownloader] = [:]
     
     private let maxConcurrentDownloads = 2
+    private let maxConcurrentHLSDownloads = 1
+    private let minimumFreeBytesForHLS: Int64 = 750 * 1024 * 1024
     private let fileManager = FileManager.default
     private let accessQueue = DispatchQueue(label: "com.luna.download-manager", attributes: .concurrent)
+    private var backgroundHLSPipelineEnabled: Bool {
+        UserDefaults.standard.bool(forKey: "backgroundHLSPipelineEnabled")
+    }
     
     private var persistenceURL: URL {
         downloadsDirectory.appendingPathComponent(".downloads_metadata.json")
@@ -110,6 +118,10 @@ final class DownloadManager: NSObject, ObservableObject {
     
     private override init() {
         super.init()
+
+        #if canImport(UIKit)
+        UIDevice.current.isBatteryMonitoringEnabled = true
+        #endif
         
         let config = URLSessionConfiguration.background(withIdentifier: "com.luna.downloads")
         config.isDiscretionary = false
@@ -462,15 +474,31 @@ final class DownloadManager: NSObject, ObservableObject {
     
     private func processQueue() {
         let currentlyDownloading = downloads.filter { $0.status == .downloading }.count
-        let slotsAvailable = maxConcurrentDownloads - currentlyDownloading
+        var slotsAvailable = maxConcurrentDownloads - currentlyDownloading
         
         guard slotsAvailable > 0 else { return }
         
         let queued = downloads.filter { $0.status == .queued }
-        let toStart = Array(queued.prefix(slotsAvailable))
-        
-        for item in toStart {
+
+        for item in queued {
+            guard slotsAvailable > 0 else { break }
+
+            if item.isHLS {
+                if activeHLSDownloaders.count >= maxConcurrentHLSDownloads {
+                    setQueuedMessage(id: item.id, message: "Waiting to package HLS")
+                    continue
+                }
+
+                if let delayReason = hlsStartDelayReason() {
+                    setQueuedMessage(id: item.id, message: delayReason)
+                    Logger.shared.log("Delaying HLS packaging for \(item.displayTitle): \(delayReason)", type: "Download")
+                    continue
+                }
+            }
+
+            clearQueuedMessage(id: item.id)
             startDownload(item)
+            slotsAvailable -= 1
         }
     }
     
@@ -480,8 +508,13 @@ final class DownloadManager: NSObject, ObservableObject {
             return
         }
         
-        // Route HLS streams to AVAssetDownloadURLSession for proper segment downloading
+        // Route HLS streams to the guarded TS packager so VLC/mpv playback stays compatible.
         if item.isHLS {
+            if let delayReason = hlsStartDelayReason() {
+                setQueuedMessage(id: item.id, message: delayReason)
+                Logger.shared.log("HLS queued instead of starting: \(delayReason)", type: "Download")
+                return
+            }
             startHLSDownload(item)
             return
         }
@@ -523,6 +556,10 @@ final class DownloadManager: NSObject, ObservableObject {
         guard let url = URL(string: item.streamURL) else {
             markFailed(id: item.id, error: "Invalid stream URL")
             return
+        }
+
+        if backgroundHLSPipelineEnabled {
+            Logger.shared.log("Background HLS experiment enabled; using guarded single-lane TS packager", type: "Download")
         }
         
         let fileName = "\(item.id).ts"
@@ -568,7 +605,20 @@ final class DownloadManager: NSObject, ObservableObject {
                 Logger.shared.log("HLS download completed: \(item.displayTitle) -> \(fileName)", type: "Download")
                 
             case .failure(let error):
-                self.markFailed(id: item.id, error: error.localizedDescription)
+                if let hlsError = error as? HLSError,
+                   case .systemBackoff(let reason) = hlsError {
+                    DispatchQueue.main.async {
+                        if let index = self.downloads.firstIndex(where: { $0.id == item.id }) {
+                            self.downloads[index].status = .queued
+                            self.downloads[index].error = reason
+                            self.saveDownloads()
+                            self.processQueue()
+                        }
+                    }
+                    Logger.shared.log("HLS packaging paused for \(item.displayTitle): \(reason)", type: "Download")
+                } else {
+                    self.markFailed(id: item.id, error: error.localizedDescription)
+                }
             }
         }
         
@@ -589,6 +639,65 @@ final class DownloadManager: NSObject, ObservableObject {
         }
         
         Logger.shared.log("Started HLS download: \(item.displayTitle)", type: "Download")
+    }
+
+    private func hlsStartDelayReason() -> String? {
+        #if canImport(UIKit)
+        let thermalState = ProcessInfo.processInfo.thermalState
+        if thermalState == .serious || thermalState == .critical {
+            return "Paused for thermal state"
+        }
+
+        let device = UIDevice.current
+        if device.batteryState == .unplugged && device.batteryLevel >= 0 && device.batteryLevel < 0.15 {
+            return "Paused for low battery"
+        }
+        #endif
+
+        if let freeBytes = availableDownloadCapacity(), freeBytes < minimumFreeBytesForHLS {
+            return "Paused for low disk space"
+        }
+
+        return nil
+    }
+
+    private func availableDownloadCapacity() -> Int64? {
+        do {
+            let values = try downloadsDirectory.resourceValues(forKeys: [
+                .volumeAvailableCapacityForImportantUsageKey,
+                .volumeAvailableCapacityKey
+            ])
+
+            if let importantUsage = values.volumeAvailableCapacityForImportantUsage {
+                return importantUsage
+            }
+            if let capacity = values.volumeAvailableCapacity {
+                return Int64(capacity)
+            }
+        } catch {
+            Logger.shared.log("Could not read free disk space for HLS: \(error.localizedDescription)", type: "Download")
+        }
+
+        return nil
+    }
+
+    private func setQueuedMessage(id: String, message: String) {
+        DispatchQueue.main.async {
+            guard let index = self.downloads.firstIndex(where: { $0.id == id }),
+                  self.downloads[index].status == .queued,
+                  self.downloads[index].error != message else { return }
+            self.downloads[index].error = message
+            self.saveDownloads()
+        }
+    }
+
+    private func clearQueuedMessage(id: String) {
+        DispatchQueue.main.async {
+            guard let index = self.downloads.firstIndex(where: { $0.id == id }),
+                  self.downloads[index].error != nil else { return }
+            self.downloads[index].error = nil
+            self.saveDownloads()
+        }
     }
     
     /// Known video file extensions that VLC/mpv can play

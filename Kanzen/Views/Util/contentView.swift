@@ -32,6 +32,7 @@ struct contentView: View {
     @State var reverseChapterlist: Bool = false
     @State var toggleFavourite: Bool = false
     @State var loadingState : Bool = true
+    @State private var scrollOffset: CGFloat = 0
 
     /// Stable numeric ID derived from module + content params for progress & library.
     private var stableId: Int {
@@ -86,7 +87,17 @@ struct contentView: View {
             }
             .padding(.horizontal, 16)
             .padding(.top, 8)
+            .background(
+                GeometryReader { geo in
+                    Color.clear.preference(
+                        key: ScrollOffsetPreferenceKey.self,
+                        value: -geo.frame(in: .named("moduleContentScroll")).origin.y
+                    )
+                }
+            )
         }
+        .coordinateSpace(name: "moduleContentScroll")
+        .onPreferenceChange(ScrollOffsetPreferenceKey.self) { scrollOffset = $0 }
         .onAppear {
             getContentData()
             toggleFavourite = checkIfFavorited()
@@ -130,7 +141,7 @@ struct contentView: View {
         }
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
-        .background(LunaTheme.shared.backgroundBase.ignoresSafeArea())
+        .kanzenGradientBackground(scrollOffset: scrollOffset)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
