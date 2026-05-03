@@ -10,10 +10,10 @@ DEVELOPMENT_TEAM = 399LMK6Q2Y
 BUNDLE_IDENTIFIER = me.cranci.solar
 ICLOUD_CONTAINER_ID = iCloud.me.cranci.sora
 CODE_SIGN_ENTITLEMENTS = Luna/Luna.entitlements
-MAL_CLIENT_ID =
-MAL_CLIENT_SECRET =
+MAL_CLIENT_ID = f77af957cfc3ca2fcb3338390dcb6ccd
+MAL_CLIENT_SECRET = 2590cce64b72ef3c1e186de119d8ec94a05479e309ca501c9200e012c7d81ccd
 // In Build.local.xcconfig, write URL values as luna:/$()/mal-callback so // is not parsed as a comment.
-MAL_REDIRECT_URI =
+MAL_REDIRECT_URI = luna:/$()/mal-callback
 
 // Optional local overrides (ignored in Git)
 #include? "Build.local.xcconfig"
