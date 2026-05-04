@@ -146,8 +146,13 @@ final class VLCRenderer: NSObject {
     private let eventQueue = DispatchQueue(label: "vlc.renderer.events", qos: .userInitiated)
     private let stateQueue = DispatchQueue(label: "vlc.renderer.state", attributes: .concurrent)
     
-    // VLC rendering container - uses OpenGL rendering
-    private let vlcView: VLCPictureInPictureDrawableView
+    // VLC renders into one of these child views. The parent stays stable in the UI
+    // while the actual drawable is plain UIView when PiP is off and VideoLAN's
+    // PiP-capable drawable only when PiP is on.
+    private let renderingContainerView: UIView
+    private let plainVLCView: UIView
+    private let pictureInPictureVLCView: VLCPictureInPictureDrawableView
+    private var activeVLCView: UIView
     
     private var vlcInstance: VLCMediaList?
     private var mediaPlayer: VLCMediaPlayer?
@@ -195,10 +200,15 @@ final class VLCRenderer: NSObject {
     
     init(displayLayer: AVSampleBufferDisplayLayer) {
         self.displayLayer = displayLayer
-        // Create a UIView container that VLC will render into and newer VLCKit can use for PiP.
-        self.vlcView = VLCPictureInPictureDrawableView()
+        let containerView = UIView()
+        let plainView = UIView()
+        let pipView = VLCPictureInPictureDrawableView()
+        self.renderingContainerView = containerView
+        self.plainVLCView = plainView
+        self.pictureInPictureVLCView = pipView
+        self.activeVLCView = VLCRenderer.isPictureInPictureEnabledInDefaults() ? pipView : plainView
         super.init()
-        self.vlcView.renderer = self
+        self.pictureInPictureVLCView.renderer = self
         setupVLCView()
     }
     
@@ -209,14 +219,90 @@ final class VLCRenderer: NSObject {
     // MARK: - View Setup
     
     private func setupVLCView() {
-        vlcView.backgroundColor = .black
-        // Prefer aspect-fit semantics to keep full frame visible; rely on black bars
-        vlcView.contentMode = .scaleAspectFit
-        vlcView.layer.contentsGravity = .resizeAspect
-        vlcView.layer.isOpaque = true
-        vlcView.clipsToBounds = true
-        vlcView.isUserInteractionEnabled = false  // Allow touches to pass through to controls
-        logVLC("setup view contentMode=\(vlcView.contentMode.rawValue) gravity=\(vlcView.layer.contentsGravity.rawValue)")
+        renderingContainerView.backgroundColor = .black
+        renderingContainerView.clipsToBounds = true
+        renderingContainerView.isUserInteractionEnabled = false
+        renderingContainerView.layer.isOpaque = true
+
+        configureVLCView(plainVLCView)
+        configureVLCView(pictureInPictureVLCView)
+        attachActiveRenderingViewToContainer(reason: "setup")
+
+        logVLC("setup view mode=\(renderingModeDescription()) contentMode=\(activeVLCView.contentMode.rawValue) gravity=\(activeVLCView.layer.contentsGravity.rawValue)")
+    }
+
+    private func configureVLCView(_ view: UIView) {
+        view.backgroundColor = .black
+        // Prefer aspect-fit semantics to keep full frame visible; rely on black bars.
+        view.contentMode = .scaleAspectFit
+        view.layer.contentsGravity = .resizeAspect
+        view.layer.isOpaque = true
+        view.clipsToBounds = true
+        view.isUserInteractionEnabled = false
+    }
+
+    private static func isPictureInPictureEnabledInDefaults() -> Bool {
+        UserDefaults.standard.object(forKey: "vlcPiPEnabled") == nil
+            ? true
+            : UserDefaults.standard.bool(forKey: "vlcPiPEnabled")
+    }
+
+    private func desiredRenderingViewForCurrentSetting() -> UIView {
+        isPictureInPictureSettingEnabled ? pictureInPictureVLCView : plainVLCView
+    }
+
+    private func renderingModeDescription(for view: UIView? = nil) -> String {
+        let target = view ?? activeVLCView
+        if target === pictureInPictureVLCView { return "pip-drawable" }
+        if target === plainVLCView { return "plain-view" }
+        return String(describing: type(of: target))
+    }
+
+    private var isUsingPictureInPictureDrawableForRendering: Bool {
+        activeVLCView === pictureInPictureVLCView && isPictureInPictureSettingEnabled
+    }
+
+    private func attachActiveRenderingViewToContainer(reason: String) {
+        if activeVLCView.superview === renderingContainerView {
+            return
+        }
+
+        plainVLCView.removeFromSuperview()
+        pictureInPictureVLCView.removeFromSuperview()
+        renderingContainerView.addSubview(activeVLCView)
+        activeVLCView.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            activeVLCView.topAnchor.constraint(equalTo: renderingContainerView.topAnchor),
+            activeVLCView.bottomAnchor.constraint(equalTo: renderingContainerView.bottomAnchor),
+            activeVLCView.leadingAnchor.constraint(equalTo: renderingContainerView.leadingAnchor),
+            activeVLCView.trailingAnchor.constraint(equalTo: renderingContainerView.trailingAnchor)
+        ])
+        logVLC("attached VLC rendering view mode=\(renderingModeDescription()) reason=\(reason)")
+    }
+
+    private func syncRenderingViewWithPictureInPictureSetting(reason: String, reassignPlayerDrawable: Bool) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.syncRenderingViewWithPictureInPictureSetting(reason: reason, reassignPlayerDrawable: reassignPlayerDrawable)
+            }
+            return
+        }
+
+        let desiredView = desiredRenderingViewForCurrentSetting()
+        let oldMode = renderingModeDescription()
+        if activeVLCView !== desiredView {
+            activeVLCView = desiredView
+            attachActiveRenderingViewToContainer(reason: reason)
+            logVLC("switched VLC rendering view \(oldMode) -> \(renderingModeDescription()) reason=\(reason) setting=\(isPictureInPictureSettingEnabled)")
+        } else {
+            attachActiveRenderingViewToContainer(reason: reason)
+            logVLC("kept VLC rendering view mode=\(renderingModeDescription()) reason=\(reason) setting=\(isPictureInPictureSettingEnabled)")
+        }
+
+        if reassignPlayerDrawable, isRunning, !isStopping {
+            mediaPlayer?.drawable = activeVLCView
+            logDrawableSnapshot("sync rendering view drawable reassigned")
+        }
     }
 
     private func logVLC(_ message: String, type: String = "Player") {
@@ -250,12 +336,14 @@ final class VLCRenderer: NSObject {
     private func logDrawableSnapshot(_ event: String) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            let bounds = self.vlcView.bounds
-            let superBounds = self.vlcView.superview?.bounds ?? .zero
+            let drawableView = self.activeVLCView
+            let bounds = drawableView.bounds
+            let containerBounds = self.renderingContainerView.bounds
+            let superBounds = self.renderingContainerView.superview?.bounds ?? .zero
             let currentDrawable = self.mediaPlayer?.drawable
-            let drawableMatches = (currentDrawable as? UIView) === self.vlcView
+            let drawableMatches = (currentDrawable as? UIView) === drawableView
             let drawableType = currentDrawable.map { String(describing: type(of: $0)) } ?? "nil"
-            self.logVLC("\(event) drawable hidden=\(self.vlcView.isHidden) alpha=\(String(format: "%.2f", self.vlcView.alpha)) bounds=\(String(format: "%.0fx%.0f", bounds.width, bounds.height)) super=\(String(format: "%.0fx%.0f", superBounds.width, superBounds.height)) window=\(self.vlcView.window != nil) attachedToPlayer=\(drawableMatches) drawableType=\(drawableType) detachedForBackground=\(self.detachedDrawableForBackground) snapshot={\(self.playerSnapshot())}")
+            self.logVLC("\(event) drawableMode=\(self.renderingModeDescription()) drawableHidden=\(drawableView.isHidden) drawableAlpha=\(String(format: "%.2f", drawableView.alpha)) drawableBounds=\(String(format: "%.0fx%.0f", bounds.width, bounds.height)) containerBounds=\(String(format: "%.0fx%.0f", containerBounds.width, containerBounds.height)) super=\(String(format: "%.0fx%.0f", superBounds.width, superBounds.height)) window=\(self.renderingContainerView.window != nil) attachedToPlayer=\(drawableMatches) drawableType=\(drawableType) detachedForBackground=\(self.detachedDrawableForBackground) snapshot={\(self.playerSnapshot())}")
         }
     }
 
@@ -268,9 +356,7 @@ final class VLCRenderer: NSObject {
     }
 
     fileprivate var isPictureInPictureSettingEnabled: Bool {
-        UserDefaults.standard.object(forKey: "vlcPiPEnabled") == nil
-            ? true
-            : UserDefaults.standard.bool(forKey: "vlcPiPEnabled")
+        Self.isPictureInPictureEnabledInDefaults()
     }
 
     fileprivate var canStartPictureInPictureAutomaticallyFromInline: Bool {
@@ -283,9 +369,10 @@ final class VLCRenderer: NSObject {
         logVLC("reattach drawable requested snapshot={\(playerSnapshot())}")
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.mediaPlayer?.drawable = self.vlcView
-            self.vlcView.setNeedsLayout()
-            self.vlcView.layoutIfNeeded()
+            self.syncRenderingViewWithPictureInPictureSetting(reason: "reattach", reassignPlayerDrawable: false)
+            self.mediaPlayer?.drawable = self.activeVLCView
+            self.activeVLCView.setNeedsLayout()
+            self.activeVLCView.layoutIfNeeded()
             self.logDrawableSnapshot("reattach drawable applied")
             self.scheduleDrawableSnapshots("reattach drawable followup")
         }
@@ -327,13 +414,14 @@ final class VLCRenderer: NSObject {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
             guard let self, self.isRunning, !self.isStopping else { return }
-            self.mediaPlayer?.drawable = self.vlcView
-            self.vlcView.isHidden = false
-            self.vlcView.alpha = 1
-            self.vlcView.superview?.setNeedsLayout()
-            self.vlcView.superview?.layoutIfNeeded()
-            self.vlcView.setNeedsLayout()
-            self.vlcView.layoutIfNeeded()
+            self.syncRenderingViewWithPictureInPictureSetting(reason: "recover after PiP stop", reassignPlayerDrawable: false)
+            self.mediaPlayer?.drawable = self.activeVLCView
+            self.activeVLCView.isHidden = false
+            self.activeVLCView.alpha = 1
+            self.renderingContainerView.setNeedsLayout()
+            self.renderingContainerView.layoutIfNeeded()
+            self.activeVLCView.setNeedsLayout()
+            self.activeVLCView.layoutIfNeeded()
             self.logDrawableSnapshot("recover rendering view layout pass")
         }
 
@@ -369,8 +457,8 @@ final class VLCRenderer: NSObject {
     
     /// Return the VLC view to be added to the view hierarchy
     func getRenderingView() -> UIView {
-        logVLC("getRenderingView snapshot={\(playerSnapshot())}")
-        return vlcView
+        logVLC("getRenderingView mode=\(renderingModeDescription()) snapshot={\(playerSnapshot())}")
+        return renderingContainerView
     }
     
     // MARK: - Lifecycle
@@ -391,8 +479,12 @@ final class VLCRenderer: NSObject {
                 throw RendererError.vlcInitializationFailed
             }
             
-            // Render directly into the VLC view (stable video output)
-            mediaPlayer.drawable = vlcView
+            if Thread.isMainThread {
+                syncRenderingViewWithPictureInPictureSetting(reason: "start", reassignPlayerDrawable: false)
+            }
+
+            // Render directly into the currently selected VLC drawable.
+            mediaPlayer.drawable = activeVLCView
             
             // Set up event handling
             NotificationCenter.default.addObserver(
@@ -585,7 +677,7 @@ final class VLCRenderer: NSObject {
             self.currentMedia = media
             
             player.media = media
-            player.drawable = self.vlcView
+            player.drawable = self.activeVLCView
             self.ensureAudioSessionActive()
             self.logVLC("load configured media; calling play snapshot={\(self.playerSnapshot(player))}", type: "Stream")
             player.play()
@@ -819,13 +911,14 @@ final class VLCRenderer: NSObject {
         logVLC("refreshVideoOutputAfterSeek shouldResume=\(shouldResumePlayback) snapshot={\(playerSnapshot(player))}", type: "Progress")
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isRunning, !self.isStopping else { return }
-            self.mediaPlayer?.drawable = self.vlcView
-            self.vlcView.isHidden = false
-            self.vlcView.alpha = 1
-            self.vlcView.superview?.setNeedsLayout()
-            self.vlcView.superview?.layoutIfNeeded()
-            self.vlcView.setNeedsLayout()
-            self.vlcView.layoutIfNeeded()
+            self.syncRenderingViewWithPictureInPictureSetting(reason: "seek refresh", reassignPlayerDrawable: false)
+            self.mediaPlayer?.drawable = self.activeVLCView
+            self.activeVLCView.isHidden = false
+            self.activeVLCView.alpha = 1
+            self.renderingContainerView.setNeedsLayout()
+            self.renderingContainerView.layoutIfNeeded()
+            self.activeVLCView.setNeedsLayout()
+            self.activeVLCView.layoutIfNeeded()
             self.logDrawableSnapshot("refreshVideoOutputAfterSeek layout")
         }
 
@@ -851,6 +944,10 @@ final class VLCRenderer: NSObject {
 
     private func markForegroundResumeVideoNudgeNeeded(reason: String) {
         guard isRunning, !isStopping else { return }
+        guard isUsingPictureInPictureDrawableForRendering else {
+            logVLC("foreground resume video nudge not marked reason=\(reason) mode=\(renderingModeDescription()) setting=\(isPictureInPictureSettingEnabled) snapshot={\(playerSnapshot())}", type: "Player")
+            return
+        }
         needsForegroundResumeVideoNudge = true
         foregroundResumeVideoNudgeScheduled = false
         foregroundResumeVideoNudgeGeneration += 1
@@ -867,16 +964,27 @@ final class VLCRenderer: NSObject {
 
     private func scheduleForegroundResumeVideoNudgeIfNeeded(on player: VLCMediaPlayer, reason: String) {
         guard needsForegroundResumeVideoNudge else { return }
+        guard isUsingPictureInPictureDrawableForRendering else {
+            clearForegroundResumeVideoNudge(reason: "rendering mode changed before nudge")
+            logVLC("foreground resume video nudge skipped before scheduling reason=\(reason) mode=\(renderingModeDescription()) snapshot={\(playerSnapshot(player))}", type: "Player")
+            return
+        }
         needsForegroundResumeVideoNudge = false
         foregroundResumeVideoNudgeScheduled = true
         let generation = foregroundResumeVideoNudgeGeneration
-        logVLC("foreground resume video nudge scheduled reason=\(reason) generation=\(generation) snapshot={\(playerSnapshot(player))}", type: "Player")
+        let nudgeDelay: TimeInterval = 0.20
+        let nudgeSeconds: Double = 0.12
+        logVLC("foreground resume video nudge scheduled reason=\(reason) generation=\(generation) delay=\(secondsText(nudgeDelay)) offset=\(secondsText(nudgeSeconds)) snapshot={\(playerSnapshot(player))}", type: "Player")
 
-        eventQueue.asyncAfter(deadline: .now() + 0.35) { [weak self, weak player] in
+        eventQueue.asyncAfter(deadline: .now() + nudgeDelay) { [weak self, weak player] in
             guard let self, self.isRunning, !self.isStopping, let player else { return }
             self.foregroundResumeVideoNudgeScheduled = false
             guard generation == self.foregroundResumeVideoNudgeGeneration else {
                 self.logVLC("foreground resume video nudge skipped stale generation=\(generation) current=\(self.foregroundResumeVideoNudgeGeneration)", type: "Player")
+                return
+            }
+            guard self.isUsingPictureInPictureDrawableForRendering else {
+                self.logVLC("foreground resume video nudge skipped mode changed mode=\(self.renderingModeDescription()) setting=\(self.isPictureInPictureSettingEnabled) snapshot={\(self.playerSnapshot(player))}", type: "Player")
                 return
             }
             guard UIApplication.shared.applicationState == .active else {
@@ -895,8 +1003,8 @@ final class VLCRenderer: NSObject {
             }
 
             let current = self.resolvedPlaybackProgress(from: player).position
-            let upperBound = max(0, duration - 0.5)
-            let target = min(max(0, current + 0.35), upperBound)
+            let upperBound = max(0, duration - max(0.2, nudgeSeconds))
+            let target = min(max(0, current + nudgeSeconds), upperBound)
             guard target > current + 0.01 else {
                 self.logVLC("foreground resume video nudge skipped target unavailable current=\(self.secondsText(current)) duration=\(self.secondsText(duration))", type: "Player")
                 return
@@ -1526,7 +1634,7 @@ final class VLCRenderer: NSObject {
     fileprivate func nativePictureInPictureMediaController() -> AnyObject {
         guard let player = mediaPlayer else {
             recordNativePictureInPictureMediaControllerMode("drawable-shim")
-            return vlcView
+            return pictureInPictureVLCView
         }
 
         if canUseVLCMediaPlayerForNativePictureInPictureControl(player) {
@@ -1535,7 +1643,7 @@ final class VLCRenderer: NSObject {
         }
 
         recordNativePictureInPictureMediaControllerMode("drawable-shim")
-        return vlcView
+        return pictureInPictureVLCView
     }
 
     private func canUseVLCMediaPlayerForNativePictureInPictureControl(_ player: VLCMediaPlayer) -> Bool {
@@ -1828,17 +1936,15 @@ final class VLCRenderer: NSObject {
         let enabled = isPictureInPictureSettingEnabled
         logVLC("handlePictureInPictureSettingChanged enabled=\(enabled) snapshot={\(playerSnapshot())}", type: "Player")
         if enabled {
+            syncRenderingViewWithPictureInPictureSetting(reason: "PiP setting enabled", reassignPlayerDrawable: true)
             if nativePiPController != nil {
                 setNativePictureInPictureAvailable(true)
                 updatePictureInPicturePlaybackState()
             }
-            if isRunning, !isStopping {
-                mediaPlayer?.drawable = vlcView
-                logDrawableSnapshot("PiP setting enabled drawable refresh")
-            }
             return
         }
 
+        clearForegroundResumeVideoNudge(reason: "PiP setting disabled")
         if nativePiPActive || nativePiPStartRequested {
             stopPictureInPicture()
         }
@@ -1848,6 +1954,7 @@ final class VLCRenderer: NSObject {
         }
         nativePiPStartRequested = false
         setNativePictureInPictureAvailable(false)
+        syncRenderingViewWithPictureInPictureSetting(reason: "PiP setting disabled", reassignPlayerDrawable: true)
     }
 
     private func setNativePictureInPictureActive(_ active: Bool) {
