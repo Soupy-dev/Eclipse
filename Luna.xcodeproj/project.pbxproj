@@ -44,6 +44,7 @@
 		139509A22E7DDAE100CB60D4 /* PlayerSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 139509A12E7DDAE100CB60D4 /* PlayerSettingsView.swift */; };
 		BB7777912F20000000BB7791 /* VLCLanguageSelectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB7777902F20000000BB7790 /* VLCLanguageSelectionView.swift */; };
 		F9A1B2C32F90000100A1B2C3 /* VLCHeaderProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9A1B2C22F90000100A1B2C3 /* VLCHeaderProxy.swift */; };
+		BB7777972F20000001BB7797 /* VLCKitSPM in Frameworks */ = {isa = PBXBuildFile; productRef = BB7777982F20000001BB7798 /* VLCKitSPM */; };
 		13A46CFD2EF5943400423BC6 /* FakeWebKit in Frameworks */ = {isa = PBXBuildFile; productRef = 13A46CFC2EF5943400423BC6 /* FakeWebKit */; };
 		13A46D002EF5944C00423BC6 /* Kingfisher in Frameworks */ = {isa = PBXBuildFile; productRef = 13A46CFF2EF5944C00423BC6 /* Kingfisher */; };
 		13A46D032EF5945700423BC6 /* SoraCore in Frameworks */ = {isa = PBXBuildFile; productRef = 13A46D022EF5945700423BC6 /* SoraCore */; };
@@ -200,8 +201,6 @@
 		5E4444402F60000000AE4440 /* StremioAddonManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StremioAddonManager.swift; sourceTree = "<group>"; };
 		1240112B2EFF3B8B00CEC6EB /* Luna.local.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Luna.local.entitlements; sourceTree = "<group>"; };
 		129CC9062EBA1D4600D2D84B /* Build.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Build.xcconfig; sourceTree = "<group>"; };
-		129CC90B2EBA1FEA00D2D84B /* Build-Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = "Build-Debug.xcconfig"; sourceTree = "<group>"; };
-		129CC90C2EBA1FEA00D2D84B /* Build-Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = "Build-Release.xcconfig"; sourceTree = "<group>"; };
 		129CC9082EBA1F8400D2D84B /* Build.local.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Build.local.xcconfig; sourceTree = "<group>"; };
 		129CC90B2EBA920A00D2D84B /* Bundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bundle.swift; sourceTree = "<group>"; };
 		12DA48AF2EE21409000ADDF0 /* DownloadProgressView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadProgressView.swift; sourceTree = "<group>"; };
@@ -359,6 +358,7 @@
 				13A46D032EF5945700423BC6 /* SoraCore in Frameworks */,
 				13A46CFD2EF5943400423BC6 /* FakeWebKit in Frameworks */,
 				136C25C62EFE950300E37A6E /* MPVKit-GPL in Frameworks */,
+				BB7777972F20000001BB7797 /* VLCKitSPM in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -656,8 +656,6 @@
 				13F0725D2E4B2D3300EF90EB /* Luna */,
 				13E1ED992ED9E65F00087629 /* Kanzen */,
 				129CC9062EBA1D4600D2D84B /* Build.xcconfig */,
-				129CC90B2EBA1FEA00D2D84B /* Build-Debug.xcconfig */,
-				129CC90C2EBA1FEA00D2D84B /* Build-Release.xcconfig */,
 				129CC9082EBA1F8400D2D84B /* Build.local.xcconfig */,
 				13E1EDF22ED9E67000087629 /* ContentModel.xcdatamodeld */,
 				13F0725C2E4B2D3300EF90EB /* Products */,
@@ -950,6 +948,7 @@
 				13A46CFF2EF5944C00423BC6 /* Kingfisher */,
 				13A46D022EF5945700423BC6 /* SoraCore */,
 				136C25C52EFE950300E37A6E /* MPVKit-GPL */,
+				BB7777982F20000001BB7798 /* VLCKitSPM */,
 			);
 			productName = Sora;
 			productReference = 13F0725B2E4B2D3300EF90EB /* Luna.app */;
@@ -984,6 +983,7 @@
 				13A46CFE2EF5944C00423BC6 /* XCRemoteSwiftPackageReference "Kingfisher" */,
 				13A46D012EF5945700423BC6 /* XCRemoteSwiftPackageReference "SoraCore" */,
 				136C25C42EFE950300E37A6E /* XCRemoteSwiftPackageReference "MPVKit" */,
+				BB7777992F20000001BB7799 /* XCRemoteSwiftPackageReference "vlckit-spm" */,
 			);
 			productRefGroup = 13F0725C2E4B2D3300EF90EB /* Products */;
 			projectDirPath = "";
@@ -1195,7 +1195,7 @@
 /* Begin XCBuildConfiguration section */
 		13F072682E4B2D3700EF90EB /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 129CC90B2EBA1FEA00D2D84B /* Build-Debug.xcconfig */;
+			baseConfigurationReference = 129CC9062EBA1D4600D2D84B /* Build.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -1260,7 +1260,7 @@
 		};
 		13F072692E4B2D3700EF90EB /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 129CC90C2EBA1FEA00D2D84B /* Build-Release.xcconfig */;
+			baseConfigurationReference = 129CC9062EBA1D4600D2D84B /* Build.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -1317,7 +1317,7 @@
 		};
 		13F0726B2E4B2D3700EF90EB /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 129CC90B2EBA1FEA00D2D84B /* Build-Debug.xcconfig */;
+			baseConfigurationReference = 129CC9062EBA1D4600D2D84B /* Build.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -1372,7 +1372,7 @@
 		};
 		13F0726C2E4B2D3700EF90EB /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 129CC90C2EBA1FEA00D2D84B /* Build-Release.xcconfig */;
+			baseConfigurationReference = 129CC9062EBA1D4600D2D84B /* Build.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -1481,6 +1481,14 @@
 				kind = branch;
 			};
 		};
+		BB7777992F20000001BB7799 /* XCRemoteSwiftPackageReference "vlckit-spm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/tylerjonesio/vlckit-spm";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 3.6.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -1507,6 +1515,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 13A46D012EF5945700423BC6 /* XCRemoteSwiftPackageReference "SoraCore" */;
 			productName = SoraCore;
+		};
+		BB7777982F20000001BB7798 /* VLCKitSPM */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = BB7777992F20000001BB7799 /* XCRemoteSwiftPackageReference "vlckit-spm" */;
+			productName = VLCKitSPM;
 		};
 /* End XCSwiftPackageProductDependency section */
 

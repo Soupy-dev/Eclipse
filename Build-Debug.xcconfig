@@ -1,7 +1,0 @@
-//
-//  Build-Debug.xcconfig
-//  Luna
-//
-
-#include? "Pods/Target Support Files/Pods-Luna/Pods-Luna.debug.xcconfig"
-#include "Build.xcconfig"

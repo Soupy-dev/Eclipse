@@ -131,7 +131,7 @@ final class PlayerSettingsStore: ObservableObject {
     }
 
     @Published var vlcPiPEnabled: Bool {
-        didSet { UserDefaults.standard.set(vlcPiPEnabled, forKey: "vlcPiPEnabled") }
+        didSet { UserDefaults.standard.set(false, forKey: "vlcPiPEnabled") }
     }
 
     @Published var vlcOpenSubtitlesEnabled: Bool {
@@ -209,12 +209,8 @@ final class PlayerSettingsStore: ObservableObject {
         let savedDoubleTapSeconds = UserDefaults.standard.double(forKey: "vlcDoubleTapSeekSeconds")
         self.vlcDoubleTapSeekSeconds = savedDoubleTapSeconds > 0 ? savedDoubleTapSeconds : 10.0
 
-        if UserDefaults.standard.object(forKey: "vlcPiPEnabled") == nil {
-            UserDefaults.standard.set(true, forKey: "vlcPiPEnabled")
-            self.vlcPiPEnabled = true
-        } else {
-            self.vlcPiPEnabled = UserDefaults.standard.bool(forKey: "vlcPiPEnabled")
-        }
+        UserDefaults.standard.set(false, forKey: "vlcPiPEnabled")
+        self.vlcPiPEnabled = false
 
         self.vlcOpenSubtitlesEnabled = UserDefaults.standard.bool(forKey: "vlcOpenSubtitlesEnabled")
 
@@ -347,7 +343,7 @@ struct PlayerSettingsView: View {
             }
             
             if store.inAppPlayer == .vlc {
-                Section(header: Text("VLC Player"), footer: Text("VLC-only playback, subtitle, PiP, and gesture settings.")) {
+                Section(header: Text("VLC Player"), footer: Text("VLC-only playback, subtitle, and gesture settings.")) {
                     DisclosureGroup {
                         settingsToggleRow(
                             title: "Enable Subtitles by Default",
@@ -611,16 +607,6 @@ struct PlayerSettingsView: View {
 
                     DisclosureGroup {
                         settingsToggleRow(
-                            title: "Picture in Picture",
-                            detail: "Allow native VLC PiP from the button or while entering the background.",
-                            binding: $store.vlcPiPEnabled
-                        )
-                    } label: {
-                        Label("Picture in Picture", systemImage: "pip")
-                    }
-
-                    DisclosureGroup {
-                        settingsToggleRow(
                             title: "OpenSubtitles",
                             detail: "Enable VLC subtitle search through the Stremio OpenSubtitles v3 add-on.",
                             binding: $store.vlcOpenSubtitlesEnabled
@@ -728,6 +714,7 @@ struct PlayerSettingsView: View {
             if UserDefaults.standard.object(forKey: headerProxyKey) as? Bool != true {
                 UserDefaults.standard.set(true, forKey: headerProxyKey)
             }
+            UserDefaults.standard.set(false, forKey: "vlcPiPEnabled")
             refreshVLCSubtitleStyleStateFromDefaults()
         }
     }

@@ -33,7 +33,7 @@ AltStore and SideStore users can add this source:
 ## Notes
 
 - VLC is the preferred in-app player in this fork.
-- VLC uses VideoLAN's official `VLCKit` `4.0.0a19` CocoaPod so native PiP can use the VLC drawable/controller path. There is no AVPlayer fallback. This is a nightly build of VLCKit, expect bugs until the stable release.
+- VLC is backed by the Swift Package Manager `VLCKitSPM` build. Picture in Picture is not enabled for VLC due to current VLCKit stability limits.
 
 
 
