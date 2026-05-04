@@ -180,6 +180,9 @@ final class VLCRenderer: NSObject {
     private var nativePiPBlockedSeekDeadline: Date?
     private var nativePiPMediaControllerMode: String?
     private var detachedDrawableForBackground = false
+    private var needsForegroundResumeVideoNudge = false
+    private var foregroundResumeVideoNudgeScheduled = false
+    private var foregroundResumeVideoNudgeGeneration = 0
     private var lastLoggedStateCode: Int?
     private var lastProgressLogBucket = -1
     private var lastProgressAnomalyKey: String?
@@ -646,6 +649,7 @@ final class VLCRenderer: NSObject {
         if currentPlaybackSpeed != 1.0 {
             player.rate = Float(currentPlaybackSpeed)
         }
+        scheduleForegroundResumeVideoNudgeIfNeeded(on: player, reason: "play")
         updatePictureInPicturePlaybackState()
         logVLC("play submitted snapshot={\(playerSnapshot(player))}", type: "Stream")
         logDrawableSnapshot("play submitted")
@@ -689,6 +693,7 @@ final class VLCRenderer: NSObject {
     
     func seek(to seconds: Double) {
         logVLC("seek(to:) requested target=\(secondsText(seconds)) snapshot={\(playerSnapshot())}", type: "Progress")
+        clearForegroundResumeVideoNudge(reason: "manual seek(to:)")
         eventQueue.async { [weak self] in
             guard let self, let player = self.mediaPlayer else {
                 Logger.shared.log("[VLCRenderer] seek(to:) dropped: mediaPlayer missing target=\(seconds)", type: "Error")
@@ -700,6 +705,7 @@ final class VLCRenderer: NSObject {
 
     func seek(by seconds: Double) {
         logVLC("seek(by:) requested delta=\(secondsText(seconds)) snapshot={\(playerSnapshot())}", type: "Progress")
+        clearForegroundResumeVideoNudge(reason: "manual seek(by:)")
         eventQueue.async { [weak self] in
             guard let self, let player = self.mediaPlayer else {
                 Logger.shared.log("[VLCRenderer] seek(by:) dropped: mediaPlayer missing delta=\(seconds)", type: "Error")
@@ -840,6 +846,64 @@ final class VLCRenderer: NSObject {
             self.clearLoadingState()
             self.publishPlaybackProgress(from: player)
             self.logVLC("refreshVideoOutputAfterSeek follow-up snapshot={\(self.playerSnapshot(player))}", type: "Progress")
+        }
+    }
+
+    private func markForegroundResumeVideoNudgeNeeded(reason: String) {
+        guard isRunning, !isStopping else { return }
+        needsForegroundResumeVideoNudge = true
+        foregroundResumeVideoNudgeScheduled = false
+        foregroundResumeVideoNudgeGeneration += 1
+        logVLC("foreground resume video nudge marked reason=\(reason) generation=\(foregroundResumeVideoNudgeGeneration) snapshot={\(playerSnapshot())}", type: "Player")
+    }
+
+    private func clearForegroundResumeVideoNudge(reason: String) {
+        guard needsForegroundResumeVideoNudge || foregroundResumeVideoNudgeScheduled else { return }
+        needsForegroundResumeVideoNudge = false
+        foregroundResumeVideoNudgeScheduled = false
+        foregroundResumeVideoNudgeGeneration += 1
+        logVLC("foreground resume video nudge cleared reason=\(reason) generation=\(foregroundResumeVideoNudgeGeneration) snapshot={\(playerSnapshot())}", type: "Player")
+    }
+
+    private func scheduleForegroundResumeVideoNudgeIfNeeded(on player: VLCMediaPlayer, reason: String) {
+        guard needsForegroundResumeVideoNudge else { return }
+        needsForegroundResumeVideoNudge = false
+        foregroundResumeVideoNudgeScheduled = true
+        let generation = foregroundResumeVideoNudgeGeneration
+        logVLC("foreground resume video nudge scheduled reason=\(reason) generation=\(generation) snapshot={\(playerSnapshot(player))}", type: "Player")
+
+        eventQueue.asyncAfter(deadline: .now() + 0.35) { [weak self, weak player] in
+            guard let self, self.isRunning, !self.isStopping, let player else { return }
+            self.foregroundResumeVideoNudgeScheduled = false
+            guard generation == self.foregroundResumeVideoNudgeGeneration else {
+                self.logVLC("foreground resume video nudge skipped stale generation=\(generation) current=\(self.foregroundResumeVideoNudgeGeneration)", type: "Player")
+                return
+            }
+            guard UIApplication.shared.applicationState == .active else {
+                self.logVLC("foreground resume video nudge skipped app=\(self.appStateText()) snapshot={\(self.playerSnapshot(player))}", type: "Player")
+                return
+            }
+            guard !self.isPaused, self.isPlaybackActive(player), !self.isTerminalState(player.state) else {
+                self.logVLC("foreground resume video nudge skipped inactive playback snapshot={\(self.playerSnapshot(player))}", type: "Player")
+                return
+            }
+
+            let duration = self.reliableDuration(from: player)
+            guard duration >= self.minimumReliableDuration else {
+                self.logVLC("foreground resume video nudge skipped duration unavailable snapshot={\(self.playerSnapshot(player))}", type: "Player")
+                return
+            }
+
+            let current = self.resolvedPlaybackProgress(from: player).position
+            let upperBound = max(0, duration - 0.5)
+            let target = min(max(0, current + 0.35), upperBound)
+            guard target > current + 0.01 else {
+                self.logVLC("foreground resume video nudge skipped target unavailable current=\(self.secondsText(current)) duration=\(self.secondsText(duration))", type: "Player")
+                return
+            }
+
+            self.logVLC("foreground resume video nudge applying current=\(self.secondsText(current)) target=\(self.secondsText(target)) generation=\(generation) snapshot={\(self.playerSnapshot(player))}", type: "Player")
+            self.applySeek(to: target, on: player, refreshVideoOutput: true)
         }
     }
 
@@ -1383,6 +1447,8 @@ final class VLCRenderer: NSObject {
         if isPictureInPictureActive {
             Logger.shared.log("[VLCRenderer.PiP] returning to foreground; stopping native VLC PiP", type: "Player")
             stopPictureInPicture()
+        } else {
+            markForegroundResumeVideoNudgeNeeded(reason: "willEnterForeground")
         }
         // Match the stable pre-foreground-restore behavior: normal no-PiP return
         // only reactivates audio. PiP stop still performs its own drawable recovery.
