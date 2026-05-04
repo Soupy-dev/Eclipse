@@ -3839,7 +3839,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             Logger.shared.log("[PlayerVC.progress] non-finite input from renderer. rawPos=\(position) rawDur=\(duration) cachedPos=\(cachedPosition) cachedDur=\(cachedDuration)", type: "Error")
         }
 
-
+        let previousPosition = cachedPosition
+        let playbackAdvanced = safePosition > max(0, previousPosition) + 0.05
 
         DispatchQueue.main.async {
             if duration.isFinite, duration > 0 {
@@ -3867,8 +3868,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
 #endif
 
-            // If playback is progressing, force-hide any lingering loading spinner
-            if !self.isRendererLoading && (self.loadingIndicator.alpha > 0.0 || self.loadingIndicator.isAnimating) {
+            // If playback is progressing, force-hide any lingering loading spinner.
+            if self.isRendererLoading && playbackAdvanced {
+                self.isRendererLoading = false
+                self.loadingIndicator.stopAnimating()
+                self.loadingIndicator.alpha = 0.0
+                self.centerPlayPauseButton.isHidden = false
+                self.updatePlayPauseButton(isPaused: self.rendererIsPausedState(), shouldShowControls: false)
+            } else if !self.isRendererLoading && (self.loadingIndicator.alpha > 0.0 || self.loadingIndicator.isAnimating) {
                 self.loadingIndicator.stopAnimating()
                 self.loadingIndicator.alpha = 0.0
                 self.centerPlayPauseButton.isHidden = false
