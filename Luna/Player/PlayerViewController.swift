@@ -4430,13 +4430,34 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
 
             if waitingForInitialResume {
+                self.cachedPosition = safePosition
+                if safeDuration > 0 {
+                    self.updateProgressHostingController()
+                }
+                self.progressModel.position = safePosition
                 self.progressModel.duration = max(safeDuration, 1.0)
                 self.progressModel.durationIsKnown = durationIsReliable
+                if self.rendererIsPictureInPictureActive() {
+                    self.rendererUpdatePictureInPicturePlaybackState()
+                }
+                if self.isVLCPlayer {
+                    self.updateVLCSubtitleOverlay(for: safePosition)
+                }
+#if !os(tvOS)
+                if self.isVLCPlayer, durationIsReliable {
+                    if !self.skipDataFetched {
+                        self.fetchSkipData()
+                    }
+                    self.updateSkipState(position: safePosition, duration: effectiveDuration)
+                    self.updateNextEpisodeState(position: safePosition, duration: effectiveDuration)
+                }
+#endif
                 if self.isRendererLoading && playbackAdvanced {
                     self.isRendererLoading = false
                     self.loadingIndicator.stopAnimating()
                     self.loadingIndicator.alpha = 0.0
                     self.centerPlayPauseButton.isHidden = false
+                    self.updatePlayPauseButton(isPaused: self.rendererIsPausedState(), shouldShowControls: false)
                 }
                 return
             }

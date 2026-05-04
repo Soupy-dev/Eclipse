@@ -177,6 +177,9 @@ final class VLCRenderer: NSObject {
     private var nativePiPBlockedSeekDeadline: Date?
     private var nativePiPMediaControllerMode: String?
     private var detachedDrawableForBackground = false
+    private var foregroundVideoOutputRefreshPending = false
+    private var foregroundVideoOutputRefreshGeneration = 0
+    private var backgroundedPosition: Double?
     private var lastLoggedStateCode: Int?
     private var lastProgressLogBucket = -1
     private var lastProgressAnomalyKey: String?
@@ -311,6 +314,100 @@ final class VLCRenderer: NSObject {
         reattachRenderingView()
     }
 
+    private func markForegroundVideoOutputRefreshNeeded(reason: String) {
+        foregroundVideoOutputRefreshPending = true
+        backgroundedPosition = cachedPosition
+        foregroundVideoOutputRefreshGeneration += 1
+        logVLC("foreground video output refresh marked reason=\(reason) generation=\(foregroundVideoOutputRefreshGeneration) restore=\(secondsText(backgroundedPosition)) snapshot={\(playerSnapshot())}", type: "Player")
+    }
+
+    private func scheduleForegroundVideoOutputRefresh(reason: String, delays: [TimeInterval] = [0.05, 0.35]) {
+        guard foregroundVideoOutputRefreshPending else {
+            logVLC("foreground video output refresh schedule skipped reason=\(reason) pending=false snapshot={\(playerSnapshot())}", type: "Player")
+            return
+        }
+        let generation = foregroundVideoOutputRefreshGeneration
+        logVLC("foreground video output refresh scheduled reason=\(reason) generation=\(generation) app=\(appStateText())", type: "Player")
+        for delay in delays {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self else { return }
+                let consume = !self.isPaused
+                _ = self.refreshForegroundVideoOutputIfNeeded(
+                    reason: "\(reason)+\(String(format: "%.2f", delay))s",
+                    generation: generation,
+                    consume: consume
+                )
+            }
+        }
+    }
+
+    @discardableResult
+    private func refreshForegroundVideoOutputIfNeeded(reason: String, generation: Int? = nil, consume: Bool = true) -> Bool {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                _ = self?.refreshForegroundVideoOutputIfNeeded(reason: reason, generation: generation, consume: consume)
+            }
+            return false
+        }
+        guard isRunning, !isStopping else { return false }
+        guard foregroundVideoOutputRefreshPending else {
+            logVLC("foreground video output refresh skipped reason=\(reason) pending=false snapshot={\(playerSnapshot())}", type: "Player")
+            return false
+        }
+        if let generation, generation != foregroundVideoOutputRefreshGeneration {
+            logVLC("foreground video output refresh skipped reason=\(reason) staleGeneration=\(generation) current=\(foregroundVideoOutputRefreshGeneration)", type: "Player")
+            return false
+        }
+        guard UIApplication.shared.applicationState == .active else {
+            logVLC("foreground video output refresh waiting reason=\(reason) app=\(appStateText()) snapshot={\(playerSnapshot())}", type: "Player")
+            return false
+        }
+        guard !isPictureInPictureActive else {
+            logVLC("foreground video output refresh skipped reason=\(reason) PiP active snapshot={\(playerSnapshot())}", type: "Player")
+            return false
+        }
+        guard let player = mediaPlayer else { return false }
+
+        let restorePosition = backgroundedPosition ?? cachedPosition
+        if consume {
+            foregroundVideoOutputRefreshPending = false
+        }
+        logVLC("foreground video output refresh applying reason=\(reason) consume=\(consume) restore=\(secondsText(restorePosition)) snapshot={\(playerSnapshot(player))}", type: "Player")
+
+        mediaPlayer?.drawable = nil
+        vlcView.isHidden = false
+        vlcView.alpha = 1
+        vlcView.superview?.setNeedsLayout()
+        vlcView.superview?.layoutIfNeeded()
+        vlcView.setNeedsLayout()
+        vlcView.layoutIfNeeded()
+        mediaPlayer?.drawable = vlcView
+        logDrawableSnapshot("foreground video output refresh applied \(reason)")
+
+        eventQueue.asyncAfter(deadline: .now() + 0.08) { [weak self, weak player] in
+            guard let self, self.isRunning, !self.isStopping, let player else { return }
+            guard UIApplication.shared.applicationState != .background else { return }
+            self.ensureAudioSessionActive()
+            if self.isPaused {
+                if restorePosition > 0 {
+                    self.cachedPosition = restorePosition
+                }
+                self.refreshPausedVideoFrameIfPossible(player)
+                self.stopProgressPolling()
+            } else {
+                player.play()
+                if self.currentPlaybackSpeed != 1.0 {
+                    player.rate = Float(self.currentPlaybackSpeed)
+                }
+                self.startProgressPolling()
+            }
+            self.publishPlaybackProgress(from: player)
+            self.updatePictureInPicturePlaybackState()
+            self.logVLC("foreground video output refresh follow-up reason=\(reason) snapshot={\(self.playerSnapshot(player))}", type: "Player")
+        }
+        return true
+    }
+
     private func recoverRenderingViewAfterPictureInPictureStop(reloadMedia: Bool = false) {
         guard isRunning, !isStopping else { return }
         let restorePosition = cachedPosition
@@ -413,6 +510,12 @@ final class VLCRenderer: NSObject {
                 self,
                 selector: #selector(handleAppWillEnterForeground),
                 name: UIApplication.willEnterForegroundNotification,
+                object: nil
+            )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleAppDidBecomeActive),
+                name: UIApplication.didBecomeActiveNotification,
                 object: nil
             )
             
@@ -611,6 +714,10 @@ final class VLCRenderer: NSObject {
 
         guard let player = mediaPlayer else { return }
         ensureAudioSessionActive()
+        let refreshedForegroundOutput = refreshForegroundVideoOutputIfNeeded(reason: "play", consume: true)
+        if refreshedForegroundOutput {
+            logVLC("play refreshed foreground video output before resume snapshot={\(playerSnapshot(player))}", type: "Player")
+        }
 
         // If VLC's media has stopped or ended (e.g. network timeout while backgrounded),
         // calling play() alone won't work — reload the stream and seek back.
@@ -1301,9 +1408,11 @@ final class VLCRenderer: NSObject {
         logVLC("appDidEnterBackground snapshot={\(playerSnapshot())}", type: "Player")
         logDrawableSnapshot("appDidEnterBackground")
         scheduleDrawableSnapshots("appDidEnterBackground followup", delays: [0.5, 1.5])
+        markForegroundVideoOutputRefreshNeeded(reason: "didEnterBackground")
 
         if isPictureInPictureActive {
             if isPictureInPictureSettingEnabled {
+                foregroundVideoOutputRefreshPending = false
                 Logger.shared.log("[VLCRenderer.PiP] entering background with native VLC PiP already active; preserving playback", type: "Player")
                 return
             }
@@ -1347,6 +1456,12 @@ final class VLCRenderer: NSObject {
             Logger.shared.log("[VLCRenderer.PiP] foreground found a stale background-detached drawable; restoring once", type: "Player")
             restoreBackgroundDetachedDrawableIfNeeded()
         }
+        scheduleForegroundVideoOutputRefresh(reason: "willEnterForeground")
+    }
+
+    @objc private func handleAppDidBecomeActive() {
+        logVLC("appDidBecomeActive snapshot={\(playerSnapshot())}", type: "Player")
+        scheduleForegroundVideoOutputRefresh(reason: "didBecomeActive", delays: [0.02, 0.25])
     }
 
     private func refreshPausedVideoFrameIfPossible(_ player: VLCMediaPlayer) {
