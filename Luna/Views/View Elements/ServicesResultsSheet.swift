@@ -1298,7 +1298,7 @@ struct ModulesSearchResultsSheet: View {
                         report.context.streamURL,
                         addon: addon,
                         subtitles: report.context.subtitles,
-                        subtitleNames: report.context.subtitleNames,
+                        subtitleNames: report.context.subtitleNames ?? [],
                         headers: report.context.headers,
                         autoModeLaunch: true,
                         retryCount: attempts + 1
