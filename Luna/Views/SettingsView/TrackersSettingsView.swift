@@ -210,6 +210,56 @@ struct TrackersSettingsView: View {
     }
 
     @ViewBuilder
+    private var malImportSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Import MAL Library")
+                        .font(.headline)
+                        .foregroundColor(.white)
+
+                    Text("Import MAL lists as Eclipse collections and reader progress")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                if trackerManager.isImportingMAL {
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                } else {
+                    Button(action: { showMALImportConfirmation = true }) {
+                        Text("Import")
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.blue)
+                            .cornerRadius(6)
+                    }
+                }
+            }
+
+            if let progress = trackerManager.malImportProgress {
+                Text(progress)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
+            if let error = trackerManager.malImportError {
+                Text(error)
+                    .font(.caption2)
+                    .foregroundColor(.orange)
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(12)
+    }
+
+    @ViewBuilder
     private func trackerRow(
         service: TrackerService,
         isConnected: Bool,
@@ -393,56 +443,6 @@ private struct TrackerSyncToolsSheet: View {
                 .disabled(trackerManager.isRunningSyncTool || preview == nil)
             }
             .font(.caption.weight(.medium))
-        }
-        .padding()
-        .background(Color.gray.opacity(0.1))
-        .cornerRadius(12)
-    }
-
-    @ViewBuilder
-    private var malImportSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Import MAL Library")
-                        .font(.headline)
-                        .foregroundColor(.white)
-
-                    Text("Import MAL lists as Eclipse collections and reader progress")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
-
-                Spacer()
-
-                if trackerManager.isImportingMAL {
-                    ProgressView()
-                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                } else {
-                    Button(action: { showMALImportConfirmation = true }) {
-                        Text("Import")
-                            .font(.caption)
-                            .fontWeight(.medium)
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 6)
-                            .background(Color.blue)
-                            .cornerRadius(6)
-                    }
-                }
-            }
-
-            if let progress = trackerManager.malImportProgress {
-                Text(progress)
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-            }
-
-            if let error = trackerManager.malImportError {
-                Text(error)
-                    .font(.caption2)
-                    .foregroundColor(.orange)
-            }
         }
         .padding()
         .background(Color.gray.opacity(0.1))
