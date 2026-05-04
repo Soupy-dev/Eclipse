@@ -2102,7 +2102,7 @@ final class TrackerManager: NSObject, ObservableObject {
                 if let malId = item.media.idMal {
                     cacheMyAnimeListId(malId, forAniListId: item.media.id, mediaType: "ANIME")
                 }
-                RemoteAnimeProgress(
+                return RemoteAnimeProgress(
                     anilistId: item.media.id,
                     malId: item.media.idMal,
                     title: item.media.title.english ?? item.media.title.romaji ?? item.media.title.native ?? "Unknown",
@@ -2267,7 +2267,7 @@ final class TrackerManager: NSObject, ObservableObject {
                 if let malId = item.media.idMal {
                     cacheMyAnimeListId(malId, forAniListId: item.media.id, mediaType: "MANGA")
                 }
-                RemoteMangaProgress(
+                return RemoteMangaProgress(
                     anilistId: item.media.id,
                     malId: item.media.idMal,
                     title: item.media.title.english ?? item.media.title.romaji ?? item.media.title.native ?? "Unknown",
