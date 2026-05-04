@@ -120,7 +120,9 @@ final class VLCRenderer: NSObject {
     }
 
     private static func isPictureInPictureEnabledInDefaults() -> Bool {
-        UserDefaults.standard.set(false, forKey: "vlcPiPEnabled")
+        if UserDefaults.standard.object(forKey: "vlcPiPEnabled") as? Bool != false {
+            UserDefaults.standard.set(false, forKey: "vlcPiPEnabled")
+        }
         return false
     }
 
@@ -1227,7 +1229,9 @@ final class VLCRenderer: NSObject {
 
     func handlePictureInPictureSettingChanged() {
         logVLC("handlePictureInPictureSettingChanged ignored; VLC PiP is disabled on stable VLCKitSPM path", type: "Player")
-        UserDefaults.standard.set(false, forKey: "vlcPiPEnabled")
+        if UserDefaults.standard.object(forKey: "vlcPiPEnabled") as? Bool != false {
+            UserDefaults.standard.set(false, forKey: "vlcPiPEnabled")
+        }
         delegate?.renderer(self, didChangePictureInPictureAvailability: false)
         delegate?.renderer(self, didChangePictureInPictureActive: false)
         syncRenderingViewWithPictureInPictureSetting(reason: "PiP disabled stable SPM", reassignPlayerDrawable: true)
