@@ -251,10 +251,6 @@ final class VLCHeaderProxy {
         }
 
         do {
-            let targetDescription = "\(targetURL.host ?? "unknown")\(targetURL.path)"
-            let requestedRange = request.value(forHTTPHeaderField: "Range") ?? "none"
-            Logger.shared.log("VLCHeaderProxy: upstream request method=\(method) range=\(requestedRange) target=\(targetDescription)", type: "Stream")
-
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 sendSimpleResponse(connection, statusCode: 502, body: "Bad gateway")
@@ -262,9 +258,7 @@ final class VLCHeaderProxy {
             }
 
             let isHead = method == "HEAD"
-            let contentType = http.value(forHTTPHeaderField: "Content-Type") ?? "unknown"
             let (responseData, responseHeaders) = rewriteIfNeeded(http: http, data: data, targetURL: targetURL, sessionId: sessionId)
-            Logger.shared.log("VLCHeaderProxy: upstream response status=\(http.statusCode) bytes=\(data.count) type=\(contentType) target=\(targetDescription)", type: "Stream")
 
             sendResponse(
                 connection,
@@ -273,7 +267,6 @@ final class VLCHeaderProxy {
                 body: isHead ? Data() : responseData
             )
         } catch {
-            Logger.shared.log("VLCHeaderProxy: upstream request failed: \(error)", type: "Error")
             sendSimpleResponse(connection, statusCode: 502, body: "Upstream error")
         }
     }

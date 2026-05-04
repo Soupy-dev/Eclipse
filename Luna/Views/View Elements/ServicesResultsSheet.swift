@@ -135,7 +135,6 @@ struct ModulesSearchResultsSheet: View {
     @State private var autoModeDidRun = false
     @State private var autoModeRunToken: String?
     @State private var autoModeCancelled = false
-    @State private var autoModePlaybackFailedSourceIds: Set<String> = []
     @State private var showManualPicker = false
     @State private var sheetHostController: UIViewController?
 
@@ -394,12 +393,7 @@ struct ModulesSearchResultsSheet: View {
     private var activeAutoModeItems: [ResultItem] {
         _ = healthStore.version
         let configuredIds = selectedAutoModeSourceIds
-        let selectedItems = sortedResultItems.filter {
-            let sourceId = autoModeSourceId(for: $0)
-            return configuredIds.contains(sourceId)
-                && !healthStore.shouldSkipForAutoMode(sourceId: sourceId)
-                && !autoModePlaybackFailedSourceIds.contains(sourceId)
-        }
+        let selectedItems = sortedResultItems.filter { configuredIds.contains(autoModeSourceId(for: $0)) }
         let byId = Dictionary(uniqueKeysWithValues: selectedItems.map { (autoModeSourceId(for: $0), $0) })
         let orderedIds = UserDefaults.standard.stringArray(forKey: "servicesAutoModeSourceOrderIds") ?? []
         var ordered = orderedIds.compactMap { byId[$0] }
@@ -782,17 +776,7 @@ struct ModulesSearchResultsSheet: View {
             return "Auto Mode is enabled, but no active service/addon is selected. Please select at least one source in Services settings."
         }
 
-        let healthSkipped = selectedActive.filter { healthStore.shouldSkipForAutoMode(sourceId: $0.sourceId) }
-        if !healthSkipped.isEmpty, healthSkipped.count == selectedActive.count {
-            let names = healthSkipped.map(\.displayName).joined(separator: ", ")
-            return "Auto Mode skipped \(names) because today's health check says \(healthSkipped.count == 1 ? "it is" : "they are") unreachable. Try manual selection or check Services settings."
-        }
-
-        if !autoModePlaybackFailedSourceIds.isEmpty {
-            return "Auto Mode tried the selected sources, but playback failed. Try again or choose a source manually."
-        }
-
-        return "Auto Mode is enabled, but no active service/addon is selected. Please select at least one source in Services settings."
+        return "Auto Mode could not find a playable result from the selected sources. Try again or choose a source manually."
     }
 
     private func autoModeSourceId(for item: ResultItem) -> String {
@@ -1075,7 +1059,6 @@ struct ModulesSearchResultsSheet: View {
         autoModeRunToken = requestToken
         autoModeDidRun = true
         autoModeCancelled = false
-        autoModePlaybackFailedSourceIds.removeAll()
         viewModel.moduleResults.removeAll()
         viewModel.stremioResults.removeAll()
         viewModel.searchedServices.removeAll()
@@ -1244,90 +1227,33 @@ struct ModulesSearchResultsSheet: View {
 
     @MainActor
     private func handleServicePlaybackPreparationFailure(_ service: Service, message: String, autoModeLaunch: Bool? = nil) {
-        let shouldContinueAutoMode = autoModeLaunch ?? viewModel.pendingPlaybackAutoMode
-        guard shouldContinueAutoMode else {
-            viewModel.isFetchingStreams = false
-            viewModel.streamError = message
-            viewModel.showingStreamError = true
-            return
-        }
-
-        let sourceId = SourceHealth.serviceId(service)
-        SourceHealthStore.shared.recordPlaybackFailure(
-            sourceId: sourceId,
-            sourceName: service.metadata.sourceName,
-            reason: message,
-            isSourceFailure: true
-        )
-        autoModePlaybackFailedSourceIds.insert(sourceId)
-        viewModel.currentFetchingTitle = service.metadata.sourceName
-        viewModel.streamFetchProgress = "\(service.metadata.sourceName) did not return a playable stream. Searching another source..."
-
-        Task { @MainActor in
-            await runOrderedAutoModeSelection()
-        }
+        viewModel.isFetchingStreams = false
+        viewModel.streamError = message
+        viewModel.showingStreamError = true
     }
 
     @MainActor
     private func handleStremioPlaybackPreparationFailure(_ addon: StremioAddon, message: String, autoModeLaunch: Bool) {
-        guard autoModeLaunch else {
-            viewModel.isFetchingStreams = false
-            viewModel.streamError = message
-            viewModel.showingStreamError = true
-            return
-        }
-
-        let sourceId = SourceHealth.stremioId(addon)
-        SourceHealthStore.shared.recordPlaybackFailure(
-            sourceId: sourceId,
-            sourceName: addon.manifest.name,
-            reason: message,
-            isSourceFailure: true
-        )
-        autoModePlaybackFailedSourceIds.insert(sourceId)
-        viewModel.currentFetchingTitle = addon.manifest.name
-        viewModel.streamFetchProgress = "\(addon.manifest.name) did not return a playable stream. Searching another source..."
-
-        Task { @MainActor in
-            await runOrderedAutoModeSelection()
-        }
+        viewModel.isFetchingStreams = false
+        viewModel.streamError = message
+        viewModel.showingStreamError = true
     }
 
     @MainActor
     private func handlePlaybackStartupFailure(_ report: PlaybackFailureReport) {
-        guard report.context.autoMode else { return }
-
-        let sourceId = report.context.sourceId
-        guard report.isSourceFailure else {
-            showAutoModeFailure("Playback from \(report.context.sourceName) is taking too long, but your connection also looks slow. Try again when the connection is stable or choose a source manually.")
-            return
-        }
-
-        autoModePlaybackFailedSourceIds.insert(sourceId)
-        viewModel.currentFetchingTitle = report.context.sourceName
-        viewModel.streamFetchProgress = "\(report.context.sourceName) failed. Searching another source..."
-
-        Task { @MainActor in
-            await runOrderedAutoModeSelection()
-        }
+        viewModel.isFetchingStreams = false
+        viewModel.streamError = "\(report.context.sourceName) could not start playback. \(report.message)"
+        viewModel.showingStreamError = true
     }
 
     private func configurePlaybackRecovery(_ player: PlayerViewController, context: PlaybackLaunchContext) {
-        player.playbackLaunchContext = context
-        player.onPlaybackStartupFailure = { report in
-            Task { @MainActor in
-                handlePlaybackStartupFailure(report)
-            }
-        }
+        player.playbackLaunchContext = nil
+        player.onPlaybackStartupFailure = nil
     }
 
     private func configurePlaybackRecovery(_ player: NormalPlayer, context: PlaybackLaunchContext) {
-        player.playbackLaunchContext = context
-        player.onPlaybackStartupFailure = { report in
-            Task { @MainActor in
-                handlePlaybackStartupFailure(report)
-            }
-        }
+        player.playbackLaunchContext = nil
+        player.onPlaybackStartupFailure = nil
     }
 
     @MainActor

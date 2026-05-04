@@ -395,6 +395,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var volumePanStartLevel: Float = 0.5
     private var isBrightnessControlActive = false
     private var isVolumeControlActive = false
+    private var outputVolumeObservation: NSKeyValueObservation?
 #if canImport(MediaPlayer)
     private weak var systemVolumeSlider: UISlider?
 #endif
@@ -1125,6 +1126,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         setNeedsStatusBarAppearanceUpdate()
+        if isVLCPlayer {
+            refreshGestureControlLevels(animated: false)
+        }
     }
     
     override func viewWillDisappear(_ animated: Bool) {
@@ -1165,6 +1169,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         audioMenuDebounceTimer?.invalidate()
         subtitleMenuDebounceTimer?.invalidate()
         playbackStartupWorkItem?.cancel()
+#if !os(tvOS)
+        outputVolumeObservation?.invalidate()
+        outputVolumeObservation = nil
+#endif
         if let mpv = mpvRenderer {
             mpv.delegate = nil
         } else if let vlc = vlcRenderer {
@@ -1253,7 +1261,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
         logVLCUI("load resume prepared pendingSeek=\(secondsText(pendingSeekTime)) progressCached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) launchContext=\(String(describing: playbackLaunchContext))", type: "Progress")
         rendererPrepareInitialSeek(to: pendingSeekTime)
-        preparePlaybackStartupMonitoring(for: url, headers: headers ?? [:])
         rendererLoad(url: url, preset: preset, headers: headers)
         applyDefaultPlaybackSpeed()
         
@@ -1268,15 +1275,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         playbackDidStart = false
         playbackFailureHandled = false
         playbackSlowProbeCount = 0
-
-        guard playbackLaunchContext != nil,
-              !url.isFileURL,
-              url.host != "127.0.0.1",
-              url.host != "localhost" else {
-            return
-        }
-
-        schedulePlaybackStartupCheck(url: url, headers: headers, delay: isVLCPlayer ? 12 : 35)
+        Logger.shared.log("[PlayerVC.PlaybackStart] smart startup recovery disabled; using normal player/proxy behavior", type: "Stream")
     }
 
     private func schedulePlaybackStartupCheck(url: URL, headers: [String: String], delay: TimeInterval) {
@@ -1295,6 +1294,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func markPlaybackStarted(reason: String) {
+        guard playbackStartupWorkItem != nil else { return }
         guard !playbackDidStart else { return }
         playbackDidStart = true
         playbackStartupWorkItem?.cancel()
@@ -1792,6 +1792,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         brightnessPanGesture = pan
         videoContainer.addGestureRecognizer(pan)
         loadBrightnessLevel()
+        setupBrightnessObservation()
         updateBrightnessControlVisibility()
 #endif
     }
@@ -1804,6 +1805,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         volumePanGesture = pan
         videoContainer.addGestureRecognizer(pan)
         loadVolumeLevel()
+        setupVolumeObservation()
         updateVolumeControlVisibility()
 #endif
     }
@@ -1817,6 +1819,19 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         brightnessLevel = max(0.0, min(stored, 1.0))
         brightnessSlider.value = brightnessLevel
         applyBrightnessLevel(brightnessLevel)
+    }
+
+    private func setupBrightnessObservation() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(screenBrightnessChanged(_:)),
+            name: UIScreen.brightnessDidChangeNotification,
+            object: UIScreen.main
+        )
+    }
+
+    @objc private func screenBrightnessChanged(_ notification: Notification) {
+        refreshGestureControlLevels(animated: true)
     }
 
     @objc private func brightnessSliderChanged(_ sender: UISlider) {
@@ -1909,6 +1924,34 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #else
         volumeSlider.value = AVAudioSession.sharedInstance().outputVolume
 #endif
+    }
+
+    private func setupVolumeObservation() {
+        outputVolumeObservation = AVAudioSession.sharedInstance().observe(\.outputVolume, options: [.initial, .new]) { [weak self] session, _ in
+            let level = max(0.0, min(session.outputVolume, 1.0))
+            DispatchQueue.main.async {
+                guard let self, !self.isClosing else { return }
+                self.volumeSlider.setValue(level, animated: true)
+            }
+        }
+    }
+
+    private func refreshGestureControlLevels(animated: Bool) {
+        if isClosing { return }
+
+        let brightness = max(0.0, min(Float(UIScreen.main.brightness), 1.0))
+        brightnessLevel = brightness
+        UserDefaults.standard.set(brightness, forKey: brightnessLevelKey)
+        brightnessSlider.setValue(brightness, animated: animated)
+
+        var volume = AVAudioSession.sharedInstance().outputVolume
+#if canImport(MediaPlayer)
+        if systemVolumeSlider == nil {
+            systemVolumeSlider = systemVolumeView.subviews.compactMap { $0 as? UISlider }.first
+        }
+        volume = systemVolumeSlider?.value ?? volume
+#endif
+        volumeSlider.setValue(max(0.0, min(volume, 1.0)), animated: animated)
     }
 
     @objc private func volumeSliderChanged(_ sender: UISlider) {
@@ -4646,7 +4689,6 @@ extension PlayerViewController: VLCRendererDelegate {
             return
         }
         Logger.shared.log("PlayerViewController: VLC error: \(message)", type: "Error")
-        handlePlaybackStartupFailure(message, isSourceFailure: true)
     }
 
     func rendererDidChangeTracks(_ renderer: VLCRenderer) {
@@ -4804,6 +4846,11 @@ extension PlayerViewController: PiPControllerDelegate {
     @objc private func appWillEnterForeground() {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+#if !os(tvOS)
+            if self.isVLCPlayer {
+                self.refreshGestureControlLevels(animated: false)
+            }
+#endif
             if let vlc = self.vlcRenderer {
                 if vlc.isPictureInPictureActive {
                     Logger.shared.log("[PlayerVC.PiP] returning to foreground; stopping native VLC PiP", type: "Player")
