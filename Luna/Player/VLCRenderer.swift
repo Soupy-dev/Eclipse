@@ -157,6 +157,7 @@ final class VLCRenderer: NSObject {
     private var nativePiPMediaControllerMode: String?
     private var wasPausedBeforeBackground = true
     private var backgroundedPosition: Double?
+    private var foregroundRestoreGeneration = 0
     
     weak var delegate: VLCRendererDelegate?
     
@@ -288,6 +289,12 @@ final class VLCRenderer: NSObject {
                 self,
                 selector: #selector(handleAppWillEnterForeground),
                 name: UIApplication.willEnterForegroundNotification,
+                object: nil
+            )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleAppDidBecomeActive),
+                name: UIApplication.didBecomeActiveNotification,
                 object: nil
             )
             
@@ -1041,11 +1048,50 @@ final class VLCRenderer: NSObject {
             Logger.shared.log("[VLCRenderer.PiP] returning to foreground; stopping native VLC PiP", type: "Player")
             stopPictureInPicture()
         }
+        restoreVideoAfterForeground()
+        scheduleForegroundVideoRestoreFollowUp()
+    }
+
+    @objc private func handleAppDidBecomeActive() {
+        guard !isPictureInPictureActive else { return }
+        restoreVideoAfterForeground()
+    }
+
+    private func scheduleForegroundVideoRestoreFollowUp() {
+        foregroundRestoreGeneration += 1
+        let generation = foregroundRestoreGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self, self.foregroundRestoreGeneration == generation else { return }
+            self.restoreVideoAfterForeground()
+        }
+    }
+
+    private func restoreVideoAfterForeground() {
+        guard isRunning, !isStopping else { return }
+        guard UIApplication.shared.applicationState != .background else { return }
         // Re-activate the audio session that iOS may have deactivated during background.
         ensureAudioSessionActive()
         reattachRenderingView()
-        if wasPausedBeforeBackground {
+        if wasPausedBeforeBackground || isPaused {
             restorePausedVideoAfterForeground()
+        } else {
+            recoverActiveVideoAfterForeground()
+        }
+    }
+
+    private func recoverActiveVideoAfterForeground() {
+        recoverRenderingViewAfterPictureInPictureStop(reloadMedia: false)
+        eventQueue.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            guard let self, self.isRunning, !self.isStopping, let player = self.mediaPlayer, !self.isPaused else { return }
+            self.ensureAudioSessionActive()
+            player.play()
+            if self.currentPlaybackSpeed != 1.0 {
+                player.rate = Float(self.currentPlaybackSpeed)
+            }
+            self.startProgressPolling()
+            self.clearLoadingState()
+            self.updatePictureInPicturePlaybackState()
+            self.publishPlaybackProgress(from: player)
         }
     }
 

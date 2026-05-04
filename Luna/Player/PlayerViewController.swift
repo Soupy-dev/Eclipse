@@ -1546,20 +1546,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 #if !os(tvOS)
         NSLayoutConstraint.activate([
-            brightnessContainer.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
-            brightnessContainer.centerYAnchor.constraint(equalTo: videoContainer.centerYAnchor),
-            brightnessContainer.widthAnchor.constraint(equalToConstant: 52),
-            brightnessContainer.heightAnchor.constraint(equalToConstant: 220),
+            brightnessContainer.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 10),
+            brightnessContainer.centerYAnchor.constraint(equalTo: videoContainer.centerYAnchor, constant: -12),
+            brightnessContainer.widthAnchor.constraint(equalToConstant: 44),
+            brightnessContainer.heightAnchor.constraint(equalToConstant: 154),
 
             brightnessSlider.centerXAnchor.constraint(equalTo: brightnessContainer.contentView.centerXAnchor),
             brightnessSlider.centerYAnchor.constraint(equalTo: brightnessContainer.contentView.centerYAnchor),
-            brightnessSlider.widthAnchor.constraint(equalTo: brightnessContainer.contentView.heightAnchor, multiplier: 0.82),
-            brightnessSlider.heightAnchor.constraint(equalToConstant: 34),
+            brightnessSlider.widthAnchor.constraint(equalTo: brightnessContainer.contentView.heightAnchor, multiplier: 0.72),
+            brightnessSlider.heightAnchor.constraint(equalToConstant: 28),
 
             brightnessIcon.centerXAnchor.constraint(equalTo: brightnessContainer.contentView.centerXAnchor),
-            brightnessIcon.topAnchor.constraint(equalTo: brightnessContainer.contentView.topAnchor, constant: 8),
-            brightnessIcon.heightAnchor.constraint(equalToConstant: 20),
-            brightnessIcon.widthAnchor.constraint(equalToConstant: 20),
+            brightnessIcon.topAnchor.constraint(equalTo: brightnessContainer.contentView.topAnchor, constant: 6),
+            brightnessIcon.heightAnchor.constraint(equalToConstant: 18),
+            brightnessIcon.widthAnchor.constraint(equalToConstant: 18),
 
             volumeContainer.leadingAnchor.constraint(greaterThanOrEqualTo: videoContainer.safeAreaLayoutGuide.leadingAnchor, constant: 12),
             volumeContainer.trailingAnchor.constraint(equalTo: videoContainer.safeAreaLayoutGuide.trailingAnchor, constant: -12),
@@ -1781,10 +1781,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func updateBrightnessControlVisibility() {
         if isClosing { return }
-        if !isBrightnessControlEnabled || !isBrightnessControlActive {
+        if !isBrightnessControlEnabled || (!controlsVisible && !isBrightnessControlActive) {
             brightnessContainer.isHidden = true
             brightnessContainer.alpha = 0.0
+            return
         }
+        brightnessContainer.isHidden = false
+        brightnessContainer.alpha = 1.0
+        videoContainer.bringSubviewToFront(brightnessContainer)
+        bringTimedActionButtonsToFront()
     }
 
     private func showBrightnessControl() {
@@ -1797,6 +1802,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func hideBrightnessControlSoon() {
         isBrightnessControlActive = false
+        guard !isBrightnessControlEnabled else {
+            updateBrightnessControlVisibility()
+            return
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             guard let self, !self.isBrightnessControlActive else { return }
             UIView.animate(withDuration: 0.2) {
@@ -1867,10 +1876,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func updateVolumeControlVisibility() {
         if isClosing { return }
-        if !isVolumeControlEnabled || !isVolumeControlActive {
+        if !isVolumeControlEnabled || (!controlsVisible && !isVolumeControlActive) {
             volumeContainer.isHidden = true
             volumeContainer.alpha = 0.0
+            return
         }
+        volumeContainer.isHidden = false
+        volumeContainer.alpha = 1.0
+        videoContainer.bringSubviewToFront(volumeContainer)
+        bringTimedActionButtonsToFront()
     }
 
     private func showVolumeControl() {
@@ -1883,6 +1897,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func hideVolumeControlSoon() {
         isVolumeControlActive = false
+        guard !isVolumeControlEnabled else {
+            updateVolumeControlVisibility()
+            return
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             guard let self, !self.isVolumeControlActive else { return }
             UIView.animate(withDuration: 0.2) {
@@ -3931,6 +3949,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         controlsHideWorkItem?.cancel()
         controlsVisible = true
         updateBrightnessControlVisibility()
+        updateVolumeControlVisibility()
 
         // Ensure controls sit above the video layer/view
         videoContainer.bringSubviewToFront(controlsOverlayView)
@@ -4025,6 +4044,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 if self.skip85sButtonShown {
                     self.skip85sButton.isHidden = true
                 }
+                self.updateBrightnessControlVisibility()
+                self.updateVolumeControlVisibility()
 #endif
             }
         }
@@ -4037,13 +4058,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         #if !os(tvOS)
-        if isBrightnessControlEnabled {
+        if isBrightnessControlEnabled && !brightnessContainer.isHidden && brightnessContainer.alpha > 0.01 {
             let location = touch.location(in: brightnessContainer)
             if brightnessContainer.bounds.contains(location) {
                 return false
             }
         }
-        if isVolumeControlEnabled {
+        if isVolumeControlEnabled && !volumeContainer.isHidden && volumeContainer.alpha > 0.01 {
             let location = touch.location(in: volumeContainer)
             if volumeContainer.bounds.contains(location) {
                 return false
