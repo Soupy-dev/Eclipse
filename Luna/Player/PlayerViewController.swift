@@ -295,16 +295,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
 #if !os(tvOS)
     private let brightnessContainer: UIVisualEffectView = {
-        let effect: UIBlurEffect
-        if #available(iOS 15.0, *) {
-            effect = UIBlurEffect(style: .systemThinMaterialDark)
-        } else {
-            effect = UIBlurEffect(style: .dark)
-        }
-        let v = UIVisualEffectView(effect: effect)
+        let v = UIVisualEffectView(effect: nil)
         v.translatesAutoresizingMaskIntoConstraints = false
-        v.layer.cornerRadius = 12
-        v.clipsToBounds = true
+        v.backgroundColor = .clear
+        v.contentView.backgroundColor = .clear
+        v.clipsToBounds = false
         v.alpha = 0.0
         v.isHidden = true
         return v
@@ -332,16 +327,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }()
 
     private let volumeContainer: UIVisualEffectView = {
-        let effect: UIBlurEffect
-        if #available(iOS 15.0, *) {
-            effect = UIBlurEffect(style: .systemThinMaterialDark)
-        } else {
-            effect = UIBlurEffect(style: .dark)
-        }
-        let v = UIVisualEffectView(effect: effect)
+        let v = UIVisualEffectView(effect: nil)
         v.translatesAutoresizingMaskIntoConstraints = false
-        v.layer.cornerRadius = 12
-        v.clipsToBounds = true
+        v.backgroundColor = .clear
+        v.contentView.backgroundColor = .clear
+        v.clipsToBounds = false
         v.alpha = 0.0
         v.isHidden = true
         return v
@@ -390,6 +380,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     class ProgressModel: ObservableObject {
         @Published var position: Double = 0
         @Published var duration: Double = 1
+        @Published var durationIsKnown: Bool = false
         @Published var skipSegments: [(start: Double, end: Double)] = []
     }
     private var progressModel = ProgressModel()
@@ -564,6 +555,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var audioMenuDebounceTimer: Timer?
     private var subtitleMenuDebounceTimer: Timer?
     private var vlcSubtitleOverlayBottomConstraint: NSLayoutConstraint?
+#if !os(tvOS)
+    private var volumeTopConstraint: NSLayoutConstraint?
+    private var volumeWidthConstraint: NSLayoutConstraint?
+    private var volumeHeightConstraint: NSLayoutConstraint?
+#endif
     
     // MARK: - Renderer Wrapper Methods
     // These methods abstract away differences between MPVSoftwareRenderer and VLCRenderer
@@ -1139,6 +1135,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+#if !os(tvOS)
+        updateGestureControlLayoutForCurrentSize()
+#endif
         
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -1151,6 +1150,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         
         CATransaction.commit()
     }
+
+#if !os(tvOS)
+    private func updateGestureControlLayoutForCurrentSize() {
+        let isPortrait = view.bounds.height > view.bounds.width
+        volumeWidthConstraint?.constant = isPortrait ? 154 : 220
+        volumeHeightConstraint?.constant = isPortrait ? 32 : 36
+        volumeTopConstraint?.constant = isPortrait ? 62 : 12
+    }
+#endif
     
     deinit {
         isClosing = true
@@ -1204,6 +1212,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         openSubtitlesLoadedURLs.removeAll()
         vlcExternalSubtitlePriorityDeadline = nil
         defaultPlaybackSpeedApplied = false
+        cachedPosition = 0
+        cachedDuration = 0
+        progressModel.position = 0
+        progressModel.duration = 1
+        progressModel.durationIsKnown = false
         updatePiPButtonVisibility()
         updatePlayerTitle()
         let mediaInfoLabel: String = {
@@ -1261,7 +1274,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return
         }
 
-        schedulePlaybackStartupCheck(url: url, headers: headers, delay: 35)
+        schedulePlaybackStartupCheck(url: url, headers: headers, delay: isVLCPlayer ? 12 : 35)
     }
 
     private func schedulePlaybackStartupCheck(url: URL, headers: [String: String], delay: TimeInterval) {
@@ -1585,6 +1598,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             ])
         }
 #if !os(tvOS)
+        volumeTopConstraint = volumeContainer.topAnchor.constraint(equalTo: videoContainer.safeAreaLayoutGuide.topAnchor, constant: 12)
+        volumeWidthConstraint = volumeContainer.widthAnchor.constraint(equalToConstant: 220)
+        volumeHeightConstraint = volumeContainer.heightAnchor.constraint(equalToConstant: 36)
         NSLayoutConstraint.activate([
             brightnessContainer.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 10),
             brightnessContainer.centerYAnchor.constraint(equalTo: videoContainer.centerYAnchor, constant: -12),
@@ -1603,9 +1619,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
             volumeContainer.leadingAnchor.constraint(greaterThanOrEqualTo: videoContainer.safeAreaLayoutGuide.leadingAnchor, constant: 12),
             volumeContainer.trailingAnchor.constraint(equalTo: videoContainer.safeAreaLayoutGuide.trailingAnchor, constant: -12),
-            volumeContainer.topAnchor.constraint(equalTo: videoContainer.safeAreaLayoutGuide.topAnchor, constant: 12),
-            volumeContainer.widthAnchor.constraint(equalToConstant: 230),
-            volumeContainer.heightAnchor.constraint(equalToConstant: 52),
+            volumeTopConstraint!,
+            volumeWidthConstraint!,
+            volumeHeightConstraint!,
 
             volumeIcon.leadingAnchor.constraint(equalTo: volumeContainer.contentView.leadingAnchor, constant: 12),
             volumeIcon.centerYAnchor.constraint(equalTo: volumeContainer.contentView.centerYAnchor),
@@ -3813,6 +3829,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     textColor: .white.opacity(0.7),
                     emptyColor: .white.opacity(0.3),
                     height: 33,
+                    durationKnown: model.durationIsKnown,
                     segments: model.skipSegments,
                     onEditingChanged: onEditingChanged
                 )
@@ -4283,7 +4300,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             effectiveDuration = 0
         }
         let durationIsReliable = effectiveDuration > 0
-        let safeDuration = durationIsReliable ? max(effectiveDuration, safePosition + 0.5) : max(60.0, safePosition + 300.0)
+        let safeDuration: Double
+        if durationIsReliable {
+            safeDuration = max(effectiveDuration, safePosition + 0.5)
+        } else if playbackDidStart || safePosition > 0.1 {
+            safeDuration = max(60.0, safePosition + 300.0)
+        } else {
+            safeDuration = 1.0
+        }
 
         if !position.isFinite || !duration.isFinite {
             Logger.shared.log("[PlayerVC.progress] non-finite input from renderer. rawPos=\(position) rawDur=\(duration) cachedPos=\(cachedPosition) cachedDur=\(cachedDuration)", type: "Error")
@@ -4325,6 +4349,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
             if waitingForInitialResume {
                 self.progressModel.duration = max(safeDuration, 1.0)
+                self.progressModel.durationIsKnown = durationIsReliable
                 if self.isRendererLoading && playbackAdvanced {
                     self.isRendererLoading = false
                     self.loadingIndicator.stopAnimating()
@@ -4340,6 +4365,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
             self.progressModel.position = safePosition
             self.progressModel.duration = max(safeDuration, 1.0)
+            self.progressModel.durationIsKnown = durationIsReliable
             
             if self.rendererIsPictureInPictureActive() {
                 self.rendererUpdatePictureInPicturePlaybackState()

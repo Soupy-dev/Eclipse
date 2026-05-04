@@ -17,6 +17,7 @@ struct MusicProgressSlider<T: BinaryFloatingPoint>: View {
     let textColor: Color
     let emptyColor: Color
     let height: CGFloat
+    let durationKnown: Bool
     /// Normalized 0-1 skip segment ranges to render as yellow overlays.
     let segments: [(start: Double, end: Double)]
     let onEditingChanged: (Bool) -> Void
@@ -35,6 +36,7 @@ struct MusicProgressSlider<T: BinaryFloatingPoint>: View {
         textColor: Color,
         emptyColor: Color,
         height: CGFloat,
+        durationKnown: Bool = true,
         segments: [(start: Double, end: Double)] = [],
         onEditingChanged: @escaping (Bool) -> Void
     ) {
@@ -45,6 +47,7 @@ struct MusicProgressSlider<T: BinaryFloatingPoint>: View {
         self.textColor = textColor
         self.emptyColor = emptyColor
         self.height = height
+        self.durationKnown = durationKnown
         self.segments = segments
         self.onEditingChanged = onEditingChanged
     }
@@ -93,7 +96,7 @@ struct MusicProgressSlider<T: BinaryFloatingPoint>: View {
                     HStack {
                         Text(timeString(from: progressDuration))
                         Spacer(minLength: 0)
-                        Text("-" + timeString(from: (inRange.upperBound - progressDuration)))
+                        Text(displayDurationIsKnown ? "-" + timeString(from: (inRange.upperBound - progressDuration)) : "--:--")
                     }
                     .font(.system(size: 12.5))
                     .foregroundColor(textColor)
@@ -145,6 +148,11 @@ struct MusicProgressSlider<T: BinaryFloatingPoint>: View {
         } else {
             return .spring(response: 0.5, dampingFraction: 0.5, blendDuration: 0.6)
         }
+    }
+
+    private var displayDurationIsKnown: Bool {
+        let upper = Double(inRange.upperBound)
+        return durationKnown && upper.isFinite && upper > 1.5
     }
     
     private func getPrgPercentage(_ value: T) -> T {

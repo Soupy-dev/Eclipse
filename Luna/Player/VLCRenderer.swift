@@ -92,6 +92,11 @@ private final class VLCPictureInPictureDrawableView: UIView {
         renderer?.seekFromPictureInPicture(byMilliseconds: offset, completion: completion)
     }
 
+    @objc(seekBy:completionHandler:)
+    func seekBy(_ offset: Int64, completionHandler: NativeVLCPiPSeekCompletion?) {
+        renderer?.seekFromPictureInPicture(byMilliseconds: offset, completion: completionHandler)
+    }
+
     @objc(mediaTime)
     func mediaTime() -> Int64 {
         return renderer?.nativePictureInPictureMediaTime ?? 0
@@ -626,25 +631,39 @@ final class VLCRenderer: NSObject {
     }
 
     fileprivate func seekFromPictureInPicture(byMilliseconds offset: Int64, completion: NativeVLCPiPSeekCompletion?) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else {
-                completion?()
+        eventQueue.async { [weak self] in
+            guard let self, let player = self.mediaPlayer else {
+                DispatchQueue.main.async {
+                    completion?()
+                }
                 return
             }
 
-            self.nativePiPBlockedSeekDeadline = Date().addingTimeInterval(3)
-            Logger.shared.log("[VLCRenderer.PiP] blocked native PiP seek offsetMs=\(offset); VLC PiP seek is unsafe on this VLCKit path", type: "Player")
-            self.updatePictureInPicturePlaybackState()
-            completion?()
+            let duration = self.reliableDuration(from: player)
+            guard duration >= self.minimumReliableDuration else {
+                Logger.shared.log("[VLCRenderer.PiP] seek ignored: duration unavailable offsetMs=\(offset) snapshot={\(self.playerSnapshot(player))}", type: "Player")
+                self.updatePictureInPicturePlaybackState()
+                DispatchQueue.main.async {
+                    completion?()
+                }
+                return
+            }
+
+            let currentPosition = self.resolvedPlaybackProgress(from: player).position
+            let target = currentPosition + (Double(offset) / 1000.0)
+            let clampedTarget = min(max(0, target), max(0, duration - 0.1))
+            Logger.shared.log("[VLCRenderer.PiP] seek requested offsetMs=\(offset) current=\(self.secondsText(currentPosition)) target=\(self.secondsText(target)) clamped=\(self.secondsText(clampedTarget))", type: "Player")
+            self.applySeek(to: clampedTarget, on: player, refreshVideoOutput: false)
+            self.finishPictureInPictureSeek(target: clampedTarget, completion: completion)
         }
     }
 
-    private func applySeek(to seconds: Double, on player: VLCMediaPlayer) {
+    private func applySeek(to seconds: Double, on player: VLCMediaPlayer, refreshVideoOutput: Bool = true) {
         let duration = reliableDuration(from: player)
         let upperBound = duration >= minimumReliableDuration ? max(0, duration - 0.1) : Double.greatestFiniteMagnitude
         let clamped = min(max(0, seconds), upperBound)
         let before = resolvedPlaybackProgress(from: player).position
-        logVLC("applySeek begin requested=\(secondsText(seconds)) current=\(secondsText(before)) clamped=\(secondsText(clamped)) reliableDuration=\(secondsText(duration)) cachedDuration=\(secondsText(cachedDuration)) paused=\(isPaused)", type: "Progress")
+        logVLC("applySeek begin requested=\(secondsText(seconds)) current=\(secondsText(before)) clamped=\(secondsText(clamped)) reliableDuration=\(secondsText(duration)) cachedDuration=\(secondsText(cachedDuration)) paused=\(isPaused) refreshVideoOutput=\(refreshVideoOutput)", type: "Progress")
 
         if duration >= minimumReliableDuration {
             let normalized = min(max(clamped / duration, 0), 1)
@@ -668,12 +687,65 @@ final class VLCRenderer: NSObject {
             startProgressPolling()
         }
         updatePictureInPicturePlaybackState()
-        refreshVideoOutputAfterSeek(player, shouldResumePlayback: !isPaused)
+        if refreshVideoOutput {
+            refreshVideoOutputAfterSeek(player, shouldResumePlayback: !isPaused)
+        } else {
+            eventQueue.asyncAfter(deadline: .now() + 0.08) { [weak self, weak player] in
+                guard let self, self.isRunning, !self.isStopping, let player else { return }
+                self.clearLoadingState()
+                self.publishPlaybackProgress(from: player)
+                self.updatePictureInPicturePlaybackState()
+                self.logVLC("applySeek PiP follow-up snapshot={\(self.playerSnapshot(player))}", type: "Progress")
+            }
+        }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.delegate?.renderer(self, didUpdatePosition: clamped, duration: max(duration, self.cachedDuration))
         }
         logVLC("applySeek end snapshot={\(playerSnapshot(player))}", type: "Progress")
+    }
+
+    private func finishPictureInPictureSeek(target: Double, completion: NativeVLCPiPSeekCompletion?, attempt: Int = 0) {
+        guard let completion else { return }
+
+        eventQueue.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            guard let self else {
+                DispatchQueue.main.async {
+                    completion()
+                }
+                return
+            }
+
+            let observedPosition = self.mediaPlayer.flatMap { self.observedSeekCompletionPosition(from: $0) }
+            let position = observedPosition ?? self.cachedPosition
+            let isCloseEnough = observedPosition != nil && abs(position - target) <= 1.5
+            let shouldFinish = isCloseEnough || attempt >= 8
+
+            if shouldFinish {
+                self.logVLC("PiP seek completion target=\(self.secondsText(target)) position=\(self.secondsText(position)) attempt=\(attempt) closeEnough=\(isCloseEnough)", type: "Player")
+                self.updatePictureInPicturePlaybackState()
+                DispatchQueue.main.async {
+                    completion()
+                }
+            } else {
+                self.finishPictureInPictureSeek(target: target, completion: completion, attempt: attempt + 1)
+            }
+        }
+    }
+
+    private func observedSeekCompletionPosition(from player: VLCMediaPlayer) -> Double? {
+        let rawPosition = max(0, (player.time.value?.doubleValue ?? 0) / 1000.0)
+        if rawPosition > 0 {
+            return rawPosition
+        }
+
+        let duration = reliableDuration(from: player)
+        let normalized = normalizedPosition(from: player)
+        if duration >= minimumReliableDuration, normalized > 0 {
+            return normalized * duration
+        }
+
+        return nil
     }
 
     private func refreshVideoOutputAfterSeek(_ player: VLCMediaPlayer, shouldResumePlayback: Bool) {
@@ -1083,6 +1155,16 @@ final class VLCRenderer: NSObject {
                 self.logVLC("loading sanity delay=\(String(format: "%.2f", delay)) positionMs=\(String(format: "%.0f", positionMs)) snapshot={\(self.playerSnapshot(player))}", type: "Stream")
                 if positionMs > 0 || self.isPlaybackActive(player) {
                     self.clearLoadingState()
+                } else if delay >= 1.5, self.isTerminalState(player.state) {
+                    self.isLoading = false
+                    self.stopProgressPolling()
+                    let message = "VLC could not start playback (state \(self.describeState(player.state)) at 0s)"
+                    self.logVLC("startup failed: \(message) snapshot={\(self.playerSnapshot(player))}", type: "Error")
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self else { return }
+                        self.delegate?.renderer(self, didChangeLoading: false)
+                        self.delegate?.renderer(self, didFailWithError: message)
+                    }
                 }
             }
         }
@@ -1329,8 +1411,9 @@ final class VLCRenderer: NSObject {
     }
 
     fileprivate var nativePictureInPictureMediaTime: Int64 {
-        let value = Int64(max(0, cachedPosition) * 1000.0)
-        logPiPMediaQueryIfNeeded(key: "mediaTime", message: "mediaTime queried valueMs=\(value) cachedPosition=\(secondsText(cachedPosition))")
+        let position = mediaPlayer.map { resolvedPlaybackProgress(from: $0).position } ?? cachedPosition
+        let value = Int64(max(0, position) * 1000.0)
+        logPiPMediaQueryIfNeeded(key: "mediaTime", message: "mediaTime queried valueMs=\(value) position=\(secondsText(position)) cachedPosition=\(secondsText(cachedPosition))")
         return value
     }
 
@@ -1346,8 +1429,15 @@ final class VLCRenderer: NSObject {
     }
 
     fileprivate var nativePictureInPictureMediaSeekable: Bool {
-        logPiPMediaQueryIfNeeded(key: "isMediaSeekable", message: "isMediaSeekable queried -> false mode=\(nativePiPMediaControllerMode ?? "nil"); 10s buttons will be hidden on drawable-shim path")
-        return false
+        let duration: Double
+        if let player = mediaPlayer {
+            duration = reliableDuration(from: player)
+        } else {
+            duration = cachedDuration
+        }
+        let seekable = isRunning && !isStopping && duration >= minimumReliableDuration
+        logPiPMediaQueryIfNeeded(key: "isMediaSeekable", message: "isMediaSeekable queried -> \(seekable) duration=\(secondsText(duration)) mode=\(nativePiPMediaControllerMode ?? "nil")")
+        return seekable
     }
 
     fileprivate var nativePictureInPictureMediaPlaying: Bool {
