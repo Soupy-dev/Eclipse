@@ -180,6 +180,15 @@ final class VLCRenderer: NSObject {
         vlcView.isUserInteractionEnabled = false  // Allow touches to pass through to controls
     }
 
+    private func reattachRenderingView() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.mediaPlayer?.drawable = self.vlcView
+            self.vlcView.setNeedsLayout()
+            self.vlcView.layoutIfNeeded()
+        }
+    }
+
     private func ensureAudioSessionActive() {
         do {
             let session = AVAudioSession.sharedInstance()
@@ -285,6 +294,10 @@ final class VLCRenderer: NSObject {
         
         currentURL = url
         currentPreset = preset
+        cachedPosition = 0
+        cachedDuration = 0
+        pendingAbsoluteSeek = nil
+        lastProgressHostTime = nil
 
         // Use provided headers as-is; they're already built correctly by the caller
         // (StreamURL domain should NOT be used for headers—service baseUrl should be)
@@ -355,6 +368,7 @@ final class VLCRenderer: NSObject {
             self.currentMedia = media
             
             player.media = media
+            player.drawable = self.vlcView
             self.ensureAudioSessionActive()
             player.play()
             self.startProgressPolling()
@@ -413,13 +427,19 @@ final class VLCRenderer: NSObject {
     }
     
     func pausePlayback() {
+        let player = mediaPlayer
+        let shouldSendPause = player.map {
+            isPlayerActivelyPlaying($0) || isPlayingState($0.state) || (!isPaused && !isVLCPlayerPausedState($0.state) && !isTerminalState($0.state))
+        } ?? !isPaused
         isPaused = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.delegate?.renderer(self, didChangePause: true)
         }
 
-        mediaPlayer?.pause()
+        if shouldSendPause {
+            player?.pause()
+        }
         stopProgressPolling()
         updatePictureInPicturePlaybackState()
     }
@@ -676,6 +696,14 @@ final class VLCRenderer: NSObject {
         cachedPosition = position
         cachedDuration = duration
 
+        if isPlaybackActive(player), isPaused {
+            isPaused = false
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.delegate?.renderer(self, didChangePause: false)
+            }
+        }
+
         // If we were waiting for duration to apply a pending seek, do it once duration is known.
         if duration > 0, let pending = pendingAbsoluteSeek {
             let normalized = min(max(pending / duration, 0), 1)
@@ -688,7 +716,7 @@ final class VLCRenderer: NSObject {
         }
 
         // If we were marked loading but playback is progressing, clear loading state.
-        if isLoading && (position > 0 || isPlayerActivelyPlaying(player)) {
+        if isLoading && (position > 0 || isPlaybackActive(player)) {
             clearLoadingState()
         }
 
@@ -709,7 +737,7 @@ final class VLCRenderer: NSObject {
             Logger.shared.log("VLCRenderer: ERROR url=\(urlString) headers=\(headerCount) preset=\(currentPreset?.id.rawValue ?? "nil")", type: "Error")
         }
         
-        if isPlayingState(state) || isPlayerActivelyPlaying(player) {
+        if isPlaybackActive(player) {
             isPaused = false
             isReadyToSeek = true
             clearLoadingState()
@@ -729,7 +757,7 @@ final class VLCRenderer: NSObject {
             }
             
         } else if isLoadingState(state) {
-            guard !isPlayerActivelyPlaying(player) else {
+            guard !isPlaybackActive(player) else {
                 clearLoadingState()
                 updatePictureInPicturePlaybackState()
                 return
@@ -775,7 +803,7 @@ final class VLCRenderer: NSObject {
                 guard let self, self.isLoading, let player = self.mediaPlayer else { return }
 
                 let positionMs = player.time.value?.doubleValue ?? 0
-                if positionMs > 0 || self.isPlayerActivelyPlaying(player) {
+                if positionMs > 0 || self.isPlaybackActive(player) {
                     self.clearLoadingState()
                 }
             }
@@ -810,7 +838,7 @@ final class VLCRenderer: NSObject {
         if duration <= 0, normalized > 0 {
             duration = 1.0
         }
-        let isPlaying = isPlayerActivelyPlaying(player)
+        let isPlaying = isPlaybackActive(player) || (!isPaused && !isLoading)
 
         let position: Double
         if rawPosition > 0 {
@@ -840,8 +868,10 @@ final class VLCRenderer: NSObject {
             : UserDefaults.standard.bool(forKey: "vlcPiPEnabled")
 
         guard pipEnabled else {
-            Logger.shared.log("[VLCRenderer.PiP] entering background with native VLC PiP disabled; pausing playback", type: "Player")
-            pausePlayback()
+            Logger.shared.log("[VLCRenderer.PiP] entering background with native VLC PiP disabled", type: "Player")
+            if !isPaused {
+                pausePlayback()
+            }
             return
         }
 
@@ -852,8 +882,10 @@ final class VLCRenderer: NSObject {
             }
         }
 
-        Logger.shared.log("[VLCRenderer.PiP] entering background without native VLC PiP; pausing playback", type: "Player")
-        pausePlayback()
+        Logger.shared.log("[VLCRenderer.PiP] entering background without native VLC PiP", type: "Player")
+        if !isPaused {
+            pausePlayback()
+        }
     }
     
     @objc private func handleAppWillEnterForeground() {
@@ -863,6 +895,7 @@ final class VLCRenderer: NSObject {
         }
         // Re-activate the audio session that iOS may have deactivated during background.
         ensureAudioSessionActive()
+        reattachRenderingView()
     }
     
     // MARK: - Native VLC Picture in Picture
@@ -1112,6 +1145,10 @@ final class VLCRenderer: NSObject {
 
     private func isPlayerActivelyPlaying(_ player: VLCMediaPlayer) -> Bool {
         return vlcBool(from: player, key: "playing", selectors: ["isPlaying", "playing"], fallback: false)
+    }
+
+    private func isPlaybackActive(_ player: VLCMediaPlayer) -> Bool {
+        return isPlayerActivelyPlaying(player) || isPlayingState(player.state)
     }
 
     private func describeState(_ state: VLCMediaPlayerState) -> String {

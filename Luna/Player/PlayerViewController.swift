@@ -402,6 +402,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var volumePanGesture: UIPanGestureRecognizer?
     private var brightnessPanStartLevel: Float = 1.0
     private var volumePanStartLevel: Float = 0.5
+    private var isBrightnessControlActive = false
+    private var isVolumeControlActive = false
 #if canImport(MediaPlayer)
     private weak var systemVolumeSlider: UISlider?
 #endif
@@ -815,7 +817,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var openSubtitlesLoadedURLs: Set<String> = []
 
     private var isVLCCustomSubtitleOverlayEnabled: Bool {
-        return isVLCPlayer && Settings.shared.enableVLCSubtitleEditMenu
+        return isVLCPlayer && UserDefaults.standard.bool(forKey: "vlcCustomSubtitleOverlayEnabled")
     }
 
     private var isVLCOpenSubtitlesEnabled: Bool {
@@ -1183,12 +1185,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if url.host != "127.0.0.1" {
             vlcProxyFallbackTried = false
         }
-        preparePlaybackStartupMonitoring(for: url, headers: headers ?? [:])
-        rendererLoad(url: url, preset: preset, headers: headers)
-        applyDefaultPlaybackSpeed()
+        pendingSeekTime = nil
         if let info = mediaInfo {
             prepareSeekToLastPosition(for: info)
         }
+        preparePlaybackStartupMonitoring(for: url, headers: headers ?? [:])
+        rendererLoad(url: url, preset: preset, headers: headers)
+        applyDefaultPlaybackSpeed()
         
         if let subs = initialSubtitles, !subs.isEmpty {
             loadSubtitles(subs, names: initialSubtitleNames)
@@ -1544,8 +1547,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             brightnessIcon.heightAnchor.constraint(equalToConstant: 20),
             brightnessIcon.widthAnchor.constraint(equalToConstant: 20),
 
-            volumeContainer.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -16),
-            volumeContainer.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 66),
+            volumeContainer.leadingAnchor.constraint(greaterThanOrEqualTo: videoContainer.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+            volumeContainer.trailingAnchor.constraint(equalTo: videoContainer.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            volumeContainer.topAnchor.constraint(equalTo: videoContainer.safeAreaLayoutGuide.topAnchor, constant: 12),
             volumeContainer.widthAnchor.constraint(equalToConstant: 230),
             volumeContainer.heightAnchor.constraint(equalToConstant: 52),
 
@@ -1763,9 +1767,31 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func updateBrightnessControlVisibility() {
         if isClosing { return }
-        if !isBrightnessControlEnabled || !controlsVisible {
+        if !isBrightnessControlEnabled || !isBrightnessControlActive {
             brightnessContainer.isHidden = true
             brightnessContainer.alpha = 0.0
+        }
+    }
+
+    private func showBrightnessControl() {
+        isBrightnessControlActive = true
+        brightnessContainer.isHidden = false
+        brightnessContainer.alpha = 1.0
+        videoContainer.bringSubviewToFront(brightnessContainer)
+        bringTimedActionButtonsToFront()
+    }
+
+    private func hideBrightnessControlSoon() {
+        isBrightnessControlActive = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self, !self.isBrightnessControlActive else { return }
+            UIView.animate(withDuration: 0.2) {
+                self.brightnessContainer.alpha = 0.0
+            } completion: { _ in
+                if !self.isBrightnessControlActive {
+                    self.brightnessContainer.isHidden = true
+                }
+            }
         }
     }
 
@@ -1775,8 +1801,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         switch gesture.state {
         case .began:
             brightnessPanStartLevel = Float(UIScreen.main.brightness)
-            brightnessContainer.isHidden = false
-            brightnessContainer.alpha = 1.0
+            showBrightnessControl()
             controlsHideWorkItem?.cancel()
         case .changed:
             let translation = gesture.translation(in: videoContainer)
@@ -1786,6 +1811,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             applyBrightnessLevel(brightnessSlider.value)
         case .ended, .cancelled, .failed:
             showControlsTemporarily()
+            hideBrightnessControlSoon()
         default:
             break
         }
@@ -1827,9 +1853,31 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func updateVolumeControlVisibility() {
         if isClosing { return }
-        if !isVolumeControlEnabled || !controlsVisible {
+        if !isVolumeControlEnabled || !isVolumeControlActive {
             volumeContainer.isHidden = true
             volumeContainer.alpha = 0.0
+        }
+    }
+
+    private func showVolumeControl() {
+        isVolumeControlActive = true
+        volumeContainer.isHidden = false
+        volumeContainer.alpha = 1.0
+        videoContainer.bringSubviewToFront(volumeContainer)
+        bringTimedActionButtonsToFront()
+    }
+
+    private func hideVolumeControlSoon() {
+        isVolumeControlActive = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self, !self.isVolumeControlActive else { return }
+            UIView.animate(withDuration: 0.2) {
+                self.volumeContainer.alpha = 0.0
+            } completion: { _ in
+                if !self.isVolumeControlActive {
+                    self.volumeContainer.isHidden = true
+                }
+            }
         }
     }
 
@@ -1839,8 +1887,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         switch gesture.state {
         case .began:
             volumePanStartLevel = volumeSlider.value
-            volumeContainer.isHidden = false
-            volumeContainer.alpha = 1.0
+            showVolumeControl()
             controlsHideWorkItem?.cancel()
         case .changed:
             let translation = gesture.translation(in: videoContainer)
@@ -1850,6 +1897,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             applyVolumeLevel(target)
         case .ended, .cancelled, .failed:
             showControlsTemporarily()
+            hideVolumeControlSoon()
         default:
             break
         }
@@ -2074,6 +2122,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             fontSize: subtitleModel.fontSize,
             isVisible: subtitleModel.isVisible
         ))
+
+        if isVLCPlayer && !isVLCCustomSubtitleOverlayEnabled {
+            subtitleEntries.removeAll()
+            updateVLCSubtitleOverlay(for: cachedPosition)
+            rendererRefreshSubtitleOverlay()
+            updateSubtitleTracksMenu()
+            return
+        }
 
         if isVLCCustomSubtitleOverlayEnabled {
             updateVLCSubtitleOverlay(for: cachedPosition)
@@ -2482,6 +2538,18 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
 #if !os(tvOS)
+    private func bringTimedActionButtonsToFront() {
+        if !skipButton.isHidden || skipButton.alpha > 0 {
+            videoContainer.bringSubviewToFront(skipButton)
+        }
+        if nextEpisodeButtonShown || !nextEpisodeButton.isHidden || nextEpisodeButton.alpha > 0 {
+            videoContainer.bringSubviewToFront(nextEpisodeButton)
+        }
+        if skip85sButtonShown || !skip85sButton.isHidden || skip85sButton.alpha > 0 {
+            videoContainer.bringSubviewToFront(skip85sButton)
+        }
+    }
+
     private func updateSkipState(position: Double, duration: Double) {
         guard !skipSegments.isEmpty, duration > 0 else { return }
 
@@ -2574,6 +2642,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         guard skipButton.isHidden || skipButton.alpha < 1 else { return }
         skipButton.isHidden = false
         videoContainer.bringSubviewToFront(skipButton)
+        bringTimedActionButtonsToFront()
         UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseOut]) {
             self.skipButton.alpha = 1.0
         }
@@ -2599,6 +2668,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         guard controlsVisible else { return }
         skip85sButton.isHidden = false
         videoContainer.bringSubviewToFront(skip85sButton)
+        bringTimedActionButtonsToFront()
         UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseOut]) {
             self.skip85sButton.alpha = 1.0
         }
@@ -2619,6 +2689,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         nextEpisodeButtonShown = true
         nextEpisodeButton.isHidden = false
         videoContainer.bringSubviewToFront(nextEpisodeButton)
+        bringTimedActionButtonsToFront()
         UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseOut]) {
             self.nextEpisodeButton.alpha = 1.0
         }
@@ -2778,12 +2849,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return
         }
         let useCustomExternalOverlay = isVLCCustomSubtitleOverlayEnabled
-        let externalTracks: [(Int, String)] = useCustomExternalOverlay
-            ? subtitleURLs.enumerated().map { (index, _) in
-                let name = index < subtitleNames.count ? subtitleNames[index] : "Subtitle \(index + 1)"
-                return (index, name)
-            }
-            : []
+        let externalTracks: [(Int, String)] = subtitleURLs.enumerated().map { (index, _) in
+            let name = index < subtitleNames.count ? subtitleNames[index] : "Subtitle \(index + 1)"
+            return (index, name)
+        }
         let embeddedTracks = rendererGetSubtitleTracks().filter { $0.0 >= 0 && !isDisabledTrackName($0.1) }
 
         Logger.shared.log("PlayerViewController: subtitle tracks external=\(externalTracks.count) embedded=\(embeddedTracks.count) userSelected=\(userSelectedSubtitleTrack) renderer=\(vlcRenderer != nil ? "VLC" : "MPV")", type: "Player")
@@ -2809,9 +2878,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     Logger.shared.log("[PlayerVC.Subtitles] default selected embedded track id=\(selectedEmbeddedTrack.0) name=\(selectedEmbeddedTrack.1)", type: "Player")
                 } else if let selectedExternalTrack = preferredDefaultSubtitleTrack(from: externalTracks, preferredLang: preferredLang) {
                     currentSubtitleIndex = selectedExternalTrack.0
-                    loadCurrentSubtitle()
-                    rendererDisableSubtitles()
-                    updateVLCSubtitleOverlay(for: cachedPosition)
+                    if useCustomExternalOverlay {
+                        loadCurrentSubtitle()
+                        rendererDisableSubtitles()
+                        updateVLCSubtitleOverlay(for: cachedPosition)
+                    } else {
+                        subtitleEntries.removeAll()
+                        rendererLoadExternalSubtitles(urls: [subtitleURLs[selectedExternalTrack.0]], enforce: true)
+                        updateVLCSubtitleOverlay(for: cachedPosition)
+                    }
                     userSelectedSubtitleTrack = true
                     subtitleModel.isVisible = true
                     vlcSubtitleSelection = .external(index: selectedExternalTrack.0)
@@ -2820,9 +2895,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     Logger.shared.log("[PlayerVC.Subtitles] OpenSubtitles fallback requested for preferredLang=\(preferredLang)", type: "Player")
                 } else if let fallbackExternalTrack = fallbackDefaultSubtitleTrack(from: externalTracks) {
                     currentSubtitleIndex = fallbackExternalTrack.0
-                    loadCurrentSubtitle()
-                    rendererDisableSubtitles()
-                    updateVLCSubtitleOverlay(for: cachedPosition)
+                    if useCustomExternalOverlay {
+                        loadCurrentSubtitle()
+                        rendererDisableSubtitles()
+                        updateVLCSubtitleOverlay(for: cachedPosition)
+                    } else {
+                        subtitleEntries.removeAll()
+                        rendererLoadExternalSubtitles(urls: [subtitleURLs[fallbackExternalTrack.0]], enforce: true)
+                        updateVLCSubtitleOverlay(for: cachedPosition)
+                    }
                     userSelectedSubtitleTrack = true
                     subtitleModel.isVisible = true
                     vlcSubtitleSelection = .external(index: fallbackExternalTrack.0)
@@ -2880,9 +2961,17 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     self.currentSubtitleIndex = id
                     self.vlcSubtitleSelection = .external(index: id)
                     Logger.shared.log("[PlayerVC.Subtitles] user selected external subtitle index=\(id) name=\(name)", type: "Player")
-                    self.loadCurrentSubtitle()
-                    self.rendererDisableSubtitles()
-                    self.updateVLCSubtitleOverlay(for: self.cachedPosition)
+                    if useCustomExternalOverlay {
+                        self.loadCurrentSubtitle()
+                        self.rendererDisableSubtitles()
+                        self.updateVLCSubtitleOverlay(for: self.cachedPosition)
+                    } else {
+                        self.subtitleEntries.removeAll()
+                        if id < self.subtitleURLs.count {
+                            self.rendererLoadExternalSubtitles(urls: [self.subtitleURLs[id]], enforce: true)
+                        }
+                        self.updateVLCSubtitleOverlay(for: self.cachedPosition)
+                    }
                     self.updateSubtitleButtonAppearance()
                     // Debounce menu update to avoid lag - only update after 0.3s of no selection changes
                     self.subtitleMenuDebounceTimer?.invalidate()
@@ -3321,6 +3410,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         vlcSubtitleSelection = .none
         vlcExternalSubtitlesLoadedNatively = false
         vlcExternalSubtitlePriorityDeadline = nil
+        subtitleEntries.removeAll()
         
         if !urls.isEmpty {
             Logger.shared.log("PlayerViewController: loadSubtitles count=\(urls.count) renderer=\(vlcRenderer != nil ? "VLC" : "MPV")", type: "Stream")
@@ -3489,6 +3579,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if !isVLCPlayer {
             subtitleEntries = SubtitleLoader.parseSubtitles(from: content, fontSize: subtitleModel.fontSize, foregroundColor: subtitleModel.foregroundColor)
             Logger.shared.log("Loaded \(subtitleEntries.count) subtitle entries", type: "Info")
+            return
+        }
+
+        guard isVLCCustomSubtitleOverlayEnabled else {
+            Logger.shared.log("[PlayerVC.Subtitles] ignoring manual subtitle parse because VLC native subtitles are active", type: "Player")
             return
         }
 
@@ -3819,9 +3914,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #if !os(tvOS)
         videoContainer.bringSubviewToFront(brightnessContainer)
         videoContainer.bringSubviewToFront(volumeContainer)
-        if skip85sButtonShown {
-            videoContainer.bringSubviewToFront(skip85sButton)
-        }
+        bringTimedActionButtonsToFront()
 #endif
         
         DispatchQueue.main.async {
@@ -3845,14 +3938,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     }
                 }
 #if !os(tvOS)
-                if self.isBrightnessControlEnabled {
-                    self.brightnessContainer.isHidden = false
-                    self.brightnessContainer.alpha = 1.0
-                }
-                if self.isVolumeControlEnabled {
-                    self.volumeContainer.isHidden = false
-                    self.volumeContainer.alpha = 1.0
-                }
                 if self.skip85sButtonShown {
                     self.skip85sButton.isHidden = false
                     self.skip85sButton.alpha = 1.0
@@ -3871,6 +3956,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func hideControls() {
         controlsHideWorkItem?.cancel()
         controlsVisible = false
+#if !os(tvOS)
+        isBrightnessControlActive = false
+        isVolumeControlActive = false
+#endif
         
         DispatchQueue.main.async {
             UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseIn]) {
@@ -4158,6 +4247,15 @@ extension PlayerViewController: MPVSoftwareRendererDelegate {
         if !isPaused {
             markPlaybackStarted(reason: "playing")
         }
+        if isRendererLoading && !isPaused {
+            isRendererLoading = false
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.loadingIndicator.stopAnimating()
+                self.loadingIndicator.alpha = 0.0
+                self.centerPlayPauseButton.isHidden = false
+            }
+        }
         if isRendererLoading {
             pipController?.updatePlaybackState()
             return
@@ -4189,13 +4287,13 @@ extension PlayerViewController: MPVSoftwareRendererDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.markPlaybackStarted(reason: "ready")
-            self.applyDefaultPlaybackSpeed()
             
             if let seekTime = self.pendingSeekTime {
                 self.rendererSeek(to: seekTime)
                 Logger.shared.log("Resumed MPV playback from \(Int(seekTime))s", type: "Progress")
                 self.pendingSeekTime = nil
             }
+            self.applyDefaultPlaybackSpeed()
 
             // Fetch skip data once MPV is ready
             self.fetchSkipData()
@@ -4255,6 +4353,15 @@ extension PlayerViewController: VLCRendererDelegate {
         if !isPaused {
             markPlaybackStarted(reason: "playing")
         }
+        if isRendererLoading && !isPaused {
+            isRendererLoading = false
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.loadingIndicator.stopAnimating()
+                self.loadingIndicator.alpha = 0.0
+                self.centerPlayPauseButton.isHidden = false
+            }
+        }
         if isRendererLoading {
             renderer.updatePictureInPicturePlaybackState()
             return
@@ -4288,7 +4395,6 @@ extension PlayerViewController: VLCRendererDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.markPlaybackStarted(reason: "ready")
-            self.applyDefaultPlaybackSpeed()
             
             // Update audio and subtitle tracks now that the video is ready
             self.updateAudioTracksMenuWhenReady()
@@ -4302,6 +4408,7 @@ extension PlayerViewController: VLCRendererDelegate {
                 Logger.shared.log("Resumed VLC playback from \(Int(seekTime))s", type: "Progress")
                 self.pendingSeekTime = nil
             }
+            self.applyDefaultPlaybackSpeed()
 
             // Fetch skip data once VLC is ready
             self.fetchSkipData()
@@ -4328,7 +4435,7 @@ extension PlayerViewController: VLCRendererDelegate {
     }
     
     func renderer(_ renderer: VLCRenderer, getSubtitleForTime time: Double) -> NSAttributedString? {
-        guard subtitleModel.isVisible, !subtitleEntries.isEmpty else {
+        guard isVLCCustomSubtitleOverlayEnabled, subtitleModel.isVisible, !subtitleEntries.isEmpty else {
             return nil
         }
         

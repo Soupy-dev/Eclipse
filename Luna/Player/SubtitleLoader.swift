@@ -17,11 +17,19 @@ struct SubtitleEntry {
 class SubtitleLoader {
     
     static func parseSubtitles(from content: String, fontSize: CGFloat = 18.0, foregroundColor: UIColor = .white) -> [SubtitleEntry] {
-        if content.contains("WEBVTT") {
-            return parseVTT(content, fontSize: fontSize, foregroundColor: foregroundColor)
+        let normalized = normalizeLineEndings(content)
+        if normalized.contains("WEBVTT") {
+            return parseVTT(normalized, fontSize: fontSize, foregroundColor: foregroundColor)
         } else {
-            return parseSRT(content, fontSize: fontSize, foregroundColor: foregroundColor)
+            return parseSRT(normalized, fontSize: fontSize, foregroundColor: foregroundColor)
         }
+    }
+
+    private static func normalizeLineEndings(_ content: String) -> String {
+        content
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\n[ \t]*\n", with: "\n\n", options: .regularExpression)
     }
     
     // MARK: - SRT Parser
@@ -32,10 +40,11 @@ class SubtitleLoader {
         
         for block in blocks {
             let lines = block.components(separatedBy: "\n").filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            guard lines.count >= 3 else { continue }
+            guard let timeLineIndex = lines.firstIndex(where: { $0.contains("-->") }),
+                  timeLineIndex + 1 < lines.count else { continue }
             
-            let timeLine = lines[1]
-            let textLines = Array(lines[2...])
+            let timeLine = lines[timeLineIndex]
+            let textLines = Array(lines[(timeLineIndex + 1)...])
             
             if let (start, end) = parseTimestamp(timeLine) {
                 let rawText = textLines.joined(separator: "\n")
