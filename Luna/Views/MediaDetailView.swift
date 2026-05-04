@@ -109,7 +109,7 @@ struct MediaDetailView: View {
     @State private var detailLoadTask: Task<Void, Never>?
     @State private var specialsLoadTask: Task<Void, Never>?
     @State private var specialsLoadGeneration = 0
-    @State private var detailContentRefreshToken = UUID()
+    @State private var detailContentRefreshTick = 0
     
     @StateObject private var serviceManager = ServiceManager.shared
     @StateObject private var stremioManager = StremioAddonManager.shared
@@ -449,12 +449,12 @@ struct MediaDetailView: View {
     @ViewBuilder
     private var mainScrollView: some View {
         let _ = Logger.shared.log("MediaDetailView construct mainScrollView: id=\(searchResult.id) isLoading=\(isLoading) hasLoaded=\(hasLoadedContent) isAnime=\(isAnimeShow) tvSeasons=\(tvShowDetail?.seasons.count ?? 0) selectedSeason=\(selectedSeason?.seasonNumber.description ?? "nil")", type: "CrashProbe")
+        let _ = detailContentRefreshTick
         ScrollView(showsIndicators: false) {
             VStack(spacing: 0) {
                 heroImageSection
                 contentContainer
             }
-            .id(detailContentRefreshToken)
         }
         .ignoresSafeArea(edges: [.top, .leading, .trailing])
     }
@@ -464,7 +464,7 @@ struct MediaDetailView: View {
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             guard hasLoadedContent, !isLoading else { return }
-            detailContentRefreshToken = UUID()
+            detailContentRefreshTick += 1
             Logger.shared.log("MediaDetailView refreshed content layout: id=\(searchResult.id) reason=\(reason)", type: "CrashProbe")
         }
     }

@@ -61,16 +61,47 @@ struct DownloadItem: Codable, Identifiable {
         }
         return ""
     }
+
+    var playerTitleBase: String {
+        guard isAnime else { return title }
+        guard !isMovie else { return nonEmptyTrimmed(displayTitle) ?? title }
+        return animeDisplayTitleWithoutEpisodeSuffix
+    }
+
+    private var animeDisplayTitleWithoutEpisodeSuffix: String {
+        var base = nonEmptyTrimmed(displayTitle) ?? title
+        let suffixPatterns = [
+            #"(?i)\s*-\s*S\d{1,2}E\d{1,4}$"#,
+            #"(?i)\s*S\d{1,2}E\d{1,4}$"#,
+            #"(?i)\s*-\s*E\d{1,4}$"#,
+            #"(?i)\s*E\d{1,4}$"#,
+            #"(?i)\s*Episode\s+\d{1,4}$"#
+        ]
+
+        for pattern in suffixPatterns {
+            if let range = base.range(of: pattern, options: .regularExpression) {
+                base.removeSubrange(range)
+                break
+            }
+        }
+
+        return nonEmptyTrimmed(base) ?? title
+    }
+
+    private func nonEmptyTrimmed(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed?.isEmpty == false ? trimmed : nil
+    }
     
     var mediaInfo: MediaInfo {
         if isMovie {
-            return .movie(id: tmdbId, title: title, posterURL: posterURL, isAnime: isAnime)
+            return .movie(id: tmdbId, title: playerTitleBase, posterURL: posterURL, isAnime: isAnime)
         } else {
             return .episode(
                 showId: tmdbId,
                 seasonNumber: seasonNumber ?? 1,
                 episodeNumber: episodeNumber ?? 1,
-                showTitle: title,
+                showTitle: playerTitleBase,
                 showPosterURL: posterURL,
                 isAnime: isAnime
             )
