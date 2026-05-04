@@ -917,6 +917,33 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         Logger.shared.log("[PlayerVC.VLC \(playerLogId)] \(message)", type: type)
     }
 
+    private func logVLCUIViewSnapshot(_ event: String) {
+        guard isVLCPlayer else { return }
+        let appState: String
+        switch UIApplication.shared.applicationState {
+        case .active: appState = "active"
+        case .inactive: appState = "inactive"
+        case .background: appState = "background"
+        @unknown default: appState = "unknown"
+        }
+        let viewBounds = view.bounds
+        let videoBounds = videoContainer.bounds
+        let windowBounds = view.window?.bounds ?? .zero
+        let pipActive = vlcRenderer?.isPictureInPictureActive ?? false
+        let pipAvailable = vlcRenderer?.isPictureInPictureAvailable ?? false
+        logVLCUI("\(event) ui app=\(appState) window=\(view.window != nil) presenting=\(presentingViewController != nil) closing=\(isClosing) running=\(isRunning) loading=\(isRendererLoading) controls=\(controlsVisible) paused=\(rendererIsPausedState()) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pipEnabled=\(Settings.shared.vlcPiPEnabled) pipAvailable=\(pipAvailable) pipActive=\(pipActive) view=\(String(format: "%.0fx%.0f", viewBounds.width, viewBounds.height)) video=\(String(format: "%.0fx%.0f", videoBounds.width, videoBounds.height)) windowBounds=\(String(format: "%.0fx%.0f", windowBounds.width, windowBounds.height))", type: "Player")
+    }
+
+    private func scheduleVLCUIViewSnapshots(_ event: String, delays: [TimeInterval] = [0.25, 1.0]) {
+        guard isVLCPlayer else { return }
+        for delay in delays {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self else { return }
+                self.logVLCUIViewSnapshot("\(event) +\(String(format: "%.2f", delay))s")
+            }
+        }
+    }
+
     private func secondsText(_ value: Double?) -> String {
         guard let value, value.isFinite else { return "nil" }
         return String(format: "%.2f", value)
@@ -1116,6 +1143,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         view.bringSubviewToFront(errorBanner)
+        logVLCUIViewSnapshot("viewDidAppear")
     }
     
 #if !os(tvOS)
@@ -1135,12 +1163,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         setNeedsStatusBarAppearanceUpdate()
         if isVLCPlayer {
             refreshGestureControlLevels(animated: false)
+            logVLCUIViewSnapshot("viewWillAppear")
         }
     }
     
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         setNeedsStatusBarAppearanceUpdate()
+        logVLCUIViewSnapshot("viewWillDisappear")
     }
 #endif
     
@@ -4768,7 +4798,8 @@ extension PlayerViewController: VLCRendererDelegate {
         if isClosing { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            Logger.shared.log("[PlayerVC.PiP] native VLC availability changed available=\(isAvailable)", type: "Player")
+            Logger.shared.log("[PlayerVC.PiP] native VLC availability changed available=\(isAvailable) enabled=\(Settings.shared.vlcPiPEnabled) active=\(renderer.isPictureInPictureActive) paused=\(self.rendererIsPausedState())", type: "Player")
+            self.logVLCUIViewSnapshot("delegate didChangePictureInPictureAvailability")
             self.updatePiPButtonVisibility()
         }
     }
@@ -4777,7 +4808,8 @@ extension PlayerViewController: VLCRendererDelegate {
         if isClosing { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            Logger.shared.log("[PlayerVC.PiP] native VLC active changed active=\(isActive)", type: "Player")
+            Logger.shared.log("[PlayerVC.PiP] native VLC active changed active=\(isActive) enabled=\(Settings.shared.vlcPiPEnabled) available=\(renderer.isPictureInPictureAvailable) paused=\(self.rendererIsPausedState())", type: "Player")
+            self.logVLCUIViewSnapshot("delegate didChangePictureInPictureActive")
             self.updatePiPButtonVisibility()
             renderer.updatePictureInPicturePlaybackState()
         }
@@ -4830,12 +4862,34 @@ extension PlayerViewController: PiPControllerDelegate {
     @objc private func appDidEnterBackground() {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            self.logVLCUIViewSnapshot("appDidEnterBackground async start")
             if let vlc = self.vlcRenderer {
                 let pipEnabled = Settings.shared.vlcPiPEnabled
-                Logger.shared.log("[PlayerVC.PiP] VLC background check active=\(vlc.isPictureInPictureActive) available=\(vlc.isPictureInPictureAvailable) paused=\(self.rendererIsPausedState()) enabled=\(pipEnabled)", type: "Player")
-                if pipEnabled && vlc.isPictureInPictureAvailable && !vlc.isPictureInPictureActive && !self.rendererIsPausedState() {
-                    _ = vlc.startPictureInPicture()
+                let paused = self.rendererIsPausedState()
+                let active = vlc.isPictureInPictureActive
+                let available = vlc.isPictureInPictureAvailable
+                let shouldStartPiP = pipEnabled && available && !active && !paused
+                let skipReason: String
+                if shouldStartPiP {
+                    skipReason = "none"
+                } else if !pipEnabled {
+                    skipReason = "setting-off"
+                } else if !available {
+                    skipReason = "unavailable"
+                } else if active {
+                    skipReason = "already-active"
+                } else if paused {
+                    skipReason = "paused"
+                } else {
+                    skipReason = "unknown"
                 }
+                Logger.shared.log("[PlayerVC.PiP] VLC background check active=\(active) available=\(available) paused=\(paused) enabled=\(pipEnabled) shouldStart=\(shouldStartPiP) skipReason=\(skipReason)", type: "Player")
+                if shouldStartPiP {
+                    let started = vlc.startPictureInPicture()
+                    Logger.shared.log("[PlayerVC.PiP] VLC background auto-start requested result=\(started)", type: "Player")
+                }
+                self.logVLCUIViewSnapshot("appDidEnterBackground async end")
+                self.scheduleVLCUIViewSnapshots("appDidEnterBackground followup", delays: [0.5, 1.5])
                 return
             }
 
@@ -4853,16 +4907,22 @@ extension PlayerViewController: PiPControllerDelegate {
     @objc private func appWillEnterForeground() {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            self.logVLCUIViewSnapshot("appWillEnterForeground async start")
 #if !os(tvOS)
             if self.isVLCPlayer {
                 self.refreshGestureControlLevels(animated: false)
             }
 #endif
             if let vlc = self.vlcRenderer {
+                Logger.shared.log("[PlayerVC.PiP] VLC foreground check active=\(vlc.isPictureInPictureActive) available=\(vlc.isPictureInPictureAvailable) enabled=\(Settings.shared.vlcPiPEnabled) paused=\(self.rendererIsPausedState())", type: "Player")
                 if vlc.isPictureInPictureActive {
                     Logger.shared.log("[PlayerVC.PiP] returning to foreground; stopping native VLC PiP", type: "Player")
                     vlc.stopPictureInPicture()
+                } else {
+                    Logger.shared.log("[PlayerVC.PiP] foreground did not stop PiP because native VLC PiP was inactive", type: "Player")
                 }
+                self.logVLCUIViewSnapshot("appWillEnterForeground async end")
+                self.scheduleVLCUIViewSnapshots("appWillEnterForeground followup")
                 return
             }
             guard let pip = self.pipController else { return }
@@ -4870,6 +4930,7 @@ extension PlayerViewController: PiPControllerDelegate {
                 self.logMPV("Returning to foreground; stopping PiP")
                 pip.stopPictureInPicture()
             }
+            self.logVLCUIViewSnapshot("appWillEnterForeground async end")
         }
     }
 }
