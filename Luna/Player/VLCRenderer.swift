@@ -37,6 +37,11 @@ private typealias NativeVLCPiPReadyBlock = @convention(block) (AnyObject) -> Voi
 private typealias NativeVLCPiPSeekCompletion = @convention(block) () -> Void
 private typealias NativeVLCPiPStateChangeBlock = @convention(block) (Bool) -> Void
 
+private extension Notification.Name {
+    static let lunaVLCMediaPlayerTimeChanged = Notification.Name("VLCMediaPlayerTimeChanged")
+    static let lunaVLCMediaPlayerStateChanged = Notification.Name("VLCMediaPlayerStateChanged")
+}
+
 private final class VLCPictureInPictureDrawableView: UIView {
     weak var renderer: VLCRenderer?
 
@@ -209,13 +214,13 @@ final class VLCRenderer: NSObject {
             NotificationCenter.default.addObserver(
                 self,
                 selector: #selector(mediaPlayerTimeChanged),
-                name: NSNotification.Name(rawValue: VLCMediaPlayerTimeChanged),
+                name: .lunaVLCMediaPlayerTimeChanged,
                 object: mediaPlayer
             )
             NotificationCenter.default.addObserver(
                 self,
                 selector: #selector(mediaPlayerStateChanged),
-                name: NSNotification.Name(rawValue: VLCMediaPlayerStateChanged),
+                name: .lunaVLCMediaPlayerStateChanged,
                 object: mediaPlayer
             )
             
@@ -295,7 +300,15 @@ final class VLCRenderer: NSObject {
                 return 
             }
             
-            let media = VLCMedia(url: url)
+            guard let media = VLCMedia(url: url) else {
+                Logger.shared.log("[VLCRenderer.load] ERROR: VLCMedia could not be created for \(url.absoluteString)", type: "Error")
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.delegate?.renderer(self, didChangeLoading: false)
+                    self.delegate?.renderer(self, didFailWithError: "VLC could not load this media")
+                }
+                return
+            }
             if let headers = self.currentHeaders, !headers.isEmpty {
                 if let ua = headers["User-Agent"], !ua.isEmpty {
                     media.addOption(":http-user-agent=\(ua)")
@@ -369,7 +382,7 @@ final class VLCRenderer: NSObject {
         // If VLC's media has stopped or ended (e.g. network timeout while backgrounded),
         // calling play() alone won't work — reload the stream and seek back.
         let state = player.state
-        if state == .stopped || state == .ended || state == .error {
+        if isTerminalState(state) {
             Logger.shared.log("[VLCRenderer.play] Player in \(describeState(state)) state — reloading from position \(cachedPosition)s", type: "Stream")
             reloadAndSeekToLastPosition()
             return
@@ -418,7 +431,7 @@ final class VLCRenderer: NSObject {
             let durationSec = durationMs / 1000.0
             if durationSec > 0 {
                 let normalized = min(max(clamped / durationSec, 0), 1)
-                player.position = Float(normalized)
+                self.setNormalizedPosition(normalized, on: player)
                 self.cachedDuration = durationSec
                 self.pendingAbsoluteSeek = nil
                 self.updatePictureInPicturePlaybackState()
@@ -428,7 +441,7 @@ final class VLCRenderer: NSObject {
             // If we have a cached duration, fall back to it.
             if self.cachedDuration > 0 {
                 let normalized = min(max(clamped / self.cachedDuration, 0), 1)
-                player.position = Float(normalized)
+                self.setNormalizedPosition(normalized, on: player)
                 self.pendingAbsoluteSeek = clamped
                 self.updatePictureInPicturePlaybackState()
                 return
@@ -470,14 +483,12 @@ final class VLCRenderer: NSObject {
         
         var result: [(Int, String, String)] = []
         
-        // VLC provides audio track info through the media player
-        if let audioTrackIndexes = player.audioTrackIndexes as? [Int],
-           let audioTrackNames = player.audioTrackNames as? [String] {
-            // VLCKit doesn't expose language codes publicly here; rely on name parsing.
-            for (index, name) in zip(audioTrackIndexes, audioTrackNames) {
-                let code = guessLanguageCode(from: name)
-                result.append((index, name, code))
-            }
+        let audioTrackIndexes = vlcIntArray(from: player, key: "audioTrackIndexes")
+        let audioTrackNames = vlcStringArray(from: player, key: "audioTrackNames")
+        // VLCKit doesn't expose language codes publicly here; rely on name parsing.
+        for (index, name) in zip(audioTrackIndexes, audioTrackNames) {
+            let code = guessLanguageCode(from: name)
+            result.append((index, name, code))
         }
         
         return result
@@ -515,7 +526,7 @@ final class VLCRenderer: NSObject {
         
         // Set track immediately - VLC property setters are thread-safe
         Logger.shared.log("VLCRenderer: Setting audio track to ID \(id)", type: "Player")
-        player.currentAudioTrackIndex = Int32(id)
+        setVLCInt(id, on: player, key: "currentAudioTrackIndex")
         
         // Notify delegates on main thread
         DispatchQueue.main.async { [weak self] in
@@ -526,7 +537,7 @@ final class VLCRenderer: NSObject {
     
     func getCurrentAudioTrackId() -> Int {
         guard let player = mediaPlayer else { return -1 }
-        return Int(player.currentAudioTrackIndex)
+        return vlcInt(from: player, key: "currentAudioTrackIndex", fallback: -1)
     }
 
     
@@ -537,12 +548,10 @@ final class VLCRenderer: NSObject {
         
         var result: [(Int, String)] = []
         
-        // VLC provides subtitle track info through the media player
-        if let subtitleIndexes = player.videoSubTitlesIndexes as? [Int],
-           let subtitleNames = player.videoSubTitlesNames as? [String] {
-            for (index, name) in zip(subtitleIndexes, subtitleNames) {
-                result.append((index, name))
-            }
+        let subtitleIndexes = vlcIntArray(from: player, key: "videoSubTitlesIndexes")
+        let subtitleNames = vlcStringArray(from: player, key: "videoSubTitlesNames")
+        for (index, name) in zip(subtitleIndexes, subtitleNames) {
+            result.append((index, name))
         }
         
         return result
@@ -553,7 +562,7 @@ final class VLCRenderer: NSObject {
         
         // Set track immediately - VLC property setters are thread-safe
         Logger.shared.log("VLCRenderer: Setting subtitle track to ID \(id)", type: "Player")
-        player.currentVideoSubTitleIndex = Int32(id)
+        setVLCInt(id, on: player, key: "currentVideoSubTitleIndex")
         
         // Notify delegates on main thread
         DispatchQueue.main.async { [weak self] in
@@ -566,7 +575,7 @@ final class VLCRenderer: NSObject {
     func disableSubtitles() {
         guard let player = mediaPlayer else { return }
         // Disable subtitles immediately by setting track index to -1
-        player.currentVideoSubTitleIndex = -1
+        setVLCInt(-1, on: player, key: "currentVideoSubTitleIndex")
     }
     
     func refreshSubtitleOverlay() {
@@ -577,7 +586,7 @@ final class VLCRenderer: NSObject {
     // MARK: - External Subtitles
     
     func loadExternalSubtitles(urls: [String], enforce: Bool = false) {
-        guard let player = mediaPlayer, let media = currentMedia else { return }
+        guard let player = mediaPlayer else { return }
         
         eventQueue.async { [weak self] in
             Logger.shared.log("VLCRenderer: Adding external subtitles count=\(urls.count)", type: "Info")
@@ -607,10 +616,10 @@ final class VLCRenderer: NSObject {
 
             // Best-effort live re-apply: toggle current subtitle track to force renderer refresh.
             if let player = self.mediaPlayer {
-                let currentTrack = player.currentVideoSubTitleIndex
+                let currentTrack = self.vlcInt(from: player, key: "currentVideoSubTitleIndex", fallback: -1)
                 if currentTrack >= 0 {
-                    player.currentVideoSubTitleIndex = -1
-                    player.currentVideoSubTitleIndex = currentTrack
+                    self.setVLCInt(-1, on: player, key: "currentVideoSubTitleIndex")
+                    self.setVLCInt(currentTrack, on: player, key: "currentVideoSubTitleIndex")
                 }
             }
         }
@@ -642,7 +651,7 @@ final class VLCRenderer: NSObject {
     
     func getCurrentSubtitleTrackId() -> Int {
         guard let player = mediaPlayer else { return -1 }
-        return Int(player.currentVideoSubTitleIndex)
+        return vlcInt(from: player, key: "currentVideoSubTitleIndex", fallback: -1)
     }
 
     // MARK: - Event Handlers
@@ -653,17 +662,13 @@ final class VLCRenderer: NSObject {
         let durationMs = player.media?.length.value?.doubleValue ?? 0
         let position = positionMs / 1000.0
         let duration = durationMs / 1000.0
-        let normalizedPosition = Double(player.position)
-
-        let now = CACurrentMediaTime()
-
         cachedPosition = position
         cachedDuration = duration
 
         // If we were waiting for duration to apply a pending seek, do it once duration is known.
         if duration > 0, let pending = pendingAbsoluteSeek {
             let normalized = min(max(pending / duration, 0), 1)
-            player.position = Float(normalized)
+            setNormalizedPosition(normalized, on: player)
             pendingAbsoluteSeek = nil
         }
 
@@ -693,14 +698,13 @@ final class VLCRenderer: NSObject {
         
         let state = player.state
         
-        if state == .error {
+        if isErrorState(state) {
             let urlString = currentURL?.absoluteString ?? "nil"
             let headerCount = currentHeaders?.count ?? 0
             Logger.shared.log("VLCRenderer: ERROR url=\(urlString) headers=\(headerCount) preset=\(currentPreset?.id.rawValue ?? "nil")", type: "Error")
         }
         
-        switch state {
-        case .playing:
+        if isPlayingState(state) {
             isPaused = false
             isLoading = false
             isReadyToSeek = true
@@ -712,21 +716,21 @@ final class VLCRenderer: NSObject {
                 self.delegate?.renderer(self, didBecomeReadyToSeek: true)
             }
             
-        case .paused:
+        } else if isVLCPlayerPausedState(state) {
             isPaused = true
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.delegate?.renderer(self, didChangePause: true)
             }
             
-        case .opening, .buffering:
+        } else if isLoadingState(state) {
             isLoading = true
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.delegate?.renderer(self, didChangeLoading: true)
             }
 
-        case .stopped, .ended, .error:
+        } else if isTerminalState(state) {
             isPaused = true
             isLoading = false
             DispatchQueue.main.async { [weak self] in
@@ -734,15 +738,12 @@ final class VLCRenderer: NSObject {
                 self.delegate?.renderer(self, didChangePause: true)
                 self.delegate?.renderer(self, didChangeLoading: false)
             }
-            if state == .error {
+            if isErrorState(state) {
                 DispatchQueue.main.async { [weak self] in
                     guard let self else { return }
                     self.delegate?.renderer(self, didFailWithError: "VLC playback error")
                 }
             }
-            
-        default:
-            break
         }
         updatePictureInPicturePlaybackState()
     }
@@ -987,20 +988,124 @@ final class VLCRenderer: NSObject {
         return isPaused
     }
 
+    private func stateCode(_ state: VLCMediaPlayerState) -> Int {
+        return Int(state.rawValue)
+    }
+
+    private func isPlayingState(_ state: VLCMediaPlayerState) -> Bool {
+        return stateCode(state) == 5
+    }
+
+    private func isVLCPlayerPausedState(_ state: VLCMediaPlayerState) -> Bool {
+        return stateCode(state) == 6
+    }
+
+    private func isLoadingState(_ state: VLCMediaPlayerState) -> Bool {
+        let code = stateCode(state)
+        return code == 1 || code == 2
+    }
+
+    private func isErrorState(_ state: VLCMediaPlayerState) -> Bool {
+        return stateCode(state) == 4
+    }
+
+    private func isTerminalState(_ state: VLCMediaPlayerState) -> Bool {
+        let code = stateCode(state)
+        return code == 0 || code == 3 || code == 4
+    }
+
     private func describeState(_ state: VLCMediaPlayerState) -> String {
-        switch state {
-        case .opening: return "opening"
-        case .buffering: return "buffering"
-        case .ended: return "ended"
-        case .error: return "error"
-        case .paused: return "paused"
-        case .playing: return "playing"
-        case .stopped: return "stopped"
-        case .esAdded: return "esAdded"
-        @unknown default:
-            // Older or newer SDKs may expose an idle/unknown state; fall back to rawValue for logging.
-            return "unknown(\(state.rawValue))"
+        switch stateCode(state) {
+        case 0: return "stopped"
+        case 1: return "opening"
+        case 2: return "buffering"
+        case 3: return "ended"
+        case 4: return "error"
+        case 5: return "playing"
+        case 6: return "paused"
+        case 7: return "esAdded"
+        default: return "unknown(\(stateCode(state)))"
         }
+    }
+
+    private func setNormalizedPosition(_ normalized: Double, on player: VLCMediaPlayer) {
+        setVLCDouble(min(max(normalized, 0), 1), on: player, key: "position")
+    }
+
+    private func vlcIntArray(from player: VLCMediaPlayer, key: String) -> [Int] {
+        guard let value = vlcValue(from: player, key: key) else { return [] }
+        if let ints = value as? [Int] {
+            return ints
+        }
+        if let numbers = value as? [NSNumber] {
+            return numbers.map { $0.intValue }
+        }
+        if let array = value as? NSArray {
+            return array.compactMap { item in
+                if let number = item as? NSNumber { return number.intValue }
+                if let int = item as? Int { return int }
+                if let string = item as? String { return Int(string) }
+                return nil
+            }
+        }
+        return []
+    }
+
+    private func vlcStringArray(from player: VLCMediaPlayer, key: String) -> [String] {
+        guard let value = vlcValue(from: player, key: key) else { return [] }
+        if let strings = value as? [String] {
+            return strings
+        }
+        if let array = value as? NSArray {
+            return array.compactMap { item in
+                if let string = item as? String { return string }
+                if item is NSNull { return nil }
+                return String(describing: item)
+            }
+        }
+        return []
+    }
+
+    private func vlcInt(from player: VLCMediaPlayer, key: String, fallback: Int) -> Int {
+        guard let value = vlcValue(from: player, key: key) else { return fallback }
+        if let int = value as? Int {
+            return int
+        }
+        if let number = value as? NSNumber {
+            return number.intValue
+        }
+        if let int32 = value as? Int32 {
+            return Int(int32)
+        }
+        if let string = value as? String, let int = Int(string) {
+            return int
+        }
+        return fallback
+    }
+
+    private func setVLCInt(_ value: Int, on player: VLCMediaPlayer, key: String) {
+        setVLCValue(NSNumber(value: value), on: player, key: key)
+    }
+
+    private func setVLCDouble(_ value: Double, on player: VLCMediaPlayer, key: String) {
+        setVLCValue(NSNumber(value: value), on: player, key: key)
+    }
+
+    private func vlcValue(from player: VLCMediaPlayer, key: String) -> Any? {
+        let object = player as NSObject
+        guard object.responds(to: NSSelectorFromString(key)) else { return nil }
+        return object.value(forKey: key)
+    }
+
+    private func setVLCValue(_ value: Any, on player: VLCMediaPlayer, key: String) {
+        let object = player as NSObject
+        guard object.responds(to: NSSelectorFromString(setterSelectorName(for: key))) else { return }
+        object.setValue(value, forKey: key)
+    }
+
+    private func setterSelectorName(for key: String) -> String {
+        guard let first = key.first else { return "set:" }
+        return "set\(String(first).uppercased())\(key.dropFirst()):"
     }
 }
 
