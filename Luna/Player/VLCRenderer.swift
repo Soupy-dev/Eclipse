@@ -54,8 +54,8 @@ private final class VLCPictureInPictureDrawableView: UIView {
         if protocolName == "VLCPictureInPictureDrawable" ||
             protocolName == "VLCPictureInPictureMediaControlling" {
             let setting = renderer?.isPictureInPictureSettingEnabled ?? false
-            logPiPDrawableEvent("conforms protocol=\(protocolName) exposed=true setting=\(setting) rendererAttached=\(renderer != nil)")
-            return true
+            logPiPDrawableEvent("conforms protocol=\(protocolName) exposed=\(setting) setting=\(setting) rendererAttached=\(renderer != nil)")
+            return setting
         }
         return super.conforms(to: aProtocol)
     }
@@ -63,6 +63,9 @@ private final class VLCPictureInPictureDrawableView: UIView {
     @objc(mediaController)
     func mediaController() -> AnyObject {
         logPiPDrawableEvent("mediaController requested setting=\(renderer?.isPictureInPictureSettingEnabled ?? false)")
+        guard renderer?.isPictureInPictureSettingEnabled == true else {
+            return self
+        }
         return renderer?.nativePictureInPictureMediaController() ?? self
     }
 
@@ -179,6 +182,7 @@ final class VLCRenderer: NSObject {
     private var detachedDrawableForBackground = false
     private var foregroundVideoOutputRefreshPending = false
     private var foregroundVideoOutputRefreshGeneration = 0
+    private var foregroundVideoOutputSeekNudgeGeneration = -1
     private var backgroundedPosition: Double?
     private var lastLoggedStateCode: Int?
     private var lastProgressLogBucket = -1
@@ -318,6 +322,7 @@ final class VLCRenderer: NSObject {
         foregroundVideoOutputRefreshPending = true
         backgroundedPosition = cachedPosition
         foregroundVideoOutputRefreshGeneration += 1
+        foregroundVideoOutputSeekNudgeGeneration = -1
         logVLC("foreground video output refresh marked reason=\(reason) generation=\(foregroundVideoOutputRefreshGeneration) restore=\(secondsText(backgroundedPosition)) snapshot={\(playerSnapshot())}", type: "Player")
     }
 
@@ -374,7 +379,6 @@ final class VLCRenderer: NSObject {
         }
         logVLC("foreground video output refresh applying reason=\(reason) consume=\(consume) restore=\(secondsText(restorePosition)) snapshot={\(playerSnapshot(player))}", type: "Player")
 
-        mediaPlayer?.drawable = nil
         vlcView.isHidden = false
         vlcView.alpha = 1
         vlcView.superview?.setNeedsLayout()
@@ -383,6 +387,24 @@ final class VLCRenderer: NSObject {
         vlcView.layoutIfNeeded()
         mediaPlayer?.drawable = vlcView
         logDrawableSnapshot("foreground video output refresh applied \(reason)")
+
+        let activeGeneration = generation ?? foregroundVideoOutputRefreshGeneration
+        let shouldSeekNudge = consume || foregroundVideoOutputSeekNudgeGeneration != activeGeneration
+        if shouldSeekNudge {
+            foregroundVideoOutputSeekNudgeGeneration = activeGeneration
+            eventQueue.async { [weak self, weak player] in
+                guard let self, self.isRunning, !self.isStopping, let player else { return }
+                guard UIApplication.shared.applicationState != .background else { return }
+                let livePosition = self.resolvedPlaybackProgress(from: player).position
+                let targetPosition = restorePosition > 0 ? restorePosition : livePosition
+                self.logVLC("foreground video output seek-nudge reason=\(reason) target=\(self.secondsText(targetPosition)) live=\(self.secondsText(livePosition)) generation=\(activeGeneration) paused=\(self.isPaused) snapshot={\(self.playerSnapshot(player))}", type: "Player")
+                self.applySeek(to: targetPosition, on: player, refreshVideoOutput: true)
+                if self.isPaused {
+                    self.stopProgressPolling()
+                }
+            }
+            return true
+        }
 
         eventQueue.asyncAfter(deadline: .now() + 0.08) { [weak self, weak player] in
             guard let self, self.isRunning, !self.isStopping, let player else { return }
@@ -504,6 +526,12 @@ final class VLCRenderer: NSObject {
                 self,
                 selector: #selector(handleAppDidEnterBackground),
                 name: UIApplication.didEnterBackgroundNotification,
+                object: nil
+            )
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(handleAppWillResignActive),
+                name: UIApplication.willResignActiveNotification,
                 object: nil
             )
             NotificationCenter.default.addObserver(
@@ -1440,6 +1468,19 @@ final class VLCRenderer: NSObject {
         pausePlayback(forceSendToPlayer: true)
         logDrawableSnapshot("appDidEnterBackground no PiP no detach")
     }
+
+    @objc private func handleAppWillResignActive() {
+        guard !isPictureInPictureSettingEnabled else { return }
+        logVLC("appWillResignActive with PiP disabled; suppressing native PiP controller snapshot={\(playerSnapshot())}", type: "Player")
+        if nativePiPActive || nativePiPStartRequested {
+            stopPictureInPicture()
+        }
+        if invalidateNativePictureInPictureController(reason: "willResignActive setting disabled") {
+            nativePiPController = nil
+            nativePiPStateChangeHandler = nil
+        }
+        setNativePictureInPictureAvailable(false)
+    }
     
     @objc private func handleAppWillEnterForeground() {
         logVLC("appWillEnterForeground snapshot={\(playerSnapshot())}", type: "Player")
@@ -1480,7 +1521,7 @@ final class VLCRenderer: NSObject {
     // MARK: - Native VLC Picture in Picture
 
     var isPictureInPictureAvailable: Bool {
-        return nativePiPAvailable
+        return isPictureInPictureSettingEnabled && nativePiPAvailable
     }
 
     var isPictureInPictureActive: Bool {
@@ -1696,6 +1737,19 @@ final class VLCRenderer: NSObject {
             return
         }
 
+        guard isPictureInPictureSettingEnabled else {
+            logVLC("native VLC PiP controller ready while setting disabled; stopping and not advertising availability type=\(String(describing: type(of: controller))) snapshot={\(playerSnapshot())}", type: "Player")
+            nativePiPController = controller
+            installNativePictureInPictureStateHandler(on: controller)
+            stopPictureInPicture()
+            if invalidateNativePictureInPictureController(reason: "controller ready while setting disabled") {
+                nativePiPController = nil
+                nativePiPStateChangeHandler = nil
+            }
+            setNativePictureInPictureAvailable(false)
+            return
+        }
+
         nativePiPController = controller
         nativePiPStartRequested = false
         installNativePictureInPictureStateHandler(on: controller)
@@ -1730,6 +1784,26 @@ final class VLCRenderer: NSObject {
         }
         nativePiPStateChangeHandler = handler
         object.setValue(handler, forKey: "stateChangeEventHandler")
+    }
+
+    @discardableResult
+    private func invalidateNativePictureInPictureController(reason: String) -> Bool {
+        guard let controller = nativePiPController as? NSObject else {
+            logVLC("native PiP invalidate skipped reason=\(reason) controller=nil snapshot={\(playerSnapshot())}", type: "Player")
+            return false
+        }
+
+        for selectorName in ["invalidate", "invalidatePictureInPicture"] {
+            let selector = NSSelectorFromString(selectorName)
+            if controller.responds(to: selector) {
+                Logger.shared.log("[VLCRenderer.PiP] invalidating native controller via \(selectorName) reason=\(reason)", type: "Player")
+                _ = controller.perform(selector)
+                return true
+            }
+        }
+
+        logVLC("native PiP invalidate unavailable reason=\(reason) type=\(String(describing: type(of: controller)))", type: "Player")
+        return false
     }
 
     private func scheduleNativePictureInPictureStartFallbackCheck() {
@@ -1774,14 +1848,48 @@ final class VLCRenderer: NSObject {
             return
         }
 
-        if !available {
+        let effectiveAvailable = available && isPictureInPictureSettingEnabled
+        if !effectiveAvailable {
             nativePiPStartRequested = false
         }
 
-        guard nativePiPAvailable != available else { return }
-        nativePiPAvailable = available
-        logVLC("setNativePictureInPictureAvailable=\(available) snapshot={\(playerSnapshot())}", type: "Player")
-        delegate?.renderer(self, didChangePictureInPictureAvailability: available)
+        guard nativePiPAvailable != effectiveAvailable else { return }
+        nativePiPAvailable = effectiveAvailable
+        logVLC("setNativePictureInPictureAvailable=\(effectiveAvailable) requested=\(available) setting=\(isPictureInPictureSettingEnabled) snapshot={\(playerSnapshot())}", type: "Player")
+        delegate?.renderer(self, didChangePictureInPictureAvailability: effectiveAvailable)
+    }
+
+    func handlePictureInPictureSettingChanged() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.handlePictureInPictureSettingChanged()
+            }
+            return
+        }
+
+        let enabled = isPictureInPictureSettingEnabled
+        logVLC("handlePictureInPictureSettingChanged enabled=\(enabled) snapshot={\(playerSnapshot())}", type: "Player")
+        if enabled {
+            if nativePiPController != nil {
+                setNativePictureInPictureAvailable(true)
+                updatePictureInPicturePlaybackState()
+            }
+            if isRunning, !isStopping {
+                mediaPlayer?.drawable = vlcView
+                logDrawableSnapshot("PiP setting enabled drawable refresh")
+            }
+            return
+        }
+
+        if nativePiPActive || nativePiPStartRequested {
+            stopPictureInPicture()
+        }
+        if invalidateNativePictureInPictureController(reason: "setting disabled") {
+            nativePiPController = nil
+            nativePiPStateChangeHandler = nil
+        }
+        nativePiPStartRequested = false
+        setNativePictureInPictureAvailable(false)
     }
 
     private func setNativePictureInPictureActive(_ active: Bool) {

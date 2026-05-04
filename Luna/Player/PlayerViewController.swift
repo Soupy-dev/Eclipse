@@ -3579,6 +3579,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         Logger.shared.log("[PlayerVC.Settings] UserDefaults changed; evaluating VLC subtitle mode", type: "Player")
         applyVLCSubtitleModeSettingIfNeeded()
         applyVLCSubtitleOverlayPositionSetting()
+        vlcRenderer?.handlePictureInPictureSettingChanged()
         updatePiPButtonVisibility()
         updateSubtitleTracksMenu()
         prefetchOpenSubtitlesIfEnabled(reason: "settings")
