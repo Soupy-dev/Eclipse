@@ -109,6 +109,7 @@ struct MediaDetailView: View {
     @State private var detailLoadTask: Task<Void, Never>?
     @State private var specialsLoadTask: Task<Void, Never>?
     @State private var specialsLoadGeneration = 0
+    @State private var detailContentRefreshToken = UUID()
     
     @StateObject private var serviceManager = ServiceManager.shared
     @StateObject private var stremioManager = StremioAddonManager.shared
@@ -116,6 +117,7 @@ struct MediaDetailView: View {
     
     @Environment(\.presentationMode) var presentationMode
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+    @Environment(\.scenePhase) private var scenePhase
     @AppStorage("tmdbLanguage") private var selectedLanguage = "en-US"
     private let nextEpisodeSheetPresentationDelay: TimeInterval = 1.2
 
@@ -198,6 +200,7 @@ struct MediaDetailView: View {
                 loadMediaDetails()
             } else {
                 Logger.shared.log("MediaDetailView onAppear using existing loaded state: id=\(searchResult.id) tvSeasons=\(tvShowDetail?.seasons.count ?? 0) selectedSeason=\(selectedSeason?.seasonNumber.description ?? "nil")", type: "CrashProbe")
+                refreshDetailContentLayout(reason: "detail appeared")
             }
             updateBookmarkStatus()
         }
@@ -273,9 +276,29 @@ struct MediaDetailView: View {
         }
         .onChangeComp(of: showingSearchResults) { _, newValue in
             Logger.shared.log("MediaDetailView showingSearchResults changed: id=\(searchResult.id) visible=\(newValue) episode=\(selectedEpisodeForSearch.map { "S\($0.seasonNumber)E\($0.episodeNumber)" } ?? "nil")", type: "CrashProbe")
+            if !newValue {
+                refreshDetailContentLayout(reason: "play sheet dismissed")
+            }
         }
         .onChangeComp(of: showingDownloadSheet) { _, newValue in
             Logger.shared.log("MediaDetailView showingDownloadSheet changed: id=\(searchResult.id) visible=\(newValue) episode=\(selectedEpisodeForSearch.map { "S\($0.seasonNumber)E\($0.episodeNumber)" } ?? "nil")", type: "CrashProbe")
+            if !newValue {
+                refreshDetailContentLayout(reason: "download sheet dismissed")
+            }
+        }
+        .onChangeComp(of: specialSearchRequest?.id) { _, newValue in
+            if newValue == nil {
+                refreshDetailContentLayout(reason: "special search sheet dismissed")
+            }
+        }
+        .onChange(of: scenePhase) { newPhase in
+            if newPhase == .active {
+                refreshDetailContentLayout(reason: "scene active")
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .playerDidClose)) { notification in
+            guard playerCloseNotificationMatchesDetail(notification) else { return }
+            refreshDetailContentLayout(reason: "player closed")
         }
         .onDisappear {
             invalidatePendingNextEpisodePresentation()
@@ -427,12 +450,30 @@ struct MediaDetailView: View {
     private var mainScrollView: some View {
         let _ = Logger.shared.log("MediaDetailView construct mainScrollView: id=\(searchResult.id) isLoading=\(isLoading) hasLoaded=\(hasLoadedContent) isAnime=\(isAnimeShow) tvSeasons=\(tvShowDetail?.seasons.count ?? 0) selectedSeason=\(selectedSeason?.seasonNumber.description ?? "nil")", type: "CrashProbe")
         ScrollView(showsIndicators: false) {
-            LazyVStack(spacing: 0) {
+            VStack(spacing: 0) {
                 heroImageSection
                 contentContainer
             }
+            .id(detailContentRefreshToken)
         }
         .ignoresSafeArea(edges: [.top, .leading, .trailing])
+    }
+
+    private func refreshDetailContentLayout(reason: String) {
+        guard hasLoadedContent, !isLoading else { return }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            guard hasLoadedContent, !isLoading else { return }
+            detailContentRefreshToken = UUID()
+            Logger.shared.log("MediaDetailView refreshed content layout: id=\(searchResult.id) reason=\(reason)", type: "CrashProbe")
+        }
+    }
+
+    private func playerCloseNotificationMatchesDetail(_ notification: Notification) -> Bool {
+        guard let tmdbId = notification.userInfo?["tmdbId"] as? Int else {
+            return true
+        }
+        return tmdbId == searchResult.id
     }
     
     @ViewBuilder

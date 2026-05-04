@@ -140,6 +140,7 @@ final class VLCRenderer: NSObject {
     private var progressTimer: DispatchSourceTimer?
     private var pendingAbsoluteSeek: Double?
     private var preparedInitialSeek: Double?
+    private let minimumReliableDuration: Double = 5.0
     private var currentURL: URL?
     private var currentHeaders: [String: String]?
     private var currentPreset: PlayerPreset?
@@ -472,7 +473,7 @@ final class VLCRenderer: NSObject {
             // If VLC already knows the duration, seek accurately using normalized position.
             let durationMs = player.media?.length.value?.doubleValue ?? 0
             let durationSec = durationMs / 1000.0
-            if durationSec > 0 {
+            if durationSec >= self.minimumReliableDuration {
                 let normalized = min(max(clamped / durationSec, 0), 1)
                 self.setNormalizedPosition(normalized, on: player)
                 self.cachedDuration = durationSec
@@ -482,7 +483,7 @@ final class VLCRenderer: NSObject {
             }
 
             // If we have a cached duration, fall back to it.
-            if self.cachedDuration > 0 {
+            if self.cachedDuration >= self.minimumReliableDuration {
                 let normalized = min(max(clamped / self.cachedDuration, 0), 1)
                 self.setNormalizedPosition(normalized, on: player)
                 self.pendingAbsoluteSeek = clamped
@@ -710,7 +711,9 @@ final class VLCRenderer: NSObject {
         let position = progress.position
         let duration = progress.duration
         cachedPosition = position
-        cachedDuration = duration
+        if duration.isFinite, duration > 0 {
+            cachedDuration = duration
+        }
 
         if isPlaybackActive(player), isPaused {
             isPaused = false
@@ -850,10 +853,11 @@ final class VLCRenderer: NSObject {
         let rawPosition = max(0, (player.time.value?.doubleValue ?? 0) / 1000.0)
         let rawDuration = max(0, (player.media?.length.value?.doubleValue ?? 0) / 1000.0)
         let normalized = normalizedPosition(from: player)
-        var duration = rawDuration > 0 ? rawDuration : cachedDuration
-        if duration <= 0, normalized > 0 {
-            duration = 1.0
-        }
+        let reportedDurationFitsPosition = rawPosition <= 0 || rawPosition <= rawDuration + 2.0
+        let cachedDurationFitsPosition = rawPosition <= 0 || rawPosition <= cachedDuration + 2.0
+        let reportedDurationIsReliable = rawDuration.isFinite && rawDuration >= minimumReliableDuration && reportedDurationFitsPosition
+        let cachedDurationIsReliable = cachedDuration.isFinite && cachedDuration >= minimumReliableDuration && cachedDurationFitsPosition
+        let duration = reportedDurationIsReliable ? rawDuration : (cachedDurationIsReliable ? cachedDuration : 0)
         let isPlaying = isPlaybackActive(player) || (!isPaused && !isLoading)
 
         let position: Double
@@ -940,11 +944,11 @@ final class VLCRenderer: NSObject {
             if restorePosition > 0 {
                 let durationMs = player.media?.length.value?.doubleValue ?? 0
                 let durationSec = durationMs / 1000.0
-                if durationSec > 0 {
+                if durationSec >= self.minimumReliableDuration {
                     let normalized = min(max(restorePosition / durationSec, 0), 1)
                     self.setNormalizedPosition(normalized, on: player)
                     self.cachedDuration = durationSec
-                } else if self.cachedDuration > 0 {
+                } else if self.cachedDuration >= self.minimumReliableDuration {
                     let normalized = min(max(restorePosition / self.cachedDuration, 0), 1)
                     self.setNormalizedPosition(normalized, on: player)
                 } else {

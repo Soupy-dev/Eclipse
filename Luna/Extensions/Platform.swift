@@ -5,7 +5,12 @@
 //  Created by Dominic on 02.11.25.
 //
 
+import Foundation
 import SwiftUI
+
+extension Notification.Name {
+    static let playerDidClose = Notification.Name("playerDidClose")
+}
 
 // MARK: - iPad Scaling Utilities
 

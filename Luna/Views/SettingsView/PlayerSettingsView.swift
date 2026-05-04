@@ -561,7 +561,7 @@ struct PlayerSettingsView: View {
 
                         settingsToggleRow(
                             title: "Volume Gesture",
-                            detail: "Use a top-right horizontal drag for system volume.",
+                            detail: "Use a right-side vertical drag for system volume.",
                             binding: $store.vlcVolumeGestureEnabled
                         )
 

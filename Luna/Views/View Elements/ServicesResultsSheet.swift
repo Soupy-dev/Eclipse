@@ -641,6 +641,7 @@ struct ModulesSearchResultsSheet: View {
     private var serverSelectionDialogContent: some View {
         ForEach(viewModel.streamOptions) { option in
             Button(option.name) {
+                viewModel.showingStreamMenu = false
                 if let service = viewModel.pendingService {
                     resolveSubtitleSelection(
                         subtitles: viewModel.pendingSubtitles,
@@ -653,7 +654,9 @@ struct ModulesSearchResultsSheet: View {
                 }
             }
         }
-        Button("Cancel", role: .cancel) { }
+        Button("Cancel", role: .cancel) {
+            cancelPendingAutoModeChoice("Auto Mode needs you to choose a stream option before it can continue.")
+        }
     }
     
     @ViewBuilder
@@ -672,7 +675,7 @@ struct ModulesSearchResultsSheet: View {
             }
         }
         Button("Cancel", role: .cancel) {
-            viewModel.resetPickerState()
+            cancelPendingAutoModeChoice("Auto Mode needs you to choose a season before it can continue.")
         }
     }
     
@@ -689,7 +692,7 @@ struct ModulesSearchResultsSheet: View {
             }
         }
         Button("Cancel", role: .cancel) {
-            viewModel.resetPickerState()
+            cancelPendingAutoModeChoice("Auto Mode needs you to choose an episode before it can continue.")
         }
     }
     
@@ -721,10 +724,7 @@ struct ModulesSearchResultsSheet: View {
             }
         }
         Button("Cancel", role: .cancel) {
-            viewModel.subtitleOptions = []
-            viewModel.pendingStreamURL = nil
-            viewModel.pendingHeaders = nil
-            viewModel.pendingServiceHref = nil
+            cancelPendingAutoModeChoice("Auto Mode needs you to choose a subtitle option before it can continue.")
         }
     }
     
@@ -1209,6 +1209,20 @@ struct ModulesSearchResultsSheet: View {
         viewModel.isFetchingStreams = false
         viewModel.streamError = message
         viewModel.showingStreamError = true
+    }
+
+    @MainActor
+    private func cancelPendingAutoModeChoice(_ message: String) {
+        let wasAutoModeChoice = viewModel.pendingPlaybackAutoMode
+        viewModel.resetPickerState()
+        viewModel.resetStreamState()
+        viewModel.subtitleOptions = []
+        viewModel.pendingStreamURL = nil
+        viewModel.pendingHeaders = nil
+
+        if wasAutoModeChoice && autoModeOnly && !showManualPicker {
+            showAutoModeFailure(message)
+        }
     }
 
     @MainActor
@@ -2500,20 +2514,12 @@ struct ModulesSearchResultsSheet: View {
         let availableStreams = parseStreamOptions(streams: streams, sources: sources)
         
         if availableStreams.count > 1 {
-            if viewModel.pendingPlaybackAutoMode, let firstStream = availableStreams.first {
-                Logger.shared.log("Auto Mode found \(availableStreams.count) stream options, using first option", type: "Stream")
-                resolveSubtitleSelection(
-                    subtitles: subtitles,
-                    defaultSubtitle: firstStream.subtitle,
-                    service: service,
-                    streamURL: firstStream.url,
-                    headers: firstStream.headers,
-                    serviceHref: viewModel.pendingServiceHref
-                )
-                return
+            if viewModel.pendingPlaybackAutoMode {
+                Logger.shared.log("Auto Mode found \(availableStreams.count) stream options for \(service.metadata.sourceName); waiting for user choice", type: "Stream")
+                viewModel.streamFetchProgress = "\(service.metadata.sourceName) needs a stream choice."
+            } else {
+                Logger.shared.log("Found \(availableStreams.count) stream options, showing selection", type: "Stream")
             }
-
-            Logger.shared.log("Found \(availableStreams.count) stream options, showing selection", type: "Stream")
             viewModel.streamOptions = availableStreams
             viewModel.pendingSubtitles = subtitles
             viewModel.pendingService = service

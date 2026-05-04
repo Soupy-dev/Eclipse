@@ -4125,6 +4125,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
             self.rendererStop()
             self.logMPV("renderer.stop called from closeTapped")
+            self.postPlayerDidCloseNotification()
         }
 
         if let presenter = presentingViewController {
@@ -4143,6 +4144,21 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             teardownAndStop()
             self.dispatchPendingNextEpisodeRequestIfNeeded()
         }
+    }
+
+    private func postPlayerDidCloseNotification() {
+        var userInfo: [String: Any] = [:]
+        if let mediaInfo {
+            switch mediaInfo {
+            case .movie(let id, _, _, _):
+                userInfo["tmdbId"] = id
+                userInfo["isMovie"] = true
+            case .episode(let showId, _, _, _, _, _):
+                userInfo["tmdbId"] = showId
+                userInfo["isMovie"] = false
+            }
+        }
+        NotificationCenter.default.post(name: .playerDidClose, object: self, userInfo: userInfo)
     }
     
     @objc private func pipTapped() {
@@ -4178,14 +4194,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func updatePosition(_ position: Double, duration: Double) {
 
-        // Some VLC/HLS sources report 0 duration for a while; keep the last good duration so progress persists.
-        let effectiveDuration: Double
-        if duration.isFinite, duration > 0 {
-            effectiveDuration = duration
-        } else {
-            effectiveDuration = cachedDuration
-        }
-
         let safePosition: Double
         if position.isFinite, position >= 0 {
             safePosition = position
@@ -4193,12 +4201,19 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             safePosition = max(0, cachedPosition)
         }
 
-        let safeDuration: Double
-        if effectiveDuration.isFinite, effectiveDuration > 0 {
-            safeDuration = effectiveDuration
-        } else {
-            safeDuration = max(1.0, cachedDuration)
-        }
+        // Newer VLCKit builds can temporarily report a tiny/unknown duration while
+        // valid playback time is already advancing. Treat that as unknown instead
+        // of letting the slider collapse to the end of a 1-second range.
+        let minimumReliableDuration = 5.0
+        let reportedDurationIsReliable = duration.isFinite
+            && duration >= minimumReliableDuration
+            && safePosition <= duration + 2.0
+        let cachedDurationIsReliable = cachedDuration.isFinite
+            && cachedDuration >= minimumReliableDuration
+            && safePosition <= cachedDuration + 2.0
+        let effectiveDuration = reportedDurationIsReliable ? duration : (cachedDurationIsReliable ? cachedDuration : 0)
+        let durationIsReliable = effectiveDuration > 0
+        let safeDuration = durationIsReliable ? max(effectiveDuration, safePosition + 0.5) : max(60.0, safePosition + 300.0)
 
         if !position.isFinite || !duration.isFinite {
             Logger.shared.log("[PlayerVC.progress] non-finite input from renderer. rawPos=\(position) rawDur=\(duration) cachedPos=\(cachedPosition) cachedDur=\(cachedDuration)", type: "Error")
@@ -4225,7 +4240,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 
         DispatchQueue.main.async {
-            if duration.isFinite, duration > 0 {
+            if reportedDurationIsReliable {
                 self.cachedDuration = duration
             }
 
@@ -4256,12 +4271,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
 
 #if !os(tvOS)
-            if self.isVLCPlayer {
+            if self.isVLCPlayer, durationIsReliable {
                 if !self.skipDataFetched {
                     self.fetchSkipData()
                 }
-                self.updateSkipState(position: safePosition, duration: safeDuration)
-                self.updateNextEpisodeState(position: safePosition, duration: safeDuration)
+                self.updateSkipState(position: safePosition, duration: effectiveDuration)
+                self.updateNextEpisodeState(position: safePosition, duration: effectiveDuration)
             }
 #endif
 
@@ -4281,18 +4296,19 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         guard !waitingForInitialResume else { return }
         
-        guard safeDuration.isFinite, safeDuration > 0, safePosition >= 0, let info = mediaInfo else { return }
+        guard durationIsReliable, effectiveDuration.isFinite, effectiveDuration > 0, safePosition >= 0, let info = mediaInfo else { return }
+        let persistPosition = min(safePosition, effectiveDuration)
         
         switch info {
         case .movie(let id, let title, _, _):
-            ProgressManager.shared.updateMovieProgress(movieId: id, title: title, currentTime: safePosition, totalDuration: safeDuration)
+            ProgressManager.shared.updateMovieProgress(movieId: id, title: title, currentTime: persistPosition, totalDuration: effectiveDuration)
         case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, let showPosterURL, _):
             ProgressManager.shared.updateEpisodeProgress(
                 showId: showId,
                 seasonNumber: seasonNumber,
                 episodeNumber: episodeNumber,
-                currentTime: safePosition,
-                totalDuration: safeDuration,
+                currentTime: persistPosition,
+                totalDuration: effectiveDuration,
                 showTitle: showTitle,
                 showPosterURL: showPosterURL,
                 playbackContext: episodePlaybackContext?.forEpisodeNumber(episodeNumber)

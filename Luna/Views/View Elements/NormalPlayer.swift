@@ -43,6 +43,7 @@ class NormalPlayer: AVPlayerViewController, AVPlayerViewControllerDelegate {
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         player?.pause()
+        postPlayerDidCloseNotification()
         
         if let token = timeObserverToken {
             player?.removeTimeObserver(token)
@@ -53,6 +54,21 @@ class NormalPlayer: AVPlayerViewController, AVPlayerViewControllerDelegate {
             startupTimeObserverToken = nil
         }
         startupWorkItem?.cancel()
+    }
+
+    private func postPlayerDidCloseNotification() {
+        var userInfo: [String: Any] = [:]
+        if let mediaInfo {
+            switch mediaInfo {
+            case .movie(let id, _, _, _):
+                userInfo["tmdbId"] = id
+                userInfo["isMovie"] = true
+            case .episode(let showId, _, _, _, _, _):
+                userInfo["tmdbId"] = showId
+                userInfo["isMovie"] = false
+            }
+        }
+        NotificationCenter.default.post(name: .playerDidClose, object: self, userInfo: userInfo)
     }
     
     deinit {
