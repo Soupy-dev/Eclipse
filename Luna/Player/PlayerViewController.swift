@@ -882,8 +882,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         switch info {
         case .movie(_, let title, _, _):
             return title
-        case .episode(_, let seasonNumber, let episodeNumber, let showTitle, _, _):
+        case .episode(_, let seasonNumber, let episodeNumber, let showTitle, _, let isAnime):
             let prefix = trimmedTitle(showTitle)
+            if isAnime {
+                let episodeCode = "E\(episodeNumber)"
+                if let prefix, !prefix.isEmpty {
+                    return "\(prefix) \(episodeCode)"
+                }
+                return episodeCode
+            }
             let episodeCode = String(format: "S%02dE%02d", seasonNumber, episodeNumber)
             if let prefix, !prefix.isEmpty {
                 return "\(prefix) - \(episodeCode)"
