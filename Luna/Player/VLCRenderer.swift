@@ -139,6 +139,7 @@ final class VLCRenderer: NSObject {
     private var lastProgressHostTime: CFTimeInterval?
     private var progressTimer: DispatchSourceTimer?
     private var pendingAbsoluteSeek: Double?
+    private var preparedInitialSeek: Double?
     private var currentURL: URL?
     private var currentHeaders: [String: String]?
     private var currentPreset: PlayerPreset?
@@ -152,6 +153,8 @@ final class VLCRenderer: NSObject {
     private var nativePiPStartRequested = false
     private var nativePiPActive = false
     private var nativePiPAvailable = false
+    private var wasPausedBeforeBackground = true
+    private var backgroundedPosition: Double?
     
     weak var delegate: VLCRendererDelegate?
     
@@ -288,15 +291,23 @@ final class VLCRenderer: NSObject {
     }
     
     // MARK: - Playback Control
+
+    func prepareInitialSeek(to seconds: Double?) {
+        let clamped = seconds.map { max(0, $0) }
+        preparedInitialSeek = clamped
+        pendingAbsoluteSeek = clamped
+    }
     
     func load(url: URL, with preset: PlayerPreset, headers: [String: String]? = nil) {
         Logger.shared.log("[VLCRenderer.load] URL=\(url.absoluteString) headers=\(headers?.count ?? 0) isLocal=\(url.isFileURL)", type: "Stream")
         
         currentURL = url
         currentPreset = preset
+        let initialSeek = preparedInitialSeek
+        preparedInitialSeek = nil
         cachedPosition = 0
         cachedDuration = 0
-        pendingAbsoluteSeek = nil
+        pendingAbsoluteSeek = initialSeek
         lastProgressHostTime = nil
 
         // Use provided headers as-is; they're already built correctly by the caller
@@ -351,6 +362,11 @@ final class VLCRenderer: NSObject {
 
             // Apply subtitle styling options (best effort; depends on libvlc text renderer support)
             self.applySubtitleStyleOptions(to: media)
+
+            if let initialSeek, initialSeek > 0 {
+                media.addOption(":start-time=\(String(format: "%.3f", initialSeek))")
+                Logger.shared.log("[VLCRenderer.load] prepared initial seek \(Int(initialSeek))s", type: "Progress")
+            }
 
             // Tune caching and demuxer for local vs. remote playback
             if url.isFileURL {
@@ -863,6 +879,21 @@ final class VLCRenderer: NSObject {
     }
     
     @objc private func handleAppDidEnterBackground() {
+        let player = mediaPlayer
+        let pausedForBackground = player.map { player in
+            (isPaused || isVLCPlayerPausedState(player.state)) && !isPlayerActivelyPlaying(player)
+        } ?? isPaused
+        wasPausedBeforeBackground = pausedForBackground
+        backgroundedPosition = cachedPosition
+
+        if pausedForBackground {
+            Logger.shared.log("[VLCRenderer.PiP] entering background while paused; preserving paused video output", type: "Player")
+            isPaused = true
+            stopProgressPolling()
+            updatePictureInPicturePlaybackState()
+            return
+        }
+
         let pipEnabled = UserDefaults.standard.object(forKey: "vlcPiPEnabled") == nil
             ? true
             : UserDefaults.standard.bool(forKey: "vlcPiPEnabled")
@@ -896,6 +927,51 @@ final class VLCRenderer: NSObject {
         // Re-activate the audio session that iOS may have deactivated during background.
         ensureAudioSessionActive()
         reattachRenderingView()
+        if wasPausedBeforeBackground {
+            restorePausedVideoAfterForeground()
+        }
+    }
+
+    private func restorePausedVideoAfterForeground() {
+        let restorePosition = backgroundedPosition ?? cachedPosition
+        eventQueue.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self, let player = self.mediaPlayer else { return }
+
+            if restorePosition > 0 {
+                let durationMs = player.media?.length.value?.doubleValue ?? 0
+                let durationSec = durationMs / 1000.0
+                if durationSec > 0 {
+                    let normalized = min(max(restorePosition / durationSec, 0), 1)
+                    self.setNormalizedPosition(normalized, on: player)
+                    self.cachedDuration = durationSec
+                } else if self.cachedDuration > 0 {
+                    let normalized = min(max(restorePosition / self.cachedDuration, 0), 1)
+                    self.setNormalizedPosition(normalized, on: player)
+                } else {
+                    self.pendingAbsoluteSeek = restorePosition
+                }
+                self.cachedPosition = restorePosition
+            }
+
+            if self.isPlayerActivelyPlaying(player) || self.isPlayingState(player.state) {
+                player.pause()
+            }
+
+            self.isPaused = true
+            self.stopProgressPolling()
+            self.updatePictureInPicturePlaybackState()
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.mediaPlayer?.drawable = self.vlcView
+                self.vlcView.setNeedsLayout()
+                self.vlcView.layoutIfNeeded()
+                self.delegate?.renderer(self, didChangePause: true)
+                if restorePosition > 0 {
+                    self.delegate?.renderer(self, didUpdatePosition: restorePosition, duration: self.cachedDuration)
+                }
+            }
+        }
     }
     
     // MARK: - Native VLC Picture in Picture
@@ -917,7 +993,7 @@ final class VLCRenderer: NSObject {
     }
 
     fileprivate var nativePictureInPictureMediaSeekable: Bool {
-        return cachedDuration > 0
+        return currentURL != nil
     }
 
     fileprivate var nativePictureInPictureMediaPlaying: Bool {
@@ -1311,6 +1387,7 @@ final class VLCRenderer {
     func getRenderingView() -> UIView { UIView() }
     func start() throws { throw RendererError.vlcInitializationFailed }
     func stop() { }
+    func prepareInitialSeek(to seconds: Double?) { }
     func load(url: URL, with preset: PlayerPreset, headers: [String: String]?) { }
     func reloadCurrentItem() { }
     func applyPreset(_ preset: PlayerPreset) { }

@@ -552,6 +552,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var playbackSlowProbeCount = 0
     private var userSelectedAudioTrack = false
     private var userSelectedSubtitleTrack = false
+    private var pendingInitialResumeTarget: Double?
+    private var pendingInitialResumeDeadline: Date?
     private var vlcProxyFallbackTried = false
     
     // Debounce timers for menu updates to avoid excessive rebuilds
@@ -739,6 +741,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func rendererLoadExternalSubtitles(urls: [String], enforce: Bool = false) {
         if let vlc = vlcRenderer {
             vlc.loadExternalSubtitles(urls: urls, enforce: enforce)
+        }
+    }
+
+    private func rendererPrepareInitialSeek(to seconds: Double?) {
+        if let vlc = vlcRenderer {
+            vlc.prepareInitialSeek(to: seconds)
         }
     }
 
@@ -1186,9 +1194,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             vlcProxyFallbackTried = false
         }
         pendingSeekTime = nil
+        pendingInitialResumeTarget = nil
+        pendingInitialResumeDeadline = nil
         if let info = mediaInfo {
             prepareSeekToLastPosition(for: info)
         }
+        rendererPrepareInitialSeek(to: pendingSeekTime)
         preparePlaybackStartupMonitoring(for: url, headers: headers ?? [:])
         rendererLoad(url: url, preset: preset, headers: headers)
         applyDefaultPlaybackSpeed()
@@ -1360,6 +1371,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             
             if progress < 0.95 {
                 pendingSeekTime = lastPlayedTime
+                pendingInitialResumeTarget = lastPlayedTime
+                pendingInitialResumeDeadline = Date().addingTimeInterval(20)
+                Logger.shared.log("Prepared resume seek to \(Int(lastPlayedTime))s", type: "Progress")
             }
         }
     }
@@ -1891,9 +1905,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             controlsHideWorkItem?.cancel()
         case .changed:
             let translation = gesture.translation(in: videoContainer)
-            let usableWidth = max(videoContainer.bounds.width * 0.4, 1)
-            let delta = Float(translation.x / usableWidth)
-            let target = volumePanStartLevel + delta
+            let delta = Float(-translation.y / max(videoContainer.bounds.height, 1))
+            let target = volumePanStartLevel + delta * 1.25
             applyVolumeLevel(target)
         case .ended, .cancelled, .failed:
             showControlsTemporarily()
@@ -2360,7 +2373,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func fetchSkipData() {
         guard !skipDataFetched else { return }
-        guard let info = mediaInfo else { return }
+        guard let info = mediaInfo else {
+            skipDataFetched = true
+#if !os(tvOS)
+            applySkip85sFallbackVisibility()
+#endif
+            Logger.shared.log("SkipData: no mediaInfo; using Skip 85s fallback if enabled", type: "Skip")
+            return
+        }
 
         // Extract TMDB ID, season, episode from mediaInfo
         let tmdbId: Int
@@ -2548,6 +2568,17 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if skip85sButtonShown || !skip85sButton.isHidden || skip85sButton.alpha > 0 {
             videoContainer.bringSubviewToFront(skip85sButton)
         }
+    }
+
+    @discardableResult
+    private func applySkip85sFallbackVisibility() -> Bool {
+        guard isVLCPlayer else { return false }
+        if UserDefaults.standard.bool(forKey: "skip85sEnabled") {
+            showSkip85sButton()
+            return true
+        }
+        hideSkip85sButton()
+        return false
     }
 
     private func updateSkipState(position: Double, duration: Double) {
@@ -3158,38 +3189,40 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return base
     }
 
-    private func shouldAttemptOpenSubtitlesFallback() -> Bool {
+    private func maybeUseOpenSubtitlesFallback(preferredLang: String) -> Bool {
+        guard canAutoApplyOpenSubtitlesFallback() else { return false }
+
+        if let subtitle = preferredOpenSubtitle(from: openSubtitlesResults, preferredLang: preferredLang) {
+            openSubtitlesFallbackAttempted = true
+            loadOpenSubtitle(subtitle, userSelected: false)
+            return true
+        }
+
+        guard !openSubtitlesFallbackAttempted,
+              !openSubtitlesFetchInProgress else { return false }
+        openSubtitlesFallbackAttempted = true
+        fetchOpenSubtitles(autoSelect: true, reason: "auto-fallback")
+        return true
+    }
+
+    private func canAutoApplyOpenSubtitlesFallback() -> Bool {
         if let deadline = vlcExternalSubtitlePriorityDeadline, Date() < deadline {
             return false
         }
         return isVLCOpenSubtitlesEnabled
             && Settings.shared.vlcOpenSubtitlesAutoFallbackEnabled
             && Settings.shared.enableSubtitlesByDefault
-            && !openSubtitlesFallbackAttempted
-            && !openSubtitlesSearchAttempted
-            && !openSubtitlesFetchInProgress
             && !userSelectedSubtitleTrack
-    }
-
-    private func maybeUseOpenSubtitlesFallback(preferredLang: String) -> Bool {
-        guard isVLCOpenSubtitlesEnabled else { return false }
-
-        if let subtitle = preferredOpenSubtitle(from: openSubtitlesResults, preferredLang: preferredLang) {
-            loadOpenSubtitle(subtitle, userSelected: false)
-            return true
-        }
-
-        guard shouldAttemptOpenSubtitlesFallback() else { return false }
-        openSubtitlesFallbackAttempted = true
-        fetchOpenSubtitles(autoSelect: true, reason: "auto-fallback")
-        return true
     }
 
     private func fetchOpenSubtitles(autoSelect: Bool, reason: String, forceRefresh: Bool = false) {
         guard isVLCOpenSubtitlesEnabled else { return }
         if openSubtitlesFetchInProgress { return }
         if !forceRefresh, !openSubtitlesResults.isEmpty {
-            if autoSelect, let subtitle = preferredOpenSubtitle(from: openSubtitlesResults, preferredLang: Settings.shared.defaultSubtitleLanguage) {
+            if autoSelect,
+               canAutoApplyOpenSubtitlesFallback(),
+               let subtitle = preferredOpenSubtitle(from: openSubtitlesResults, preferredLang: Settings.shared.defaultSubtitleLanguage) {
+                openSubtitlesFallbackAttempted = true
                 loadOpenSubtitle(subtitle, userSelected: false)
             }
             return
@@ -3209,7 +3242,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 self.openSubtitlesFetchInProgress = false
                 self.openSubtitlesResults = results
                 Logger.shared.log("[PlayerVC.OpenSubtitles] fetch complete reason=\(reason) count=\(results.count)", type: "Player")
-                if autoSelect, let subtitle = self.preferredOpenSubtitle(from: results, preferredLang: Settings.shared.defaultSubtitleLanguage) {
+                if autoSelect,
+                   self.canAutoApplyOpenSubtitlesFallback(),
+                   let subtitle = self.preferredOpenSubtitle(from: results, preferredLang: Settings.shared.defaultSubtitleLanguage) {
+                    self.openSubtitlesFallbackAttempted = true
                     self.loadOpenSubtitle(subtitle, userSelected: false)
                 } else {
                     self.updateSubtitleTracksMenu()
@@ -4040,9 +4076,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if gestureRecognizer === volumePanGesture {
             guard isVolumeControlEnabled else { return false }
             let location = gestureRecognizer.location(in: videoContainer)
-            let topLimit = max(view.safeAreaInsets.top + 130, videoContainer.bounds.height * 0.24)
             let velocity = (gestureRecognizer as? UIPanGestureRecognizer)?.velocity(in: videoContainer) ?? .zero
-            return location.x >= videoContainer.bounds.width * 0.58 && location.y <= topLimit && abs(velocity.x) >= abs(velocity.y)
+            return location.x >= videoContainer.bounds.width * 0.72 && abs(velocity.y) >= abs(velocity.x)
         }
 #endif
         return true
@@ -4171,6 +4206,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         let previousPosition = cachedPosition
         let playbackAdvanced = safePosition > max(0, previousPosition) + 0.05
+        let waitingForInitialResume: Bool
+        if let resumeTarget = pendingInitialResumeTarget {
+            let deadline = pendingInitialResumeDeadline ?? .distantPast
+            if safePosition + 2.0 < resumeTarget && Date() < deadline {
+                waitingForInitialResume = true
+            } else {
+                waitingForInitialResume = false
+                pendingInitialResumeTarget = nil
+                pendingInitialResumeDeadline = nil
+            }
+        } else {
+            waitingForInitialResume = false
+        }
+
         if playbackAdvanced || safePosition > 0.1 {
             markPlaybackStarted(reason: "position")
         }
@@ -4179,6 +4228,18 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             if duration.isFinite, duration > 0 {
                 self.cachedDuration = duration
             }
+
+            if waitingForInitialResume {
+                self.progressModel.duration = max(safeDuration, 1.0)
+                if self.isRendererLoading && playbackAdvanced {
+                    self.isRendererLoading = false
+                    self.loadingIndicator.stopAnimating()
+                    self.loadingIndicator.alpha = 0.0
+                    self.centerPlayPauseButton.isHidden = false
+                }
+                return
+            }
+
             self.cachedPosition = safePosition
             if safeDuration > 0 {
                 self.updateProgressHostingController()
@@ -4196,6 +4257,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
 #if !os(tvOS)
             if self.isVLCPlayer {
+                if !self.skipDataFetched {
+                    self.fetchSkipData()
+                }
                 self.updateSkipState(position: safePosition, duration: safeDuration)
                 self.updateNextEpisodeState(position: safePosition, duration: safeDuration)
             }
@@ -4214,6 +4278,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 self.centerPlayPauseButton.isHidden = false
             }
         }
+
+        guard !waitingForInitialResume else { return }
         
         guard safeDuration.isFinite, safeDuration > 0, safePosition >= 0, let info = mediaInfo else { return }
         
@@ -4289,6 +4355,8 @@ extension PlayerViewController: MPVSoftwareRendererDelegate {
             self.markPlaybackStarted(reason: "ready")
             
             if let seekTime = self.pendingSeekTime {
+                self.pendingInitialResumeTarget = seekTime
+                self.pendingInitialResumeDeadline = Date().addingTimeInterval(20)
                 self.rendererSeek(to: seekTime)
                 Logger.shared.log("Resumed MPV playback from \(Int(seekTime))s", type: "Progress")
                 self.pendingSeekTime = nil
@@ -4404,6 +4472,8 @@ extension PlayerViewController: VLCRendererDelegate {
             self.updatePiPButtonVisibility()
             
             if let seekTime = self.pendingSeekTime {
+                self.pendingInitialResumeTarget = seekTime
+                self.pendingInitialResumeDeadline = Date().addingTimeInterval(20)
                 self.rendererSeek(to: seekTime)
                 Logger.shared.log("Resumed VLC playback from \(Int(seekTime))s", type: "Progress")
                 self.pendingSeekTime = nil
@@ -4459,6 +4529,18 @@ extension PlayerViewController: VLCRendererDelegate {
         if isClosing { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            if trackId < 0 {
+                self.subtitleModel.isVisible = false
+                self.vlcSubtitleSelection = .none
+                self.subtitleEntries.removeAll()
+                self.updateVLCSubtitleOverlay(for: self.cachedPosition)
+                self.updateSubtitleButtonAppearance()
+                if self.userSelectedSubtitleTrack {
+                    self.updateSubtitleTracksMenu()
+                }
+                return
+            }
+
             self.subtitleModel.isVisible = true
             if trackId >= 0 {
                 self.vlcSubtitleSelection = .embedded(trackId: trackId)

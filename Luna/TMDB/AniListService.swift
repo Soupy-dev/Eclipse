@@ -620,6 +620,9 @@ final class AniListService {
                     guard allowedRelationTypes.contains(edge.relationType), edge.node.type == "ANIME" else {
                         continue
                     }
+                    if edge.node.status == "NOT_YET_RELEASED" {
+                        continue
+                    }
                     if let format = edge.node.format, !(format == "TV" || format == "TV_SHORT" || format == "ONA") {
                         continue
                     }
@@ -754,6 +757,7 @@ final class AniListService {
                                     guard allowedRelationTypes.contains(edge.relationType), edge.node.type == "ANIME" else {
                                         continue
                                     }
+                                    if edge.node.status == "NOT_YET_RELEASED" { continue }
                                     if let format = edge.node.format, !(format == "TV" || format == "TV_SHORT" || format == "ONA") { continue }
                                     if !seenIds.insert(edge.node.id).inserted { continue }
 
@@ -1164,10 +1168,24 @@ final class AniListService {
             yearFiltered = pool
         }
 
-        // If we know the TMDB episode count, pick the closest match; otherwise fall back to highest episodes.
+        let titleFiltered: [AniListAnime] = {
+            let tmdbTitle = normalizedAnimeTitle(tmdbShow.name)
+            guard !tmdbTitle.isEmpty else { return yearFiltered }
+
+            let exactMatches = yearFiltered.filter { anime in
+                AniListTitlePicker.titleCandidates(from: anime.title)
+                    .map(normalizedAnimeTitle)
+                    .contains(tmdbTitle)
+            }
+            return exactMatches.isEmpty ? yearFiltered : exactMatches
+        }()
+
+        // If we know the TMDB episode count, pick the closest match within exact title matches;
+        // otherwise fall back to highest episodes. This keeps side-story/short entries out of
+        // multi-season roots like Link Click, where a side story can be closer to TMDB's total.
         let chosen: AniListAnime?
         if let tmdbEpisodes {
-            chosen = yearFiltered.min(by: { lhs, rhs in
+            chosen = titleFiltered.min(by: { lhs, rhs in
                 let lhsEpisodes = lhs.episodes ?? 0
                 let rhsEpisodes = rhs.episodes ?? 0
                 let lhsDiff = abs(lhsEpisodes - tmdbEpisodes)
@@ -1177,7 +1195,7 @@ final class AniListService {
                 return lhs.id < rhs.id
             })
         } else {
-            chosen = yearFiltered.sorted(by: { lhs, rhs in
+            chosen = titleFiltered.sorted(by: { lhs, rhs in
                 let lhsEpisodes = lhs.episodes ?? 0
                 let rhsEpisodes = rhs.episodes ?? 0
                 if lhsEpisodes != rhsEpisodes { return lhsEpisodes > rhsEpisodes }
@@ -1186,6 +1204,13 @@ final class AniListService {
         }
 
         return chosen ?? candidates.first!
+    }
+
+    private func normalizedAnimeTitle(_ value: String) -> String {
+        value
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .joined()
     }
 
     // MARK: - Update Watch Progress

@@ -28,7 +28,7 @@
           "date": "2026-05-03",
           "localizedDescription": "Release build with MAL tracker sync tools, safer HLS download handling, reader-mode gradient fixes, and update metadata refresh.",
           "downloadURL": "https://github.com/Soupy-dev/Eclipse/releases/download/v1.0.2/Eclipse.ipa",
-          "size": 36963136,
+          "size": 27963136,
           "minOSVersion": "15.0"
         }
       ],
