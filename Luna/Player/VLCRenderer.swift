@@ -683,7 +683,7 @@ final class VLCRenderer: NSObject {
             } else if self.isTerminalState(player.state), !self.isPlaybackActive(player) {
                 self.logVLC("refreshVideoOutputAfterSeek skipped paused frame refresh because player is terminal snapshot={\(self.playerSnapshot(player))}", type: "Progress")
             } else {
-                self.refreshPausedVideoFrameIfPossible(player)
+                self.logVLC("refreshVideoOutputAfterSeek paused seek on stable VLCKitSPM path; drawable already refreshed snapshot={\(self.playerSnapshot(player))}", type: "Progress")
             }
             self.clearLoadingState()
             self.publishPlaybackProgress(from: player)
