@@ -944,14 +944,10 @@ final class VLCRenderer: NSObject {
 
     private func markForegroundResumeVideoNudgeNeeded(reason: String) {
         guard isRunning, !isStopping else { return }
-        guard isUsingPictureInPictureDrawableForRendering else {
-            logVLC("foreground resume video nudge not marked reason=\(reason) mode=\(renderingModeDescription()) setting=\(isPictureInPictureSettingEnabled) snapshot={\(playerSnapshot())}", type: "Player")
-            return
-        }
         needsForegroundResumeVideoNudge = true
         foregroundResumeVideoNudgeScheduled = false
         foregroundResumeVideoNudgeGeneration += 1
-        logVLC("foreground resume video nudge marked reason=\(reason) generation=\(foregroundResumeVideoNudgeGeneration) snapshot={\(playerSnapshot())}", type: "Player")
+        logVLC("foreground resume video nudge marked reason=\(reason) generation=\(foregroundResumeVideoNudgeGeneration) mode=\(renderingModeDescription()) setting=\(isPictureInPictureSettingEnabled) snapshot={\(playerSnapshot())}", type: "Player")
     }
 
     private func clearForegroundResumeVideoNudge(reason: String) {
@@ -964,27 +960,19 @@ final class VLCRenderer: NSObject {
 
     private func scheduleForegroundResumeVideoNudgeIfNeeded(on player: VLCMediaPlayer, reason: String) {
         guard needsForegroundResumeVideoNudge else { return }
-        guard isUsingPictureInPictureDrawableForRendering else {
-            clearForegroundResumeVideoNudge(reason: "rendering mode changed before nudge")
-            logVLC("foreground resume video nudge skipped before scheduling reason=\(reason) mode=\(renderingModeDescription()) snapshot={\(playerSnapshot(player))}", type: "Player")
-            return
-        }
         needsForegroundResumeVideoNudge = false
         foregroundResumeVideoNudgeScheduled = true
         let generation = foregroundResumeVideoNudgeGeneration
+        let mode = renderingModeDescription()
         let nudgeDelay: TimeInterval = 0.20
-        let nudgeSeconds: Double = 0.12
-        logVLC("foreground resume video nudge scheduled reason=\(reason) generation=\(generation) delay=\(secondsText(nudgeDelay)) offset=\(secondsText(nudgeSeconds)) snapshot={\(playerSnapshot(player))}", type: "Player")
+        let nudgeSeconds: Double = isUsingPictureInPictureDrawableForRendering ? 0.12 : 0.08
+        logVLC("foreground resume video nudge scheduled reason=\(reason) generation=\(generation) mode=\(mode) delay=\(secondsText(nudgeDelay)) offset=\(secondsText(nudgeSeconds)) snapshot={\(playerSnapshot(player))}", type: "Player")
 
         eventQueue.asyncAfter(deadline: .now() + nudgeDelay) { [weak self, weak player] in
             guard let self, self.isRunning, !self.isStopping, let player else { return }
             self.foregroundResumeVideoNudgeScheduled = false
             guard generation == self.foregroundResumeVideoNudgeGeneration else {
                 self.logVLC("foreground resume video nudge skipped stale generation=\(generation) current=\(self.foregroundResumeVideoNudgeGeneration)", type: "Player")
-                return
-            }
-            guard self.isUsingPictureInPictureDrawableForRendering else {
-                self.logVLC("foreground resume video nudge skipped mode changed mode=\(self.renderingModeDescription()) setting=\(self.isPictureInPictureSettingEnabled) snapshot={\(self.playerSnapshot(player))}", type: "Player")
                 return
             }
             guard UIApplication.shared.applicationState == .active else {
