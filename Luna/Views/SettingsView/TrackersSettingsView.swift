@@ -11,6 +11,7 @@ import Kingfisher
 struct TrackersSettingsView: View {
     @StateObject private var trackerManager = TrackerManager.shared
     @State private var showImportConfirmation = false
+    @State private var showMALImportConfirmation = false
     @State private var showSyncTools = false
 
     @State private var scrollOffset: CGFloat = 0
@@ -83,6 +84,10 @@ struct TrackersSettingsView: View {
                         onDisconnect: { trackerManager.disconnectTracker(.myAnimeList) }
                     )
 
+                    if trackerManager.trackerState.getAccount(for: .myAnimeList) != nil {
+                        malImportSection
+                    }
+
                     // Trakt Section
                     trackerRow(
                         service: .trakt,
@@ -137,7 +142,15 @@ struct TrackersSettingsView: View {
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("This will import your AniList Watching, Planning, and Completed lists as collections in your library. Existing items won't be duplicated.")
+            Text("This will import your AniList lists as Eclipse collections and fill local watch/read progress without deleting or downgrading anything.")
+        }
+        .alert("Import MAL Library", isPresented: $showMALImportConfirmation) {
+            Button("Import", role: .none) {
+                trackerManager.importMALToLibrary()
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This will import your MAL lists as Eclipse collections and fill local watch/read progress without deleting or downgrading anything.")
         }
         .sheet(isPresented: $showSyncTools) {
             TrackerSyncToolsSheet(trackerManager: trackerManager)
@@ -380,6 +393,56 @@ private struct TrackerSyncToolsSheet: View {
                 .disabled(trackerManager.isRunningSyncTool || preview == nil)
             }
             .font(.caption.weight(.medium))
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(12)
+    }
+
+    @ViewBuilder
+    private var malImportSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Import MAL Library")
+                        .font(.headline)
+                        .foregroundColor(.white)
+
+                    Text("Import MAL lists as Eclipse collections and reader progress")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Spacer()
+
+                if trackerManager.isImportingMAL {
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                } else {
+                    Button(action: { showMALImportConfirmation = true }) {
+                        Text("Import")
+                            .font(.caption)
+                            .fontWeight(.medium)
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(Color.blue)
+                            .cornerRadius(6)
+                    }
+                }
+            }
+
+            if let progress = trackerManager.malImportProgress {
+                Text(progress)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+
+            if let error = trackerManager.malImportError {
+                Text(error)
+                    .font(.caption2)
+                    .foregroundColor(.orange)
+            }
         }
         .padding()
         .background(Color.gray.opacity(0.1))

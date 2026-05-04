@@ -50,6 +50,7 @@ struct BackupData: Codable {
     var kanzenAutoUpdateModules: Bool = true
     var seasonMenu: Bool = false
     var horizontalEpisodeList: Bool = false
+    var useClassicScheduleUI: Bool = false
     var mediaColumnsPortrait: Int = 3
     var mediaColumnsLandscape: Int = 5
 
@@ -105,7 +106,7 @@ struct BackupData: Codable {
         case accentColor, tmdbLanguage, selectedAppearance, enableSubtitlesByDefault, defaultSubtitleLanguage, enableVLCSubtitleEditMenu, preferredAnimeAudioLanguage, inAppPlayer, playerChoice, showScheduleTab, showLocalScheduleTime
         case holdSpeedPlayer, externalPlayer, alwaysLandscape, aniSkipAutoSkip, skip85sEnabled, showNextEpisodeButton, nextEpisodeThreshold, vlcHeaderProxyEnabled
         case subtitleForegroundColor, subtitleStrokeColor, subtitleStrokeWidth, subtitleFontSize, subtitleVerticalOffset
-        case showKanzen, kanzenAutoMode, kanzenAutoUpdateModules, seasonMenu, horizontalEpisodeList, mediaColumnsPortrait, mediaColumnsLandscape
+        case showKanzen, kanzenAutoMode, kanzenAutoUpdateModules, seasonMenu, horizontalEpisodeList, useClassicScheduleUI, mediaColumnsPortrait, mediaColumnsLandscape
         case readingMode
         case readerFontSize, readerFontFamily, readerFontWeight, readerColorPreset, readerTextAlignment, readerLineSpacing, readerMargin
         case autoClearCacheEnabled, autoClearCacheThresholdMB, highQualityThreshold
@@ -158,6 +159,7 @@ struct BackupData: Codable {
         kanzenAutoUpdateModules = try container.decodeIfPresent(Bool.self, forKey: .kanzenAutoUpdateModules) ?? true
         seasonMenu = try container.decodeIfPresent(Bool.self, forKey: .seasonMenu) ?? false
         horizontalEpisodeList = try container.decodeIfPresent(Bool.self, forKey: .horizontalEpisodeList) ?? false
+        useClassicScheduleUI = try container.decodeIfPresent(Bool.self, forKey: .useClassicScheduleUI) ?? false
         mediaColumnsPortrait = try container.decodeIfPresent(Int.self, forKey: .mediaColumnsPortrait) ?? 3
         mediaColumnsLandscape = try container.decodeIfPresent(Int.self, forKey: .mediaColumnsLandscape) ?? 5
 
@@ -231,6 +233,7 @@ struct BackupData: Codable {
         try container.encode(kanzenAutoUpdateModules, forKey: .kanzenAutoUpdateModules)
         try container.encode(seasonMenu, forKey: .seasonMenu)
         try container.encode(horizontalEpisodeList, forKey: .horizontalEpisodeList)
+        try container.encode(useClassicScheduleUI, forKey: .useClassicScheduleUI)
         try container.encode(mediaColumnsPortrait, forKey: .mediaColumnsPortrait)
         try container.encode(mediaColumnsLandscape, forKey: .mediaColumnsLandscape)
 
@@ -303,6 +306,7 @@ struct BackupData: Codable {
         kanzenAutoUpdateModules: Bool = true,
         seasonMenu: Bool = false,
         horizontalEpisodeList: Bool = false,
+        useClassicScheduleUI: Bool = false,
         mediaColumnsPortrait: Int = 3,
         mediaColumnsLandscape: Int = 5,
 
@@ -370,6 +374,7 @@ struct BackupData: Codable {
         self.kanzenAutoUpdateModules = kanzenAutoUpdateModules
         self.seasonMenu = seasonMenu
         self.horizontalEpisodeList = horizontalEpisodeList
+        self.useClassicScheduleUI = useClassicScheduleUI
         self.mediaColumnsPortrait = mediaColumnsPortrait
         self.mediaColumnsLandscape = mediaColumnsLandscape
 
@@ -565,6 +570,7 @@ class BackupManager {
         let kanzenAutoUpdateModules = ModuleManager.isAutoUpdateEnabled
         let seasonMenu = userDefaults.bool(forKey: "seasonMenu")
         let horizontalEpisodeList = userDefaults.bool(forKey: "horizontalEpisodeList")
+        let useClassicScheduleUI = userDefaults.bool(forKey: "useClassicScheduleUI")
         let mediaColumnsPortrait = userDefaults.object(forKey: "mediaColumnsPortrait") != nil ? userDefaults.integer(forKey: "mediaColumnsPortrait") : 3
         let mediaColumnsLandscape = userDefaults.object(forKey: "mediaColumnsLandscape") != nil ? userDefaults.integer(forKey: "mediaColumnsLandscape") : 5
 
@@ -598,9 +604,16 @@ class BackupManager {
         let progressManager = ProgressManager.shared
         let progressData = progressManager.getProgressData()
         
-        // Get tracker state
+        // Get tracker state, including connected AniList/MAL/Trakt accounts and sync settings.
         let trackerManager = TrackerManager.shared
-        let trackerState = trackerManager.trackerState
+        let trackerState: TrackerState
+        if Thread.isMainThread {
+            trackerState = trackerManager.trackerState
+        } else {
+            trackerState = DispatchQueue.main.sync {
+                trackerManager.trackerState
+            }
+        }
         
         // Get catalogs
         let catalogManager = CatalogManager.shared
@@ -698,6 +711,7 @@ class BackupManager {
             kanzenAutoUpdateModules: kanzenAutoUpdateModules,
             seasonMenu: seasonMenu,
             horizontalEpisodeList: horizontalEpisodeList,
+            useClassicScheduleUI: useClassicScheduleUI,
             mediaColumnsPortrait: mediaColumnsPortrait,
             mediaColumnsLandscape: mediaColumnsLandscape,
 
@@ -819,6 +833,7 @@ class BackupManager {
         let kanzenAutoUpdateModules = json["kanzenAutoUpdateModules"] as? Bool ?? true
         let seasonMenu = json["seasonMenu"] as? Bool ?? false
         let horizontalEpisodeList = json["horizontalEpisodeList"] as? Bool ?? false
+        let useClassicScheduleUI = json["useClassicScheduleUI"] as? Bool ?? false
         let mediaColumnsPortrait = json["mediaColumnsPortrait"] as? Int ?? 3
         let mediaColumnsLandscape = json["mediaColumnsLandscape"] as? Int ?? 5
 
@@ -997,6 +1012,7 @@ class BackupManager {
             kanzenAutoUpdateModules: kanzenAutoUpdateModules,
             seasonMenu: seasonMenu,
             horizontalEpisodeList: horizontalEpisodeList,
+            useClassicScheduleUI: useClassicScheduleUI,
             mediaColumnsPortrait: mediaColumnsPortrait,
             mediaColumnsLandscape: mediaColumnsLandscape,
             readingMode: readingMode,
@@ -1079,6 +1095,7 @@ class BackupManager {
         userDefaults.set(backup.kanzenAutoUpdateModules, forKey: "kanzenAutoUpdateModules")
         userDefaults.set(backup.seasonMenu, forKey: "seasonMenu")
         userDefaults.set(backup.horizontalEpisodeList, forKey: "horizontalEpisodeList")
+        userDefaults.set(backup.useClassicScheduleUI, forKey: "useClassicScheduleUI")
         userDefaults.set(backup.mediaColumnsPortrait, forKey: "mediaColumnsPortrait")
         userDefaults.set(backup.mediaColumnsLandscape, forKey: "mediaColumnsLandscape")
 
@@ -1114,11 +1131,15 @@ class BackupManager {
         let progressManager = ProgressManager.shared
         progressManager.replaceProgressDataForRestore(backup.progressData)
         
-        // Restore tracker state
-        // Update tracker state properties from backup
-        DispatchQueue.main.async {
+        // Restore tracker state, including connected AniList/MAL/Trakt accounts and sync settings.
+        let restoreTrackerState = {
             trackerManager.trackerState = backup.trackerState
             trackerManager.saveTrackerState()
+        }
+        if Thread.isMainThread {
+            restoreTrackerState()
+        } else {
+            DispatchQueue.main.sync(execute: restoreTrackerState)
         }
         
         // Restore catalogs (merge to preserve new defaults like widget catalogs)

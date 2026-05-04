@@ -61,7 +61,7 @@ struct BackupManagementView: View {
             } header: {
                 Text("Export")
             } footer: {
-                Text("Create a backup file containing all your collections, settings, watch progress, and service configurations.")
+                Text("Create a backup file containing all your collections, settings, watch progress, tracker logins including MAL, and service configurations.")
             }
             .background(LunaScrollTracker())
             
@@ -130,7 +130,7 @@ struct BackupManagementView: View {
                 performRestore()
             }
         } message: {
-            Text("This will overwrite your current settings, collections, watch progress, and service configurations with the backup data. Continue?")
+            Text("This will overwrite your current settings, collections, watch progress, tracker logins including MAL, and service configurations with the backup data. Continue?")
         }
         .alert("Message", isPresented: $showMessageAlert) {
             Button("OK", role: .cancel) { }

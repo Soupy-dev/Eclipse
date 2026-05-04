@@ -88,6 +88,13 @@ private struct RemoteMangaProgress {
     let totalChapters: Int?
 }
 
+private struct TrackerSyncToolPlan {
+    let action: TrackerSyncToolAction
+    let preview: TrackerSyncPreview
+    var animeEntries: [RemoteAnimeProgress] = []
+    var mangaEntries: [RemoteMangaProgress] = []
+}
+
 final class TrackerManager: NSObject, ObservableObject {
     static let shared = TrackerManager()
 
@@ -97,6 +104,7 @@ final class TrackerManager: NSObject, ObservableObject {
     @Published var isRunningSyncTool = false
     @Published var syncToolStatus: String?
     @Published var syncToolPreview: TrackerSyncPreview?
+    private var cachedSyncToolPlan: TrackerSyncToolPlan?
 
     private let trackerStateURL: URL
     #if !os(tvOS)
@@ -106,6 +114,14 @@ final class TrackerManager: NSObject, ObservableObject {
     // Cache for TMDB ID -> AniList ID mappings to support anime syncing
     private var anilistIdCache: [Int: Int] = [:]
     private let anilistIdCacheQueue = DispatchQueue(label: "com.luna.anilistIdCache")
+
+    // Cross-provider ID caches keep sync tools from resolving the same IDs repeatedly.
+    private var malToAniListAnimeIdCache: [Int: Int] = [:]
+    private var malToAniListMangaIdCache: [Int: Int] = [:]
+    private var aniListToMALAnimeIdCache: [Int: Int] = [:]
+    private var aniListToMALMangaIdCache: [Int: Int] = [:]
+    private var aniListEpisodeCountCache: [Int: Int] = [:]
+    private let malListPageLimit = 1000
     
     // Cache for (TMDB ID, season number) -> AniList ID for anime with multiple AniList entries per season
     private var anilistSeasonIdCache: [String: Int] = [:] // key format: "tmdbId_seasonNumber"
@@ -1101,8 +1117,8 @@ final class TrackerManager: NSObject, ObservableObject {
             let body: [String: Any] = ["query": mutation]
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-            let (data, response) = try await URLSession.shared.data(for: request)
-            if (response as? HTTPURLResponse)?.statusCode == 200 {
+            let (data, response) = try await sendTrackerRequest(request, provider: .anilist)
+            if response.statusCode == 200 {
                 // Parse response to check for errors
                 if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let errors = json["errors"] as? [[String: Any]], !errors.isEmpty {
@@ -1112,7 +1128,7 @@ final class TrackerManager: NSObject, ObservableObject {
                     Logger.shared.log("Synced to AniList: mediaId=\(anilistId) S\(seasonNumber)E\(episodeNumber) (\(status))", type: "Tracker")
                 }
             } else {
-                Logger.shared.log("AniList sync returned status \((response as? HTTPURLResponse)?.statusCode ?? -1)", type: "Tracker")
+                Logger.shared.log("AniList sync returned status \(response.statusCode)", type: "Tracker")
             }
         } catch {
             Logger.shared.log("Failed to sync to AniList: \(error.localizedDescription)", type: "Error")
@@ -1334,6 +1350,10 @@ final class TrackerManager: NSObject, ObservableObject {
     // MARK: - Helper Methods
 
     private func getMyAnimeListId(fromAniListId aniListId: Int, mediaType: String) async -> Int? {
+        if let cached = cachedMyAnimeListId(fromAniListId: aniListId, mediaType: mediaType) {
+            return cached
+        }
+
         let query = """
         query {
             Media(id: \(aniListId), type: \(mediaType)) {
@@ -1360,7 +1380,11 @@ final class TrackerManager: NSObject, ObservableObject {
             guard response.statusCode == 200 else { return nil }
 
             let decoded = try JSONDecoder().decode(Response.self, from: data)
-            return decoded.data.Media?.idMal
+            if let malId = decoded.data.Media?.idMal {
+                cacheMyAnimeListId(malId, forAniListId: aniListId, mediaType: mediaType)
+                return malId
+            }
+            return nil
         } catch {
             Logger.shared.log("Failed to resolve MAL ID for AniList \(aniListId): \(error.localizedDescription)", type: "Tracker")
             return nil
@@ -1402,6 +1426,10 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     private func getAniListEpisodeCount(mediaId: Int) async -> Int? {
+        if let cached = aniListEpisodeCountCache[mediaId] {
+            return cached
+        }
+
         let query = """
         query {
             Media(id: \(mediaId), type: ANIME) {
@@ -1430,7 +1458,11 @@ final class TrackerManager: NSObject, ObservableObject {
             guard response.statusCode == 200 else { return nil }
 
             let decoded = try JSONDecoder().decode(Response.self, from: data)
-            return decoded.data.Media?.episodes
+            if let episodes = decoded.data.Media?.episodes {
+                aniListEpisodeCountCache[mediaId] = episodes
+                return episodes
+            }
+            return nil
         } catch {
             Logger.shared.log("Failed to fetch AniList episode count for mediaId \(mediaId): \(error.localizedDescription)", type: "Tracker")
             return nil
@@ -1570,9 +1602,10 @@ final class TrackerManager: NSObject, ObservableObject {
             }
 
             do {
-                let preview = try await buildSyncToolPreview(for: action)
+                let plan = try await buildSyncToolPlan(for: action)
                 await MainActor.run {
-                    self.syncToolPreview = preview
+                    self.cachedSyncToolPlan = plan
+                    self.syncToolPreview = plan.preview
                     self.syncToolStatus = "Preview ready"
                     self.isRunningSyncTool = false
                 }
@@ -1595,8 +1628,10 @@ final class TrackerManager: NSObject, ObservableObject {
             }
 
             do {
-                let result = try await performSyncTool(action)
+                let plan = try await cachedOrBuildSyncToolPlan(for: action)
+                let result = try await performSyncTool(plan)
                 await MainActor.run {
+                    self.cachedSyncToolPlan = nil
                     self.syncToolPreview = result
                     self.syncToolStatus = "Finished \(action.title)"
                     self.isRunningSyncTool = false
@@ -1610,7 +1645,20 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
+    private func cachedOrBuildSyncToolPlan(for action: TrackerSyncToolAction) async throws -> TrackerSyncToolPlan {
+        if let cachedSyncToolPlan, cachedSyncToolPlan.action == action {
+            return cachedSyncToolPlan
+        }
+        let plan = try await buildSyncToolPlan(for: action)
+        cachedSyncToolPlan = plan
+        return plan
+    }
+
     private func buildSyncToolPreview(for action: TrackerSyncToolAction) async throws -> TrackerSyncPreview {
+        try await buildSyncToolPlan(for: action).preview
+    }
+
+    private func buildSyncToolPlan(for action: TrackerSyncToolAction) async throws -> TrackerSyncToolPlan {
         switch action {
         case .fillEclipseFromAniList:
             let account = try connectedAccount(.anilist)
@@ -1619,15 +1667,16 @@ final class TrackerManager: NSObject, ObservableObject {
             let animePreview = previewForRemoteFill(action: action, entries: animeEntries, sourceName: "AniList")
             let mangaMapped = mangaEntries.filter { $0.anilistId != nil }
             let mangaUnmapped = mangaEntries.count - mangaMapped.count
-            return TrackerSyncPreview(
+            let preview = TrackerSyncPreview(
                 action: action,
                 itemsToAdd: animePreview.itemsToAdd,
                 itemsToAdvance: animePreview.itemsToAdvance + mangaMapped.filter { remoteReadChapters($0) > 0 }.count,
                 skipped: animePreview.skipped + mangaUnmapped,
                 unmapped: animePreview.unmapped + mangaUnmapped,
-                estimatedAPICalls: animePreview.estimatedAPICalls + mangaEntries.count,
-                notes: ["AniList fill only adds missing library items and advances incomplete local watch/read progress."]
+                estimatedAPICalls: estimatedReadCalls(sourceName: "AniList", animeCount: animeEntries.count, mangaCount: mangaEntries.count),
+                notes: ["AniList fill reuses this preview when you run it; local progress is never deleted or downgraded."]
             )
+            return TrackerSyncToolPlan(action: action, preview: preview, animeEntries: animeEntries, mangaEntries: mangaEntries)
 
         case .fillEclipseFromMAL:
             let account = try connectedAccount(.myAnimeList)
@@ -1636,21 +1685,22 @@ final class TrackerManager: NSObject, ObservableObject {
             let animePreview = previewForRemoteFill(action: action, entries: animeEntries, sourceName: "MAL")
             let mangaMapped = mangaEntries.filter { $0.anilistId != nil }
             let mangaUnmapped = mangaEntries.count - mangaMapped.count
-            return TrackerSyncPreview(
+            let preview = TrackerSyncPreview(
                 action: action,
                 itemsToAdd: animePreview.itemsToAdd,
                 itemsToAdvance: animePreview.itemsToAdvance + mangaMapped.filter { remoteReadChapters($0) > 0 }.count,
                 skipped: animePreview.skipped + mangaUnmapped,
                 unmapped: animePreview.unmapped + mangaUnmapped,
-                estimatedAPICalls: animePreview.estimatedAPICalls + mangaEntries.count * 2,
-                notes: ["MAL fill resolves IDs through AniList, then advances local watch/read progress without overwrites."]
+                estimatedAPICalls: estimatedReadCalls(sourceName: "MAL", animeCount: animeEntries.count, mangaCount: mangaEntries.count),
+                notes: ["MAL IDs are resolved in batches through AniList, then local progress advances without overwrites."]
             )
+            return TrackerSyncToolPlan(action: action, preview: preview, animeEntries: animeEntries, mangaEntries: mangaEntries)
 
         case .pushEclipseToAniList:
             _ = try connectedAccount(.anilist)
             let anime = localHighestWatchedEpisodes()
             let manga = localHighestReadMangaChapters()
-            return TrackerSyncPreview(
+            let preview = TrackerSyncPreview(
                 action: action,
                 itemsToAdd: 0,
                 itemsToAdvance: anime.count + manga.count,
@@ -1659,12 +1709,13 @@ final class TrackerManager: NSObject, ObservableObject {
                 estimatedAPICalls: anime.count * 3 + manga.count,
                 notes: ["Local Eclipse progress will only push watched/read progress; it will not delete or downgrade AniList."]
             )
+            return TrackerSyncToolPlan(action: action, preview: preview)
 
         case .pushEclipseToMAL:
             _ = try connectedAccount(.myAnimeList)
             let anime = localHighestWatchedEpisodes()
             let manga = localHighestReadMangaChapters()
-            return TrackerSyncPreview(
+            let preview = TrackerSyncPreview(
                 action: action,
                 itemsToAdd: 0,
                 itemsToAdvance: anime.count + manga.count,
@@ -1673,89 +1724,131 @@ final class TrackerManager: NSObject, ObservableObject {
                 estimatedAPICalls: anime.count * 4 + manga.count * 2,
                 notes: ["Local Eclipse progress will resolve AniList/MAL IDs first, then push watched/read counts."]
             )
+            return TrackerSyncToolPlan(action: action, preview: preview)
 
         case .portAniListToMAL:
             let account = try connectedAccount(.anilist)
-            _ = try connectedAccount(.myAnimeList)
-            let animeEntries = try await fetchAniListAnimeProgressEntries(account: account)
-            let mangaEntries = try await fetchAniListMangaProgressEntries(account: account)
-            let mapped = animeEntries.filter { $0.malId != nil }.count + mangaEntries.filter { $0.malId != nil }.count
-            let total = animeEntries.count + mangaEntries.count
-            return TrackerSyncPreview(
+            let destination = try connectedAccount(.myAnimeList)
+            let sourceAnimeEntries = try await fetchAniListAnimeProgressEntries(account: account)
+            let sourceMangaEntries = try await fetchAniListMangaProgressEntries(account: account)
+            let destinationAnime = try await fetchMALAnimeProgressEntries(account: destination)
+            let destinationManga = try await fetchMALMangaProgressEntries(account: destination)
+            let destinationAnimeByMAL = remoteAnimeByMALId(destinationAnime)
+            let destinationMangaByMAL = remoteMangaByMALId(destinationManga)
+            let animeEntries = sourceAnimeEntries.filter { entry in
+                guard let malId = entry.malId else { return false }
+                return shouldWriteAnimeProgress(source: entry, destination: destinationAnimeByMAL[malId])
+            }
+            let mangaEntries = sourceMangaEntries.filter { entry in
+                guard let malId = entry.malId else { return false }
+                return shouldWriteMangaProgress(source: entry, destination: destinationMangaByMAL[malId])
+            }
+            let mapped = animeEntries.count + mangaEntries.count
+            let alreadyCurrent = sourceAnimeEntries.filter { entry in
+                guard let malId = entry.malId else { return false }
+                return !shouldWriteAnimeProgress(source: entry, destination: destinationAnimeByMAL[malId])
+            }.count + sourceMangaEntries.filter { entry in
+                guard let malId = entry.malId else { return false }
+                return !shouldWriteMangaProgress(source: entry, destination: destinationMangaByMAL[malId])
+            }.count
+            let total = sourceAnimeEntries.count + sourceMangaEntries.count
+            let unmapped = max(0, total - mapped - alreadyCurrent)
+            let preview = TrackerSyncPreview(
                 action: action,
                 itemsToAdd: 0,
                 itemsToAdvance: mapped,
                 skipped: total - mapped,
-                unmapped: total - mapped,
-                estimatedAPICalls: total + mapped,
-                notes: ["Provider-to-provider writes require confirmation. AniList entries without idMal are skipped and reported."]
+                unmapped: unmapped,
+                estimatedAPICalls: estimatedReadCalls(sourceName: "AniList", animeCount: sourceAnimeEntries.count, mangaCount: sourceMangaEntries.count) + estimatedReadCalls(sourceName: "MAL", animeCount: destinationAnime.count, mangaCount: destinationManga.count) + mapped,
+                notes: ["Only entries that advance MAL are written; already-current destination entries are skipped."]
             )
+            return TrackerSyncToolPlan(action: action, preview: preview, animeEntries: animeEntries, mangaEntries: mangaEntries)
 
         case .portMALToAniList:
             let account = try connectedAccount(.myAnimeList)
-            _ = try connectedAccount(.anilist)
-            let animeEntries = try await resolveMALAnimeEntriesToAniList(try await fetchMALAnimeProgressEntries(account: account))
-            let mangaEntries = try await resolveMALMangaEntriesToAniList(try await fetchMALMangaProgressEntries(account: account))
-            let mapped = animeEntries.filter { $0.anilistId != nil }.count + mangaEntries.filter { $0.anilistId != nil }.count
-            let total = animeEntries.count + mangaEntries.count
-            return TrackerSyncPreview(
+            let destination = try connectedAccount(.anilist)
+            let sourceAnimeEntries = try await resolveMALAnimeEntriesToAniList(try await fetchMALAnimeProgressEntries(account: account))
+            let sourceMangaEntries = try await resolveMALMangaEntriesToAniList(try await fetchMALMangaProgressEntries(account: account))
+            let destinationAnime = try await fetchAniListAnimeProgressEntries(account: destination)
+            let destinationManga = try await fetchAniListMangaProgressEntries(account: destination)
+            let destinationAnimeByAniList = remoteAnimeByAniListId(destinationAnime)
+            let destinationMangaByAniList = remoteMangaByAniListId(destinationManga)
+            let animeEntries = sourceAnimeEntries.filter { entry in
+                guard let anilistId = entry.anilistId else { return false }
+                return shouldWriteAnimeProgress(source: entry, destination: destinationAnimeByAniList[anilistId])
+            }
+            let mangaEntries = sourceMangaEntries.filter { entry in
+                guard let anilistId = entry.anilistId else { return false }
+                return shouldWriteMangaProgress(source: entry, destination: destinationMangaByAniList[anilistId])
+            }
+            let mapped = animeEntries.count + mangaEntries.count
+            let alreadyCurrent = sourceAnimeEntries.filter { entry in
+                guard let anilistId = entry.anilistId else { return false }
+                return !shouldWriteAnimeProgress(source: entry, destination: destinationAnimeByAniList[anilistId])
+            }.count + sourceMangaEntries.filter { entry in
+                guard let anilistId = entry.anilistId else { return false }
+                return !shouldWriteMangaProgress(source: entry, destination: destinationMangaByAniList[anilistId])
+            }.count
+            let total = sourceAnimeEntries.count + sourceMangaEntries.count
+            let unmapped = max(0, total - mapped - alreadyCurrent)
+            let preview = TrackerSyncPreview(
                 action: action,
                 itemsToAdd: 0,
                 itemsToAdvance: mapped,
                 skipped: total - mapped,
-                unmapped: total - mapped,
-                estimatedAPICalls: total * 2 + mapped,
-                notes: ["MAL-only entries are resolved through AniList idMal lookup. Unresolved items are skipped."]
+                unmapped: unmapped,
+                estimatedAPICalls: estimatedReadCalls(sourceName: "MAL", animeCount: sourceAnimeEntries.count, mangaCount: sourceMangaEntries.count) + estimatedReadCalls(sourceName: "AniList", animeCount: destinationAnime.count, mangaCount: destinationManga.count) + mapped,
+                notes: ["MAL IDs are resolved in batches, and only entries that advance AniList are written."]
             )
+            return TrackerSyncToolPlan(action: action, preview: preview, animeEntries: animeEntries, mangaEntries: mangaEntries)
         }
     }
 
-    private func performSyncTool(_ action: TrackerSyncToolAction) async throws -> TrackerSyncPreview {
+    private func performSyncTool(_ plan: TrackerSyncToolPlan) async throws -> TrackerSyncPreview {
+        let action = plan.action
         switch action {
         case .fillEclipseFromAniList:
-            let account = try connectedAccount(.anilist)
-            let animeResult = await fillEclipseFromRemoteAnime(try await fetchAniListAnimeProgressEntries(account: account), sourceName: "AniList", action: action)
-            let mangaResult = await fillEclipseFromRemoteManga(try await fetchAniListMangaProgressEntries(account: account), sourceName: "AniList", action: action)
+            _ = try connectedAccount(.anilist)
+            let animeResult = await fillEclipseFromRemoteAnime(plan.animeEntries, sourceName: "AniList", action: action)
+            let mangaResult = await fillEclipseFromRemoteManga(plan.mangaEntries, sourceName: "AniList", action: action)
             return combineSyncPreviews(action: action, animeResult, mangaResult, note: "AniList fill completed without deleting or downgrading local progress.")
 
         case .fillEclipseFromMAL:
-            let account = try connectedAccount(.myAnimeList)
-            let animeEntries = try await resolveMALAnimeEntriesToAniList(try await fetchMALAnimeProgressEntries(account: account))
-            let mangaEntries = try await resolveMALMangaEntriesToAniList(try await fetchMALMangaProgressEntries(account: account))
-            let animeResult = await fillEclipseFromRemoteAnime(animeEntries, sourceName: "MAL", action: action)
-            let mangaResult = await fillEclipseFromRemoteManga(mangaEntries, sourceName: "MAL", action: action)
+            _ = try connectedAccount(.myAnimeList)
+            let animeResult = await fillEclipseFromRemoteAnime(plan.animeEntries, sourceName: "MAL", action: action)
+            let mangaResult = await fillEclipseFromRemoteManga(plan.mangaEntries, sourceName: "MAL", action: action)
             return combineSyncPreviews(action: action, animeResult, mangaResult, note: "MAL fill completed without deleting or downgrading local progress.")
 
         case .pushEclipseToAniList:
             let account = try connectedAccount(.anilist)
             let anime = localHighestWatchedEpisodes()
+            let manga = localHighestReadMangaChapters()
             for entry in anime {
                 await syncToAniList(account: account, showId: entry.showId, seasonNumber: entry.seasonNumber, episodeNumber: entry.episodeNumber, progress: 1.0)
             }
-            for item in localHighestReadMangaChapters() {
+            for item in manga {
                 await sendMangaProgressToAniList(mediaId: item.mangaId, chapterNumber: item.chapter, account: account)
             }
-            return try await buildSyncToolPreview(for: action)
+            return TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: anime.count + manga.count, skipped: 0, unmapped: 0, estimatedAPICalls: 0, notes: ["Eclipse progress push completed."])
 
         case .pushEclipseToMAL:
             let account = try connectedAccount(.myAnimeList)
             let anime = localHighestWatchedEpisodes()
+            let manga = localHighestReadMangaChapters()
             for entry in anime {
                 await syncToMyAnimeList(account: account, showId: entry.showId, seasonNumber: entry.seasonNumber, episodeNumber: entry.episodeNumber, progress: 1.0)
             }
-            for item in localHighestReadMangaChapters() {
+            for item in manga {
                 await sendMangaProgressToMAL(aniListId: item.mangaId, chapterNumber: item.chapter, account: account)
             }
-            return try await buildSyncToolPreview(for: action)
+            return TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: anime.count + manga.count, skipped: 0, unmapped: 0, estimatedAPICalls: 0, notes: ["Eclipse progress push completed."])
 
         case .portAniListToMAL:
-            let source = try connectedAccount(.anilist)
+            _ = try connectedAccount(.anilist)
             let destination = try connectedAccount(.myAnimeList)
-            let entries = try await fetchAniListAnimeProgressEntries(account: source)
-            let mangaEntries = try await fetchAniListMangaProgressEntries(account: source)
             var advanced = 0
             var unmapped = 0
-            for entry in entries {
+            for entry in plan.animeEntries {
                 guard let malId = entry.malId else {
                     unmapped += 1
                     continue
@@ -1768,7 +1861,7 @@ final class TrackerManager: NSObject, ObservableObject {
                 )
                 advanced += 1
             }
-            for entry in mangaEntries {
+            for entry in plan.mangaEntries {
                 guard let malId = entry.malId else {
                     unmapped += 1
                     continue
@@ -1784,13 +1877,11 @@ final class TrackerManager: NSObject, ObservableObject {
             return TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: advanced, skipped: unmapped, unmapped: unmapped, estimatedAPICalls: advanced, notes: ["AniList to MAL port finished. No entries were deleted."])
 
         case .portMALToAniList:
-            let source = try connectedAccount(.myAnimeList)
+            _ = try connectedAccount(.myAnimeList)
             let destination = try connectedAccount(.anilist)
-            let entries = try await resolveMALAnimeEntriesToAniList(try await fetchMALAnimeProgressEntries(account: source))
-            let mangaEntries = try await resolveMALMangaEntriesToAniList(try await fetchMALMangaProgressEntries(account: source))
             var advanced = 0
             var unmapped = 0
-            for entry in entries {
+            for entry in plan.animeEntries {
                 guard let anilistId = entry.anilistId else {
                     unmapped += 1
                     continue
@@ -1803,7 +1894,7 @@ final class TrackerManager: NSObject, ObservableObject {
                 )
                 advanced += 1
             }
-            for entry in mangaEntries {
+            for entry in plan.mangaEntries {
                 guard let anilistId = entry.anilistId else {
                     unmapped += 1
                     continue
@@ -1852,6 +1943,96 @@ final class TrackerManager: NSObject, ObservableObject {
             estimatedAPICalls: max(2, entries.count * (sourceName == "MAL" ? 2 : 1)),
             notes: ["\(sourceName) fill only adds missing library items and advances incomplete local progress."]
         )
+    }
+
+    private func estimatedReadCalls(sourceName: String, animeCount: Int, mangaCount: Int) -> Int {
+        switch sourceName {
+        case "AniList":
+            return listFetchCallCount(itemCount: animeCount, pageSize: 50) + listFetchCallCount(itemCount: mangaCount, pageSize: 50)
+        case "MAL":
+            let malListReads = listFetchCallCount(itemCount: animeCount, pageSize: malListPageLimit) + listFetchCallCount(itemCount: mangaCount, pageSize: malListPageLimit)
+            let aniListBatchResolves = pagedCallCount(itemCount: animeCount, pageSize: 50) + pagedCallCount(itemCount: mangaCount, pageSize: 50)
+            return malListReads + aniListBatchResolves
+        default:
+            return 0
+        }
+    }
+
+    private func listFetchCallCount(itemCount: Int, pageSize: Int) -> Int {
+        max(1, pagedCallCount(itemCount: itemCount, pageSize: pageSize))
+    }
+
+    private func pagedCallCount(itemCount: Int, pageSize: Int) -> Int {
+        guard itemCount > 0, pageSize > 0 else { return 0 }
+        return Int(ceil(Double(itemCount) / Double(pageSize)))
+    }
+
+    private func shouldWriteAnimeProgress(source: RemoteAnimeProgress, destination: RemoteAnimeProgress?) -> Bool {
+        let sourceProgress = remoteWatchedEpisodes(source)
+        guard sourceProgress > 0 || isCompletedStatus(source.status) else { return false }
+        guard let destination else { return true }
+
+        let destinationProgress = remoteWatchedEpisodes(destination)
+        if sourceProgress > destinationProgress { return true }
+        return sourceProgress == destinationProgress && isCompletedStatus(source.status) && !isCompletedStatus(destination.status)
+    }
+
+    private func shouldWriteMangaProgress(source: RemoteMangaProgress, destination: RemoteMangaProgress?) -> Bool {
+        let sourceProgress = remoteReadChapters(source)
+        guard sourceProgress > 0 || isCompletedStatus(source.status) else { return false }
+        guard let destination else { return true }
+
+        let destinationProgress = remoteReadChapters(destination)
+        if sourceProgress > destinationProgress { return true }
+        return sourceProgress == destinationProgress && isCompletedStatus(source.status) && !isCompletedStatus(destination.status)
+    }
+
+    private func isCompletedStatus(_ status: String) -> Bool {
+        status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "completed"
+    }
+
+    private func remoteAnimeByMALId(_ entries: [RemoteAnimeProgress]) -> [Int: RemoteAnimeProgress] {
+        entries.reduce(into: [Int: RemoteAnimeProgress]()) { result, entry in
+            guard let id = entry.malId else { return }
+            if let existing = result[id],
+               remoteWatchedEpisodes(existing) > remoteWatchedEpisodes(entry) {
+                return
+            }
+            result[id] = entry
+        }
+    }
+
+    private func remoteAnimeByAniListId(_ entries: [RemoteAnimeProgress]) -> [Int: RemoteAnimeProgress] {
+        entries.reduce(into: [Int: RemoteAnimeProgress]()) { result, entry in
+            guard let id = entry.anilistId else { return }
+            if let existing = result[id],
+               remoteWatchedEpisodes(existing) > remoteWatchedEpisodes(entry) {
+                return
+            }
+            result[id] = entry
+        }
+    }
+
+    private func remoteMangaByMALId(_ entries: [RemoteMangaProgress]) -> [Int: RemoteMangaProgress] {
+        entries.reduce(into: [Int: RemoteMangaProgress]()) { result, entry in
+            guard let id = entry.malId else { return }
+            if let existing = result[id],
+               remoteReadChapters(existing) > remoteReadChapters(entry) {
+                return
+            }
+            result[id] = entry
+        }
+    }
+
+    private func remoteMangaByAniListId(_ entries: [RemoteMangaProgress]) -> [Int: RemoteMangaProgress] {
+        entries.reduce(into: [Int: RemoteMangaProgress]()) { result, entry in
+            guard let id = entry.anilistId else { return }
+            if let existing = result[id],
+               remoteReadChapters(existing) > remoteReadChapters(entry) {
+                return
+            }
+            result[id] = entry
+        }
     }
 
     private func fetchAniListAnimeProgressEntries(account: TrackerAccount) async throws -> [RemoteAnimeProgress] {
@@ -1918,6 +2099,9 @@ final class TrackerManager: NSObject, ObservableObject {
 
             let decoded = try JSONDecoder().decode(Response.self, from: data)
             entries.append(contentsOf: decoded.data.Page.mediaList.map { item in
+                if let malId = item.media.idMal {
+                    cacheMyAnimeListId(malId, forAniListId: item.media.id, mediaType: "ANIME")
+                }
                 RemoteAnimeProgress(
                     anilistId: item.media.id,
                     malId: item.media.idMal,
@@ -1936,7 +2120,7 @@ final class TrackerManager: NSObject, ObservableObject {
 
     private func fetchMALAnimeProgressEntries(account: TrackerAccount) async throws -> [RemoteAnimeProgress] {
         var entries: [RemoteAnimeProgress] = []
-        var nextURL: URL? = URL(string: "https://api.myanimelist.net/v2/users/@me/animelist?fields=list_status,num_episodes&limit=100&nsfw=true")
+        var nextURL: URL? = URL(string: "https://api.myanimelist.net/v2/users/@me/animelist?fields=list_status,num_episodes&limit=\(malListPageLimit)&nsfw=true")
 
         struct Response: Codable {
             let data: [Entry]
@@ -2001,28 +2185,19 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     private func resolveMALAnimeEntriesToAniList(_ entries: [RemoteAnimeProgress]) async -> [RemoteAnimeProgress] {
-        var resolved: [RemoteAnimeProgress] = []
+        let malIds = entries.compactMap(\.malId)
+        let resolvedIds = await resolveAniListIds(fromMALIds: malIds, mediaType: "ANIME")
 
-        for entry in entries {
-            guard let malId = entry.malId else {
-                resolved.append(entry)
-                continue
-            }
-
-            let anilistId = await getAniListId(fromMALId: malId, mediaType: "ANIME")
-            resolved.append(
-                RemoteAnimeProgress(
-                    anilistId: anilistId,
-                    malId: entry.malId,
-                    title: entry.title,
-                    status: entry.status,
-                    progress: entry.progress,
-                    totalEpisodes: entry.totalEpisodes
-                )
+        return entries.map { entry in
+            RemoteAnimeProgress(
+                anilistId: entry.malId.flatMap { resolvedIds[$0] },
+                malId: entry.malId,
+                title: entry.title,
+                status: entry.status,
+                progress: entry.progress,
+                totalEpisodes: entry.totalEpisodes
             )
         }
-
-        return resolved
     }
 
     private func fetchAniListMangaProgressEntries(account: TrackerAccount) async throws -> [RemoteMangaProgress] {
@@ -2089,6 +2264,9 @@ final class TrackerManager: NSObject, ObservableObject {
 
             let decoded = try JSONDecoder().decode(Response.self, from: data)
             entries.append(contentsOf: decoded.data.Page.mediaList.map { item in
+                if let malId = item.media.idMal {
+                    cacheMyAnimeListId(malId, forAniListId: item.media.id, mediaType: "MANGA")
+                }
                 RemoteMangaProgress(
                     anilistId: item.media.id,
                     malId: item.media.idMal,
@@ -2107,7 +2285,7 @@ final class TrackerManager: NSObject, ObservableObject {
 
     private func fetchMALMangaProgressEntries(account: TrackerAccount) async throws -> [RemoteMangaProgress] {
         var entries: [RemoteMangaProgress] = []
-        var nextURL: URL? = URL(string: "https://api.myanimelist.net/v2/users/@me/mangalist?fields=list_status,num_chapters&limit=100&nsfw=true")
+        var nextURL: URL? = URL(string: "https://api.myanimelist.net/v2/users/@me/mangalist?fields=list_status,num_chapters&limit=\(malListPageLimit)&nsfw=true")
 
         struct Response: Codable {
             let data: [Entry]
@@ -2172,28 +2350,135 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     private func resolveMALMangaEntriesToAniList(_ entries: [RemoteMangaProgress]) async -> [RemoteMangaProgress] {
-        var resolved: [RemoteMangaProgress] = []
+        let malIds = entries.compactMap(\.malId)
+        let resolvedIds = await resolveAniListIds(fromMALIds: malIds, mediaType: "MANGA")
 
-        for entry in entries {
-            guard let malId = entry.malId else {
-                resolved.append(entry)
-                continue
-            }
-
-            let anilistId = await getAniListId(fromMALId: malId, mediaType: "MANGA")
-            resolved.append(
-                RemoteMangaProgress(
-                    anilistId: anilistId,
-                    malId: entry.malId,
-                    title: entry.title,
-                    status: entry.status,
-                    progress: entry.progress,
-                    totalChapters: entry.totalChapters
-                )
+        return entries.map { entry in
+            RemoteMangaProgress(
+                anilistId: entry.malId.flatMap { resolvedIds[$0] },
+                malId: entry.malId,
+                title: entry.title,
+                status: entry.status,
+                progress: entry.progress,
+                totalChapters: entry.totalChapters
             )
         }
+    }
 
-        return resolved
+    private func resolveAniListIds(fromMALIds malIds: [Int], mediaType: String) async -> [Int: Int] {
+        let uniqueIds = Array(Set(malIds))
+        guard !uniqueIds.isEmpty else { return [:] }
+
+        var result: [Int: Int] = [:]
+        let cached = cachedAniListIds(fromMALIds: uniqueIds, mediaType: mediaType)
+        result.merge(cached) { current, _ in current }
+
+        let missing = uniqueIds.filter { cached[$0] == nil }
+        for chunk in chunked(missing, size: 50) {
+            let fetched = await fetchAniListIdsByMALIds(chunk, mediaType: mediaType)
+            result.merge(fetched) { current, _ in current }
+            for (malId, anilistId) in fetched {
+                cacheAniListId(anilistId, forMALId: malId, mediaType: mediaType)
+            }
+
+            let unresolved = chunk.filter { fetched[$0] == nil }
+            for malId in unresolved {
+                if let anilistId = await getAniListId(fromMALId: malId, mediaType: mediaType) {
+                    result[malId] = anilistId
+                    cacheAniListId(anilistId, forMALId: malId, mediaType: mediaType)
+                }
+            }
+        }
+
+        return result
+    }
+
+    private func fetchAniListIdsByMALIds(_ malIds: [Int], mediaType: String) async -> [Int: Int] {
+        guard !malIds.isEmpty else { return [:] }
+        let idList = malIds.map(String.init).joined(separator: ", ")
+        let query = """
+        query {
+            Page(perPage: \(malIds.count)) {
+                media(type: \(mediaType), idMal_in: [\(idList)]) {
+                    id
+                    idMal
+                }
+            }
+        }
+        """
+
+        struct Response: Codable {
+            let data: DataWrapper
+            struct DataWrapper: Codable { let Page: PageData }
+            struct PageData: Codable { let media: [Media] }
+            struct Media: Codable {
+                let id: Int
+                let idMal: Int?
+            }
+        }
+
+        do {
+            var request = URLRequest(url: URL(string: "https://graphql.anilist.co")!)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONSerialization.data(withJSONObject: ["query": query])
+
+            let (data, response) = try await sendTrackerRequest(request, provider: .anilist)
+            guard response.statusCode == 200 else { return [:] }
+
+            let decoded = try JSONDecoder().decode(Response.self, from: data)
+            return decoded.data.Page.media.reduce(into: [Int: Int]()) { result, media in
+                if let malId = media.idMal {
+                    result[malId] = media.id
+                }
+            }
+        } catch {
+            Logger.shared.log("Batch AniList idMal lookup failed for \(malIds.count) \(mediaType) entries: \(error.localizedDescription)", type: "Tracker")
+            return [:]
+        }
+    }
+
+    private func cachedAniListIds(fromMALIds malIds: [Int], mediaType: String) -> [Int: Int] {
+        let cache = mediaType == "MANGA" ? malToAniListMangaIdCache : malToAniListAnimeIdCache
+        return malIds.reduce(into: [Int: Int]()) { result, malId in
+            if let anilistId = cache[malId] {
+                result[malId] = anilistId
+            }
+        }
+    }
+
+    private func cacheAniListId(_ anilistId: Int, forMALId malId: Int, mediaType: String) {
+        if mediaType == "MANGA" {
+            malToAniListMangaIdCache[malId] = anilistId
+            aniListToMALMangaIdCache[anilistId] = malId
+        } else {
+            malToAniListAnimeIdCache[malId] = anilistId
+            aniListToMALAnimeIdCache[anilistId] = malId
+        }
+    }
+
+    private func cachedMyAnimeListId(fromAniListId aniListId: Int, mediaType: String) -> Int? {
+        if mediaType == "MANGA" {
+            return aniListToMALMangaIdCache[aniListId]
+        }
+        return aniListToMALAnimeIdCache[aniListId]
+    }
+
+    private func cacheMyAnimeListId(_ malId: Int, forAniListId aniListId: Int, mediaType: String) {
+        if mediaType == "MANGA" {
+            aniListToMALMangaIdCache[aniListId] = malId
+            malToAniListMangaIdCache[malId] = aniListId
+        } else {
+            aniListToMALAnimeIdCache[aniListId] = malId
+            malToAniListAnimeIdCache[malId] = aniListId
+        }
+    }
+
+    private func chunked<T>(_ values: [T], size: Int) -> [[T]] {
+        guard size > 0, !values.isEmpty else { return [] }
+        return stride(from: 0, to: values.count, by: size).map { start in
+            Array(values[start..<min(start + size, values.count)])
+        }
     }
 
     private func fillEclipseFromRemoteAnime(_ entries: [RemoteAnimeProgress], sourceName: String, action: TrackerSyncToolAction) async -> TrackerSyncPreview {
@@ -2497,13 +2782,15 @@ final class TrackerManager: NSObject, ObservableObject {
         saveTrackerState()
     }
 
-    // MARK: - AniList Library Import
+    // MARK: - Tracker Library Import
 
-    /// Import the user's AniList anime lists (Watching, Planning, Completed) into local library collections.
-    /// Uses the standard AniList→TMDB matching pipeline so items are consistent with the rest of the app.
+    /// Import the user's tracker anime/manga progress into local Eclipse collections and reader progress.
     @Published var isImportingAniList = false
     @Published var aniListImportError: String?
     @Published var aniListImportProgress: String?
+    @Published var isImportingMAL = false
+    @Published var malImportError: String?
+    @Published var malImportProgress: String?
 
     func importAniListToLibrary() {
         guard let account = trackerState.getAccount(for: .anilist), account.isConnected else {
@@ -2516,81 +2803,84 @@ final class TrackerManager: NSObject, ObservableObject {
         Task { @MainActor in
             isImportingAniList = true
             aniListImportError = nil
-            aniListImportProgress = "Fetching your AniList library…"
+            aniListImportProgress = "Fetching your AniList library..."
         }
 
         Task {
+            setBackupRestoreSyncSuppressed(true)
+            defer { setBackupRestoreSyncSuppressed(false) }
+
             do {
-                let userId = Int(account.userId) ?? 0
-                let lists = try await AniListService.shared.fetchUserAnimeListsForImport(
-                    token: account.accessToken,
-                    userId: userId,
-                    tmdbService: TMDBService.shared
-                )
+                let animeEntries = try await fetchAniListAnimeProgressEntries(account: account)
+                let mangaEntries = try await fetchAniListMangaProgressEntries(account: account)
 
                 await MainActor.run {
-                    aniListImportProgress = "Adding items to library…"
+                    aniListImportProgress = "Adding items to Eclipse..."
                 }
 
-                let library = LibraryManager.shared
-                let mapping: [(name: String, items: [AniListService.AniListImportEntry])] = [
-                    ("Watching",  lists.watching),
-                    ("Planning",  lists.planning),
-                    ("Completed", lists.completed),
-                    ("Paused",    lists.paused),
-                    ("Dropped",   lists.dropped),
-                    ("Repeating", lists.repeating),
-                ]
-
-                // Suppress tracker sync during import to avoid syncing back to AniList
-                setBackupRestoreSyncSuppressed(true)
+                let animeResult = await fillEclipseFromRemoteAnime(animeEntries, sourceName: "AniList", action: .fillEclipseFromAniList)
+                let mangaResult = await fillEclipseFromRemoteManga(mangaEntries, sourceName: "AniList", action: .fillEclipseFromAniList)
+                let imported = animeResult.itemsToAdd + animeResult.itemsToAdvance + mangaResult.itemsToAdvance
 
                 await MainActor.run {
-                    for (collectionName, importEntries) in mapping where !importEntries.isEmpty {
-                        // Find or create the collection
-                        let collection: LibraryCollection
-                        if let existing = library.collections.first(where: { $0.name == collectionName }) {
-                            collection = existing
-                        } else {
-                            library.createCollection(name: collectionName, description: "Imported from AniList")
-                            collection = library.collections.first(where: { $0.name == collectionName })!
-                        }
-
-                        var added = 0
-                        for entry in importEntries {
-                            let item = LibraryItem(searchResult: entry.tmdbResult)
-                            if !library.isItemInCollection(collection.id, item: item) {
-                                library.addItem(to: collection.id, item: item)
-                                added += 1
-                            }
-
-                            // Import episode watch progress into ProgressManager
-                            if entry.episodesWatched > 0 {
-                                ProgressManager.shared.bulkMarkEpisodesAsWatched(
-                                    showId: entry.tmdbResult.id,
-                                    seasonNumber: 1,
-                                    throughEpisode: entry.episodesWatched
-                                )
-                            }
-                        }
-                        Logger.shared.log("AniList import: Added \(added) new items to '\(collectionName)' (\(importEntries.count) total matched)", type: "Tracker")
-                    }
-
-                    let totalImported = mapping.reduce(0) { $0 + $1.items.count }
                     isImportingAniList = false
                     aniListImportProgress = nil
                     aniListImportError = nil
-                    Logger.shared.log("AniList import completed: \(totalImported) total items across \(mapping.filter { !$0.items.isEmpty }.count) collections", type: "Tracker")
+                    Logger.shared.log("AniList import completed: \(imported) local changes from \(animeEntries.count) anime and \(mangaEntries.count) manga entries", type: "Tracker")
                 }
-
-                setBackupRestoreSyncSuppressed(false)
             } catch {
-                setBackupRestoreSyncSuppressed(false)
                 await MainActor.run {
                     isImportingAniList = false
                     aniListImportProgress = nil
                     aniListImportError = "Import failed: \(error.localizedDescription)"
                     Logger.shared.log("AniList import failed: \(error.localizedDescription)", type: "Error")
+                }
+            }
+        }
+    }
+
+    func importMALToLibrary() {
+        guard let account = trackerState.getAccount(for: .myAnimeList), account.isConnected else {
+            malImportError = "No connected MAL account"
+            return
+        }
+
+        guard !isImportingMAL else { return }
+
+        Task { @MainActor in
+            isImportingMAL = true
+            malImportError = nil
+            malImportProgress = "Fetching your MAL library..."
+        }
+
+        Task {
+            setBackupRestoreSyncSuppressed(true)
+            defer { setBackupRestoreSyncSuppressed(false) }
+
+            do {
+                let animeEntries = await resolveMALAnimeEntriesToAniList(try await fetchMALAnimeProgressEntries(account: account))
+                let mangaEntries = await resolveMALMangaEntriesToAniList(try await fetchMALMangaProgressEntries(account: account))
+
+                await MainActor.run {
+                    malImportProgress = "Adding items to Eclipse..."
+                }
+
+                let animeResult = await fillEclipseFromRemoteAnime(animeEntries, sourceName: "MAL", action: .fillEclipseFromMAL)
+                let mangaResult = await fillEclipseFromRemoteManga(mangaEntries, sourceName: "MAL", action: .fillEclipseFromMAL)
+                let imported = animeResult.itemsToAdd + animeResult.itemsToAdvance + mangaResult.itemsToAdvance
+
+                await MainActor.run {
+                    isImportingMAL = false
+                    malImportProgress = nil
+                    malImportError = nil
+                    Logger.shared.log("MAL import completed: \(imported) local changes from \(animeEntries.count) anime and \(mangaEntries.count) manga entries", type: "Tracker")
+                }
+            } catch {
+                await MainActor.run {
+                    isImportingMAL = false
+                    malImportProgress = nil
+                    malImportError = "Import failed: \(error.localizedDescription)"
+                    Logger.shared.log("MAL import failed: \(error.localizedDescription)", type: "Error")
                 }
             }
         }

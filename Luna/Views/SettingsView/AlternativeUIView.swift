@@ -10,6 +10,7 @@ import SwiftUI
 struct AlternativeUIView: View {
     @AppStorage("seasonMenu") private var useSeasonMenu = false
     @AppStorage("horizontalEpisodeList") private var horizontalEpisodeList = false
+    @AppStorage("useClassicScheduleUI") private var useClassicScheduleUI = false
     
     @StateObject private var accentColorManager = AccentColorManager.shared
     @ObservedObject private var theme = LunaTheme.shared
@@ -121,10 +122,28 @@ struct AlternativeUIView: View {
                     Toggle("", isOn: $horizontalEpisodeList)
                         .tint(accentColorManager.currentAccentColor)
                 }
+
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Classic Schedule Layout")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+
+                        Text("Use the original full schedule list instead of the compact day picker.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.leading)
+                    }
+
+                    Spacer()
+
+                    Toggle("", isOn: $useClassicScheduleUI)
+                        .tint(accentColorManager.currentAccentColor)
+                }
             } header: {
                 Text("DISPLAY OPTIONS")
             } footer: {
-                Text("The alternative season menu uses a dropdown instead of a horizontal scroll for selecting seasons.")
+                Text("Classic schedule keeps the old all-days list. The alternative season menu uses a dropdown instead of a horizontal scroll for selecting seasons.")
             }
         }
         .navigationTitle("Appearance")
