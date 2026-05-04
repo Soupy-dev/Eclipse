@@ -1898,9 +1898,9 @@ struct ModulesSearchResultsSheet: View {
             var playerMediaInfo: MediaInfo? = nil
             let posterURL = resolvedPosterURL
             if isMovie {
-                playerMediaInfo = .movie(id: tmdbId, title: mediaTitle, posterURL: posterURL, isAnime: isAnimeContent)
+                playerMediaInfo = .movie(id: tmdbId, title: effectiveTitle, posterURL: posterURL, isAnime: isAnimeContent)
             } else if let episode = selectedEpisode {
-                playerMediaInfo = .episode(showId: tmdbId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, showTitle: mediaTitle, showPosterURL: posterURL, isAnime: isAnimeContent)
+                playerMediaInfo = .episode(showId: tmdbId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, showTitle: effectiveTitle, showPosterURL: posterURL, isAnime: isAnimeContent)
             }
 
             if inAppPlayer == "mpv" || inAppPlayer == "VLC" {
@@ -1952,9 +1952,9 @@ struct ModulesSearchResultsSheet: View {
             let item = AVPlayerItem(asset: asset)
             playerVC.player = AVPlayer(playerItem: item)
             if isMovie {
-                playerVC.mediaInfo = .movie(id: tmdbId, title: mediaTitle, posterURL: posterURL, isAnime: isAnimeContent)
+                playerVC.mediaInfo = .movie(id: tmdbId, title: effectiveTitle, posterURL: posterURL, isAnime: isAnimeContent)
             } else if let episode = selectedEpisode {
-                playerVC.mediaInfo = .episode(showId: tmdbId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, showTitle: mediaTitle, showPosterURL: posterURL, isAnime: isAnimeContent)
+                playerVC.mediaInfo = .episode(showId: tmdbId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, showTitle: effectiveTitle, showPosterURL: posterURL, isAnime: isAnimeContent)
             }
             playerVC.episodePlaybackContext = effectivePlaybackContext
             playerVC.modalPresentationStyle = .fullScreen
@@ -1995,7 +1995,7 @@ struct ModulesSearchResultsSheet: View {
 
         let displayTitle: String
         if isMovie {
-            displayTitle = mediaTitle
+            displayTitle = effectiveTitle
         } else if let ep = selectedEpisode {
             if specialTitleOnlySearch {
                 displayTitle = animeSeasonTitle != nil ? animeEffectiveTitle : effectiveTitle
@@ -2005,13 +2005,13 @@ struct ModulesSearchResultsSheet: View {
                 displayTitle = "\(effectiveTitle) S\(ep.seasonNumber)E\(ep.episodeNumber)"
             }
         } else {
-            displayTitle = mediaTitle
+            displayTitle = effectiveTitle
         }
 
         DownloadManager.shared.enqueueDownload(
             tmdbId: tmdbId,
             isMovie: isMovie,
-            title: mediaTitle,
+            title: effectiveTitle,
             displayTitle: displayTitle,
             posterURL: posterURL,
             seasonNumber: selectedEpisode?.seasonNumber,
@@ -2514,9 +2514,9 @@ struct ModulesSearchResultsSheet: View {
                 var playerMediaInfo: MediaInfo? = nil
                 let posterURL = resolvedPosterURL
                 if isMovie {
-                    playerMediaInfo = .movie(id: tmdbId, title: mediaTitle, posterURL: posterURL, isAnime: isAnimeContent)
+                    playerMediaInfo = .movie(id: tmdbId, title: effectiveTitle, posterURL: posterURL, isAnime: isAnimeContent)
                 } else if let episode = selectedEpisode {
-                    playerMediaInfo = .episode(showId: tmdbId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, showTitle: mediaTitle, showPosterURL: posterURL, isAnime: isAnimeContent)
+                    playerMediaInfo = .episode(showId: tmdbId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, showTitle: effectiveTitle, showPosterURL: posterURL, isAnime: isAnimeContent)
                 }
                 
                 let pvc = PlayerViewController(
@@ -2572,9 +2572,9 @@ struct ModulesSearchResultsSheet: View {
                 var playerMediaInfo: MediaInfo? = nil
                 let posterURL = resolvedPosterURL
                 if isMovie {
-                    playerMediaInfo = .movie(id: tmdbId, title: mediaTitle, posterURL: posterURL, isAnime: isAnimeContent)
+                    playerMediaInfo = .movie(id: tmdbId, title: effectiveTitle, posterURL: posterURL, isAnime: isAnimeContent)
                 } else if let episode = selectedEpisode {
-                    playerMediaInfo = .episode(showId: tmdbId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, showTitle: mediaTitle, showPosterURL: posterURL, isAnime: isAnimeContent)
+                    playerMediaInfo = .episode(showId: tmdbId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, showTitle: effectiveTitle, showPosterURL: posterURL, isAnime: isAnimeContent)
                 }
                 
                 let pvc = PlayerViewController(
@@ -2628,10 +2628,10 @@ struct ModulesSearchResultsSheet: View {
                 playerVC.player = AVPlayer(playerItem: item)
                 if isMovie {
                     let posterURL = resolvedPosterURL
-                    playerVC.mediaInfo = .movie(id: tmdbId, title: mediaTitle, posterURL: posterURL, isAnime: isAnimeContent)
+                    playerVC.mediaInfo = .movie(id: tmdbId, title: effectiveTitle, posterURL: posterURL, isAnime: isAnimeContent)
                 } else if let episode = selectedEpisode {
                     let posterURL = resolvedPosterURL
-                    playerVC.mediaInfo = .episode(showId: tmdbId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, showTitle: mediaTitle, showPosterURL: posterURL, isAnime: isAnimeContent)
+                    playerVC.mediaInfo = .episode(showId: tmdbId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, showTitle: effectiveTitle, showPosterURL: posterURL, isAnime: isAnimeContent)
                 }
                 playerVC.episodePlaybackContext = effectivePlaybackContext
                 playerVC.modalPresentationStyle = .fullScreen
@@ -2674,7 +2674,7 @@ struct ModulesSearchResultsSheet: View {
         
         let displayTitle: String
         if isMovie {
-            displayTitle = mediaTitle
+            displayTitle = effectiveTitle
         } else if let ep = selectedEpisode {
             if specialTitleOnlySearch {
                 displayTitle = animeSeasonTitle != nil ? animeEffectiveTitle : effectiveTitle
@@ -2684,13 +2684,13 @@ struct ModulesSearchResultsSheet: View {
                 displayTitle = "\(effectiveTitle) S\(ep.seasonNumber)E\(ep.episodeNumber)"
             }
         } else {
-            displayTitle = mediaTitle
+            displayTitle = effectiveTitle
         }
         
         DownloadManager.shared.enqueueDownload(
             tmdbId: tmdbId,
             isMovie: isMovie,
-            title: mediaTitle,
+            title: effectiveTitle,
             displayTitle: displayTitle,
             posterURL: posterURL,
             seasonNumber: selectedEpisode?.seasonNumber,

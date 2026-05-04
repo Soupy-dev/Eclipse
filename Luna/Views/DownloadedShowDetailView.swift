@@ -332,6 +332,7 @@ struct DownloadedShowDetailView: View {
                 mediaInfo: item.mediaInfo
             )
             pvc.isAnimeHint = item.isAnime
+            pvc.playerTitleOverride = item.isAnime ? item.displayTitle : nil
             pvc.episodePlaybackContext = item.episodePlaybackContext
             pvc.originalTMDBSeasonNumber = item.episodePlaybackContext?.resolvedTMDBSeasonNumber
             pvc.originalTMDBEpisodeNumber = item.episodePlaybackContext?.resolvedTMDBEpisodeNumber

@@ -419,6 +419,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     
     var mediaInfo: MediaInfo?
     var imdbId: String?
+    var playerTitleOverride: String?
     // Optional override: when true, treat content as anime regardless of tracker mapping
     var isAnimeHint: Bool?
     /// Original TMDB season/episode numbers for anime (before AniList restructuring).
@@ -778,6 +779,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var openSubtitlesResults: [StremioSubtitle] = []
     private var openSubtitlesFetchTask: Task<Void, Never>?
     private var openSubtitlesFetchInProgress = false
+    private var openSubtitlesSearchAttempted = false
     private var openSubtitlesFallbackAttempted = false
     private var openSubtitlesLoadedURLs: Set<String> = []
 
@@ -807,18 +809,27 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func playerDisplayTitle() -> String {
+        if let override = trimmedTitle(playerTitleOverride) {
+            return override
+        }
+
         guard let info = mediaInfo else { return "" }
         switch info {
         case .movie(_, let title, _, _):
             return title
         case .episode(_, let seasonNumber, let episodeNumber, let showTitle, _, _):
-            let prefix = showTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let prefix = trimmedTitle(showTitle)
             let episodeCode = String(format: "S%02dE%02d", seasonNumber, episodeNumber)
             if let prefix, !prefix.isEmpty {
                 return "\(prefix) - \(episodeCode)"
             }
             return episodeCode
         }
+    }
+
+    private func trimmedTitle(_ title: String?) -> String? {
+        let trimmed = title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed?.isEmpty == false ? trimmed : nil
     }
 
     private var shouldShowTopErrorBanner: Bool {
@@ -1091,6 +1102,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         openSubtitlesFetchTask?.cancel()
         openSubtitlesFetchTask = nil
         openSubtitlesFetchInProgress = false
+        openSubtitlesSearchAttempted = false
         openSubtitlesFallbackAttempted = false
         openSubtitlesLoadedURLs.removeAll()
         vlcExternalSubtitlePriorityDeadline = nil
@@ -1126,6 +1138,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if let subs = initialSubtitles, !subs.isEmpty {
             loadSubtitles(subs, names: initialSubtitleNames)
         }
+        prefetchOpenSubtitlesIfEnabled(reason: "load")
     }
     
     private func prepareSeekToLastPosition(for mediaInfo: MediaInfo) {
@@ -2811,9 +2824,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if openSubtitlesFetchInProgress {
             actions.append(UIAction(title: "Searching OpenSubtitles...", image: UIImage(systemName: "hourglass"), attributes: .disabled) { _ in })
         } else if openSubtitlesResults.isEmpty {
-            actions.append(UIAction(title: "Search OpenSubtitles", image: UIImage(systemName: "magnifyingglass")) { [weak self] _ in
-                self?.fetchOpenSubtitles(autoSelect: false, reason: "manual-menu")
-            })
+            if openSubtitlesSearchAttempted {
+                actions.append(UIAction(title: "No OpenSubtitles results", image: UIImage(systemName: "captions.bubble"), attributes: .disabled) { _ in })
+                actions.append(UIAction(title: "Refresh OpenSubtitles", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
+                    self?.fetchOpenSubtitles(autoSelect: false, reason: "manual-refresh-empty", forceRefresh: true)
+                })
+            } else {
+                actions.append(UIAction(title: "Search OpenSubtitles", image: UIImage(systemName: "magnifyingglass")) { [weak self] _ in
+                    self?.fetchOpenSubtitles(autoSelect: false, reason: "manual-menu")
+                })
+            }
         } else {
             actions.append(UIAction(title: "Refresh OpenSubtitles", image: UIImage(systemName: "arrow.clockwise")) { [weak self] _ in
                 self?.fetchOpenSubtitles(autoSelect: false, reason: "manual-refresh", forceRefresh: true)
@@ -2850,6 +2870,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             && Settings.shared.vlcOpenSubtitlesAutoFallbackEnabled
             && Settings.shared.enableSubtitlesByDefault
             && !openSubtitlesFallbackAttempted
+            && !openSubtitlesSearchAttempted
             && !openSubtitlesFetchInProgress
             && !userSelectedSubtitleTrack
     }
@@ -2880,6 +2901,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         openSubtitlesFetchTask?.cancel()
         openSubtitlesFetchInProgress = true
+        openSubtitlesSearchAttempted = true
         updateSubtitleTracksMenu()
 
         openSubtitlesFetchTask = Task { [weak self] in
@@ -2898,6 +2920,17 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 }
             }
         }
+    }
+
+    private func prefetchOpenSubtitlesIfEnabled(reason: String) {
+        guard isVLCOpenSubtitlesEnabled else { return }
+        guard !openSubtitlesFetchInProgress,
+              openSubtitlesResults.isEmpty,
+              !openSubtitlesSearchAttempted else {
+            return
+        }
+        guard openSubtitlesLookupMetadata() != nil else { return }
+        fetchOpenSubtitles(autoSelect: false, reason: "auto-prefetch-\(reason)")
     }
 
     private func fetchOpenSubtitlesResults(reason: String) async -> [StremioSubtitle] {
@@ -3027,6 +3060,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         applyVLCSubtitleOverlayPositionSetting()
         updatePiPButtonVisibility()
         updateSubtitleTracksMenu()
+        prefetchOpenSubtitlesIfEnabled(reason: "settings")
 #if !os(tvOS)
         updateBrightnessControlVisibility()
         updateVolumeControlVisibility()
@@ -4039,6 +4073,7 @@ extension PlayerViewController: VLCRendererDelegate {
             // Update audio and subtitle tracks now that the video is ready
             self.updateAudioTracksMenuWhenReady()
             self.updateSubtitleTracksMenuWhenReady()
+            self.prefetchOpenSubtitlesIfEnabled(reason: "ready")
             renderer.updatePictureInPicturePlaybackState()
             self.updatePiPButtonVisibility()
             
