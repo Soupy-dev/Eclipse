@@ -534,6 +534,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var isSeeking = false
     private var cachedDuration: Double = 0
     private var cachedPosition: Double = 0
+    private var lastVLCUIProgressLogBucket = -1
+    private var lastVLCUIProgressAnomalyKey: String?
+    private var lastVLCUIProgressAnomalyLogTime: CFTimeInterval = 0
+    private var lastPiPButtonVisibilityLogKey: String?
 
     private var isRendererLoading: Bool = false
     private var isClosing = false
@@ -566,6 +570,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     
     private func rendererLoad(url: URL, preset: PlayerPreset, headers: [String: String]?) {
         if let vlc = vlcRenderer {
+            logVLCUI("rendererLoad url=\(url.absoluteString) preset=\(preset.id.rawValue) headers=\(headers?.count ?? 0) pendingSeek=\(secondsText(pendingSeekTime)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))", type: "Stream")
             vlc.load(url: url, with: preset, headers: headers)
         } else if let mpv = mpvRenderer {
             mpv.load(url: url, with: preset, headers: headers)
@@ -574,6 +579,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     
     private func rendererReloadCurrentItem() {
         if let vlc = vlcRenderer {
+            logVLCUI("rendererReloadCurrentItem cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))", type: "Stream")
             vlc.reloadCurrentItem()
         } else if let mpv = mpvRenderer {
             mpv.reloadCurrentItem()
@@ -590,7 +596,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     
     private func rendererStart() throws {
         if let vlc = vlcRenderer {
+            logVLCUI("rendererStart requested isRunning=\(isRunning)", type: "Stream")
             try vlc.start()
+            logVLCUI("rendererStart completed", type: "Stream")
         } else if let mpv = mpvRenderer {
             try mpv.start()
         }
@@ -599,6 +607,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     
     private func rendererStop() {
         if let vlc = vlcRenderer {
+            logVLCUI("rendererStop requested cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pipActive=\(vlc.isPictureInPictureActive)", type: "Stream")
             vlc.stop()
         } else if let mpv = mpvRenderer {
             mpv.stop()
@@ -608,6 +617,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     
     private func rendererPlay() {
         if let vlc = vlcRenderer {
+            logVLCUI("rendererPlay requested cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) loading=\(isRendererLoading)", type: "Stream")
             vlc.play()
         } else if let mpv = mpvRenderer {
             mpv.play()
@@ -616,6 +626,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     
     private func rendererPausePlayback() {
         if let vlc = vlcRenderer {
+            logVLCUI("rendererPause requested cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) loading=\(isRendererLoading)", type: "Stream")
             vlc.pausePlayback()
         } else if let mpv = mpvRenderer {
             mpv.pausePlayback()
@@ -632,6 +643,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func rendererSeek(to seconds: Double) {
         if let vlc = vlcRenderer {
+            logVLCUI("rendererSeek(to:) target=\(secondsText(seconds)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) loading=\(isRendererLoading)", type: "Progress")
             vlc.seek(to: seconds)
         } else if let mpv = mpvRenderer {
             mpv.seek(to: seconds)
@@ -640,6 +652,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     
     private func rendererSeek(by seconds: Double) {
         if let vlc = vlcRenderer {
+            logVLCUI("rendererSeek(by:) delta=\(secondsText(seconds)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) loading=\(isRendererLoading)", type: "Progress")
             vlc.seek(by: seconds)
         } else if let mpv = mpvRenderer {
             mpv.seek(by: seconds)
@@ -648,6 +661,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     
     private func rendererSetSpeed(_ speed: Double) {
         if let vlc = vlcRenderer {
+            logVLCUI("rendererSetSpeed \(String(format: "%.2f", speed))", type: "Player")
             vlc.setSpeed(speed)
         } else if let mpv = mpvRenderer {
             mpv.setSpeed(speed)
@@ -683,6 +697,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     
     private func rendererSetAudioTrack(id: Int) {
         if let vlc = vlcRenderer {
+            logVLCUI("rendererSetAudioTrack id=\(id) userSelected=\(userSelectedAudioTrack)", type: "Player")
             vlc.setAudioTrack(id: id)
         } else if let mpv = mpvRenderer {
             mpv.setAudioTrack(id: id)
@@ -709,6 +724,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     
     private func rendererSetSubtitleTrack(id: Int) {
         if let vlc = vlcRenderer {
+            logVLCUI("rendererSetSubtitleTrack id=\(id) userSelected=\(userSelectedSubtitleTrack) selection=\(vlcSubtitleSelection)", type: "Player")
             vlc.setSubtitleTrack(id: id)
         } else if let mpv = mpvRenderer {
             mpv.setSubtitleTrack(id: id)
@@ -726,6 +742,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     
     private func rendererDisableSubtitles() {
         if let vlc = vlcRenderer {
+            logVLCUI("rendererDisableSubtitles currentSelection=\(vlcSubtitleSelection)", type: "Player")
             vlc.disableSubtitles()
         } else if let mpv = mpvRenderer {
             mpv.disableSubtitles()
@@ -740,12 +757,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     
     private func rendererLoadExternalSubtitles(urls: [String], enforce: Bool = false) {
         if let vlc = vlcRenderer {
+            logVLCUI("rendererLoadExternalSubtitles count=\(urls.count) enforce=\(enforce) urls=\(urls.joined(separator: " | "))", type: "Player")
             vlc.loadExternalSubtitles(urls: urls, enforce: enforce)
         }
     }
 
     private func rendererPrepareInitialSeek(to seconds: Double?) {
         if let vlc = vlcRenderer {
+            logVLCUI("rendererPrepareInitialSeek \(secondsText(seconds))", type: "Progress")
             vlc.prepareInitialSeek(to: seconds)
         }
     }
@@ -766,6 +785,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func rendererApplySubtitleStyle(_ style: SubtitleStyle) {
         if let vlc = vlcRenderer {
+            logVLCUI("rendererApplySubtitleStyle visible=\(style.isVisible) font=\(String(format: "%.1f", style.fontSize)) stroke=\(String(format: "%.1f", style.strokeWidth))", type: "Player")
             vlc.applySubtitleStyle(style)
         }
     }
@@ -841,6 +861,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let shouldShow = isAvailable && (!isVLCPlayer || Settings.shared.vlcPiPEnabled)
         pipButton.isHidden = !shouldShow
         pipButton.isEnabled = shouldShow
+        if isVLCPlayer {
+            let key = "available=\(isAvailable) show=\(shouldShow) hidden=\(pipButton.isHidden) active=\(rendererIsPictureInPictureActive()) enabled=\(Settings.shared.vlcPiPEnabled) image=\(imageName)"
+            if key != lastPiPButtonVisibilityLogKey {
+                lastPiPButtonVisibilityLogKey = key
+                logVLCUI("updatePiPButtonVisibility \(key)", type: "Player")
+            }
+        }
     }
 
     private func updatePlayerTitle() {
@@ -879,6 +906,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func logMPV(_ message: String) {
         Logger.shared.log("[MPV \(playerLogId)] " + message, type: "MPV")
+    }
+
+    private func logVLCUI(_ message: String, type: String = "Player") {
+        guard isVLCPlayer else { return }
+        Logger.shared.log("[PlayerVC.VLC \(playerLogId)] \(message)", type: type)
+    }
+
+    private func secondsText(_ value: Double?) -> String {
+        guard let value, value.isFinite else { return "nil" }
+        return String(format: "%.2f", value)
     }
     
     class SubtitleModel: ObservableObject {
@@ -1006,6 +1043,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         super.viewDidLoad()
         view.backgroundColor = .black
         logMPV("viewDidLoad, initialURL=")
+        logVLCUI("viewDidLoad initialURL=\(initialURL?.absoluteString ?? "nil") preset=\(initialPreset?.id.rawValue ?? "nil") mediaInfo=\(String(describing: mediaInfo))", type: "Stream")
         
 #if !os(tvOS)
         modalPresentationCapturesStatusBarAppearance = true
@@ -1178,6 +1216,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
         }()
         Logger.shared.log("PlayerViewController.load: isAnimeHint=\(isAnimeHint ?? false) mediaInfo=\(mediaInfoLabel)", type: "Stream")
+        logVLCUI("load prepared mediaInfo=\(mediaInfoLabel) pendingSeek=\(secondsText(pendingSeekTime)) subtitles=\(subtitleURLs.count) openSubsEnabled=\(Settings.shared.vlcOpenSubtitlesEnabled) fallback=\(Settings.shared.vlcOpenSubtitlesAutoFallbackEnabled)", type: "Stream")
         
         // Ensure renderer is started before loading media
         if !isRunning {
@@ -1199,6 +1238,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if let info = mediaInfo {
             prepareSeekToLastPosition(for: info)
         }
+        logVLCUI("load resume prepared pendingSeek=\(secondsText(pendingSeekTime)) progressCached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) launchContext=\(String(describing: playbackLaunchContext))", type: "Progress")
         rendererPrepareInitialSeek(to: pendingSeekTime)
         preparePlaybackStartupMonitoring(for: url, headers: headers ?? [:])
         rendererLoad(url: url, preset: preset, headers: headers)
@@ -4269,6 +4309,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             markPlaybackStarted(reason: "position")
         }
 
+        logVLCUIProgressIfNeeded(
+            rawPosition: position,
+            rawDuration: duration,
+            safePosition: safePosition,
+            effectiveDuration: effectiveDuration,
+            durationIsReliable: durationIsReliable,
+            waitingForInitialResume: waitingForInitialResume
+        )
+
         DispatchQueue.main.async {
             if reportedDurationIsReliable {
                 self.cachedDuration = max(self.cachedDuration, duration)
@@ -4343,6 +4392,34 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 showPosterURL: showPosterURL,
                 playbackContext: episodePlaybackContext?.forEpisodeNumber(episodeNumber)
             )
+        }
+    }
+
+    private func logVLCUIProgressIfNeeded(rawPosition: Double, rawDuration: Double, safePosition: Double, effectiveDuration: Double, durationIsReliable: Bool, waitingForInitialResume: Bool) {
+        guard isVLCPlayer else { return }
+        let bucket = Int(max(0, safePosition) / 10.0)
+        if bucket != lastVLCUIProgressLogBucket {
+            lastVLCUIProgressLogBucket = bucket
+            logVLCUI("progress raw=\(secondsText(rawPosition))/\(secondsText(rawDuration)) safe=\(secondsText(safePosition))/\(secondsText(effectiveDuration)) reliable=\(durationIsReliable) waitingResume=\(waitingForInitialResume) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) loading=\(isRendererLoading)", type: "Progress")
+        }
+
+        let anomaly: String?
+        if safePosition > 1.0 && !durationIsReliable {
+            anomaly = "position-advancing-duration-unreliable rawDuration=\(secondsText(rawDuration)) cachedDuration=\(secondsText(cachedDuration))"
+        } else if durationIsReliable && cachedDuration > 0 && effectiveDuration + 30.0 < cachedDuration {
+            anomaly = "effective-duration-shrank effective=\(secondsText(effectiveDuration)) cached=\(secondsText(cachedDuration))"
+        } else if waitingForInitialResume {
+            anomaly = "waiting-for-initial-resume target=\(secondsText(pendingInitialResumeTarget)) position=\(secondsText(safePosition))"
+        } else {
+            anomaly = nil
+        }
+
+        guard let anomaly else { return }
+        let now = CACurrentMediaTime()
+        if anomaly != lastVLCUIProgressAnomalyKey || now - lastVLCUIProgressAnomalyLogTime > 8.0 {
+            lastVLCUIProgressAnomalyKey = anomaly
+            lastVLCUIProgressAnomalyLogTime = now
+            logVLCUI("progress anomaly \(anomaly)", type: "Error")
         }
     }
 }
@@ -4463,6 +4540,7 @@ extension PlayerViewController: VLCRendererDelegate {
     
     func renderer(_ renderer: VLCRenderer, didChangePause isPaused: Bool) {
         if isClosing { return }
+        logVLCUI("delegate didChangePause isPaused=\(isPaused) loading=\(isRendererLoading) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pipActive=\(renderer.isPictureInPictureActive)", type: "Player")
 
         if !isPaused {
             markPlaybackStarted(reason: "playing")
@@ -4486,6 +4564,7 @@ extension PlayerViewController: VLCRendererDelegate {
     
     func renderer(_ renderer: VLCRenderer, didChangeLoading isLoading: Bool) {
         if isClosing { return }
+        logVLCUI("delegate didChangeLoading isLoading=\(isLoading) currentLoading=\(isRendererLoading) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))", type: "Stream")
 
         isRendererLoading = isLoading
         DispatchQueue.main.async { [weak self] in
@@ -4505,6 +4584,7 @@ extension PlayerViewController: VLCRendererDelegate {
     
     func renderer(_ renderer: VLCRenderer, didBecomeReadyToSeek: Bool) {
         if isClosing { return }
+        logVLCUI("delegate didBecomeReadyToSeek=\(didBecomeReadyToSeek) pendingSeek=\(secondsText(pendingSeekTime)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) audioTracks=\(rendererGetAudioTracks().count) subtitleTracks=\(rendererGetSubtitleTracks().count)", type: "Stream")
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -4545,6 +4625,7 @@ extension PlayerViewController: VLCRendererDelegate {
         if isClosing { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            self.logVLCUI("delegate rendererDidChangeTracks audioCount=\(self.rendererGetAudioTracks().count) subtitleCount=\(self.rendererGetSubtitleTracks().count) currentAudio=\(self.rendererGetCurrentAudioTrackId()) currentSubtitle=\(self.rendererGetCurrentSubtitleTrackId())", type: "Player")
             self.updateAudioTracksMenu()
             self.updateSubtitleTracksMenu()
         }
@@ -4575,6 +4656,7 @@ extension PlayerViewController: VLCRendererDelegate {
         if isClosing { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            self.logVLCUI("delegate subtitleTrackDidChange trackId=\(trackId) previousSelection=\(self.vlcSubtitleSelection) userSelected=\(self.userSelectedSubtitleTrack)", type: "Player")
             if trackId < 0 {
                 self.subtitleModel.isVisible = false
                 self.vlcSubtitleSelection = .none
