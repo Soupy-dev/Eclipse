@@ -104,7 +104,12 @@ final class TrackerManager: NSObject, ObservableObject {
     @Published var isRunningSyncTool = false
     @Published var syncToolStatus: String?
     @Published var syncToolPreview: TrackerSyncPreview?
+    @Published var syncToolProgressCompleted = 0
+    @Published var syncToolProgressTotal = 0
+    @Published var syncToolProgressDetail: String?
+    @Published var syncToolIsLocked = false
     private var cachedSyncToolPlan: TrackerSyncToolPlan?
+    private var syncToolTask: Task<Void, Never>?
 
     private let trackerStateURL: URL
     #if !os(tvOS)
@@ -122,6 +127,7 @@ final class TrackerManager: NSObject, ObservableObject {
     private var aniListToMALMangaIdCache: [Int: Int] = [:]
     private var aniListEpisodeCountCache: [Int: Int] = [:]
     private let malListPageLimit = 1000
+    private let largeSyncAPICallThreshold = 90
     
     // Cache for (TMDB ID, season number) -> AniList ID for anime with multiple AniList entries per season
     private var anilistSeasonIdCache: [String: Int] = [:] // key format: "tmdbId_seasonNumber"
@@ -184,6 +190,20 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
+    func setSyncEnabled(_ enabled: Bool) {
+        trackerState.syncEnabled = enabled
+        saveTrackerState()
+    }
+
+    func setAutoSyncRatings(_ enabled: Bool) {
+        trackerState.autoSyncRatings = enabled
+        saveTrackerState()
+    }
+
+    func hasConnectedAccount(_ service: TrackerService) -> Bool {
+        trackerState.getAccount(for: service) != nil
+    }
+
     func setBackupRestoreSyncSuppressed(_ suppressed: Bool) {
         backupRestoreSyncQueue.sync {
             syncSuppressedDuringBackupRestore = suppressed
@@ -202,6 +222,7 @@ final class TrackerManager: NSObject, ObservableObject {
 
         for attempt in 0..<maxRetries {
             await TrackerRequestScheduler.shared.waitForSlot(provider: provider)
+            try Task.checkCancellation()
 
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse else {
@@ -213,8 +234,10 @@ final class TrackerManager: NSObject, ObservableObject {
                 Logger.shared.log("Tracker request paused for rate limit (\(provider)) for \(Int(retryDelay))s", type: "Tracker")
                 await MainActor.run {
                     self.syncToolStatus = "Paused for rate limit. Resuming in \(Int(retryDelay))s..."
+                    self.syncToolProgressDetail = "Paused for rate limit. Resuming in \(Int(retryDelay))s..."
                 }
                 try await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
+                try Task.checkCancellation()
                 lastError = NSError(domain: "TrackerRateLimit", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "Rate limited by tracker"])
                 continue
             }
@@ -939,6 +962,187 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
+    func syncUserRating(tmdbId: Int, ratingOutOf10: Int, isAnime: Bool) {
+        let clampedRating = max(1, min(10, ratingOutOf10))
+
+        guard trackerState.autoSyncRatings else {
+            Logger.shared.log("Skipping auto rating sync (auto sync ratings disabled) for TMDB \(tmdbId)", type: "Tracker")
+            return
+        }
+
+        guard isAnime else {
+            Logger.shared.log("Skipping remote rating sync for non-anime TMDB \(tmdbId)", type: "Tracker")
+            return
+        }
+
+        guard !isBackupRestoreSyncSuppressed() else {
+            Logger.shared.log("Skipping rating sync during backup restore for TMDB \(tmdbId)", type: "Tracker")
+            return
+        }
+
+        guard trackerState.syncEnabled else {
+            Logger.shared.log("Skipping rating sync (sync disabled) for TMDB \(tmdbId)", type: "Tracker")
+            return
+        }
+
+        let accounts = trackerState.accounts.filter { $0.isConnected && ($0.service == .anilist || $0.service == .myAnimeList) }
+        guard !accounts.isEmpty else {
+            Logger.shared.log("Skipping rating sync (no connected AniList/MAL account) for TMDB \(tmdbId)", type: "Tracker")
+            return
+        }
+
+        Task {
+            var resolvedAniListId = cachedAniListId(for: tmdbId)
+            if resolvedAniListId == nil {
+                resolvedAniListId = await getAniListMediaId(tmdbId: tmdbId)
+            }
+            guard let aniListId = resolvedAniListId else {
+                Logger.shared.log("Could not find AniList ID for rating sync, TMDB \(tmdbId)", type: "Tracker")
+                return
+            }
+
+            for account in accounts {
+                switch account.service {
+                case .anilist:
+                    await saveAniListRatingAndNote(account: account, anilistId: aniListId, rating: clampedRating, note: nil)
+                case .myAnimeList:
+                    guard let malId = await getMyAnimeListId(fromAniListId: aniListId, mediaType: "ANIME") else {
+                        Logger.shared.log("Could not find MAL anime ID for rating sync, AniList \(aniListId)", type: "Tracker")
+                        continue
+                    }
+                    await saveMALAnimeRatingAndNote(account: account, malId: malId, rating: clampedRating, note: nil)
+                case .trakt:
+                    break
+                }
+            }
+        }
+    }
+
+    func syncRatingAndNote(tmdbId: Int, ratingOutOf10: Int, note: String, service: TrackerService, isAnime: Bool) {
+        let clampedRating = max(1, min(10, ratingOutOf10))
+
+        guard isAnime else {
+            Logger.shared.log("Skipping rating note sync for non-anime TMDB \(tmdbId)", type: "Tracker")
+            return
+        }
+
+        guard !isBackupRestoreSyncSuppressed() else {
+            Logger.shared.log("Skipping rating note sync during backup restore for TMDB \(tmdbId)", type: "Tracker")
+            return
+        }
+
+        guard trackerState.syncEnabled else {
+            Logger.shared.log("Skipping rating note sync (sync disabled) for TMDB \(tmdbId)", type: "Tracker")
+            return
+        }
+
+        guard let account = trackerState.getAccount(for: service), account.isConnected else {
+            Logger.shared.log("Skipping rating note sync (no connected \(service.displayName) account) for TMDB \(tmdbId)", type: "Tracker")
+            return
+        }
+
+        Task {
+            var resolvedAniListId = cachedAniListId(for: tmdbId)
+            if resolvedAniListId == nil {
+                resolvedAniListId = await getAniListMediaId(tmdbId: tmdbId)
+            }
+            guard let aniListId = resolvedAniListId else {
+                Logger.shared.log("Could not find AniList ID for rating note sync, TMDB \(tmdbId)", type: "Tracker")
+                return
+            }
+
+            switch service {
+            case .anilist:
+                await saveAniListRatingAndNote(account: account, anilistId: aniListId, rating: clampedRating, note: note)
+            case .myAnimeList:
+                guard let malId = await getMyAnimeListId(fromAniListId: aniListId, mediaType: "ANIME") else {
+                    Logger.shared.log("Could not find MAL anime ID for rating note sync, AniList \(aniListId)", type: "Tracker")
+                    return
+                }
+                await saveMALAnimeRatingAndNote(account: account, malId: malId, rating: clampedRating, note: note)
+            case .trakt:
+                break
+            }
+        }
+    }
+
+    private func saveAniListRatingAndNote(account: TrackerAccount, anilistId: Int, rating: Int, note: String?) async {
+        let clampedRating = max(1, min(10, rating))
+        let variableDeclaration = note == nil
+            ? "($mediaId: Int, $scoreRaw: Int)"
+            : "($mediaId: Int, $scoreRaw: Int, $notes: String)"
+        let notesArgument = note == nil ? "" : ",\n                notes: $notes"
+        let mutation = """
+        mutation \(variableDeclaration) {
+            SaveMediaListEntry(
+                mediaId: $mediaId,
+                scoreRaw: $scoreRaw\(notesArgument)
+            ) {
+                id
+                scoreRaw
+                notes
+            }
+        }
+        """
+        var variables: [String: Any] = [
+            "mediaId": anilistId,
+            "scoreRaw": clampedRating * 10
+        ]
+        if let note {
+            variables["notes"] = note
+        }
+
+        do {
+            let url = URL(string: "https://graphql.anilist.co")!
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer \(account.accessToken)", forHTTPHeaderField: "Authorization")
+            request.httpBody = try JSONSerialization.data(withJSONObject: ["query": mutation, "variables": variables])
+
+            let (data, response) = try await sendTrackerRequest(request, provider: .anilist)
+            if response.statusCode == 200,
+               let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let errors = json["errors"] as? [[String: Any]], !errors.isEmpty {
+                Logger.shared.log("AniList rating sync error: \(errors.first?["message"] as? String ?? "Unknown error")", type: "Tracker")
+            } else if response.statusCode == 200 {
+                Logger.shared.log("Synced AniList rating \(clampedRating)/10\(note == nil ? "" : " and notes") for mediaId \(anilistId)", type: "Tracker")
+            } else {
+                Logger.shared.log("AniList rating sync returned status \(response.statusCode)", type: "Tracker")
+            }
+        } catch {
+            Logger.shared.log("Failed to sync AniList rating \(anilistId): \(error.localizedDescription)", type: "Error")
+        }
+    }
+
+    private func saveMALAnimeRatingAndNote(account: TrackerAccount, malId: Int, rating: Int, note: String?) async {
+        let clampedRating = max(1, min(10, rating))
+        let url = URL(string: "https://api.myanimelist.net/v2/anime/\(malId)/my_list_status")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "PATCH"
+        request.setValue("Bearer \(account.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        var values = [
+            "score": String(clampedRating)
+        ]
+        if let note {
+            values["comments"] = note
+        }
+        request.httpBody = formURLEncodedBody(values)
+
+        do {
+            let (data, response) = try await sendTrackerRequest(request, provider: .myAnimeList)
+            if (200...299).contains(response.statusCode) {
+                Logger.shared.log("Synced MAL rating \(clampedRating)/10\(note == nil ? "" : " and comments") for animeId \(malId)", type: "Tracker")
+            } else {
+                let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+                Logger.shared.log("MAL rating sync returned status \(response.statusCode): \(bodyPreview)", type: "Tracker")
+            }
+        } catch {
+            Logger.shared.log("Failed to sync MAL rating \(malId): \(error.localizedDescription)", type: "Error")
+        }
+    }
+
     private func sendMangaProgressToAniList(mediaId: Int, chapterNumber: Int, account: TrackerAccount) async {
         let mutation = """
         mutation {
@@ -1599,6 +1803,10 @@ final class TrackerManager: NSObject, ObservableObject {
                 self.isRunningSyncTool = true
                 self.syncToolStatus = "Building preview..."
                 self.syncToolPreview = nil
+                self.syncToolProgressCompleted = 0
+                self.syncToolProgressTotal = 0
+                self.syncToolProgressDetail = nil
+                self.syncToolIsLocked = false
             }
 
             do {
@@ -1621,27 +1829,61 @@ final class TrackerManager: NSObject, ObservableObject {
     func runSyncTool(_ action: TrackerSyncToolAction) {
         guard !isRunningSyncTool else { return }
 
-        Task {
+        let task = Task {
             await MainActor.run {
                 self.isRunningSyncTool = true
                 self.syncToolStatus = "Running \(action.title)..."
+                self.syncToolProgressCompleted = 0
+                self.syncToolProgressTotal = 0
+                self.syncToolProgressDetail = "Preparing sync..."
             }
 
             do {
                 let plan = try await cachedOrBuildSyncToolPlan(for: action)
+                let total = syncToolOperationCount(for: plan)
+                await MainActor.run {
+                    self.syncToolProgressCompleted = 0
+                    self.syncToolProgressTotal = total
+                    self.syncToolProgressDetail = total > 0 ? "0 of \(total) operations complete" : "No write operations needed"
+                    self.syncToolIsLocked = plan.preview.estimatedAPICalls >= self.largeSyncAPICallThreshold || total >= self.largeSyncAPICallThreshold
+                }
                 let result = try await performSyncTool(plan)
                 await MainActor.run {
                     self.cachedSyncToolPlan = nil
                     self.syncToolPreview = result
                     self.syncToolStatus = "Finished \(action.title)"
+                    self.syncToolProgressCompleted = self.syncToolProgressTotal
+                    self.syncToolProgressDetail = "Finished"
+                    self.syncToolIsLocked = false
                     self.isRunningSyncTool = false
+                    self.syncToolTask = nil
+                }
+            } catch is CancellationError {
+                await MainActor.run {
+                    self.syncToolStatus = "Canceled \(action.title)"
+                    self.syncToolProgressDetail = "Canceled"
+                    self.syncToolIsLocked = false
+                    self.isRunningSyncTool = false
+                    self.syncToolTask = nil
                 }
             } catch {
                 await MainActor.run {
                     self.syncToolStatus = "Sync failed: \(error.localizedDescription)"
+                    self.syncToolProgressDetail = nil
+                    self.syncToolIsLocked = false
                     self.isRunningSyncTool = false
+                    self.syncToolTask = nil
                 }
             }
+        }
+        syncToolTask = task
+    }
+
+    func cancelSyncTool() {
+        syncToolTask?.cancel()
+        Task { @MainActor in
+            self.syncToolStatus = "Canceling sync..."
+            self.syncToolProgressDetail = "Stopping after the current request..."
         }
     }
 
@@ -1652,6 +1894,33 @@ final class TrackerManager: NSObject, ObservableObject {
         let plan = try await buildSyncToolPlan(for: action)
         cachedSyncToolPlan = plan
         return plan
+    }
+
+    private func syncToolOperationCount(for plan: TrackerSyncToolPlan) -> Int {
+        switch plan.action {
+        case .fillEclipseFromAniList, .fillEclipseFromMAL, .portAniListToMAL, .portMALToAniList:
+            return plan.animeEntries.count + plan.mangaEntries.count
+        case .pushEclipseToAniList, .pushEclipseToMAL:
+            return localHighestWatchedEpisodes().count + localHighestReadMangaChapters().count
+        }
+    }
+
+    private func updateSyncToolProgress(detail: String?) async {
+        await MainActor.run {
+            self.syncToolProgressDetail = detail
+        }
+    }
+
+    private func advanceSyncToolProgress(by amount: Int = 1, detail: String? = nil) async throws {
+        try Task.checkCancellation()
+        await MainActor.run {
+            self.syncToolProgressCompleted = min(self.syncToolProgressCompleted + amount, self.syncToolProgressTotal)
+            if let detail {
+                self.syncToolProgressDetail = detail
+            } else if self.syncToolProgressTotal > 0 {
+                self.syncToolProgressDetail = "\(self.syncToolProgressCompleted) of \(self.syncToolProgressTotal) operations complete"
+            }
+        }
     }
 
     private func buildSyncToolPreview(for action: TrackerSyncToolAction) async throws -> TrackerSyncPreview {
@@ -1805,29 +2074,44 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     private func performSyncTool(_ plan: TrackerSyncToolPlan) async throws -> TrackerSyncPreview {
+        try Task.checkCancellation()
         let action = plan.action
         switch action {
         case .fillEclipseFromAniList:
             _ = try connectedAccount(.anilist)
-            let animeResult = await fillEclipseFromRemoteAnime(plan.animeEntries, sourceName: "AniList", action: action)
-            let mangaResult = await fillEclipseFromRemoteManga(plan.mangaEntries, sourceName: "AniList", action: action)
+            await updateSyncToolProgress(detail: "Filling Eclipse anime from AniList...")
+            let animeResult = try await fillEclipseFromRemoteAnime(plan.animeEntries, sourceName: "AniList", action: action)
+            try await advanceSyncToolProgress(by: plan.animeEntries.count, detail: "Finished AniList anime fill")
+            await updateSyncToolProgress(detail: "Filling Eclipse manga from AniList...")
+            let mangaResult = try await fillEclipseFromRemoteManga(plan.mangaEntries, sourceName: "AniList", action: action)
+            try await advanceSyncToolProgress(by: plan.mangaEntries.count, detail: "Finished AniList manga fill")
             return combineSyncPreviews(action: action, animeResult, mangaResult, note: "AniList fill completed without deleting or downgrading local progress.")
 
         case .fillEclipseFromMAL:
             _ = try connectedAccount(.myAnimeList)
-            let animeResult = await fillEclipseFromRemoteAnime(plan.animeEntries, sourceName: "MAL", action: action)
-            let mangaResult = await fillEclipseFromRemoteManga(plan.mangaEntries, sourceName: "MAL", action: action)
+            await updateSyncToolProgress(detail: "Filling Eclipse anime from MAL...")
+            let animeResult = try await fillEclipseFromRemoteAnime(plan.animeEntries, sourceName: "MAL", action: action)
+            try await advanceSyncToolProgress(by: plan.animeEntries.count, detail: "Finished MAL anime fill")
+            await updateSyncToolProgress(detail: "Filling Eclipse manga from MAL...")
+            let mangaResult = try await fillEclipseFromRemoteManga(plan.mangaEntries, sourceName: "MAL", action: action)
+            try await advanceSyncToolProgress(by: plan.mangaEntries.count, detail: "Finished MAL manga fill")
             return combineSyncPreviews(action: action, animeResult, mangaResult, note: "MAL fill completed without deleting or downgrading local progress.")
 
         case .pushEclipseToAniList:
             let account = try connectedAccount(.anilist)
             let anime = localHighestWatchedEpisodes()
             let manga = localHighestReadMangaChapters()
-            for entry in anime {
+            for (index, entry) in anime.enumerated() {
+                try Task.checkCancellation()
+                await updateSyncToolProgress(detail: "Pushing anime \(index + 1) of \(anime.count) to AniList...")
                 await syncToAniList(account: account, showId: entry.showId, seasonNumber: entry.seasonNumber, episodeNumber: entry.episodeNumber, progress: 1.0)
+                try await advanceSyncToolProgress()
             }
-            for item in manga {
+            for (index, item) in manga.enumerated() {
+                try Task.checkCancellation()
+                await updateSyncToolProgress(detail: "Pushing manga \(index + 1) of \(manga.count) to AniList...")
                 await sendMangaProgressToAniList(mediaId: item.mangaId, chapterNumber: item.chapter, account: account)
+                try await advanceSyncToolProgress()
             }
             return TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: anime.count + manga.count, skipped: 0, unmapped: 0, estimatedAPICalls: 0, notes: ["Eclipse progress push completed."])
 
@@ -1835,11 +2119,17 @@ final class TrackerManager: NSObject, ObservableObject {
             let account = try connectedAccount(.myAnimeList)
             let anime = localHighestWatchedEpisodes()
             let manga = localHighestReadMangaChapters()
-            for entry in anime {
+            for (index, entry) in anime.enumerated() {
+                try Task.checkCancellation()
+                await updateSyncToolProgress(detail: "Pushing anime \(index + 1) of \(anime.count) to MAL...")
                 await syncToMyAnimeList(account: account, showId: entry.showId, seasonNumber: entry.seasonNumber, episodeNumber: entry.episodeNumber, progress: 1.0)
+                try await advanceSyncToolProgress()
             }
-            for item in manga {
+            for (index, item) in manga.enumerated() {
+                try Task.checkCancellation()
+                await updateSyncToolProgress(detail: "Pushing manga \(index + 1) of \(manga.count) to MAL...")
                 await sendMangaProgressToMAL(aniListId: item.mangaId, chapterNumber: item.chapter, account: account)
+                try await advanceSyncToolProgress()
             }
             return TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: anime.count + manga.count, skipped: 0, unmapped: 0, estimatedAPICalls: 0, notes: ["Eclipse progress push completed."])
 
@@ -1848,9 +2138,12 @@ final class TrackerManager: NSObject, ObservableObject {
             let destination = try connectedAccount(.myAnimeList)
             var advanced = 0
             var unmapped = 0
-            for entry in plan.animeEntries {
+            for (index, entry) in plan.animeEntries.enumerated() {
+                try Task.checkCancellation()
+                await updateSyncToolProgress(detail: "Writing anime \(index + 1) of \(plan.animeEntries.count) to MAL...")
                 guard let malId = entry.malId else {
                     unmapped += 1
+                    try await advanceSyncToolProgress()
                     continue
                 }
                 await saveMALAnimeProgress(
@@ -1860,10 +2153,14 @@ final class TrackerManager: NSObject, ObservableObject {
                     status: malStatus(fromAniListStatus: entry.status)
                 )
                 advanced += 1
+                try await advanceSyncToolProgress()
             }
-            for entry in plan.mangaEntries {
+            for (index, entry) in plan.mangaEntries.enumerated() {
+                try Task.checkCancellation()
+                await updateSyncToolProgress(detail: "Writing manga \(index + 1) of \(plan.mangaEntries.count) to MAL...")
                 guard let malId = entry.malId else {
                     unmapped += 1
+                    try await advanceSyncToolProgress()
                     continue
                 }
                 await saveMALMangaProgress(
@@ -1873,6 +2170,7 @@ final class TrackerManager: NSObject, ObservableObject {
                     status: malMangaStatus(fromAniListStatus: entry.status)
                 )
                 advanced += 1
+                try await advanceSyncToolProgress()
             }
             return TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: advanced, skipped: unmapped, unmapped: unmapped, estimatedAPICalls: advanced, notes: ["AniList to MAL port finished. No entries were deleted."])
 
@@ -1881,9 +2179,12 @@ final class TrackerManager: NSObject, ObservableObject {
             let destination = try connectedAccount(.anilist)
             var advanced = 0
             var unmapped = 0
-            for entry in plan.animeEntries {
+            for (index, entry) in plan.animeEntries.enumerated() {
+                try Task.checkCancellation()
+                await updateSyncToolProgress(detail: "Writing anime \(index + 1) of \(plan.animeEntries.count) to AniList...")
                 guard let anilistId = entry.anilistId else {
                     unmapped += 1
+                    try await advanceSyncToolProgress()
                     continue
                 }
                 await saveAniListAnimeProgress(
@@ -1893,10 +2194,14 @@ final class TrackerManager: NSObject, ObservableObject {
                     status: aniListStatus(fromMALStatus: entry.status)
                 )
                 advanced += 1
+                try await advanceSyncToolProgress()
             }
-            for entry in plan.mangaEntries {
+            for (index, entry) in plan.mangaEntries.enumerated() {
+                try Task.checkCancellation()
+                await updateSyncToolProgress(detail: "Writing manga \(index + 1) of \(plan.mangaEntries.count) to AniList...")
                 guard let anilistId = entry.anilistId else {
                     unmapped += 1
+                    try await advanceSyncToolProgress()
                     continue
                 }
                 await saveAniListMangaProgress(
@@ -1906,6 +2211,7 @@ final class TrackerManager: NSObject, ObservableObject {
                     status: aniListStatus(fromMALStatus: entry.status)
                 )
                 advanced += 1
+                try await advanceSyncToolProgress()
             }
             return TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: advanced, skipped: unmapped, unmapped: unmapped, estimatedAPICalls: advanced, notes: ["MAL to AniList port finished. No entries were deleted."])
         }
@@ -2481,17 +2787,20 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    private func fillEclipseFromRemoteAnime(_ entries: [RemoteAnimeProgress], sourceName: String, action: TrackerSyncToolAction) async -> TrackerSyncPreview {
+    private func fillEclipseFromRemoteAnime(_ entries: [RemoteAnimeProgress], sourceName: String, action: TrackerSyncToolAction) async throws -> TrackerSyncPreview {
+        try Task.checkCancellation()
         let anilistIds = entries.compactMap { $0.anilistId }
         let tmdbMap = await AniListService.shared.mapAniListAnimeIdsToTMDBForImport(anilistIds, tmdbService: TMDBService.shared)
+        try Task.checkCancellation()
 
-        let counts = await MainActor.run { () -> (added: Int, advanced: Int, unmapped: Int) in
+        let counts = try await MainActor.run { () throws -> (added: Int, advanced: Int, unmapped: Int) in
             let library = LibraryManager.shared
             var added = 0
             var advanced = 0
             var unmapped = 0
 
             for entry in entries {
+                try Task.checkCancellation()
                 guard let anilistId = entry.anilistId,
                       let tmdb = tmdbMap[anilistId] else {
                     unmapped += 1
@@ -2534,12 +2843,13 @@ final class TrackerManager: NSObject, ObservableObject {
         )
     }
 
-    private func fillEclipseFromRemoteManga(_ entries: [RemoteMangaProgress], sourceName: String, action: TrackerSyncToolAction) async -> TrackerSyncPreview {
-        let counts = await MainActor.run { () -> (advanced: Int, unmapped: Int) in
+    private func fillEclipseFromRemoteManga(_ entries: [RemoteMangaProgress], sourceName: String, action: TrackerSyncToolAction) async throws -> TrackerSyncPreview {
+        let counts = try await MainActor.run { () throws -> (advanced: Int, unmapped: Int) in
             var advanced = 0
             var unmapped = 0
 
             for entry in entries {
+                try Task.checkCancellation()
                 guard let anilistId = entry.anilistId else {
                     unmapped += 1
                     continue

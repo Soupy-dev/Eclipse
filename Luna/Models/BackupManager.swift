@@ -100,6 +100,7 @@ struct BackupData: Codable {
 
     // User Ratings
     var userRatings: [String: Int] = [:]
+    var userRatingNotes: [String: String] = [:]
 
     enum CodingKeys: String, CodingKey {
         case version, createdDate
@@ -113,7 +114,7 @@ struct BackupData: Codable {
         case collections, progressData, trackerState, catalogs, services, stremioAddons
         case mangaCollections, mangaReadingProgress, mangaCatalogs, kanzenModules
         case recommendationCache
-        case userRatings
+        case userRatings, userRatingNotes
     }
 
     init(from decoder: Decoder) throws {
@@ -192,6 +193,7 @@ struct BackupData: Codable {
         kanzenModules = try container.decodeIfPresent([BackupKanzenModule].self, forKey: .kanzenModules) ?? []
         recommendationCache = try container.decodeIfPresent([TMDBSearchResult].self, forKey: .recommendationCache) ?? []
         userRatings = try container.decodeIfPresent([String: Int].self, forKey: .userRatings) ?? [:]
+        userRatingNotes = try container.decodeIfPresent([String: String].self, forKey: .userRatingNotes) ?? [:]
     }
 
     func encode(to encoder: Encoder) throws {
@@ -266,6 +268,7 @@ struct BackupData: Codable {
         try container.encode(kanzenModules, forKey: .kanzenModules)
         try container.encode(recommendationCache, forKey: .recommendationCache)
         try container.encode(userRatings, forKey: .userRatings)
+        try container.encode(userRatingNotes, forKey: .userRatingNotes)
     }
     
     init(
@@ -338,7 +341,8 @@ struct BackupData: Codable {
         mangaCatalogs: [MangaCatalog] = [],
         kanzenModules: [BackupKanzenModule] = [],
         recommendationCache: [TMDBSearchResult] = [],
-        userRatings: [String: Int] = [:]
+        userRatings: [String: Int] = [:],
+        userRatingNotes: [String: String] = [:]
     ) {
         self.version = version
         self.createdDate = createdDate
@@ -404,6 +408,7 @@ struct BackupData: Codable {
         self.kanzenModules = kanzenModules
         self.recommendationCache = recommendationCache
         self.userRatings = userRatings
+        self.userRatingNotes = userRatingNotes
     }
 
 }
@@ -740,7 +745,8 @@ class BackupManager {
             mangaCatalogs: mangaCatalogs,
             kanzenModules: kanzenModules,
             recommendationCache: RecommendationEngine.shared.getRecommendationCache(),
-            userRatings: UserRatingManager.shared.getRatingsForBackup()
+            userRatings: UserRatingManager.shared.getRatingsForBackup(),
+            userRatingNotes: UserRatingManager.shared.getNotesForBackup()
         )
         
         return backup
@@ -980,6 +986,11 @@ class BackupManager {
         if let ratingsDict = json["userRatings"] as? [String: Int] {
             userRatings = ratingsDict
         }
+
+        var userRatingNotes: [String: String] = [:]
+        if let notesDict = json["userRatingNotes"] as? [String: String] {
+            userRatingNotes = notesDict
+        }
         
         return BackupData(
             version: version,
@@ -1037,7 +1048,8 @@ class BackupManager {
             mangaCatalogs: mangaCatalogs,
             kanzenModules: kanzenModules,
             recommendationCache: recommendationCache,
-            userRatings: userRatings
+            userRatings: userRatings,
+            userRatingNotes: userRatingNotes
         )
     }
     
@@ -1252,9 +1264,12 @@ class BackupManager {
             RecommendationEngine.shared.restoreRecommendationCache(backup.recommendationCache)
         }
 
-        // Restore user ratings
-        if !backup.userRatings.isEmpty {
-            UserRatingManager.shared.restoreRatings(backup.userRatings)
+        // Restore user ratings and private notes without triggering tracker writes.
+        if !backup.userRatings.isEmpty || !backup.userRatingNotes.isEmpty {
+            UserRatingManager.shared.restoreRatingsAndNotes(
+                ratings: backup.userRatings,
+                notes: backup.userRatingNotes
+            )
         }
         
         Logger.shared.log("Backup restored successfully", type: "Info")

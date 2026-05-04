@@ -27,11 +27,23 @@ struct TrackersSettingsView: View {
 
                 VStack(spacing: 12) {
                     // Sync Toggle
-                    Toggle("Enable Sync", isOn: $trackerManager.trackerState.syncEnabled)
+                    Toggle("Enable Sync", isOn: Binding(
+                        get: { trackerManager.trackerState.syncEnabled },
+                        set: { trackerManager.setSyncEnabled($0) }
+                    ))
                         .foregroundColor(.white)
                         .padding()
                         .background(Color.gray.opacity(0.2))
                         .cornerRadius(12)
+
+                    Toggle("Auto Sync Ratings", isOn: Binding(
+                        get: { trackerManager.trackerState.autoSyncRatings },
+                        set: { trackerManager.setAutoSyncRatings($0) }
+                    ))
+                    .foregroundColor(.white)
+                    .padding()
+                    .background(Color.gray.opacity(0.2))
+                    .cornerRadius(12)
 
                     Button(action: { showSyncTools = true }) {
                         HStack(spacing: 12) {
@@ -331,21 +343,7 @@ private struct TrackerSyncToolsSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
                     if let status = trackerManager.syncToolStatus {
-                        HStack(spacing: 8) {
-                            if trackerManager.isRunningSyncTool {
-                                ProgressView()
-                                    .progressViewStyle(CircularProgressViewStyle(tint: .white))
-                            }
-
-                            Text(status)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-
-                            Spacer()
-                        }
-                        .padding()
-                        .background(Color.gray.opacity(0.12))
-                        .cornerRadius(12)
+                        syncStatusCard(status)
                     }
 
                     ForEach(TrackerSyncToolAction.allCases) { action in
@@ -358,10 +356,12 @@ private struct TrackerSyncToolsSheet: View {
             .navigationTitle("Sync Tools")
             #if !os(tvOS)
             .navigationBarTitleDisplayMode(.inline)
+            .interactiveDismissDisabled(trackerManager.syncToolIsLocked)
             #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
+                        .disabled(trackerManager.syncToolIsLocked)
                 }
             }
             .alert("Run Sync Tool?", isPresented: Binding(
@@ -381,6 +381,62 @@ private struct TrackerSyncToolsSheet: View {
                 Text("This writes progress to the selected destination but never deletes entries or downgrades progress.")
             }
         }
+    }
+
+    @ViewBuilder
+    private func syncStatusCard(_ status: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                if trackerManager.isRunningSyncTool {
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                }
+
+                Text(status)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                Spacer()
+
+                if trackerManager.isRunningSyncTool {
+                    Button(role: .destructive) {
+                        trackerManager.cancelSyncTool()
+                    } label: {
+                        Label("Cancel", systemImage: "xmark.circle")
+                    }
+                    .font(.caption.weight(.semibold))
+                    .buttonStyle(.bordered)
+                    .tint(.red)
+                }
+            }
+
+            if trackerManager.syncToolProgressTotal > 0 {
+                ProgressView(
+                    value: Double(trackerManager.syncToolProgressCompleted),
+                    total: Double(max(trackerManager.syncToolProgressTotal, 1))
+                )
+                .tint(.blue)
+
+                HStack {
+                    Text("\(trackerManager.syncToolProgressCompleted) / \(trackerManager.syncToolProgressTotal)")
+                    Spacer()
+                    if trackerManager.syncToolIsLocked {
+                        Text("Stay here while this large sync runs")
+                    }
+                }
+                .font(.caption2)
+                .foregroundColor(.secondary)
+            }
+
+            if let detail = trackerManager.syncToolProgressDetail {
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.12))
+        .cornerRadius(12)
     }
 
     @ViewBuilder
@@ -413,6 +469,12 @@ private struct TrackerSyncToolsSheet: View {
                     previewMetric("Skipped", preview.skipped)
                     previewMetric("Unmapped", preview.unmapped)
                     previewMetric("API calls", preview.estimatedAPICalls)
+
+                    if preview.estimatedAPICalls >= 90 {
+                        Label("Large sync: Eclipse will show progress, honor rate limits, and keep this sheet open until it finishes or you cancel.", systemImage: "hourglass")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                    }
 
                     ForEach(preview.notes, id: \.self) { note in
                         Text(note)

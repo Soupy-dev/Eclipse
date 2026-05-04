@@ -474,7 +474,7 @@ struct MediaDetailView: View {
                         castSection
                     }
                     
-                    StarRatingView(mediaId: searchResult.id)
+                    StarRatingView(mediaId: searchResult.id, isAnime: false)
                 } else {
                     episodesSection
                 }
@@ -662,7 +662,7 @@ struct MediaDetailView: View {
                     castSection
                 }
                 
-                StarRatingView(mediaId: searchResult.id)
+                StarRatingView(mediaId: searchResult.id, isAnime: isAnimeShow)
             }
             .onAppear {
                 Logger.shared.log("MediaDetailView episodesSection appeared: tmdbId=\(searchResult.id) isAnime=\(isAnimeShow) tvSeasons=\(tvShowDetail?.seasons.count ?? 0) selectedSeason=\(selectedSeason?.seasonNumber.description ?? "nil") anilistEpisodes=\(anilistEpisodes?.count ?? 0)", type: "CrashProbe")

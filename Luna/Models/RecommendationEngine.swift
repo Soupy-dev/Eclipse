@@ -330,9 +330,8 @@ final class RecommendationEngine {
 
         // 3. User star ratings — direct signal
         for rating in UserRatingManager.shared.allRatings() {
-            // Highly-rated items (4-5 stars) boost their genres significantly
-            // Low-rated items (1-2 stars) dampen their genres
-            let ratingWeight: Double = Double(rating.stars) - 3.0 // -2 to +2
+            // Highly-rated items boost their genres; low-rated items dampen them.
+            let ratingWeight: Double = (Double(rating.stars) - 5.5) / 2.25 // about -2 to +2
             for collection in collections {
                 for item in collection.items where item.searchResult.id == rating.tmdbId {
                     if let genres = item.searchResult.genreIds {

@@ -65,7 +65,25 @@ struct TrackerAccount: Codable {
 struct TrackerState: Codable {
     var accounts: [TrackerAccount] = []
     var syncEnabled: Bool = true
+    var autoSyncRatings: Bool = false
     var lastSyncDate: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case accounts
+        case syncEnabled
+        case autoSyncRatings
+        case lastSyncDate
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        accounts = try container.decodeIfPresent([TrackerAccount].self, forKey: .accounts) ?? []
+        syncEnabled = try container.decodeIfPresent(Bool.self, forKey: .syncEnabled) ?? true
+        autoSyncRatings = try container.decodeIfPresent(Bool.self, forKey: .autoSyncRatings) ?? false
+        lastSyncDate = try container.decodeIfPresent(Date.self, forKey: .lastSyncDate)
+    }
 
     mutating func addOrUpdateAccount(_ account: TrackerAccount) {
         if let index = accounts.firstIndex(where: { $0.service == account.service }) {

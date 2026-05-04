@@ -28,6 +28,7 @@ AltStore and SideStore users can add this source:
 13. Manga mode is available.
 14. Light novel support is available.
 15. The app UI has been overhauled.
+16. And more
 
 ## Notes
 
