@@ -57,7 +57,7 @@ private final class VLCPictureInPictureDrawableView: UIView {
 
     @objc(mediaController)
     func mediaController() -> AnyObject {
-        return self
+        return renderer?.nativePictureInPictureMediaController() ?? self
     }
 
     @objc(pictureInPictureReady)
@@ -153,6 +153,8 @@ final class VLCRenderer: NSObject {
     private var nativePiPStartRequested = false
     private var nativePiPActive = false
     private var nativePiPAvailable = false
+    private var nativePiPBlockedSeekDeadline: Date?
+    private var nativePiPMediaControllerMode: String?
     private var wasPausedBeforeBackground = true
     private var backgroundedPosition: Double?
     
@@ -192,8 +194,9 @@ final class VLCRenderer: NSObject {
         }
     }
 
-    private func recoverRenderingViewAfterPictureInPictureStop() {
+    private func recoverRenderingViewAfterPictureInPictureStop(reloadMedia: Bool = false) {
         guard isRunning, !isStopping else { return }
+        let restorePosition = cachedPosition
 
         ensureAudioSessionActive()
         reattachRenderingView()
@@ -216,6 +219,15 @@ final class VLCRenderer: NSObject {
                 self.clearLoadingState()
             }
             self.publishPlaybackProgress(from: player)
+        }
+
+        if reloadMedia {
+            eventQueue.asyncAfter(deadline: .now() + 0.45) { [weak self] in
+                guard let self, self.isRunning, !self.isStopping else { return }
+                guard UIApplication.shared.applicationState != .background else { return }
+                Logger.shared.log("[VLCRenderer.PiP] reloading VLC output after blocked native PiP seek", type: "Player")
+                self.reloadCurrentItemPreservingPosition(restorePosition)
+            }
         }
     }
 
@@ -423,6 +435,14 @@ final class VLCRenderer: NSObject {
         guard let url = currentURL, let preset = currentPreset else { return }
         load(url: url, with: preset, headers: currentHeaders)
     }
+
+    private func reloadCurrentItemPreservingPosition(_ position: Double) {
+        guard let url = currentURL, let preset = currentPreset else { return }
+        let resumePosition = max(0, position)
+        preparedInitialSeek = resumePosition
+        pendingAbsoluteSeek = resumePosition
+        load(url: url, with: preset, headers: currentHeaders)
+    }
     
     func applyPreset(_ preset: PlayerPreset) {
         currentPreset = preset
@@ -506,21 +526,16 @@ final class VLCRenderer: NSObject {
     }
 
     fileprivate func seekFromPictureInPicture(byMilliseconds offset: Int64, completion: NativeVLCPiPSeekCompletion?) {
-        eventQueue.async { [weak self] in
-            guard let self, let player = self.mediaPlayer else {
-                DispatchQueue.main.async { completion?() }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else {
+                completion?()
                 return
             }
 
-            guard self.nativePictureInPictureMediaSeekable else {
-                DispatchQueue.main.async { completion?() }
-                return
-            }
-
-            let currentPosition = self.resolvedPlaybackProgress(from: player).position
-            let target = currentPosition + (Double(offset) / 1000.0)
-            self.applySeek(to: target, on: player)
-            self.completePictureInPictureSeek(completion)
+            self.nativePiPBlockedSeekDeadline = Date().addingTimeInterval(3)
+            Logger.shared.log("[VLCRenderer.PiP] blocked native PiP seek offsetMs=\(offset); VLC PiP seek is unsafe on this VLCKit path", type: "Player")
+            self.updatePictureInPicturePlaybackState()
+            completion?()
         }
     }
 
@@ -564,15 +579,6 @@ final class VLCRenderer: NSObject {
         return cached
     }
 
-    private func completePictureInPictureSeek(_ completion: NativeVLCPiPSeekCompletion?) {
-        let complete: () -> Void = { [weak self] in
-            self?.updatePictureInPicturePlaybackState()
-            completion?()
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: complete)
-    }
-    
     func setSpeed(_ speed: Double) {
         eventQueue.async { [weak self] in
             guard let self, let player = self.mediaPlayer else { return }
@@ -1076,13 +1082,51 @@ final class VLCRenderer: NSObject {
     }
 
     fileprivate var nativePictureInPictureMediaSeekable: Bool {
-        guard let player = mediaPlayer else { return false }
-        guard reliableDuration(from: player) >= minimumReliableDuration else { return false }
-        return vlcBool(from: player, key: "seekable", selectors: ["isSeekable", "seekable"], fallback: true)
+        return false
     }
 
     fileprivate var nativePictureInPictureMediaPlaying: Bool {
         return !isPaused
+    }
+
+    fileprivate func nativePictureInPictureMediaController() -> AnyObject {
+        guard let player = mediaPlayer else {
+            recordNativePictureInPictureMediaControllerMode("drawable-shim")
+            return vlcView
+        }
+
+        if canUseVLCMediaPlayerForNativePictureInPictureControl(player) {
+            recordNativePictureInPictureMediaControllerMode("vlc-media-player")
+            return player
+        }
+
+        recordNativePictureInPictureMediaControllerMode("drawable-shim")
+        return vlcView
+    }
+
+    private func canUseVLCMediaPlayerForNativePictureInPictureControl(_ player: VLCMediaPlayer) -> Bool {
+        let object = player as NSObject
+        let requiredSelectors = [
+            "mediaTime",
+            "mediaLength",
+            "isMediaSeekable",
+            "isMediaPlaying",
+            "play",
+            "pause"
+        ]
+        let hasBaseControl = requiredSelectors.allSatisfy {
+            object.responds(to: NSSelectorFromString($0))
+        }
+        let hasSeekCompletion =
+            object.responds(to: NSSelectorFromString("seekBy:completion:")) ||
+            object.responds(to: NSSelectorFromString("seekBy:completionHandler:"))
+        return hasBaseControl && hasSeekCompletion
+    }
+
+    private func recordNativePictureInPictureMediaControllerMode(_ mode: String) {
+        guard nativePiPMediaControllerMode != mode else { return }
+        nativePiPMediaControllerMode = mode
+        Logger.shared.log("[VLCRenderer.PiP] mediaController mode=\(mode)", type: "Player")
     }
 
     @discardableResult
@@ -1271,8 +1315,12 @@ final class VLCRenderer: NSObject {
         guard storedActiveChanged || wasEffectivelyActive != isEffectivelyActive else { return }
         delegate?.renderer(self, didChangePictureInPictureActive: isEffectivelyActive)
         if wasEffectivelyActive && !isEffectivelyActive {
+            let shouldReloadAfterBlockedSeek = nativePiPBlockedSeekDeadline.map { Date() <= $0 } ?? false
+            nativePiPBlockedSeekDeadline = nil
             Logger.shared.log("[VLCRenderer.PiP] native PiP stopped; reattaching VLC drawable", type: "Player")
-            recoverRenderingViewAfterPictureInPictureStop()
+            recoverRenderingViewAfterPictureInPictureStop(reloadMedia: shouldReloadAfterBlockedSeek)
+        } else if isEffectivelyActive {
+            nativePiPBlockedSeekDeadline = nil
         }
     }
 
