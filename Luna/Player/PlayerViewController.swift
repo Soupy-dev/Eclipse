@@ -59,6 +59,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }()
     
     private let displayLayer = AVSampleBufferDisplayLayer()
+    private weak var vlcRenderingView: UIView?
     
     private func createSymbolButton(symbolName: String, pointSize: CGFloat = 18, weight: UIImage.SymbolWeight = .semibold, backgroundColor: UIColor? = nil) -> UIButton {
         let b = UIButton(type: .system)
@@ -931,7 +932,19 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let windowBounds = view.window?.bounds ?? .zero
         let pipActive = vlcRenderer?.isPictureInPictureActive ?? false
         let pipAvailable = vlcRenderer?.isPictureInPictureAvailable ?? false
-        logVLCUI("\(event) ui app=\(appState) window=\(view.window != nil) presenting=\(presentingViewController != nil) closing=\(isClosing) running=\(isRunning) loading=\(isRendererLoading) controls=\(controlsVisible) paused=\(rendererIsPausedState()) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pipEnabled=\(Settings.shared.vlcPiPEnabled) pipAvailable=\(pipAvailable) pipActive=\(pipActive) view=\(String(format: "%.0fx%.0f", viewBounds.width, viewBounds.height)) video=\(String(format: "%.0fx%.0f", videoBounds.width, videoBounds.height)) windowBounds=\(String(format: "%.0fx%.0f", windowBounds.width, windowBounds.height))", type: "Player")
+        let displayFrame = displayLayer.frame
+        let displayBackground = displayLayer.backgroundColor.map { UIColor(cgColor: $0).description } ?? "nil"
+        let vlcView = vlcRenderingView
+        let vlcIndex = vlcView.flatMap { target in videoContainer.subviews.firstIndex { $0 === target } } ?? -1
+        let subviewStack = videoContainer.subviews.enumerated().map { index, subview -> String in
+            if let vlcView = vlcView, subview === vlcView { return "\(index):vlc" }
+            if subview === controlsOverlayView { return "\(index):controls" }
+            if subview === dimmingView { return "\(index):dimming" }
+            if subview === tapOverlayView { return "\(index):tap" }
+            if subview === loadingIndicator { return "\(index):loading" }
+            return "\(index):\(type(of: subview))"
+        }.joined(separator: "|")
+        logVLCUI("\(event) ui app=\(appState) window=\(view.window != nil) presenting=\(presentingViewController != nil) closing=\(isClosing) running=\(isRunning) loading=\(isRendererLoading) controls=\(controlsVisible) paused=\(rendererIsPausedState()) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pipEnabled=\(Settings.shared.vlcPiPEnabled) pipAvailable=\(pipAvailable) pipActive=\(pipActive) view=\(String(format: "%.0fx%.0f", viewBounds.width, viewBounds.height)) video=\(String(format: "%.0fx%.0f", videoBounds.width, videoBounds.height)) windowBounds=\(String(format: "%.0fx%.0f", windowBounds.width, windowBounds.height)) vlcIndex=\(vlcIndex) vlcHidden=\(vlcView?.isHidden ?? true) vlcAlpha=\(String(format: "%.2f", vlcView?.alpha ?? 0)) displayAttached=\(displayLayer.superlayer != nil) displayHidden=\(displayLayer.isHidden) displayOpacity=\(String(format: "%.2f", displayLayer.opacity)) displayFrame=\(String(format: "%.0fx%.0f", displayFrame.width, displayFrame.height)) displayBg=\(displayBackground) stack=\(subviewStack)", type: "Player")
     }
 
     private func scheduleVLCUIViewSnapshots(_ event: String, delays: [TimeInterval] = [0.25, 1.0]) {
@@ -1183,7 +1196,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         
-        displayLayer.frame = videoContainer.bounds
+        if isVLCPlayer {
+            if displayLayer.superlayer != nil || !displayLayer.isHidden || displayLayer.opacity != 0 {
+                displayLayer.removeFromSuperlayer()
+                displayLayer.isHidden = true
+                displayLayer.opacity = 0.0
+                logVLCUI("viewDidLayout removed sample-buffer displayLayer from VLC stack", type: "Player")
+            }
+        } else {
+            displayLayer.frame = videoContainer.bounds
+        }
         
         if let gradientLayer = controlsOverlayView.layer.sublayers?.first(where: { $0.name == "gradientLayer" }) {
             gradientLayer.frame = controlsOverlayView.bounds
@@ -1494,13 +1516,24 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 #endif
         displayLayer.backgroundColor = (vlcRenderer == nil) ? UIColor.black.cgColor : UIColor.clear.cgColor
-        videoContainer.layer.addSublayer(displayLayer)
+        if isVLCPlayer {
+            displayLayer.removeFromSuperlayer()
+            displayLayer.isHidden = true
+            displayLayer.opacity = 0.0
+            logVLCUI("setupLayout skipped sample-buffer displayLayer for VLC renderer", type: "Player")
+        } else {
+            displayLayer.isHidden = false
+            displayLayer.opacity = 1.0
+            videoContainer.layer.addSublayer(displayLayer)
+        }
         
         // Add VLC rendering view FIRST (before all UI elements) so it renders behind controls
         if let vlc = vlcRenderer {
             let vlcView = vlc.getRenderingView()
+            vlcRenderingView = vlcView
             videoContainer.addSubview(vlcView)
             vlcView.translatesAutoresizingMaskIntoConstraints = false
+            vlcView.layer.zPosition = 0
             // Ensure container remains interactive for gesture recognition
             videoContainer.isUserInteractionEnabled = true
             NSLayoutConstraint.activate([

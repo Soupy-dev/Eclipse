@@ -53,9 +53,9 @@ private final class VLCPictureInPictureDrawableView: UIView {
         }
         if protocolName == "VLCPictureInPictureDrawable" ||
             protocolName == "VLCPictureInPictureMediaControlling" {
-            let allowed = renderer?.isPictureInPictureSettingEnabled ?? false
-            logPiPDrawableEvent("conforms protocol=\(protocolName) allowed=\(allowed) rendererAttached=\(renderer != nil)")
-            return allowed
+            let setting = renderer?.isPictureInPictureSettingEnabled ?? false
+            logPiPDrawableEvent("conforms protocol=\(protocolName) exposed=true setting=\(setting) rendererAttached=\(renderer != nil)")
+            return true
         }
         return super.conforms(to: aProtocol)
     }
