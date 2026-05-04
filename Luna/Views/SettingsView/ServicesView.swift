@@ -11,6 +11,7 @@ import Kingfisher
 struct ServicesView: View {
     @StateObject private var serviceManager = ServiceManager.shared
     @StateObject private var stremioManager = StremioAddonManager.shared
+    @StateObject private var healthStore = SourceHealthStore.shared
     @Environment(\.editMode) private var editMode
     @State private var showDownloadAlert = false
     @State private var downloadURL = ""
@@ -246,9 +247,9 @@ struct ServicesView: View {
                     ForEach(unifiedItems) { item in
                         switch item {
                         case .service(let service):
-                            ServiceRow(service: service, serviceManager: serviceManager)
+                            ServiceRow(service: service, serviceManager: serviceManager, healthStore: healthStore)
                         case .stremio(let addon):
-                            StremioAddonRow(addon: addon, manager: stremioManager)
+                            StremioAddonRow(addon: addon, manager: stremioManager, healthStore: healthStore)
                         }
                     }
                     .onDelete(perform: deleteUnifiedItems)
@@ -269,6 +270,7 @@ struct ServicesView: View {
             }
         }
         .onAppear {
+            _ = healthStore.version
             syncAutoModeSelectionWithInstalledSources()
         }
     }
@@ -327,6 +329,7 @@ struct ServicesView: View {
                 try await stremioManager.addAddon(from: stremioURL)
                 await MainActor.run {
                     stremioURL = ""
+                    reloadAutoModeSelectionFromDefaults()
                 }
             } catch {
                 await MainActor.run {
@@ -342,6 +345,12 @@ struct ServicesView: View {
         UserDefaults.standard.set(Array(selectedAutoModeSourceIds), forKey: "servicesAutoModeSourceIds")
         autoModeSourceOrderIds = orderedSelected
         UserDefaults.standard.set(orderedSelected, forKey: "servicesAutoModeSourceOrderIds")
+    }
+
+    private func reloadAutoModeSelectionFromDefaults() {
+        selectedAutoModeSourceIds = Set(UserDefaults.standard.stringArray(forKey: "servicesAutoModeSourceIds") ?? [])
+        autoModeSourceOrderIds = UserDefaults.standard.stringArray(forKey: "servicesAutoModeSourceOrderIds") ?? []
+        syncAutoModeSelectionWithInstalledSources()
     }
 
     private func syncAutoModeSelectionWithInstalledSources() {
@@ -382,6 +391,7 @@ struct ServicesView: View {
                 if wasHandled {
                     await MainActor.run {
                         downloadURL = ""
+                        reloadAutoModeSelectionFromDefaults()
                         showServiceDownloadAlert = true
                     }
                 }
@@ -394,6 +404,7 @@ struct ServicesView: View {
 struct ServiceRow: View {
     let service: Service
     @ObservedObject var serviceManager: ServiceManager
+    @ObservedObject var healthStore: SourceHealthStore
     @State private var showingSettings = false
     
     private var isServiceActive: Bool {
@@ -405,6 +416,16 @@ struct ServiceRow: View {
     
     private var hasSettings: Bool {
         service.metadata.settings == true
+    }
+
+    private var sourceId: String {
+        SourceHealth.serviceId(service)
+    }
+
+    private var healthState: SourceHealthDisplayState {
+        _ = healthStore.version
+        guard isServiceActive else { return .unchecked }
+        return healthStore.displayState(for: sourceId)
     }
     
     var body: some View {
@@ -449,6 +470,8 @@ struct ServiceRow: View {
                         .font(.caption)
                         .foregroundStyle(.gray)
                 }
+
+                healthStatusLabel
             }
             
             Spacer()
@@ -480,6 +503,32 @@ struct ServiceRow: View {
         }
         .sheet(isPresented: $showingSettings) {
             ServiceSettingsView(service: service, serviceManager: serviceManager)
+        }
+    }
+
+    @ViewBuilder
+    private var healthStatusLabel: some View {
+        switch healthState {
+        case .healthy:
+            Label("Reachable", systemImage: "checkmark.circle")
+                .font(.caption2)
+                .foregroundStyle(.green)
+        case .warning(let reason):
+            Label(reason, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+                .lineLimit(1)
+        case .playbackIssue(let reason):
+            Label(reason, systemImage: "play.slash")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+                .lineLimit(1)
+        case .stale:
+            Label("Health check pending", systemImage: "clock")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        case .unchecked:
+            EmptyView()
         }
     }
 }
@@ -547,6 +596,7 @@ private struct AddServiceInputModifier: ViewModifier {
 struct StremioAddonRow: View {
     let addon: StremioAddon
     @ObservedObject var manager: StremioAddonManager
+    @ObservedObject var healthStore: SourceHealthStore
     @State private var showConfigure = false
     @State private var showReconfigure = false
     @State private var reconfigureURL = ""
@@ -562,6 +612,16 @@ struct StremioAddonRow: View {
 
     private var isConfigurable: Bool {
         addon.manifest.behaviorHints?.configurable == true
+    }
+
+    private var sourceId: String {
+        SourceHealth.stremioId(addon)
+    }
+
+    private var healthState: SourceHealthDisplayState {
+        _ = healthStore.version
+        guard isAddonActive else { return .unchecked }
+        return healthStore.displayState(for: sourceId)
     }
 
     var body: some View {
@@ -615,6 +675,8 @@ struct StremioAddonRow: View {
                             .lineLimit(1)
                     }
                 }
+
+                healthStatusLabel
             }
 
             Spacer()
@@ -660,6 +722,32 @@ struct StremioAddonRow: View {
             if let error = reconfigureError {
                 Text(error)
             }
+        }
+    }
+
+    @ViewBuilder
+    private var healthStatusLabel: some View {
+        switch healthState {
+        case .healthy:
+            Label("Reachable", systemImage: "checkmark.circle")
+                .font(.caption2)
+                .foregroundStyle(.green)
+        case .warning(let reason):
+            Label(reason, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+                .lineLimit(1)
+        case .playbackIssue(let reason):
+            Label(reason, systemImage: "play.slash")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+                .lineLimit(1)
+        case .stale:
+            Label("Health check pending", systemImage: "clock")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        case .unchecked:
+            EmptyView()
         }
     }
 

@@ -10,8 +10,17 @@ import AVKit
 class NormalPlayer: AVPlayerViewController, AVPlayerViewControllerDelegate {
     private var originalRate: Float = 1.0
     private var timeObserverToken: Any?
+    private var startupTimeObserverToken: Any?
+    private var itemStatusObservation: NSKeyValueObservation?
+    private var timeControlObservation: NSKeyValueObservation?
+    private var startupWorkItem: DispatchWorkItem?
+    private var playbackDidStart = false
+    private var playbackFailureHandled = false
+    private var slowProbeCount = 0
     var mediaInfo: MediaInfo?
     var episodePlaybackContext: EpisodePlaybackContext?
+    var playbackLaunchContext: PlaybackLaunchContext?
+    var onPlaybackStartupFailure: ((PlaybackFailureReport) -> Void)?
     
 #if os(iOS)
     private var holdGesture: UILongPressGestureRecognizer?
@@ -27,6 +36,7 @@ class NormalPlayer: AVPlayerViewController, AVPlayerViewControllerDelegate {
         if let info = mediaInfo {
             setupProgressTracking(for: info)
         }
+        setupPlaybackStartupMonitoring()
         setupAudioSession()
     }
     
@@ -38,12 +48,21 @@ class NormalPlayer: AVPlayerViewController, AVPlayerViewControllerDelegate {
             player?.removeTimeObserver(token)
             timeObserverToken = nil
         }
+        if let token = startupTimeObserverToken {
+            player?.removeTimeObserver(token)
+            startupTimeObserverToken = nil
+        }
+        startupWorkItem?.cancel()
     }
     
     deinit {
         if let token = timeObserverToken {
             player?.removeTimeObserver(token)
         }
+        if let token = startupTimeObserverToken {
+            player?.removeTimeObserver(token)
+        }
+        startupWorkItem?.cancel()
     }
     
 #if os(iOS)
@@ -113,6 +132,165 @@ class NormalPlayer: AVPlayerViewController, AVPlayerViewControllerDelegate {
     
     private func endHoldSpeed() {
         player?.rate = originalRate
+    }
+
+    func playAtDefaultSpeed() {
+        let savedSpeed = UserDefaults.standard.double(forKey: "defaultPlaybackSpeed")
+        let speed = Float(savedSpeed > 0 ? min(max(savedSpeed, 0.25), 3.0) : 1.0)
+        if abs(speed - 1.0) < 0.01 {
+            player?.play()
+        } else {
+            player?.playImmediately(atRate: speed)
+        }
+    }
+
+    private func setupPlaybackStartupMonitoring() {
+        guard let context = playbackLaunchContext,
+              let player = player,
+              let url = URL(string: context.streamURL),
+              !url.isFileURL else {
+            return
+        }
+
+        itemStatusObservation = player.currentItem?.observe(\.status, options: [.new]) { [weak self] item, _ in
+            DispatchQueue.main.async {
+                switch item.status {
+                case .readyToPlay:
+                    self?.markPlaybackStarted()
+                case .failed:
+                    self?.handlePlaybackStartupFailure(item.error?.localizedDescription ?? "AVPlayer could not load this stream", isSourceFailure: true)
+                default:
+                    break
+                }
+            }
+        }
+
+        timeControlObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] player, _ in
+            if player.timeControlStatus == .playing {
+                DispatchQueue.main.async {
+                    self?.markPlaybackStarted()
+                }
+            }
+        }
+
+        startupTimeObserverToken = player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.5, preferredTimescale: CMTimeScale(NSEC_PER_SEC)),
+            queue: .main
+        ) { [weak self] time in
+            if time.seconds.isFinite, time.seconds > 0.1 {
+                self?.markPlaybackStarted()
+            }
+        }
+
+        schedulePlaybackStartupCheck(url: url, headers: context.headers, delay: 35)
+    }
+
+    private func schedulePlaybackStartupCheck(url: URL, headers: [String: String], delay: TimeInterval) {
+        startupWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, !self.playbackDidStart, !self.playbackFailureHandled else { return }
+            self.runPlaybackStartupProbe(url: url, headers: headers)
+        }
+        startupWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func markPlaybackStarted() {
+        guard !playbackDidStart else { return }
+        playbackDidStart = true
+        startupWorkItem?.cancel()
+        if let context = playbackLaunchContext {
+            SourceHealthStore.shared.recordPlaybackSuccess(sourceId: context.sourceId, sourceName: context.sourceName)
+        }
+    }
+
+    private func runPlaybackStartupProbe(url: URL, headers: [String: String]) {
+        Task { [weak self] in
+            let result = await SourceHealthMonitor.shared.probeStream(url: url, headers: headers)
+            await MainActor.run {
+                guard let self, !self.playbackDidStart, !self.playbackFailureHandled else { return }
+                switch result {
+                case .reachable:
+                    self.slowProbeCount += 1
+                    self.schedulePlaybackStartupCheck(url: url, headers: headers, delay: 20)
+                case .slowOrIndeterminate(let reason):
+                    self.slowProbeCount += 1
+                    if self.slowProbeCount >= 3 {
+                        self.handlePlaybackStartupFailure("Playback is taking too long: \(reason)", isSourceFailure: false)
+                    } else {
+                        self.schedulePlaybackStartupCheck(url: url, headers: headers, delay: 20)
+                    }
+                case .networkUnavailable:
+                    self.handlePlaybackStartupFailure("No internet connection is available.", isSourceFailure: false)
+                case .sourceFailed(let reason):
+                    self.handlePlaybackStartupFailure(reason, isSourceFailure: true)
+                }
+            }
+        }
+    }
+
+    private func handlePlaybackStartupFailure(_ message: String, isSourceFailure: Bool) {
+        guard !playbackDidStart, !playbackFailureHandled, let context = playbackLaunchContext else { return }
+        playbackFailureHandled = true
+        startupWorkItem?.cancel()
+
+        SourceHealthStore.shared.recordPlaybackFailure(
+            sourceId: context.sourceId,
+            sourceName: context.sourceName,
+            reason: message,
+            isSourceFailure: isSourceFailure
+        )
+
+        let report = PlaybackFailureReport(context: context, message: message, isSourceFailure: isSourceFailure)
+        if context.autoMode {
+            dismiss(animated: true) { [weak self] in
+                self?.player?.pause()
+                self?.onPlaybackStartupFailure?(report)
+            }
+        } else {
+            let alert = UIAlertController(
+                title: "Playback Failed",
+                message: "\(context.sourceName) could not start playback. \(message)",
+                preferredStyle: .alert
+            )
+            alert.addAction(UIAlertAction(title: "Retry", style: .default) { [weak self] _ in
+                self?.retryPlaybackAfterFailure()
+            })
+            alert.addAction(UIAlertAction(title: "Close", style: .cancel) { [weak self] _ in
+                self?.dismiss(animated: true)
+            })
+            present(alert, animated: true)
+        }
+    }
+
+    private func retryPlaybackAfterFailure() {
+        guard let context = playbackLaunchContext, let url = URL(string: context.streamURL) else {
+            player?.seek(to: .zero)
+            playAtDefaultSpeed()
+            return
+        }
+
+        itemStatusObservation = nil
+        timeControlObservation = nil
+        if let token = startupTimeObserverToken {
+            player?.removeTimeObserver(token)
+            startupTimeObserverToken = nil
+        }
+        startupWorkItem?.cancel()
+
+        playbackFailureHandled = false
+        playbackDidStart = false
+        slowProbeCount = 0
+
+        let asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": context.headers])
+        let item = AVPlayerItem(asset: asset)
+        if player == nil {
+            player = AVPlayer(playerItem: item)
+        } else {
+            player?.replaceCurrentItem(with: item)
+        }
+        setupPlaybackStartupMonitoring()
+        playAtDefaultSpeed()
     }
     
     func setupAudioSession() {

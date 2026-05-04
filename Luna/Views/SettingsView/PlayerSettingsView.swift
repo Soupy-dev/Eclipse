@@ -48,9 +48,24 @@ enum InAppPlayer: String, CaseIterable, Identifiable {
     case vlc = "VLC"
     
     var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .vlc:
+            return rawValue
+        case .mpv:
+            return "\(rawValue) (Not recommended)"
+        case .normal:
+            return "Normal AVPlayer (Not recommended)"
+        }
+    }
 }
 
 final class PlayerSettingsStore: ObservableObject {
+    @Published var defaultPlaybackSpeed: Double {
+        didSet { UserDefaults.standard.set(defaultPlaybackSpeed, forKey: "defaultPlaybackSpeed") }
+    }
+
     @Published var holdSpeed: Double {
         didSet { UserDefaults.standard.set(holdSpeed, forKey: "holdSpeedPlayer") }
     }
@@ -107,6 +122,14 @@ final class PlayerSettingsStore: ObservableObject {
         didSet { UserDefaults.standard.set(playerTwoFingerTapPlayPauseEnabled, forKey: "playerTwoFingerTapPlayPauseEnabled") }
     }
 
+    @Published var vlcDoubleTapSeekEnabled: Bool {
+        didSet { UserDefaults.standard.set(vlcDoubleTapSeekEnabled, forKey: "vlcDoubleTapSeekEnabled") }
+    }
+
+    @Published var vlcDoubleTapSeekSeconds: Double {
+        didSet { UserDefaults.standard.set(vlcDoubleTapSeekSeconds, forKey: "vlcDoubleTapSeekSeconds") }
+    }
+
     @Published var vlcPiPEnabled: Bool {
         didSet { UserDefaults.standard.set(vlcPiPEnabled, forKey: "vlcPiPEnabled") }
     }
@@ -120,6 +143,9 @@ final class PlayerSettingsStore: ObservableObject {
     }
 
     init() {
+        let savedDefaultSpeed = UserDefaults.standard.double(forKey: "defaultPlaybackSpeed")
+        self.defaultPlaybackSpeed = savedDefaultSpeed > 0 ? savedDefaultSpeed : 1.0
+
         let savedSpeed = UserDefaults.standard.double(forKey: "holdSpeedPlayer")
         self.holdSpeed = savedSpeed > 0 ? savedSpeed : 2.0
         
@@ -173,6 +199,16 @@ final class PlayerSettingsStore: ObservableObject {
             self.playerTwoFingerTapPlayPauseEnabled = UserDefaults.standard.bool(forKey: "playerTwoFingerTapPlayPauseEnabled")
         }
 
+        if UserDefaults.standard.object(forKey: "vlcDoubleTapSeekEnabled") == nil {
+            UserDefaults.standard.set(true, forKey: "vlcDoubleTapSeekEnabled")
+            self.vlcDoubleTapSeekEnabled = true
+        } else {
+            self.vlcDoubleTapSeekEnabled = UserDefaults.standard.bool(forKey: "vlcDoubleTapSeekEnabled")
+        }
+
+        let savedDoubleTapSeconds = UserDefaults.standard.double(forKey: "vlcDoubleTapSeekSeconds")
+        self.vlcDoubleTapSeekSeconds = savedDoubleTapSeconds > 0 ? savedDoubleTapSeconds : 10.0
+
         if UserDefaults.standard.object(forKey: "vlcPiPEnabled") == nil {
             UserDefaults.standard.set(true, forKey: "vlcPiPEnabled")
             self.vlcPiPEnabled = true
@@ -200,10 +236,34 @@ struct PlayerSettingsView: View {
     @State private var subtitleStrokeWidth: Double = 1.0
     @State private var subtitleFontSizePresetName: String = "Medium"
     @State private var subtitleVerticalOffset: Double = -6.0
+    private let playbackSpeedOptions: [Double] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
+    private let doubleTapSeekOptions: [Double] = [5, 10, 15, 20, 30, 45, 60]
     
     var body: some View {
         List {
             Section(header: Text("Default Player"), footer: Text("This settings work exclusively with the Default media player.")) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Default Playback Speed")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+
+                        Text("Speed used when a video starts.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.leading)
+                    }
+
+                    Spacer()
+
+                    Picker("", selection: $store.defaultPlaybackSpeed) {
+                        ForEach(playbackSpeedOptions, id: \.self) { speed in
+                            Text(formatSpeed(speed)).tag(speed)
+                        }
+                    }
+                    .pickerStyle(.menu)
+                }
+
 #if !os(tvOS)
                 HStack {
                     VStack(alignment: .leading, spacing: 2) {
@@ -279,7 +339,7 @@ struct PlayerSettingsView: View {
                     
                     Picker("", selection: $store.inAppPlayer) {
                         ForEach(InAppPlayer.allCases) { p in
-                            Text(p.rawValue).tag(p)
+                            Text(p.displayName).tag(p)
                         }
                     }
                     .pickerStyle(.menu)
@@ -510,6 +570,41 @@ struct PlayerSettingsView: View {
                             detail: "Toggle play and pause with a two-finger tap.",
                             binding: $store.playerTwoFingerTapPlayPauseEnabled
                         )
+
+                        settingsToggleRow(
+                            title: "Double-Tap Seek",
+                            detail: "Double-tap the left or right side of the video to seek.",
+                            binding: $store.vlcDoubleTapSeekEnabled
+                        )
+
+                        if store.vlcDoubleTapSeekEnabled {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Double-Tap Seek Amount")
+                                        .font(.subheadline)
+                                        .fontWeight(.medium)
+
+                                    Text("Seek \(Int(store.vlcDoubleTapSeekSeconds)) seconds backward or forward.")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .multilineTextAlignment(.leading)
+                                }
+
+                                Spacer()
+
+#if os(tvOS)
+                                Picker("", selection: $store.vlcDoubleTapSeekSeconds) {
+                                    ForEach(doubleTapSeekOptions, id: \.self) { seconds in
+                                        Text("\(Int(seconds))s").tag(seconds)
+                                    }
+                                }
+                                .pickerStyle(.menu)
+#else
+                                Stepper("", value: $store.vlcDoubleTapSeekSeconds, in: 5...60, step: 5)
+                                    .frame(width: 100)
+#endif
+                            }
+                        }
                     } label: {
                         Label("Playback Gestures", systemImage: "hand.draw")
                     }
@@ -541,150 +636,82 @@ struct PlayerSettingsView: View {
                     } label: {
                         Label("OpenSubtitles", systemImage: "globe")
                     }
-                }
 
-                Section(header: Text("Skip Segments")) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("AniSkip")
-                                .font(.subheadline)
-                                .fontWeight(.medium)
+                    DisclosureGroup {
+                        settingsToggleRow(
+                            title: "AniSkip",
+                            detail: "Fetch skip segments from AniSkip for anime content.",
+                            binding: $store.aniSkipEnabled
+                        )
 
-                            Text("Fetch skip segments from AniSkip for anime content.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.leading)
-                        }
+                        settingsToggleRow(
+                            title: "TheIntroDB",
+                            detail: "Fetch skip segments from TheIntroDB for all content.",
+                            binding: $store.introDBEnabled
+                        )
 
-                        Spacer()
+                        settingsToggleRow(
+                            title: "Auto Skip",
+                            detail: "Automatically skip intros, outros, recaps, and previews when detected. A skip button is always shown regardless of this setting.",
+                            binding: $store.aniSkipAutoSkip
+                        )
 
-                        Toggle("", isOn: $store.aniSkipEnabled)
-                            .tint(accentColorManager.currentAccentColor)
+                        settingsToggleRow(
+                            title: "Skip 85s Fallback",
+                            detail: "Show a skip 85 seconds button when no skip data is returned for the current episode.",
+                            binding: $store.skip85sEnabled
+                        )
+
+                        settingsToggleRow(
+                            title: "Always Show Skip 85s",
+                            detail: "Keep the Skip 85s button visible even when skip segments are available.",
+                            binding: $store.skip85sAlwaysVisible
+                        )
+                    } label: {
+                        Label("Skip Segments", systemImage: "forward.fill")
                     }
 
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("TheIntroDB")
-                                .font(.subheadline)
-                                .fontWeight(.medium)
+                    DisclosureGroup {
+                        settingsToggleRow(
+                            title: "Show Next Episode Button",
+                            detail: "Display a button near the end of an episode to quickly open stream search for the next episode.",
+                            binding: $store.showNextEpisodeButton
+                        )
 
-                            Text("Fetch skip segments from TheIntroDB for all content.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.leading)
-                        }
+                        if store.showNextEpisodeButton {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Appearance Threshold")
+                                        .font(.subheadline)
+                                        .fontWeight(.medium)
 
-                        Spacer()
+                                    Text("How far into the episode (%) before the button appears. Default is 90%.")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                        .multilineTextAlignment(.leading)
+                                }
 
-                        Toggle("", isOn: $store.introDBEnabled)
-                            .tint(accentColorManager.currentAccentColor)
-                    }
+                                Spacer()
 
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Auto Skip")
-                                .font(.subheadline)
-                                .fontWeight(.medium)
-
-                            Text("Automatically skip intros, outros, recaps, and previews when detected. A skip button is always shown regardless of this setting.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.leading)
-                        }
-
-                        Spacer()
-
-                        Toggle("", isOn: $store.aniSkipAutoSkip)
-                            .tint(accentColorManager.currentAccentColor)
-                    }
-
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Skip 85s Fallback")
-                                .font(.subheadline)
-                                .fontWeight(.medium)
-
-                            Text("Show a skip 85 seconds button when no skip data is returned for the current episode.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.leading)
-                        }
-
-                        Spacer()
-
-                        Toggle("", isOn: $store.skip85sEnabled)
-                            .tint(accentColorManager.currentAccentColor)
-                    }
-
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Always Show Skip 85s")
-                                .font(.subheadline)
-                                .fontWeight(.medium)
-
-                            Text("Keep the Skip 85s button visible even when skip segments are available.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.leading)
-                        }
-
-                        Spacer()
-
-                        Toggle("", isOn: $store.skip85sAlwaysVisible)
-                            .tint(accentColorManager.currentAccentColor)
-                    }
-                }
-
-                Section(header: Text("Next Episode")) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Show Next Episode Button")
-                                .font(.subheadline)
-                                .fontWeight(.medium)
-
-                            Text("Display a button near the end of an episode to quickly open stream search for the next episode.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.leading)
-                        }
-
-                        Spacer()
-
-                        Toggle("", isOn: $store.showNextEpisodeButton)
-                            .tint(accentColorManager.currentAccentColor)
-                    }
-
-                    if store.showNextEpisodeButton {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Appearance Threshold")
-                                    .font(.subheadline)
-                                    .fontWeight(.medium)
-
-                                Text("How far into the episode (%) before the button appears. Default is 90%.")
-                                    .font(.caption)
+                                Text("\(Int(store.nextEpisodeThreshold * 100))%")
                                     .foregroundColor(.secondary)
-                                    .multilineTextAlignment(.leading)
-                            }
-
-                            Spacer()
-
-                            Text("\(Int(store.nextEpisodeThreshold * 100))%")
-                                .foregroundColor(.secondary)
-                                .font(.subheadline)
+                                    .font(.subheadline)
 
 #if os(tvOS)
-                            Picker("", selection: $store.nextEpisodeThreshold) {
-                                ForEach(Array(stride(from: 0.50, through: 0.99, by: 0.05)), id: \.self) { value in
-                                    Text("\(Int(value * 100))%").tag(value)
+                                Picker("", selection: $store.nextEpisodeThreshold) {
+                                    ForEach(Array(stride(from: 0.50, through: 0.99, by: 0.05)), id: \.self) { value in
+                                        Text("\(Int(value * 100))%").tag(value)
+                                    }
                                 }
-                            }
-                            .pickerStyle(.menu)
+                                .pickerStyle(.menu)
 #else
-                            Stepper("", value: $store.nextEpisodeThreshold, in: 0.50...0.99, step: 0.05)
-                                .frame(width: 100)
+                                Stepper("", value: $store.nextEpisodeThreshold, in: 0.50...0.99, step: 0.05)
+                                    .frame(width: 100)
 #endif
+                            }
                         }
+                    } label: {
+                        Label("Next Episode", systemImage: "forward.end.fill")
                     }
                 }
             }
@@ -719,6 +746,14 @@ struct PlayerSettingsView: View {
             "rus": "Russian"
         ]
         return languages[code] ?? code.uppercased()
+    }
+
+    private func formatSpeed(_ speed: Double) -> String {
+        let oneDecimal = (speed * 10).rounded() / 10
+        if abs(speed - oneDecimal) < 0.001 {
+            return String(format: "%.1fx", speed)
+        }
+        return String(format: "%.2fx", speed)
     }
 
     private func settingsToggleRow(title: String, detail: String, binding: Binding<Bool>) -> some View {

@@ -66,6 +66,32 @@ class Settings: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: "playerTwoFingerTapPlayPauseEnabled") }
     }
 
+    var defaultPlaybackSpeed: Double {
+        get {
+            let savedSpeed = UserDefaults.standard.double(forKey: "defaultPlaybackSpeed")
+            return savedSpeed > 0 ? savedSpeed : 1.0
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "defaultPlaybackSpeed") }
+    }
+
+    var vlcDoubleTapSeekEnabled: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: "vlcDoubleTapSeekEnabled") == nil {
+                UserDefaults.standard.set(true, forKey: "vlcDoubleTapSeekEnabled")
+            }
+            return UserDefaults.standard.bool(forKey: "vlcDoubleTapSeekEnabled")
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "vlcDoubleTapSeekEnabled") }
+    }
+
+    var vlcDoubleTapSeekSeconds: Double {
+        get {
+            let savedSeconds = UserDefaults.standard.double(forKey: "vlcDoubleTapSeekSeconds")
+            return savedSeconds > 0 ? savedSeconds : 10.0
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "vlcDoubleTapSeekSeconds") }
+    }
+
     var vlcPiPEnabled: Bool {
         get {
             if UserDefaults.standard.object(forKey: "vlcPiPEnabled") == nil {

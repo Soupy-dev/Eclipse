@@ -371,7 +371,7 @@ struct DownloadedShowDetailView: View {
                let rootVC = windowScene.windows.first?.rootViewController,
                let topmostVC = rootVC.topmostViewController() as UIViewController? {
                 topmostVC.present(playerVC, animated: true) {
-                    playerVC.player?.play()
+                    playerVC.playAtDefaultSpeed()
                 }
             }
         }

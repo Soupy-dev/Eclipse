@@ -28,6 +28,7 @@ struct BackupData: Codable {
     var showLocalScheduleTime: Bool
 
     // Player Settings
+    var defaultPlaybackSpeed: Double = 1.0
     var holdSpeedPlayer: Double = 2.0
     var externalPlayer: String = "none"
     var alwaysLandscape: Bool = false
@@ -39,6 +40,8 @@ struct BackupData: Codable {
     var vlcBrightnessGestureEnabled: Bool = false
     var vlcVolumeGestureEnabled: Bool = false
     var playerTwoFingerTapPlayPauseEnabled: Bool = true
+    var vlcDoubleTapSeekEnabled: Bool = true
+    var vlcDoubleTapSeekSeconds: Double = 10.0
     var vlcPiPEnabled: Bool = true
     var vlcOpenSubtitlesEnabled: Bool = false
     var vlcOpenSubtitlesAutoFallbackEnabled: Bool = true
@@ -111,8 +114,8 @@ struct BackupData: Codable {
     enum CodingKeys: String, CodingKey {
         case version, createdDate
         case accentColor, tmdbLanguage, selectedAppearance, enableSubtitlesByDefault, defaultSubtitleLanguage, enableVLCSubtitleEditMenu, preferredAnimeAudioLanguage, inAppPlayer, playerChoice, showScheduleTab, showLocalScheduleTime
-        case holdSpeedPlayer, externalPlayer, alwaysLandscape, aniSkipAutoSkip, skip85sEnabled, showNextEpisodeButton, nextEpisodeThreshold, vlcHeaderProxyEnabled
-        case vlcBrightnessGestureEnabled, vlcVolumeGestureEnabled, playerTwoFingerTapPlayPauseEnabled, vlcPiPEnabled, vlcOpenSubtitlesEnabled, vlcOpenSubtitlesAutoFallbackEnabled
+        case defaultPlaybackSpeed, holdSpeedPlayer, externalPlayer, alwaysLandscape, aniSkipAutoSkip, skip85sEnabled, showNextEpisodeButton, nextEpisodeThreshold, vlcHeaderProxyEnabled
+        case vlcBrightnessGestureEnabled, vlcVolumeGestureEnabled, playerTwoFingerTapPlayPauseEnabled, vlcDoubleTapSeekEnabled, vlcDoubleTapSeekSeconds, vlcPiPEnabled, vlcOpenSubtitlesEnabled, vlcOpenSubtitlesAutoFallbackEnabled
         case subtitleForegroundColor, subtitleStrokeColor, subtitleStrokeWidth, subtitleFontSize, subtitleVerticalOffset
         case showKanzen, kanzenAutoMode, kanzenAutoUpdateModules, seasonMenu, horizontalEpisodeList, useClassicScheduleUI, mediaColumnsPortrait, mediaColumnsLandscape
         case readingMode
@@ -145,6 +148,7 @@ struct BackupData: Codable {
         showLocalScheduleTime = try container.decodeIfPresent(Bool.self, forKey: .showLocalScheduleTime) ?? true
 
         // Player settings
+        defaultPlaybackSpeed = try container.decodeIfPresent(Double.self, forKey: .defaultPlaybackSpeed) ?? 1.0
         holdSpeedPlayer = try container.decodeIfPresent(Double.self, forKey: .holdSpeedPlayer) ?? 2.0
         externalPlayer = try container.decodeIfPresent(String.self, forKey: .externalPlayer) ?? "none"
         alwaysLandscape = try container.decodeIfPresent(Bool.self, forKey: .alwaysLandscape) ?? false
@@ -156,6 +160,8 @@ struct BackupData: Codable {
         vlcBrightnessGestureEnabled = try container.decodeIfPresent(Bool.self, forKey: .vlcBrightnessGestureEnabled) ?? false
         vlcVolumeGestureEnabled = try container.decodeIfPresent(Bool.self, forKey: .vlcVolumeGestureEnabled) ?? false
         playerTwoFingerTapPlayPauseEnabled = try container.decodeIfPresent(Bool.self, forKey: .playerTwoFingerTapPlayPauseEnabled) ?? true
+        vlcDoubleTapSeekEnabled = try container.decodeIfPresent(Bool.self, forKey: .vlcDoubleTapSeekEnabled) ?? true
+        vlcDoubleTapSeekSeconds = try container.decodeIfPresent(Double.self, forKey: .vlcDoubleTapSeekSeconds) ?? 10.0
         vlcPiPEnabled = try container.decodeIfPresent(Bool.self, forKey: .vlcPiPEnabled) ?? true
         vlcOpenSubtitlesEnabled = try container.decodeIfPresent(Bool.self, forKey: .vlcOpenSubtitlesEnabled) ?? false
         vlcOpenSubtitlesAutoFallbackEnabled = try container.decodeIfPresent(Bool.self, forKey: .vlcOpenSubtitlesAutoFallbackEnabled) ?? true
@@ -226,6 +232,7 @@ struct BackupData: Codable {
         try container.encode(showLocalScheduleTime, forKey: .showLocalScheduleTime)
 
         // Player settings
+        try container.encode(defaultPlaybackSpeed, forKey: .defaultPlaybackSpeed)
         try container.encode(holdSpeedPlayer, forKey: .holdSpeedPlayer)
         try container.encode(externalPlayer, forKey: .externalPlayer)
         try container.encode(alwaysLandscape, forKey: .alwaysLandscape)
@@ -237,6 +244,8 @@ struct BackupData: Codable {
         try container.encode(vlcBrightnessGestureEnabled, forKey: .vlcBrightnessGestureEnabled)
         try container.encode(vlcVolumeGestureEnabled, forKey: .vlcVolumeGestureEnabled)
         try container.encode(playerTwoFingerTapPlayPauseEnabled, forKey: .playerTwoFingerTapPlayPauseEnabled)
+        try container.encode(vlcDoubleTapSeekEnabled, forKey: .vlcDoubleTapSeekEnabled)
+        try container.encode(vlcDoubleTapSeekSeconds, forKey: .vlcDoubleTapSeekSeconds)
         try container.encode(vlcPiPEnabled, forKey: .vlcPiPEnabled)
         try container.encode(vlcOpenSubtitlesEnabled, forKey: .vlcOpenSubtitlesEnabled)
         try container.encode(vlcOpenSubtitlesAutoFallbackEnabled, forKey: .vlcOpenSubtitlesAutoFallbackEnabled)
@@ -306,6 +315,7 @@ struct BackupData: Codable {
         showLocalScheduleTime: Bool,
 
         // Player settings
+        defaultPlaybackSpeed: Double = 1.0,
         holdSpeedPlayer: Double = 2.0,
         externalPlayer: String = "none",
         alwaysLandscape: Bool = false,
@@ -317,6 +327,8 @@ struct BackupData: Codable {
         vlcBrightnessGestureEnabled: Bool = false,
         vlcVolumeGestureEnabled: Bool = false,
         playerTwoFingerTapPlayPauseEnabled: Bool = true,
+        vlcDoubleTapSeekEnabled: Bool = true,
+        vlcDoubleTapSeekSeconds: Double = 10.0,
         vlcPiPEnabled: Bool = true,
         vlcOpenSubtitlesEnabled: Bool = false,
         vlcOpenSubtitlesAutoFallbackEnabled: Bool = true,
@@ -383,6 +395,7 @@ struct BackupData: Codable {
         self.showScheduleTab = showScheduleTab
         self.showLocalScheduleTime = showLocalScheduleTime
 
+        self.defaultPlaybackSpeed = defaultPlaybackSpeed
         self.holdSpeedPlayer = holdSpeedPlayer
         self.externalPlayer = externalPlayer
         self.alwaysLandscape = alwaysLandscape
@@ -394,6 +407,8 @@ struct BackupData: Codable {
         self.vlcBrightnessGestureEnabled = vlcBrightnessGestureEnabled
         self.vlcVolumeGestureEnabled = vlcVolumeGestureEnabled
         self.playerTwoFingerTapPlayPauseEnabled = playerTwoFingerTapPlayPauseEnabled
+        self.vlcDoubleTapSeekEnabled = vlcDoubleTapSeekEnabled
+        self.vlcDoubleTapSeekSeconds = vlcDoubleTapSeekSeconds
         self.vlcPiPEnabled = vlcPiPEnabled
         self.vlcOpenSubtitlesEnabled = vlcOpenSubtitlesEnabled
         self.vlcOpenSubtitlesAutoFallbackEnabled = vlcOpenSubtitlesAutoFallbackEnabled
@@ -579,6 +594,8 @@ class BackupManager {
         let showLocalScheduleTime = userDefaults.bool(forKey: "showLocalScheduleTime")
         
         // Player settings
+        let savedDefaultPlaybackSpeed = userDefaults.double(forKey: "defaultPlaybackSpeed")
+        let defaultPlaybackSpeed = savedDefaultPlaybackSpeed > 0 ? savedDefaultPlaybackSpeed : 1.0
         let savedHoldSpeed = userDefaults.double(forKey: "holdSpeedPlayer")
         let holdSpeedPlayer = savedHoldSpeed > 0 ? savedHoldSpeed : 2.0
         let externalPlayer = userDefaults.string(forKey: "externalPlayer") ?? "none"
@@ -597,6 +614,9 @@ class BackupManager {
         } else {
             playerTwoFingerTapPlayPauseEnabled = userDefaults.bool(forKey: "playerTwoFingerTapPlayPauseEnabled")
         }
+        let vlcDoubleTapSeekEnabled = userDefaults.object(forKey: "vlcDoubleTapSeekEnabled") == nil ? true : userDefaults.bool(forKey: "vlcDoubleTapSeekEnabled")
+        let savedDoubleTapSeekSeconds = userDefaults.double(forKey: "vlcDoubleTapSeekSeconds")
+        let vlcDoubleTapSeekSeconds = savedDoubleTapSeekSeconds > 0 ? savedDoubleTapSeekSeconds : 10.0
         let vlcPiPEnabled = userDefaults.object(forKey: "vlcPiPEnabled") == nil ? true : userDefaults.bool(forKey: "vlcPiPEnabled")
         let vlcOpenSubtitlesEnabled = userDefaults.bool(forKey: "vlcOpenSubtitlesEnabled")
         let vlcOpenSubtitlesAutoFallbackEnabled = userDefaults.object(forKey: "vlcOpenSubtitlesAutoFallbackEnabled") == nil ? true : userDefaults.bool(forKey: "vlcOpenSubtitlesAutoFallbackEnabled")
@@ -738,6 +758,7 @@ class BackupManager {
             showScheduleTab: showScheduleTab,
             showLocalScheduleTime: showLocalScheduleTime,
 
+            defaultPlaybackSpeed: defaultPlaybackSpeed,
             holdSpeedPlayer: holdSpeedPlayer,
             externalPlayer: externalPlayer,
             alwaysLandscape: alwaysLandscape,
@@ -749,6 +770,8 @@ class BackupManager {
             vlcBrightnessGestureEnabled: vlcBrightnessGestureEnabled,
             vlcVolumeGestureEnabled: vlcVolumeGestureEnabled,
             playerTwoFingerTapPlayPauseEnabled: playerTwoFingerTapPlayPauseEnabled,
+            vlcDoubleTapSeekEnabled: vlcDoubleTapSeekEnabled,
+            vlcDoubleTapSeekSeconds: vlcDoubleTapSeekSeconds,
             vlcPiPEnabled: vlcPiPEnabled,
             vlcOpenSubtitlesEnabled: vlcOpenSubtitlesEnabled,
             vlcOpenSubtitlesAutoFallbackEnabled: vlcOpenSubtitlesAutoFallbackEnabled,
@@ -865,6 +888,7 @@ class BackupManager {
         let showLocalScheduleTime = json["showLocalScheduleTime"] as? Bool ?? true
 
         // Player settings
+        let defaultPlaybackSpeed = json["defaultPlaybackSpeed"] as? Double ?? 1.0
         let holdSpeedPlayer = json["holdSpeedPlayer"] as? Double ?? 2.0
         let externalPlayer = json["externalPlayer"] as? String ?? "none"
         let alwaysLandscape = json["alwaysLandscape"] as? Bool ?? false
@@ -876,6 +900,8 @@ class BackupManager {
         let vlcBrightnessGestureEnabled = json["vlcBrightnessGestureEnabled"] as? Bool ?? false
         let vlcVolumeGestureEnabled = json["vlcVolumeGestureEnabled"] as? Bool ?? false
         let playerTwoFingerTapPlayPauseEnabled = json["playerTwoFingerTapPlayPauseEnabled"] as? Bool ?? true
+        let vlcDoubleTapSeekEnabled = json["vlcDoubleTapSeekEnabled"] as? Bool ?? true
+        let vlcDoubleTapSeekSeconds = json["vlcDoubleTapSeekSeconds"] as? Double ?? 10.0
         let vlcPiPEnabled = json["vlcPiPEnabled"] as? Bool ?? true
         let vlcOpenSubtitlesEnabled = json["vlcOpenSubtitlesEnabled"] as? Bool ?? false
         let vlcOpenSubtitlesAutoFallbackEnabled = json["vlcOpenSubtitlesAutoFallbackEnabled"] as? Bool ?? true
@@ -1059,6 +1085,7 @@ class BackupManager {
             inAppPlayer: inAppPlayer,
             showScheduleTab: showScheduleTab,
             showLocalScheduleTime: showLocalScheduleTime,
+            defaultPlaybackSpeed: defaultPlaybackSpeed,
             holdSpeedPlayer: holdSpeedPlayer,
             externalPlayer: externalPlayer,
             alwaysLandscape: alwaysLandscape,
@@ -1070,6 +1097,8 @@ class BackupManager {
             vlcBrightnessGestureEnabled: vlcBrightnessGestureEnabled,
             vlcVolumeGestureEnabled: vlcVolumeGestureEnabled,
             playerTwoFingerTapPlayPauseEnabled: playerTwoFingerTapPlayPauseEnabled,
+            vlcDoubleTapSeekEnabled: vlcDoubleTapSeekEnabled,
+            vlcDoubleTapSeekSeconds: vlcDoubleTapSeekSeconds,
             vlcPiPEnabled: vlcPiPEnabled,
             vlcOpenSubtitlesEnabled: vlcOpenSubtitlesEnabled,
             vlcOpenSubtitlesAutoFallbackEnabled: vlcOpenSubtitlesAutoFallbackEnabled,
@@ -1140,6 +1169,7 @@ class BackupManager {
         userDefaults.set(backup.showLocalScheduleTime, forKey: "showLocalScheduleTime")
 
         // Player settings
+        userDefaults.set(backup.defaultPlaybackSpeed, forKey: "defaultPlaybackSpeed")
         userDefaults.set(backup.holdSpeedPlayer, forKey: "holdSpeedPlayer")
         userDefaults.set(backup.externalPlayer, forKey: "externalPlayer")
         userDefaults.set(backup.alwaysLandscape, forKey: "alwaysLandscape")
@@ -1152,6 +1182,8 @@ class BackupManager {
         userDefaults.set(backup.vlcBrightnessGestureEnabled, forKey: "vlcBrightnessGestureEnabled")
         userDefaults.set(backup.vlcVolumeGestureEnabled, forKey: "vlcVolumeGestureEnabled")
         userDefaults.set(backup.playerTwoFingerTapPlayPauseEnabled, forKey: "playerTwoFingerTapPlayPauseEnabled")
+        userDefaults.set(backup.vlcDoubleTapSeekEnabled, forKey: "vlcDoubleTapSeekEnabled")
+        userDefaults.set(backup.vlcDoubleTapSeekSeconds, forKey: "vlcDoubleTapSeekSeconds")
         userDefaults.set(backup.vlcPiPEnabled, forKey: "vlcPiPEnabled")
         userDefaults.set(backup.vlcOpenSubtitlesEnabled, forKey: "vlcOpenSubtitlesEnabled")
         userDefaults.set(backup.vlcOpenSubtitlesAutoFallbackEnabled, forKey: "vlcOpenSubtitlesAutoFallbackEnabled")

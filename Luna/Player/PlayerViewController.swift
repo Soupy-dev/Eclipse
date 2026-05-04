@@ -15,6 +15,29 @@ import AVKit
 import MediaPlayer
 #endif
 
+enum PlaybackSourceKind: String {
+    case service
+    case stremio
+}
+
+struct PlaybackLaunchContext {
+    let sourceId: String
+    let sourceName: String
+    let sourceKind: PlaybackSourceKind
+    let autoMode: Bool
+    let streamURL: String
+    let headers: [String: String]
+    let subtitles: [String]
+    let subtitleNames: [String]?
+    let retryCount: Int
+}
+
+struct PlaybackFailureReport {
+    let context: PlaybackLaunchContext
+    let message: String
+    let isSourceFailure: Bool
+}
+
 final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate {
     private let playerLogId = UUID().uuidString.prefix(8)
     private let trackerManager = TrackerManager.shared
@@ -387,6 +410,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var brightnessLevel: Float = 1.0
     private let twoFingerSettingKey = "playerTwoFingerTapPlayPauseEnabled"
     private let legacyTwoFingerSettingKey = "mpvTwoFingerTapEnabled"
+    private let doubleTapSeekEnabledKey = "vlcDoubleTapSeekEnabled"
+    private let doubleTapSeekSecondsKey = "vlcDoubleTapSeekSeconds"
     private let brightnessLevelKey = "mpvBrightnessLevel"
     
     private lazy var renderer: Any = {
@@ -517,6 +542,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var initialHeaders: [String: String]?
     private var initialSubtitles: [String]?
     private var initialSubtitleNames: [String]?
+    var playbackLaunchContext: PlaybackLaunchContext?
+    var onPlaybackStartupFailure: ((PlaybackFailureReport) -> Void)?
+    private var playbackStartupWorkItem: DispatchWorkItem?
+    private var playbackDidStart = false
+    private var playbackFailureHandled = false
+    private var playbackSlowProbeCount = 0
     private var userSelectedAudioTrack = false
     private var userSelectedSubtitleTrack = false
     private var vlcProxyFallbackTried = false
@@ -930,6 +961,22 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
         return UserDefaults.standard.bool(forKey: twoFingerSettingKey)
     }
+    private var isDoubleTapSeekEnabled: Bool {
+        if UserDefaults.standard.object(forKey: doubleTapSeekEnabledKey) == nil {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: doubleTapSeekEnabledKey)
+    }
+    private var doubleTapSeekSeconds: Double {
+        let savedSeconds = UserDefaults.standard.double(forKey: doubleTapSeekSecondsKey)
+        let seconds = savedSeconds > 0 ? savedSeconds : 10.0
+        return min(max(seconds, 5.0), 60.0)
+    }
+    private var defaultPlaybackSpeed: Double {
+        let savedSpeed = UserDefaults.standard.double(forKey: "defaultPlaybackSpeed")
+        let speed = savedSpeed > 0 ? savedSpeed : 1.0
+        return min(max(speed, 0.25), 3.0)
+    }
     private var isBrightnessControlEnabled: Bool {
         return isVLCPlayer && UserDefaults.standard.bool(forKey: "vlcBrightnessGestureEnabled")
     }
@@ -943,6 +990,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var controlsHideWorkItem: DispatchWorkItem?
     private var controlsVisible: Bool = true
     private var pendingSeekTime: Double?
+    private var defaultPlaybackSpeedApplied = false
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -1060,6 +1108,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         isClosing = true
         audioMenuDebounceTimer?.invalidate()
         subtitleMenuDebounceTimer?.invalidate()
+        playbackStartupWorkItem?.cancel()
         if let mpv = mpvRenderer {
             mpv.delegate = nil
         } else if let vlc = vlcRenderer {
@@ -1106,6 +1155,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         openSubtitlesFallbackAttempted = false
         openSubtitlesLoadedURLs.removeAll()
         vlcExternalSubtitlePriorityDeadline = nil
+        defaultPlaybackSpeedApplied = false
         updatePiPButtonVisibility()
         updatePlayerTitle()
         let mediaInfoLabel: String = {
@@ -1130,7 +1180,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         
         userSelectedAudioTrack = false
         userSelectedSubtitleTrack = false
+        if url.host != "127.0.0.1" {
+            vlcProxyFallbackTried = false
+        }
+        preparePlaybackStartupMonitoring(for: url, headers: headers ?? [:])
         rendererLoad(url: url, preset: preset, headers: headers)
+        applyDefaultPlaybackSpeed()
         if let info = mediaInfo {
             prepareSeekToLastPosition(for: info)
         }
@@ -1139,6 +1194,145 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             loadSubtitles(subs, names: initialSubtitleNames)
         }
         prefetchOpenSubtitlesIfEnabled(reason: "load")
+    }
+
+    private func preparePlaybackStartupMonitoring(for url: URL, headers: [String: String]) {
+        playbackStartupWorkItem?.cancel()
+        playbackDidStart = false
+        playbackFailureHandled = false
+        playbackSlowProbeCount = 0
+
+        guard playbackLaunchContext != nil,
+              !url.isFileURL else {
+            return
+        }
+
+        schedulePlaybackStartupCheck(url: url, headers: headers, delay: 35)
+    }
+
+    private func schedulePlaybackStartupCheck(url: URL, headers: [String: String], delay: TimeInterval) {
+        playbackStartupWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  !self.playbackDidStart,
+                  !self.playbackFailureHandled,
+                  !self.isClosing else {
+                return
+            }
+            self.runPlaybackStartupProbe(url: url, headers: headers)
+        }
+        playbackStartupWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func markPlaybackStarted(reason: String) {
+        guard !playbackDidStart else { return }
+        playbackDidStart = true
+        playbackStartupWorkItem?.cancel()
+        if let context = playbackLaunchContext {
+            SourceHealthStore.shared.recordPlaybackSuccess(sourceId: context.sourceId, sourceName: context.sourceName)
+            Logger.shared.log("[PlayerVC.PlaybackStart] \(context.sourceName) started via \(reason)", type: "Stream")
+        }
+    }
+
+    private func runPlaybackStartupProbe(url: URL, headers: [String: String]) {
+        Task { [weak self] in
+            let result = await SourceHealthMonitor.shared.probeStream(url: url, headers: headers)
+            await MainActor.run {
+                guard let self,
+                      !self.playbackDidStart,
+                      !self.playbackFailureHandled,
+                      !self.isClosing else {
+                    return
+                }
+
+                switch result {
+                case .reachable:
+                    self.playbackSlowProbeCount += 1
+                    self.showErrorBanner("Stream is reachable but still starting. Waiting a little longer...")
+                    self.schedulePlaybackStartupCheck(url: url, headers: headers, delay: 20)
+                case .slowOrIndeterminate(let reason):
+                    self.playbackSlowProbeCount += 1
+                    if self.playbackSlowProbeCount >= 3 {
+                        self.handlePlaybackStartupFailure("Playback is taking too long: \(reason)", isSourceFailure: false)
+                    } else {
+                        self.showErrorBanner("Connection looks slow. Still waiting for playback...")
+                        self.schedulePlaybackStartupCheck(url: url, headers: headers, delay: 20)
+                    }
+                case .networkUnavailable:
+                    self.handlePlaybackStartupFailure("No internet connection is available.", isSourceFailure: false)
+                case .sourceFailed(let reason):
+                    self.handlePlaybackStartupFailure(reason, isSourceFailure: true)
+                }
+            }
+        }
+    }
+
+    private func handlePlaybackStartupFailure(_ message: String, isSourceFailure: Bool) {
+        guard !playbackDidStart, !playbackFailureHandled, let context = playbackLaunchContext else { return }
+        playbackFailureHandled = true
+        playbackStartupWorkItem?.cancel()
+
+        SourceHealthStore.shared.recordPlaybackFailure(
+            sourceId: context.sourceId,
+            sourceName: context.sourceName,
+            reason: message,
+            isSourceFailure: isSourceFailure
+        )
+
+        let report = PlaybackFailureReport(context: context, message: message, isSourceFailure: isSourceFailure)
+        if context.autoMode {
+            showErrorBanner("\(context.sourceName) failed. Retrying another stream...")
+            dismissAfterPlaybackFailure(report)
+        } else {
+            showManualPlaybackFailureAlert(report)
+        }
+    }
+
+    private func showManualPlaybackFailureAlert(_ report: PlaybackFailureReport) {
+        let alert = UIAlertController(
+            title: "Playback Failed",
+            message: "\(report.context.sourceName) could not start playback. \(report.message)",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "Retry", style: .default) { [weak self] _ in
+            self?.retryPlaybackAfterFailure()
+        })
+        alert.addAction(UIAlertAction(title: "Close", style: .cancel) { [weak self] _ in
+            self?.closeTapped()
+        })
+        present(alert, animated: true)
+    }
+
+    private func retryPlaybackAfterFailure() {
+        guard let context = playbackLaunchContext,
+              let preset = initialPreset,
+              let url = URL(string: context.streamURL) else {
+            rendererReloadCurrentItem()
+            return
+        }
+
+        playbackDidStart = false
+        playbackFailureHandled = false
+        playbackSlowProbeCount = 0
+        vlcProxyFallbackTried = false
+        initialSubtitles = context.subtitles.isEmpty ? nil : context.subtitles
+        initialSubtitleNames = context.subtitleNames
+        load(url: url, preset: preset, headers: context.headers)
+    }
+
+    private func dismissAfterPlaybackFailure(_ report: PlaybackFailureReport) {
+        let finish: () -> Void = { [weak self] in
+            guard let self else { return }
+            self.rendererStop()
+            self.onPlaybackStartupFailure?(report)
+        }
+
+        if presentingViewController != nil {
+            dismiss(animated: true, completion: finish)
+        } else {
+            finish()
+        }
     }
     
     private func prepareSeekToLastPosition(for mediaInfo: MediaInfo) {
@@ -1486,18 +1680,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     @objc private func leftSideDoubleTapped(_ gesture: UITapGestureRecognizer) {
+        guard isDoubleTapSeekEnabled else { return }
         let location = gesture.location(in: videoContainer)
         let isLeftSide = location.x < videoContainer.bounds.width / 2
         guard isLeftSide else { return }
-        rendererSeek(by: -10)
+        rendererSeek(by: -doubleTapSeekSeconds)
         animateButtonTap(skipBackwardButton)
     }
 
     @objc private func rightSideDoubleTapped(_ gesture: UITapGestureRecognizer) {
+        guard isDoubleTapSeekEnabled else { return }
         let location = gesture.location(in: videoContainer)
         let isRightSide = location.x >= videoContainer.bounds.width / 2
         guard isRightSide else { return }
-        rendererSeek(by: 10)
+        rendererSeek(by: doubleTapSeekSeconds)
         animateButtonTap(skipForwardButton)
     }
 
@@ -1698,6 +1894,17 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             UIView.animate(withDuration: 0.2) {
                 self?.speedIndicatorLabel.alpha = 0.0
             }
+        }
+    }
+
+    private func applyDefaultPlaybackSpeed() {
+        guard !defaultPlaybackSpeedApplied else { return }
+        let speed = defaultPlaybackSpeed
+        rendererSetSpeed(speed)
+        defaultPlaybackSpeedApplied = true
+        updateSpeedMenu()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            self?.updateSpeedMenu()
         }
     }
     
@@ -3724,9 +3931,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let isLeftSide = location.x < videoContainer.bounds.width / 2
         
         if gestureRecognizer === leftDoubleTapGesture {
-            return isLeftSide
+            return isDoubleTapSeekEnabled && isLeftSide
         } else if gestureRecognizer === rightDoubleTapGesture {
-            return !isLeftSide
+            return isDoubleTapSeekEnabled && !isLeftSide
         }
         
         return true
@@ -3875,6 +4082,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         let previousPosition = cachedPosition
         let playbackAdvanced = safePosition > max(0, previousPosition) + 0.05
+        if playbackAdvanced || safePosition > 0.1 {
+            markPlaybackStarted(reason: "position")
+        }
 
         DispatchQueue.main.async {
             if duration.isFinite, duration > 0 {
@@ -3945,6 +4155,9 @@ extension PlayerViewController: MPVSoftwareRendererDelegate {
     
     func renderer(_ renderer: MPVSoftwareRenderer, didChangePause isPaused: Bool) {
         if isClosing { return }
+        if !isPaused {
+            markPlaybackStarted(reason: "playing")
+        }
         if isRendererLoading {
             pipController?.updatePlaybackState()
             return
@@ -3975,6 +4188,8 @@ extension PlayerViewController: MPVSoftwareRendererDelegate {
         if isClosing { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            self.markPlaybackStarted(reason: "ready")
+            self.applyDefaultPlaybackSpeed()
             
             if let seekTime = self.pendingSeekTime {
                 self.rendererSeek(to: seekTime)
@@ -4037,6 +4252,9 @@ extension PlayerViewController: VLCRendererDelegate {
     func renderer(_ renderer: VLCRenderer, didChangePause isPaused: Bool) {
         if isClosing { return }
 
+        if !isPaused {
+            markPlaybackStarted(reason: "playing")
+        }
         if isRendererLoading {
             renderer.updatePictureInPicturePlaybackState()
             return
@@ -4069,6 +4287,8 @@ extension PlayerViewController: VLCRendererDelegate {
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            self.markPlaybackStarted(reason: "ready")
+            self.applyDefaultPlaybackSpeed()
             
             // Update audio and subtitle tracks now that the video is ready
             self.updateAudioTracksMenuWhenReady()
@@ -4095,6 +4315,7 @@ extension PlayerViewController: VLCRendererDelegate {
             return
         }
         Logger.shared.log("PlayerViewController: VLC error: \(message)", type: "Error")
+        handlePlaybackStartupFailure(message, isSourceFailure: true)
     }
 
     func rendererDidChangeTracks(_ renderer: VLCRenderer) {

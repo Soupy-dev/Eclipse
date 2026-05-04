@@ -151,6 +151,7 @@ struct ContentView: View {
 
     private func runBackgroundAutoChecks() async {
         await ServiceManager.shared.autoUpdateServicesIfNeeded()
+        await SourceHealthMonitor.shared.runDailyEnabledSourceChecksIfNeeded()
         await GitHubReleaseChecker.checkForUpdatesIfNeeded()
 
         await MainActor.run {

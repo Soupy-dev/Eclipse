@@ -251,24 +251,48 @@ final class VLCHeaderProxy {
         }
 
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (bytes, response) = try await URLSession.shared.bytes(for: request)
             guard let http = response as? HTTPURLResponse else {
                 sendSimpleResponse(connection, statusCode: 502, body: "Bad gateway")
                 return
             }
 
             let isHead = method == "HEAD"
-            let (responseData, responseHeaders) = rewriteIfNeeded(http: http, data: data, targetURL: targetURL, sessionId: sessionId)
+            let contentType = http.value(forHTTPHeaderField: "Content-Type") ?? ""
+            let isPlaylist = contentType.lowercased().contains("application/vnd.apple.mpegurl")
+                || contentType.lowercased().contains("application/x-mpegurl")
+                || targetURL.pathExtension.lowercased() == "m3u8"
 
-            sendResponse(
-                connection,
-                statusCode: http.statusCode,
-                headers: responseHeaders,
-                body: isHead ? Data() : responseData
-            )
+            if isHead {
+                sendResponse(connection, statusCode: http.statusCode, headers: filteredResponseHeaders(from: http), body: Data())
+            } else if isPlaylist {
+                let data = try await collectBytes(bytes, maxBytes: 4 * 1024 * 1024)
+                let (responseData, responseHeaders) = rewriteIfNeeded(http: http, data: data, targetURL: targetURL, sessionId: sessionId)
+                sendResponse(connection, statusCode: http.statusCode, headers: responseHeaders, body: responseData)
+            } else {
+                var responseHeaders = filteredResponseHeaders(from: http)
+                responseHeaders.removeValue(forKey: "Content-Encoding")
+                responseHeaders.removeValue(forKey: "Content-Length")
+                guard await sendHeaders(connection, statusCode: http.statusCode, headers: responseHeaders) else {
+                    return
+                }
+                await streamBytes(bytes, to: connection)
+            }
         } catch {
             sendSimpleResponse(connection, statusCode: 502, body: "Upstream error")
         }
+    }
+
+    private func collectBytes(_ bytes: URLSession.AsyncBytes, maxBytes: Int) async throws -> Data {
+        var data = Data()
+        data.reserveCapacity(min(maxBytes, 128 * 1024))
+        for try await byte in bytes {
+            data.append(byte)
+            if data.count > maxBytes {
+                throw URLError(.dataLengthExceedsMaximum)
+            }
+        }
+        return data
     }
 
     private func rewriteIfNeeded(
@@ -361,6 +385,54 @@ final class VLCHeaderProxy {
         connection.send(content: responseData, completion: .contentProcessed { _ in
             connection.cancel()
         })
+    }
+
+    private func sendHeaders(_ connection: NWConnection, statusCode: Int, headers: [String: String]) async -> Bool {
+        var lines: [String] = []
+        let statusText = httpStatusText(statusCode)
+        lines.append("HTTP/1.1 \(statusCode) \(statusText)")
+        lines.append("Connection: close")
+
+        for (key, value) in headers {
+            lines.append("\(key): \(value)")
+        }
+
+        lines.append("\r\n")
+        return await sendChunk(Data(lines.joined(separator: "\r\n").utf8), to: connection)
+    }
+
+    private func streamBytes(_ bytes: URLSession.AsyncBytes, to connection: NWConnection) async {
+        var chunk = Data()
+        chunk.reserveCapacity(32 * 1024)
+
+        do {
+            for try await byte in bytes {
+                chunk.append(byte)
+                if chunk.count >= 32 * 1024 {
+                    guard await sendChunk(chunk, to: connection) else {
+                        connection.cancel()
+                        return
+                    }
+                    chunk.removeAll(keepingCapacity: true)
+                }
+            }
+
+            if !chunk.isEmpty {
+                _ = await sendChunk(chunk, to: connection)
+            }
+        } catch {
+            Logger.shared.log("VLCHeaderProxy: upstream stream error: \(error)", type: "Error")
+        }
+
+        connection.cancel()
+    }
+
+    private func sendChunk(_ data: Data, to connection: NWConnection) async -> Bool {
+        await withCheckedContinuation { continuation in
+            connection.send(content: data, completion: .contentProcessed { error in
+                continuation.resume(returning: error == nil)
+            })
+        }
     }
 
     private func httpStatusText(_ code: Int) -> String {

@@ -7,6 +7,7 @@
 
 import CryptoKit
 import Foundation
+import Network
 
 struct ServiceSetting {
     let key: String
@@ -18,6 +19,382 @@ struct ServiceSetting {
     enum SettingType {
         case string, bool, int, float
     }
+}
+
+enum SourceHealth {
+    static func serviceId(_ service: Service) -> String {
+        "service:\(service.id.uuidString)"
+    }
+
+    static func stremioId(_ addon: StremioAddon) -> String {
+        "stremio:\(addon.id.uuidString)"
+    }
+}
+
+enum SourceHealthStatus: String, Codable {
+    case unchecked
+    case healthy
+    case unhealthy
+}
+
+enum SourceHealthDisplayState {
+    case unchecked
+    case healthy
+    case stale
+    case warning(String)
+    case playbackIssue(String)
+}
+
+struct SourceHealthRecord: Codable {
+    var sourceId: String
+    var sourceName: String
+    var endpointStatus: SourceHealthStatus
+    var endpointReason: String?
+    var lastEndpointCheckedAt: Date?
+    var lastPlaybackSuccessAt: Date?
+    var lastPlaybackFailureAt: Date?
+    var playbackFailureReason: String?
+    var lastNoInternetSkipAt: Date?
+}
+
+final class SourceHealthStore: ObservableObject {
+    static let shared = SourceHealthStore()
+
+    @Published private(set) var version = 0
+
+    private let storageKey = "sourceHealthRecordsV1"
+    private let queue = DispatchQueue(label: "luna.source.health.store")
+    private var records: [String: SourceHealthRecord]
+
+    private init() {
+        if let data = UserDefaults.standard.data(forKey: storageKey),
+           let decoded = try? JSONDecoder().decode([String: SourceHealthRecord].self, from: data) {
+            records = decoded
+        } else {
+            records = [:]
+        }
+    }
+
+    func record(for sourceId: String) -> SourceHealthRecord? {
+        queue.sync { records[sourceId] }
+    }
+
+    func displayState(for sourceId: String) -> SourceHealthDisplayState {
+        guard let record = record(for: sourceId) else { return .unchecked }
+
+        let endpointFresh = record.lastEndpointCheckedAt.map { Date().timeIntervalSince($0) < 36 * 60 * 60 } ?? false
+        if record.endpointStatus == .unhealthy, endpointFresh {
+            return .warning(record.endpointReason ?? "Source endpoint is unreachable")
+        }
+
+        if let failureDate = record.lastPlaybackFailureAt,
+           Date().timeIntervalSince(failureDate) < 24 * 60 * 60,
+           (record.lastPlaybackSuccessAt ?? .distantPast) < failureDate {
+            return .playbackIssue(record.playbackFailureReason ?? "Recent playback failed")
+        }
+
+        if record.endpointStatus == .healthy, endpointFresh {
+            return .healthy
+        }
+
+        if record.lastEndpointCheckedAt != nil {
+            return .stale
+        }
+
+        return .unchecked
+    }
+
+    func warningText(for sourceId: String) -> String? {
+        switch displayState(for: sourceId) {
+        case .warning(let reason):
+            return reason
+        case .playbackIssue(let reason):
+            return reason
+        default:
+            return nil
+        }
+    }
+
+    func shouldSkipForAutoMode(sourceId: String) -> Bool {
+        guard let record = record(for: sourceId),
+              record.endpointStatus == .unhealthy,
+              let checkedAt = record.lastEndpointCheckedAt else {
+            return false
+        }
+        return Date().timeIntervalSince(checkedAt) < 36 * 60 * 60
+    }
+
+    func recordEndpoint(sourceId: String, sourceName: String, status: SourceHealthStatus, reason: String?) {
+        update(sourceId: sourceId, sourceName: sourceName) { record in
+            record.endpointStatus = status
+            record.endpointReason = reason
+            record.lastEndpointCheckedAt = Date()
+        }
+    }
+
+    func recordNoInternetSkip(sourceId: String, sourceName: String) {
+        update(sourceId: sourceId, sourceName: sourceName) { record in
+            record.lastNoInternetSkipAt = Date()
+        }
+    }
+
+    func recordPlaybackSuccess(sourceId: String, sourceName: String) {
+        update(sourceId: sourceId, sourceName: sourceName) { record in
+            record.lastPlaybackSuccessAt = Date()
+            record.playbackFailureReason = nil
+        }
+    }
+
+    func recordPlaybackFailure(sourceId: String, sourceName: String, reason: String, isSourceFailure: Bool) {
+        update(sourceId: sourceId, sourceName: sourceName) { record in
+            record.lastPlaybackFailureAt = Date()
+            record.playbackFailureReason = reason
+            if isSourceFailure {
+                record.endpointReason = record.endpointReason ?? reason
+            }
+        }
+    }
+
+    private func update(sourceId: String, sourceName: String, mutate: @escaping (inout SourceHealthRecord) -> Void) {
+        queue.async {
+            var record = self.records[sourceId] ?? SourceHealthRecord(
+                sourceId: sourceId,
+                sourceName: sourceName,
+                endpointStatus: .unchecked,
+                endpointReason: nil,
+                lastEndpointCheckedAt: nil,
+                lastPlaybackSuccessAt: nil,
+                lastPlaybackFailureAt: nil,
+                playbackFailureReason: nil,
+                lastNoInternetSkipAt: nil
+            )
+            record.sourceName = sourceName
+            mutate(&record)
+            self.records[sourceId] = record
+            self.saveLocked()
+            DispatchQueue.main.async {
+                self.version += 1
+            }
+        }
+    }
+
+    private func saveLocked() {
+        guard let data = try? JSONEncoder().encode(records) else { return }
+        UserDefaults.standard.set(data, forKey: storageKey)
+    }
+}
+
+enum AutoModeSourceSelection {
+    private static let idsKey = "servicesAutoModeSourceIds"
+    private static let orderKey = "servicesAutoModeSourceOrderIds"
+
+    static func appendSourceIfNeeded(_ sourceId: String) {
+        var ids = Set(UserDefaults.standard.stringArray(forKey: idsKey) ?? [])
+        var order = UserDefaults.standard.stringArray(forKey: orderKey) ?? []
+
+        ids.insert(sourceId)
+        if !order.contains(sourceId) {
+            order.append(sourceId)
+        }
+
+        UserDefaults.standard.set(Array(ids), forKey: idsKey)
+        UserDefaults.standard.set(order, forKey: orderKey)
+    }
+}
+
+final class SourceHealthMonitor {
+    static let shared = SourceHealthMonitor()
+
+    private let lastDailyCheckKey = "sourceHealthLastDailyCheckTimestamp"
+    private let dailyInterval: TimeInterval = 24 * 60 * 60
+    private let session: URLSession
+
+    private init() {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 10
+        config.timeoutIntervalForResource = 15
+        session = URLSession(configuration: config)
+    }
+
+    func runDailyEnabledSourceChecksIfNeeded(force: Bool = false) async {
+        let now = Date()
+        let last = UserDefaults.standard.double(forKey: lastDailyCheckKey)
+        if !force, last > 0, now.timeIntervalSince1970 - last < dailyInterval {
+            return
+        }
+
+        let services = ServiceStore.shared.getServices().filter(\.isActive)
+        let addons = StremioAddonStore.shared.getAddons().filter(\.isActive)
+        guard !services.isEmpty || !addons.isEmpty else { return }
+
+        guard await hasInternetConnection() else {
+            for service in services {
+                SourceHealthStore.shared.recordNoInternetSkip(
+                    sourceId: SourceHealth.serviceId(service),
+                    sourceName: service.metadata.sourceName
+                )
+            }
+            for addon in addons {
+                SourceHealthStore.shared.recordNoInternetSkip(
+                    sourceId: SourceHealth.stremioId(addon),
+                    sourceName: addon.manifest.name
+                )
+            }
+            Logger.shared.log("SourceHealth: skipped daily source checks because internet is unavailable", type: "ServiceManager")
+            return
+        }
+
+        for service in services {
+            let result = await checkServiceEndpoint(service)
+            SourceHealthStore.shared.recordEndpoint(
+                sourceId: SourceHealth.serviceId(service),
+                sourceName: service.metadata.sourceName,
+                status: result.ok ? .healthy : .unhealthy,
+                reason: result.ok ? nil : result.reason
+            )
+        }
+
+        for addon in addons {
+            let result = await checkAddonEndpoint(addon)
+            SourceHealthStore.shared.recordEndpoint(
+                sourceId: SourceHealth.stremioId(addon),
+                sourceName: addon.manifest.name,
+                status: result.ok ? .healthy : .unhealthy,
+                reason: result.ok ? nil : result.reason
+            )
+        }
+
+        UserDefaults.standard.set(now.timeIntervalSince1970, forKey: lastDailyCheckKey)
+    }
+
+    func probeStream(url: URL, headers: [String: String]) async -> StreamProbeResult {
+        guard await hasInternetConnection() else { return .networkUnavailable }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 8
+        request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
+        for (key, value) in headers where !value.isEmpty {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+
+        do {
+            let (_, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return .sourceFailed("Stream did not return an HTTP response")
+            }
+            switch http.statusCode {
+            case 200...299:
+                return .reachable
+            case 401, 403, 404, 410, 451:
+                return .sourceFailed("Stream returned HTTP \(http.statusCode)")
+            case 500...599:
+                return .sourceFailed("Stream host returned HTTP \(http.statusCode)")
+            default:
+                return .slowOrIndeterminate("Stream returned HTTP \(http.statusCode)")
+            }
+        } catch {
+            if let urlError = error as? URLError {
+                switch urlError.code {
+                case .timedOut, .cannotFindHost, .dnsLookupFailed, .networkConnectionLost:
+                    return .slowOrIndeterminate(urlError.localizedDescription)
+                case .notConnectedToInternet:
+                    return .networkUnavailable
+                default:
+                    break
+                }
+            }
+            return .sourceFailed(error.localizedDescription)
+        }
+    }
+
+    private func checkServiceEndpoint(_ service: Service) async -> (ok: Bool, reason: String?) {
+        do {
+            guard let metadataURL = URL(string: service.url) else {
+                return (false, "Invalid service metadata URL")
+            }
+            let (metadataData, metadataResponse) = try await session.data(from: metadataURL)
+            guard let metadataHTTP = metadataResponse as? HTTPURLResponse,
+                  (200...299).contains(metadataHTTP.statusCode) else {
+                return (false, "Metadata returned HTTP \((metadataResponse as? HTTPURLResponse)?.statusCode ?? 0)")
+            }
+            let metadata = try JSONDecoder().decode(ServiceMetadata.self, from: metadataData)
+            guard let scriptURL = URL(string: metadata.scriptUrl) else {
+                return (false, "Invalid service script URL")
+            }
+            let (scriptData, scriptResponse) = try await session.data(from: scriptURL)
+            guard let scriptHTTP = scriptResponse as? HTTPURLResponse,
+                  (200...299).contains(scriptHTTP.statusCode) else {
+                return (false, "Script returned HTTP \((scriptResponse as? HTTPURLResponse)?.statusCode ?? 0)")
+            }
+            guard !scriptData.isEmpty else {
+                return (false, "Service script is empty")
+            }
+            return (true, nil)
+        } catch {
+            return (false, error.localizedDescription)
+        }
+    }
+
+    private func checkAddonEndpoint(_ addon: StremioAddon) async -> (ok: Bool, reason: String?) {
+        do {
+            let manifest = try await StremioClient.shared.fetchManifest(from: addon.configuredURL)
+            guard manifest.supportsStreams else {
+                return (false, "Addon manifest no longer supports streams")
+            }
+            return (true, nil)
+        } catch {
+            return (false, error.localizedDescription)
+        }
+    }
+
+    private func hasInternetConnection() async -> Bool {
+        guard await networkPathIsSatisfied() else { return false }
+        guard let url = URL(string: "https://www.apple.com/library/test/success.html") else { return true }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 5
+
+        do {
+            let (_, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return false }
+            return (200...399).contains(http.statusCode)
+        } catch {
+            return false
+        }
+    }
+
+    private func networkPathIsSatisfied() async -> Bool {
+        await withCheckedContinuation { continuation in
+            let monitor = NWPathMonitor()
+            let queue = DispatchQueue(label: "luna.source.health.path")
+            var didResume = false
+
+            let finish: (Bool) -> Void = { satisfied in
+                queue.async {
+                    guard !didResume else { return }
+                    didResume = true
+                    monitor.cancel()
+                    continuation.resume(returning: satisfied)
+                }
+            }
+
+            monitor.pathUpdateHandler = { path in
+                finish(path.status == .satisfied)
+            }
+            monitor.start(queue: queue)
+            queue.asyncAfter(deadline: .now() + 1.5) {
+                finish(false)
+            }
+        }
+    }
+}
+
+enum StreamProbeResult {
+    case reachable
+    case slowOrIndeterminate(String)
+    case networkUnavailable
+    case sourceFailed(String)
 }
 
 @MainActor
@@ -168,8 +545,9 @@ class ServiceManager: ObservableObject {
                 url: jsonURL,
                 jsonMetadata: String(data: try JSONEncoder().encode(metadata), encoding: .utf8) ?? "",
                 jsScript: jsContent,
-                isActive: false
+                isActive: true
             )
+            AutoModeSourceSelection.appendSourceIfNeeded("service:\(serviceId.uuidString)")
             try? await Task.sleep(nanoseconds: delay)
 
             loadServicesFromCloud()

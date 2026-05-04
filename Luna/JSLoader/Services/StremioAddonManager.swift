@@ -65,6 +65,7 @@ class StremioAddonManager: ObservableObject {
             manifestJSON: manifestJSON,
             isActive: true
         )
+        AutoModeSourceSelection.appendSourceIfNeeded("stremio:\(id.uuidString)")
 
         loadAddons()
         Logger.shared.log("Stremio: Added addon '\(manifest.name)' (\(manifest.id))", type: "Stremio")
