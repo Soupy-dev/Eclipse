@@ -136,7 +136,6 @@ struct ModulesSearchResultsSheet: View {
     @State private var autoModeRunToken: String?
     @State private var autoModeCancelled = false
     @State private var autoModePlaybackFailedSourceIds: Set<String> = []
-    @State private var autoModePlaybackRetryAttempts: [String: Int] = [:]
     @State private var showManualPicker = false
     @State private var sheetHostController: UIViewController?
 
@@ -1077,7 +1076,6 @@ struct ModulesSearchResultsSheet: View {
         autoModeDidRun = true
         autoModeCancelled = false
         autoModePlaybackFailedSourceIds.removeAll()
-        autoModePlaybackRetryAttempts.removeAll()
         viewModel.moduleResults.removeAll()
         viewModel.stremioResults.removeAll()
         viewModel.searchedServices.removeAll()
@@ -1305,46 +1303,9 @@ struct ModulesSearchResultsSheet: View {
             return
         }
 
-        let attempts = max(autoModePlaybackRetryAttempts[sourceId] ?? 0, report.context.retryCount)
-        if attempts < 1 {
-            autoModePlaybackRetryAttempts[sourceId] = attempts + 1
-            viewModel.currentFetchingTitle = report.context.sourceName
-            viewModel.streamFetchProgress = "\(report.context.sourceName) failed. Retrying stream..."
-
-            switch report.context.sourceKind {
-            case .service:
-                if let service = serviceManager.activeServices.first(where: { SourceHealth.serviceId($0) == sourceId }) {
-                    playStreamURL(
-                        report.context.streamURL,
-                        service: service,
-                        subtitle: report.context.subtitles.first,
-                        headers: report.context.headers,
-                        serviceHref: nil,
-                        autoModeLaunch: true,
-                        retryCount: attempts + 1
-                    )
-                    return
-                }
-            case .stremio:
-                if let addon = stremioManager.activeAddons.first(where: { SourceHealth.stremioId($0) == sourceId }) {
-                    playStremioStreamURL(
-                        report.context.streamURL,
-                        addon: addon,
-                        subtitles: report.context.subtitles,
-                        subtitleNames: report.context.subtitleNames ?? [],
-                        headers: report.context.headers,
-                        autoModeLaunch: true,
-                        retryCount: attempts + 1
-                    )
-                    return
-                }
-            }
-        }
-
         autoModePlaybackFailedSourceIds.insert(sourceId)
-        autoModePlaybackRetryAttempts[sourceId] = attempts
         viewModel.currentFetchingTitle = report.context.sourceName
-        viewModel.streamFetchProgress = "\(report.context.sourceName) failed again. Searching another source..."
+        viewModel.streamFetchProgress = "\(report.context.sourceName) failed. Searching another source..."
 
         Task { @MainActor in
             await runOrderedAutoModeSelection()
@@ -2721,6 +2682,12 @@ struct ModulesSearchResultsSheet: View {
             guard let streamURL = URL(string: url) else {
                 Logger.shared.log("Invalid stream URL: \(url)", type: "Error")
                 handleServicePlaybackPreparationFailure(service, message: "Invalid stream URL. The source returned a malformed URL.", autoModeLaunch: autoModeLaunch)
+                return
+            }
+            guard let streamScheme = streamURL.scheme?.lowercased(),
+                  streamScheme == "http" || streamScheme == "https" else {
+                Logger.shared.log("Invalid stream URL scheme: \(url)", type: "Error")
+                handleServicePlaybackPreparationFailure(service, message: "Invalid stream URL. The source did not return a playable HTTP stream.", autoModeLaunch: autoModeLaunch)
                 return
             }
             

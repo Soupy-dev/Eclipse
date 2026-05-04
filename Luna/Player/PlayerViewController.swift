@@ -1270,7 +1270,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         playbackSlowProbeCount = 0
 
         guard playbackLaunchContext != nil,
-              !url.isFileURL else {
+              !url.isFileURL,
+              url.host != "127.0.0.1",
+              url.host != "localhost" else {
             return
         }
 

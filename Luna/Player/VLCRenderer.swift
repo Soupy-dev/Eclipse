@@ -144,6 +144,7 @@ final class VLCRenderer: NSObject {
     private var progressTimer: DispatchSourceTimer?
     private var pendingAbsoluteSeek: Double?
     private var preparedInitialSeek: Double?
+    private var loadGeneration = 0
     private let minimumReliableDuration: Double = 5.0
     private var currentURL: URL?
     private var currentHeaders: [String: String]?
@@ -382,6 +383,7 @@ final class VLCRenderer: NSObject {
         logVLC("stop begin snapshot={\(playerSnapshot())}", type: "Stream")
         isRunning = false
         isStopping = true
+        loadGeneration += 1
         stopProgressPolling()
         teardownNativePictureInPicture()
 
@@ -424,6 +426,7 @@ final class VLCRenderer: NSObject {
         
         currentURL = url
         currentPreset = preset
+        loadGeneration += 1
         let initialSeek = preparedInitialSeek
         preparedInitialSeek = nil
         cachedPosition = 0
@@ -654,7 +657,9 @@ final class VLCRenderer: NSObject {
             let clampedTarget = min(max(0, target), max(0, duration - 0.1))
             Logger.shared.log("[VLCRenderer.PiP] seek requested offsetMs=\(offset) current=\(self.secondsText(currentPosition)) target=\(self.secondsText(target)) clamped=\(self.secondsText(clampedTarget))", type: "Player")
             self.applySeek(to: clampedTarget, on: player, refreshVideoOutput: false)
-            self.finishPictureInPictureSeek(target: clampedTarget, completion: completion)
+            DispatchQueue.main.async {
+                completion?()
+            }
         }
     }
 
@@ -703,49 +708,6 @@ final class VLCRenderer: NSObject {
             self.delegate?.renderer(self, didUpdatePosition: clamped, duration: max(duration, self.cachedDuration))
         }
         logVLC("applySeek end snapshot={\(playerSnapshot(player))}", type: "Progress")
-    }
-
-    private func finishPictureInPictureSeek(target: Double, completion: NativeVLCPiPSeekCompletion?, attempt: Int = 0) {
-        guard let completion else { return }
-
-        eventQueue.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-            guard let self else {
-                DispatchQueue.main.async {
-                    completion()
-                }
-                return
-            }
-
-            let observedPosition = self.mediaPlayer.flatMap { self.observedSeekCompletionPosition(from: $0) }
-            let position = observedPosition ?? self.cachedPosition
-            let isCloseEnough = observedPosition != nil && abs(position - target) <= 1.5
-            let shouldFinish = isCloseEnough || attempt >= 8
-
-            if shouldFinish {
-                self.logVLC("PiP seek completion target=\(self.secondsText(target)) position=\(self.secondsText(position)) attempt=\(attempt) closeEnough=\(isCloseEnough)", type: "Player")
-                self.updatePictureInPicturePlaybackState()
-                DispatchQueue.main.async {
-                    completion()
-                }
-            } else {
-                self.finishPictureInPictureSeek(target: target, completion: completion, attempt: attempt + 1)
-            }
-        }
-    }
-
-    private func observedSeekCompletionPosition(from player: VLCMediaPlayer) -> Double? {
-        let rawPosition = max(0, (player.time.value?.doubleValue ?? 0) / 1000.0)
-        if rawPosition > 0 {
-            return rawPosition
-        }
-
-        let duration = reliableDuration(from: player)
-        let normalized = normalizedPosition(from: player)
-        if duration >= minimumReliableDuration, normalized > 0 {
-            return normalized * duration
-        }
-
-        return nil
     }
 
     private func refreshVideoOutputAfterSeek(_ player: VLCMediaPlayer, shouldResumePlayback: Bool) {
@@ -1146,16 +1108,24 @@ final class VLCRenderer: NSObject {
     }
 
     private func scheduleLoadingSanityChecks() {
-        logVLC("scheduleLoadingSanityChecks snapshot={\(playerSnapshot())}", type: "Stream")
-        for delay in [0.75, 1.5, 3.0] {
+        let generation = loadGeneration
+        let isProxyLoad = currentURL?.host == "127.0.0.1" || currentURL?.host == "localhost"
+        let failureDelay = isProxyLoad ? 10.0 : 1.5
+        let delays: [Double] = isProxyLoad ? [2.0, 5.0, 10.0] : [0.75, 1.5, 3.0]
+        logVLC("scheduleLoadingSanityChecks generation=\(generation) proxy=\(isProxyLoad) snapshot={\(playerSnapshot())}", type: "Stream")
+        for delay in delays {
             eventQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self, self.isLoading, let player = self.mediaPlayer else { return }
+                guard self.loadGeneration == generation else {
+                    self.logVLC("loading sanity skipped stale generation check=\(generation) current=\(self.loadGeneration)", type: "Stream")
+                    return
+                }
 
                 let positionMs = player.time.value?.doubleValue ?? 0
-                self.logVLC("loading sanity delay=\(String(format: "%.2f", delay)) positionMs=\(String(format: "%.0f", positionMs)) snapshot={\(self.playerSnapshot(player))}", type: "Stream")
+                self.logVLC("loading sanity delay=\(String(format: "%.2f", delay)) generation=\(generation) proxy=\(isProxyLoad) positionMs=\(String(format: "%.0f", positionMs)) snapshot={\(self.playerSnapshot(player))}", type: "Stream")
                 if positionMs > 0 || self.isPlaybackActive(player) {
                     self.clearLoadingState()
-                } else if delay >= 1.5, self.isTerminalState(player.state) {
+                } else if delay >= failureDelay, self.isTerminalState(player.state) {
                     self.isLoading = false
                     self.stopProgressPolling()
                     let message = "VLC could not start playback (state \(self.describeState(player.state)) at 0s)"
