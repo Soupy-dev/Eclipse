@@ -3128,8 +3128,8 @@ final class TrackerManager: NSObject, ObservableObject {
                     aniListImportProgress = "Adding items to Eclipse..."
                 }
 
-                let animeResult = await fillEclipseFromRemoteAnime(animeEntries, sourceName: "AniList", action: .fillEclipseFromAniList)
-                let mangaResult = await fillEclipseFromRemoteManga(mangaEntries, sourceName: "AniList", action: .fillEclipseFromAniList)
+                let animeResult = try await fillEclipseFromRemoteAnime(animeEntries, sourceName: "AniList", action: .fillEclipseFromAniList)
+                let mangaResult = try await fillEclipseFromRemoteManga(mangaEntries, sourceName: "AniList", action: .fillEclipseFromAniList)
                 let imported = animeResult.itemsToAdd + animeResult.itemsToAdvance + mangaResult.itemsToAdvance
 
                 await MainActor.run {
@@ -3175,8 +3175,8 @@ final class TrackerManager: NSObject, ObservableObject {
                     malImportProgress = "Adding items to Eclipse..."
                 }
 
-                let animeResult = await fillEclipseFromRemoteAnime(animeEntries, sourceName: "MAL", action: .fillEclipseFromMAL)
-                let mangaResult = await fillEclipseFromRemoteManga(mangaEntries, sourceName: "MAL", action: .fillEclipseFromMAL)
+                let animeResult = try await fillEclipseFromRemoteAnime(animeEntries, sourceName: "MAL", action: .fillEclipseFromMAL)
+                let mangaResult = try await fillEclipseFromRemoteManga(mangaEntries, sourceName: "MAL", action: .fillEclipseFromMAL)
                 let imported = animeResult.itemsToAdd + animeResult.itemsToAdvance + mangaResult.itemsToAdvance
 
                 await MainActor.run {
