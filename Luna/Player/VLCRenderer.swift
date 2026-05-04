@@ -563,9 +563,39 @@ final class VLCRenderer: NSObject {
             startProgressPolling()
         }
         updatePictureInPicturePlaybackState()
+        refreshVideoOutputAfterSeek(player, shouldResumePlayback: !isPaused)
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.delegate?.renderer(self, didUpdatePosition: clamped, duration: max(duration, self.cachedDuration))
+        }
+    }
+
+    private func refreshVideoOutputAfterSeek(_ player: VLCMediaPlayer, shouldResumePlayback: Bool) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isRunning, !self.isStopping else { return }
+            self.mediaPlayer?.drawable = self.vlcView
+            self.vlcView.isHidden = false
+            self.vlcView.alpha = 1
+            self.vlcView.superview?.setNeedsLayout()
+            self.vlcView.superview?.layoutIfNeeded()
+            self.vlcView.setNeedsLayout()
+            self.vlcView.layoutIfNeeded()
+        }
+
+        eventQueue.asyncAfter(deadline: .now() + 0.08) { [weak self, weak player] in
+            guard let self, self.isRunning, !self.isStopping, let player else { return }
+            if shouldResumePlayback {
+                self.ensureAudioSessionActive()
+                player.play()
+                if self.currentPlaybackSpeed != 1.0 {
+                    player.rate = Float(self.currentPlaybackSpeed)
+                }
+                self.startProgressPolling()
+            } else {
+                self.refreshPausedVideoFrameIfPossible(player)
+            }
+            self.clearLoadingState()
+            self.publishPlaybackProgress(from: player)
         }
     }
 
@@ -1021,20 +1051,38 @@ final class VLCRenderer: NSObject {
 
     private func restorePausedVideoAfterForeground() {
         let restorePosition = backgroundedPosition ?? cachedPosition
-        eventQueue.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.mediaPlayer?.drawable = self.vlcView
+            self.vlcView.isHidden = false
+            self.vlcView.alpha = 1
+            self.vlcView.superview?.setNeedsLayout()
+            self.vlcView.superview?.layoutIfNeeded()
+            self.vlcView.setNeedsLayout()
+            self.vlcView.layoutIfNeeded()
+            self.delegate?.renderer(self, didChangePause: true)
+            if restorePosition > 0 {
+                self.delegate?.renderer(self, didUpdatePosition: restorePosition, duration: self.cachedDuration)
+            }
+        }
+
+        eventQueue.async { [weak self] in
             guard let self, let player = self.mediaPlayer else { return }
 
             if restorePosition > 0 {
-                let durationSec = self.reliableDuration(from: player)
-                if durationSec >= self.minimumReliableDuration {
-                    let normalized = min(max(restorePosition / durationSec, 0), 1)
-                    self.setNormalizedPosition(normalized, on: player)
-                    self.cachedDuration = max(self.cachedDuration, durationSec)
-                } else if self.cachedDuration >= self.minimumReliableDuration {
-                    let normalized = min(max(restorePosition / self.cachedDuration, 0), 1)
-                    self.setNormalizedPosition(normalized, on: player)
-                } else {
-                    self.pendingAbsoluteSeek = restorePosition
+                let currentPosition = self.resolvedPlaybackProgress(from: player).position
+                if abs(currentPosition - restorePosition) > 0.75 {
+                    let durationSec = self.reliableDuration(from: player)
+                    if durationSec >= self.minimumReliableDuration {
+                        let normalized = min(max(restorePosition / durationSec, 0), 1)
+                        self.setNormalizedPosition(normalized, on: player)
+                        self.cachedDuration = max(self.cachedDuration, durationSec)
+                    } else if self.cachedDuration >= self.minimumReliableDuration {
+                        let normalized = min(max(restorePosition / self.cachedDuration, 0), 1)
+                        self.setNormalizedPosition(normalized, on: player)
+                    } else {
+                        self.pendingAbsoluteSeek = restorePosition
+                    }
                 }
                 self.cachedPosition = restorePosition
             }
@@ -1046,16 +1094,18 @@ final class VLCRenderer: NSObject {
             self.isPaused = true
             self.stopProgressPolling()
             self.updatePictureInPicturePlaybackState()
+            self.refreshPausedVideoFrameIfPossible(player)
+        }
+    }
 
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.mediaPlayer?.drawable = self.vlcView
-                self.vlcView.setNeedsLayout()
-                self.vlcView.layoutIfNeeded()
-                self.delegate?.renderer(self, didChangePause: true)
-                if restorePosition > 0 {
-                    self.delegate?.renderer(self, didUpdatePosition: restorePosition, duration: self.cachedDuration)
-                }
+    private func refreshPausedVideoFrameIfPossible(_ player: VLCMediaPlayer) {
+        let object = player as NSObject
+        for selectorName in ["gotoNextFrame", "nextFrame"] {
+            let selector = NSSelectorFromString(selectorName)
+            if object.responds(to: selector) {
+                _ = object.perform(selector)
+                Logger.shared.log("[VLCRenderer.PiP] refreshed paused video frame using \(selectorName)", type: "Player")
+                return
             }
         }
     }
