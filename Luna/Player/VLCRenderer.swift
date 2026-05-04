@@ -84,13 +84,12 @@ private final class VLCPictureInPictureDrawableView: UIView {
 
     @objc(seekBy:)
     func seekBy(_ offset: Int64) {
-        renderer?.seek(by: Double(offset) / 1000.0)
+        renderer?.seekFromPictureInPicture(byMilliseconds: offset, completion: nil)
     }
 
     @objc(seekBy:completion:)
     func seekBy(_ offset: Int64, completion: NativeVLCPiPSeekCompletion?) {
-        renderer?.seek(by: Double(offset) / 1000.0)
-        completion?()
+        renderer?.seekFromPictureInPicture(byMilliseconds: offset, completion: completion)
     }
 
     @objc(mediaTime)
@@ -190,6 +189,33 @@ final class VLCRenderer: NSObject {
             self.mediaPlayer?.drawable = self.vlcView
             self.vlcView.setNeedsLayout()
             self.vlcView.layoutIfNeeded()
+        }
+    }
+
+    private func recoverRenderingViewAfterPictureInPictureStop() {
+        guard isRunning, !isStopping else { return }
+
+        ensureAudioSessionActive()
+        reattachRenderingView()
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            guard let self, self.isRunning, !self.isStopping else { return }
+            self.mediaPlayer?.drawable = self.vlcView
+            self.vlcView.isHidden = false
+            self.vlcView.alpha = 1
+            self.vlcView.superview?.setNeedsLayout()
+            self.vlcView.superview?.layoutIfNeeded()
+            self.vlcView.setNeedsLayout()
+            self.vlcView.layoutIfNeeded()
+        }
+
+        eventQueue.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            guard let self, self.isRunning, !self.isStopping, let player = self.mediaPlayer else { return }
+            if self.isPlaybackActive(player) || (!self.isPaused && !self.isTerminalState(player.state)) {
+                self.startProgressPolling()
+                self.clearLoadingState()
+            }
+            self.publishPlaybackProgress(from: player)
         }
     }
 
@@ -468,41 +494,86 @@ final class VLCRenderer: NSObject {
     func seek(to seconds: Double) {
         eventQueue.async { [weak self] in
             guard let self, let player = self.mediaPlayer else { return }
-            let clamped = max(0, seconds)
-
-            // If VLC already knows the duration, seek accurately using normalized position.
-            let durationMs = player.media?.length.value?.doubleValue ?? 0
-            let durationSec = durationMs / 1000.0
-            if durationSec >= self.minimumReliableDuration {
-                let normalized = min(max(clamped / durationSec, 0), 1)
-                self.setNormalizedPosition(normalized, on: player)
-                self.cachedDuration = durationSec
-                self.pendingAbsoluteSeek = nil
-                self.updatePictureInPicturePlaybackState()
-                return
-            }
-
-            // If we have a cached duration, fall back to it.
-            if self.cachedDuration >= self.minimumReliableDuration {
-                let normalized = min(max(clamped / self.cachedDuration, 0), 1)
-                self.setNormalizedPosition(normalized, on: player)
-                self.pendingAbsoluteSeek = clamped
-                self.updatePictureInPicturePlaybackState()
-                return
-            }
-
-            // Duration unknown: stash the seek request to apply once duration arrives.
-            self.pendingAbsoluteSeek = clamped
-            self.updatePictureInPicturePlaybackState()
+            self.applySeek(to: seconds, on: player)
         }
     }
-    
+
     func seek(by seconds: Double) {
         eventQueue.async { [weak self] in
             guard let self, let player = self.mediaPlayer else { return }
-            let newTime = self.cachedPosition + seconds
-            self.seek(to: newTime)
+            let currentPosition = self.resolvedPlaybackProgress(from: player).position
+            self.applySeek(to: currentPosition + seconds, on: player)
         }
+    }
+
+    fileprivate func seekFromPictureInPicture(byMilliseconds offset: Int64, completion: NativeVLCPiPSeekCompletion?) {
+        eventQueue.async { [weak self] in
+            guard let self, let player = self.mediaPlayer else {
+                DispatchQueue.main.async { completion?() }
+                return
+            }
+
+            guard self.nativePictureInPictureMediaSeekable else {
+                DispatchQueue.main.async { completion?() }
+                return
+            }
+
+            let currentPosition = self.resolvedPlaybackProgress(from: player).position
+            let target = currentPosition + (Double(offset) / 1000.0)
+            self.applySeek(to: target, on: player)
+            self.completePictureInPictureSeek(completion)
+        }
+    }
+
+    private func applySeek(to seconds: Double, on player: VLCMediaPlayer) {
+        let duration = reliableDuration(from: player)
+        let upperBound = duration >= minimumReliableDuration ? max(0, duration - 0.1) : Double.greatestFiniteMagnitude
+        let clamped = min(max(0, seconds), upperBound)
+
+        if duration >= minimumReliableDuration {
+            let normalized = min(max(clamped / duration, 0), 1)
+            setNormalizedPosition(normalized, on: player)
+            cachedDuration = duration
+            pendingAbsoluteSeek = nil
+        } else if cachedDuration >= minimumReliableDuration {
+            let normalized = min(max(clamped / cachedDuration, 0), 1)
+            setNormalizedPosition(normalized, on: player)
+            pendingAbsoluteSeek = clamped
+        } else {
+            pendingAbsoluteSeek = clamped
+        }
+
+        cachedPosition = clamped
+        if isPlaybackActive(player) || !isPaused {
+            lastProgressHostTime = CACurrentMediaTime()
+            startProgressPolling()
+        }
+        updatePictureInPicturePlaybackState()
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.delegate?.renderer(self, didUpdatePosition: clamped, duration: max(duration, self.cachedDuration))
+        }
+    }
+
+    private func reliableDuration(from player: VLCMediaPlayer) -> Double {
+        let mediaDurationMs = player.media?.length.value?.doubleValue ?? 0
+        let mediaDuration = mediaDurationMs / 1000.0
+        if mediaDuration.isFinite, mediaDuration >= minimumReliableDuration {
+            return mediaDuration
+        }
+        if cachedDuration.isFinite, cachedDuration >= minimumReliableDuration {
+            return cachedDuration
+        }
+        return 0
+    }
+
+    private func completePictureInPictureSeek(_ completion: NativeVLCPiPSeekCompletion?) {
+        let complete: () -> Void = { [weak self] in
+            self?.updatePictureInPicturePlaybackState()
+            completion?()
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35, execute: complete)
     }
     
     func setSpeed(_ speed: Double) {
@@ -993,11 +1064,16 @@ final class VLCRenderer: NSObject {
     }
 
     fileprivate var nativePictureInPictureMediaLength: Int64 {
+        if let player = mediaPlayer {
+            return Int64(max(0, reliableDuration(from: player)) * 1000.0)
+        }
         return Int64(max(0, cachedDuration) * 1000.0)
     }
 
     fileprivate var nativePictureInPictureMediaSeekable: Bool {
-        return currentURL != nil
+        guard let player = mediaPlayer else { return false }
+        guard reliableDuration(from: player) >= minimumReliableDuration else { return false }
+        return vlcBool(from: player, key: "seekable", selectors: ["isSeekable", "seekable"], fallback: true)
     }
 
     fileprivate var nativePictureInPictureMediaPlaying: Bool {
@@ -1189,6 +1265,10 @@ final class VLCRenderer: NSObject {
         let isEffectivelyActive = nativePiPActive || nativePiPStartRequested
         guard storedActiveChanged || wasEffectivelyActive != isEffectivelyActive else { return }
         delegate?.renderer(self, didChangePictureInPictureActive: isEffectivelyActive)
+        if wasEffectivelyActive && !isEffectivelyActive {
+            Logger.shared.log("[VLCRenderer.PiP] native PiP stopped; reattaching VLC drawable", type: "Player")
+            recoverRenderingViewAfterPictureInPictureStop()
+        }
     }
 
     // MARK: - State Properties
