@@ -260,10 +260,35 @@ final class ProgressManager: ObservableObject {
         }
     }
 
+    private func stableProgressTimes(
+        currentTime: Double,
+        totalDuration: Double,
+        previousDuration: Double,
+        label: String
+    ) -> (currentTime: Double, totalDuration: Double)? {
+        guard currentTime.isFinite, totalDuration.isFinite, currentTime >= 0, totalDuration > 0 else {
+            Logger.shared.log("Invalid progress values for \(label): currentTime=\(currentTime), totalDuration=\(totalDuration)", type: "Warning")
+            return nil
+        }
+
+        var resolvedDuration = totalDuration
+        if previousDuration.isFinite, previousDuration > 0 {
+            let shrinkTolerance = max(2.0, previousDuration * 0.005)
+            if totalDuration + shrinkTolerance < previousDuration {
+                Logger.shared.log("Ignoring shorter reported duration for \(label): previous=\(previousDuration), reported=\(totalDuration)", type: "Warning")
+            }
+            resolvedDuration = max(resolvedDuration, previousDuration)
+        }
+
+        resolvedDuration = max(resolvedDuration, currentTime)
+        let resolvedTime = min(max(0, currentTime), resolvedDuration)
+        return (resolvedTime, resolvedDuration)
+    }
+
     // MARK: - Movie Progress
 
     func updateMovieProgress(movieId: Int, title: String, currentTime: Double, totalDuration: Double, posterURL: String? = nil) {
-        guard currentTime >= 0 && totalDuration > 0 && currentTime <= totalDuration else {
+        guard currentTime.isFinite, totalDuration.isFinite, currentTime >= 0, totalDuration > 0 else {
             Logger.shared.log("Invalid progress values for movie \(title): currentTime=\(currentTime), totalDuration=\(totalDuration)", type: "Warning")
             return
         }
@@ -271,8 +296,14 @@ final class ProgressManager: ObservableObject {
         accessQueue.async(flags: .barrier) { [weak self] in
             guard let self = self else { return }
             var entry = self.progressData.findMovie(id: movieId) ?? MovieProgressEntry(id: movieId, title: title)
-            entry.currentTime = currentTime
-            entry.totalDuration = totalDuration
+            guard let times = self.stableProgressTimes(
+                currentTime: currentTime,
+                totalDuration: totalDuration,
+                previousDuration: entry.totalDuration,
+                label: "movie \(title)"
+            ) else { return }
+            entry.currentTime = times.currentTime
+            entry.totalDuration = times.totalDuration
             entry.lastUpdated = Date()
             
             // Update poster if provided
@@ -353,7 +384,7 @@ final class ProgressManager: ObservableObject {
     // MARK: - Episode Progress
 
     func updateEpisodeProgress(showId: Int, seasonNumber: Int, episodeNumber: Int, currentTime: Double, totalDuration: Double, showTitle: String? = nil, showPosterURL: String? = nil, playbackContext: EpisodePlaybackContext? = nil) {
-        guard currentTime >= 0 && totalDuration > 0 && currentTime <= totalDuration else {
+        guard currentTime.isFinite, totalDuration.isFinite, currentTime >= 0, totalDuration > 0 else {
             Logger.shared.log("Invalid progress values for episode S\(seasonNumber)E\(episodeNumber): currentTime=\(currentTime), totalDuration=\(totalDuration)", type: "Warning")       
             return
         }
@@ -364,8 +395,14 @@ final class ProgressManager: ObservableObject {
                 ?? EpisodeProgressEntry(showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber)
 
             let previousWatchedState = entry.isWatched
-            entry.currentTime = currentTime
-            entry.totalDuration = totalDuration
+            guard let times = self.stableProgressTimes(
+                currentTime: currentTime,
+                totalDuration: totalDuration,
+                previousDuration: entry.totalDuration,
+                label: "episode S\(seasonNumber)E\(episodeNumber)"
+            ) else { return }
+            entry.currentTime = times.currentTime
+            entry.totalDuration = times.totalDuration
             entry.lastUpdated = Date()
 
             if entry.progress >= 0.85 {

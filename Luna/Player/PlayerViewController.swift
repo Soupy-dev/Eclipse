@@ -4211,7 +4211,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let cachedDurationIsReliable = cachedDuration.isFinite
             && cachedDuration >= minimumReliableDuration
             && safePosition <= cachedDuration + 2.0
-        let effectiveDuration = reportedDurationIsReliable ? duration : (cachedDurationIsReliable ? cachedDuration : 0)
+        let effectiveDuration: Double
+        if reportedDurationIsReliable, cachedDurationIsReliable {
+            effectiveDuration = max(duration, cachedDuration)
+        } else if reportedDurationIsReliable {
+            effectiveDuration = duration
+        } else if cachedDurationIsReliable {
+            effectiveDuration = cachedDuration
+        } else {
+            effectiveDuration = 0
+        }
         let durationIsReliable = effectiveDuration > 0
         let safeDuration = durationIsReliable ? max(effectiveDuration, safePosition + 0.5) : max(60.0, safePosition + 300.0)
 
@@ -4241,7 +4250,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         DispatchQueue.main.async {
             if reportedDurationIsReliable {
-                self.cachedDuration = duration
+                self.cachedDuration = max(self.cachedDuration, duration)
             }
 
             if waitingForInitialResume {

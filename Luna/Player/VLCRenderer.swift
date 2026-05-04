@@ -391,8 +391,7 @@ final class VLCRenderer: NSObject {
             self.applySubtitleStyleOptions(to: media)
 
             if let initialSeek, initialSeek > 0 {
-                media.addOption(":start-time=\(String(format: "%.3f", initialSeek))")
-                Logger.shared.log("[VLCRenderer.load] prepared initial seek \(Int(initialSeek))s", type: "Progress")
+                Logger.shared.log("[VLCRenderer.load] queued initial seek \(Int(initialSeek))s", type: "Progress")
             }
 
             // Tune caching and demuxer for local vs. remote playback
@@ -558,13 +557,11 @@ final class VLCRenderer: NSObject {
     private func reliableDuration(from player: VLCMediaPlayer) -> Double {
         let mediaDurationMs = player.media?.length.value?.doubleValue ?? 0
         let mediaDuration = mediaDurationMs / 1000.0
+        let cached = cachedDuration.isFinite && cachedDuration >= minimumReliableDuration ? cachedDuration : 0
         if mediaDuration.isFinite, mediaDuration >= minimumReliableDuration {
-            return mediaDuration
+            return max(mediaDuration, cached)
         }
-        if cachedDuration.isFinite, cachedDuration >= minimumReliableDuration {
-            return cachedDuration
-        }
-        return 0
+        return cached
     }
 
     private func completePictureInPictureSeek(_ completion: NativeVLCPiPSeekCompletion?) {
@@ -783,7 +780,7 @@ final class VLCRenderer: NSObject {
         let duration = progress.duration
         cachedPosition = position
         if duration.isFinite, duration > 0 {
-            cachedDuration = duration
+            cachedDuration = max(cachedDuration, duration)
         }
 
         if isPlaybackActive(player), isPaused {
@@ -928,7 +925,16 @@ final class VLCRenderer: NSObject {
         let cachedDurationFitsPosition = rawPosition <= 0 || rawPosition <= cachedDuration + 2.0
         let reportedDurationIsReliable = rawDuration.isFinite && rawDuration >= minimumReliableDuration && reportedDurationFitsPosition
         let cachedDurationIsReliable = cachedDuration.isFinite && cachedDuration >= minimumReliableDuration && cachedDurationFitsPosition
-        let duration = reportedDurationIsReliable ? rawDuration : (cachedDurationIsReliable ? cachedDuration : 0)
+        let duration: Double
+        if reportedDurationIsReliable, cachedDurationIsReliable {
+            duration = max(rawDuration, cachedDuration)
+        } else if reportedDurationIsReliable {
+            duration = rawDuration
+        } else if cachedDurationIsReliable {
+            duration = cachedDuration
+        } else {
+            duration = 0
+        }
         let isPlaying = isPlaybackActive(player) || (!isPaused && !isLoading)
 
         let position: Double
@@ -1013,12 +1019,11 @@ final class VLCRenderer: NSObject {
             guard let self, let player = self.mediaPlayer else { return }
 
             if restorePosition > 0 {
-                let durationMs = player.media?.length.value?.doubleValue ?? 0
-                let durationSec = durationMs / 1000.0
+                let durationSec = self.reliableDuration(from: player)
                 if durationSec >= self.minimumReliableDuration {
                     let normalized = min(max(restorePosition / durationSec, 0), 1)
                     self.setNormalizedPosition(normalized, on: player)
-                    self.cachedDuration = durationSec
+                    self.cachedDuration = max(self.cachedDuration, durationSec)
                 } else if self.cachedDuration >= self.minimumReliableDuration {
                     let normalized = min(max(restorePosition / self.cachedDuration, 0), 1)
                     self.setNormalizedPosition(normalized, on: player)
