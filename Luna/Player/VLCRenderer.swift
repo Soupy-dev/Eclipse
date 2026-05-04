@@ -161,10 +161,6 @@ final class VLCRenderer: NSObject {
     private var nativePiPAvailable = false
     private var nativePiPBlockedSeekDeadline: Date?
     private var nativePiPMediaControllerMode: String?
-    private var wasPausedBeforeBackground = true
-    private var backgroundedPosition: Double?
-    private var foregroundRestoreGeneration = 0
-    private var pausedForegroundRestoreGeneration = 0
     private var lastLoggedStateCode: Int?
     private var lastProgressLogBucket = -1
     private var lastProgressAnomalyKey: String?
@@ -351,12 +347,6 @@ final class VLCRenderer: NSObject {
                 self,
                 selector: #selector(handleAppWillEnterForeground),
                 name: UIApplication.willEnterForegroundNotification,
-                object: nil
-            )
-            NotificationCenter.default.addObserver(
-                self,
-                selector: #selector(handleAppDidBecomeActive),
-                name: UIApplication.didBecomeActiveNotification,
                 object: nil
             )
             
@@ -547,7 +537,6 @@ final class VLCRenderer: NSObject {
     func play() {
         logVLC("play requested snapshot={\(playerSnapshot())}", type: "Stream")
         isPaused = false
-        wasPausedBeforeBackground = false
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.delegate?.renderer(self, didChangePause: false)
@@ -1218,21 +1207,7 @@ final class VLCRenderer: NSObject {
     }
     
     @objc private func handleAppDidEnterBackground() {
-        let player = mediaPlayer
-        let pausedForBackground = player.map { player in
-            (isPaused || isVLCPlayerPausedState(player.state)) && !isPlayerActivelyPlaying(player)
-        } ?? isPaused
-        wasPausedBeforeBackground = pausedForBackground
-        backgroundedPosition = cachedPosition
-        logVLC("appDidEnterBackground pausedForBackground=\(pausedForBackground) backgroundedPosition=\(secondsText(backgroundedPosition)) snapshot={\(playerSnapshot(player))}", type: "Player")
-
-        if pausedForBackground {
-            Logger.shared.log("[VLCRenderer.PiP] entering background while paused; preserving paused video output", type: "Player")
-            isPaused = true
-            stopProgressPolling()
-            updatePictureInPicturePlaybackState()
-            return
-        }
+        logVLC("appDidEnterBackground snapshot={\(playerSnapshot())}", type: "Player")
 
         let pipEnabled = UserDefaults.standard.object(forKey: "vlcPiPEnabled") == nil
             ? true
@@ -1240,9 +1215,7 @@ final class VLCRenderer: NSObject {
 
         guard pipEnabled else {
             Logger.shared.log("[VLCRenderer.PiP] entering background with native VLC PiP disabled", type: "Player")
-            if !isPaused {
-                pausePlayback()
-            }
+            pausePlayback()
             return
         }
 
@@ -1253,10 +1226,8 @@ final class VLCRenderer: NSObject {
             }
         }
 
-        Logger.shared.log("[VLCRenderer.PiP] entering background without native VLC PiP", type: "Player")
-        if !isPaused {
-            pausePlayback()
-        }
+        Logger.shared.log("[VLCRenderer.PiP] entering background without native VLC PiP; pausing playback", type: "Player")
+        pausePlayback()
     }
     
     @objc private func handleAppWillEnterForeground() {
@@ -1265,177 +1236,9 @@ final class VLCRenderer: NSObject {
             Logger.shared.log("[VLCRenderer.PiP] returning to foreground; stopping native VLC PiP", type: "Player")
             stopPictureInPicture()
         }
-        restoreVideoAfterForeground()
-        scheduleForegroundVideoRestoreFollowUp()
-    }
-
-    @objc private func handleAppDidBecomeActive() {
-        guard !isPictureInPictureActive else { return }
-        logVLC("appDidBecomeActive snapshot={\(playerSnapshot())}", type: "Player")
-        restoreVideoAfterForeground()
-    }
-
-    private func scheduleForegroundVideoRestoreFollowUp() {
-        foregroundRestoreGeneration += 1
-        let generation = foregroundRestoreGeneration
-        logVLC("scheduleForegroundVideoRestoreFollowUp generation=\(generation)", type: "Player")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            guard let self, self.foregroundRestoreGeneration == generation else { return }
-            self.restoreVideoAfterForeground()
-        }
-    }
-
-    private func restoreVideoAfterForeground() {
-        guard isRunning, !isStopping else { return }
-        guard UIApplication.shared.applicationState != .background else { return }
-        let player = mediaPlayer
-        let playbackActive = player.map { isPlaybackActive($0) } ?? false
-        let playerPaused = player.map { isVLCPlayerPausedState($0.state) && !isPlayerActivelyPlaying($0) } ?? false
-        let shouldRestorePaused = (wasPausedBeforeBackground || isPaused || playerPaused) && isPaused && !playbackActive
-        logVLC("restoreVideoAfterForeground wasPausedBeforeBackground=\(wasPausedBeforeBackground) isPaused=\(isPaused) playerPaused=\(playerPaused) playbackActive=\(playbackActive) shouldRestorePaused=\(shouldRestorePaused) snapshot={\(playerSnapshot(player))}", type: "Player")
-        // Re-activate the audio session that iOS may have deactivated during background.
+        // Match the stable pre-foreground-restore behavior: normal no-PiP return
+        // only reactivates audio. PiP stop still performs its own drawable recovery.
         ensureAudioSessionActive()
-        reattachRenderingView()
-        if shouldRestorePaused {
-            restorePausedVideoAfterForeground()
-        } else {
-            recoverActiveVideoAfterForeground()
-        }
-    }
-
-    private func recoverActiveVideoAfterForeground() {
-        logVLC("recoverActiveVideoAfterForeground snapshot={\(playerSnapshot())}", type: "Player")
-        recoverRenderingViewAfterPictureInPictureStop(reloadMedia: false)
-        eventQueue.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-            guard let self, self.isRunning, !self.isStopping, let player = self.mediaPlayer, !self.isPaused else { return }
-            self.ensureAudioSessionActive()
-            player.play()
-            if self.currentPlaybackSpeed != 1.0 {
-                player.rate = Float(self.currentPlaybackSpeed)
-            }
-            self.startProgressPolling()
-            self.clearLoadingState()
-            self.updatePictureInPicturePlaybackState()
-            self.publishPlaybackProgress(from: player)
-            self.logVLC("recoverActiveVideoAfterForeground follow-up snapshot={\(self.playerSnapshot(player))}", type: "Player")
-        }
-    }
-
-    private func restorePausedVideoAfterForeground() {
-        let restorePosition = backgroundedPosition ?? cachedPosition
-        pausedForegroundRestoreGeneration += 1
-        let restoreGeneration = pausedForegroundRestoreGeneration
-        logVLC("restorePausedVideoAfterForeground restorePosition=\(secondsText(restorePosition)) snapshot={\(playerSnapshot())}", type: "Player")
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.mediaPlayer?.drawable = self.vlcView
-            self.vlcView.isHidden = false
-            self.vlcView.alpha = 1
-            self.vlcView.superview?.setNeedsLayout()
-            self.vlcView.superview?.layoutIfNeeded()
-            self.vlcView.setNeedsLayout()
-            self.vlcView.layoutIfNeeded()
-            self.delegate?.renderer(self, didChangePause: true)
-            if restorePosition > 0 {
-                self.delegate?.renderer(self, didUpdatePosition: restorePosition, duration: self.cachedDuration)
-            }
-        }
-
-        eventQueue.async { [weak self] in
-            guard let self, let player = self.mediaPlayer else { return }
-            guard self.isPaused else {
-                self.logVLC("restorePausedVideoAfterForeground aborted because playback resumed generation=\(restoreGeneration) snapshot={\(self.playerSnapshot(player))}", type: "Player")
-                return
-            }
-
-            if restorePosition > 0 {
-                let currentPosition = self.resolvedPlaybackProgress(from: player).position
-                if abs(currentPosition - restorePosition) > 0.75 {
-                    let durationSec = self.reliableDuration(from: player)
-                    if durationSec >= self.minimumReliableDuration {
-                        let normalized = min(max(restorePosition / durationSec, 0), 1)
-                        self.setNormalizedPosition(normalized, on: player)
-                        self.cachedDuration = max(self.cachedDuration, durationSec)
-                    } else if self.cachedDuration >= self.minimumReliableDuration {
-                        let normalized = min(max(restorePosition / self.cachedDuration, 0), 1)
-                        self.setNormalizedPosition(normalized, on: player)
-                    } else {
-                        self.pendingAbsoluteSeek = restorePosition
-                    }
-                }
-                self.cachedPosition = restorePosition
-            }
-
-            if self.isPlayerActivelyPlaying(player) || self.isPlayingState(player.state) {
-                player.pause()
-            }
-
-            self.isPaused = true
-            self.stopProgressPolling()
-            self.updatePictureInPicturePlaybackState()
-            self.schedulePausedForegroundFrameRefresh(generation: restoreGeneration, restorePosition: restorePosition)
-            self.logVLC("restorePausedVideoAfterForeground prepared frame refresh generation=\(restoreGeneration) snapshot={\(self.playerSnapshot(player))}", type: "Player")
-        }
-    }
-
-    private func schedulePausedForegroundFrameRefresh(generation: Int, restorePosition: Double) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-            guard let self, self.pausedForegroundRestoreGeneration == generation else { return }
-            guard self.isRunning, !self.isStopping else { return }
-            guard UIApplication.shared.applicationState != .background else { return }
-            guard !self.isPictureInPictureActive else {
-                self.logVLC("paused foreground frame refresh skipped: PiP active generation=\(generation)", type: "Player")
-                return
-            }
-
-            self.mediaPlayer?.drawable = nil
-            self.mediaPlayer?.drawable = self.vlcView
-            self.vlcView.isHidden = false
-            self.vlcView.alpha = 1
-            self.vlcView.superview?.setNeedsLayout()
-            self.vlcView.superview?.layoutIfNeeded()
-            self.vlcView.setNeedsLayout()
-            self.vlcView.layoutIfNeeded()
-            self.logDrawableSnapshot("paused foreground frame refresh layout")
-
-            self.eventQueue.asyncAfter(deadline: .now() + 0.08) { [weak self] in
-                guard let self, self.pausedForegroundRestoreGeneration == generation else { return }
-                guard self.isRunning, !self.isStopping, let player = self.mediaPlayer else { return }
-                guard UIApplication.shared.applicationState != .background else { return }
-                guard !self.isPictureInPictureActive else {
-                    self.logVLC("paused foreground frame refresh follow-up skipped: PiP active generation=\(generation)", type: "Player")
-                    return
-                }
-
-                if restorePosition > 0 {
-                    let currentPosition = self.resolvedPlaybackProgress(from: player).position
-                    if abs(currentPosition - restorePosition) > 0.75 {
-                        let durationSec = self.reliableDuration(from: player)
-                        if durationSec >= self.minimumReliableDuration {
-                            let normalized = min(max(restorePosition / durationSec, 0), 1)
-                            self.setNormalizedPosition(normalized, on: player)
-                            self.cachedDuration = max(self.cachedDuration, durationSec)
-                        } else if self.cachedDuration >= self.minimumReliableDuration {
-                            let normalized = min(max(restorePosition / self.cachedDuration, 0), 1)
-                            self.setNormalizedPosition(normalized, on: player)
-                        } else {
-                            self.pendingAbsoluteSeek = restorePosition
-                        }
-                        self.cachedPosition = restorePosition
-                    }
-                }
-
-                if self.isPaused && !self.isPlaybackActive(player) {
-                    self.refreshPausedVideoFrameIfPossible(player)
-                    self.stopProgressPolling()
-                    self.updatePictureInPicturePlaybackState()
-                    self.publishPlaybackProgress(from: player)
-                    self.logVLC("paused foreground frame refresh completed generation=\(generation) snapshot={\(self.playerSnapshot(player))}", type: "Player")
-                } else {
-                    self.logVLC("paused foreground frame refresh skipped frame advance because playback resumed generation=\(generation) snapshot={\(self.playerSnapshot(player))}", type: "Player")
-                }
-            }
-        }
     }
 
     private func refreshPausedVideoFrameIfPossible(_ player: VLCMediaPlayer) {
