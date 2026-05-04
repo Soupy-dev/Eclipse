@@ -642,6 +642,15 @@ final class VLCRenderer: NSObject {
                 return
             }
 
+            guard self.nativePiPMediaControllerMode == "vlc-media-player" else {
+                Logger.shared.log("[VLCRenderer.PiP] seek ignored: drawable-shim mode cannot seek without closing PiP offsetMs=\(offset) snapshot={\(self.playerSnapshot(player))}", type: "Player")
+                self.updatePictureInPicturePlaybackState()
+                DispatchQueue.main.async {
+                    completion?()
+                }
+                return
+            }
+
             let duration = self.reliableDuration(from: player)
             guard duration >= self.minimumReliableDuration else {
                 Logger.shared.log("[VLCRenderer.PiP] seek ignored: duration unavailable offsetMs=\(offset) snapshot={\(self.playerSnapshot(player))}", type: "Player")
@@ -1405,8 +1414,9 @@ final class VLCRenderer: NSObject {
         } else {
             duration = cachedDuration
         }
-        let seekable = isRunning && !isStopping && duration >= minimumReliableDuration
-        logPiPMediaQueryIfNeeded(key: "isMediaSeekable", message: "isMediaSeekable queried -> \(seekable) duration=\(secondsText(duration)) mode=\(nativePiPMediaControllerMode ?? "nil")")
+        let isNativeMediaController = nativePiPMediaControllerMode == "vlc-media-player"
+        let seekable = isNativeMediaController && isRunning && !isStopping && duration >= minimumReliableDuration
+        logPiPMediaQueryIfNeeded(key: "isMediaSeekable", message: "isMediaSeekable queried -> \(seekable) duration=\(secondsText(duration)) mode=\(nativePiPMediaControllerMode ?? "nil") nativeController=\(isNativeMediaController)")
         return seekable
     }
 
