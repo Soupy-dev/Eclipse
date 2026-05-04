@@ -1312,9 +1312,9 @@ final class VLCRenderer: NSObject {
         }
 
         guard isPictureInPictureSettingEnabled else {
-            Logger.shared.log("[VLCRenderer.PiP] entering background with native VLC PiP disabled", type: "Player")
+            Logger.shared.log("[VLCRenderer.PiP] entering background with native VLC PiP disabled; keeping drawable attached", type: "Player")
             pausePlayback(forceSendToPlayer: true)
-            detachRenderingViewForBackground(reason: "pip-disabled")
+            logDrawableSnapshot("appDidEnterBackground PiP disabled no detach")
             return
         }
 
@@ -1327,9 +1327,9 @@ final class VLCRenderer: NSObject {
             Logger.shared.log("[VLCRenderer.PiP] background native PiP start rejected by controller path", type: "Player")
         }
 
-        Logger.shared.log("[VLCRenderer.PiP] entering background without native VLC PiP; pausing playback", type: "Player")
+        Logger.shared.log("[VLCRenderer.PiP] entering background without native VLC PiP; pausing playback and keeping drawable attached", type: "Player")
         pausePlayback(forceSendToPlayer: true)
-        detachRenderingViewForBackground(reason: "no-pip")
+        logDrawableSnapshot("appDidEnterBackground no PiP no detach")
     }
     
     @objc private func handleAppWillEnterForeground() {
@@ -1343,7 +1343,10 @@ final class VLCRenderer: NSObject {
         // Match the stable pre-foreground-restore behavior: normal no-PiP return
         // only reactivates audio. PiP stop still performs its own drawable recovery.
         ensureAudioSessionActive()
-        restoreBackgroundDetachedDrawableIfNeeded()
+        if detachedDrawableForBackground {
+            Logger.shared.log("[VLCRenderer.PiP] foreground found a stale background-detached drawable; restoring once", type: "Player")
+            restoreBackgroundDetachedDrawableIfNeeded()
+        }
     }
 
     private func refreshPausedVideoFrameIfPossible(_ player: VLCMediaPlayer) {
