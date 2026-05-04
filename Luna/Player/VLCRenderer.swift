@@ -69,7 +69,7 @@ private final class VLCPictureInPictureDrawableView: UIView {
 
     @objc(canStartPictureInPictureAutomaticallyFromInline)
     func canStartPictureInPictureAutomaticallyFromInline() -> Bool {
-        return true
+        return renderer?.canStartPictureInPictureAutomaticallyFromInline == true
     }
 
     @objc(play)
@@ -232,6 +232,16 @@ final class VLCRenderer: NSObject {
             let superBounds = self.vlcView.superview?.bounds ?? .zero
             self.logVLC("\(event) drawable hidden=\(self.vlcView.isHidden) alpha=\(String(format: "%.2f", self.vlcView.alpha)) bounds=\(String(format: "%.0fx%.0f", bounds.width, bounds.height)) super=\(String(format: "%.0fx%.0f", superBounds.width, superBounds.height)) snapshot={\(self.playerSnapshot())}")
         }
+    }
+
+    private var isPictureInPictureSettingEnabled: Bool {
+        UserDefaults.standard.object(forKey: "vlcPiPEnabled") == nil
+            ? true
+            : UserDefaults.standard.bool(forKey: "vlcPiPEnabled")
+    }
+
+    fileprivate var canStartPictureInPictureAutomaticallyFromInline: Bool {
+        return isPictureInPictureSettingEnabled && !isPaused
     }
 
     private func reattachRenderingView() {
@@ -536,6 +546,7 @@ final class VLCRenderer: NSObject {
     
     func play() {
         logVLC("play requested snapshot={\(playerSnapshot())}", type: "Stream")
+        logDrawableSnapshot("play requested")
         isPaused = false
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -561,6 +572,7 @@ final class VLCRenderer: NSObject {
         }
         updatePictureInPicturePlaybackState()
         logVLC("play submitted snapshot={\(playerSnapshot(player))}", type: "Stream")
+        logDrawableSnapshot("play submitted")
     }
 
     /// Reload the current media and seek back to the last known position.
@@ -575,12 +587,13 @@ final class VLCRenderer: NSObject {
         }
     }
     
-    func pausePlayback() {
+    func pausePlayback(forceSendToPlayer: Bool = false) {
         let player = mediaPlayer
         let shouldSendPause = player.map {
-            isPlayerActivelyPlaying($0) || isPlayingState($0.state) || (!isPaused && !isVLCPlayerPausedState($0.state) && !isTerminalState($0.state))
+            forceSendToPlayer || isPlayerActivelyPlaying($0) || isPlayingState($0.state) || (!isPaused && !isVLCPlayerPausedState($0.state) && !isTerminalState($0.state))
         } ?? !isPaused
-        logVLC("pause requested shouldSendPause=\(shouldSendPause) snapshot={\(playerSnapshot(player))}", type: "Stream")
+        logVLC("pause requested forceSend=\(forceSendToPlayer) shouldSendPause=\(shouldSendPause) snapshot={\(playerSnapshot(player))}", type: "Stream")
+        logDrawableSnapshot("pause requested")
         isPaused = true
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -593,6 +606,7 @@ final class VLCRenderer: NSObject {
         stopProgressPolling()
         updatePictureInPicturePlaybackState()
         logVLC("pause completed snapshot={\(playerSnapshot(player))}", type: "Stream")
+        logDrawableSnapshot("pause completed")
     }
     
     func togglePause() {
@@ -1208,14 +1222,11 @@ final class VLCRenderer: NSObject {
     
     @objc private func handleAppDidEnterBackground() {
         logVLC("appDidEnterBackground snapshot={\(playerSnapshot())}", type: "Player")
+        logDrawableSnapshot("appDidEnterBackground")
 
-        let pipEnabled = UserDefaults.standard.object(forKey: "vlcPiPEnabled") == nil
-            ? true
-            : UserDefaults.standard.bool(forKey: "vlcPiPEnabled")
-
-        guard pipEnabled else {
+        guard isPictureInPictureSettingEnabled else {
             Logger.shared.log("[VLCRenderer.PiP] entering background with native VLC PiP disabled", type: "Player")
-            pausePlayback()
+            pausePlayback(forceSendToPlayer: true)
             return
         }
 
@@ -1227,11 +1238,12 @@ final class VLCRenderer: NSObject {
         }
 
         Logger.shared.log("[VLCRenderer.PiP] entering background without native VLC PiP; pausing playback", type: "Player")
-        pausePlayback()
+        pausePlayback(forceSendToPlayer: true)
     }
     
     @objc private func handleAppWillEnterForeground() {
         logVLC("appWillEnterForeground snapshot={\(playerSnapshot())}", type: "Player")
+        logDrawableSnapshot("appWillEnterForeground")
         if isPictureInPictureActive {
             Logger.shared.log("[VLCRenderer.PiP] returning to foreground; stopping native VLC PiP", type: "Player")
             stopPictureInPicture()
@@ -1354,6 +1366,11 @@ final class VLCRenderer: NSObject {
                 _ = self?.startPictureInPicture()
             }
             return nativePiPAvailable
+        }
+
+        guard isPictureInPictureSettingEnabled else {
+            Logger.shared.log("[VLCRenderer.PiP] start blocked: VLC PiP setting is off", type: "Player")
+            return false
         }
 
         guard nativePiPAvailable else {
