@@ -17,6 +17,8 @@ jobs:
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
+      - name: Install CocoaPods
+        run: sudo gem install cocoapods
       - name: Make build script executable
         run: chmod +x ./ipabuild.sh
       - name: Build iOS IPA

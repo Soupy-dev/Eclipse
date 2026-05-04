@@ -95,6 +95,30 @@ final class PlayerSettingsStore: ObservableObject {
         didSet { UserDefaults.standard.set(nextEpisodeThreshold, forKey: "nextEpisodeThreshold") }
     }
 
+    @Published var vlcBrightnessGestureEnabled: Bool {
+        didSet { UserDefaults.standard.set(vlcBrightnessGestureEnabled, forKey: "vlcBrightnessGestureEnabled") }
+    }
+
+    @Published var vlcVolumeGestureEnabled: Bool {
+        didSet { UserDefaults.standard.set(vlcVolumeGestureEnabled, forKey: "vlcVolumeGestureEnabled") }
+    }
+
+    @Published var playerTwoFingerTapPlayPauseEnabled: Bool {
+        didSet { UserDefaults.standard.set(playerTwoFingerTapPlayPauseEnabled, forKey: "playerTwoFingerTapPlayPauseEnabled") }
+    }
+
+    @Published var vlcPiPEnabled: Bool {
+        didSet { UserDefaults.standard.set(vlcPiPEnabled, forKey: "vlcPiPEnabled") }
+    }
+
+    @Published var vlcOpenSubtitlesEnabled: Bool {
+        didSet { UserDefaults.standard.set(vlcOpenSubtitlesEnabled, forKey: "vlcOpenSubtitlesEnabled") }
+    }
+
+    @Published var vlcOpenSubtitlesAutoFallbackEnabled: Bool {
+        didSet { UserDefaults.standard.set(vlcOpenSubtitlesAutoFallbackEnabled, forKey: "vlcOpenSubtitlesAutoFallbackEnabled") }
+    }
+
     init() {
         let savedSpeed = UserDefaults.standard.double(forKey: "holdSpeedPlayer")
         self.holdSpeed = savedSpeed > 0 ? savedSpeed : 2.0
@@ -133,6 +157,37 @@ final class PlayerSettingsStore: ObservableObject {
 
         let savedThreshold = UserDefaults.standard.double(forKey: "nextEpisodeThreshold")
         self.nextEpisodeThreshold = savedThreshold > 0 ? savedThreshold : 0.90
+
+        self.vlcBrightnessGestureEnabled = UserDefaults.standard.bool(forKey: "vlcBrightnessGestureEnabled")
+        self.vlcVolumeGestureEnabled = UserDefaults.standard.bool(forKey: "vlcVolumeGestureEnabled")
+
+        if UserDefaults.standard.object(forKey: "playerTwoFingerTapPlayPauseEnabled") == nil {
+            if let legacy = UserDefaults.standard.object(forKey: "mpvTwoFingerTapEnabled") as? Bool {
+                UserDefaults.standard.set(legacy, forKey: "playerTwoFingerTapPlayPauseEnabled")
+                self.playerTwoFingerTapPlayPauseEnabled = legacy
+            } else {
+                UserDefaults.standard.set(true, forKey: "playerTwoFingerTapPlayPauseEnabled")
+                self.playerTwoFingerTapPlayPauseEnabled = true
+            }
+        } else {
+            self.playerTwoFingerTapPlayPauseEnabled = UserDefaults.standard.bool(forKey: "playerTwoFingerTapPlayPauseEnabled")
+        }
+
+        if UserDefaults.standard.object(forKey: "vlcPiPEnabled") == nil {
+            UserDefaults.standard.set(true, forKey: "vlcPiPEnabled")
+            self.vlcPiPEnabled = true
+        } else {
+            self.vlcPiPEnabled = UserDefaults.standard.bool(forKey: "vlcPiPEnabled")
+        }
+
+        self.vlcOpenSubtitlesEnabled = UserDefaults.standard.bool(forKey: "vlcOpenSubtitlesEnabled")
+
+        if UserDefaults.standard.object(forKey: "vlcOpenSubtitlesAutoFallbackEnabled") == nil {
+            UserDefaults.standard.set(true, forKey: "vlcOpenSubtitlesAutoFallbackEnabled")
+            self.vlcOpenSubtitlesAutoFallbackEnabled = true
+        } else {
+            self.vlcOpenSubtitlesAutoFallbackEnabled = UserDefaults.standard.bool(forKey: "vlcOpenSubtitlesAutoFallbackEnabled")
+        }
     }
 }
 
@@ -232,81 +287,74 @@ struct PlayerSettingsView: View {
             }
             
             if store.inAppPlayer == .vlc {
-                Section(header: Text("VLC Player"), footer: Text("Configure default subtitle and audio settings.")) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Enable Subtitles by Default")
-                                .font(.subheadline)
-                                .fontWeight(.medium)
-                            
-                            Text("Automatically load and display subtitles when available.")
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .multilineTextAlignment(.leading)
+                Section(header: Text("VLC Player"), footer: Text("VLC-only playback, subtitle, PiP, and gesture settings.")) {
+                    DisclosureGroup {
+                        settingsToggleRow(
+                            title: "Enable Subtitles by Default",
+                            detail: "Automatically load and display subtitles when available.",
+                            binding: Binding(
+                                get: { UserDefaults.standard.bool(forKey: "enableSubtitlesByDefault") },
+                                set: { UserDefaults.standard.set($0, forKey: "enableSubtitlesByDefault") }
+                            )
+                        )
+
+                        NavigationLink(destination: VLCLanguageSelectionView(
+                            title: "Default Subtitle Language",
+                            selectedLanguage: Binding(
+                                get: { UserDefaults.standard.string(forKey: "defaultSubtitleLanguage") ?? "eng" },
+                                set: { UserDefaults.standard.set($0, forKey: "defaultSubtitleLanguage") }
+                            )
+                        )) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Default Subtitle Language")
+                                        .font(.subheadline)
+                                        .fontWeight(.medium)
+
+                                    Text("Language preference for subtitles.")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+
+                                Spacer()
+
+                                Text(getLanguageName(UserDefaults.standard.string(forKey: "defaultSubtitleLanguage") ?? "eng"))
+                                    .foregroundColor(.secondary)
+                                    .font(.caption)
+                            }
                         }
-                        
-                        Spacer()
-                        
-                        Toggle("", isOn: Binding(
-                            get: { UserDefaults.standard.bool(forKey: "enableSubtitlesByDefault") },
-                            set: { UserDefaults.standard.set($0, forKey: "enableSubtitlesByDefault") }
-                        ))
-                        .tint(accentColorManager.currentAccentColor)
+
+                        NavigationLink(destination: VLCLanguageSelectionView(
+                            title: "Preferred Anime Audio",
+                            selectedLanguage: Binding(
+                                get: { UserDefaults.standard.string(forKey: "preferredAnimeAudioLanguage") ?? "jpn" },
+                                set: { UserDefaults.standard.set($0, forKey: "preferredAnimeAudioLanguage") }
+                            )
+                        )) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Preferred Anime Audio")
+                                        .font(.subheadline)
+                                        .fontWeight(.medium)
+
+                                    Text("Audio language for anime content.")
+                                        .font(.caption)
+                                        .foregroundColor(.secondary)
+                                }
+
+                                Spacer()
+
+                                Text(getLanguageName(UserDefaults.standard.string(forKey: "preferredAnimeAudioLanguage") ?? "jpn"))
+                                    .foregroundColor(.secondary)
+                                    .font(.caption)
+                            }
+                        }
+                    } label: {
+                        Label("Subtitle Defaults", systemImage: "captions.bubble")
                     }
 
-                    NavigationLink(destination: VLCLanguageSelectionView(
-                        title: "Default Subtitle Language",
-                        selectedLanguage: Binding(
-                            get: { UserDefaults.standard.string(forKey: "defaultSubtitleLanguage") ?? "eng" },
-                            set: { UserDefaults.standard.set($0, forKey: "defaultSubtitleLanguage") }
-                        )
-                    )) {
+                    DisclosureGroup {
                         HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Default Subtitle Language")
-                                    .font(.subheadline)
-                                    .fontWeight(.medium)
-                                
-                                Text("Language preference for subtitles.")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            
-                            Spacer()
-                            
-                            Text(getLanguageName(UserDefaults.standard.string(forKey: "defaultSubtitleLanguage") ?? "eng"))
-                                .foregroundColor(.secondary)
-                                .font(.caption)
-                        }
-                    }
-                    
-                    NavigationLink(destination: VLCLanguageSelectionView(
-                        title: "Preferred Anime Audio",
-                        selectedLanguage: Binding(
-                            get: { UserDefaults.standard.string(forKey: "preferredAnimeAudioLanguage") ?? "jpn" },
-                            set: { UserDefaults.standard.set($0, forKey: "preferredAnimeAudioLanguage") }
-                        )
-                    )) {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Preferred Anime Audio")
-                                    .font(.subheadline)
-                                    .fontWeight(.medium)
-                                
-                                Text("Audio language for anime content.")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-                            
-                            Spacer()
-                            
-                            Text(getLanguageName(UserDefaults.standard.string(forKey: "preferredAnimeAudioLanguage") ?? "jpn"))
-                                .foregroundColor(.secondary)
-                                .font(.caption)
-                        }
-                    }
-
-                    HStack {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text("Subtitle Text Color")
                                     .font(.subheadline)
@@ -440,6 +488,59 @@ struct PlayerSettingsView: View {
                                     .foregroundColor(accentColorManager.currentAccentColor)
                             }
                         }
+                    } label: {
+                        Label("Subtitle Appearance", systemImage: "textformat.size")
+                    }
+
+                    DisclosureGroup {
+                        settingsToggleRow(
+                            title: "Brightness Gesture",
+                            detail: "Use a left-side vertical drag for screen brightness.",
+                            binding: $store.vlcBrightnessGestureEnabled
+                        )
+
+                        settingsToggleRow(
+                            title: "Volume Gesture",
+                            detail: "Use a top-right horizontal drag for system volume.",
+                            binding: $store.vlcVolumeGestureEnabled
+                        )
+
+                        settingsToggleRow(
+                            title: "Two-Finger Play/Pause",
+                            detail: "Toggle play and pause with a two-finger tap.",
+                            binding: $store.playerTwoFingerTapPlayPauseEnabled
+                        )
+                    } label: {
+                        Label("Playback Gestures", systemImage: "hand.draw")
+                    }
+
+                    DisclosureGroup {
+                        settingsToggleRow(
+                            title: "Picture in Picture",
+                            detail: "Allow native VLC PiP from the button or while entering the background.",
+                            binding: $store.vlcPiPEnabled
+                        )
+                    } label: {
+                        Label("Picture in Picture", systemImage: "pip")
+                    }
+
+                    DisclosureGroup {
+                        settingsToggleRow(
+                            title: "OpenSubtitles",
+                            detail: "Enable VLC subtitle search through the Stremio OpenSubtitles v3 add-on.",
+                            binding: $store.vlcOpenSubtitlesEnabled
+                        )
+
+                        if store.vlcOpenSubtitlesEnabled {
+                            settingsToggleRow(
+                                title: "Use as Auto Fallback",
+                                detail: "When auto subtitles are on, search OpenSubtitles if the selected language is missing locally.",
+                                binding: $store.vlcOpenSubtitlesAutoFallbackEnabled
+                            )
+                        }
+                    } label: {
+                        Label("OpenSubtitles", systemImage: "globe")
+                    }
                 }
 
                 Section(header: Text("Skip Segments")) {
@@ -618,6 +719,26 @@ struct PlayerSettingsView: View {
             "rus": "Russian"
         ]
         return languages[code] ?? code.uppercased()
+    }
+
+    private func settingsToggleRow(title: String, detail: String, binding: Binding<Bool>) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+
+                Text(detail)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.leading)
+            }
+
+            Spacer()
+
+            Toggle("", isOn: binding)
+                .tint(accentColorManager.currentAccentColor)
+        }
     }
 
     private var subtitleTextColorOptions: [(name: String, color: UIColor)] {

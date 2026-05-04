@@ -36,6 +36,12 @@ struct StremioManifest: Codable {
         guard let resources = resources else { return false }
         return resources.contains { $0.isStream }
     }
+
+    /// Whether this addon supports the "subtitles" resource
+    var supportsSubtitles: Bool {
+        guard let resources = resources else { return false }
+        return resources.contains { $0.isSubtitles }
+    }
 }
 
 struct StremioManifestBehaviorHints: Codable {
@@ -53,6 +59,13 @@ enum StremioResource: Codable {
         switch self {
         case .simple(let name): return name == "stream"
         case .detailed(let detail): return detail.name == "stream"
+        }
+    }
+
+    var isSubtitles: Bool {
+        switch self {
+        case .simple(let name): return name == "subtitles"
+        case .detailed(let detail): return detail.name == "subtitles"
         }
     }
 
@@ -110,6 +123,31 @@ struct StremioStreamResponse: Codable {
             streams = decoded.isEmpty ? nil : decoded
         } else {
             streams = nil
+        }
+    }
+}
+
+struct StremioSubtitleResponse: Codable, Sendable {
+    let subtitles: [StremioSubtitle]?
+
+    enum CodingKeys: String, CodingKey {
+        case subtitles
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if var unkeyedContainer = try? container.nestedUnkeyedContainer(forKey: .subtitles) {
+            var decoded = [StremioSubtitle]()
+            while !unkeyedContainer.isAtEnd {
+                if let subtitle = try? unkeyedContainer.decode(StremioSubtitle.self) {
+                    decoded.append(subtitle)
+                } else {
+                    _ = try? unkeyedContainer.decode(AnyCodable.self)
+                }
+            }
+            subtitles = decoded.isEmpty ? nil : decoded
+        } else {
+            subtitles = nil
         }
     }
 }
@@ -200,13 +238,15 @@ struct StremioProxyHeaders: Codable {
     let request: [String: String]?
 }
 
-struct StremioSubtitle: Codable {
+struct StremioSubtitle: Codable, Sendable {
     let id: String?
     let url: String?
     let lang: String?
+    let name: String?
+    let title: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, url, lang
+        case id, url, lang, name, title
     }
 
     init(from decoder: Decoder) throws {
@@ -221,6 +261,15 @@ struct StremioSubtitle: Codable {
         }
         url = try? container.decodeIfPresent(String.self, forKey: .url)
         lang = try? container.decodeIfPresent(String.self, forKey: .lang)
+        name = try? container.decodeIfPresent(String.self, forKey: .name)
+        title = try? container.decodeIfPresent(String.self, forKey: .title)
+    }
+
+    var displayName: String {
+        if let name, !name.isEmpty { return name }
+        if let title, !title.isEmpty { return title }
+        if let lang, !lang.isEmpty { return lang.uppercased() }
+        return id ?? "OpenSubtitles"
     }
 }
 

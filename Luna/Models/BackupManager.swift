@@ -36,6 +36,12 @@ struct BackupData: Codable {
     var showNextEpisodeButton: Bool = true
     var nextEpisodeThreshold: Double = 0.90
     var vlcHeaderProxyEnabled: Bool = true
+    var vlcBrightnessGestureEnabled: Bool = false
+    var vlcVolumeGestureEnabled: Bool = false
+    var playerTwoFingerTapPlayPauseEnabled: Bool = true
+    var vlcPiPEnabled: Bool = true
+    var vlcOpenSubtitlesEnabled: Bool = false
+    var vlcOpenSubtitlesAutoFallbackEnabled: Bool = true
 
     // Subtitle Styling
     var subtitleForegroundColor: Data?
@@ -106,6 +112,7 @@ struct BackupData: Codable {
         case version, createdDate
         case accentColor, tmdbLanguage, selectedAppearance, enableSubtitlesByDefault, defaultSubtitleLanguage, enableVLCSubtitleEditMenu, preferredAnimeAudioLanguage, inAppPlayer, playerChoice, showScheduleTab, showLocalScheduleTime
         case holdSpeedPlayer, externalPlayer, alwaysLandscape, aniSkipAutoSkip, skip85sEnabled, showNextEpisodeButton, nextEpisodeThreshold, vlcHeaderProxyEnabled
+        case vlcBrightnessGestureEnabled, vlcVolumeGestureEnabled, playerTwoFingerTapPlayPauseEnabled, vlcPiPEnabled, vlcOpenSubtitlesEnabled, vlcOpenSubtitlesAutoFallbackEnabled
         case subtitleForegroundColor, subtitleStrokeColor, subtitleStrokeWidth, subtitleFontSize, subtitleVerticalOffset
         case showKanzen, kanzenAutoMode, kanzenAutoUpdateModules, seasonMenu, horizontalEpisodeList, useClassicScheduleUI, mediaColumnsPortrait, mediaColumnsLandscape
         case readingMode
@@ -146,6 +153,12 @@ struct BackupData: Codable {
         showNextEpisodeButton = try container.decodeIfPresent(Bool.self, forKey: .showNextEpisodeButton) ?? true
         nextEpisodeThreshold = try container.decodeIfPresent(Double.self, forKey: .nextEpisodeThreshold) ?? 0.90
         vlcHeaderProxyEnabled = try container.decodeIfPresent(Bool.self, forKey: .vlcHeaderProxyEnabled) ?? true
+        vlcBrightnessGestureEnabled = try container.decodeIfPresent(Bool.self, forKey: .vlcBrightnessGestureEnabled) ?? false
+        vlcVolumeGestureEnabled = try container.decodeIfPresent(Bool.self, forKey: .vlcVolumeGestureEnabled) ?? false
+        playerTwoFingerTapPlayPauseEnabled = try container.decodeIfPresent(Bool.self, forKey: .playerTwoFingerTapPlayPauseEnabled) ?? true
+        vlcPiPEnabled = try container.decodeIfPresent(Bool.self, forKey: .vlcPiPEnabled) ?? true
+        vlcOpenSubtitlesEnabled = try container.decodeIfPresent(Bool.self, forKey: .vlcOpenSubtitlesEnabled) ?? false
+        vlcOpenSubtitlesAutoFallbackEnabled = try container.decodeIfPresent(Bool.self, forKey: .vlcOpenSubtitlesAutoFallbackEnabled) ?? true
 
         // Subtitle styling
         subtitleForegroundColor = try container.decodeIfPresent(Data.self, forKey: .subtitleForegroundColor)
@@ -221,6 +234,12 @@ struct BackupData: Codable {
         try container.encode(showNextEpisodeButton, forKey: .showNextEpisodeButton)
         try container.encode(nextEpisodeThreshold, forKey: .nextEpisodeThreshold)
         try container.encode(vlcHeaderProxyEnabled, forKey: .vlcHeaderProxyEnabled)
+        try container.encode(vlcBrightnessGestureEnabled, forKey: .vlcBrightnessGestureEnabled)
+        try container.encode(vlcVolumeGestureEnabled, forKey: .vlcVolumeGestureEnabled)
+        try container.encode(playerTwoFingerTapPlayPauseEnabled, forKey: .playerTwoFingerTapPlayPauseEnabled)
+        try container.encode(vlcPiPEnabled, forKey: .vlcPiPEnabled)
+        try container.encode(vlcOpenSubtitlesEnabled, forKey: .vlcOpenSubtitlesEnabled)
+        try container.encode(vlcOpenSubtitlesAutoFallbackEnabled, forKey: .vlcOpenSubtitlesAutoFallbackEnabled)
 
         // Subtitle styling
         try container.encodeIfPresent(subtitleForegroundColor, forKey: .subtitleForegroundColor)
@@ -295,6 +314,12 @@ struct BackupData: Codable {
         showNextEpisodeButton: Bool = true,
         nextEpisodeThreshold: Double = 0.90,
         vlcHeaderProxyEnabled: Bool = true,
+        vlcBrightnessGestureEnabled: Bool = false,
+        vlcVolumeGestureEnabled: Bool = false,
+        playerTwoFingerTapPlayPauseEnabled: Bool = true,
+        vlcPiPEnabled: Bool = true,
+        vlcOpenSubtitlesEnabled: Bool = false,
+        vlcOpenSubtitlesAutoFallbackEnabled: Bool = true,
 
         // Subtitle styling
         subtitleForegroundColor: Data? = nil,
@@ -366,6 +391,12 @@ struct BackupData: Codable {
         self.showNextEpisodeButton = showNextEpisodeButton
         self.nextEpisodeThreshold = nextEpisodeThreshold
         self.vlcHeaderProxyEnabled = vlcHeaderProxyEnabled
+        self.vlcBrightnessGestureEnabled = vlcBrightnessGestureEnabled
+        self.vlcVolumeGestureEnabled = vlcVolumeGestureEnabled
+        self.playerTwoFingerTapPlayPauseEnabled = playerTwoFingerTapPlayPauseEnabled
+        self.vlcPiPEnabled = vlcPiPEnabled
+        self.vlcOpenSubtitlesEnabled = vlcOpenSubtitlesEnabled
+        self.vlcOpenSubtitlesAutoFallbackEnabled = vlcOpenSubtitlesAutoFallbackEnabled
 
         self.subtitleForegroundColor = subtitleForegroundColor
         self.subtitleStrokeColor = subtitleStrokeColor
@@ -558,6 +589,17 @@ class BackupManager {
         let savedNextThreshold = userDefaults.double(forKey: "nextEpisodeThreshold")
         let nextEpisodeThreshold = savedNextThreshold > 0 ? savedNextThreshold : 0.90
         let vlcHeaderProxyEnabled = userDefaults.object(forKey: "vlcHeaderProxyEnabled") as? Bool ?? true
+        let vlcBrightnessGestureEnabled = userDefaults.bool(forKey: "vlcBrightnessGestureEnabled")
+        let vlcVolumeGestureEnabled = userDefaults.bool(forKey: "vlcVolumeGestureEnabled")
+        let playerTwoFingerTapPlayPauseEnabled: Bool
+        if userDefaults.object(forKey: "playerTwoFingerTapPlayPauseEnabled") == nil {
+            playerTwoFingerTapPlayPauseEnabled = userDefaults.object(forKey: "mpvTwoFingerTapEnabled") as? Bool ?? true
+        } else {
+            playerTwoFingerTapPlayPauseEnabled = userDefaults.bool(forKey: "playerTwoFingerTapPlayPauseEnabled")
+        }
+        let vlcPiPEnabled = userDefaults.object(forKey: "vlcPiPEnabled") == nil ? true : userDefaults.bool(forKey: "vlcPiPEnabled")
+        let vlcOpenSubtitlesEnabled = userDefaults.bool(forKey: "vlcOpenSubtitlesEnabled")
+        let vlcOpenSubtitlesAutoFallbackEnabled = userDefaults.object(forKey: "vlcOpenSubtitlesAutoFallbackEnabled") == nil ? true : userDefaults.bool(forKey: "vlcOpenSubtitlesAutoFallbackEnabled")
 
         // Subtitle styling
         let subtitleForegroundColor = userDefaults.data(forKey: "subtitles_foregroundColor")
@@ -704,6 +746,12 @@ class BackupManager {
             showNextEpisodeButton: showNextEpisodeButton,
             nextEpisodeThreshold: nextEpisodeThreshold,
             vlcHeaderProxyEnabled: vlcHeaderProxyEnabled,
+            vlcBrightnessGestureEnabled: vlcBrightnessGestureEnabled,
+            vlcVolumeGestureEnabled: vlcVolumeGestureEnabled,
+            playerTwoFingerTapPlayPauseEnabled: playerTwoFingerTapPlayPauseEnabled,
+            vlcPiPEnabled: vlcPiPEnabled,
+            vlcOpenSubtitlesEnabled: vlcOpenSubtitlesEnabled,
+            vlcOpenSubtitlesAutoFallbackEnabled: vlcOpenSubtitlesAutoFallbackEnabled,
 
             subtitleForegroundColor: subtitleForegroundColor,
             subtitleStrokeColor: subtitleStrokeColor,
@@ -825,6 +873,12 @@ class BackupManager {
         let showNextEpisodeButton = json["showNextEpisodeButton"] as? Bool ?? true
         let nextEpisodeThreshold = json["nextEpisodeThreshold"] as? Double ?? 0.90
         let vlcHeaderProxyEnabled = json["vlcHeaderProxyEnabled"] as? Bool ?? true
+        let vlcBrightnessGestureEnabled = json["vlcBrightnessGestureEnabled"] as? Bool ?? false
+        let vlcVolumeGestureEnabled = json["vlcVolumeGestureEnabled"] as? Bool ?? false
+        let playerTwoFingerTapPlayPauseEnabled = json["playerTwoFingerTapPlayPauseEnabled"] as? Bool ?? true
+        let vlcPiPEnabled = json["vlcPiPEnabled"] as? Bool ?? true
+        let vlcOpenSubtitlesEnabled = json["vlcOpenSubtitlesEnabled"] as? Bool ?? false
+        let vlcOpenSubtitlesAutoFallbackEnabled = json["vlcOpenSubtitlesAutoFallbackEnabled"] as? Bool ?? true
 
         // Subtitle styling
         let subtitleForegroundColor = json["subtitleForegroundColor"] as? Data
@@ -1013,6 +1067,12 @@ class BackupManager {
             showNextEpisodeButton: showNextEpisodeButton,
             nextEpisodeThreshold: nextEpisodeThreshold,
             vlcHeaderProxyEnabled: vlcHeaderProxyEnabled,
+            vlcBrightnessGestureEnabled: vlcBrightnessGestureEnabled,
+            vlcVolumeGestureEnabled: vlcVolumeGestureEnabled,
+            playerTwoFingerTapPlayPauseEnabled: playerTwoFingerTapPlayPauseEnabled,
+            vlcPiPEnabled: vlcPiPEnabled,
+            vlcOpenSubtitlesEnabled: vlcOpenSubtitlesEnabled,
+            vlcOpenSubtitlesAutoFallbackEnabled: vlcOpenSubtitlesAutoFallbackEnabled,
             subtitleForegroundColor: subtitleForegroundColor,
             subtitleStrokeColor: subtitleStrokeColor,
             subtitleStrokeWidth: subtitleStrokeWidth,
@@ -1089,6 +1149,12 @@ class BackupManager {
         userDefaults.set(backup.nextEpisodeThreshold, forKey: "nextEpisodeThreshold")
         // Forced on by app policy: backup value is intentionally ignored here and this flag remains enabled.
         userDefaults.set(true, forKey: "vlcHeaderProxyEnabled")
+        userDefaults.set(backup.vlcBrightnessGestureEnabled, forKey: "vlcBrightnessGestureEnabled")
+        userDefaults.set(backup.vlcVolumeGestureEnabled, forKey: "vlcVolumeGestureEnabled")
+        userDefaults.set(backup.playerTwoFingerTapPlayPauseEnabled, forKey: "playerTwoFingerTapPlayPauseEnabled")
+        userDefaults.set(backup.vlcPiPEnabled, forKey: "vlcPiPEnabled")
+        userDefaults.set(backup.vlcOpenSubtitlesEnabled, forKey: "vlcOpenSubtitlesEnabled")
+        userDefaults.set(backup.vlcOpenSubtitlesAutoFallbackEnabled, forKey: "vlcOpenSubtitlesAutoFallbackEnabled")
 
         // Subtitle styling
         if let fgColor = backup.subtitleForegroundColor {

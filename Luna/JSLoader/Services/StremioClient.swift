@@ -11,6 +11,7 @@ import Foundation
 /// SAFETY: Only returns streams with direct HTTP(S) URLs. Torrent-only streams are discarded.
 final class StremioClient {
     static let shared = StremioClient()
+    static let openSubtitlesV3BaseURL = "https://opensubtitles-v3.strem.io"
 
     private let session: URLSession
     private let decoder = JSONDecoder()
@@ -104,6 +105,78 @@ final class StremioClient {
         return safeStreams
     }
 
+    // MARK: - Fetch Subtitles
+
+    func fetchSubtitles(baseURL: String, type: String, id: String) async throws -> [StremioSubtitle] {
+        let base = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
+
+        let cleanBase: String
+        if base.hasSuffix("/manifest.json") {
+            cleanBase = String(base.dropLast("/manifest.json".count))
+        } else {
+            cleanBase = base
+        }
+
+        guard let encodedId = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed),
+              let url = URL(string: "\(cleanBase)/subtitles/\(type)/\(encodedId).json") else {
+            throw StremioError.invalidURL
+        }
+
+        Logger.shared.log("Stremio: Fetching subtitles - type=\(type) id=\(id) url=\(url.absoluteString)", type: "Stremio")
+
+        let (data, response) = try await session.data(from: url)
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            Logger.shared.log("Stremio: Subtitle fetch FAILED HTTP \(statusCode) - base=\(cleanBase) type=\(type) id=\(id)", type: "Stremio")
+            throw StremioError.httpError(statusCode)
+        }
+
+        let subtitleResponse: StremioSubtitleResponse
+        do {
+            subtitleResponse = try decoder.decode(StremioSubtitleResponse.self, from: data)
+        } catch {
+            let preview = String(data: data.prefix(512), encoding: .utf8) ?? "<binary>"
+            Logger.shared.log("Stremio: Subtitle decode FAILED for \(cleanBase) - \(error.localizedDescription) body=\(preview)", type: "Stremio")
+            throw error
+        }
+
+        let subtitles = (subtitleResponse.subtitles ?? []).filter { subtitle in
+            guard let url = subtitle.url?.lowercased(), !url.isEmpty else { return false }
+            return url.hasPrefix("http://") || url.hasPrefix("https://")
+        }
+
+        Logger.shared.log("Stremio: Got \(subtitles.count) HTTP subtitle(s) from \(cleanBase)", type: "Stremio")
+        return subtitles
+    }
+
+    func fetchOpenSubtitlesV3(tmdbId: Int, imdbId: String?, type: String, season: Int?, episode: Int?) async throws -> [StremioSubtitle] {
+        let manifest = try await fetchManifest(from: Self.openSubtitlesV3BaseURL)
+        guard manifest.supportsSubtitles else {
+            Logger.shared.log("Stremio: OpenSubtitles v3 manifest does not advertise subtitles", type: "Stremio")
+            return []
+        }
+
+        guard let contentId = buildContentId(
+            tmdbId: tmdbId,
+            imdbId: imdbId,
+            type: type,
+            season: season,
+            episode: episode,
+            idPrefixes: manifest.idPrefixes,
+            addonName: manifest.name
+        ) else {
+            Logger.shared.log("Stremio: OpenSubtitles v3 missing supported content ID", type: "Stremio")
+            return []
+        }
+
+        return try await fetchSubtitles(
+            baseURL: Self.openSubtitlesV3BaseURL,
+            type: type,
+            id: contentId
+        )
+    }
+
     // MARK: - Build Stremio Content ID
 
     /// Builds the Stremio content ID string for a given item.
@@ -116,11 +189,23 @@ final class StremioClient {
     ///   - addon: The addon to build the ID for (checks idPrefixes)
     /// - Returns: The single best content ID to use for this addon
     func buildContentId(tmdbId: Int, imdbId: String?, type: String, season: Int?, episode: Int?, addon: StremioAddon) -> String? {
-        let prefixes = addon.manifest.idPrefixes ?? []
+        return buildContentId(
+            tmdbId: tmdbId,
+            imdbId: imdbId,
+            type: type,
+            season: season,
+            episode: episode,
+            idPrefixes: addon.manifest.idPrefixes,
+            addonName: addon.manifest.name
+        )
+    }
+
+    func buildContentId(tmdbId: Int, imdbId: String?, type: String, season: Int?, episode: Int?, idPrefixes: [String]?, addonName: String) -> String? {
+        let prefixes = idPrefixes ?? []
         let supportsTMDB = prefixes.isEmpty || prefixes.contains("tmdb") || prefixes.contains("tmdb:")
         let supportsIMDB = prefixes.isEmpty || prefixes.contains("tt")
 
-        Logger.shared.log("Stremio: buildContentId addon=\(addon.manifest.name) prefixes=\(prefixes) imdbId=\(imdbId ?? "nil") tmdbId=\(tmdbId) type=\(type) s=\(season?.description ?? "nil") e=\(episode?.description ?? "nil")", type: "Stremio")
+        Logger.shared.log("Stremio: buildContentId addon=\(addonName) prefixes=\(prefixes) imdbId=\(imdbId ?? "nil") tmdbId=\(tmdbId) type=\(type) s=\(season?.description ?? "nil") e=\(episode?.description ?? "nil")", type: "Stremio")
 
         // Prefer IMDB — it is the universal Stremio standard and avoids extra requests
         if supportsIMDB, let imdb = imdbId, !imdb.isEmpty {
@@ -147,7 +232,7 @@ final class StremioClient {
             return result
         }
 
-        Logger.shared.log("Stremio: No supported prefix for addon \(addon.manifest.name)", type: "Stremio")
+        Logger.shared.log("Stremio: No supported prefix for addon \(addonName)", type: "Stremio")
         return nil
     }
 

@@ -94,6 +94,9 @@ playground.xcworkspace
 
 Carthage/Build/
 
+# CocoaPods
+Pods/
+
 # Accio dependency management
 Dependencies/
 .accio/

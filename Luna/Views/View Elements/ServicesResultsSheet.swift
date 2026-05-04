@@ -1913,7 +1913,8 @@ struct ModulesSearchResultsSheet: View {
                     headers: finalHeaders,
                     subtitles: subtitleArray,
                     subtitleNames: subtitleNames.isEmpty ? nil : subtitleNames,
-                    mediaInfo: playerMediaInfo
+                    mediaInfo: playerMediaInfo,
+                    imdbId: imdbId
                 )
                 let isAnimeHint = isAnimeContent || animeSeasonTitle != nil || TrackerManager.shared.cachedAniListId(for: tmdbId) != nil
                 pvc.isAnimeHint = isAnimeHint
@@ -2523,7 +2524,8 @@ struct ModulesSearchResultsSheet: View {
                     preset: preset ?? PlayerPreset(id: .sdrRec709, title: "Default", summary: "", stream: nil, commands: []),
                     headers: finalHeaders,
                     subtitles: subtitleArray,
-                    mediaInfo: playerMediaInfo
+                    mediaInfo: playerMediaInfo,
+                    imdbId: imdbId
                 )
                 let isAnimeHint = isAnimeContent || animeSeasonTitle != nil || TrackerManager.shared.cachedAniListId(for: tmdbId) != nil
                 pvc.isAnimeHint = isAnimeHint
@@ -2580,7 +2582,8 @@ struct ModulesSearchResultsSheet: View {
                     preset: preset ?? PlayerPreset(id: .sdrRec709, title: "Default", summary: "", stream: nil, commands: []),
                     headers: finalHeaders,
                     subtitles: subtitleArray,
-                    mediaInfo: playerMediaInfo
+                    mediaInfo: playerMediaInfo,
+                    imdbId: imdbId
                 )
                 let isAnimeHint = isAnimeContent || animeSeasonTitle != nil || TrackerManager.shared.cachedAniListId(for: tmdbId) != nil
                 pvc.isAnimeHint = isAnimeHint

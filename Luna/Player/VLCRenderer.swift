@@ -2,20 +2,22 @@
 //  VLCRenderer.swift
 //  Luna
 //
-//  VLC player renderer using VLCKitSPM for GPU-accelerated playback
+//  VLC player renderer using VLCKit for GPU-accelerated playback
 //  Provides same interface as MPVSoftwareRenderer for thermal optimization
 //
-//  DEPENDENCY: Add VLCKitSPM via Swift Package Manager:
-//  File → Add Package Dependencies → https://github.com/tylerjonesio/vlckit-spm
-//  
-//  Package: VLCKitSPM (version 3.6.0+)
+//  DEPENDENCY: VLCKit 4.0.0a19+ via CocoaPods for native VideoLAN PiP.
 
 import UIKit
 import AVFoundation
 
 // MARK: - Compatibility: VLC renderer is iOS-only (tvOS uses MPV)
-#if canImport(VLCKitSPM) && os(iOS)
+#if (canImport(VLCKit) || canImport(VLCKitSPM)) && os(iOS)
+import ObjectiveC
+#if canImport(VLCKit)
+import VLCKit
+#else
 import VLCKitSPM
+#endif
 
 protocol VLCRendererDelegate: AnyObject {
     func renderer(_ renderer: VLCRenderer, didUpdatePosition position: Double, duration: Double)
@@ -26,7 +28,85 @@ protocol VLCRendererDelegate: AnyObject {
     func renderer(_ renderer: VLCRenderer, getSubtitleForTime time: Double) -> NSAttributedString?
     func renderer(_ renderer: VLCRenderer, getSubtitleStyle: Void) -> SubtitleStyle
     func renderer(_ renderer: VLCRenderer, subtitleTrackDidChange trackId: Int)
+    func renderer(_ renderer: VLCRenderer, didChangePictureInPictureAvailability isAvailable: Bool)
+    func renderer(_ renderer: VLCRenderer, didChangePictureInPictureActive isActive: Bool)
     func rendererDidChangeTracks(_ renderer: VLCRenderer)
+}
+
+private typealias NativeVLCPiPReadyBlock = @convention(block) (AnyObject) -> Void
+private typealias NativeVLCPiPSeekCompletion = @convention(block) () -> Void
+private typealias NativeVLCPiPStateChangeBlock = @convention(block) (Bool) -> Void
+
+private final class VLCPictureInPictureDrawableView: UIView {
+    weak var renderer: VLCRenderer?
+
+    override func conforms(to aProtocol: Protocol) -> Bool {
+        let protocolName = String(cString: protocol_getName(aProtocol))
+        if protocolName == "VLCDrawable" ||
+            protocolName == "VLCPictureInPictureDrawable" ||
+            protocolName == "VLCPictureInPictureMediaControlling" {
+            return true
+        }
+        return super.conforms(to: aProtocol)
+    }
+
+    @objc(mediaController)
+    func mediaController() -> AnyObject {
+        return self
+    }
+
+    @objc(pictureInPictureReady)
+    func pictureInPictureReady() -> NativeVLCPiPReadyBlock {
+        return { [weak self] controller in
+            self?.renderer?.handleNativePictureInPictureControllerReady(controller)
+        }
+    }
+
+    @objc(canStartPictureInPictureAutomaticallyFromInline)
+    func canStartPictureInPictureAutomaticallyFromInline() -> Bool {
+        return true
+    }
+
+    @objc(play)
+    func playFromPictureInPicture() {
+        renderer?.play()
+    }
+
+    @objc(pause)
+    func pauseFromPictureInPicture() {
+        renderer?.pausePlayback()
+    }
+
+    @objc(seekBy:)
+    func seekBy(_ offset: Int64) {
+        renderer?.seek(by: Double(offset) / 1000.0)
+    }
+
+    @objc(seekBy:completion:)
+    func seekBy(_ offset: Int64, completion: NativeVLCPiPSeekCompletion?) {
+        renderer?.seek(by: Double(offset) / 1000.0)
+        completion?()
+    }
+
+    @objc(mediaTime)
+    func mediaTime() -> Int64 {
+        return renderer?.nativePictureInPictureMediaTime ?? 0
+    }
+
+    @objc(mediaLength)
+    func mediaLength() -> Int64 {
+        return renderer?.nativePictureInPictureMediaLength ?? 0
+    }
+
+    @objc(isMediaSeekable)
+    func isMediaSeekable() -> Bool {
+        return renderer?.nativePictureInPictureMediaSeekable ?? false
+    }
+
+    @objc(isMediaPlaying)
+    func isMediaPlaying() -> Bool {
+        return renderer?.nativePictureInPictureMediaPlaying ?? false
+    }
 }
 
 final class VLCRenderer: NSObject {
@@ -40,7 +120,7 @@ final class VLCRenderer: NSObject {
     private let stateQueue = DispatchQueue(label: "vlc.renderer.state", attributes: .concurrent)
     
     // VLC rendering container - uses OpenGL rendering
-    private let vlcView: UIView
+    private let vlcView: VLCPictureInPictureDrawableView
     
     private var vlcInstance: VLCMediaList?
     private var mediaPlayer: VLCMediaPlayer?
@@ -60,14 +140,20 @@ final class VLCRenderer: NSObject {
     private var currentPlaybackSpeed: Double = 1.0
 
     private var currentSubtitleStyle: SubtitleStyle = .default
+    private var nativePiPController: AnyObject?
+    private var nativePiPStateChangeHandler: NativeVLCPiPStateChangeBlock?
+    private var nativePiPStartRequested = false
+    private var nativePiPActive = false
+    private var nativePiPAvailable = false
     
     weak var delegate: VLCRendererDelegate?
     
     init(displayLayer: AVSampleBufferDisplayLayer) {
         self.displayLayer = displayLayer
-        // Create a UIView container that VLC will render into
-        self.vlcView = UIView()
+        // Create a UIView container that VLC will render into and newer VLCKit can use for PiP.
+        self.vlcView = VLCPictureInPictureDrawableView()
         super.init()
+        self.vlcView.renderer = self
         setupVLCView()
     }
     
@@ -162,6 +248,7 @@ final class VLCRenderer: NSObject {
         
         isRunning = false
         isStopping = true
+        teardownNativePictureInPicture()
 
         eventQueue.async { [weak self] in
             guard let self else { return }
@@ -254,6 +341,7 @@ final class VLCRenderer: NSObject {
             player.media = media
             self.ensureAudioSessionActive()
             player.play()
+            self.updatePictureInPicturePlaybackState()
         }
     }
     
@@ -291,6 +379,7 @@ final class VLCRenderer: NSObject {
         if currentPlaybackSpeed != 1.0 {
             player.rate = Float(currentPlaybackSpeed)
         }
+        updatePictureInPicturePlaybackState()
     }
 
     /// Reload the current media and seek back to the last known position.
@@ -312,6 +401,7 @@ final class VLCRenderer: NSObject {
         }
 
         mediaPlayer?.pause()
+        updatePictureInPicturePlaybackState()
     }
     
     func togglePause() {
@@ -331,6 +421,7 @@ final class VLCRenderer: NSObject {
                 player.position = Float(normalized)
                 self.cachedDuration = durationSec
                 self.pendingAbsoluteSeek = nil
+                self.updatePictureInPicturePlaybackState()
                 return
             }
 
@@ -339,11 +430,13 @@ final class VLCRenderer: NSObject {
                 let normalized = min(max(clamped / self.cachedDuration, 0), 1)
                 player.position = Float(normalized)
                 self.pendingAbsoluteSeek = clamped
+                self.updatePictureInPicturePlaybackState()
                 return
             }
 
             // Duration unknown: stash the seek request to apply once duration arrives.
             self.pendingAbsoluteSeek = clamped
+            self.updatePictureInPicturePlaybackState()
         }
     }
     
@@ -380,7 +473,7 @@ final class VLCRenderer: NSObject {
         // VLC provides audio track info through the media player
         if let audioTrackIndexes = player.audioTrackIndexes as? [Int],
            let audioTrackNames = player.audioTrackNames as? [String] {
-            // VLCKitSPM doesn't expose language codes publicly; rely on name parsing
+            // VLCKit doesn't expose language codes publicly here; rely on name parsing.
             for (index, name) in zip(audioTrackIndexes, audioTrackNames) {
                 let code = guessLanguageCode(from: name)
                 result.append((index, name, code))
@@ -483,7 +576,7 @@ final class VLCRenderer: NSObject {
     
     // MARK: - External Subtitles
     
-    func loadExternalSubtitles(urls: [String]) {
+    func loadExternalSubtitles(urls: [String], enforce: Bool = false) {
         guard let player = mediaPlayer, let media = currentMedia else { return }
         
         eventQueue.async { [weak self] in
@@ -491,7 +584,7 @@ final class VLCRenderer: NSObject {
             for urlString in urls {
                 if let url = URL(string: urlString) {
                     // enforce: true for local files so VLC auto-selects the subtitle track
-                    let shouldEnforce = url.isFileURL
+                    let shouldEnforce = enforce || url.isFileURL
                     player.addPlaybackSlave(url, type: VLCMediaPlaybackSlaveType.subtitle, enforce: shouldEnforce)
                     Logger.shared.log("VLCRenderer: added playback slave subtitle=\(url.absoluteString) enforce=\(shouldEnforce)", type: "Info")
                 }
@@ -574,6 +667,10 @@ final class VLCRenderer: NSObject {
             pendingAbsoluteSeek = nil
         }
 
+        if nativePiPActive || nativePiPStartRequested {
+            updatePictureInPicturePlaybackState()
+        }
+
         // If we were marked loading but playback is progressing, clear loading state
         if isLoading && position > 0 {
             isLoading = false
@@ -647,20 +744,243 @@ final class VLCRenderer: NSObject {
         default:
             break
         }
+        updatePictureInPicturePlaybackState()
     }
     
     @objc private func handleAppDidEnterBackground() {
-        // Pause playback when app goes to background
+        if !isPaused, isPictureInPictureAvailable {
+            Logger.shared.log("[VLCRenderer.PiP] entering background; starting native VLC PiP", type: "Player")
+            if startPictureInPicture() {
+                return
+            }
+        }
+
+        Logger.shared.log("[VLCRenderer.PiP] entering background without native VLC PiP; pausing playback", type: "Player")
         pausePlayback()
     }
     
     @objc private func handleAppWillEnterForeground() {
+        if isPictureInPictureActive {
+            Logger.shared.log("[VLCRenderer.PiP] returning to foreground; stopping native VLC PiP", type: "Player")
+            stopPictureInPicture()
+        }
         // Re-activate the audio session that iOS may have deactivated during background.
         ensureAudioSessionActive()
-        // Do NOT auto-resume — stay paused until the user explicitly plays.
-        // VLC PiP is disabled; will be revisited when VideoLAN adds native PiP.
     }
     
+    // MARK: - Native VLC Picture in Picture
+
+    var isPictureInPictureAvailable: Bool {
+        return nativePiPAvailable
+    }
+
+    var isPictureInPictureActive: Bool {
+        return nativePiPActive || nativePiPStartRequested
+    }
+
+    fileprivate var nativePictureInPictureMediaTime: Int64 {
+        return Int64(max(0, cachedPosition) * 1000.0)
+    }
+
+    fileprivate var nativePictureInPictureMediaLength: Int64 {
+        return Int64(max(0, cachedDuration) * 1000.0)
+    }
+
+    fileprivate var nativePictureInPictureMediaSeekable: Bool {
+        return cachedDuration > 0
+    }
+
+    fileprivate var nativePictureInPictureMediaPlaying: Bool {
+        return !isPaused
+    }
+
+    @discardableResult
+    func startPictureInPicture() -> Bool {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                _ = self?.startPictureInPicture()
+            }
+            return nativePiPAvailable
+        }
+
+        guard nativePiPAvailable else {
+            Logger.shared.log("[VLCRenderer.PiP] start blocked: native controller not ready", type: "Player")
+            return false
+        }
+
+        guard let controller = nativePiPController as? NSObject else {
+            Logger.shared.log("[VLCRenderer.PiP] start blocked: native controller missing", type: "Player")
+            setNativePictureInPictureAvailable(false)
+            return false
+        }
+
+        if nativePiPActive || nativePiPStartRequested {
+            Logger.shared.log("[VLCRenderer.PiP] start ignored: already active or pending", type: "Player")
+            return true
+        }
+
+        let selector = NSSelectorFromString("startPictureInPicture")
+        guard controller.responds(to: selector) else {
+            Logger.shared.log("[VLCRenderer.PiP] start blocked: native controller has no startPictureInPicture selector", type: "Player")
+            setNativePictureInPictureAvailable(false)
+            return false
+        }
+
+        ensureAudioSessionActive()
+        nativePiPStartRequested = true
+        Logger.shared.log("[VLCRenderer.PiP] start requested via native VLC controller", type: "Player")
+        _ = controller.perform(selector)
+        if nativePiPStateChangeHandler == nil {
+            setNativePictureInPictureActive(true)
+        }
+        scheduleNativePictureInPictureStartFallbackCheck()
+        updatePictureInPicturePlaybackState()
+        return true
+    }
+
+    func stopPictureInPicture() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.stopPictureInPicture()
+            }
+            return
+        }
+
+        guard let controller = nativePiPController as? NSObject else {
+            setNativePictureInPictureActive(false)
+            return
+        }
+
+        let selector = NSSelectorFromString("stopPictureInPicture")
+        if controller.responds(to: selector) {
+            Logger.shared.log("[VLCRenderer.PiP] stop requested via native VLC controller", type: "Player")
+            _ = controller.perform(selector)
+        }
+
+        setNativePictureInPictureActive(false)
+        updatePictureInPicturePlaybackState()
+    }
+
+    func updatePictureInPicturePlaybackState() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.updatePictureInPicturePlaybackState()
+            }
+            return
+        }
+
+        guard nativePiPAvailable,
+              let controller = nativePiPController as? NSObject else {
+            return
+        }
+
+        let selector = NSSelectorFromString("invalidatePlaybackState")
+        if controller.responds(to: selector) {
+            _ = controller.perform(selector)
+        }
+    }
+
+    fileprivate func handleNativePictureInPictureControllerReady(_ controller: AnyObject) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.handleNativePictureInPictureControllerReady(controller)
+            }
+            return
+        }
+
+        nativePiPController = controller
+        nativePiPStartRequested = false
+        installNativePictureInPictureStateHandler(on: controller)
+        setNativePictureInPictureAvailable(true)
+        updatePictureInPicturePlaybackState()
+        Logger.shared.log("[VLCRenderer.PiP] native VLC PiP controller ready type=\(String(describing: type(of: controller)))", type: "Player")
+    }
+
+    private func installNativePictureInPictureStateHandler(on controller: AnyObject) {
+        guard let object = controller as? NSObject else { return }
+        let selector = NSSelectorFromString("setStateChangeEventHandler:")
+        guard object.responds(to: selector) else {
+            Logger.shared.log("[VLCRenderer.PiP] native controller has no stateChangeEventHandler; using local active state", type: "Player")
+            return
+        }
+
+        let handler: NativeVLCPiPStateChangeBlock = { [weak self] isStarted in
+            DispatchQueue.main.async {
+                self?.setNativePictureInPictureActive(isStarted)
+                self?.updatePictureInPicturePlaybackState()
+            }
+        }
+        nativePiPStateChangeHandler = handler
+        object.setValue(handler, forKey: "stateChangeEventHandler")
+    }
+
+    private func scheduleNativePictureInPictureStartFallbackCheck() {
+        guard nativePiPStateChangeHandler != nil else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self else { return }
+            guard self.nativePiPStartRequested, !self.nativePiPActive else { return }
+
+            Logger.shared.log("[VLCRenderer.PiP] native start did not report active; cancelling pending request", type: "Player")
+            self.setNativePictureInPictureActive(false)
+            if UIApplication.shared.applicationState == .background {
+                self.pausePlayback()
+            }
+            self.updatePictureInPicturePlaybackState()
+        }
+    }
+
+    private func teardownNativePictureInPicture() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.teardownNativePictureInPicture()
+            }
+            return
+        }
+
+        if nativePiPActive || nativePiPStartRequested {
+            stopPictureInPicture()
+        }
+        nativePiPController = nil
+        nativePiPStateChangeHandler = nil
+        nativePiPStartRequested = false
+        setNativePictureInPictureActive(false)
+        setNativePictureInPictureAvailable(false)
+    }
+
+    private func setNativePictureInPictureAvailable(_ available: Bool) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.setNativePictureInPictureAvailable(available)
+            }
+            return
+        }
+
+        if !available {
+            nativePiPStartRequested = false
+        }
+
+        guard nativePiPAvailable != available else { return }
+        nativePiPAvailable = available
+        delegate?.renderer(self, didChangePictureInPictureAvailability: available)
+    }
+
+    private func setNativePictureInPictureActive(_ active: Bool) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.setNativePictureInPictureActive(active)
+            }
+            return
+        }
+
+        let wasEffectivelyActive = nativePiPActive || nativePiPStartRequested
+        let storedActiveChanged = nativePiPActive != active
+        nativePiPStartRequested = false
+        nativePiPActive = active
+        let isEffectivelyActive = nativePiPActive || nativePiPStartRequested
+        guard storedActiveChanged || wasEffectivelyActive != isEffectivelyActive else { return }
+        delegate?.renderer(self, didChangePictureInPictureActive: isEffectivelyActive)
+    }
+
     // MARK: - State Properties
     
     var isPausedState: Bool {
@@ -684,9 +1004,9 @@ final class VLCRenderer: NSObject {
     }
 }
 
-#else  // Stub when VLCKitSPM is not available
+#else  // Stub when VLCKit is not available
 
-// Minimal stub to allow compilation when VLCKitSPM is not installed
+// Minimal stub to allow compilation when VLCKit is not installed
 protocol VLCRendererDelegate: AnyObject {
     func renderer(_ renderer: VLCRenderer, didUpdatePosition position: Double, duration: Double)
     func renderer(_ renderer: VLCRenderer, didChangePause isPaused: Bool)
@@ -696,6 +1016,8 @@ protocol VLCRendererDelegate: AnyObject {
     func renderer(_ renderer: VLCRenderer, getSubtitleForTime time: Double) -> NSAttributedString?
     func renderer(_ renderer: VLCRenderer, getSubtitleStyle: Void) -> SubtitleStyle
     func renderer(_ renderer: VLCRenderer, subtitleTrackDidChange trackId: Int)
+    func renderer(_ renderer: VLCRenderer, didChangePictureInPictureAvailability isAvailable: Bool)
+    func renderer(_ renderer: VLCRenderer, didChangePictureInPictureActive isActive: Bool)
     func rendererDidChangeTracks(_ renderer: VLCRenderer)
 }
 
@@ -727,11 +1049,17 @@ final class VLCRenderer {
     func setSubtitleTrack(id: Int) { }
     func disableSubtitles() { }
     func refreshSubtitleOverlay() { }
-    func loadExternalSubtitles(urls: [String]) { }
+    func loadExternalSubtitles(urls: [String], enforce: Bool = false) { }
     func applySubtitleStyle(_ style: SubtitleStyle) { }
+    var isPictureInPictureAvailable: Bool { false }
+    var isPictureInPictureActive: Bool { false }
+    @discardableResult
+    func startPictureInPicture() -> Bool { false }
+    func stopPictureInPicture() { }
+    func updatePictureInPicturePlaybackState() { }
     var isPausedState: Bool { true }
     weak var delegate: VLCRendererDelegate?
 }
 
-#endif  // canImport(VLCKitSPM)
+#endif  // canImport(VLCKit) || canImport(VLCKitSPM)
 

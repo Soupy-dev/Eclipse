@@ -22,6 +22,14 @@ SDK="iphoneos"
 XCODE_DESTINATION="generic/platform=iOS"
 OUTPUT_SUFFIX=""
 
+if ! command -v pod >/dev/null 2>&1; then
+    echo "Error: CocoaPods is required to install the pinned VLCKit 4.0 build."
+    echo "Install it with: gem install cocoapods"
+    exit 1
+fi
+
+pod install
+
 if [ ! -d "build" ]; then
     mkdir build
 fi
@@ -32,8 +40,8 @@ if [ -d "DerivedData$PLATFORM" ]; then
     rm -rf "DerivedData$PLATFORM"
 fi
 
-# Build with Xcode project (no longer using CocoaPods workspace)
-XCODE_PROJECT="-project $WORKING_LOCATION/$PROJECT_NAME.xcodeproj"
+# Build with CocoaPods workspace so the pinned VLCKit binary is linked.
+XCODE_PROJECT="-workspace $WORKING_LOCATION/$PROJECT_NAME.xcworkspace"
 
 # Create archive (required for proper IPA structure)
 ARCHIVE_PATH="$WORKING_LOCATION/build/$APPLICATION_NAME$OUTPUT_SUFFIX.xcarchive"

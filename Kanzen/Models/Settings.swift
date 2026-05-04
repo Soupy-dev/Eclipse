@@ -42,6 +42,55 @@ class Settings: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: "preferredAnimeAudioLanguage") }
     }
 
+    var vlcBrightnessGestureEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "vlcBrightnessGestureEnabled") }
+        set { UserDefaults.standard.set(newValue, forKey: "vlcBrightnessGestureEnabled") }
+    }
+
+    var vlcVolumeGestureEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "vlcVolumeGestureEnabled") }
+        set { UserDefaults.standard.set(newValue, forKey: "vlcVolumeGestureEnabled") }
+    }
+
+    var playerTwoFingerTapPlayPauseEnabled: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: "playerTwoFingerTapPlayPauseEnabled") == nil {
+                if let legacyValue = UserDefaults.standard.object(forKey: "mpvTwoFingerTapEnabled") as? Bool {
+                    UserDefaults.standard.set(legacyValue, forKey: "playerTwoFingerTapPlayPauseEnabled")
+                    return legacyValue
+                }
+                UserDefaults.standard.set(true, forKey: "playerTwoFingerTapPlayPauseEnabled")
+            }
+            return UserDefaults.standard.bool(forKey: "playerTwoFingerTapPlayPauseEnabled")
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "playerTwoFingerTapPlayPauseEnabled") }
+    }
+
+    var vlcPiPEnabled: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: "vlcPiPEnabled") == nil {
+                UserDefaults.standard.set(true, forKey: "vlcPiPEnabled")
+            }
+            return UserDefaults.standard.bool(forKey: "vlcPiPEnabled")
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "vlcPiPEnabled") }
+    }
+
+    var vlcOpenSubtitlesEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "vlcOpenSubtitlesEnabled") }
+        set { UserDefaults.standard.set(newValue, forKey: "vlcOpenSubtitlesEnabled") }
+    }
+
+    var vlcOpenSubtitlesAutoFallbackEnabled: Bool {
+        get {
+            if UserDefaults.standard.object(forKey: "vlcOpenSubtitlesAutoFallbackEnabled") == nil {
+                UserDefaults.standard.set(true, forKey: "vlcOpenSubtitlesAutoFallbackEnabled")
+            }
+            return UserDefaults.standard.bool(forKey: "vlcOpenSubtitlesAutoFallbackEnabled")
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "vlcOpenSubtitlesAutoFallbackEnabled") }
+    }
+
     var enableVLCSubtitleEditMenu: Bool {
         get {
             if UserDefaults.standard.object(forKey: "enableVLCSubtitleEditMenu") as? Bool != true {
