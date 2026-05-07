@@ -70,6 +70,7 @@ final class VLCRenderer: NSObject {
     private var isRunning = false
     private var isStopping = false
     private var currentPlaybackSpeed: Double = 1.0
+    private var subtitleDisableRequested = false
 
     private var currentSubtitleStyle: SubtitleStyle = .default
     private var lastLoggedStateCode: Int?
@@ -791,7 +792,10 @@ final class VLCRenderer: NSObject {
     // MARK: - Subtitle Track Controls
     
     func getSubtitleTracks() -> [(Int, String)] {
-        guard let player = mediaPlayer else { return [] }
+        guard let player = mediaPlayer, player.media != nil else {
+            logVLC("getSubtitleTracks skipped: player/media not ready")
+            return []
+        }
         
         var result: [(Int, String)] = []
         
@@ -808,24 +812,53 @@ final class VLCRenderer: NSObject {
     }
     
     func setSubtitleTrack(id: Int) {
-        guard let player = mediaPlayer else { return }
-        
-        // Set track immediately - VLC property setters are thread-safe
-        logVLC("setSubtitleTrack id=\(id) beforeCurrent=\(getCurrentSubtitleTrackId()) snapshot={\(playerSnapshot(player))}")
-        player.currentVideoSubTitleIndex = Int32(id)
-        
-        // Notify delegates on main thread
-        DispatchQueue.main.async { [weak self] in
+        subtitleDisableRequested = false
+        eventQueue.async { [weak self] in
             guard let self else { return }
-            self.delegate?.renderer(self, subtitleTrackDidChange: id)
-            self.delegate?.rendererDidChangeTracks(self)
+            guard let player = self.mediaPlayer, player.media != nil else {
+                self.logVLC("setSubtitleTrack deferred/skipped id=\(id): player/media not ready", type: "Player")
+                return
+            }
+
+            let beforeCurrent = Int(player.currentVideoSubTitleIndex)
+            self.logVLC("setSubtitleTrack id=\(id) beforeCurrent=\(beforeCurrent) snapshot={\(self.playerSnapshot(player))}")
+            player.currentVideoSubTitleIndex = Int32(id)
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.delegate?.renderer(self, subtitleTrackDidChange: id)
+                self.delegate?.rendererDidChangeTracks(self)
+            }
         }
     }
     
     func disableSubtitles() {
-        guard let player = mediaPlayer else { return }
-        // Disable subtitles immediately by setting track index to -1
-        logVLC("disableSubtitles beforeCurrent=\(getCurrentSubtitleTrackId()) snapshot={\(playerSnapshot(player))}")
+        subtitleDisableRequested = true
+        logVLC("disableSubtitles requested snapshot={\(playerSnapshot())}", type: "Player")
+        eventQueue.async { [weak self] in
+            guard let self else { return }
+            guard let player = self.mediaPlayer else {
+                self.logVLC("disableSubtitles deferred: player not ready", type: "Player")
+                return
+            }
+            self.applyRequestedSubtitleDisable(to: player, reason: "request")
+        }
+    }
+
+    private func applyRequestedSubtitleDisable(to player: VLCMediaPlayer, reason: String) {
+        guard subtitleDisableRequested else { return }
+        guard player.media != nil else {
+            logVLC("disableSubtitles deferred reason=\(reason): media not ready snapshot={\(playerSnapshot(player))}", type: "Player")
+            return
+        }
+
+        let beforeCurrent = Int(player.currentVideoSubTitleIndex)
+        if beforeCurrent == -1 {
+            logVLC("disableSubtitles already off reason=\(reason) snapshot={\(playerSnapshot(player))}", type: "Player")
+            return
+        }
+
+        logVLC("disableSubtitles applying reason=\(reason) beforeCurrent=\(beforeCurrent) snapshot={\(playerSnapshot(player))}", type: "Player")
         player.currentVideoSubTitleIndex = -1
     }
     
@@ -838,17 +871,27 @@ final class VLCRenderer: NSObject {
     
     func loadExternalSubtitles(urls: [String], enforce: Bool = false) {
         guard let player = mediaPlayer else { return }
+        if enforce {
+            subtitleDisableRequested = false
+        }
         
         eventQueue.async { [weak self] in
-            self?.logVLC("loadExternalSubtitles count=\(urls.count) enforce=\(enforce) urls=\(urls.joined(separator: " | "))", type: "Info")
+            guard let self else { return }
+            guard player.media != nil else {
+                self.logVLC("loadExternalSubtitles skipped: media not ready count=\(urls.count) enforce=\(enforce)", type: "Player")
+                return
+            }
+
+            self.logVLC("loadExternalSubtitles count=\(urls.count) enforce=\(enforce) urls=\(urls.joined(separator: " | "))", type: "Info")
             for urlString in urls {
                 if let url = URL(string: urlString) {
                     // enforce: true for local files so VLC auto-selects the subtitle track
                     let shouldEnforce = enforce || url.isFileURL
                     player.addPlaybackSlave(url, type: .subtitle, enforce: shouldEnforce)
-                    self?.logVLC("added playback slave subtitle=\(url.absoluteString) enforce=\(shouldEnforce)", type: "Info")
+                    self.logVLC("added playback slave subtitle=\(url.absoluteString) enforce=\(shouldEnforce)", type: "Info")
                 }
             }
+            self.applyRequestedSubtitleDisable(to: player, reason: "external subtitles loaded")
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.delegate?.rendererDidChangeTracks(self)
@@ -902,7 +945,7 @@ final class VLCRenderer: NSObject {
     }
     
     func getCurrentSubtitleTrackId() -> Int {
-        guard let player = mediaPlayer else { return -1 }
+        guard let player = mediaPlayer, player.media != nil else { return -1 }
         return Int(player.currentVideoSubTitleIndex)
     }
 
