@@ -1317,7 +1317,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         userSelectedSubtitleTrack = false
         if isVLCPlayer {
             let subtitlesEnabledByDefault = Settings.shared.enableSubtitlesByDefault
-            rendererSetSubtitlesEnabledByDefault(subtitlesEnabledByDefault)
+            if subtitlesEnabledByDefault {
+                rendererSetSubtitlesEnabledByDefault(true)
+            }
             if !subtitlesEnabledByDefault {
                 subtitleModel.isVisible = false
                 vlcSubtitleSelection = .none
@@ -3146,14 +3148,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     Logger.shared.log("[PlayerVC.Subtitles] default selected fallback external track index=\(fallbackExternalTrack.0)", type: "Player")
                 }
             } else {
-                if rendererGetCurrentSubtitleTrackId() >= 0 {
-                    rendererDisableSubtitles()
-                }
                 subtitleEntries.removeAll()
                 updateVLCSubtitleOverlay(for: cachedPosition)
                 subtitleModel.isVisible = false
                 vlcSubtitleSelection = .none
-                Logger.shared.log("[PlayerVC.Subtitles] defaults disabled; subtitles forced off", type: "Player")
+                Logger.shared.log("[PlayerVC.Subtitles] defaults disabled; skipping VLC subtitle mutation during startup", type: "Player")
             }
             updateSubtitleButtonAppearance()
         }
@@ -3667,7 +3666,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             if vlcRenderer != nil {
                 if isVLCCustomSubtitleOverlayEnabled {
                     Logger.shared.log("[PlayerVC.Subtitles] loadSubtitles path=VLC customOverlay", type: "Stream")
-                    rendererDisableSubtitles()
+                    if enableByDefault {
+                        rendererDisableSubtitles()
+                    } else {
+                        Logger.shared.log("[PlayerVC.Subtitles] VLC defaults disabled; skipping custom-overlay native subtitle disable during startup", type: "Stream")
+                    }
                     updateSubtitleTracksMenu()
                     updateVLCSubtitleOverlay(for: cachedPosition)
                 } else {

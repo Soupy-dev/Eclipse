@@ -71,7 +71,6 @@ final class VLCRenderer: NSObject {
     private var isStopping = false
     private var currentPlaybackSpeed: Double = 1.0
     private var subtitleDisableRequested = false
-    private var subtitleDisableRetryGeneration = 0
 
     private var currentSubtitleStyle: SubtitleStyle = .default
     private var lastLoggedStateCode: Int?
@@ -451,11 +450,6 @@ final class VLCRenderer: NSObject {
 
             // Apply subtitle styling options (best effort; depends on libvlc text renderer support)
             self.applySubtitleStyleOptions(to: media)
-            if self.subtitleDisableRequested {
-                media.addOption(":sub-track=-1")
-                media.addOption(":no-sub-autodetect-file")
-                self.logVLC("load applied subtitle-off media options", type: "Player")
-            }
 
             if let initialSeek, initialSeek > 0 {
                 Logger.shared.log("[VLCRenderer.load] queued initial seek \(Int(initialSeek))s", type: "Progress")
@@ -483,9 +477,6 @@ final class VLCRenderer: NSObject {
             player.play()
             self.startProgressPolling()
             self.scheduleLoadingSanityChecks()
-            if self.subtitleDisableRequested {
-                self.scheduleSubtitleDisableRetry(reason: "load submitted")
-            }
             self.updatePictureInPicturePlaybackState()
             self.logVLC("load submitted play snapshot={\(self.playerSnapshot(player))}", type: "Stream")
         }
@@ -801,9 +792,10 @@ final class VLCRenderer: NSObject {
     // MARK: - Subtitle Track Controls
 
     func setSubtitlesEnabledByDefault(_ enabled: Bool) {
-        subtitleDisableRequested = !enabled
-        subtitleDisableRetryGeneration += 1
-        logVLC("setSubtitlesEnabledByDefault enabled=\(enabled) disableRequested=\(subtitleDisableRequested) snapshot={\(playerSnapshot())}", type: "Player")
+        if enabled {
+            subtitleDisableRequested = false
+        }
+        logVLC("setSubtitlesEnabledByDefault enabled=\(enabled) snapshot={\(playerSnapshot())}", type: "Player")
     }
     
     func getSubtitleTracks() -> [(Int, String)] {
@@ -828,7 +820,6 @@ final class VLCRenderer: NSObject {
     
     func setSubtitleTrack(id: Int) {
         subtitleDisableRequested = false
-        subtitleDisableRetryGeneration += 1
         eventQueue.async { [weak self] in
             guard let self else { return }
             guard let player = self.mediaPlayer, player.media != nil else {
@@ -850,13 +841,11 @@ final class VLCRenderer: NSObject {
     
     func disableSubtitles() {
         subtitleDisableRequested = true
-        subtitleDisableRetryGeneration += 1
         logVLC("disableSubtitles requested snapshot={\(playerSnapshot())}", type: "Player")
         eventQueue.async { [weak self] in
             guard let self else { return }
             guard let player = self.mediaPlayer else {
                 self.logVLC("disableSubtitles deferred: player not ready", type: "Player")
-                self.scheduleSubtitleDisableRetry(reason: "player not ready")
                 return
             }
             self.applyRequestedSubtitleDisable(to: player, reason: "request")
@@ -867,12 +856,6 @@ final class VLCRenderer: NSObject {
         guard subtitleDisableRequested else { return }
         guard player.media != nil else {
             logVLC("disableSubtitles deferred reason=\(reason): media not ready snapshot={\(playerSnapshot(player))}", type: "Player")
-            scheduleSubtitleDisableRetry(reason: reason)
-            return
-        }
-        guard canSafelyApplySubtitleSelection(to: player) else {
-            logVLC("disableSubtitles deferred reason=\(reason): player not ready for track mutation snapshot={\(playerSnapshot(player))}", type: "Player")
-            scheduleSubtitleDisableRetry(reason: reason)
             return
         }
 
@@ -885,39 +868,6 @@ final class VLCRenderer: NSObject {
 
         logVLC("disableSubtitles applying reason=\(reason) beforeCurrent=\(beforeCurrent) disabledTrackId=\(disabledTrackId) snapshot={\(playerSnapshot(player))}", type: "Player")
         player.currentVideoSubTitleIndex = Int32(disabledTrackId)
-    }
-
-    private func scheduleSubtitleDisableRetry(reason: String, attempt: Int = 0) {
-        guard subtitleDisableRequested, attempt < 10 else { return }
-        let generation = subtitleDisableRetryGeneration
-        let delay = attempt == 0 ? 0.35 : 0.5
-        eventQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self,
-                  self.subtitleDisableRequested,
-                  self.subtitleDisableRetryGeneration == generation else {
-                return
-            }
-
-            guard let player = self.mediaPlayer else {
-                self.logVLC("disableSubtitles retry waiting for player reason=\(reason) attempt=\(attempt + 1)", type: "Player")
-                self.scheduleSubtitleDisableRetry(reason: reason, attempt: attempt + 1)
-                return
-            }
-
-            let before = Int(player.currentVideoSubTitleIndex)
-            self.applyRequestedSubtitleDisable(to: player, reason: "\(reason) retry \(attempt + 1)")
-            let after = Int(player.currentVideoSubTitleIndex)
-            if self.subtitleDisableRequested, before == after, after >= 0 {
-                self.scheduleSubtitleDisableRetry(reason: reason, attempt: attempt + 1)
-            }
-        }
-    }
-
-    private func canSafelyApplySubtitleSelection(to player: VLCMediaPlayer) -> Bool {
-        if isPlaybackActive(player) || isVLCPlayerPausedState(player.state) {
-            return true
-        }
-        return hasUsablePlaybackSignal(player)
     }
 
     private func disabledSubtitleTrackId(from player: VLCMediaPlayer) -> Int {
@@ -945,17 +895,12 @@ final class VLCRenderer: NSObject {
     func loadExternalSubtitles(urls: [String], enforce: Bool = false) {
         if enforce {
             subtitleDisableRequested = false
-            subtitleDisableRetryGeneration += 1
         }
         
         eventQueue.async { [weak self] in
             guard let self else { return }
             guard let player = self.mediaPlayer else {
                 self.logVLC("loadExternalSubtitles skipped: player not ready count=\(urls.count) enforce=\(enforce)", type: "Player")
-                return
-            }
-            if self.subtitleDisableRequested && !enforce {
-                self.logVLC("loadExternalSubtitles skipped: subtitles disabled by default count=\(urls.count)", type: "Player")
                 return
             }
             guard player.media != nil else {
