@@ -128,6 +128,7 @@ final class TrackerManager: NSObject, ObservableObject {
     private var aniListEpisodeCountCache: [Int: Int] = [:]
     private let malListPageLimit = 1000
     private let largeSyncAPICallThreshold = 90
+    private let tokenRefreshLeeway: TimeInterval = 5 * 60
     
     // Cache for (TMDB ID, season number) -> AniList ID for anime with multiple AniList entries per season
     private var anilistSeasonIdCache: [String: Int] = [:] // key format: "tmdbId_seasonNumber"
@@ -246,6 +247,41 @@ final class TrackerManager: NSObject, ObservableObject {
         }
 
         throw lastError ?? NSError(domain: "TrackerNetwork", code: -1, userInfo: [NSLocalizedDescriptionKey: "Tracker request failed"])
+    }
+
+    private func connectedMALAccount() async throws -> TrackerAccount {
+        let account = try connectedAccount(.myAnimeList)
+        return try await refreshedMALAccountIfNeeded(account)
+    }
+
+    private func refreshedMALAccountIfNeeded(_ account: TrackerAccount) async throws -> TrackerAccount {
+        guard account.service == .myAnimeList else { return account }
+        guard let expiresAt = account.expiresAt else { return account }
+        guard expiresAt.timeIntervalSinceNow <= tokenRefreshLeeway else { return account }
+
+        guard let refreshToken = account.refreshToken, !refreshToken.isEmpty else {
+            throw NSError(
+                domain: "MALAuth",
+                code: 401,
+                userInfo: [NSLocalizedDescriptionKey: "MAL session expired. Reconnect MyAnimeList, then import again."]
+            )
+        }
+
+        let token = try await refreshMALToken(refreshToken)
+        var refreshed = account
+        refreshed.updateTokens(
+            access: token.accessToken,
+            refresh: token.refreshToken ?? refreshToken,
+            expiresAt: token.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) }
+                ?? Date().addingTimeInterval(30 * 24 * 60 * 60)
+        )
+
+        await MainActor.run {
+            self.trackerState.addOrUpdateAccount(refreshed)
+            self.saveTrackerState()
+        }
+        Logger.shared.log("MAL token refreshed before tracker library operation", type: "Tracker")
+        return refreshed
     }
 
     private func formURLEncodedBody(_ values: [String: String]) -> Data? {
@@ -641,6 +677,31 @@ final class TrackerManager: NSObject, ObservableObject {
         guard response.statusCode == 200 else {
             let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
             throw NSError(domain: "MALAuth", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "MAL token request failed: \(bodyPreview)"])
+        }
+
+        return try JSONDecoder().decode(MALAuthResponse.self, from: data)
+    }
+
+    private func refreshMALToken(_ refreshToken: String) async throws -> MALAuthResponse {
+        let url = URL(string: "https://myanimelist.net/v1/oauth2/token")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+
+        var body: [String: String] = [
+            "client_id": malClientId,
+            "grant_type": "refresh_token",
+            "refresh_token": refreshToken
+        ]
+        if let secret = malClientSecret {
+            body["client_secret"] = secret
+        }
+        request.httpBody = formURLEncodedBody(body)
+
+        let (data, response) = try await sendTrackerRequest(request, provider: .myAnimeList)
+        guard response.statusCode == 200 else {
+            let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+            throw NSError(domain: "MALAuth", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "MAL token refresh failed: \(bodyPreview)"])
         }
 
         return try JSONDecoder().decode(MALAuthResponse.self, from: data)
@@ -2470,7 +2531,8 @@ final class TrackerManager: NSObject, ObservableObject {
 
             let (data, response) = try await sendTrackerRequest(request, provider: .myAnimeList)
             guard response.statusCode == 200 else {
-                throw NSError(domain: "MAL", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "MAL list fetch failed"])
+                let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+                throw NSError(domain: "MAL", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "MAL anime list fetch failed (\(response.statusCode)): \(bodyPreview)"])
             }
 
             let decoded = try JSONDecoder().decode(Response.self, from: data)
@@ -2635,7 +2697,8 @@ final class TrackerManager: NSObject, ObservableObject {
 
             let (data, response) = try await sendTrackerRequest(request, provider: .myAnimeList)
             guard response.statusCode == 200 else {
-                throw NSError(domain: "MAL", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "MAL manga list fetch failed"])
+                let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+                throw NSError(domain: "MAL", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "MAL manga list fetch failed (\(response.statusCode)): \(bodyPreview)"])
             }
 
             let decoded = try JSONDecoder().decode(Response.self, from: data)
@@ -2843,6 +2906,102 @@ final class TrackerManager: NSObject, ObservableObject {
         )
     }
 
+    private func fillMALAnimeCollectionsForLibraryImport(_ entries: [RemoteAnimeProgress], action: TrackerSyncToolAction) async throws -> TrackerSyncPreview {
+        try Task.checkCancellation()
+        let anilistIds = entries.compactMap { $0.anilistId }
+        let aniMapMatches = await AniListService.shared.mapAniListAnimeIdsToTMDBViaAniMapForMALImport(
+            anilistIds,
+            tmdbService: TMDBService.shared
+        )
+        let fallbackIds = anilistIds.filter { aniMapMatches[$0] == nil }
+        let fallbackMap = await AniListService.shared.mapAniListAnimeIdsToTMDBForImport(
+            fallbackIds,
+            tmdbService: TMDBService.shared
+        )
+        try Task.checkCancellation()
+
+        let counts = try await MainActor.run { () throws -> (added: Int, advanced: Int, unmapped: Int, aniMapMapped: Int, fallbackMapped: Int) in
+            let library = LibraryManager.shared
+            var added = 0
+            var advanced = 0
+            var unmapped = 0
+            var aniMapMapped = 0
+            var fallbackMapped = 0
+
+            for entry in entries {
+                try Task.checkCancellation()
+                guard let anilistId = entry.anilistId else {
+                    unmapped += 1
+                    continue
+                }
+
+                let tmdb: TMDBSearchResult
+                let mappedSeason: Int?
+                if let match = aniMapMatches[anilistId] {
+                    tmdb = match.tmdbResult
+                    mappedSeason = match.tmdbSeason
+                    aniMapMapped += 1
+                } else if let fallback = fallbackMap[anilistId] {
+                    tmdb = fallback
+                    mappedSeason = nil
+                    fallbackMapped += 1
+                } else {
+                    unmapped += 1
+                    continue
+                }
+
+                let collectionName = localCollectionName(forRemoteStatus: entry.status, sourceName: "MAL")
+                let collection: LibraryCollection
+                if let existing = library.collections.first(where: { $0.name == collectionName }) {
+                    collection = existing
+                } else {
+                    library.createCollection(name: collectionName, description: "Imported from MAL")
+                    collection = library.collections.first(where: { $0.name == collectionName })!
+                }
+
+                let item = LibraryItem(searchResult: tmdb)
+                if !library.isItemInCollection(collection.id, item: item) {
+                    library.addItem(to: collection.id, item: item)
+                    added += 1
+                }
+
+                let watched = remoteWatchedEpisodes(entry)
+                guard watched > 0 else { continue }
+
+                if tmdb.isTVShow {
+                    ProgressManager.shared.bulkMarkEpisodesAsWatched(
+                        showId: tmdb.id,
+                        seasonNumber: mappedSeason ?? 1,
+                        throughEpisode: watched
+                    )
+                    advanced += 1
+                } else if tmdb.isMovie {
+                    ProgressManager.shared.updateMovieProgress(
+                        movieId: tmdb.id,
+                        title: tmdb.displayTitle,
+                        currentTime: 1,
+                        totalDuration: 1,
+                        posterURL: tmdb.fullPosterURL
+                    )
+                    advanced += 1
+                }
+            }
+
+            return (added: added, advanced: advanced, unmapped: unmapped, aniMapMapped: aniMapMapped, fallbackMapped: fallbackMapped)
+        }
+
+        Logger.shared.log("MAL anime import mapped \(counts.aniMapMapped) through AniMap and \(counts.fallbackMapped) through title search", type: "Tracker")
+        return TrackerSyncPreview(
+            action: action,
+            itemsToAdd: counts.added,
+            itemsToAdvance: counts.advanced,
+            skipped: counts.unmapped,
+            unmapped: counts.unmapped,
+            estimatedAPICalls: max(1, entries.count),
+            notes: ["MAL anime lists were imported into Luna collections."]
+        )
+    }
+
     private func fillEclipseFromRemoteManga(_ entries: [RemoteMangaProgress], sourceName: String, action: TrackerSyncToolAction) async throws -> TrackerSyncPreview {
         let counts = try await MainActor.run { () throws -> (advanced: Int, unmapped: Int) in
             var advanced = 0
@@ -2878,6 +3037,55 @@ final class TrackerManager: NSObject, ObservableObject {
             unmapped: counts.unmapped,
             estimatedAPICalls: max(1, entries.count),
             notes: ["\(sourceName) manga fill completed without deleting or downgrading local reader progress."]
+        )
+    }
+
+    private func fillMALMangaCollectionsForLibraryImport(_ entries: [RemoteMangaProgress], action: TrackerSyncToolAction) async throws -> TrackerSyncPreview {
+        let counts = try await MainActor.run { () throws -> (added: Int, unmapped: Int) in
+            let library = MangaLibraryManager.shared
+            var added = 0
+            var unmapped = 0
+
+            for entry in entries {
+                try Task.checkCancellation()
+                guard let anilistId = entry.anilistId else {
+                    unmapped += 1
+                    continue
+                }
+
+                let collectionName = localMangaCollectionName(forRemoteStatus: entry.status, sourceName: "MAL")
+                let collection: MangaLibraryCollection
+                if let existing = library.collections.first(where: { $0.name == collectionName }) {
+                    collection = existing
+                } else {
+                    library.createCollection(name: collectionName, description: "Imported from MAL")
+                    collection = library.collections.first(where: { $0.name == collectionName })!
+                }
+
+                let item = MangaLibraryItem(
+                    aniListId: anilistId,
+                    title: entry.title,
+                    coverURL: nil,
+                    format: nil,
+                    totalChapters: entry.totalChapters
+                )
+                if !library.isItemInCollection(collection.id, item: item) {
+                    library.addItem(to: collection.id, item: item)
+                    added += 1
+                }
+            }
+
+            return (added: added, unmapped: unmapped)
+        }
+
+        return TrackerSyncPreview(
+            action: action,
+            itemsToAdd: counts.added,
+            itemsToAdvance: 0,
+            skipped: counts.unmapped,
+            unmapped: counts.unmapped,
+            estimatedAPICalls: 0,
+            notes: ["MAL manga lists were imported into Kanzen collections."]
         )
     }
 
@@ -2945,6 +3153,29 @@ final class TrackerManager: NSObject, ObservableObject {
         case "DROPPED":
             base = "Dropped"
         case "REPEATING":
+            base = "Repeating"
+        default:
+            base = "Tracking"
+        }
+
+        return sourceName == "AniList" ? base : "\(sourceName) \(base)"
+    }
+
+    private func localMangaCollectionName(forRemoteStatus status: String, sourceName: String) -> String {
+        let normalized = status.uppercased()
+        let base: String
+        switch normalized {
+        case "CURRENT", "READING":
+            base = "Reading"
+        case "PLANNING", "PLAN_TO_READ":
+            base = "Planning"
+        case "COMPLETED":
+            base = "Completed"
+        case "PAUSED", "ON_HOLD":
+            base = "Paused"
+        case "DROPPED":
+            base = "Dropped"
+        case "REPEATING", "REREADING":
             base = "Repeating"
         default:
             base = "Tracking"
@@ -3150,7 +3381,7 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     func importMALToLibrary() {
-        guard let account = trackerState.getAccount(for: .myAnimeList), account.isConnected else {
+        guard trackerState.getAccount(for: .myAnimeList)?.isConnected == true else {
             malImportError = "No connected MAL account"
             return
         }
@@ -3168,16 +3399,27 @@ final class TrackerManager: NSObject, ObservableObject {
             defer { setBackupRestoreSyncSuppressed(false) }
 
             do {
-                let animeEntries = await resolveMALAnimeEntriesToAniList(try await fetchMALAnimeProgressEntries(account: account))
-                let mangaEntries = await resolveMALMangaEntriesToAniList(try await fetchMALMangaProgressEntries(account: account))
+                let account = try await connectedMALAccount()
+                let fetchedAnimeEntries = try await fetchMALAnimeProgressEntries(account: account)
+                let fetchedMangaEntries = try await fetchMALMangaProgressEntries(account: account)
 
                 await MainActor.run {
-                    malImportProgress = "Adding items to Eclipse..."
+                    malImportProgress = "Matching MAL entries to app collections..."
                 }
 
-                let animeResult = try await fillEclipseFromRemoteAnime(animeEntries, sourceName: "MAL", action: .fillEclipseFromMAL)
+                let animeEntries = await resolveMALAnimeEntriesToAniList(fetchedAnimeEntries)
+                let mangaEntries = await resolveMALMangaEntriesToAniList(fetchedMangaEntries)
+                let mappedAnimeCount = animeEntries.filter { $0.anilistId != nil }.count
+                let mappedMangaCount = mangaEntries.filter { $0.anilistId != nil }.count
+
+                await MainActor.run {
+                    malImportProgress = "Adding \(mappedAnimeCount) anime and \(mappedMangaCount) manga entries to app collections..."
+                }
+
+                let animeResult = try await fillMALAnimeCollectionsForLibraryImport(animeEntries, action: .fillEclipseFromMAL)
+                let mangaCollectionResult = try await fillMALMangaCollectionsForLibraryImport(mangaEntries, action: .fillEclipseFromMAL)
                 let mangaResult = try await fillEclipseFromRemoteManga(mangaEntries, sourceName: "MAL", action: .fillEclipseFromMAL)
-                let imported = animeResult.itemsToAdd + animeResult.itemsToAdvance + mangaResult.itemsToAdvance
+                let imported = animeResult.itemsToAdd + animeResult.itemsToAdvance + mangaCollectionResult.itemsToAdd + mangaResult.itemsToAdvance
 
                 await MainActor.run {
                     isImportingMAL = false

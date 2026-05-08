@@ -78,11 +78,17 @@ private struct AniMapMapping: Decodable {
     }
 }
 
+struct AniMapTMDBImportMatch {
+    let tmdbResult: TMDBSearchResult
+    let tmdbSeason: Int?
+}
+
 private actor AniMapSpecialsService {
     static let shared = AniMapSpecialsService()
 
     private let baseURL = URL(string: "https://animap.s0n1c.ca")!
     private var cacheByTMDBShowId: [Int: [AniMapMapping]] = [:]
+    private var cacheByAniListId: [Int: [AniMapMapping]] = [:]
 
     func specialMappings(forTMDBShowId tmdbShowId: Int) async -> [AniMapMapping] {
         if let cached = cacheByTMDBShowId[tmdbShowId] {
@@ -124,6 +130,46 @@ private actor AniMapSpecialsService {
         } catch {
             Logger.shared.log("AniMapSpecialsService: lookup failed for TMDB show \(tmdbShowId): \(error.localizedDescription)", type: "AniList")
             cacheByTMDBShowId[tmdbShowId] = []
+            return []
+        }
+    }
+
+    func mappings(forAniListId anilistId: Int) async -> [AniMapMapping] {
+        if let cached = cacheByAniListId[anilistId] {
+            return cached
+        }
+
+        let mappingsURL = baseURL
+            .appendingPathComponent("mappings")
+            .appendingPathComponent(String(anilistId))
+        guard var components = URLComponents(url: mappingsURL, resolvingAgainstBaseURL: false) else {
+            cacheByAniListId[anilistId] = []
+            return []
+        }
+        components.queryItems = [URLQueryItem(name: "mapping_key", value: "anilist")]
+
+        guard let url = components.url else {
+            cacheByAniListId[anilistId] = []
+            return []
+        }
+
+        do {
+            let request = URLRequest(url: url, timeoutInterval: 4.0)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                cacheByAniListId[anilistId] = []
+                return []
+            }
+
+            let decoded = try JSONDecoder().decode(AniMapMappingList.self, from: data)
+            let mappings = decoded.mappings.filter { mapping in
+                mapping.anilistId == nil || mapping.anilistId == anilistId
+            }
+            cacheByAniListId[anilistId] = mappings
+            return mappings
+        } catch {
+            Logger.shared.log("AniMapSpecialsService: AniList lookup failed for \(anilistId): \(error.localizedDescription)", type: "AniList")
+            cacheByAniListId[anilistId] = []
             return []
         }
     }
@@ -1721,6 +1767,131 @@ final class AniListService {
 
         let nodes = await batchFetchAniListNodes(ids: uniqueIds)
         return await batchMapAniListToTMDB(Array(nodes.values), tmdbService: tmdbService)
+    }
+
+    /// MAL library import only: prefer AniMap's direct AniList -> TMDB IDs before title-search fallback.
+    func mapAniListAnimeIdsToTMDBViaAniMapForMALImport(
+        _ ids: [Int],
+        tmdbService: TMDBService
+    ) async -> [Int: AniMapTMDBImportMatch] {
+        let uniqueIds = Array(Set(ids))
+        guard !uniqueIds.isEmpty else { return [:] }
+
+        return await withTaskGroup(of: (Int, AniMapTMDBImportMatch?).self) { group in
+            for anilistId in uniqueIds {
+                group.addTask {
+                    let mappings = await AniMapSpecialsService.shared.mappings(forAniListId: anilistId)
+                    guard let mapping = Self.bestAniMapImportMapping(mappings, anilistId: anilistId),
+                          let match = await Self.tmdbImportMatch(from: mapping, tmdbService: tmdbService) else {
+                        return (anilistId, nil)
+                    }
+                    return (anilistId, match)
+                }
+            }
+
+            var result: [Int: AniMapTMDBImportMatch] = [:]
+            for await (anilistId, match) in group {
+                if let match {
+                    result[anilistId] = match
+                }
+            }
+            return result
+        }
+    }
+
+    private static func bestAniMapImportMapping(_ mappings: [AniMapMapping], anilistId: Int) -> AniMapMapping? {
+        mappings
+            .filter { $0.anilistId == nil || $0.anilistId == anilistId }
+            .max { lhs, rhs in
+                Self.aniMapImportScore(lhs) < Self.aniMapImportScore(rhs)
+            }
+    }
+
+    private static func aniMapImportScore(_ mapping: AniMapMapping) -> Int {
+        let type = mapping.mediaType?.uppercased()
+        var score = 0
+        if type == "MOVIE", mapping.tmdbMovieId != nil {
+            score += 50
+        }
+        if mapping.tmdbShowId != nil {
+            score += 40
+        }
+        if mapping.tmdbMovieId != nil {
+            score += 30
+        }
+        if mapping.tmdbSeason != nil {
+            score += 5
+        }
+        let isSpecialLike = type == "SPECIAL" || type == "OVA"
+        if !isSpecialLike {
+            score += 2
+        }
+        return score
+    }
+
+    private static func tmdbImportMatch(from mapping: AniMapMapping, tmdbService: TMDBService) async -> AniMapTMDBImportMatch? {
+        if mapping.mediaType?.uppercased() == "MOVIE",
+           let movieId = mapping.tmdbMovieId,
+           let detail = try? await tmdbService.getMovieDetails(id: movieId) {
+            return AniMapTMDBImportMatch(
+                tmdbResult: Self.tmdbSearchResult(from: detail),
+                tmdbSeason: nil
+            )
+        }
+
+        if let showId = mapping.tmdbShowId,
+           let detail = try? await tmdbService.getTVShowDetails(id: showId) {
+            return AniMapTMDBImportMatch(
+                tmdbResult: Self.tmdbSearchResult(from: detail),
+                tmdbSeason: mapping.tmdbSeason
+            )
+        }
+
+        if let movieId = mapping.tmdbMovieId,
+           let detail = try? await tmdbService.getMovieDetails(id: movieId) {
+            return AniMapTMDBImportMatch(
+                tmdbResult: Self.tmdbSearchResult(from: detail),
+                tmdbSeason: nil
+            )
+        }
+
+        return nil
+    }
+
+    private static func tmdbSearchResult(from detail: TMDBTVShowDetail) -> TMDBSearchResult {
+        TMDBSearchResult(
+            id: detail.id,
+            mediaType: "tv",
+            title: nil,
+            name: detail.name,
+            overview: detail.overview,
+            posterPath: detail.posterPath,
+            backdropPath: detail.backdropPath,
+            releaseDate: nil,
+            firstAirDate: detail.firstAirDate,
+            voteAverage: detail.voteAverage,
+            popularity: detail.popularity,
+            adult: detail.adult,
+            genreIds: detail.genres.map(\.id)
+        )
+    }
+
+    private static func tmdbSearchResult(from detail: TMDBMovieDetail) -> TMDBSearchResult {
+        TMDBSearchResult(
+            id: detail.id,
+            mediaType: "movie",
+            title: detail.title,
+            name: nil,
+            overview: detail.overview,
+            posterPath: detail.posterPath,
+            backdropPath: detail.backdropPath,
+            releaseDate: detail.releaseDate,
+            firstAirDate: nil,
+            voteAverage: detail.voteAverage,
+            popularity: detail.popularity,
+            adult: detail.adult,
+            genreIds: detail.genres.map(\.id)
+        )
     }
 
     // MARK: - Private Helpers
