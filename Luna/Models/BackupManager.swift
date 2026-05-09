@@ -108,7 +108,7 @@ struct BackupData: Codable {
     var recommendationCache: [TMDBSearchResult] = []
 
     // User Ratings
-    var userRatings: [String: Int] = [:]
+    var userRatings: [String: Double] = [:]
     var userRatingNotes: [String: String] = [:]
 
     enum CodingKeys: String, CodingKey {
@@ -212,7 +212,7 @@ struct BackupData: Codable {
         mangaCatalogs = try container.decodeIfPresent([MangaCatalog].self, forKey: .mangaCatalogs) ?? []
         kanzenModules = try container.decodeIfPresent([BackupKanzenModule].self, forKey: .kanzenModules) ?? []
         recommendationCache = try container.decodeIfPresent([TMDBSearchResult].self, forKey: .recommendationCache) ?? []
-        userRatings = try container.decodeIfPresent([String: Int].self, forKey: .userRatings) ?? [:]
+        userRatings = Self.decodeUserRatings(from: container)
         userRatingNotes = try container.decodeIfPresent([String: String].self, forKey: .userRatingNotes) ?? [:]
     }
 
@@ -379,7 +379,7 @@ struct BackupData: Codable {
         mangaCatalogs: [MangaCatalog] = [],
         kanzenModules: [BackupKanzenModule] = [],
         recommendationCache: [TMDBSearchResult] = [],
-        userRatings: [String: Int] = [:],
+        userRatings: [String: Double] = [:],
         userRatingNotes: [String: String] = [:]
     ) {
         self.version = version
@@ -456,6 +456,26 @@ struct BackupData: Codable {
         self.recommendationCache = recommendationCache
         self.userRatings = userRatings
         self.userRatingNotes = userRatingNotes
+    }
+
+    private static func decodeUserRatings(from container: KeyedDecodingContainer<CodingKeys>) -> [String: Double] {
+        if let ratings = try? container.decodeIfPresent([String: Double].self, forKey: .userRatings) {
+            return normalizeUserRatings(ratings)
+        }
+
+        if let ratings = try? container.decodeIfPresent([String: Int].self, forKey: .userRatings) {
+            return normalizeUserRatings(ratings.mapValues(Double.init))
+        }
+
+        return [:]
+    }
+
+    private static func normalizeUserRatings(_ ratings: [String: Double]) -> [String: Double] {
+        ratings.mapValues { value in
+            let finiteValue = value.isFinite ? value : 0.5
+            let halfStepValue = (finiteValue * 2).rounded() / 2
+            return max(0.5, min(10, halfStepValue))
+        }
     }
 
 }
@@ -538,6 +558,26 @@ class BackupManager {
     
     private let fileManager = FileManager.default
     private let dateFormatter = ISO8601DateFormatter()
+
+    private static func parseUserRatings(_ ratings: [String: Any]) -> [String: Double] {
+        Dictionary(uniqueKeysWithValues: ratings.compactMap { key, value -> (String, Double)? in
+            let numericValue: Double?
+            if let number = value as? NSNumber {
+                numericValue = number.doubleValue
+            } else if let value = value as? Double {
+                numericValue = value
+            } else if let value = value as? Int {
+                numericValue = Double(value)
+            } else {
+                numericValue = nil
+            }
+
+            guard let numericValue else { return nil }
+            let finiteValue = numericValue.isFinite ? numericValue : 0.5
+            let halfStepValue = (finiteValue * 2).rounded() / 2
+            return (key, max(0.5, min(10, halfStepValue)))
+        })
+    }
     
     // MARK: - Export Backup
     
@@ -1063,9 +1103,9 @@ class BackupManager {
             }
         }
 
-        var userRatings: [String: Int] = [:]
-        if let ratingsDict = json["userRatings"] as? [String: Int] {
-            userRatings = ratingsDict
+        var userRatings: [String: Double] = [:]
+        if let ratingsDict = json["userRatings"] as? [String: Any] {
+            userRatings = Self.parseUserRatings(ratingsDict)
         }
 
         var userRatingNotes: [String: String] = [:]

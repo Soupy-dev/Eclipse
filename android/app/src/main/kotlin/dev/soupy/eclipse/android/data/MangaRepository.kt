@@ -6,6 +6,7 @@ import dev.soupy.eclipse.android.core.model.MangaLibraryItem
 import dev.soupy.eclipse.android.core.model.MangaLibraryCollection
 import dev.soupy.eclipse.android.core.model.MangaLibrarySnapshot
 import dev.soupy.eclipse.android.core.model.MangaProgress
+import dev.soupy.eclipse.android.core.model.SimilarityAlgorithm
 import dev.soupy.eclipse.android.core.model.displayTitle
 import dev.soupy.eclipse.android.core.model.posterUrl
 import dev.soupy.eclipse.android.core.js.KanzenModuleRuntime
@@ -36,6 +37,12 @@ private const val DefaultMangaCollectionName = "Library"
 private const val FavoritesCollectionId = "android-favorites"
 private const val FavoritesCollectionName = "Favorites"
 private val ModuleAutoUpdateInterval: Duration = Duration.ofHours(1)
+
+private data class KanzenAutoSourceCandidate(
+    val item: MangaCatalogItemSnapshot,
+    val titleScore: Double,
+    val chapterCount: Int?,
+)
 
 data class MangaCatalogSectionSnapshot(
     val id: String,
@@ -92,6 +99,7 @@ data class AniListMangaLibraryImportDraft(
     val progressVolumes: Int = 0,
     val score: Double = 0.0,
     val updatedAtEpochSeconds: Long? = null,
+    val sourceName: String = "AniList",
 )
 
 data class MangaImportSummary(
@@ -227,6 +235,69 @@ class MangaRepository(
         aniListResults + snapshot.searchKanzenModules(
             query = trimmed,
             isNovel = false,
+        )
+    }
+
+    suspend fun resolveKanzenAutoSource(draft: MangaLibraryItemDraft): Result<MangaCatalogItemSnapshot> = runCatching {
+        val title = draft.title.trim()
+        require(title.isNotBlank()) { "Kanzen Auto Mode needs a manga title." }
+        val snapshot = seedFromBackupIfNeeded().first
+        val isNovel = draft.format.equals("NOVEL", ignoreCase = true) ||
+            draft.format.equals("LIGHT_NOVEL", ignoreCase = true)
+        val titleCandidates = listOf(title)
+        val savedIds = snapshot.savedAniListIds()
+        val progress = snapshot.progressByAniListId()[draft.aniListId]
+        val favoriteIds = snapshot.favoriteAniListIds()
+        val candidates = snapshot.searchKanzenModules(
+            query = title,
+            isNovel = isNovel,
+        ).mapNotNull { item ->
+            val titleScore = titleMatchScore(
+                expectedTitles = titleCandidates,
+                candidateText = item.title,
+                algorithm = SimilarityAlgorithm.JARO_WINKLER,
+            )
+            if (titleScore < 0.85) return@mapNotNull null
+            val chapterCount = runCatching {
+                loadKanzenReaderChapters(
+                    moduleId = item.moduleId,
+                    contentParams = item.contentParams,
+                    isNovel = isNovel,
+                ).getOrThrow().size
+            }.getOrNull()
+            KanzenAutoSourceCandidate(
+                item = item,
+                titleScore = titleScore,
+                chapterCount = chapterCount,
+            )
+        }
+
+        val best = candidates
+            .sortedWith(
+                compareByDescending<KanzenAutoSourceCandidate> { it.chapterCount ?: 0 }
+                    .thenByDescending { it.titleScore },
+            )
+            .firstOrNull()
+            ?: error("No high-confidence Kanzen source matched $title.")
+        val item = best.item
+        item.copy(
+            id = "kanzen-auto-${draft.aniListId}",
+            aniListId = draft.aniListId,
+            title = draft.title,
+            subtitle = listOfNotNull(
+                item.sourceName?.takeIf(String::isNotBlank),
+                item.subtitle.takeIf(String::isNotBlank),
+            ).distinct().joinToString(" - "),
+            coverUrl = item.coverUrl ?: draft.coverUrl,
+            format = draft.format ?: item.format,
+            totalChapters = best.chapterCount ?: item.totalChapters ?: draft.totalChapters,
+            isSaved = draft.aniListId in savedIds,
+            isFavorite = draft.aniListId in favoriteIds,
+            readChapterCount = progress?.readChapterNumbers?.size ?: 0,
+            unreadChapterCount = (best.chapterCount ?: item.totalChapters ?: draft.totalChapters)?.let { total ->
+                (total - (progress?.readChapterNumbers?.size ?: 0)).coerceAtLeast(0)
+            },
+            lastReadChapter = progress?.lastReadChapter,
         )
     }
 
@@ -457,8 +528,14 @@ class MangaRepository(
         val updatedProgress = snapshot.readingProgress
             .filterKeys { key -> importedProgress.none { (id, _) -> id == key } } +
             importedProgress.toMap()
+        val importedCollections = snapshot.collections
+            .withImportedManga(
+                items = importedItems,
+                sourceName = uniqueDrafts.firstOrNull()?.sourceName ?: "AniList",
+            )
+            .withRemoteMangaStatusCollections(uniqueDrafts)
         val updated = snapshot.copy(
-            collections = snapshot.collections.withImportedManga(importedItems),
+            collections = importedCollections,
             readingProgress = updatedProgress,
         )
         mangaStore.write(updated)
@@ -1101,6 +1178,7 @@ private val MangaLibraryItem.isNovelItem: Boolean
 
 private fun List<MangaLibraryCollection>.withImportedManga(
     items: List<MangaLibraryItem>,
+    sourceName: String,
 ): List<MangaLibraryCollection> {
     if (items.isEmpty()) return this
     val importedIds = items.map(MangaLibraryItem::aniListId).toSet()
@@ -1117,7 +1195,7 @@ private fun List<MangaLibraryCollection>.withImportedManga(
         MangaLibraryCollection(
             id = DefaultMangaCollectionId,
             name = DefaultMangaCollectionName,
-            description = "Imported from AniList",
+            description = "Imported from $sourceName",
             items = items,
         )
     }
@@ -1129,6 +1207,60 @@ private fun List<MangaLibraryCollection>.withImportedManga(
     } else {
         listOf(target) + this
     }
+}
+
+private fun List<MangaLibraryCollection>.withRemoteMangaStatusCollections(
+    drafts: List<AniListMangaLibraryImportDraft>,
+): List<MangaLibraryCollection> {
+    val remoteDrafts = drafts.filterNot { draft -> draft.sourceName.equals("AniList", ignoreCase = true) }
+    if (remoteDrafts.isEmpty()) return this
+
+    val grouped = remoteDrafts
+        .groupBy(AniListMangaLibraryImportDraft::remoteMangaCollectionName)
+        .mapValues { (_, entries) -> entries.map(AniListMangaLibraryImportDraft::toMangaLibraryItem) }
+    val keyedCollections = associateBy { collection -> collection.name.lowercase() }.toMutableMap()
+    grouped.forEach { (name, items) ->
+        val key = name.lowercase()
+        val sourceName = remoteDrafts.firstOrNull { draft -> draft.remoteMangaCollectionName() == name }
+            ?.sourceName
+            ?: "tracker"
+        val importedIds = items.map(MangaLibraryItem::aniListId).toSet()
+        val existing = keyedCollections[key]
+        keyedCollections[key] = if (existing == null) {
+            MangaLibraryCollection(
+                id = "tracker-manga-${name.slugified()}",
+                name = name,
+                description = "Imported from $sourceName",
+                items = items,
+            )
+        } else {
+            existing.copy(
+                items = items + existing.items.filterNot { item -> item.aniListId in importedIds },
+            )
+        }
+    }
+    return keyedCollections.values.toList()
+}
+
+private fun AniListMangaLibraryImportDraft.remoteMangaCollectionName(): String {
+    val status = status.toMangaDisplayStatus() ?: "Tracking"
+    return "$sourceName $status"
+}
+
+private fun String?.toMangaDisplayStatus(): String? {
+    val normalized = this?.trim()?.takeIf(String::isNotBlank)?.lowercase() ?: return null
+    val base = when (normalized) {
+        "current", "reading" -> "Reading"
+        "planning", "plan_to_read" -> "Planning"
+        "completed" -> "Completed"
+        "paused", "on_hold" -> "Paused"
+        "dropped" -> "Dropped"
+        "repeating", "rereading" -> "Repeating"
+        else -> normalized.split('_', ' ').joinToString(" ") { token ->
+            token.replaceFirstChar { char -> char.uppercase() }
+        }
+    }
+    return base
 }
 
 private fun List<MangaLibraryCollection>.withFavoriteManga(
@@ -1217,6 +1349,12 @@ private fun String.toModuleDisplayName(): String {
         ?.takeIf(String::isNotBlank)
     return pathName ?: uri?.host?.removePrefix("www.") ?: "Kanzen Module"
 }
+
+private fun String.slugified(): String =
+    lowercase()
+        .replace(Regex("[^a-z0-9]+"), "-")
+        .trim('-')
+        .ifBlank { "collection-${System.currentTimeMillis()}" }
 
 private fun JsonElement?.withModuleMetadata(
     sourceName: String,

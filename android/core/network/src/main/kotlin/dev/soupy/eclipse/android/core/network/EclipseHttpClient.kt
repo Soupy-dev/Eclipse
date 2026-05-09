@@ -1,6 +1,7 @@
 package dev.soupy.eclipse.android.core.network
 
 import java.io.IOException
+import java.net.URLEncoder
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -32,6 +33,30 @@ class EclipseHttpClient(
             .url(url)
             .applyHeaders(headers)
             .post(body.toRequestBody("application/json".toMediaType()))
+            .build(),
+    )
+
+    suspend fun postForm(
+        url: String,
+        fields: Map<String, String>,
+        headers: Map<String, String> = emptyMap(),
+    ): NetworkResult<String> = execute(
+        Request.Builder()
+            .url(url)
+            .applyHeaders(headers)
+            .post(fields.toFormBody().toRequestBody("application/x-www-form-urlencoded".toMediaType()))
+            .build(),
+    )
+
+    suspend fun patchForm(
+        url: String,
+        fields: Map<String, String>,
+        headers: Map<String, String> = emptyMap(),
+    ): NetworkResult<String> = execute(
+        Request.Builder()
+            .url(url)
+            .applyHeaders(headers)
+            .patch(fields.toFormBody().toRequestBody("application/x-www-form-urlencoded".toMediaType()))
             .build(),
     )
 
@@ -86,4 +111,11 @@ private fun Request.Builder.applyHeaders(headers: Map<String, String>): Request.
     headers.forEach { (key, value) -> header(key, value) }
 }
 
+private fun Map<String, String>.toFormBody(): String =
+    entries.joinToString("&") { (key, value) ->
+        "${key.formEncoded()}=${value.formEncoded()}"
+    }
+
+private fun String.formEncoded(): String =
+    URLEncoder.encode(this, Charsets.UTF_8.name())
 

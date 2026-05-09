@@ -41,15 +41,23 @@ class BackupDocumentTest {
               "version": "1.0",
               "createdDate": "2026-04-23T00:00:00Z",
               "tmdbLanguage": "en-US",
+              "settingsGradientColor": "#401F73",
               "selectedAppearance": "dark",
               "enableSubtitlesByDefault": true,
               "defaultSubtitleLanguage": "eng",
               "preferredAnimeAudioLanguage": "jpn",
               "inAppPlayer": "VLC",
+              "useClassicScheduleUI": true,
+              "defaultPlaybackSpeed": 1.25,
               "holdSpeedPlayer": 2.0,
               "externalPlayer": "org.videolan.vlc",
               "alwaysLandscape": true,
               "vlcHeaderProxyEnabled": false,
+              "playerTwoFingerTapPlayPauseEnabled": false,
+              "vlcDoubleTapSeekEnabled": true,
+              "vlcDoubleTapSeekSeconds": 15.0,
+              "vlcOpenSubtitlesEnabled": true,
+              "vlcOpenSubtitlesAutoFallbackEnabled": false,
               "skip85sEnabled": true,
               "nextEpisodeThreshold": 0.9,
               "subtitleForegroundColor": "#FFFFFF",
@@ -146,7 +154,10 @@ class BackupDocumentTest {
                 }
               ],
               "userRatings": {
-                "99": 5
+                "99": 7.5
+              },
+              "userRatingNotes": {
+                "99": "rewatch with friends"
               },
               "futureIosOnlySection": {
                 "still": "preserved"
@@ -158,12 +169,20 @@ class BackupDocumentTest {
         val encoded = document.encode(json)
 
         assertEquals("1.0", document.payload.version)
+        assertEquals("#401F73", document.payload.settingsGradientColor)
         assertEquals(InAppPlayer.VLC, document.payload.resolvedInAppPlayer)
+        assertEquals(true, document.payload.useClassicScheduleUI)
+        assertEquals(1.25, document.payload.defaultPlaybackSpeed)
         assertEquals(90, document.payload.nextEpisodeThresholdPercent())
         assertEquals(true, document.payload.enableSubtitlesByDefault)
         assertEquals("org.videolan.vlc", document.payload.externalPlayer)
         assertEquals(true, document.payload.alwaysLandscape)
         assertEquals(false, document.payload.vlcHeaderProxyEnabled)
+        assertEquals(false, document.payload.playerTwoFingerTapPlayPauseEnabled)
+        assertEquals(true, document.payload.vlcDoubleTapSeekEnabled)
+        assertEquals(15.0, document.payload.vlcDoubleTapSeekSeconds)
+        assertEquals(true, document.payload.vlcOpenSubtitlesEnabled)
+        assertEquals(false, document.payload.vlcOpenSubtitlesAutoFallbackEnabled)
         assertEquals(true, document.payload.skip85sEnabled)
         assertEquals("#FFFFFF", document.payload.subtitleForegroundColor)
         assertEquals("#111111", document.payload.subtitleStrokeColor)
@@ -179,10 +198,12 @@ class BackupDocumentTest {
         val stremioAddons = assertNotNull(document.payload.stremioAddons)
         assertEquals("https://addon.example", stremioAddons.single().resolvedTransportUrl)
         assertEquals("2", document.payload.mangaReadingProgress.getValue("123").lastReadChapter)
-        assertEquals(5, document.payload.userRatings.getValue("99"))
+        assertEquals(7.5, document.payload.userRatings.getValue("99"))
+        assertEquals("rewatch with friends", document.payload.userRatingNotes.getValue("99"))
         assertTrue("futureIosOnlySection" in document.unknownKeys)
         assertTrue(encoded.contains("futureIosOnlySection"))
         assertTrue(encoded.contains("manifestJSON"))
+        assertTrue(encoded.contains("userRatingNotes"))
     }
 }
 

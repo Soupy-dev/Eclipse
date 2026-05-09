@@ -13,6 +13,7 @@ import dev.soupy.eclipse.android.data.MangaOverviewSnapshot
 import dev.soupy.eclipse.android.data.MangaReadingProgressDraft
 import dev.soupy.eclipse.android.data.MangaRepository
 import dev.soupy.eclipse.android.data.ReaderCacheRepository
+import dev.soupy.eclipse.android.core.storage.SettingsStore
 import dev.soupy.eclipse.android.feature.manga.MangaCatalogItemRow
 import dev.soupy.eclipse.android.feature.manga.MangaCatalogSectionRow
 import dev.soupy.eclipse.android.feature.manga.MangaCollectionRow
@@ -30,11 +31,19 @@ import kotlinx.coroutines.launch
 class AndroidMangaViewModel(
     private val repository: MangaRepository,
     private val readerCacheRepository: ReaderCacheRepository? = null,
+    private val settingsStore: SettingsStore? = null,
 ) : ViewModel() {
     private val _state = MutableStateFlow(MangaScreenState(isLoading = true))
     val state: StateFlow<MangaScreenState> = _state.asStateFlow()
 
     init {
+        settingsStore?.let { store ->
+            viewModelScope.launch {
+                store.settings.collect { settings ->
+                    _state.update { state -> state.copy(kanzenAutoMode = settings.kanzenAutoMode) }
+                }
+            }
+        }
         refresh()
     }
 
@@ -157,7 +166,7 @@ class AndroidMangaViewModel(
         _state.update {
             it.copy(
                 selectedDetail = item,
-                isDetailLoading = item.isKanzenBacked,
+                isDetailLoading = item.isKanzenBacked || it.kanzenAutoMode,
                 detailError = null,
                 noticeMessage = null,
                 errorMessage = null,
@@ -165,6 +174,8 @@ class AndroidMangaViewModel(
         }
         if (item.isKanzenBacked) {
             loadKanzenCatalogDetails(item)
+        } else if (_state.value.kanzenAutoMode) {
+            resolveKanzenAutoSource(item)
         }
     }
 
@@ -644,6 +655,7 @@ class AndroidMangaViewModel(
                     isActive = module.isActive,
                 )
             },
+            kanzenAutoMode = previous.kanzenAutoMode,
         )
         val selectedDetail = previous.selectedDetail?.let { detail ->
             nextState.findCatalogItem(detail.id)
@@ -660,6 +672,51 @@ class AndroidMangaViewModel(
                 nextState.readerPanelFor(reader.aniListId)?.mergeRuntimeState(reader)
             },
         )
+    }
+
+    private fun resolveKanzenAutoSource(item: MangaCatalogItemRow) {
+        viewModelScope.launch {
+            repository.resolveKanzenAutoSource(item.toDraft())
+                .onSuccess { source ->
+                    val sourceRow = source.toRow()
+                    val enriched = item.copy(
+                        moduleId = sourceRow.moduleId,
+                        contentParams = sourceRow.contentParams,
+                        sourceName = sourceRow.sourceName,
+                        subtitle = sourceRow.subtitle.takeIf(String::isNotBlank) ?: item.subtitle,
+                        coverUrl = sourceRow.coverUrl ?: item.coverUrl,
+                        description = sourceRow.description ?: item.description,
+                        totalChapters = sourceRow.totalChapters ?: item.totalChapters,
+                        isSaved = sourceRow.isSaved || item.isSaved,
+                        isFavorite = sourceRow.isFavorite || item.isFavorite,
+                        readChapterCount = sourceRow.readChapterCount,
+                        unreadChapterCount = sourceRow.unreadChapterCount ?: item.unreadChapterCount,
+                        lastReadChapter = sourceRow.lastReadChapter ?: item.lastReadChapter,
+                    )
+                    _state.update { state ->
+                        state.withUpdatedCatalogItem(item.id, enriched).copy(
+                            selectedDetail = state.selectedDetail?.let { detail ->
+                                if (detail.id == item.id || detail.aniListId == item.aniListId) {
+                                    detail.withDetailFieldsFrom(enriched)
+                                } else {
+                                    detail
+                                }
+                            } ?: enriched,
+                            isDetailLoading = false,
+                            detailError = null,
+                            noticeMessage = "Kanzen Auto Mode selected ${enriched.sourceName ?: "a module source"}.",
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(
+                            isDetailLoading = false,
+                            detailError = error.message ?: "Kanzen Auto Mode could not find a source.",
+                        )
+                    }
+                }
+        }
     }
 
     private fun loadKanzenCatalogDetails(item: MangaCatalogItemRow) {
@@ -960,13 +1017,13 @@ private fun MangaScreenState.activeReaderPanelFor(aniListId: Int): MangaReaderPa
 private fun MangaScreenState.readerPanelFor(aniListId: Int): MangaReaderPanelRow? =
     savedItems.firstOrNull { it.aniListId == aniListId }
         ?.toReaderPanel()
-        ?: searchResults.firstOrNull { it.aniListId == aniListId && it.isSaved }
+        ?: searchResults.firstOrNull { it.aniListId == aniListId && (it.isSaved || it.isKanzenBacked) }
             ?.toReaderPanel()
         ?: catalogs.asSequence()
             .flatMap { section -> section.items.asSequence() }
-            .firstOrNull { it.aniListId == aniListId && it.isSaved }
+            .firstOrNull { it.aniListId == aniListId && (it.isSaved || it.isKanzenBacked) }
             ?.toReaderPanel()
-        ?: selectedDetail?.takeIf { it.aniListId == aniListId && it.isSaved }
+        ?: selectedDetail?.takeIf { it.aniListId == aniListId && (it.isSaved || it.isKanzenBacked) }
             ?.toReaderPanel()
         ?: recent.firstOrNull { it.aniListId == aniListId }
             ?.toReaderPanel()

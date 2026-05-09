@@ -109,6 +109,8 @@ fun DownloadsRoute(
     onClearAll: () -> Unit,
     onCleanupOrphans: () -> Unit,
     onVerifyFiles: () -> Unit,
+    onPlaybackReady: (PlayerSource) -> Unit = {},
+    onPlaybackFailure: (PlayerSource, String, Boolean) -> Unit = { _, _, _ -> },
     preferredPlayer: InAppPlayer = InAppPlayer.NORMAL,
     playbackSettings: PlaybackSettingsSnapshot = PlaybackSettingsSnapshot(),
 ) {
@@ -187,6 +189,8 @@ fun DownloadsRoute(
                     source = source,
                     preferredPlayer = preferredPlayer,
                     settings = playbackSettings,
+                    onPlaybackReady = onPlaybackReady,
+                    onPlaybackFailure = onPlaybackFailure,
                 )
             }
         }

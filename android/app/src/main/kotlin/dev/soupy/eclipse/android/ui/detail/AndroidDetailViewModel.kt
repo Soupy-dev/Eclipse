@@ -27,6 +27,9 @@ import dev.soupy.eclipse.android.core.model.DetailTarget
 import dev.soupy.eclipse.android.core.model.EpisodePlaybackContext
 import dev.soupy.eclipse.android.core.model.PlayerSource
 import dev.soupy.eclipse.android.core.model.SkipSegment
+import dev.soupy.eclipse.android.core.model.TrackerStateSnapshot
+import dev.soupy.eclipse.android.core.model.formattedUserRatingOutOf10
+import dev.soupy.eclipse.android.core.model.normalizedUserRatingOutOf10
 import dev.soupy.eclipse.android.feature.detail.DetailCastRow
 import dev.soupy.eclipse.android.feature.detail.DetailEpisodeRow
 import dev.soupy.eclipse.android.feature.detail.DetailFactRow
@@ -52,6 +55,7 @@ class AndroidDetailViewModel(
     private var currentTarget: DetailTarget? = null
     private var currentProgressTarget: DetailTarget? = null
     private var currentRatingTmdbId: Int? = null
+    private var currentRatingAniListId: Int? = null
     private var skipProviderSettings = SkipProviderSettings()
     private val syncedTrackerProgressKeys = mutableSetOf<String>()
 
@@ -71,6 +75,7 @@ class AndroidDetailViewModel(
             currentTarget = null
             currentProgressTarget = null
             currentRatingTmdbId = null
+            currentRatingAniListId = null
             _state.value = DetailScreenState()
             return
         }
@@ -87,14 +92,25 @@ class AndroidDetailViewModel(
                 .onSuccess { content ->
                     currentProgressTarget = content.progressTarget ?: target
                     currentRatingTmdbId = (currentProgressTarget ?: target).tmdbRatingId()
-                    val rating = currentRatingTmdbId?.let { id ->
-                        ratingsRepository.loadSnapshot().getOrNull()?.ratings?.get(id.toString())
+                    currentRatingAniListId = content.primaryAniListId.takeIf { content.isAnime }
+                    val ratingsSnapshot = ratingsRepository.loadSnapshot().getOrNull()
+                    val ratingKey = currentRatingTmdbId?.toString()
+                    val rating = ratingKey?.let { key ->
+                        ratingsSnapshot?.ratings?.get(key)
                     }
-                    _state.value = content.toUiState(userRating = rating)
+                    val note = ratingKey?.let { key ->
+                        ratingsSnapshot?.notes?.get(key)
+                    }.orEmpty()
+                    val trackerSnapshot = trackerRepository.loadSnapshot().getOrNull()
+                    _state.value = content.toUiState(userRating = rating, userRatingNote = note).copy(
+                        canSyncRatingToAniList = content.canSyncRatingTo("anilist", trackerSnapshot),
+                        canSyncRatingToMyAnimeList = content.canSyncRatingTo("myanimelist", trackerSnapshot),
+                    )
                 }
                 .onFailure { error ->
                     currentProgressTarget = null
                     currentRatingTmdbId = null
+                    currentRatingAniListId = null
                     _state.update {
                         it.copy(
                             hasSelection = true,
@@ -106,21 +122,70 @@ class AndroidDetailViewModel(
         }
     }
 
-    fun setUserRating(rating: Int) {
+    fun setUserRating(rating: Double) {
         val tmdbId = currentRatingTmdbId ?: return markUnsupportedRating()
+        val anilistId = currentRatingAniListId
+        val clampedRating = normalizedUserRatingOutOf10(rating)
+        val ratingText = formattedUserRatingOutOf10(clampedRating)
         viewModelScope.launch {
-            ratingsRepository.setRating(tmdbId, rating)
+            ratingsRepository.setRating(tmdbId, clampedRating)
                 .onSuccess {
                     _state.update {
                         it.copy(
-                            userRating = rating.coerceIn(1, 5),
-                            streamStatusMessage = "Saved rating ${rating.coerceIn(1, 5)}/5.",
+                            userRating = clampedRating,
+                            streamStatusMessage = "Saved rating $ratingText/10.",
                         )
                     }
+                    syncRatingIfNeeded(anilistId, clampedRating)
                 }
                 .onFailure { error ->
                     _state.update {
                         it.copy(streamStatusMessage = error.message ?: "Could not save rating.")
+                    }
+                }
+        }
+    }
+
+    private suspend fun syncRatingIfNeeded(
+        anilistId: Int?,
+        rating: Double,
+    ) {
+        if (anilistId == null) return
+        val ratingText = formattedUserRatingOutOf10(rating)
+        trackerRepository.syncUserRating(anilistId, rating)
+            .onSuccess { summary ->
+                val message = when {
+                    summary.failures.isNotEmpty() && summary.syncedItems == 0 ->
+                        "Saved rating $ratingText/10 locally. Remote rating sync failed: ${summary.failures.first()}"
+                    summary.failures.isNotEmpty() ->
+                        "Saved rating $ratingText/10 and synced ${summary.syncedItems} tracker rating${summary.syncedItems.pluralSuffix()} with ${summary.failures.size} issue${summary.failures.size.pluralSuffix()}."
+                    summary.syncedItems > 0 ->
+                        "Saved rating $ratingText/10 and synced ${summary.syncedItems} tracker rating${summary.syncedItems.pluralSuffix()}."
+                    else -> null
+                }
+                message?.let { status ->
+                    _state.update { it.copy(streamStatusMessage = status) }
+                }
+            }
+            .onFailure { error ->
+                _state.update {
+                    it.copy(streamStatusMessage = "Saved rating $ratingText/10 locally. Remote rating sync failed: ${error.message ?: "unknown error"}.")
+                }
+            }
+    }
+
+    fun setUserRatingNote(note: String) {
+        val tmdbId = currentRatingTmdbId ?: return markUnsupportedRating()
+        viewModelScope.launch {
+            ratingsRepository.setNote(tmdbId, note)
+                .onSuccess {
+                    _state.update {
+                        it.copy(userRatingNote = note, streamStatusMessage = "Saved private note.")
+                    }
+                }
+                .onFailure { error ->
+                    _state.update {
+                        it.copy(streamStatusMessage = error.message ?: "Could not save note.")
                     }
                 }
         }
@@ -140,6 +205,42 @@ class AndroidDetailViewModel(
                         it.copy(streamStatusMessage = error.message ?: "Could not remove rating.")
                     }
                 }
+        }
+    }
+
+    fun syncRatingNoteToAniList() {
+        syncRatingNoteTo("AniList")
+    }
+
+    fun syncRatingNoteToMyAnimeList() {
+        syncRatingNoteTo("MyAnimeList")
+    }
+
+    private fun syncRatingNoteTo(service: String) {
+        val anilistId = currentRatingAniListId ?: return markUnsupportedRating()
+        val rating = _state.value.userRating ?: return
+        val note = _state.value.userRatingNote
+        viewModelScope.launch {
+            _state.update {
+                it.copy(streamStatusMessage = "Syncing rating and note to $service...")
+            }
+            trackerRepository.syncUserRatingAndNote(
+                service = service,
+                anilistMediaId = anilistId,
+                ratingOutOf10 = rating,
+                note = note,
+            ).onSuccess { summary ->
+                val message = when {
+                    summary.failures.isNotEmpty() -> "Could not sync $service rating: ${summary.failures.first()}"
+                    summary.syncedItems > 0 -> "Synced rating and note to $service."
+                    else -> "No $service rating sync was needed."
+                }
+                _state.update { it.copy(streamStatusMessage = message) }
+            }.onFailure { error ->
+                _state.update {
+                    it.copy(streamStatusMessage = error.message ?: "Could not sync rating to $service.")
+                }
+            }
         }
     }
 
@@ -390,15 +491,23 @@ class AndroidDetailViewModel(
         )
     }
 
-    fun currentDownloadDraft(): DownloadDraft? {
+    fun currentDownloadDraft(
+        episodeId: String? = null,
+        playerSourceOverride: PlayerSource? = null,
+    ): DownloadDraft? {
         val target = currentTarget ?: return null
         val snapshot = state.value
         if (snapshot.title.isBlank()) return null
 
-        val selectedEpisode = snapshot.selectedEpisodeId
+        val selectedEpisode = episodeId
+            ?.let { id -> snapshot.episodes.firstOrNull { it.id == id } }
+            ?: snapshot.selectedEpisodeId
             ?.let { id -> snapshot.episodes.firstOrNull { it.id == id } }
             ?: snapshot.episodes.firstOrNull()
-        val playbackContext = snapshot.playerSource?.context
+        val attachedPlayerSource = playerSourceOverride ?: snapshot.playerSource.takeIf {
+            episodeId == null || selectedEpisode?.id == snapshot.selectedEpisodeId
+        }
+        val playbackContext = attachedPlayerSource?.context
         val isEpisodeDraft = selectedEpisode != null || playbackContext != null
         return DownloadDraft(
             detailTarget = target,
@@ -409,16 +518,27 @@ class AndroidDetailViewModel(
             mediaLabel = snapshot.metadataChips.firstOrNull(),
             progressLabel = selectedEpisode?.subtitle?.let { "Preparing offline draft near $it" }
                 ?: "Preparing an offline draft from the current source.",
-            sourceLabel = snapshot.playerSource?.title ?: if (isEpisodeDraft) {
+            sourceLabel = attachedPlayerSource?.title ?: if (isEpisodeDraft) {
                 "Episode download draft"
             } else {
                 "Movie download draft"
             },
             downloadKeySuffix = selectedEpisode?.downloadKeySuffix()
                 ?: playbackContext?.downloadKeySuffix(),
-            playerSource = snapshot.playerSource,
+            playerSource = attachedPlayerSource,
         )
     }
+
+    fun currentDownloadDraftForStream(streamId: String): DownloadDraft? {
+        val source = state.value.streamCandidates.firstOrNull { stream -> stream.id == streamId }?.playerSource
+            ?: return null
+        return currentDownloadDraft(playerSourceOverride = source)
+    }
+
+    fun currentDownloadDrafts(episodeIds: List<String>): List<DownloadDraft> =
+        episodeIds
+            .distinct()
+            .mapNotNull { episodeId -> currentDownloadDraft(episodeId) }
 
     private fun recordTypedProgress(
         target: DetailTarget,
@@ -676,7 +796,10 @@ private data class SkipProviderSettings(
     val introDbEnabled: Boolean = true,
 )
 
-private fun DetailContent.toUiState(userRating: Int?): DetailScreenState = DetailScreenState(
+private fun DetailContent.toUiState(
+    userRating: Double?,
+    userRatingNote: String,
+): DetailScreenState = DetailScreenState(
     hasSelection = true,
     isLoading = false,
     title = title,
@@ -693,6 +816,7 @@ private fun DetailContent.toUiState(userRating: Int?): DetailScreenState = Detai
     },
     contentRating = contentRating,
     userRating = userRating,
+    userRatingNote = userRatingNote,
     cast = cast.map {
         DetailCastRow(
             id = it.id,
@@ -723,11 +847,37 @@ private fun DetailContent.toUiState(userRating: Int?): DetailScreenState = Detai
     isMovie = isMovie,
 )
 
+private fun DetailContent.canSyncRatingTo(
+    service: String,
+    trackerSnapshot: TrackerStateSnapshot?,
+): Boolean {
+    if (!isAnime || primaryAniListId == null || trackerSnapshot?.syncEnabled != true) return false
+    return trackerSnapshot.accounts.any { account ->
+        account.isConnected &&
+            account.accessToken.isNotBlank() &&
+            account.service.isSameTrackerService(service)
+    }
+}
+
 private fun DetailTarget.tmdbRatingId(): Int? = when (this) {
     is DetailTarget.TmdbMovie -> id
     is DetailTarget.TmdbShow -> id
     is DetailTarget.AniListMediaTarget -> null
     is DetailTarget.ServiceMedia -> null
+}
+
+private fun Int.pluralSuffix(): String = if (this == 1) "" else "s"
+
+private fun String.normalizedTrackerService(): String =
+    trim()
+        .lowercase()
+        .replace(" ", "")
+        .replace("-", "")
+
+private fun String.isSameTrackerService(other: String): Boolean {
+    val left = normalizedTrackerService()
+    val right = other.normalizedTrackerService()
+    return left == right || left in setOf("myanimelist", "mal") && right in setOf("myanimelist", "mal")
 }
 
 private fun DetailEpisodeRow.toStreamEpisodeSelection(): StreamEpisodeSelection? {

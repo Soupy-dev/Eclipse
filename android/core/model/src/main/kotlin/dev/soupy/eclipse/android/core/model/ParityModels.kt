@@ -1,10 +1,14 @@
 package dev.soupy.eclipse.android.core.model
 
+import java.util.Locale
+import kotlin.math.roundToInt
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 
 private const val WatchedThreshold = 0.85
+private const val MinimumUserRating = 0.5
+private const val MaximumUserRating = 10.0
 
 val DefaultCatalogs: List<BackupCatalog> = listOf(
     BackupCatalog(id = "forYou", name = "Just For You", source = "Local", isEnabled = true, order = 0),
@@ -42,10 +46,31 @@ data class CatalogSnapshot(
 
 @Serializable
 data class RatingsSnapshot(
-    val ratings: Map<String, Int> = emptyMap(),
+    val ratings: Map<String, Double> = emptyMap(),
+    val notes: Map<String, String> = emptyMap(),
 ) {
     val normalized: RatingsSnapshot
-        get() = copy(ratings = ratings.mapValues { (_, value) -> value.coerceIn(1, 5) })
+        get() = copy(
+            ratings = ratings.mapValues { (_, value) -> normalizedUserRatingOutOf10(value) },
+            notes = notes
+                .mapValues { (_, value) -> value.trim() }
+                .filterValues { it.isNotBlank() },
+        )
+}
+
+fun normalizedUserRatingOutOf10(rating: Double): Double {
+    val finiteRating = if (rating.isFinite()) rating else MinimumUserRating
+    return ((finiteRating * 2.0).roundToInt() / 2.0).coerceIn(MinimumUserRating, MaximumUserRating)
+}
+
+fun formattedUserRatingOutOf10(rating: Double): String {
+    val normalized = normalizedUserRatingOutOf10(rating)
+    val asInt = normalized.roundToInt()
+    return if (normalized == asInt.toDouble()) {
+        asInt.toString()
+    } else {
+        String.format(Locale.US, "%.1f", normalized)
+    }
 }
 
 @Serializable

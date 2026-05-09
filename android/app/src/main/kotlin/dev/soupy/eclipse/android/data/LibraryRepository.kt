@@ -40,6 +40,7 @@ data class AniListLibraryImportDraft(
     val progress: Int = 0,
     val score: Double = 0.0,
     val updatedAtEpochSeconds: Long? = null,
+    val sourceName: String = "AniList",
 )
 
 data class LibraryImportSummary(
@@ -91,7 +92,7 @@ class LibraryRepository(
         val importedContinueWatching = uniqueDrafts.mapNotNull(AniListLibraryImportDraft::toContinueWatchingRecord)
         val importedSavedIds = importedSaved.map(LibraryItemRecord::id).toSet()
         val importedContinueWatchingIds = importedContinueWatching.map(ContinueWatchingRecord::id).toSet()
-        val importedCollections = snapshot.collections.withAniListStatusCollections(uniqueDrafts)
+        val importedCollections = snapshot.collections.withRemoteStatusCollections(uniqueDrafts)
 
         val updated = writeSnapshot(
             snapshot.copy(
@@ -336,12 +337,12 @@ private fun List<MediaLibraryCollection>.withItemInCollection(
     }
 }
 
-private fun List<MediaLibraryCollection>.withAniListStatusCollections(
+private fun List<MediaLibraryCollection>.withRemoteStatusCollections(
     drafts: List<AniListLibraryImportDraft>,
 ): List<MediaLibraryCollection> {
     val now = System.currentTimeMillis()
     val grouped = drafts
-        .groupBy { it.status.toDisplayStatus() ?: "AniList" }
+        .groupBy(AniListLibraryImportDraft::remoteImportCollectionName)
         .mapValues { (_, entries) ->
             entries.map { DetailTarget.AniListMediaTarget(it.media.id).storageKey() }.distinct()
         }
@@ -350,11 +351,14 @@ private fun List<MediaLibraryCollection>.withAniListStatusCollections(
         val name = status.ifBlank { "AniList" }
         val key = name.lowercase()
         val existing = keyedCollections[key]
+        val sourceName = drafts.firstOrNull { draft -> draft.remoteImportCollectionName() == name }
+            ?.sourceName
+            ?: "tracker"
         keyedCollections[key] = if (existing == null) {
             MediaLibraryCollection(
                 id = "anilist-${name.slugified()}",
                 name = name,
-                description = "Imported from AniList.",
+                description = "Imported from $sourceName.",
                 itemIds = ids,
                 createdAt = now,
                 updatedAt = now,
@@ -401,10 +405,15 @@ private fun AniListLibraryImportDraft.toLibraryRecord(id: String): LibraryItemRe
         overview = media.description,
         imageUrl = media.posterUrl,
         backdropUrl = media.bannerImage,
-        mediaLabel = listOfNotNull("AniList", status.toDisplayStatus()).joinToString(" - "),
+        mediaLabel = listOfNotNull(sourceName, status.toDisplayStatus()).joinToString(" - "),
         addedAt = updatedAtMillis,
         updatedAt = updatedAtMillis,
     )
+}
+
+private fun AniListLibraryImportDraft.remoteImportCollectionName(): String {
+    val status = status.toDisplayStatus() ?: "Tracking"
+    return if (sourceName.equals("AniList", ignoreCase = true)) status else "$sourceName $status"
 }
 
 private fun AniListLibraryImportDraft.toContinueWatchingRecord(): ContinueWatchingRecord? {
@@ -419,7 +428,7 @@ private fun AniListLibraryImportDraft.toContinueWatchingRecord(): ContinueWatchi
         imageUrl = media.posterUrl,
         backdropUrl = media.bannerImage,
         progressPercent = (progress.toFloat() / episodeCount.toFloat()).coerceIn(0f, 0.96f),
-        progressLabel = "AniList progress $progress/$episodeCount",
+        progressLabel = "$sourceName progress $progress/$episodeCount",
         updatedAt = updatedAtMillis,
     )
 }

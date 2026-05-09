@@ -57,6 +57,41 @@ class AndroidDownloadsViewModel(
         repository.queueDownload(draft)
     }
 
+    fun queueDownloads(drafts: List<DownloadDraft>) {
+        val distinctDrafts = drafts.distinctBy { draft ->
+            draft.detailTarget to draft.downloadKeySuffix
+        }
+        if (distinctDrafts.isEmpty()) {
+            _state.value = _state.value.copy(noticeMessage = "No episodes to queue.")
+            return
+        }
+        viewModelScope.launch {
+            var latest: DownloadSnapshot? = null
+            var queuedCount = 0
+            var failureMessage: String? = null
+            distinctDrafts.forEach { draft ->
+                repository.queueDownload(draft)
+                    .onSuccess { snapshot ->
+                        latest = snapshot
+                        queuedCount += 1
+                    }
+                    .onFailure { error ->
+                        failureMessage = error.message ?: "A season download could not be queued."
+                    }
+            }
+            latest?.let { snapshot ->
+                _state.value = snapshot.toUiState(
+                    noticeMessage = "Queued $queuedCount episode download${queuedCount.pluralSuffix()}.",
+                    playerSource = _state.value.playerSource,
+                )
+            } ?: run {
+                _state.value = _state.value.copy(
+                    errorMessage = failureMessage ?: "No episodes could be queued.",
+                )
+            }
+        }
+    }
+
     fun pause(id: String) = mutate(
         successMessage = "Paused download draft.",
     ) {

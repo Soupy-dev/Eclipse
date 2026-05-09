@@ -85,4 +85,4 @@ private fun ExploreMediaCard.tmdbKey(): String? = when (val target = detailTarge
     is DetailTarget.ServiceMedia -> null
 }
 
-private fun Int?.orZero(): Int = this ?: 0
+private fun Double?.orZero(): Double = this ?: 0.0

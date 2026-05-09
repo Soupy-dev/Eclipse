@@ -65,6 +65,8 @@ data class DetailContent(
     val episodesTitle: String? = null,
     val episodes: List<DetailEpisodeEntry> = emptyList(),
     val isMovie: Boolean = false,
+    val isAnime: Boolean = false,
+    val primaryAniListId: Int? = null,
     val progressTarget: DetailTarget? = null,
 )
 
@@ -208,6 +210,8 @@ class DetailRepository(
             episodes = animeBundle?.episodes ?: seasonDetails.flatMap { seasonDetail ->
                 seasonDetail.episodes.map { it.toDetailEpisodeEntry() }
             },
+            isAnime = animeBundle != null,
+            primaryAniListId = animeBundle?.primaryAniListId ?: sourceAnime?.id,
             progressTarget = DetailTarget.TmdbShow(showId),
         )
     }
@@ -272,6 +276,7 @@ class DetailRepository(
         val specialEpisodes = loadAnimeSpecialEpisodes(show)
 
         AnimeSeasonBundle(
+            primaryAniListId = rootAnime.id,
             episodesTitle = "Episodes",
             seasonCount = animeSeasons.size,
             totalEpisodes = episodes.size + specialEpisodes.size,
@@ -482,6 +487,7 @@ private fun ServiceResolvedDetail.toDetailContent(): DetailContent = DetailConte
 )
 
 private data class AnimeSeasonBundle(
+    val primaryAniListId: Int,
     val episodesTitle: String,
     val seasonCount: Int,
     val totalEpisodes: Int,
@@ -586,6 +592,8 @@ private suspend fun AniListMedia.toDetailContent(
         cast = tmdbShowMetadata?.cast.orEmpty(),
         episodesTitle = tmdbShowMetadata?.episodesTitle ?: syntheticEpisodes.takeIf { it.isNotEmpty() }?.let { "Episodes" },
         episodes = tmdbShowMetadata?.episodes ?: syntheticEpisodes,
+        isAnime = true,
+        primaryAniListId = id,
         progressTarget = tmdbMatch?.target,
     )
 }

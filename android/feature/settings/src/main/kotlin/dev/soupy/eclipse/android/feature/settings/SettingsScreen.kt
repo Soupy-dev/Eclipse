@@ -6,6 +6,8 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts.CreateDocument
 import androidx.activity.result.contract.ActivityResultContracts.OpenDocument
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -14,9 +16,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -31,6 +35,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
@@ -42,7 +48,8 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
 data class SettingsScreenState(
-    val accentColor: String = "#6D8CFF",
+    val accentColor: String = "#401F73",
+    val settingsGradientColor: String = "#401F73",
     val tmdbLanguage: String = "en-US",
     val selectedAppearance: String = "system",
     val autoModeEnabled: Boolean = true,
@@ -53,12 +60,22 @@ data class SettingsScreenState(
     val nextEpisodeThreshold: Int = 90,
     val inAppPlayer: InAppPlayer = InAppPlayer.NORMAL,
     val enableSubtitlesByDefault: Boolean = false,
+    val enableVLCSubtitleEditMenu: Boolean = true,
     val defaultSubtitleLanguage: String = "eng",
     val preferredAnimeAudioLanguage: String = "jpn",
+    val defaultPlaybackSpeed: Double = 1.0,
     val holdSpeedPlayer: Double = 2.0,
     val externalPlayer: String = "none",
     val alwaysLandscape: Boolean = false,
     val vlcHeaderProxyEnabled: Boolean = true,
+    val vlcBrightnessGestureEnabled: Boolean = false,
+    val vlcVolumeGestureEnabled: Boolean = false,
+    val playerTwoFingerTapPlayPauseEnabled: Boolean = true,
+    val vlcDoubleTapSeekEnabled: Boolean = true,
+    val vlcDoubleTapSeekSeconds: Double = 10.0,
+    val vlcPiPEnabled: Boolean = false,
+    val vlcOpenSubtitlesEnabled: Boolean = false,
+    val vlcOpenSubtitlesAutoFallbackEnabled: Boolean = true,
     val subtitleForegroundColor: String? = null,
     val subtitleStrokeColor: String? = null,
     val subtitleStrokeWidth: Double = 1.0,
@@ -70,6 +87,8 @@ data class SettingsScreenState(
     val skip85sEnabled: Boolean = false,
     val skip85sAlwaysVisible: Boolean = false,
     val showScheduleTab: Boolean = true,
+    val showLocalScheduleTime: Boolean = true,
+    val useClassicScheduleUI: Boolean = false,
     val showKanzen: Boolean = false,
     val seasonMenu: Boolean = false,
     val horizontalEpisodeList: Boolean = false,
@@ -83,6 +102,7 @@ data class SettingsScreenState(
     val readerLineSpacing: Double = 1.6,
     val readerMargin: Double = 4.0,
     val readerTextAlignment: String = "left",
+    val kanzenAutoMode: Boolean = false,
     val kanzenAutoUpdateModules: Boolean = true,
     val isBackupBusy: Boolean = false,
     val hasLocalBackup: Boolean = false,
@@ -96,9 +116,11 @@ data class SettingsScreenState(
     val logRows: List<LogSettingsRow> = emptyList(),
     val loggerStatus: String = "No logs captured yet.",
     val trackerSyncEnabled: Boolean = true,
+    val autoSyncRatings: Boolean = false,
     val trackerRows: List<TrackerSettingsRow> = emptyList(),
     val trackerStatus: String = "No tracker accounts connected yet.",
     val aniListOAuthUrl: String = "",
+    val myAnimeListOAuthUrl: String = "",
     val traktOAuthUrl: String = "",
     val autoUpdateServicesEnabled: Boolean = true,
     val githubReleaseAutoCheckEnabled: Boolean = true,
@@ -145,6 +167,14 @@ private val AppearanceOptions = listOf(
     "dark" to "Dark",
 )
 
+private val SettingsThemePresets = listOf(
+    "Purple" to "#401F73",
+    "Blue" to "#1A2666",
+    "Teal" to "#14474D",
+    "Red" to "#611A1F",
+    "Green" to "#1A4724",
+)
+
 private val ReaderFontFamilies = listOf(
     "-apple-system" to "System",
     "Georgia" to "Georgia",
@@ -185,9 +215,12 @@ fun SettingsRoute(
     state: SettingsScreenState,
     onClose: () -> Unit,
     onAccentColorChanged: (String) -> Unit,
+    onSettingsGradientColorChanged: (String) -> Unit,
     onTmdbLanguageChanged: (String) -> Unit,
     onAppearanceChanged: (String) -> Unit,
     onShowScheduleTabChanged: (Boolean) -> Unit,
+    onShowLocalScheduleTimeChanged: (Boolean) -> Unit,
+    onUseClassicScheduleUiChanged: (Boolean) -> Unit,
     onShowKanzenChanged: (Boolean) -> Unit,
     onSeasonMenuChanged: (Boolean) -> Unit,
     onHorizontalEpisodeListChanged: (Boolean) -> Unit,
@@ -202,12 +235,22 @@ fun SettingsRoute(
     onNextEpisodeThresholdChanged: (Int) -> Unit,
     onPlayerSelected: (InAppPlayer) -> Unit,
     onEnableSubtitlesByDefaultChanged: (Boolean) -> Unit,
+    onEnableVLCSubtitleEditMenuChanged: (Boolean) -> Unit,
     onDefaultSubtitleLanguageChanged: (String) -> Unit,
     onPreferredAnimeAudioLanguageChanged: (String) -> Unit,
+    onDefaultPlaybackSpeedChanged: (Double) -> Unit,
     onHoldSpeedChanged: (Double) -> Unit,
     onExternalPlayerChanged: (String) -> Unit,
     onAlwaysLandscapeChanged: (Boolean) -> Unit,
     onVlcHeaderProxyChanged: (Boolean) -> Unit,
+    onVlcBrightnessGestureChanged: (Boolean) -> Unit,
+    onVlcVolumeGestureChanged: (Boolean) -> Unit,
+    onPlayerTwoFingerTapPlayPauseChanged: (Boolean) -> Unit,
+    onVlcDoubleTapSeekEnabledChanged: (Boolean) -> Unit,
+    onVlcDoubleTapSeekSecondsChanged: (Double) -> Unit,
+    onVlcPiPChanged: (Boolean) -> Unit,
+    onVlcOpenSubtitlesChanged: (Boolean) -> Unit,
+    onVlcOpenSubtitlesAutoFallbackChanged: (Boolean) -> Unit,
     onSubtitleForegroundColorChanged: (String?) -> Unit,
     onSubtitleStrokeColorChanged: (String?) -> Unit,
     onSubtitleStrokeWidthChanged: (Double) -> Unit,
@@ -235,13 +278,16 @@ fun SettingsRoute(
     onReaderLineSpacingChanged: (Double) -> Unit,
     onReaderMarginChanged: (Double) -> Unit,
     onReaderAlignmentChanged: (String) -> Unit,
+    onKanzenAutoModeChanged: (Boolean) -> Unit,
     onKanzenAutoUpdateModulesChanged: (Boolean) -> Unit,
     onTrackerManualConnect: (String, String, String) -> Unit,
     onTrackerSyncEnabledChanged: (Boolean) -> Unit,
+    onAutoSyncRatingsChanged: (Boolean) -> Unit,
     onTrackerDisconnect: (String) -> Unit,
     onTrackerSyncNow: () -> Unit,
     onAniListImportLibrary: () -> Unit,
     onAniListImportMangaLibrary: () -> Unit,
+    onMyAnimeListImportLibrary: () -> Unit,
     onAniListSyncMangaProgress: () -> Unit,
     onExportBackup: (Uri) -> Unit,
     onImportBackup: (Uri) -> Unit,
@@ -328,20 +374,23 @@ fun SettingsRoute(
             }
 
         item {
-            AppearanceSettingsCard(
-                state = state,
-                onAccentColorChanged = onAccentColorChanged,
-                onTmdbLanguageChanged = onTmdbLanguageChanged,
-                onAppearanceChanged = onAppearanceChanged,
-            )
+                AppearanceSettingsCard(
+                    state = state,
+                    onAccentColorChanged = onAccentColorChanged,
+                    onSettingsGradientColorChanged = onSettingsGradientColorChanged,
+                    onTmdbLanguageChanged = onTmdbLanguageChanged,
+                    onAppearanceChanged = onAppearanceChanged,
+                )
         }
 
         item {
-            DisplayOptionsCard(
-                state = state,
-                onShowScheduleTabChanged = onShowScheduleTabChanged,
-                onShowKanzenChanged = onShowKanzenChanged,
-                onSeasonMenuChanged = onSeasonMenuChanged,
+                DisplayOptionsCard(
+                    state = state,
+                    onShowScheduleTabChanged = onShowScheduleTabChanged,
+                    onShowLocalScheduleTimeChanged = onShowLocalScheduleTimeChanged,
+                    onUseClassicScheduleUiChanged = onUseClassicScheduleUiChanged,
+                    onShowKanzenChanged = onShowKanzenChanged,
+                    onSeasonMenuChanged = onSeasonMenuChanged,
                 onHorizontalEpisodeListChanged = onHorizontalEpisodeListChanged,
                 onMediaColumnsPortraitChanged = onMediaColumnsPortraitChanged,
                 onMediaColumnsLandscapeChanged = onMediaColumnsLandscapeChanged,
@@ -458,12 +507,22 @@ fun SettingsRoute(
             PlayerPreferencesCard(
                 state = state,
                 onEnableSubtitlesByDefaultChanged = onEnableSubtitlesByDefaultChanged,
+                onEnableVLCSubtitleEditMenuChanged = onEnableVLCSubtitleEditMenuChanged,
                 onDefaultSubtitleLanguageChanged = onDefaultSubtitleLanguageChanged,
                 onPreferredAnimeAudioLanguageChanged = onPreferredAnimeAudioLanguageChanged,
+                onDefaultPlaybackSpeedChanged = onDefaultPlaybackSpeedChanged,
                 onHoldSpeedChanged = onHoldSpeedChanged,
                 onExternalPlayerChanged = onExternalPlayerChanged,
                 onAlwaysLandscapeChanged = onAlwaysLandscapeChanged,
                 onVlcHeaderProxyChanged = onVlcHeaderProxyChanged,
+                onVlcBrightnessGestureChanged = onVlcBrightnessGestureChanged,
+                onVlcVolumeGestureChanged = onVlcVolumeGestureChanged,
+                onPlayerTwoFingerTapPlayPauseChanged = onPlayerTwoFingerTapPlayPauseChanged,
+                onVlcDoubleTapSeekEnabledChanged = onVlcDoubleTapSeekEnabledChanged,
+                onVlcDoubleTapSeekSecondsChanged = onVlcDoubleTapSeekSecondsChanged,
+                onVlcPiPChanged = onVlcPiPChanged,
+                onVlcOpenSubtitlesChanged = onVlcOpenSubtitlesChanged,
+                onVlcOpenSubtitlesAutoFallbackChanged = onVlcOpenSubtitlesAutoFallbackChanged,
             )
         }
 
@@ -559,6 +618,7 @@ fun SettingsRoute(
                 onReaderLineSpacingChanged = onReaderLineSpacingChanged,
                 onReaderMarginChanged = onReaderMarginChanged,
                 onReaderAlignmentChanged = onReaderAlignmentChanged,
+                onKanzenAutoModeChanged = onKanzenAutoModeChanged,
                 onKanzenAutoUpdateModulesChanged = onKanzenAutoUpdateModulesChanged,
             )
         }
@@ -568,7 +628,7 @@ fun SettingsRoute(
         item {
             SectionHeading(
                 title = "Trackers",
-                subtitle = "AniList and Trakt account state.",
+                subtitle = "AniList, MyAnimeList, and Trakt account state.",
             )
         }
 
@@ -586,10 +646,12 @@ fun SettingsRoute(
                     trackerToken = ""
                 },
                 onSyncEnabledChanged = onTrackerSyncEnabledChanged,
+                onAutoSyncRatingsChanged = onAutoSyncRatingsChanged,
                 onDisconnect = onTrackerDisconnect,
                 onSyncNow = onTrackerSyncNow,
                 onAniListImportLibrary = onAniListImportLibrary,
                 onAniListImportMangaLibrary = onAniListImportMangaLibrary,
+                onMyAnimeListImportLibrary = onMyAnimeListImportLibrary,
                 onAniListSyncMangaProgress = onAniListSyncMangaProgress,
             )
         }
@@ -858,6 +920,7 @@ private fun SettingsStaticRow(
 private fun AppearanceSettingsCard(
     state: SettingsScreenState,
     onAccentColorChanged: (String) -> Unit,
+    onSettingsGradientColorChanged: (String) -> Unit,
     onTmdbLanguageChanged: (String) -> Unit,
     onAppearanceChanged: (String) -> Unit,
 ) {
@@ -875,6 +938,37 @@ private fun AppearanceSettingsCard(
                 label = { Text("Accent Color") },
                 singleLine = true,
             )
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    text = "Settings Theme Color",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.82f),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    SettingsThemePresets.forEach { (_, color) ->
+                        val selected = color.equals(state.settingsGradientColor, ignoreCase = true)
+                        androidx.compose.foundation.layout.Box(
+                            modifier = Modifier
+                                .size(if (selected) 38.dp else 34.dp)
+                                .clip(CircleShape)
+                                .background(color.toComposeColor(Color(0xFF401F73)))
+                                .border(
+                                    width = if (selected) 3.dp else 0.dp,
+                                    color = Color.White,
+                                    shape = CircleShape,
+                                )
+                                .clickable { onSettingsGradientColorChanged(color) },
+                        )
+                    }
+                }
+                OutlinedTextField(
+                    value = state.settingsGradientColor,
+                    onValueChange = onSettingsGradientColorChanged,
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("Custom Settings Theme Color") },
+                    singleLine = true,
+                )
+            }
             OutlinedTextField(
                 value = state.tmdbLanguage,
                 onValueChange = onTmdbLanguageChanged,
@@ -896,6 +990,8 @@ private fun AppearanceSettingsCard(
 private fun DisplayOptionsCard(
     state: SettingsScreenState,
     onShowScheduleTabChanged: (Boolean) -> Unit,
+    onShowLocalScheduleTimeChanged: (Boolean) -> Unit,
+    onUseClassicScheduleUiChanged: (Boolean) -> Unit,
     onShowKanzenChanged: (Boolean) -> Unit,
     onSeasonMenuChanged: (Boolean) -> Unit,
     onHorizontalEpisodeListChanged: (Boolean) -> Unit,
@@ -914,6 +1010,16 @@ private fun DisplayOptionsCard(
                 title = "Show Schedule Tab",
                 checked = state.showScheduleTab,
                 onCheckedChange = onShowScheduleTabChanged,
+            )
+            SettingInlineToggle(
+                title = "Local Schedule Time",
+                checked = state.showLocalScheduleTime,
+                onCheckedChange = onShowLocalScheduleTimeChanged,
+            )
+            SettingInlineToggle(
+                title = "Classic Schedule Layout",
+                checked = state.useClassicScheduleUI,
+                onCheckedChange = onUseClassicScheduleUiChanged,
             )
             SettingInlineToggle(
                 title = "Kanzen Mode",
@@ -1087,12 +1193,22 @@ private fun SimilarityAlgorithmCard(
 private fun PlayerPreferencesCard(
     state: SettingsScreenState,
     onEnableSubtitlesByDefaultChanged: (Boolean) -> Unit,
+    onEnableVLCSubtitleEditMenuChanged: (Boolean) -> Unit,
     onDefaultSubtitleLanguageChanged: (String) -> Unit,
     onPreferredAnimeAudioLanguageChanged: (String) -> Unit,
+    onDefaultPlaybackSpeedChanged: (Double) -> Unit,
     onHoldSpeedChanged: (Double) -> Unit,
     onExternalPlayerChanged: (String) -> Unit,
     onAlwaysLandscapeChanged: (Boolean) -> Unit,
     onVlcHeaderProxyChanged: (Boolean) -> Unit,
+    onVlcBrightnessGestureChanged: (Boolean) -> Unit,
+    onVlcVolumeGestureChanged: (Boolean) -> Unit,
+    onPlayerTwoFingerTapPlayPauseChanged: (Boolean) -> Unit,
+    onVlcDoubleTapSeekEnabledChanged: (Boolean) -> Unit,
+    onVlcDoubleTapSeekSecondsChanged: (Double) -> Unit,
+    onVlcPiPChanged: (Boolean) -> Unit,
+    onVlcOpenSubtitlesChanged: (Boolean) -> Unit,
+    onVlcOpenSubtitlesAutoFallbackChanged: (Boolean) -> Unit,
 ) {
     GlassPanel {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -1105,6 +1221,11 @@ private fun PlayerPreferencesCard(
                 title = "Subtitles On By Default",
                 checked = state.enableSubtitlesByDefault,
                 onCheckedChange = onEnableSubtitlesByDefaultChanged,
+            )
+            SettingInlineToggle(
+                title = "VLC Subtitle Edit Menu",
+                checked = state.enableVLCSubtitleEditMenu,
+                onCheckedChange = onEnableVLCSubtitleEditMenuChanged,
             )
             OutlinedTextField(
                 value = state.defaultSubtitleLanguage,
@@ -1128,6 +1249,13 @@ private fun PlayerPreferencesCard(
                 singleLine = true,
             )
             ReaderValueSlider(
+                title = "Default Playback Speed",
+                valueLabel = "%.2fx".format(state.defaultPlaybackSpeed),
+                value = state.defaultPlaybackSpeed.toFloat(),
+                valueRange = 0.25f..3.0f,
+                onValueChange = { onDefaultPlaybackSpeedChanged(it.toDouble()) },
+            )
+            ReaderValueSlider(
                 title = "Hold Speed",
                 valueLabel = "%.2fx".format(state.holdSpeedPlayer),
                 value = state.holdSpeedPlayer.toFloat(),
@@ -1143,6 +1271,48 @@ private fun PlayerPreferencesCard(
                 title = "VLC Header Proxy",
                 checked = state.vlcHeaderProxyEnabled,
                 onCheckedChange = onVlcHeaderProxyChanged,
+            )
+            SettingInlineToggle(
+                title = "Brightness Gesture",
+                checked = state.vlcBrightnessGestureEnabled,
+                onCheckedChange = onVlcBrightnessGestureChanged,
+            )
+            SettingInlineToggle(
+                title = "Volume Gesture",
+                checked = state.vlcVolumeGestureEnabled,
+                onCheckedChange = onVlcVolumeGestureChanged,
+            )
+            SettingInlineToggle(
+                title = "Two-Finger Play/Pause",
+                checked = state.playerTwoFingerTapPlayPauseEnabled,
+                onCheckedChange = onPlayerTwoFingerTapPlayPauseChanged,
+            )
+            SettingInlineToggle(
+                title = "Double-Tap Seek",
+                checked = state.vlcDoubleTapSeekEnabled,
+                onCheckedChange = onVlcDoubleTapSeekEnabledChanged,
+            )
+            ReaderValueSlider(
+                title = "Double-Tap Seek Seconds",
+                valueLabel = "%.0fs".format(state.vlcDoubleTapSeekSeconds),
+                value = state.vlcDoubleTapSeekSeconds.toFloat(),
+                valueRange = 5f..60f,
+                onValueChange = { onVlcDoubleTapSeekSecondsChanged(it.toDouble()) },
+            )
+            SettingInlineToggle(
+                title = "Picture in Picture",
+                checked = state.vlcPiPEnabled,
+                onCheckedChange = onVlcPiPChanged,
+            )
+            SettingInlineToggle(
+                title = "OpenSubtitles",
+                checked = state.vlcOpenSubtitlesEnabled,
+                onCheckedChange = onVlcOpenSubtitlesChanged,
+            )
+            SettingInlineToggle(
+                title = "OpenSubtitles Fallback",
+                checked = state.vlcOpenSubtitlesAutoFallbackEnabled,
+                onCheckedChange = onVlcOpenSubtitlesAutoFallbackChanged,
             )
         }
     }
@@ -1214,6 +1384,7 @@ private fun ReaderSettingsCard(
     onReaderLineSpacingChanged: (Double) -> Unit,
     onReaderMarginChanged: (Double) -> Unit,
     onReaderAlignmentChanged: (String) -> Unit,
+    onKanzenAutoModeChanged: (Boolean) -> Unit,
     onKanzenAutoUpdateModulesChanged: (Boolean) -> Unit,
 ) {
     GlassPanel {
@@ -1254,14 +1425,14 @@ private fun ReaderSettingsCard(
                 title = "Line Spacing",
                 valueLabel = "%.1fx".format(state.readerLineSpacing),
                 value = state.readerLineSpacing.toFloat(),
-                valueRange = 1.0f..2.4f,
+                valueRange = 1.0f..3.0f,
                 onValueChange = { onReaderLineSpacingChanged(it.toDouble()) },
             )
             ReaderValueSlider(
                 title = "Margin",
                 valueLabel = "${state.readerMargin.toInt()}",
                 value = state.readerMargin.toFloat(),
-                valueRange = 0f..12f,
+                valueRange = 0f..30f,
                 onValueChange = { onReaderMarginChanged(it.toDouble()) },
             )
             Text(
@@ -1272,6 +1443,11 @@ private fun ReaderSettingsCard(
             ReaderAlignmentButtons(
                 selected = state.readerTextAlignment,
                 onSelected = onReaderAlignmentChanged,
+            )
+            SettingInlineToggle(
+                title = "Kanzen Auto Mode",
+                checked = state.kanzenAutoMode,
+                onCheckedChange = onKanzenAutoModeChanged,
             )
             SettingInlineToggle(
                 title = "Auto-Update Kanzen Modules",
@@ -1293,14 +1469,19 @@ private fun TrackerSettingsCard(
     onTokenChanged: (String) -> Unit,
     onConnect: () -> Unit,
     onSyncEnabledChanged: (Boolean) -> Unit,
+    onAutoSyncRatingsChanged: (Boolean) -> Unit,
     onDisconnect: (String) -> Unit,
     onSyncNow: () -> Unit,
     onAniListImportLibrary: () -> Unit,
     onAniListImportMangaLibrary: () -> Unit,
+    onMyAnimeListImportLibrary: () -> Unit,
     onAniListSyncMangaProgress: () -> Unit,
 ) {
     val hasAniListAccount = state.trackerRows.any { row ->
         row.isConnected && row.service.equals("AniList", ignoreCase = true)
+    }
+    val hasMyAnimeListAccount = state.trackerRows.any { row ->
+        row.isConnected && row.service.isMyAnimeListService()
     }
     val uriHandler = LocalUriHandler.current
     GlassPanel {
@@ -1330,6 +1511,12 @@ private fun TrackerSettingsCard(
                 )
             }
 
+            SettingInlineToggle(
+                title = "Auto Sync Ratings",
+                checked = state.autoSyncRatings,
+                onCheckedChange = onAutoSyncRatingsChanged,
+            )
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -1348,6 +1535,13 @@ private fun TrackerSettingsCard(
                 ) {
                     Text("Connect Trakt")
                 }
+            }
+            OutlinedButton(
+                onClick = { uriHandler.openUri(state.myAnimeListOAuthUrl) },
+                enabled = state.myAnimeListOAuthUrl.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Connect MyAnimeList")
             }
 
             OutlinedTextField(
@@ -1400,8 +1594,15 @@ private fun TrackerSettingsCard(
                 Text("Import AniList Manga Library")
             }
             OutlinedButton(
+                onClick = onMyAnimeListImportLibrary,
+                enabled = hasMyAnimeListAccount,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Import MAL Library")
+            }
+            OutlinedButton(
                 onClick = onAniListSyncMangaProgress,
-                enabled = hasAniListAccount,
+                enabled = hasAniListAccount || hasMyAnimeListAccount,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("Sync Manga Progress")
@@ -1830,6 +2031,21 @@ private fun List<LogSettingsRow>.toShareText(status: String): String =
         }
     }
 
+private fun String.toComposeColor(fallback: Color): Color {
+    val value = trim().removePrefix("#")
+    if ((value.length != 6 && value.length != 8) || !value.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) {
+        return fallback
+    }
+    val argb = runCatching {
+        if (value.length == 6) {
+            0xFF000000L or value.toLong(16)
+        } else {
+            value.toLong(16)
+        }
+    }.getOrNull() ?: return fallback
+    return Color(argb)
+}
+
 @Composable
 private fun CatalogSettingsCard(
     catalog: CatalogSettingsRow,
@@ -2026,6 +2242,11 @@ private fun PlayerChoiceButton(
             Text(label)
         }
     }
+}
+
+private fun String.isMyAnimeListService(): Boolean {
+    val normalized = lowercase().replace(Regex("[^a-z0-9]+"), "")
+    return normalized == "myanimelist" || normalized == "mal"
 }
 
 @Composable

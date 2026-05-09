@@ -2,22 +2,27 @@ package dev.soupy.eclipse.android.data
 
 import dev.soupy.eclipse.android.core.model.DetailTarget
 import dev.soupy.eclipse.android.core.model.EpisodePlaybackContext
+import dev.soupy.eclipse.android.core.model.InAppPlayer
 import dev.soupy.eclipse.android.core.model.PlayerSource
 import dev.soupy.eclipse.android.core.model.SimilarityAlgorithm
 import dev.soupy.eclipse.android.core.js.ServiceStreamResult
 import dev.soupy.eclipse.android.core.model.StremioContentIdRequest
 import dev.soupy.eclipse.android.core.model.StremioManifest
+import dev.soupy.eclipse.android.core.model.StremioSubtitle
 import dev.soupy.eclipse.android.core.model.StremioStream
 import dev.soupy.eclipse.android.core.model.SubtitleTrack
 import dev.soupy.eclipse.android.core.model.buildContentId
+import dev.soupy.eclipse.android.core.model.displayLabel
 import dev.soupy.eclipse.android.core.model.displayTitle
 import dev.soupy.eclipse.android.core.model.isDirectHttp
 import dev.soupy.eclipse.android.core.model.isTorrentLike
 import dev.soupy.eclipse.android.core.model.qualityScore
+import dev.soupy.eclipse.android.core.model.warningTextFor
 import dev.soupy.eclipse.android.core.network.AniListService
 import dev.soupy.eclipse.android.core.network.EclipseJson
 import dev.soupy.eclipse.android.core.network.StremioService
 import dev.soupy.eclipse.android.core.network.TmdbService
+import dev.soupy.eclipse.android.core.storage.AppSettings
 import dev.soupy.eclipse.android.core.storage.SettingsStore
 import dev.soupy.eclipse.android.core.storage.StremioAddonDao
 import dev.soupy.eclipse.android.core.storage.StremioAddonEntity
@@ -70,24 +75,33 @@ class StreamResolutionRepository(
     private val stremioAddonDao: StremioAddonDao,
     private val settingsStore: SettingsStore,
     private val servicesRepository: ServicesRepository,
+    private val sourceHealthRepository: SourceHealthRepository,
 ) {
     suspend fun resolve(
         target: DetailTarget,
         episode: StreamEpisodeSelection? = null,
     ): Result<StreamResolutionResult> = runCatching {
+        sourceHealthRepository.load()
+        val healthSnapshot = sourceHealthRepository.snapshot.value
         if (target is DetailTarget.ServiceMedia) {
-            return@runCatching resolveServiceMedia(target, episode)
+            return@runCatching resolveServiceMedia(
+                target = target,
+                episode = episode,
+                sourceWarning = healthSnapshot.warningTextFor("service:${target.serviceId}"),
+            )
         }
         val request = buildRequest(target, episode)
         val settings = settingsStore.settings.first()
         val addons = stremioAddonDao.observeAll().first()
             .filter(StremioAddonEntity::enabled)
             .let { enabled ->
-                val selectedAddonIds = enabled
-                    .map { addon -> "stremio:${addon.transportUrl}" }
-                    .filter { it in settings.autoModeSourceIds }
+                val enabledByAutoModeId = enabled.associateBy { addon -> "stremio:${addon.transportUrl}" }
+                val selectedAddonIds = settings.autoModeSourceOrderIds
+                    .filter { it in settings.autoModeSourceIds && it in enabledByAutoModeId } +
+                    enabledByAutoModeId.keys
+                        .filter { it in settings.autoModeSourceIds && it !in settings.autoModeSourceOrderIds }
                 if (settings.autoModeEnabled && selectedAddonIds.isNotEmpty()) {
-                    enabled.filter { addon -> "stremio:${addon.transportUrl}" in selectedAddonIds }
+                    selectedAddonIds.mapNotNull(enabledByAutoModeId::get)
                 } else {
                     enabled
                 }
@@ -104,9 +118,10 @@ class StreamResolutionRepository(
         }
 
         var rejectedTorrentCount = 0
-        val candidates = buildList {
+        val rawCandidates = buildList {
             addons.forEach { addon ->
                 val addonLabel = addon.name.ifBlank { addon.transportUrl }
+                val sourceWarning = healthSnapshot.warningTextFor("stremio:${addon.transportUrl}")
                 val manifest = addon.manifest()
                 val contentId = manifest?.buildContentId(request.toContentIdRequest())
                     ?: StremioManifest().buildContentId(request.toContentIdRequest())
@@ -135,6 +150,7 @@ class StreamResolutionRepository(
                             contentId = contentId,
                             playbackContext = request.playbackContext,
                             similarityAlgorithm = settings.selectedSimilarityAlgorithm,
+                            sourceWarning = sourceWarning,
                             index = index,
                         )
                     }
@@ -147,6 +163,8 @@ class StreamResolutionRepository(
                 .thenBy { it.addonName.lowercase() }
                 .thenBy { it.title.lowercase() },
         )
+        val openSubtitles = fetchOpenSubtitlesFallbackTracks(settings, request, rawCandidates)
+        val candidates = rawCandidates.withAdditionalSubtitles(openSubtitles)
 
         if (candidates.isEmpty()) {
             return@runCatching StreamResolutionResult(
@@ -189,6 +207,7 @@ class StreamResolutionRepository(
     private suspend fun resolveServiceMedia(
         target: DetailTarget.ServiceMedia,
         episode: StreamEpisodeSelection?,
+        sourceWarning: String?,
     ): StreamResolutionResult {
         val href = episode?.serviceHref ?: target.href
         val streamResult = servicesRepository.resolveServiceStream(
@@ -199,6 +218,7 @@ class StreamResolutionRepository(
             target = target,
             href = href,
             episode = episode,
+            sourceWarning = sourceWarning,
         )
         return StreamResolutionResult(
             statusMessage = if (candidates.isEmpty()) {
@@ -291,6 +311,37 @@ class StreamResolutionRepository(
         is DetailTarget.ServiceMedia -> error("Service-backed media streams use the service runtime.")
     }
 
+    private suspend fun fetchOpenSubtitlesFallbackTracks(
+        settings: AppSettings,
+        request: StremioRequest,
+        candidates: List<ResolvedStreamCandidate>,
+    ): List<SubtitleTrack> {
+        if (settings.inAppPlayer != InAppPlayer.VLC ||
+            !settings.vlcOpenSubtitlesEnabled ||
+            !settings.vlcOpenSubtitlesAutoFallbackEnabled ||
+            !settings.enableSubtitlesByDefault
+        ) {
+            return emptyList()
+        }
+
+        val preferredLanguage = settings.defaultSubtitleLanguage
+        val needsFallback = candidates.any { candidate ->
+            val source = candidate.playerSource ?: return@any false
+            !source.hasPreferredSubtitle(preferredLanguage)
+        }
+        if (!needsFallback) return emptyList()
+
+        return stremioService.fetchOpenSubtitlesV3(
+            tmdbId = request.tmdbId,
+            imdbId = request.imdbId,
+            type = request.type,
+            season = request.season,
+            episode = request.episode,
+        ).orNull()
+            .orEmpty()
+            .toOpenSubtitleTracks(preferredLanguage)
+    }
+
     private suspend fun firstPlayableEpisode(
         showId: Int,
         preferredSeasonNumber: Int? = null,
@@ -310,6 +361,78 @@ class StreamResolutionRepository(
             episodeNumber = firstEpisode.episodeNumber,
             label = "S${firstSeason.seasonNumber}E${firstEpisode.episodeNumber}",
         )
+    }
+}
+
+private fun List<ResolvedStreamCandidate>.withAdditionalSubtitles(
+    subtitles: List<SubtitleTrack>,
+): List<ResolvedStreamCandidate> {
+    if (subtitles.isEmpty()) return this
+    return map { candidate ->
+        val source = candidate.playerSource ?: return@map candidate
+        candidate.copy(playerSource = source.withAdditionalSubtitles(subtitles))
+    }
+}
+
+private fun PlayerSource.withAdditionalSubtitles(
+    subtitles: List<SubtitleTrack>,
+): PlayerSource {
+    val seenUris = this.subtitles.mapNotNull(SubtitleTrack::uri).toMutableSet()
+    val deduped = subtitles.filter { subtitle ->
+        val uri = subtitle.uri ?: return@filter false
+        seenUris.add(uri)
+    }
+    return if (deduped.isEmpty()) this else copy(subtitles = this.subtitles + deduped)
+}
+
+private fun PlayerSource.hasPreferredSubtitle(preferredLanguage: String): Boolean =
+    subtitles.any { subtitle -> subtitle.matchesPreferredLanguage(preferredLanguage) }
+
+private fun SubtitleTrack.matchesPreferredLanguage(preferredLanguage: String): Boolean {
+    val tokens = languageTokens(preferredLanguage)
+    if (tokens.isEmpty()) return true
+    val fields = listOfNotNull(language, label, id).joinToString(" ").lowercase()
+    return tokens.any(fields::contains)
+}
+
+private fun List<StremioSubtitle>.toOpenSubtitleTracks(preferredLanguage: String): List<SubtitleTrack> {
+    val seenUris = mutableSetOf<String>()
+    return asSequence()
+        .filter { subtitle -> subtitle.url.isDirectHttpUrl() }
+        .filter { subtitle -> subtitle.url?.let(seenUris::add) == true }
+        .sortedWith(
+            compareByDescending<StremioSubtitle> { subtitle -> subtitle.matchesPreferredLanguage(preferredLanguage) }
+                .thenBy { subtitle -> subtitle.openSubtitleDisplayName().lowercase() },
+        )
+        .take(20)
+        .mapIndexed { index, subtitle ->
+            val displayName = subtitle.openSubtitleDisplayName()
+            SubtitleTrack(
+                id = "opensubtitles-${subtitle.id ?: index + 1}",
+                label = "OpenSubtitles - $displayName",
+                language = subtitle.lang,
+                uri = subtitle.url,
+                format = subtitle.url.subtitleFormatFromUrl(),
+                isDefault = index == 0 && subtitle.matchesPreferredLanguage(preferredLanguage),
+            )
+        }
+        .toList()
+}
+
+private fun StremioSubtitle.matchesPreferredLanguage(preferredLanguage: String): Boolean {
+    val tokens = languageTokens(preferredLanguage)
+    if (tokens.isEmpty()) return true
+    val fields = listOfNotNull(lang, label, name, title, id).joinToString(" ").lowercase()
+    return tokens.any(fields::contains)
+}
+
+private fun StremioSubtitle.openSubtitleDisplayName(): String {
+    val base = displayLabel
+    val language = lang?.uppercase()?.takeIf { it.isNotBlank() }
+    return if (language != null && !base.contains(language, ignoreCase = true)) {
+        "$language - $base"
+    } else {
+        base
     }
 }
 
@@ -354,6 +477,7 @@ private fun StremioStream.toResolvedCandidate(
     contentId: String,
     playbackContext: EpisodePlaybackContext?,
     similarityAlgorithm: SimilarityAlgorithm,
+    sourceWarning: String?,
     index: Int,
 ): ResolvedStreamCandidate {
     val directUrl = url?.takeIf { isDirectHttp }
@@ -384,6 +508,7 @@ private fun StremioStream.toResolvedCandidate(
                 }
             },
             serviceId = "stremio:${addon.transportUrl}",
+            serviceName = addonLabel,
             serviceHref = contentId,
             context = playbackContext,
         )
@@ -400,6 +525,7 @@ private fun StremioStream.toResolvedCandidate(
         title = title ?: name ?: addonLabel,
         subtitle = addonLabel,
         supportingText = listOfNotNull(
+            sourceWarning?.let { "Source warning: $it" },
             description?.takeIf { it.isNotBlank() },
             stateText,
             "Match ${(matchScore * 100).toInt()}",
@@ -419,8 +545,9 @@ private fun ServiceStreamResult.toServiceCandidates(
     target: DetailTarget.ServiceMedia,
     href: String,
     episode: StreamEpisodeSelection?,
+    sourceWarning: String?,
 ): List<ResolvedStreamCandidate> {
-    val directStreams = streams.filter(String::isDirectHttpUrl)
+    val directStreams = streams.filter { stream -> stream.isDirectHttpUrl() }
     val sourceStreams = sources.mapNotNull { source ->
         val url = source["url"]?.jsonPrimitive?.contentOrNull
             ?: source["stream"]?.jsonPrimitive?.contentOrNull
@@ -428,7 +555,7 @@ private fun ServiceStreamResult.toServiceCandidates(
         val headers = source["headers"]?.jsonObjectOrNull()?.mapValues { (_, value) ->
             value.jsonPrimitive.contentOrNull.orEmpty()
         }.orEmpty()
-        url?.takeIf(String::isDirectHttpUrl)?.let { url to headers }
+        url?.takeIf { streamUrl -> streamUrl.isDirectHttpUrl() }?.let { url to headers }
     }
     val allStreams = directStreams.map { it to headers } + sourceStreams
     return allStreams.distinctBy { it.first }.mapIndexed { index, (url, streamHeaders) ->
@@ -441,7 +568,10 @@ private fun ServiceStreamResult.toServiceCandidates(
             id = "service:${target.serviceId}:$index",
             title = title,
             subtitle = "Service source",
-            supportingText = "Direct HTTP(S) stream from ${target.serviceId}",
+            supportingText = listOfNotNull(
+                sourceWarning?.let { "Source warning: $it" },
+                "Direct HTTP(S) stream from ${target.serviceId}",
+            ).joinToString(" | "),
             addonName = target.serviceId,
             isPlayable = true,
             qualityScore = 1.0,
@@ -458,6 +588,7 @@ private fun ServiceStreamResult.toServiceCandidates(
                     )
                 },
                 serviceId = "service:${target.serviceId}",
+                serviceName = target.serviceId,
                 serviceHref = href,
                 context = episode?.toPlaybackContext(),
             ),
@@ -489,5 +620,40 @@ private fun Int.rejectionSuffix(): String =
 private fun JsonElement.jsonObjectOrNull(): JsonObject? =
     this as? JsonObject
 
-private fun String.isDirectHttpUrl(): Boolean =
-    startsWith("http://", ignoreCase = true) || startsWith("https://", ignoreCase = true)
+private fun String?.isDirectHttpUrl(): Boolean =
+    this?.startsWith("http://", ignoreCase = true) == true ||
+        this?.startsWith("https://", ignoreCase = true) == true
+
+private fun String?.subtitleFormatFromUrl(): String? {
+    val path = this
+        ?.substringBefore('?')
+        ?.substringBefore('#')
+        ?.lowercase()
+        ?: return null
+    return when {
+        path.endsWith(".srt") -> "srt"
+        path.endsWith(".vtt") || path.endsWith(".webvtt") -> "vtt"
+        path.endsWith(".ass") -> "ass"
+        path.endsWith(".ssa") -> "ssa"
+        path.endsWith(".ttml") || path.endsWith(".xml") -> "ttml"
+        else -> null
+    }
+}
+
+private fun languageTokens(preferredLanguage: String): List<String> {
+    val lower = preferredLanguage.trim().lowercase()
+    if (lower.isBlank()) return emptyList()
+    return when (lower) {
+        "jpn", "ja", "jp" -> listOf("jpn", "ja", "jp", "japanese")
+        "eng", "en" -> listOf("eng", "en", "us", "uk", "english")
+        "spa", "es", "esp" -> listOf("spa", "es", "esp", "spanish", "lat")
+        "fre", "fra", "fr" -> listOf("fre", "fra", "fr", "french")
+        "ger", "deu", "de" -> listOf("ger", "deu", "de", "german")
+        "ita", "it" -> listOf("ita", "it", "italian")
+        "por", "pt" -> listOf("por", "pt", "br", "portuguese")
+        "rus", "ru" -> listOf("rus", "ru", "russian")
+        "chi", "zho", "zh" -> listOf("chi", "zho", "zh", "chinese", "mandarin", "cantonese")
+        "kor", "ko" -> listOf("kor", "ko", "korean")
+        else -> listOf(lower)
+    }
+}

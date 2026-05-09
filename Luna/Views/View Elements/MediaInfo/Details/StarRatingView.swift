@@ -5,6 +5,7 @@
 //  Expandable 10-star rating and private notes control for media details.
 //
 
+import Foundation
 import SwiftUI
 
 struct StarRatingView: View {
@@ -13,7 +14,7 @@ struct StarRatingView: View {
 
     @StateObject private var trackerManager = TrackerManager.shared
     @State private var isExpanded = false
-    @State private var currentRating: Int = 0
+    @State private var currentRating: Double = 0
     @State private var noteText = ""
     @State private var syncMessage: String?
 
@@ -38,7 +39,7 @@ struct StarRatingView: View {
                         .foregroundColor(.white.opacity(0.85))
 
                     if currentRating > 0 {
-                        Text("\(currentRating)/10")
+                        Text("\(ratingDisplayText)/10")
                             .font(.caption.weight(.medium))
                             .foregroundColor(.white.opacity(0.6))
                     }
@@ -95,28 +96,29 @@ struct StarRatingView: View {
     private var ratingStars: some View {
         HStack(spacing: 4) {
             ForEach(1...10, id: \.self) { star in
-                let starImage = Image(systemName: star <= currentRating ? "star.fill" : "star")
+                let starImage = Image(systemName: starSymbol(for: star))
                     .font(.body)
-                    .foregroundColor(star <= currentRating ? .yellow : .white.opacity(0.3))
+                    .foregroundColor(starTint(for: star))
 
-                if #available(iOS 17.0, *) {
+                GeometryReader { proxy in
                     starImage
-                        .contentTransition(.symbolEffect(.replace))
-                        .onTapGesture {
-                            updateRating(star)
-                        }
-                } else {
-                    starImage
-                        .animation(.easeInOut(duration: 0.15), value: currentRating)
-                        .onTapGesture {
-                            updateRating(star)
-                        }
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 0)
+                                .onEnded { value in
+                                    let isLeftHalf = value.location.x < proxy.size.width / 2
+                                    updateRating(Double(star) - (isLeftHalf ? 0.5 : 0))
+                                }
+                        )
                 }
+                .frame(width: 20, height: 22)
+                .animation(.easeInOut(duration: 0.15), value: currentRating)
             }
 
             Spacer(minLength: 8)
 
-            Text(currentRating > 0 ? "\(currentRating)/10" : "No rating")
+            Text(currentRating > 0 ? "\(ratingDisplayText)/10" : "No rating")
                 .font(.caption)
                 .foregroundColor(.white.opacity(0.55))
                 .lineLimit(1)
@@ -166,15 +168,16 @@ struct StarRatingView: View {
         }
     }
 
-    private func updateRating(_ star: Int) {
+    private func updateRating(_ value: Double) {
+        let rating = Self.normalizedRating(value)
         withAnimation(.easeInOut(duration: 0.15)) {
-            if currentRating == star {
+            if Self.ratingsAreEqual(currentRating, rating) {
                 currentRating = 0
                 UserRatingManager.shared.removeRating(for: mediaId)
             } else {
-                currentRating = star
-                UserRatingManager.shared.setRating(star, for: mediaId)
-                TrackerManager.shared.syncUserRating(tmdbId: mediaId, ratingOutOf10: star, isAnime: isAnime)
+                currentRating = rating
+                UserRatingManager.shared.setRating(rating, for: mediaId)
+                TrackerManager.shared.syncUserRating(tmdbId: mediaId, ratingOutOf10: rating, isAnime: isAnime)
             }
         }
     }
@@ -189,5 +192,42 @@ struct StarRatingView: View {
             isAnime: isAnime
         )
         syncMessage = "Syncing to \(service.displayName)..."
+    }
+
+    private var ratingDisplayText: String {
+        Self.ratingDisplayString(currentRating)
+    }
+
+    private func starSymbol(for star: Int) -> String {
+        let fullValue = Double(star)
+        if currentRating >= fullValue {
+            return "star.fill"
+        }
+        if currentRating >= fullValue - 0.5 {
+            return "star.leadinghalf.filled"
+        }
+        return "star"
+    }
+
+    private func starTint(for star: Int) -> Color {
+        currentRating >= Double(star) - 0.5 ? .yellow : .white.opacity(0.3)
+    }
+
+    private static func normalizedRating(_ value: Double) -> Double {
+        let finiteValue = value.isFinite ? value : 0.5
+        let halfStepValue = (finiteValue * 2).rounded() / 2
+        return max(0.5, min(10, halfStepValue))
+    }
+
+    private static func ratingsAreEqual(_ lhs: Double, _ rhs: Double) -> Bool {
+        abs(lhs - rhs) < 0.001
+    }
+
+    private static func ratingDisplayString(_ rating: Double) -> String {
+        let normalized = normalizedRating(rating)
+        if normalized.truncatingRemainder(dividingBy: 1) == 0 {
+            return String(Int(normalized))
+        }
+        return String(format: "%.1f", normalized)
     }
 }

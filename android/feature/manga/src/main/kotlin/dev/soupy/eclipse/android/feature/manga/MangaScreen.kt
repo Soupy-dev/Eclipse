@@ -64,6 +64,7 @@ data class MangaScreenState(
     val collections: List<MangaCollectionRow> = emptyList(),
     val recent: List<MangaProgressRow> = emptyList(),
     val modules: List<MangaModuleRow> = emptyList(),
+    val kanzenAutoMode: Boolean = false,
     val selectedDetail: MangaCatalogItemRow? = null,
     val isDetailLoading: Boolean = false,
     val detailError: String? = null,
@@ -252,6 +253,8 @@ fun MangaRoute(
                         "Search AniList manga and installed Kanzen modules from the dedicated Kanzen shell."
                     surfaceMode == MangaSurfaceMode.HISTORY ->
                         "Recent manga and light-novel reading progress restored into one Kanzen history surface."
+                    state.kanzenAutoMode ->
+                        "Kanzen Auto Mode will pick a matching module source when a manga detail opens."
                     state.novelCount > 0 ->
                         "${state.novelCount} novel progress ${if (state.novelCount == 1) "entry" else "entries"} restored with manga history."
                     else ->
@@ -307,6 +310,7 @@ fun MangaRoute(
                     item = detail,
                     isLoading = state.isDetailLoading,
                     errorMessage = state.detailError,
+                    kanzenAutoMode = state.kanzenAutoMode,
                     onClose = onCloseDetail,
                     onSave = { onSaveItem(detail.id) },
                     onRemove = { onRemoveItem(detail.aniListId) },
@@ -621,6 +625,7 @@ private fun MangaDetailPanel(
     item: MangaCatalogItemRow,
     isLoading: Boolean,
     errorMessage: String?,
+    kanzenAutoMode: Boolean,
     onClose: () -> Unit,
     onSave: () -> Unit,
     onRemove: () -> Unit,
@@ -673,7 +678,18 @@ private fun MangaDetailPanel(
                     }
                     if (isLoading) {
                         Text(
-                            text = "Loading module details...",
+                            text = if (kanzenAutoMode && !item.hasModuleSource) {
+                                "Searching Kanzen modules..."
+                            } else {
+                                "Loading module details..."
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    if (kanzenAutoMode && item.hasModuleSource) {
+                        Text(
+                            text = "Auto Mode source selected.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.primary,
                         )
@@ -700,10 +716,12 @@ private fun MangaDetailPanel(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                if (item.isSaved) {
+                if (item.isSaved || item.hasModuleSource) {
                     Button(onClick = onOpenReader) {
                         Text("Reader")
                     }
+                }
+                if (item.isSaved) {
                     Button(onClick = onReadNext) {
                         Text("Read Next")
                     }
@@ -719,7 +737,8 @@ private fun MangaDetailPanel(
                     OutlinedButton(onClick = onRemove) {
                         Text("Remove")
                     }
-                } else {
+                }
+                if (!item.isSaved) {
                     Button(onClick = onSave) {
                         Text("Save to Library")
                     }
@@ -794,18 +813,20 @@ private fun MangaCatalogCard(
             ) {
                 Text("Details")
             }
+            if (item.isSaved || item.hasModuleSource) {
+                Button(
+                    onClick = onOpenReader,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Reader")
+                }
+            }
             if (item.isSaved) {
                 OutlinedButton(
                     onClick = onRemove,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
                     Text("Remove")
-                }
-                Button(
-                    onClick = onOpenReader,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    Text("Reader")
                 }
                 Button(
                     onClick = onReadNext,
@@ -826,7 +847,8 @@ private fun MangaCatalogCard(
                 ) {
                     Text(if (item.isFavorite) "Unfavorite" else "Favorite")
                 }
-            } else {
+            }
+            if (!item.isSaved) {
                 Button(
                     onClick = onSave,
                     modifier = Modifier.fillMaxWidth(),
@@ -895,11 +917,12 @@ private fun MangaSearchResultCard(
                 OutlinedButton(onClick = onOpenDetail) {
                     Text("Details")
                 }
-                if (item.isSaved) {
+                if (item.isSaved || item.hasModuleSource) {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Button(onClick = onOpenReader) {
                             Text("Reader")
                         }
+                        if (item.isSaved) {
                         Button(onClick = onReadNext) {
                             Text("Read Next")
                         }
@@ -909,7 +932,10 @@ private fun MangaSearchResultCard(
                         ) {
                             Text("Unread Last")
                         }
+                        }
                     }
+                }
+                if (item.isSaved) {
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         OutlinedButton(onClick = onToggleFavorite) {
                             Text(if (item.isFavorite) "Unfavorite" else "Favorite")
@@ -924,7 +950,8 @@ private fun MangaSearchResultCard(
                         onAddToCollection = onAddToCollection,
                         onRemoveFromCollection = onRemoveFromCollection,
                     )
-                } else {
+                }
+                if (!item.isSaved) {
                     Button(onClick = onSave) {
                         Text("Save to Library")
                     }
@@ -1083,6 +1110,9 @@ private fun MangaProgressCard(
         }
     }
 }
+
+private val MangaCatalogItemRow.hasModuleSource: Boolean
+    get() = !moduleId.isNullOrBlank() && moduleId != "anilist" && !contentParams.isNullOrBlank()
 
 @Composable
 private fun MangaReaderPanel(
@@ -1363,7 +1393,7 @@ private fun MangaReaderSettingsRow.usesPagedImages(): Boolean =
     readingMode == 0
 
 private fun MangaReaderSettingsRow.horizontalPadding() =
-    readerMargin.coerceIn(0.0, 12.0).dp
+    readerMargin.coerceIn(0.0, 30.0).dp
 
 private fun MangaReaderSettingsRow.imageSpacing() =
     if (readingMode == 1) 4.dp else 12.dp

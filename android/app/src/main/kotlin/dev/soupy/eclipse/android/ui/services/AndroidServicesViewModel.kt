@@ -2,13 +2,17 @@ package dev.soupy.eclipse.android.ui.services
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import dev.soupy.eclipse.android.core.model.SourceHealthSnapshot
+import dev.soupy.eclipse.android.core.model.displayStateFor
 import dev.soupy.eclipse.android.core.storage.AppSettings
 import dev.soupy.eclipse.android.core.storage.SettingsStore
 import dev.soupy.eclipse.android.data.ServiceDraft
 import dev.soupy.eclipse.android.data.ServiceSourceRecord
 import dev.soupy.eclipse.android.data.ServicesRepository
 import dev.soupy.eclipse.android.data.ServicesSnapshot
+import dev.soupy.eclipse.android.data.SourceHealthRepository
 import dev.soupy.eclipse.android.data.StremioAddonRecord
+import dev.soupy.eclipse.android.feature.services.AutoModeSourceOrderRow
 import dev.soupy.eclipse.android.feature.services.ServiceSourceRow
 import dev.soupy.eclipse.android.feature.services.ServicesScreenState
 import dev.soupy.eclipse.android.feature.services.StremioAddonRow
@@ -21,6 +25,7 @@ import kotlinx.coroutines.launch
 class AndroidServicesViewModel(
     private val repository: ServicesRepository,
     private val settingsStore: SettingsStore,
+    private val sourceHealthRepository: SourceHealthRepository,
 ) : ViewModel() {
     private val _state = MutableStateFlow(ServicesScreenState())
     val state: StateFlow<ServicesScreenState> = _state.asStateFlow()
@@ -31,15 +36,33 @@ class AndroidServicesViewModel(
 
     init {
         viewModelScope.launch {
-            combine(
+            sourceHealthRepository.load()
+            val summary = sourceHealthRepository.runDailyEnabledSourceChecksIfNeeded()
+            if (!summary.skipped) {
+                noticeMessage.value = summary.message
+            }
+        }
+        viewModelScope.launch {
+            val sourceState = combine(
                 repository.observeSnapshot(),
                 settingsStore.settings,
+                sourceHealthRepository.snapshot,
+            ) { snapshot, settings, healthSnapshot ->
+                ServicesUiInputs(
+                    snapshot = snapshot,
+                    settings = settings,
+                    healthSnapshot = healthSnapshot,
+                )
+            }
+            combine(
+                sourceState,
                 isMutating,
                 errorMessage,
                 noticeMessage,
-            ) { snapshot, settings, isMutating, errorMessage, noticeMessage ->
-                snapshot.toUiState(
-                    settings = settings,
+            ) { sourceState, isMutating, errorMessage, noticeMessage ->
+                sourceState.snapshot.toUiState(
+                    settings = sourceState.settings,
+                    healthSnapshot = sourceState.healthSnapshot,
                     isMutating = isMutating,
                     errorMessage = errorMessage,
                     noticeMessage = noticeMessage,
@@ -123,6 +146,18 @@ class AndroidServicesViewModel(
 
     fun moveAddonDown(transportUrl: String) = moveAddon(transportUrl, ServicesRepository.MoveDirection.DOWN)
 
+    fun moveAutoModeSourceUp(sourceId: String) {
+        viewModelScope.launch {
+            settingsStore.moveAutoModeSource(sourceId, -1)
+        }
+    }
+
+    fun moveAutoModeSourceDown(sourceId: String) {
+        viewModelScope.launch {
+            settingsStore.moveAutoModeSource(sourceId, 1)
+        }
+    }
+
     fun refreshAddon(transportUrl: String) = mutate(
         successMessage = "Refreshed Stremio addon manifest.",
     ) {
@@ -134,6 +169,13 @@ class AndroidServicesViewModel(
     ) {
         val summary = repository.refreshAllSources().getOrThrow()
         noticeMessage.value = summary.statusMessage
+    }
+
+    fun checkSourceHealthNow() = mutate(
+        successMessage = "Checked source health.",
+    ) {
+        val summary = sourceHealthRepository.runDailyEnabledSourceChecksIfNeeded(force = true)
+        noticeMessage.value = summary.message
     }
 
     fun removeService(
@@ -196,15 +238,43 @@ class AndroidServicesViewModel(
     }
 }
 
+private data class ServicesUiInputs(
+    val snapshot: ServicesSnapshot,
+    val settings: AppSettings,
+    val healthSnapshot: SourceHealthSnapshot,
+)
+
 private fun ServicesSnapshot.toUiState(
     settings: AppSettings,
+    healthSnapshot: SourceHealthSnapshot,
     isMutating: Boolean,
     errorMessage: String?,
     noticeMessage: String?,
 ): ServicesScreenState {
     val selectedSourceIds = settings.autoModeSourceIds
-    val serviceRows = services.map { it.toUiRow(selectedSourceIds) }
-    val addonRows = stremioAddons.map { it.toUiRow(selectedSourceIds) }
+    val serviceRows = services.map { it.toUiRow(selectedSourceIds, healthSnapshot) }
+    val addonRows = stremioAddons.map { it.toUiRow(selectedSourceIds, healthSnapshot) }
+    val selectedOrder = settings.autoModeSourceOrderIds
+        .filter { it in selectedSourceIds } +
+        (serviceRows.filter { it.enabled && it.selectedInAutoMode }.map { it.autoModeId } +
+            addonRows.filter { it.enabled && it.selectedInAutoMode }.map { it.autoModeId })
+            .filterNot { it in settings.autoModeSourceOrderIds }
+    val autoModeRowsById = (
+        serviceRows.map { row ->
+            row.autoModeId to AutoModeSourceOrderRow(
+                id = row.autoModeId,
+                title = row.name,
+                subtitle = listOfNotNull(row.subtitle ?: "Custom service", "Health: ${row.healthLabel}").joinToString(" | "),
+            )
+        } + addonRows.map { row ->
+            row.autoModeId to AutoModeSourceOrderRow(
+                id = row.autoModeId,
+                title = row.name,
+                subtitle = listOfNotNull(row.subtitle ?: "Stremio addon", "Health: ${row.healthLabel}").joinToString(" | "),
+            )
+        }
+    ).toMap()
+    val autoModeOrder = selectedOrder.mapNotNull(autoModeRowsById::get)
     val autoModeSelectedCount = serviceRows.count { it.enabled && it.selectedInAutoMode } +
         addonRows.count { it.enabled && it.selectedInAutoMode }
 
@@ -217,35 +287,52 @@ private fun ServicesSnapshot.toUiState(
         autoModeSelectedCount = autoModeSelectedCount,
         serviceCount = serviceRows.size,
         addonCount = addonRows.size,
+        autoModeOrder = autoModeOrder,
         services = serviceRows,
         stremioAddons = addonRows,
     )
 }
 
-private fun ServiceSourceRecord.toUiRow(selectedSourceIds: Set<String>): ServiceSourceRow = ServiceSourceRow(
-    id = id,
-    autoModeId = autoModeId,
-    name = name,
-    subtitle = subtitle,
-    configurationJson = configurationJson,
-    configurationSummary = configurationSummary,
-    enabled = enabled,
-    selectedInAutoMode = autoModeId in selectedSourceIds,
-)
+private fun ServiceSourceRecord.toUiRow(
+    selectedSourceIds: Set<String>,
+    healthSnapshot: SourceHealthSnapshot,
+): ServiceSourceRow {
+    val health = healthSnapshot.displayStateFor(autoModeId)
+    return ServiceSourceRow(
+        id = id,
+        autoModeId = autoModeId,
+        name = name,
+        subtitle = subtitle,
+        configurationJson = configurationJson,
+        configurationSummary = configurationSummary,
+        enabled = enabled,
+        selectedInAutoMode = autoModeId in selectedSourceIds,
+        healthLabel = health.label,
+        healthWarning = health.warningText,
+    )
+}
 
-private fun StremioAddonRecord.toUiRow(selectedSourceIds: Set<String>): StremioAddonRow = StremioAddonRow(
-    transportUrl = transportUrl,
-    autoModeId = autoModeId,
-    name = name,
-    subtitle = subtitle,
-    enabled = enabled,
-    selectedInAutoMode = autoModeId in selectedSourceIds,
-    configured = configured,
-    configurable = configurable,
-    configurationRequired = configurationRequired,
-    configurationUrl = configurationUrl,
-    types = types,
-    resources = resources,
-    idPrefixes = idPrefixes,
-    catalogCount = catalogCount,
-)
+private fun StremioAddonRecord.toUiRow(
+    selectedSourceIds: Set<String>,
+    healthSnapshot: SourceHealthSnapshot,
+): StremioAddonRow {
+    val health = healthSnapshot.displayStateFor(autoModeId)
+    return StremioAddonRow(
+        transportUrl = transportUrl,
+        autoModeId = autoModeId,
+        name = name,
+        subtitle = subtitle,
+        enabled = enabled,
+        selectedInAutoMode = autoModeId in selectedSourceIds,
+        configured = configured,
+        configurable = configurable,
+        configurationRequired = configurationRequired,
+        configurationUrl = configurationUrl,
+        types = types,
+        resources = resources,
+        idPrefixes = idPrefixes,
+        catalogCount = catalogCount,
+        healthLabel = health.label,
+        healthWarning = health.warningText,
+    )
+}

@@ -11,8 +11,11 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 data class TrackerPlaybackProgressDraft(
@@ -68,6 +71,8 @@ internal data class TrackerItemSyncResult(
 class TrackerSyncClient(
     private val httpClient: EclipseHttpClient = EclipseHttpClient(),
 ) {
+    private val aniListToMalAnimeIdCache = mutableMapOf<Int, Int>()
+
     internal suspend fun sync(
         account: TrackerAccountSnapshot,
         item: TrackerSyncItem,
@@ -78,6 +83,8 @@ class TrackerSyncClient(
         return when (account.service.normalizedTrackerService()) {
             "anilist" -> syncAniList(account, item)
             "trakt" -> syncTrakt(account, item)
+            "myanimelist",
+            "mal" -> syncMyAnimeList(account, item)
             else -> TrackerItemSyncResult(skipped = true, message = "Unsupported tracker ${account.service}.")
         }
     }
@@ -144,6 +151,74 @@ class TrackerSyncClient(
             is NetworkResult.Failure.Http -> TrackerItemSyncResult(message = "Trakt HTTP ${result.code}: ${result.body.orEmpty()}")
             is NetworkResult.Failure.Connectivity -> TrackerItemSyncResult(message = "Trakt connectivity: ${result.throwable.message}")
             is NetworkResult.Failure.Serialization -> TrackerItemSyncResult(message = "Trakt serialization: ${result.throwable.message}")
+        }
+    }
+
+    private suspend fun syncMyAnimeList(
+        account: TrackerAccountSnapshot,
+        item: TrackerSyncItem,
+    ): TrackerItemSyncResult {
+        if (!item.isWatchedEnough) {
+            return TrackerItemSyncResult(skipped = true, message = "MAL anime sync waits until 85% watched.")
+        }
+        val mediaId = item.anilistMediaId
+            ?: return TrackerItemSyncResult(skipped = true, message = "MAL anime sync needs an AniList media id.")
+        val episodeNumber = item.anilistEpisodeNumber
+            ?: return TrackerItemSyncResult(skipped = true, message = "MAL anime sync needs an episode number.")
+        val malId = resolveMyAnimeListAnimeId(mediaId)
+            ?: return TrackerItemSyncResult(skipped = true, message = "MAL anime sync could not map AniList $mediaId.")
+        val status = if (item.isFinished) "completed" else "watching"
+        return when (
+            val result = httpClient.patchForm(
+                url = "https://api.myanimelist.net/v2/anime/$malId/my_list_status",
+                fields = mapOf(
+                    "status" to status,
+                    "num_watched_episodes" to episodeNumber.coerceAtLeast(0).toString(),
+                ),
+                headers = mapOf("Authorization" to "Bearer ${account.accessToken}"),
+            )
+        ) {
+            is NetworkResult.Success -> TrackerItemSyncResult(synced = true)
+            is NetworkResult.Failure.Http -> TrackerItemSyncResult(message = "MAL HTTP ${result.code}: ${result.body.orEmpty()}")
+            is NetworkResult.Failure.Connectivity -> TrackerItemSyncResult(message = "MAL connectivity: ${result.throwable.message}")
+            is NetworkResult.Failure.Serialization -> TrackerItemSyncResult(message = "MAL serialization: ${result.throwable.message}")
+        }
+    }
+
+    private suspend fun resolveMyAnimeListAnimeId(anilistId: Int): Int? {
+        aniListToMalAnimeIdCache[anilistId]?.let { return it }
+        val body = EclipseJson.encodeToString(
+            buildJsonObject {
+                put(
+                    "query",
+                    """
+                    query {
+                        Media(id: $anilistId, type: ANIME) {
+                            idMal
+                        }
+                    }
+                    """.trimIndent(),
+                )
+            },
+        )
+        return when (
+            val result = httpClient.postJson(
+                url = "https://graphql.anilist.co",
+                body = body,
+            )
+        ) {
+            is NetworkResult.Success -> {
+                val malId = EclipseJson.parseToJsonElement(result.value)
+                    .jsonObject["data"]
+                    ?.jsonObject
+                    ?.get("Media")
+                    ?.jsonObject
+                    ?.get("idMal")
+                    ?.jsonPrimitive
+                    ?.intOrNull
+                malId?.also { aniListToMalAnimeIdCache[anilistId] = it }
+            }
+            is NetworkResult.Failure -> null
         }
     }
 }

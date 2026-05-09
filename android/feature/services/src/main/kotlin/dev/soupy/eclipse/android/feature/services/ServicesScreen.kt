@@ -47,6 +47,8 @@ data class ServiceSourceRow(
     val configurationSummary: String? = null,
     val enabled: Boolean = true,
     val selectedInAutoMode: Boolean = false,
+    val healthLabel: String = "Unchecked",
+    val healthWarning: String? = null,
 )
 
 data class StremioAddonRow(
@@ -64,6 +66,14 @@ data class StremioAddonRow(
     val resources: List<String> = emptyList(),
     val idPrefixes: List<String> = emptyList(),
     val catalogCount: Int = 0,
+    val healthLabel: String = "Unchecked",
+    val healthWarning: String? = null,
+)
+
+data class AutoModeSourceOrderRow(
+    val id: String,
+    val title: String,
+    val subtitle: String,
 )
 
 data class ServicesScreenState(
@@ -75,6 +85,7 @@ data class ServicesScreenState(
     val autoModeSelectedCount: Int = 0,
     val serviceCount: Int = 0,
     val addonCount: Int = 0,
+    val autoModeOrder: List<AutoModeSourceOrderRow> = emptyList(),
     val services: List<ServiceSourceRow> = emptyList(),
     val stremioAddons: List<StremioAddonRow> = emptyList(),
 )
@@ -93,8 +104,11 @@ fun ServicesRoute(
     onMoveServiceDown: (String) -> Unit,
     onMoveAddonUp: (String) -> Unit,
     onMoveAddonDown: (String) -> Unit,
+    onMoveAutoModeSourceUp: (String) -> Unit,
+    onMoveAutoModeSourceDown: (String) -> Unit,
     onRefreshAddon: (String) -> Unit,
     onRefreshAllAddons: () -> Unit,
+    onCheckSourceHealth: () -> Unit,
     onRemoveService: (String, String) -> Unit,
     onRemoveAddon: (String, String) -> Unit,
 ) {
@@ -209,6 +223,22 @@ fun ServicesRoute(
                         onCheckedChange = onAutoModeChanged,
                     )
                 }
+            }
+        }
+
+        if (state.autoModeEnabled && state.autoModeOrder.isNotEmpty()) {
+            item {
+                SectionHeading(
+                    title = "Auto Mode Order",
+                    subtitle = "Checked from top to bottom before Eclipse auto-picks a stream.",
+                )
+            }
+            items(state.autoModeOrder, key = { it.id }) { row ->
+                AutoModeOrderCard(
+                    row = row,
+                    onMoveUp = { onMoveAutoModeSourceUp(row.id) },
+                    onMoveDown = { onMoveAutoModeSourceDown(row.id) },
+                )
             }
         }
 
@@ -332,7 +362,10 @@ fun ServicesRoute(
                     subtitle = listOfNotNull(
                         service.subtitle,
                         service.configurationSummary,
+                        "Health: ${service.healthLabel}",
+                        service.healthWarning?.let { "Warning: $it" },
                     ).joinToString("\n").ifBlank { null },
+                    healthWarning = service.healthWarning,
                     enabled = service.enabled,
                     selectedInAutoMode = service.selectedInAutoMode,
                     autoModeEnabled = state.autoModeEnabled,
@@ -358,12 +391,24 @@ fun ServicesRoute(
         }
 
         item {
-            OutlinedButton(
-                onClick = onRefreshAllAddons,
-                enabled = (state.stremioAddons.isNotEmpty() || state.services.isNotEmpty()) && !state.isMutating,
+            Row(
                 modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
-                Text("Update All Sources")
+                OutlinedButton(
+                    onClick = onRefreshAllAddons,
+                    enabled = (state.stremioAddons.isNotEmpty() || state.services.isNotEmpty()) && !state.isMutating,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Update All Sources")
+                }
+                Button(
+                    onClick = onCheckSourceHealth,
+                    enabled = (state.stremioAddons.isNotEmpty() || state.services.isNotEmpty()) && !state.isMutating,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text("Check Health")
+                }
             }
         }
 
@@ -391,7 +436,10 @@ fun ServicesRoute(
                             addon.configured -> "Configured import"
                             else -> null
                         },
+                        "Health: ${addon.healthLabel}",
+                        addon.healthWarning?.let { "Warning: $it" },
                     ).joinToString("\n").ifBlank { null },
+                    healthWarning = addon.healthWarning,
                     enabled = addon.enabled,
                     selectedInAutoMode = addon.selectedInAutoMode,
                     autoModeEnabled = state.autoModeEnabled,
@@ -409,6 +457,46 @@ fun ServicesRoute(
                     onRefresh = { onRefreshAddon(addon.transportUrl) },
                     onRemove = { onRemoveAddon(addon.transportUrl, addon.autoModeId) },
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AutoModeOrderCard(
+    row: AutoModeSourceOrderRow,
+    onMoveUp: () -> Unit,
+    onMoveDown: () -> Unit,
+) {
+    GlassPanel {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    text = row.title,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = row.subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            OutlinedButton(onClick = onMoveUp) {
+                Text("Up")
+            }
+            OutlinedButton(onClick = onMoveDown) {
+                Text("Down")
             }
         }
     }
@@ -572,6 +660,7 @@ private fun CustomServiceConfigurationPanel(
 private fun ServiceCard(
     title: String,
     subtitle: String?,
+    healthWarning: String?,
     enabled: Boolean,
     selectedInAutoMode: Boolean,
     autoModeEnabled: Boolean,
@@ -596,7 +685,11 @@ private fun ServiceCard(
                     Text(
                         text = title,
                         style = MaterialTheme.typography.titleLarge,
-                        color = MaterialTheme.colorScheme.onSurface,
+                        color = if (healthWarning == null) {
+                            MaterialTheme.colorScheme.onSurface
+                        } else {
+                            MaterialTheme.colorScheme.error
+                        },
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                     )

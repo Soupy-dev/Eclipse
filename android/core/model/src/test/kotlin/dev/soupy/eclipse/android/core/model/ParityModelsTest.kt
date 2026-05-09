@@ -4,6 +4,9 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 
 class ParityModelsTest {
     @Test
@@ -60,15 +63,35 @@ class ParityModelsTest {
     fun ratingsSnapshotClampsBackupValues() {
         val snapshot = RatingsSnapshot(
             ratings = mapOf(
-                "1" to 0,
-                "2" to 3,
-                "3" to 8,
+                "1" to 0.0,
+                "2" to 3.25,
+                "3" to 12.0,
             ),
+            notes = mapOf("2" to "  keep  ", "3" to "   "),
         ).normalized
 
-        assertEquals(1, snapshot.ratings.getValue("1"))
-        assertEquals(3, snapshot.ratings.getValue("2"))
-        assertEquals(5, snapshot.ratings.getValue("3"))
+        assertEquals(0.5, snapshot.ratings.getValue("1"))
+        assertEquals(3.5, snapshot.ratings.getValue("2"))
+        assertEquals(10.0, snapshot.ratings.getValue("3"))
+        assertEquals("keep", snapshot.notes.getValue("2"))
+        assertEquals(false, snapshot.notes.containsKey("3"))
+    }
+
+    @Test
+    fun ratingsSnapshotDecodesLegacyIntegerRatings() {
+        val snapshot = Json.decodeFromString<RatingsSnapshot>("""{"ratings":{"42":7}}""").normalized
+
+        assertEquals(7.0, snapshot.ratings.getValue("42"))
+    }
+
+    @Test
+    fun trackerSnapshotPreservesAutoRatingSyncFlag() {
+        val json = Json.encodeToString(TrackerStateSnapshot(autoSyncRatings = true))
+        val decoded = Json.decodeFromString<TrackerStateSnapshot>(json)
+        val legacyDecoded = Json.decodeFromString<TrackerStateSnapshot>("{}")
+
+        assertTrue(decoded.autoSyncRatings)
+        assertFalse(legacyDecoded.autoSyncRatings)
     }
 
     @Test

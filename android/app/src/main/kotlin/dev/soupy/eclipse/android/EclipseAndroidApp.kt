@@ -28,6 +28,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -43,6 +44,7 @@ import dev.soupy.eclipse.android.core.design.EclipseBackground
 import dev.soupy.eclipse.android.core.design.EclipseTheme
 import dev.soupy.eclipse.android.core.model.DetailTarget
 import dev.soupy.eclipse.android.core.model.PlaybackSettingsSnapshot
+import dev.soupy.eclipse.android.core.model.PlayerSource
 import dev.soupy.eclipse.android.data.rememberAppContainer
 import dev.soupy.eclipse.android.feature.detail.DetailRoute
 import dev.soupy.eclipse.android.feature.detail.DetailCollectionRow
@@ -69,6 +71,7 @@ import dev.soupy.eclipse.android.ui.schedule.AndroidScheduleViewModel
 import dev.soupy.eclipse.android.ui.search.AndroidSearchViewModel
 import dev.soupy.eclipse.android.ui.services.AndroidServicesViewModel
 import dev.soupy.eclipse.android.ui.settings.AndroidSettingsViewModel
+import kotlinx.coroutines.launch
 
 private data class AppDestination(
     val route: String,
@@ -129,6 +132,7 @@ fun EclipseAndroidApp(
         AndroidServicesViewModel(
             repository = appContainer.servicesRepository,
             settingsStore = appContainer.settingsStore,
+            sourceHealthRepository = appContainer.sourceHealthRepository,
         )
     }
     val downloadsViewModel = rememberFeatureViewModel("downloads") {
@@ -145,6 +149,7 @@ fun EclipseAndroidApp(
             libraryRepository = appContainer.libraryRepository,
             mangaRepository = appContainer.mangaRepository,
             aniListService = appContainer.aniListService,
+            myAnimeListService = appContainer.myAnimeListService,
             releaseRepository = appContainer.releaseRepository,
             servicesRepository = appContainer.servicesRepository,
         )
@@ -153,6 +158,7 @@ fun EclipseAndroidApp(
         AndroidMangaViewModel(
             repository = appContainer.mangaRepository,
             readerCacheRepository = appContainer.readerCacheRepository,
+            settingsStore = appContainer.settingsStore,
         )
     }
     val novelViewModel = rememberFeatureViewModel("novel") {
@@ -172,8 +178,29 @@ fun EclipseAndroidApp(
     val settingsState by settingsViewModel.state.collectAsState()
     val mangaState by mangaViewModel.state.collectAsState()
     val novelState by novelViewModel.state.collectAsState()
+    val coroutineScope = rememberCoroutineScope()
+    val recordPlaybackReady: (PlayerSource) -> Unit = remember(appContainer.sourceHealthRepository, coroutineScope) {
+        { source ->
+            coroutineScope.launch {
+                appContainer.sourceHealthRepository.recordPlaybackSuccess(source.serviceId, source.serviceName)
+            }
+        }
+    }
+    val recordPlaybackFailure: (PlayerSource, String, Boolean) -> Unit = remember(appContainer.sourceHealthRepository, coroutineScope) {
+        { source, reason, isSourceFailure ->
+            coroutineScope.launch {
+                appContainer.sourceHealthRepository.recordPlaybackFailure(
+                    sourceId = source.serviceId,
+                    sourceName = source.serviceName,
+                    reason = reason,
+                    isSourceFailure = isSourceFailure,
+                )
+            }
+        }
+    }
     val playbackSettings = PlaybackSettingsSnapshot(
         enableSubtitlesByDefault = settingsState.enableSubtitlesByDefault,
+        enableVLCSubtitleEditMenu = settingsState.enableVLCSubtitleEditMenu,
         defaultSubtitleLanguage = settingsState.defaultSubtitleLanguage,
         preferredAnimeAudioLanguage = settingsState.preferredAnimeAudioLanguage,
         subtitleForegroundColor = settingsState.subtitleForegroundColor,
@@ -181,10 +208,19 @@ fun EclipseAndroidApp(
         subtitleFontSize = settingsState.subtitleFontSize,
         subtitleStrokeWidth = settingsState.subtitleStrokeWidth,
         subtitleVerticalOffset = settingsState.subtitleVerticalOffset,
+        defaultPlaybackSpeed = settingsState.defaultPlaybackSpeed,
         holdSpeed = settingsState.holdSpeedPlayer,
         externalPlayer = settingsState.externalPlayer,
         alwaysLandscape = settingsState.alwaysLandscape,
         vlcHeaderProxyEnabled = settingsState.vlcHeaderProxyEnabled,
+        pictureInPictureEnabled = settingsState.vlcPiPEnabled,
+        brightnessGestureEnabled = settingsState.vlcBrightnessGestureEnabled,
+        volumeGestureEnabled = settingsState.vlcVolumeGestureEnabled,
+        playerTwoFingerTapPlayPauseEnabled = settingsState.playerTwoFingerTapPlayPauseEnabled,
+        doubleTapSeekEnabled = settingsState.vlcDoubleTapSeekEnabled,
+        doubleTapSeekSeconds = settingsState.vlcDoubleTapSeekSeconds,
+        openSubtitlesEnabled = settingsState.vlcOpenSubtitlesEnabled,
+        openSubtitlesAutoFallbackEnabled = settingsState.vlcOpenSubtitlesAutoFallbackEnabled,
         aniSkipAutoSkip = settingsState.aniSkipAutoSkip,
         skip85sEnabled = settingsState.skip85sEnabled,
         skip85sAlwaysVisible = settingsState.skip85sAlwaysVisible,
@@ -225,6 +261,10 @@ fun EclipseAndroidApp(
         onTrackerCallbackConsumed()
     }
 
+    LaunchedEffect(settingsState.showLocalScheduleTime) {
+        scheduleViewModel.refresh(settingsState.showLocalScheduleTime)
+    }
+
     val visibleDestinations = remember(settingsState.showScheduleTab, settingsState.showKanzen) {
         if (settingsState.showKanzen) {
             kanzenDestinations
@@ -239,7 +279,11 @@ fun EclipseAndroidApp(
         accentColor = settingsState.accentColor,
         appearance = settingsState.selectedAppearance,
     ) {
-        EclipseBackground(appearance = settingsState.selectedAppearance) {
+        EclipseBackground(
+            appearance = settingsState.selectedAppearance,
+            gradientColor = settingsState.settingsGradientColor,
+            kanzenMode = settingsState.showKanzen,
+        ) {
             val uriHandler = LocalUriHandler.current
             val navController = rememberNavController()
             val navBackStackEntry by navController.currentBackStackEntryAsState()
@@ -396,8 +440,20 @@ fun EclipseAndroidApp(
                                 detailViewModel.currentDownloadDraft()
                                     ?.let(downloadsViewModel::queueDownload)
                             },
+                            onQueueEpisodeDownload = { episodeId ->
+                                detailViewModel.currentDownloadDraft(episodeId)
+                                    ?.let(downloadsViewModel::queueDownload)
+                            },
+                            onQueueVisibleEpisodesDownload = { episodeIds ->
+                                downloadsViewModel.queueDownloads(
+                                    detailViewModel.currentDownloadDrafts(episodeIds),
+                                )
+                            },
                             onSetRating = detailViewModel::setUserRating,
                             onClearRating = detailViewModel::clearUserRating,
+                            onSetRatingNote = detailViewModel::setUserRatingNote,
+                            onSyncRatingToAniList = detailViewModel::syncRatingNoteToAniList,
+                            onSyncRatingToMyAnimeList = detailViewModel::syncRatingNoteToMyAnimeList,
                             onMarkWatched = detailViewModel::markCurrentWatched,
                             onMarkUnwatched = detailViewModel::markCurrentUnwatched,
                             onResolveStreams = detailViewModel::resolveStreams,
@@ -406,6 +462,10 @@ fun EclipseAndroidApp(
                             onMarkEpisodeUnwatched = detailViewModel::markEpisodeUnwatched,
                             onMarkPreviousEpisodesWatched = detailViewModel::markPreviousEpisodesWatched,
                             onPlayStream = detailViewModel::playResolvedStream,
+                            onDownloadStream = { streamId ->
+                                detailViewModel.currentDownloadDraftForStream(streamId)
+                                    ?.let(downloadsViewModel::queueDownload)
+                            },
                             onPlayNextEpisode = detailViewModel::playNextEpisode,
                             onPlaybackProgress = { progress ->
                                 detailViewModel.currentPlaybackProgressDraft(
@@ -414,14 +474,20 @@ fun EclipseAndroidApp(
                                     isFinished = progress.isFinished,
                                 )?.let(libraryViewModel::syncContinueWatching)
                             },
+                            onPlaybackReady = recordPlaybackReady,
+                            onPlaybackFailure = recordPlaybackFailure,
                             preferredPlayer = settingsState.inAppPlayer,
                             playbackSettings = playbackSettings,
                         )
                     }
                     composable("schedule") {
                         ScheduleRoute(
-                            state = scheduleState,
-                            onRefresh = scheduleViewModel::refresh,
+                            state = scheduleState.copy(
+                                showLocalScheduleTime = settingsState.showLocalScheduleTime,
+                                useClassicScheduleUI = settingsState.useClassicScheduleUI,
+                            ),
+                            onRefresh = { scheduleViewModel.refresh(settingsState.showLocalScheduleTime) },
+                            onShowLocalScheduleTimeChanged = settingsViewModel::setShowLocalScheduleTime,
                             onSelect = { target ->
                                 selectedDetailTarget = target
                                 navController.navigate("detail")
@@ -442,8 +508,11 @@ fun EclipseAndroidApp(
                             onMoveServiceDown = servicesViewModel::moveServiceDown,
                             onMoveAddonUp = servicesViewModel::moveAddonUp,
                             onMoveAddonDown = servicesViewModel::moveAddonDown,
+                            onMoveAutoModeSourceUp = servicesViewModel::moveAutoModeSourceUp,
+                            onMoveAutoModeSourceDown = servicesViewModel::moveAutoModeSourceDown,
                             onRefreshAddon = servicesViewModel::refreshAddon,
                             onRefreshAllAddons = servicesViewModel::refreshAllAddons,
+                            onCheckSourceHealth = servicesViewModel::checkSourceHealthNow,
                             onRemoveService = servicesViewModel::removeService,
                             onRemoveAddon = servicesViewModel::removeAddon,
                         )
@@ -486,6 +555,8 @@ fun EclipseAndroidApp(
                             onClearAll = downloadsViewModel::clearAll,
                             onCleanupOrphans = downloadsViewModel::cleanupOrphans,
                             onVerifyFiles = downloadsViewModel::verifyFiles,
+                            onPlaybackReady = recordPlaybackReady,
+                            onPlaybackFailure = recordPlaybackFailure,
                             preferredPlayer = settingsState.inAppPlayer,
                             playbackSettings = playbackSettings,
                         )
@@ -505,9 +576,12 @@ fun EclipseAndroidApp(
                                 }
                             },
                             onAccentColorChanged = settingsViewModel::setAccentColor,
+                            onSettingsGradientColorChanged = settingsViewModel::setSettingsGradientColor,
                             onTmdbLanguageChanged = settingsViewModel::setTmdbLanguage,
                             onAppearanceChanged = settingsViewModel::setAppearance,
                             onShowScheduleTabChanged = settingsViewModel::setShowScheduleTab,
+                            onShowLocalScheduleTimeChanged = settingsViewModel::setShowLocalScheduleTime,
+                            onUseClassicScheduleUiChanged = settingsViewModel::setUseClassicScheduleUi,
                             onShowKanzenChanged = settingsViewModel::setShowKanzen,
                             onSeasonMenuChanged = settingsViewModel::setSeasonMenu,
                             onHorizontalEpisodeListChanged = settingsViewModel::setHorizontalEpisodeList,
@@ -522,12 +596,22 @@ fun EclipseAndroidApp(
                             onNextEpisodeThresholdChanged = settingsViewModel::setNextEpisodeThreshold,
                             onPlayerSelected = settingsViewModel::setInAppPlayer,
                             onEnableSubtitlesByDefaultChanged = settingsViewModel::setEnableSubtitlesByDefault,
+                            onEnableVLCSubtitleEditMenuChanged = settingsViewModel::setEnableVLCSubtitleEditMenu,
                             onDefaultSubtitleLanguageChanged = settingsViewModel::setDefaultSubtitleLanguage,
                             onPreferredAnimeAudioLanguageChanged = settingsViewModel::setPreferredAnimeAudioLanguage,
+                            onDefaultPlaybackSpeedChanged = settingsViewModel::setDefaultPlaybackSpeed,
                             onHoldSpeedChanged = settingsViewModel::setHoldSpeed,
                             onExternalPlayerChanged = settingsViewModel::setExternalPlayer,
                             onAlwaysLandscapeChanged = settingsViewModel::setAlwaysLandscape,
                             onVlcHeaderProxyChanged = settingsViewModel::setVlcHeaderProxyEnabled,
+                            onVlcBrightnessGestureChanged = settingsViewModel::setVlcBrightnessGestureEnabled,
+                            onVlcVolumeGestureChanged = settingsViewModel::setVlcVolumeGestureEnabled,
+                            onPlayerTwoFingerTapPlayPauseChanged = settingsViewModel::setPlayerTwoFingerTapPlayPauseEnabled,
+                            onVlcDoubleTapSeekEnabledChanged = settingsViewModel::setVlcDoubleTapSeekEnabled,
+                            onVlcDoubleTapSeekSecondsChanged = settingsViewModel::setVlcDoubleTapSeekSeconds,
+                            onVlcPiPChanged = settingsViewModel::setVlcPiPEnabled,
+                            onVlcOpenSubtitlesChanged = settingsViewModel::setVlcOpenSubtitlesEnabled,
+                            onVlcOpenSubtitlesAutoFallbackChanged = settingsViewModel::setVlcOpenSubtitlesAutoFallbackEnabled,
                             onSubtitleForegroundColorChanged = settingsViewModel::setSubtitleForegroundColor,
                             onSubtitleStrokeColorChanged = settingsViewModel::setSubtitleStrokeColor,
                             onSubtitleStrokeWidthChanged = settingsViewModel::setSubtitleStrokeWidth,
@@ -555,9 +639,11 @@ fun EclipseAndroidApp(
                             onReaderLineSpacingChanged = settingsViewModel::setReaderLineSpacing,
                             onReaderMarginChanged = settingsViewModel::setReaderMargin,
                             onReaderAlignmentChanged = settingsViewModel::setReaderTextAlignment,
+                            onKanzenAutoModeChanged = settingsViewModel::setKanzenAutoMode,
                             onKanzenAutoUpdateModulesChanged = settingsViewModel::setKanzenAutoUpdateModules,
                             onTrackerManualConnect = settingsViewModel::saveTrackerAccount,
                             onTrackerSyncEnabledChanged = settingsViewModel::setTrackerSyncEnabled,
+                            onAutoSyncRatingsChanged = settingsViewModel::setAutoSyncRatings,
                             onTrackerDisconnect = settingsViewModel::disconnectTracker,
                             onTrackerSyncNow = settingsViewModel::syncTrackersNow,
                             onAniListImportLibrary = {
@@ -565,6 +651,13 @@ fun EclipseAndroidApp(
                             },
                             onAniListImportMangaLibrary = {
                                 settingsViewModel.importAniListMangaLibrary {
+                                    mangaViewModel.refresh()
+                                    novelViewModel.refresh()
+                                }
+                            },
+                            onMyAnimeListImportLibrary = {
+                                settingsViewModel.importMyAnimeListLibrary {
+                                    libraryViewModel.refresh()
                                     mangaViewModel.refresh()
                                     novelViewModel.refresh()
                                 }

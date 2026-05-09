@@ -28,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -106,7 +107,7 @@ private val EclipseShapes = Shapes(
 
 @Composable
 fun EclipseTheme(
-    accentColor: String = "#6D8CFF",
+    accentColor: String = "#401F73",
     appearance: String = "system",
     content: @Composable () -> Unit,
 ) {
@@ -115,11 +116,13 @@ fun EclipseTheme(
         "dark" -> true
         else -> isSystemInDarkTheme()
     }
-    val accent = accentColor.toComposeColor(if (dark) Color(0xFFB5B8FF) else Color(0xFF4965D8))
+    val accent = accentColor.toComposeColor(Color(0xFF401F73))
+    val onAccent = if (accent.luminance() > 0.45f) Color(0xFF151017) else Color.White
     val baseScheme = if (dark) EclipseDarkColors else EclipseLightColors
     MaterialTheme(
         colorScheme = baseScheme.copy(
             primary = accent,
+            onPrimary = onAccent,
             tertiary = accent,
         ),
         typography = EclipseTypography,
@@ -132,6 +135,8 @@ fun EclipseTheme(
 fun EclipseBackground(
     modifier: Modifier = Modifier,
     appearance: String = "system",
+    gradientColor: String = "#401F73",
+    kanzenMode: Boolean = false,
     content: @Composable BoxScope.() -> Unit,
 ) {
     val dark = when (appearance.trim().lowercase()) {
@@ -139,28 +144,32 @@ fun EclipseBackground(
         "dark" -> true
         else -> isSystemInDarkTheme()
     }
-    val baseColors = if (dark) {
-        listOf(
-            Color(0xFF141414),
-            Color(0xFF241536),
-            Color(0xFF3F1F73),
-            Color(0xFF141414),
+    val base = if (dark) Color(0xFF141414) else Color(0xFFF8F4FF)
+    val accent = gradientColor.toComposeColor(Color(0xFF401F73))
+    val colorStops = if (kanzenMode) {
+        arrayOf(
+            0.0f to base,
+            0.06f to accent.copy(alpha = if (dark) 0.70f else 0.30f),
+            0.15f to accent.copy(alpha = if (dark) 0.40f else 0.20f),
+            0.30f to accent.copy(alpha = if (dark) 0.15f else 0.10f),
+            0.50f to accent.copy(alpha = if (dark) 0.05f else 0.05f),
+            0.70f to base,
+            1.0f to base,
         )
     } else {
-        listOf(
-            Color(0xFFF8F4FF),
-            Color(0xFFEDE4FF),
-            Color(0xFFDCCBFF),
-            Color(0xFFFBF8FF),
+        arrayOf(
+            0.0f to base,
+            0.15f to accent.copy(alpha = if (dark) 0.60f else 0.25f),
+            0.35f to accent.copy(alpha = if (dark) 0.30f else 0.16f),
+            0.60f to base,
+            1.0f to base,
         )
     }
     Box(
         modifier = modifier
             .fillMaxSize()
             .background(
-                brush = Brush.verticalGradient(
-                    colors = baseColors,
-                ),
+                brush = Brush.verticalGradient(colorStops = colorStops),
             ),
     ) {
         content()

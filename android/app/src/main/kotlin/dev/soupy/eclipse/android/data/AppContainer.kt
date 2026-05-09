@@ -12,6 +12,7 @@ import dev.soupy.eclipse.android.core.network.EclipseJson
 import dev.soupy.eclipse.android.core.network.AniListService
 import dev.soupy.eclipse.android.core.network.AniSkipService
 import dev.soupy.eclipse.android.core.network.IntroDbService
+import dev.soupy.eclipse.android.core.network.MyAnimeListService
 import dev.soupy.eclipse.android.core.network.StremioService
 import dev.soupy.eclipse.android.core.network.TmdbService
 import dev.soupy.eclipse.android.core.storage.BackupFileStore
@@ -27,6 +28,7 @@ import dev.soupy.eclipse.android.core.storage.RatingsStore
 import dev.soupy.eclipse.android.core.storage.RecommendationStore
 import dev.soupy.eclipse.android.core.storage.SearchHistoryStore
 import dev.soupy.eclipse.android.core.storage.SettingsStore
+import dev.soupy.eclipse.android.core.storage.SourceHealthStore
 import dev.soupy.eclipse.android.core.storage.TrackerStore
 
 class EclipseAppContainer(
@@ -37,6 +39,7 @@ class EclipseAppContainer(
 
     val tmdbService: TmdbService = TmdbService(apiKey = tmdbApiKey)
     val aniListService: AniListService = AniListService()
+    val myAnimeListService: MyAnimeListService = MyAnimeListService()
     val aniSkipService: AniSkipService = AniSkipService()
     val introDbService: IntroDbService = IntroDbService()
     val stremioService: StremioService = StremioService()
@@ -95,6 +98,10 @@ class EclipseAppContainer(
         context = context,
         json = EclipseJson,
     )
+    private val sourceHealthStore: SourceHealthStore = SourceHealthStore(
+        context = context,
+        json = EclipseJson,
+    )
 
     val progressRepository: ProgressRepository = ProgressRepository(
         progressStore = progressStore,
@@ -108,6 +115,8 @@ class EclipseAppContainer(
     val trackerRepository: TrackerRepository = TrackerRepository(
         trackerStore = trackerStore,
         progressRepository = progressRepository,
+        myAnimeListClientId = BuildConfig.MAL_CLIENT_ID,
+        myAnimeListClientSecret = BuildConfig.MAL_CLIENT_SECRET,
     )
     val recommendationRepository: RecommendationRepository = RecommendationRepository(
         recommendationStore = recommendationStore,
@@ -142,6 +151,12 @@ class EclipseAppContainer(
         stremioService = stremioService,
         serviceRuntime = serviceRuntime,
     )
+    val sourceHealthRepository: SourceHealthRepository = SourceHealthRepository(
+        sourceHealthStore = sourceHealthStore,
+        serviceDao = database.serviceDao(),
+        stremioAddonDao = database.stremioAddonDao(),
+        stremioService = stremioService,
+    )
     val searchRepository: SearchRepository = SearchRepository(
         tmdbService = tmdbService,
         aniListService = aniListService,
@@ -164,6 +179,7 @@ class EclipseAppContainer(
         stremioAddonDao = database.stremioAddonDao(),
         settingsStore = settingsStore,
         servicesRepository = servicesRepository,
+        sourceHealthRepository = sourceHealthRepository,
     )
     val scheduleRepository: ScheduleRepository = ScheduleRepository(
         aniListService = aniListService,

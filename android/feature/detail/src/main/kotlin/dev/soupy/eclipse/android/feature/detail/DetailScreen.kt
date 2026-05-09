@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,6 +25,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.StarHalf
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.Download
@@ -38,6 +40,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -49,6 +52,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -62,6 +66,7 @@ import dev.soupy.eclipse.android.core.model.InAppPlayer
 import dev.soupy.eclipse.android.core.model.PlaybackSettingsSnapshot
 import dev.soupy.eclipse.android.core.model.PlayerSource
 import dev.soupy.eclipse.android.core.model.SkipSegment
+import dev.soupy.eclipse.android.core.model.formattedUserRatingOutOf10
 import dev.soupy.eclipse.android.core.player.EclipsePlayerSurface
 import dev.soupy.eclipse.android.core.player.PlaybackProgressSnapshot
 
@@ -129,7 +134,10 @@ data class DetailScreenState(
     val metadataChips: List<String> = emptyList(),
     val detailFacts: List<DetailFactRow> = emptyList(),
     val contentRating: String? = null,
-    val userRating: Int? = null,
+    val userRating: Double? = null,
+    val userRatingNote: String = "",
+    val canSyncRatingToAniList: Boolean = false,
+    val canSyncRatingToMyAnimeList: Boolean = false,
     val cast: List<DetailCastRow> = emptyList(),
     val episodesTitle: String? = null,
     val episodes: List<DetailEpisodeRow> = emptyList(),
@@ -155,8 +163,13 @@ fun DetailRoute(
     onAddToCollection: (String) -> Unit,
     onQueueResume: () -> Unit,
     onQueueDownload: () -> Unit,
-    onSetRating: (Int) -> Unit,
+    onQueueEpisodeDownload: (String) -> Unit,
+    onQueueVisibleEpisodesDownload: (List<String>) -> Unit,
+    onSetRating: (Double) -> Unit,
     onClearRating: () -> Unit,
+    onSetRatingNote: (String) -> Unit,
+    onSyncRatingToAniList: () -> Unit,
+    onSyncRatingToMyAnimeList: () -> Unit,
     onMarkWatched: () -> Unit,
     onMarkUnwatched: () -> Unit,
     onResolveStreams: () -> Unit,
@@ -165,8 +178,11 @@ fun DetailRoute(
     onMarkEpisodeUnwatched: (String) -> Unit,
     onMarkPreviousEpisodesWatched: (String) -> Unit,
     onPlayStream: (String) -> Unit,
+    onDownloadStream: (String) -> Unit,
     onPlayNextEpisode: () -> Unit,
     onPlaybackProgress: (PlaybackProgressSnapshot) -> Unit,
+    onPlaybackReady: (PlayerSource) -> Unit = {},
+    onPlaybackFailure: (PlayerSource, String, Boolean) -> Unit = { _, _, _ -> },
     preferredPlayer: InAppPlayer = InAppPlayer.NORMAL,
     playbackSettings: PlaybackSettingsSnapshot = PlaybackSettingsSnapshot(),
 ) {
@@ -276,7 +292,6 @@ fun DetailRoute(
                 DetailActions(
                     isResolvingStreams = state.isResolvingStreams,
                     selectedEpisodeLabel = state.selectedEpisodeLabel,
-                    isMovie = state.isMovie,
                     collections = state.collections,
                     onResolveStreams = onResolveStreams,
                     onSaveToLibrary = onSaveToLibrary,
@@ -323,6 +338,7 @@ fun DetailRoute(
                 StreamCandidateCard(
                     stream = stream,
                     onPlayStream = onPlayStream,
+                    onDownloadStream = onDownloadStream,
                     modifier = Modifier.padding(horizontal = 20.dp),
                 )
             }
@@ -338,6 +354,8 @@ fun DetailRoute(
                     nextEpisodeLabel = state.nextEpisodeLabel(),
                     onNextEpisode = onPlayNextEpisode,
                     onProgress = onPlaybackProgress,
+                    onPlaybackReady = onPlaybackReady,
+                    onPlaybackFailure = onPlaybackFailure,
                     modifier = Modifier.padding(horizontal = 20.dp),
                 )
             }
@@ -378,8 +396,14 @@ fun DetailRoute(
             item {
                 StarRatingSection(
                     rating = state.userRating,
+                    note = state.userRatingNote,
                     onSetRating = onSetRating,
                     onClearRating = onClearRating,
+                    onSetNote = onSetRatingNote,
+                    canSyncAniList = state.canSyncRatingToAniList,
+                    canSyncMyAnimeList = state.canSyncRatingToMyAnimeList,
+                    onSyncAniList = onSyncRatingToAniList,
+                    onSyncMyAnimeList = onSyncRatingToMyAnimeList,
                     modifier = Modifier.padding(horizontal = 20.dp),
                 )
             }
@@ -424,10 +448,12 @@ fun DetailRoute(
                         seasonMenu = state.seasonMenu,
                         episodeSeasons = episodeSeasons,
                         selectedSeason = selectedSeason,
+                        visibleEpisodeIds = visibleEpisodes.map { it.id },
                         onSelectSeason = {
                             selectedSpecialGroupKey = null
                             selectedSeason = it
                         },
+                        onQueueVisibleEpisodesDownload = onQueueVisibleEpisodesDownload,
                         modifier = Modifier.padding(horizontal = 20.dp),
                     )
                 }
@@ -445,6 +471,7 @@ fun DetailRoute(
                                     onMarkEpisodeWatched = onMarkEpisodeWatched,
                                     onMarkEpisodeUnwatched = onMarkEpisodeUnwatched,
                                     onMarkPreviousEpisodesWatched = onMarkPreviousEpisodesWatched,
+                                    onQueueEpisodeDownload = onQueueEpisodeDownload,
                                     modifier = Modifier.width(320.dp),
                                 )
                             }
@@ -458,6 +485,7 @@ fun DetailRoute(
                             onMarkEpisodeWatched = onMarkEpisodeWatched,
                             onMarkEpisodeUnwatched = onMarkEpisodeUnwatched,
                             onMarkPreviousEpisodesWatched = onMarkPreviousEpisodesWatched,
+                            onQueueEpisodeDownload = onQueueEpisodeDownload,
                             modifier = Modifier.padding(horizontal = 20.dp),
                         )
                     }
@@ -578,7 +606,6 @@ private fun MetadataStrip(
 private fun DetailActions(
     isResolvingStreams: Boolean,
     selectedEpisodeLabel: String?,
-    isMovie: Boolean,
     collections: List<DetailCollectionRow>,
     onResolveStreams: () -> Unit,
     onSaveToLibrary: () -> Unit,
@@ -623,13 +650,11 @@ private fun DetailActions(
             contentDescription = "Bookmark",
             onClick = onSaveToLibrary,
         )
-        if (isMovie) {
-            DetailIconButton(
-                icon = Icons.Rounded.Download,
-                contentDescription = "Download",
-                onClick = onQueueDownload,
-            )
-        }
+        DetailIconButton(
+            icon = Icons.Rounded.Download,
+            contentDescription = "Download",
+            onClick = onQueueDownload,
+        )
         Box {
             DetailIconButton(
                 icon = Icons.Rounded.Add,
@@ -692,9 +717,15 @@ private fun DetailIconButton(
 
 @Composable
 private fun StarRatingSection(
-    rating: Int?,
-    onSetRating: (Int) -> Unit,
+    rating: Double?,
+    note: String,
+    onSetRating: (Double) -> Unit,
     onClearRating: () -> Unit,
+    onSetNote: (String) -> Unit,
+    canSyncAniList: Boolean,
+    canSyncMyAnimeList: Boolean,
+    onSyncAniList: () -> Unit,
+    onSyncMyAnimeList: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -707,33 +738,84 @@ private fun StarRatingSection(
             fontWeight = FontWeight.SemiBold,
             color = Color.White.copy(alpha = 0.7f),
         )
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            (1..5).forEach { value ->
-                Icon(
-                    imageVector = if ((rating ?: 0) >= value) Icons.Rounded.Star else Icons.Rounded.StarBorder,
-                    contentDescription = "Rate $value",
-                    tint = if ((rating ?: 0) >= value) Color(0xFFFFD54F) else Color.White.copy(alpha = 0.32f),
-                    modifier = Modifier
-                        .size(30.dp)
-                        .clickable {
-                            if (rating == value) {
-                                onClearRating()
-                            } else {
-                                onSetRating(value)
-                            }
-                        },
-                )
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            (1..10).chunked(5).forEach { rowValues ->
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    rowValues.forEach { value ->
+                        val selectedRating = rating ?: 0.0
+                        val starValue = value.toDouble()
+                        val targetRating = if (selectedRating >= starValue) {
+                            starValue
+                        } else {
+                            starValue - 0.5
+                        }
+                        Icon(
+                            imageVector = when {
+                                selectedRating >= starValue -> Icons.Rounded.Star
+                                selectedRating >= starValue - 0.5 -> Icons.AutoMirrored.Rounded.StarHalf
+                                else -> Icons.Rounded.StarBorder
+                            },
+                            contentDescription = "Rate ${formattedUserRatingOutOf10(targetRating)}",
+                            tint = if (selectedRating >= starValue - 0.5) Color(0xFFFFD54F) else Color.White.copy(alpha = 0.32f),
+                            modifier = Modifier
+                                .size(28.dp)
+                                .pointerInput(rating, value) {
+                                    detectTapGestures { offset ->
+                                        val newRating = if (offset.x < size.width / 2f) starValue - 0.5 else starValue
+                                        if (rating == newRating) {
+                                            onClearRating()
+                                        } else {
+                                            onSetRating(newRating)
+                                        }
+                                    }
+                                },
+                        )
+                    }
+                }
             }
             rating?.let {
                 Text(
-                    text = "$it/5",
+                    text = "${formattedUserRatingOutOf10(it)}/10",
                     style = MaterialTheme.typography.labelMedium,
                     color = Color.White.copy(alpha = 0.5f),
                     modifier = Modifier.padding(start = 4.dp),
                 )
+            }
+        }
+        OutlinedTextField(
+            value = note,
+            onValueChange = onSetNote,
+            modifier = Modifier.fillMaxWidth(),
+            label = { Text("Private Note") },
+            minLines = 2,
+            maxLines = 4,
+        )
+        if (canSyncAniList || canSyncMyAnimeList) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                if (canSyncAniList) {
+                    OutlinedButton(
+                        onClick = onSyncAniList,
+                        enabled = rating != null,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("AniList")
+                    }
+                }
+                if (canSyncMyAnimeList) {
+                    OutlinedButton(
+                        onClick = onSyncMyAnimeList,
+                        enabled = rating != null,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("MAL")
+                    }
+                }
             }
         }
     }
@@ -783,6 +865,7 @@ private fun DetailFactsCard(
 private fun StreamCandidateCard(
     stream: DetailStreamRow,
     onPlayStream: (String) -> Unit,
+    onDownloadStream: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     GlassPanel(
@@ -810,8 +893,13 @@ private fun StreamCandidateCard(
                 )
             }
             if (stream.playable) {
-                Button(onClick = { onPlayStream(stream.id) }) {
-                    Text("Play Stream")
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { onPlayStream(stream.id) }) {
+                        Text("Play Stream")
+                    }
+                    OutlinedButton(onClick = { onDownloadStream(stream.id) }) {
+                        Text("Download")
+                    }
                 }
             } else {
                 Text(
@@ -869,18 +957,23 @@ private fun EpisodesHeader(
     seasonMenu: Boolean,
     episodeSeasons: List<Int>,
     selectedSeason: Int?,
+    visibleEpisodeIds: List<String>,
     onSelectSeason: (Int) -> Unit,
+    onQueueVisibleEpisodesDownload: (List<String>) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Row(
         modifier = modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
             text = title,
+            modifier = Modifier.weight(1f),
             style = MaterialTheme.typography.titleLarge,
             color = MaterialTheme.colorScheme.onBackground,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
         if (isSeasonedShow && seasonMenu) {
             SeasonDropdown(
@@ -888,6 +981,20 @@ private fun EpisodesHeader(
                 selectedSeason = selectedSeason,
                 onSelectSeason = onSelectSeason,
             )
+        }
+        if (visibleEpisodeIds.isNotEmpty()) {
+            OutlinedButton(onClick = { onQueueVisibleEpisodesDownload(visibleEpisodeIds) }) {
+                Icon(
+                    imageVector = Icons.Rounded.Download,
+                    contentDescription = null,
+                )
+                Spacer(modifier = Modifier.width(6.dp))
+                Text(
+                    text = "Download Season",
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
     }
 }
@@ -1053,6 +1160,7 @@ private fun EpisodeCard(
     onMarkEpisodeWatched: (String) -> Unit,
     onMarkEpisodeUnwatched: (String) -> Unit,
     onMarkPreviousEpisodesWatched: (String) -> Unit,
+    onQueueEpisodeDownload: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var menuExpanded by remember(episode.id) { mutableStateOf(false) }
@@ -1116,6 +1224,13 @@ private fun EpisodeCard(
                     onClick = {
                         menuExpanded = false
                         onResolveEpisodeStreams(episode.id)
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Download") },
+                    onClick = {
+                        menuExpanded = false
+                        onQueueEpisodeDownload(episode.id)
                     },
                 )
                 DropdownMenuItem(

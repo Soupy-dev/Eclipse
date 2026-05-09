@@ -940,7 +940,7 @@ private fun NovelReaderPanel(
         fontFamily = readerSettings.fontFamily(),
         fontWeight = readerSettings.fontWeight(),
         lineHeight = (readerSettings.readerFontSize.coerceIn(12.0, 32.0) *
-            readerSettings.readerLineSpacing.coerceIn(1.0, 2.4)).sp,
+            readerSettings.readerLineSpacing.coerceIn(1.0, 3.0)).sp,
         textAlign = readerSettings.textAlign(),
     )
     var controlsVisible by rememberSaveable(reader.aniListId) { mutableStateOf(true) }
@@ -1173,7 +1173,7 @@ private fun NovelReaderSettingsRow.modeLabel(): String =
     }
 
 private fun NovelReaderSettingsRow.horizontalPadding() =
-    readerMargin.coerceIn(0.0, 12.0).dp
+    readerMargin.coerceIn(0.0, 30.0).dp
 
 private fun NovelReaderSettingsRow.textAlign(): TextAlign =
     when (readerTextAlignment.lowercase()) {

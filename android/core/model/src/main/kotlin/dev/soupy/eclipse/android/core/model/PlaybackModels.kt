@@ -91,6 +91,7 @@ data class PlayerSource(
     val audioTracks: List<AudioTrack> = emptyList(),
     val isDownloaded: Boolean = false,
     val serviceId: String? = null,
+    val serviceName: String? = null,
     val serviceHref: String? = null,
     val context: EpisodePlaybackContext? = null,
 )

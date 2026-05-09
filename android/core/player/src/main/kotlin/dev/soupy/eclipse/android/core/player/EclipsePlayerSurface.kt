@@ -9,6 +9,7 @@ import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.graphics.Color
 import android.graphics.Typeface
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Bundle
 import android.provider.Browser
@@ -17,6 +18,7 @@ import android.view.GestureDetector
 import android.view.MotionEvent
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
@@ -24,6 +26,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -40,12 +44,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.Player
+import androidx.media3.common.PlaybackException
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
@@ -60,12 +66,22 @@ import dev.soupy.eclipse.android.core.model.SkipSegment
 import dev.soupy.eclipse.android.core.model.SubtitleTrack
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import org.videolan.libvlc.LibVLC
 import org.videolan.libvlc.Media
 import org.videolan.libvlc.MediaPlayer
+import org.videolan.libvlc.interfaces.IMedia
 import org.videolan.libvlc.util.VLCVideoLayout
 
-private const val DoubleTapSeekDeltaMs = 10_000L
+private const val VlcSubtitleSlaveType = 0
+private const val VlcExternalSubtitlePriority = 4
+private const val VlcDisabledTrackId = -1
+
+object EclipsePictureInPictureState {
+    @Volatile
+    var enabled: Boolean = false
+}
 
 data class PlaybackProgressSnapshot(
     val positionMs: Long,
@@ -83,7 +99,21 @@ fun EclipsePlayerSurface(
     nextEpisodeLabel: String? = null,
     onNextEpisode: () -> Unit = {},
     onProgress: (PlaybackProgressSnapshot) -> Unit = {},
+    onPlaybackReady: (PlayerSource) -> Unit = {},
+    onPlaybackFailure: (PlayerSource, String, Boolean) -> Unit = { _, _, _ -> },
 ) {
+    DisposableEffect(source?.uri, preferredPlayer, settings.pictureInPictureEnabled) {
+        val active = source != null &&
+            preferredPlayer == InAppPlayer.VLC &&
+            settings.pictureInPictureEnabled
+        EclipsePictureInPictureState.enabled = active
+        onDispose {
+            if (EclipsePictureInPictureState.enabled == active) {
+                EclipsePictureInPictureState.enabled = false
+            }
+        }
+    }
+
     if (source == null) {
         GlassPanel(
             modifier = modifier
@@ -108,6 +138,8 @@ fun EclipsePlayerSurface(
 
     val context = LocalContext.current
     val onProgressState = rememberUpdatedState(onProgress)
+    val onPlaybackReadyState = rememberUpdatedState(onPlaybackReady)
+    val onPlaybackFailureState = rememberUpdatedState(onPlaybackFailure)
     val settingsState = rememberUpdatedState(settings)
     val skipSegmentsState = rememberUpdatedState(skipSegments)
     var progressPercent by remember(source.uri) { mutableStateOf(0f) }
@@ -147,7 +179,10 @@ fun EclipsePlayerSurface(
         EmbeddedVlcPlayerPanel(
             source = source,
             modifier = modifier,
+            settings = settings,
             onProgress = onProgressState.value,
+            onPlaybackReady = onPlaybackReadyState.value,
+            onPlaybackFailure = onPlaybackFailureState.value,
         )
         return
     }
@@ -182,9 +217,16 @@ fun EclipsePlayerSurface(
             .apply {
                 setMediaItem(mediaItem)
                 prepare()
+                setPlaybackSpeed(settings.defaultPlaybackSpeed.toFloat())
                 playWhenReady = false
             }
     }
+
+    LaunchedEffect(exoPlayer, settings.defaultPlaybackSpeed) {
+        exoPlayer.setPlaybackSpeed(settings.defaultPlaybackSpeed.toFloat())
+    }
+
+    var reportedPlaybackReady by remember(source.uri) { mutableStateOf(false) }
 
     LaunchedEffect(
         exoPlayer,
@@ -274,9 +316,21 @@ fun EclipsePlayerSurface(
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_READY && !reportedPlaybackReady) {
+                    reportedPlaybackReady = true
+                    onPlaybackReadyState.value(source)
+                }
                 if (playbackState == Player.STATE_ENDED) {
                     emitProgressSnapshot(forceFinished = true)
                 }
+            }
+
+            override fun onPlayerError(error: PlaybackException) {
+                onPlaybackFailureState.value(
+                    source,
+                    error.message ?: "Playback failed.",
+                    error.message.isLikelySourceFailure(),
+                )
             }
         }
         exoPlayer.addListener(listener)
@@ -326,6 +380,11 @@ fun EclipsePlayerSurface(
                     applySubtitleStyle(settings)
                     installDoubleTapSeek(
                         exoPlayer = exoPlayer,
+                        enabled = settings.doubleTapSeekEnabled,
+                        seekDeltaMs = (settings.doubleTapSeekSeconds * 1_000.0).toLong(),
+                        twoFingerPlayPauseEnabled = settings.playerTwoFingerTapPlayPauseEnabled,
+                        brightnessGestureEnabled = settings.brightnessGestureEnabled,
+                        volumeGestureEnabled = settings.volumeGestureEnabled,
                         onSeek = { emitProgressSnapshot() },
                     )
                 }
@@ -335,6 +394,11 @@ fun EclipsePlayerSurface(
                 playerView.applySubtitleStyle(settings)
                 playerView.installDoubleTapSeek(
                     exoPlayer = exoPlayer,
+                    enabled = settings.doubleTapSeekEnabled,
+                    seekDeltaMs = (settings.doubleTapSeekSeconds * 1_000.0).toLong(),
+                    twoFingerPlayPauseEnabled = settings.playerTwoFingerTapPlayPauseEnabled,
+                    brightnessGestureEnabled = settings.brightnessGestureEnabled,
+                    volumeGestureEnabled = settings.volumeGestureEnabled,
                     onSeek = { emitProgressSnapshot() },
                 )
             },
@@ -453,7 +517,7 @@ private fun PlaybackShortcutRow(
             HoldSpeedSurface(
                 speed = settings.holdSpeed,
                 onHoldStart = { exoPlayer.setPlaybackSpeed(settings.holdSpeed.toFloat()) },
-                onHoldEnd = { exoPlayer.setPlaybackSpeed(1f) },
+                onHoldEnd = { exoPlayer.setPlaybackSpeed(settings.defaultPlaybackSpeed.toFloat()) },
             )
         }
 
@@ -480,6 +544,11 @@ private fun List<SkipSegment>.nextManualSkip(positionSeconds: Double): SkipSegme
     firstOrNull { segment ->
         positionSeconds >= segment.startTime - 8.0 && positionSeconds < segment.endTime
     }
+
+private data class VlcTrackOption(
+    val id: Int,
+    val name: String,
+)
 
 @Composable
 private fun HoldSpeedSurface(
@@ -515,17 +584,29 @@ private fun HoldSpeedSurface(
 @SuppressLint("ClickableViewAccessibility")
 private fun PlayerView.installDoubleTapSeek(
     exoPlayer: ExoPlayer,
+    enabled: Boolean,
+    seekDeltaMs: Long,
+    twoFingerPlayPauseEnabled: Boolean,
+    brightnessGestureEnabled: Boolean,
+    volumeGestureEnabled: Boolean,
     onSeek: () -> Unit,
 ) {
+    var verticalMode: VerticalGestureMode? = null
+    var startY = 0f
+    var startX = 0f
+    var startBrightness = currentWindowBrightness()
+    val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+    var startVolume = audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: 0
     val detector = GestureDetector(
         context,
         object : GestureDetector.SimpleOnGestureListener() {
             override fun onDoubleTap(e: MotionEvent): Boolean {
+                if (!enabled) return false
                 val viewWidth = width.takeIf { it > 0 } ?: return false
                 val deltaMs = if (e.x < viewWidth / 2f) {
-                    -DoubleTapSeekDeltaMs
+                    -seekDeltaMs
                 } else {
-                    DoubleTapSeekDeltaMs
+                    seekDeltaMs
                 }
                 exoPlayer.seekBy(deltaMs)
                 onSeek()
@@ -535,9 +616,199 @@ private fun PlayerView.installDoubleTapSeek(
     )
 
     setOnTouchListener { _, event ->
+        val handledVertical = handleVerticalPlayerGesture(
+            event = event,
+            brightnessGestureEnabled = brightnessGestureEnabled,
+            volumeGestureEnabled = volumeGestureEnabled,
+            audioManager = audioManager,
+            start = VerticalGestureStart(
+                mode = verticalMode,
+                startX = startX,
+                startY = startY,
+                startBrightness = startBrightness,
+                startVolume = startVolume,
+            ),
+            onStartChanged = { next ->
+                verticalMode = next.mode
+                startX = next.startX
+                startY = next.startY
+                startBrightness = next.startBrightness
+                startVolume = next.startVolume
+            },
+        )
+        if (handledVertical) return@setOnTouchListener true
+        if (
+            twoFingerPlayPauseEnabled &&
+            event.pointerCount >= 2 &&
+            event.actionMasked == MotionEvent.ACTION_POINTER_UP
+        ) {
+            if (exoPlayer.isPlaying) {
+                exoPlayer.pause()
+            } else {
+                exoPlayer.play()
+            }
+            return@setOnTouchListener true
+        }
         detector.onTouchEvent(event)
         false
     }
+}
+
+@SuppressLint("ClickableViewAccessibility")
+private fun VLCVideoLayout.installVlcGestures(
+    mediaPlayer: MediaPlayer,
+    enabled: Boolean,
+    seekDeltaMs: Long,
+    twoFingerPlayPauseEnabled: Boolean,
+    brightnessGestureEnabled: Boolean,
+    volumeGestureEnabled: Boolean,
+    onSeek: () -> Unit,
+) {
+    var verticalMode: VerticalGestureMode? = null
+    var startY = 0f
+    var startX = 0f
+    var startBrightness = currentWindowBrightness()
+    val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+    var startVolume = audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: 0
+    val detector = GestureDetector(
+        context,
+        object : GestureDetector.SimpleOnGestureListener() {
+            override fun onDoubleTap(e: MotionEvent): Boolean {
+                if (!enabled) return false
+                val viewWidth = width.takeIf { it > 0 } ?: return false
+                val deltaMs = if (e.x < viewWidth / 2f) {
+                    -seekDeltaMs
+                } else {
+                    seekDeltaMs
+                }
+                mediaPlayer.seekBy(deltaMs)
+                onSeek()
+                return true
+            }
+        },
+    )
+
+    setOnTouchListener { _, event ->
+        val handledVertical = handleVerticalPlayerGesture(
+            event = event,
+            brightnessGestureEnabled = brightnessGestureEnabled,
+            volumeGestureEnabled = volumeGestureEnabled,
+            audioManager = audioManager,
+            start = VerticalGestureStart(
+                mode = verticalMode,
+                startX = startX,
+                startY = startY,
+                startBrightness = startBrightness,
+                startVolume = startVolume,
+            ),
+            onStartChanged = { next ->
+                verticalMode = next.mode
+                startX = next.startX
+                startY = next.startY
+                startBrightness = next.startBrightness
+                startVolume = next.startVolume
+            },
+        )
+        if (handledVertical) return@setOnTouchListener true
+        if (
+            twoFingerPlayPauseEnabled &&
+            event.pointerCount >= 2 &&
+            event.actionMasked == MotionEvent.ACTION_POINTER_UP
+        ) {
+            if (mediaPlayer.isPlaying) {
+                mediaPlayer.pause()
+            } else {
+                mediaPlayer.play()
+            }
+            return@setOnTouchListener true
+        }
+        detector.onTouchEvent(event)
+        false
+    }
+}
+
+private enum class VerticalGestureMode {
+    BRIGHTNESS,
+    VOLUME,
+}
+
+private data class VerticalGestureStart(
+    val mode: VerticalGestureMode?,
+    val startX: Float,
+    val startY: Float,
+    val startBrightness: Float,
+    val startVolume: Int,
+)
+
+private fun android.view.View.handleVerticalPlayerGesture(
+    event: MotionEvent,
+    brightnessGestureEnabled: Boolean,
+    volumeGestureEnabled: Boolean,
+    audioManager: AudioManager?,
+    start: VerticalGestureStart,
+    onStartChanged: (VerticalGestureStart) -> Unit,
+): Boolean {
+    if (!brightnessGestureEnabled && !volumeGestureEnabled) return false
+
+    when (event.actionMasked) {
+        MotionEvent.ACTION_DOWN -> {
+            onStartChanged(
+                VerticalGestureStart(
+                    mode = null,
+                    startX = event.x,
+                    startY = event.y,
+                    startBrightness = currentWindowBrightness(),
+                    startVolume = audioManager?.getStreamVolume(AudioManager.STREAM_MUSIC) ?: 0,
+                ),
+            )
+            return false
+        }
+        MotionEvent.ACTION_MOVE -> {
+            val deltaX = event.x - start.startX
+            val deltaY = event.y - start.startY
+            val mode = start.mode ?: when {
+                abs(deltaY) < 24f || abs(deltaY) < abs(deltaX) -> null
+                start.startX < width / 2f && brightnessGestureEnabled -> VerticalGestureMode.BRIGHTNESS
+                start.startX >= width / 2f && volumeGestureEnabled -> VerticalGestureMode.VOLUME
+                else -> null
+            }?.also { nextMode ->
+                onStartChanged(start.copy(mode = nextMode))
+            } ?: return false
+            val fraction = (-deltaY / height.coerceAtLeast(1).toFloat()).coerceIn(-1f, 1f)
+            when (mode) {
+                VerticalGestureMode.BRIGHTNESS -> setWindowBrightness(start.startBrightness + fraction)
+                VerticalGestureMode.VOLUME -> {
+                    val manager = audioManager ?: return false
+                    val maxVolume = manager.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+                    val target = (start.startVolume + fraction * maxVolume)
+                        .roundToInt()
+                        .coerceIn(0, maxVolume)
+                    manager.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
+                }
+            }
+            return true
+        }
+        MotionEvent.ACTION_UP,
+        MotionEvent.ACTION_CANCEL -> {
+            val wasActive = start.mode != null
+            onStartChanged(start.copy(mode = null))
+            return wasActive
+        }
+    }
+
+    return false
+}
+
+private fun android.view.View.currentWindowBrightness(): Float {
+    val value = context.findActivity()?.window?.attributes?.screenBrightness ?: -1f
+    return value.takeIf { it >= 0f } ?: 0.5f
+}
+
+private fun android.view.View.setWindowBrightness(value: Float) {
+    val activity = context.findActivity() ?: return
+    val attributes = activity.window.attributes
+    attributes.screenBrightness = value.coerceIn(0.02f, 1f)
+    activity.window.attributes = attributes
 }
 
 private fun ExoPlayer.seekBy(deltaMs: Long) {
@@ -549,19 +820,92 @@ private fun ExoPlayer.seekBy(deltaMs: Long) {
     seekTo(targetPosition)
 }
 
+private fun MediaPlayer.seekBy(deltaMs: Long) {
+    val currentPosition = time.coerceAtLeast(0L)
+    val duration = length.takeIf { it > 0L }
+    val targetPosition = duration?.let { durationMs ->
+        (currentPosition + deltaMs).coerceIn(0L, (durationMs - 1_000L).coerceAtLeast(0L))
+    } ?: (currentPosition + deltaMs).coerceAtLeast(0L)
+    setTime(targetPosition)
+}
+
 @Composable
 private fun EmbeddedVlcPlayerPanel(
     source: PlayerSource,
     modifier: Modifier = Modifier,
+    settings: PlaybackSettingsSnapshot,
     onProgress: (PlaybackProgressSnapshot) -> Unit,
+    onPlaybackReady: (PlayerSource) -> Unit,
+    onPlaybackFailure: (PlayerSource, String, Boolean) -> Unit,
 ) {
     var session by remember(source.uri) { mutableStateOf<VlcSession?>(null) }
     var playbackError by remember(source.uri) { mutableStateOf<String?>(null) }
+    var audioTracks by remember(source.uri) { mutableStateOf(emptyList<VlcTrackOption>()) }
+    var subtitleTracks by remember(source.uri) { mutableStateOf(emptyList<VlcTrackOption>()) }
+    var selectedAudioTrackId by remember(source.uri) { mutableStateOf(VlcDisabledTrackId) }
+    var selectedSubtitleTrackId by remember(source.uri) { mutableStateOf(VlcDisabledTrackId) }
+    var userSelectedAudioTrack by remember(source.uri) { mutableStateOf(false) }
+    var userSelectedSubtitleTrack by remember(source.uri) { mutableStateOf(false) }
+    var autoAudioApplied by remember(source.uri, settings.preferredAnimeAudioLanguage) { mutableStateOf(false) }
+    var autoSubtitleApplied by remember(
+        source.uri,
+        settings.enableSubtitlesByDefault,
+        settings.defaultSubtitleLanguage,
+    ) {
+        mutableStateOf(false)
+    }
+
+    fun refreshVlcTracks(player: MediaPlayer?) {
+        if (player == null) return
+        audioTracks = player.vlcAudioTrackOptions()
+        subtitleTracks = player.vlcSubtitleTrackOptions()
+        selectedAudioTrackId = player.getAudioTrack()
+        selectedSubtitleTrackId = player.getSpuTrack()
+    }
 
     DisposableEffect(source.uri) {
         onDispose {
             session?.release()
             session = null
+        }
+    }
+
+    LaunchedEffect(session, settings.defaultPlaybackSpeed) {
+        session?.mediaPlayer?.setRate(settings.defaultPlaybackSpeed.toFloat())
+    }
+
+    LaunchedEffect(session) {
+        while (isActive) {
+            refreshVlcTracks(session?.mediaPlayer)
+            delay(if (audioTracks.isEmpty() && subtitleTracks.isEmpty()) 300L else 1_000L)
+        }
+    }
+
+    LaunchedEffect(session, audioTracks, settings.preferredAnimeAudioLanguage) {
+        if (autoAudioApplied || userSelectedAudioTrack || !source.isAnimeLike()) return@LaunchedEffect
+        val player = session?.mediaPlayer ?: return@LaunchedEffect
+        val preferred = preferredVlcTrack(audioTracks, settings.preferredAnimeAudioLanguage) ?: return@LaunchedEffect
+        if (player.setAudioTrack(preferred.id)) {
+            selectedAudioTrackId = preferred.id
+            autoAudioApplied = true
+        }
+    }
+
+    LaunchedEffect(session, subtitleTracks, settings.enableSubtitlesByDefault, settings.defaultSubtitleLanguage) {
+        if (autoSubtitleApplied || userSelectedSubtitleTrack) return@LaunchedEffect
+        val player = session?.mediaPlayer ?: return@LaunchedEffect
+        if (!settings.enableSubtitlesByDefault) {
+            player.setSpuTrack(VlcDisabledTrackId)
+            selectedSubtitleTrackId = VlcDisabledTrackId
+            autoSubtitleApplied = true
+            return@LaunchedEffect
+        }
+        val preferred = preferredVlcTrack(subtitleTracks, settings.defaultSubtitleLanguage)
+            ?: subtitleTracks.firstOrNull()
+            ?: return@LaunchedEffect
+        if (player.setSpuTrack(preferred.id)) {
+            selectedSubtitleTrackId = preferred.id
+            autoSubtitleApplied = true
         }
     }
 
@@ -583,48 +927,285 @@ private fun EmbeddedVlcPlayerPanel(
         }
     }
 
-    Surface(
+    Column(
         modifier = modifier
-            .fillMaxWidth()
-            .aspectRatio(16 / 9f),
-        color = androidx.compose.ui.graphics.Color.Black,
+            .fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        key(source.uri) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { context ->
-                    VLCVideoLayout(context).also { layout ->
-                        runCatching {
-                            VlcSession.create(
-                                context = context,
-                                layout = layout,
-                                source = source,
-                            )
-                        }.onSuccess { created ->
-                            session?.release()
-                            session = created
-                            playbackError = null
-                        }.onFailure { error ->
-                            playbackError = error.message ?: "Embedded VLC playback failed."
+        VlcPlaybackTrackControls(
+            audioTracks = audioTracks,
+            subtitleTracks = subtitleTracks,
+            selectedAudioTrackId = selectedAudioTrackId,
+            selectedSubtitleTrackId = selectedSubtitleTrackId,
+            showSubtitleStyleSummary = settings.enableVLCSubtitleEditMenu,
+            subtitleStyleSummary = settings.vlcSubtitleStyleSummary(),
+            onAudioTrackSelected = { track ->
+                val player = session?.mediaPlayer ?: return@VlcPlaybackTrackControls
+                userSelectedAudioTrack = true
+                if (player.setAudioTrack(track.id)) {
+                    selectedAudioTrackId = track.id
+                }
+                refreshVlcTracks(player)
+            },
+            onSubtitleDisabled = {
+                val player = session?.mediaPlayer ?: return@VlcPlaybackTrackControls
+                userSelectedSubtitleTrack = true
+                player.setSpuTrack(VlcDisabledTrackId)
+                selectedSubtitleTrackId = VlcDisabledTrackId
+                refreshVlcTracks(player)
+            },
+            onSubtitleTrackSelected = { track ->
+                val player = session?.mediaPlayer ?: return@VlcPlaybackTrackControls
+                userSelectedSubtitleTrack = true
+                if (player.setSpuTrack(track.id)) {
+                    selectedSubtitleTrackId = track.id
+                }
+                refreshVlcTracks(player)
+            },
+        )
+
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .aspectRatio(16 / 9f),
+            color = androidx.compose.ui.graphics.Color.Black,
+        ) {
+            key(source.uri) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = { context ->
+                        VLCVideoLayout(context).also { layout ->
+                            runCatching {
+                                VlcSession.create(
+                                    context = context,
+                                    layout = layout,
+                                    source = source,
+                                    settings = settings,
+                                )
+                            }.onSuccess { created ->
+                                session?.release()
+                                session = created
+                                refreshVlcTracks(created.mediaPlayer)
+                                onPlaybackReady(source)
+                                layout.installVlcGestures(
+                                    mediaPlayer = created.mediaPlayer,
+                                    enabled = settings.doubleTapSeekEnabled,
+                                    seekDeltaMs = (settings.doubleTapSeekSeconds * 1_000.0).toLong(),
+                                    twoFingerPlayPauseEnabled = settings.playerTwoFingerTapPlayPauseEnabled,
+                                    brightnessGestureEnabled = settings.brightnessGestureEnabled,
+                                    volumeGestureEnabled = settings.volumeGestureEnabled,
+                                    onSeek = {
+                                        onProgress(
+                                            PlaybackProgressSnapshot(
+                                                positionMs = created.mediaPlayer.time.coerceAtLeast(0L),
+                                                durationMs = created.mediaPlayer.length.coerceAtLeast(0L),
+                                            ),
+                                        )
+                                    },
+                                )
+                                playbackError = null
+                            }.onFailure { error ->
+                                val message = error.message ?: "Embedded VLC playback failed."
+                                playbackError = message
+                                onPlaybackFailure(source, message, message.isLikelySourceFailure())
+                            }
                         }
+                    },
+                    update = { layout ->
+                        session?.mediaPlayer?.let { mediaPlayer ->
+                            mediaPlayer.setRate(settings.defaultPlaybackSpeed.toFloat())
+                            layout.installVlcGestures(
+                                mediaPlayer = mediaPlayer,
+                                enabled = settings.doubleTapSeekEnabled,
+                                seekDeltaMs = (settings.doubleTapSeekSeconds * 1_000.0).toLong(),
+                                twoFingerPlayPauseEnabled = settings.playerTwoFingerTapPlayPauseEnabled,
+                                brightnessGestureEnabled = settings.brightnessGestureEnabled,
+                                volumeGestureEnabled = settings.volumeGestureEnabled,
+                                onSeek = {
+                                    onProgress(
+                                        PlaybackProgressSnapshot(
+                                            positionMs = mediaPlayer.time.coerceAtLeast(0L),
+                                            durationMs = mediaPlayer.length.coerceAtLeast(0L),
+                                        ),
+                                    )
+                                },
+                            )
+                        }
+                    },
+                )
+            }
+            playbackError?.let { error ->
+                GlassPanel(
+                    modifier = Modifier.padding(16.dp),
+                ) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "Embedded VLC unavailable",
+                            style = MaterialTheme.typography.titleLarge,
+                            color = MaterialTheme.colorScheme.error,
+                        )
+                        Text(
+                            text = error,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                        )
                     }
-                },
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VlcPlaybackTrackControls(
+    audioTracks: List<VlcTrackOption>,
+    subtitleTracks: List<VlcTrackOption>,
+    selectedAudioTrackId: Int,
+    selectedSubtitleTrackId: Int,
+    showSubtitleStyleSummary: Boolean,
+    subtitleStyleSummary: String,
+    onAudioTrackSelected: (VlcTrackOption) -> Unit,
+    onSubtitleDisabled: () -> Unit,
+    onSubtitleTrackSelected: (VlcTrackOption) -> Unit,
+) {
+    GlassPanel(
+        modifier = Modifier.fillMaxWidth(),
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                VlcTrackDropdown(
+                    modifier = Modifier.weight(1f),
+                    title = "Audio",
+                    selectedLabel = audioTracks.firstOrNull { it.id == selectedAudioTrackId }?.name
+                        ?: "Auto",
+                    emptyLabel = "No audio tracks",
+                    tracks = audioTracks,
+                    onTrackSelected = onAudioTrackSelected,
+                )
+                VlcSubtitleDropdown(
+                    modifier = Modifier.weight(1f),
+                    selectedLabel = subtitleTracks.firstOrNull { it.id == selectedSubtitleTrackId }?.name
+                        ?: if (selectedSubtitleTrackId == VlcDisabledTrackId) "Off" else "Auto",
+                    tracks = subtitleTracks,
+                    onDisabled = onSubtitleDisabled,
+                    onTrackSelected = onSubtitleTrackSelected,
+                )
+            }
+            if (showSubtitleStyleSummary) {
+                Text(
+                    text = subtitleStyleSummary,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun VlcTrackDropdown(
+    modifier: Modifier = Modifier,
+    title: String,
+    selectedLabel: String,
+    emptyLabel: String,
+    tracks: List<VlcTrackOption>,
+    onTrackSelected: (VlcTrackOption) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box(modifier = modifier) {
+        OutlinedButton(
+            modifier = Modifier.fillMaxWidth(),
+            onClick = { expanded = true },
+        ) {
+            Text(
+                text = "$title: $selectedLabel",
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
-        playbackError?.let { error ->
-            GlassPanel(
-                modifier = Modifier.padding(16.dp),
-            ) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = "Embedded VLC unavailable",
-                        style = MaterialTheme.typography.titleLarge,
-                        color = MaterialTheme.colorScheme.error,
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            if (tracks.isEmpty()) {
+                DropdownMenuItem(
+                    text = { Text(emptyLabel) },
+                    onClick = { expanded = false },
+                )
+            } else {
+                tracks.forEach { track ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                text = track.name,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        },
+                        onClick = {
+                            expanded = false
+                            onTrackSelected(track)
+                        },
                     )
-                    Text(
-                        text = error,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VlcSubtitleDropdown(
+    modifier: Modifier = Modifier,
+    selectedLabel: String,
+    tracks: List<VlcTrackOption>,
+    onDisabled: () -> Unit,
+    onTrackSelected: (VlcTrackOption) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box(modifier = modifier) {
+        OutlinedButton(
+            modifier = Modifier.fillMaxWidth(),
+            onClick = { expanded = true },
+        ) {
+            Text(
+                text = "Subtitles: $selectedLabel",
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            DropdownMenuItem(
+                text = { Text("Disable Subtitles") },
+                onClick = {
+                    expanded = false
+                    onDisabled()
+                },
+            )
+            if (tracks.isEmpty()) {
+                DropdownMenuItem(
+                    text = { Text("No subtitles in stream") },
+                    onClick = { expanded = false },
+                )
+            } else {
+                tracks.forEach { track ->
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                text = track.name,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        },
+                        onClick = {
+                            expanded = false
+                            onTrackSelected(track)
+                        },
                     )
                 }
             }
@@ -648,6 +1229,7 @@ private class VlcSession(
             context: Context,
             layout: VLCVideoLayout,
             source: PlayerSource,
+            settings: PlaybackSettingsSnapshot,
         ): VlcSession {
             val libVlc = LibVLC(
                 context.applicationContext,
@@ -662,12 +1244,65 @@ private class VlcSession(
             source.headers.forEach { (name, value) ->
                 media.addOption(":http-header=$name: $value")
             }
+            source.vlcSubtitleUris().forEach { subtitleUri ->
+                media.addSlave(IMedia.Slave(VlcSubtitleSlaveType, VlcExternalSubtitlePriority, subtitleUri))
+            }
             mediaPlayer.media = media
             media.release()
             mediaPlayer.play()
+            mediaPlayer.setRate(settings.defaultPlaybackSpeed.toFloat())
             return VlcSession(mediaPlayer, libVlc)
         }
     }
+}
+
+private fun MediaPlayer.vlcAudioTrackOptions(): List<VlcTrackOption> =
+    runCatching {
+        getAudioTracks()
+            ?.map { track ->
+                VlcTrackOption(
+                    id = track.id,
+                    name = track.name?.takeIf { it.isNotBlank() } ?: "Audio ${track.id}",
+                )
+            }
+            .orEmpty()
+    }.getOrDefault(emptyList())
+
+private fun MediaPlayer.vlcSubtitleTrackOptions(): List<VlcTrackOption> =
+    runCatching {
+        getSpuTracks()
+            ?.filter { track -> track.id >= 0 && !track.name.isDisabledTrackName() }
+            ?.map { track ->
+                VlcTrackOption(
+                    id = track.id,
+                    name = track.name?.takeIf { it.isNotBlank() } ?: "Subtitle ${track.id}",
+                )
+            }
+            .orEmpty()
+    }.getOrDefault(emptyList())
+
+private fun preferredVlcTrack(
+    tracks: List<VlcTrackOption>,
+    preferredLanguage: String,
+): VlcTrackOption? {
+    val languageTokens = languageTokens(preferredLanguage)
+    if (tracks.isEmpty() || languageTokens.isEmpty()) return null
+    val dialogueTokens = setOf("dialogue", "dialog", "full", "complete", "cc")
+    val lessPreferredTokens = setOf("sign", "songs", "song", "karaoke", "forced")
+    return tracks
+        .map { track ->
+            val lowerName = track.name.lowercase()
+            val score = languageTokens.count { token -> lowerName.contains(token) } * 100 +
+                dialogueTokens.count { token -> lowerName.contains(token) } * 10 -
+                lessPreferredTokens.count { token -> lowerName.contains(token) } * 8
+            track to score
+        }
+        .filter { (_, score) -> score > 0 }
+        .maxWithOrNull(
+            compareBy<Pair<VlcTrackOption, Int>> { it.second }
+                .thenByDescending { -it.first.id },
+        )
+        ?.first
 }
 
 @Composable
@@ -808,6 +1443,11 @@ private fun SubtitleTrack.toSubtitleConfiguration(
         .build()
 }
 
+private fun PlayerSource.vlcSubtitleUris(): List<String> =
+    subtitles
+        .mapNotNull { subtitle -> subtitle.uri?.takeIf { it.isNotBlank() } }
+        .distinct()
+
 private fun PlayerView.applySubtitleStyle(settings: PlaybackSettingsSnapshot) {
     subtitleView?.apply {
         setApplyEmbeddedStyles(false)
@@ -864,11 +1504,61 @@ private fun String.normalizedLanguageCode(): String =
 private fun String.matchesLanguage(other: String): Boolean =
     this == other || substringBefore('-') == other.substringBefore('-')
 
+private fun String?.isDisabledTrackName(): Boolean {
+    val lower = this?.trim()?.lowercase().orEmpty()
+    return lower.contains("disable") || lower.contains("off") || lower.contains("none")
+}
+
+private fun languageTokens(preferredLanguage: String): Set<String> {
+    val lower = preferredLanguage.trim().lowercase()
+    if (lower.isBlank()) return emptySet()
+    return when (lower) {
+        "jpn", "ja", "jp" -> setOf("jpn", "ja", "jp", "japanese")
+        "eng", "en" -> setOf("eng", "en", "us", "uk", "english")
+        "spa", "es", "esp" -> setOf("spa", "es", "esp", "spanish", "lat")
+        "fre", "fra", "fr" -> setOf("fre", "fra", "fr", "french")
+        "ger", "deu", "de" -> setOf("ger", "deu", "de", "german")
+        "ita", "it" -> setOf("ita", "it", "italian")
+        "por", "pt" -> setOf("por", "pt", "br", "portuguese")
+        "rus", "ru" -> setOf("rus", "ru", "russian")
+        "chi", "zho", "zh" -> setOf("chi", "zho", "zh", "chinese", "mandarin", "cantonese")
+        "kor", "ko" -> setOf("kor", "ko", "korean")
+        else -> setOf(lower)
+    }
+}
+
+private fun PlayerSource.isAnimeLike(): Boolean =
+    context?.anilistMediaId != null ||
+        context?.isSpecial == true ||
+        context?.titleOnlySearch == true
+
+private fun PlaybackSettingsSnapshot.vlcSubtitleStyleSummary(): String =
+    "Subtitle style: ${subtitleFontSize.roundToInt()}sp, stroke ${"%.1f".format(subtitleStrokeWidth)}, offset ${"%.0f".format(subtitleVerticalOffset)}"
+
 private fun String.isTorrentLikeUri(): Boolean {
     val clean = trim()
     return clean.startsWith("magnet:", ignoreCase = true) ||
         clean.contains("btih:", ignoreCase = true) ||
         clean.substringBefore('?').substringBefore('#').endsWith(".torrent", ignoreCase = true)
+}
+
+private fun String?.isLikelySourceFailure(): Boolean {
+    val message = this?.lowercase().orEmpty()
+    return listOf(
+        "http 401",
+        "http 403",
+        "http 404",
+        "http 410",
+        "http 451",
+        "response code: 401",
+        "response code: 403",
+        "response code: 404",
+        "source error",
+        "unable to connect",
+        "failed to connect",
+        "connection refused",
+        "unknownhost",
+    ).any(message::contains)
 }
 
 private fun Context.findActivity(): Activity? = when (this) {

@@ -20,13 +20,15 @@ class AndroidScheduleViewModel(
         refresh()
     }
 
-    fun refresh() {
+    fun refresh(localTimeZone: Boolean = true) {
         viewModelScope.launch {
             _state.update { it.copy(isLoading = true, errorMessage = null) }
-            repository.loadSchedule()
+            repository.loadSchedule(localTimeZone = localTimeZone)
                 .onSuccess { sections ->
                     _state.value = ScheduleScreenState(
                         isLoading = false,
+                        showLocalScheduleTime = localTimeZone,
+                        useClassicScheduleUI = _state.value.useClassicScheduleUI,
                         days = sections,
                     )
                 }

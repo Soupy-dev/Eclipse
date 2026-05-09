@@ -16,22 +16,28 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
 private const val SettingsFileName = "eclipse_settings"
+private const val DefaultAccentColor = "#401F73"
+private const val DefaultSettingsGradientColor = "#401F73"
 
 private val Context.dataStore by preferencesDataStore(name = SettingsFileName)
 
 data class AppSettings(
-    val accentColor: String = "#6D8CFF",
+    val accentColor: String = DefaultAccentColor,
+    val settingsGradientColor: String = DefaultSettingsGradientColor,
     val tmdbLanguage: String = "en-US",
     val selectedAppearance: String = "system",
     val enableSubtitlesByDefault: Boolean = false,
     val defaultSubtitleLanguage: String = "eng",
-    val enableVLCSubtitleEditMenu: Boolean = false,
+    val enableVLCSubtitleEditMenu: Boolean = true,
     val preferredAnimeAudioLanguage: String = "jpn",
     val inAppPlayer: InAppPlayer = InAppPlayer.NORMAL,
     val autoModeEnabled: Boolean = true,
     val autoModeSourceIds: Set<String> = emptySet(),
+    val autoModeSourceOrderIds: List<String> = emptyList(),
     val showScheduleTab: Boolean = true,
     val showLocalScheduleTime: Boolean = true,
+    val useClassicScheduleUI: Boolean = false,
+    val defaultPlaybackSpeed: Double = 1.0,
     val holdSpeedPlayer: Double = 2.0,
     val externalPlayer: String = "none",
     val alwaysLandscape: Boolean = false,
@@ -43,6 +49,14 @@ data class AppSettings(
     val showNextEpisodeButton: Boolean = true,
     val nextEpisodeThreshold: Int = 90,
     val vlcHeaderProxyEnabled: Boolean = true,
+    val vlcBrightnessGestureEnabled: Boolean = false,
+    val vlcVolumeGestureEnabled: Boolean = false,
+    val playerTwoFingerTapPlayPauseEnabled: Boolean = true,
+    val vlcDoubleTapSeekEnabled: Boolean = true,
+    val vlcDoubleTapSeekSeconds: Double = 10.0,
+    val vlcPiPEnabled: Boolean = false,
+    val vlcOpenSubtitlesEnabled: Boolean = false,
+    val vlcOpenSubtitlesAutoFallbackEnabled: Boolean = true,
     val subtitleForegroundColor: String? = null,
     val subtitleStrokeColor: String? = null,
     val subtitleStrokeWidth: Double = 1.0,
@@ -86,11 +100,13 @@ class SettingsStore(
 
     suspend fun updateAppearance(
         accentColor: String,
+        settingsGradientColor: String,
         tmdbLanguage: String,
         selectedAppearance: String,
     ) {
         context.dataStore.edit { prefs ->
-            prefs[Keys.accentColor] = accentColor.trim().ifBlank { "#6D8CFF" }
+            prefs[Keys.accentColor] = accentColor.normalizedColor(DefaultAccentColor)
+            prefs[Keys.settingsGradientColor] = settingsGradientColor.normalizedColor(DefaultSettingsGradientColor)
             prefs[Keys.tmdbLanguage] = tmdbLanguage.trim().ifBlank { "en-US" }
             prefs[Keys.selectedAppearance] = selectedAppearance.normalizedAppearance()
         }
@@ -126,8 +142,10 @@ class SettingsStore(
 
     suspend fun updatePlayerPreferences(
         enableSubtitlesByDefault: Boolean,
+        enableVLCSubtitleEditMenu: Boolean,
         defaultSubtitleLanguage: String,
         preferredAnimeAudioLanguage: String,
+        defaultPlaybackSpeed: Double,
         holdSpeedPlayer: Double,
         externalPlayer: String,
         alwaysLandscape: Boolean,
@@ -135,12 +153,36 @@ class SettingsStore(
     ) {
         context.dataStore.edit { prefs ->
             prefs[Keys.enableSubtitlesByDefault] = enableSubtitlesByDefault
+            prefs[Keys.enableVLCSubtitleEditMenu] = enableVLCSubtitleEditMenu
             prefs[Keys.defaultSubtitleLanguage] = defaultSubtitleLanguage.normalizedLanguageCode("eng")
             prefs[Keys.preferredAnimeAudioLanguage] = preferredAnimeAudioLanguage.normalizedLanguageCode("jpn")
+            prefs[Keys.defaultPlaybackSpeed] = defaultPlaybackSpeed.coerceIn(0.25, 3.0)
             prefs[Keys.holdSpeedPlayer] = holdSpeedPlayer.coerceIn(1.25, 3.0)
             prefs[Keys.externalPlayer] = externalPlayer.trim().ifBlank { "none" }
             prefs[Keys.alwaysLandscape] = alwaysLandscape
             prefs[Keys.vlcHeaderProxyEnabled] = vlcHeaderProxyEnabled
+        }
+    }
+
+    suspend fun updatePlayerGestures(
+        vlcBrightnessGestureEnabled: Boolean,
+        vlcVolumeGestureEnabled: Boolean,
+        playerTwoFingerTapPlayPauseEnabled: Boolean,
+        vlcDoubleTapSeekEnabled: Boolean,
+        vlcDoubleTapSeekSeconds: Double,
+        vlcPiPEnabled: Boolean,
+        vlcOpenSubtitlesEnabled: Boolean,
+        vlcOpenSubtitlesAutoFallbackEnabled: Boolean,
+    ) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.vlcBrightnessGestureEnabled] = vlcBrightnessGestureEnabled
+            prefs[Keys.vlcVolumeGestureEnabled] = vlcVolumeGestureEnabled
+            prefs[Keys.playerTwoFingerTapPlayPauseEnabled] = playerTwoFingerTapPlayPauseEnabled
+            prefs[Keys.vlcDoubleTapSeekEnabled] = vlcDoubleTapSeekEnabled
+            prefs[Keys.vlcDoubleTapSeekSeconds] = vlcDoubleTapSeekSeconds.coerceIn(5.0, 60.0)
+            prefs[Keys.vlcPiPEnabled] = vlcPiPEnabled
+            prefs[Keys.vlcOpenSubtitlesEnabled] = vlcOpenSubtitlesEnabled
+            prefs[Keys.vlcOpenSubtitlesAutoFallbackEnabled] = vlcOpenSubtitlesAutoFallbackEnabled
         }
     }
 
@@ -180,8 +222,8 @@ class SettingsStore(
             prefs[Keys.readerFontFamily] = readerFontFamily.trim().ifBlank { "-apple-system" }
             prefs[Keys.readerFontWeight] = readerFontWeight.trim().ifBlank { "normal" }
             prefs[Keys.readerColorPreset] = readerColorPreset.coerceIn(0, 4)
-            prefs[Keys.readerLineSpacing] = readerLineSpacing.coerceIn(1.0, 2.4)
-            prefs[Keys.readerMargin] = readerMargin.coerceIn(0.0, 12.0)
+            prefs[Keys.readerLineSpacing] = readerLineSpacing.coerceIn(1.0, 3.0)
+            prefs[Keys.readerMargin] = readerMargin.coerceIn(0.0, 30.0)
             prefs[Keys.readerTextAlignment] = readerTextAlignment.normalizedTextAlignment()
         }
     }
@@ -193,6 +235,16 @@ class SettingsStore(
         context.dataStore.edit { prefs ->
             prefs[Keys.showScheduleTab] = showScheduleTab
             prefs[Keys.showKanzen] = showKanzen
+        }
+    }
+
+    suspend fun updateScheduleOptions(
+        showLocalScheduleTime: Boolean,
+        useClassicScheduleUI: Boolean,
+    ) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.showLocalScheduleTime] = showLocalScheduleTime
+            prefs[Keys.useClassicScheduleUI] = useClassicScheduleUI
         }
     }
 
@@ -219,6 +271,12 @@ class SettingsStore(
     suspend fun setKanzenAutoUpdateModules(enabled: Boolean) {
         context.dataStore.edit { prefs ->
             prefs[Keys.kanzenAutoUpdateModules] = enabled
+        }
+    }
+
+    suspend fun setKanzenAutoMode(enabled: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[Keys.kanzenAutoMode] = enabled
         }
     }
 
@@ -303,10 +361,16 @@ class SettingsStore(
     suspend fun setAutoModeSourceEnabled(sourceId: String, enabled: Boolean) {
         context.dataStore.edit { prefs ->
             val current = prefs[Keys.autoModeSourceIds] ?: emptySet()
+            val order = prefs[Keys.autoModeSourceOrderIds].toStoredList()
             prefs[Keys.autoModeSourceIds] = if (enabled) {
                 current + sourceId
             } else {
                 current - sourceId
+            }
+            prefs[Keys.autoModeSourceOrderIds] = if (enabled) {
+                (order + sourceId).distinct().toStoredString()
+            } else {
+                order.filterNot { it == sourceId }.toStoredString()
             }
         }
     }
@@ -315,6 +379,10 @@ class SettingsStore(
         context.dataStore.edit { prefs ->
             val current = prefs[Keys.autoModeSourceIds] ?: emptySet()
             prefs[Keys.autoModeSourceIds] = current - sourceId
+            prefs[Keys.autoModeSourceOrderIds] = prefs[Keys.autoModeSourceOrderIds]
+                .toStoredList()
+                .filterNot { it == sourceId }
+                .toStoredString()
         }
     }
 
@@ -322,12 +390,38 @@ class SettingsStore(
         context.dataStore.edit { prefs ->
             val current = prefs[Keys.autoModeSourceIds] ?: emptySet()
             prefs[Keys.autoModeSourceIds] = current.intersect(allowedSourceIds)
+            prefs[Keys.autoModeSourceOrderIds] = prefs[Keys.autoModeSourceOrderIds]
+                .toStoredList()
+                .filter { it in allowedSourceIds }
+                .toStoredString()
+        }
+    }
+
+    suspend fun moveAutoModeSource(sourceId: String, direction: Int) {
+        context.dataStore.edit { prefs ->
+            val selected = prefs[Keys.autoModeSourceIds] ?: emptySet()
+            val current = prefs[Keys.autoModeSourceOrderIds]
+                .toStoredList()
+                .filter { it in selected }
+                .let { order -> order + selected.filterNot { it in order } }
+            val index = current.indexOf(sourceId)
+            if (index < 0) return@edit
+            val target = (index + direction).coerceIn(0, current.lastIndex)
+            if (target == index) return@edit
+            val reordered = current.toMutableList().apply {
+                add(target, removeAt(index))
+            }
+            prefs[Keys.autoModeSourceOrderIds] = reordered.toStoredString()
         }
     }
 
     suspend fun restoreFromBackup(payload: BackupData) {
         context.dataStore.edit { prefs ->
-            prefs[Keys.accentColor] = payload.accentColor ?: "#6D8CFF"
+            prefs[Keys.accentColor] = payload.accentColor?.normalizedColor(DefaultAccentColor) ?: DefaultAccentColor
+            prefs[Keys.settingsGradientColor] =
+                payload.settingsGradientColor?.normalizedColor(DefaultSettingsGradientColor)
+                    ?: payload.accentColor?.normalizedColor(DefaultSettingsGradientColor)
+                    ?: DefaultSettingsGradientColor
             prefs[Keys.tmdbLanguage] = payload.tmdbLanguage
             prefs[Keys.selectedAppearance] = payload.selectedAppearance
             prefs[Keys.enableSubtitlesByDefault] = payload.enableSubtitlesByDefault
@@ -337,6 +431,8 @@ class SettingsStore(
             prefs[Keys.inAppPlayer] = payload.resolvedInAppPlayer.name
             prefs[Keys.showScheduleTab] = payload.showScheduleTab
             prefs[Keys.showLocalScheduleTime] = payload.showLocalScheduleTime
+            prefs[Keys.useClassicScheduleUI] = payload.useClassicScheduleUI
+            prefs[Keys.defaultPlaybackSpeed] = payload.defaultPlaybackSpeed
             prefs[Keys.holdSpeedPlayer] = payload.holdSpeedPlayer
             prefs[Keys.externalPlayer] = payload.externalPlayer
             prefs[Keys.alwaysLandscape] = payload.alwaysLandscape
@@ -348,6 +444,14 @@ class SettingsStore(
             prefs[Keys.showNextEpisodeButton] = payload.showNextEpisodeButton
             prefs[Keys.nextEpisodeThreshold] = payload.nextEpisodeThresholdPercent()
             prefs[Keys.vlcHeaderProxyEnabled] = payload.vlcHeaderProxyEnabled
+            prefs[Keys.vlcBrightnessGestureEnabled] = payload.vlcBrightnessGestureEnabled
+            prefs[Keys.vlcVolumeGestureEnabled] = payload.vlcVolumeGestureEnabled
+            prefs[Keys.playerTwoFingerTapPlayPauseEnabled] = payload.playerTwoFingerTapPlayPauseEnabled
+            prefs[Keys.vlcDoubleTapSeekEnabled] = payload.vlcDoubleTapSeekEnabled
+            prefs[Keys.vlcDoubleTapSeekSeconds] = payload.vlcDoubleTapSeekSeconds
+            prefs[Keys.vlcPiPEnabled] = payload.vlcPiPEnabled
+            prefs[Keys.vlcOpenSubtitlesEnabled] = payload.vlcOpenSubtitlesEnabled
+            prefs[Keys.vlcOpenSubtitlesAutoFallbackEnabled] = payload.vlcOpenSubtitlesAutoFallbackEnabled
             val subtitleForegroundColor = payload.subtitleForegroundColor
             if (subtitleForegroundColor != null) {
                 prefs[Keys.subtitleForegroundColor] = subtitleForegroundColor
@@ -394,18 +498,22 @@ class SettingsStore(
     }
 
     private fun toAppSettings(preferences: Preferences): AppSettings = AppSettings(
-        accentColor = preferences[Keys.accentColor] ?: "#6D8CFF",
+        accentColor = preferences[Keys.accentColor] ?: DefaultAccentColor,
+        settingsGradientColor = preferences[Keys.settingsGradientColor] ?: DefaultSettingsGradientColor,
         tmdbLanguage = preferences[Keys.tmdbLanguage] ?: "en-US",
         selectedAppearance = preferences[Keys.selectedAppearance] ?: "system",
         enableSubtitlesByDefault = preferences[Keys.enableSubtitlesByDefault] ?: false,
         defaultSubtitleLanguage = preferences[Keys.defaultSubtitleLanguage] ?: "eng",
-        enableVLCSubtitleEditMenu = preferences[Keys.enableVLCSubtitleEditMenu] ?: false,
+        enableVLCSubtitleEditMenu = preferences[Keys.enableVLCSubtitleEditMenu] ?: true,
         preferredAnimeAudioLanguage = preferences[Keys.preferredAnimeAudioLanguage] ?: "jpn",
         inAppPlayer = preferences[Keys.inAppPlayer]?.toInAppPlayer() ?: InAppPlayer.NORMAL,
         autoModeEnabled = preferences[Keys.autoModeEnabled] ?: true,
         autoModeSourceIds = preferences[Keys.autoModeSourceIds] ?: emptySet(),
+        autoModeSourceOrderIds = preferences[Keys.autoModeSourceOrderIds].toStoredList(),
         showScheduleTab = preferences[Keys.showScheduleTab] ?: true,
         showLocalScheduleTime = preferences[Keys.showLocalScheduleTime] ?: true,
+        useClassicScheduleUI = preferences[Keys.useClassicScheduleUI] ?: false,
+        defaultPlaybackSpeed = preferences[Keys.defaultPlaybackSpeed] ?: 1.0,
         holdSpeedPlayer = preferences[Keys.holdSpeedPlayer] ?: 2.0,
         externalPlayer = preferences[Keys.externalPlayer] ?: "none",
         alwaysLandscape = preferences[Keys.alwaysLandscape] ?: false,
@@ -417,6 +525,14 @@ class SettingsStore(
         showNextEpisodeButton = preferences[Keys.showNextEpisodeButton] ?: true,
         nextEpisodeThreshold = preferences[Keys.nextEpisodeThreshold] ?: 90,
         vlcHeaderProxyEnabled = preferences[Keys.vlcHeaderProxyEnabled] ?: true,
+        vlcBrightnessGestureEnabled = preferences[Keys.vlcBrightnessGestureEnabled] ?: false,
+        vlcVolumeGestureEnabled = preferences[Keys.vlcVolumeGestureEnabled] ?: false,
+        playerTwoFingerTapPlayPauseEnabled = preferences[Keys.playerTwoFingerTapPlayPauseEnabled] ?: true,
+        vlcDoubleTapSeekEnabled = preferences[Keys.vlcDoubleTapSeekEnabled] ?: true,
+        vlcDoubleTapSeekSeconds = preferences[Keys.vlcDoubleTapSeekSeconds] ?: 10.0,
+        vlcPiPEnabled = preferences[Keys.vlcPiPEnabled] ?: false,
+        vlcOpenSubtitlesEnabled = preferences[Keys.vlcOpenSubtitlesEnabled] ?: false,
+        vlcOpenSubtitlesAutoFallbackEnabled = preferences[Keys.vlcOpenSubtitlesAutoFallbackEnabled] ?: true,
         subtitleForegroundColor = preferences[Keys.subtitleForegroundColor],
         subtitleStrokeColor = preferences[Keys.subtitleStrokeColor],
         subtitleStrokeWidth = preferences[Keys.subtitleStrokeWidth] ?: 1.0,
@@ -455,6 +571,7 @@ class SettingsStore(
 
     private object Keys {
         val accentColor = stringPreferencesKey("accent_color")
+        val settingsGradientColor = stringPreferencesKey("settings_gradient_color")
         val tmdbLanguage = stringPreferencesKey("tmdb_language")
         val selectedAppearance = stringPreferencesKey("selected_appearance")
         val enableSubtitlesByDefault = booleanPreferencesKey("enable_subtitles_by_default")
@@ -464,8 +581,11 @@ class SettingsStore(
         val inAppPlayer = stringPreferencesKey("in_app_player")
         val autoModeEnabled = booleanPreferencesKey("auto_mode_enabled")
         val autoModeSourceIds = stringSetPreferencesKey("auto_mode_source_ids")
+        val autoModeSourceOrderIds = stringPreferencesKey("auto_mode_source_order_ids")
         val showScheduleTab = booleanPreferencesKey("show_schedule_tab")
         val showLocalScheduleTime = booleanPreferencesKey("show_local_schedule_time")
+        val useClassicScheduleUI = booleanPreferencesKey("use_classic_schedule_ui")
+        val defaultPlaybackSpeed = doublePreferencesKey("default_playback_speed")
         val holdSpeedPlayer = doublePreferencesKey("hold_speed_player")
         val externalPlayer = stringPreferencesKey("external_player")
         val alwaysLandscape = booleanPreferencesKey("always_landscape")
@@ -477,6 +597,14 @@ class SettingsStore(
         val showNextEpisodeButton = booleanPreferencesKey("show_next_episode_button")
         val nextEpisodeThreshold = intPreferencesKey("next_episode_threshold")
         val vlcHeaderProxyEnabled = booleanPreferencesKey("vlc_header_proxy_enabled")
+        val vlcBrightnessGestureEnabled = booleanPreferencesKey("vlc_brightness_gesture_enabled")
+        val vlcVolumeGestureEnabled = booleanPreferencesKey("vlc_volume_gesture_enabled")
+        val playerTwoFingerTapPlayPauseEnabled = booleanPreferencesKey("player_two_finger_tap_play_pause_enabled")
+        val vlcDoubleTapSeekEnabled = booleanPreferencesKey("vlc_double_tap_seek_enabled")
+        val vlcDoubleTapSeekSeconds = doublePreferencesKey("vlc_double_tap_seek_seconds")
+        val vlcPiPEnabled = booleanPreferencesKey("vlc_pip_enabled")
+        val vlcOpenSubtitlesEnabled = booleanPreferencesKey("vlc_open_subtitles_enabled")
+        val vlcOpenSubtitlesAutoFallbackEnabled = booleanPreferencesKey("vlc_open_subtitles_auto_fallback_enabled")
         val subtitleForegroundColor = stringPreferencesKey("subtitle_foreground_color")
         val subtitleStrokeColor = stringPreferencesKey("subtitle_stroke_color")
         val subtitleStrokeWidth = doublePreferencesKey("subtitle_stroke_width")
@@ -536,6 +664,14 @@ private fun String.normalizedAppearance(): String =
         else -> "system"
     }
 
+private fun String.normalizedColor(fallback: String): String {
+    val value = trim().removePrefix("#")
+    if ((value.length != 6 && value.length != 8) || !value.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) {
+        return fallback
+    }
+    return "#${value.uppercase()}"
+}
+
 private fun String.normalizedTextAlignment(): String =
     when (trim().lowercase()) {
         "center" -> "center"
@@ -550,3 +686,17 @@ private fun String?.normalizedOptionalColor(): String? =
         ?.let { value ->
             if (value.startsWith("#")) value else "#$value"
         }
+
+private fun String?.toStoredList(): List<String> =
+    orEmpty()
+        .lineSequence()
+        .map(String::trim)
+        .filter(String::isNotBlank)
+        .distinct()
+        .toList()
+
+private fun List<String>.toStoredString(): String =
+    map(String::trim)
+        .filter(String::isNotBlank)
+        .distinct()
+        .joinToString("\n")

@@ -11,9 +11,12 @@ import dev.soupy.eclipse.android.core.network.AniListService
 class ScheduleRepository(
     private val aniListService: AniListService,
 ) {
-    suspend fun loadSchedule(daysAhead: Int = 7): Result<List<ScheduleDaySection>> = runCatching {
+    suspend fun loadSchedule(
+        daysAhead: Int = 7,
+        localTimeZone: Boolean = true,
+    ): Result<List<ScheduleDaySection>> = runCatching {
         val schedule = aniListService.fetchAiringSchedule(daysAhead = daysAhead).orThrow()
-        val zoneId = ZoneId.systemDefault()
+        val zoneId = if (localTimeZone) ZoneId.systemDefault() else ZoneId.of("UTC")
         val today = LocalDate.now(zoneId)
         val fullDateFormatter = DateTimeFormatter.ofPattern("EEEE, MMM d", Locale.US)
 

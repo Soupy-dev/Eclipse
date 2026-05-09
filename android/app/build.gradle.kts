@@ -2,6 +2,14 @@ val tmdbApiKey = providers.gradleProperty("TMDB_API_KEY")
     .orElse(providers.environmentVariable("TMDB_API_KEY"))
     .orElse("738b4edd0a156cc126dc4a4b8aea4aca")
     .get()
+val malClientId = providers.gradleProperty("MAL_CLIENT_ID")
+    .orElse(providers.environmentVariable("MAL_CLIENT_ID"))
+    .orElse("")
+    .get()
+val malClientSecret = providers.gradleProperty("MAL_CLIENT_SECRET")
+    .orElse(providers.environmentVariable("MAL_CLIENT_SECRET"))
+    .orElse("")
+    .get()
 
 plugins {
     alias(libs.plugins.android.application)
@@ -20,6 +28,8 @@ android {
         versionCode = 3
         versionName = "1.0.2"
         buildConfigField("String", "TMDB_API_KEY", "\"$tmdbApiKey\"")
+        buildConfigField("String", "MAL_CLIENT_ID", "\"$malClientId\"")
+        buildConfigField("String", "MAL_CLIENT_SECRET", "\"$malClientSecret\"")
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true

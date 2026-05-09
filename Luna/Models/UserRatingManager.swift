@@ -2,7 +2,7 @@
 //  UserRatingManager.swift
 //  Luna
 //
-//  Persists user star ratings (1-10) and private notes for media items,
+//  Persists user star ratings (0.5-10) and private notes for media items,
 //  then feeds ratings back into the RecommendationEngine for taste scoring.
 //
 
@@ -12,11 +12,16 @@ final class UserRatingManager {
     static let shared = UserRatingManager()
 
     private struct RatingStore: Codable {
+        var ratings: [String: Double] = [:]
+        var notes: [String: String] = [:]
+    }
+
+    private struct LegacyRatingStore: Codable {
         var ratings: [String: Int] = [:]
         var notes: [String: String] = [:]
     }
 
-    private var ratings: [Int: Int] = [:] // tmdbId -> 1...10
+    private var ratings: [Int: Double] = [:] // tmdbId -> 0.5...10 in half-step increments
     private var notes: [Int: String] = [:] // tmdbId -> private note/comment
     private let fileURL: URL
     private let lock = NSLock()
@@ -29,7 +34,7 @@ final class UserRatingManager {
         notes = store.notes
     }
 
-    func rating(for tmdbId: Int) -> Int? {
+    func rating(for tmdbId: Int) -> Double? {
         lock.lock()
         defer { lock.unlock() }
         return ratings[tmdbId]
@@ -41,8 +46,8 @@ final class UserRatingManager {
         return notes[tmdbId] ?? ""
     }
 
-    func setRating(_ value: Int, for tmdbId: Int) {
-        let clamped = max(1, min(10, value))
+    func setRating(_ value: Double, for tmdbId: Int) {
+        let clamped = Self.normalizedRating(value)
         lock.lock()
         ratings[tmdbId] = clamped
         let snapshot = currentStore()
@@ -74,14 +79,14 @@ final class UserRatingManager {
     }
 
     /// All ratings as (tmdbId, stars) for the recommendation engine.
-    func allRatings() -> [(tmdbId: Int, stars: Int)] {
+    func allRatings() -> [(tmdbId: Int, stars: Double)] {
         lock.lock()
         defer { lock.unlock() }
         return ratings.map { (tmdbId: $0.key, stars: $0.value) }
     }
 
     /// All ratings as a dictionary for backup.
-    func getRatingsForBackup() -> [String: Int] {
+    func getRatingsForBackup() -> [String: Double] {
         lock.lock()
         defer { lock.unlock() }
         return Dictionary(uniqueKeysWithValues: ratings.map { (String($0.key), $0.value) })
@@ -95,10 +100,10 @@ final class UserRatingManager {
     }
 
     /// Restores ratings and notes from backup, replacing current data.
-    func restoreRatingsAndNotes(ratings backupRatings: [String: Int], notes backupNotes: [String: String]) {
-        let restoredRatings = Dictionary(uniqueKeysWithValues: backupRatings.compactMap { key, value -> (Int, Int)? in
+    func restoreRatingsAndNotes(ratings backupRatings: [String: Double], notes backupNotes: [String: String]) {
+        let restoredRatings = Dictionary(uniqueKeysWithValues: backupRatings.compactMap { key, value -> (Int, Double)? in
             guard let intKey = Int(key) else { return nil }
-            return (intKey, max(1, min(10, value)))
+            return (intKey, Self.normalizedRating(value))
         })
         let restoredNotes = Dictionary(uniqueKeysWithValues: backupNotes.compactMap { key, value -> (Int, String)? in
             guard let intKey = Int(key) else { return nil }
@@ -119,6 +124,12 @@ final class UserRatingManager {
     /// Restores ratings from older backup callers, preserving any existing notes.
     func restoreRatings(_ backup: [String: Int]) {
         let existingNotes = getNotesForBackup()
+        restoreRatingsAndNotes(ratings: backup.mapValues(Double.init), notes: existingNotes)
+    }
+
+    /// Restores ratings from newer backup callers, preserving any existing notes.
+    func restoreRatings(_ backup: [String: Double]) {
+        let existingNotes = getNotesForBackup()
         restoreRatingsAndNotes(ratings: backup, notes: existingNotes)
     }
 
@@ -136,7 +147,7 @@ final class UserRatingManager {
         try? jsonData.write(to: fileURL, options: .atomic)
     }
 
-    private static func load(from url: URL) -> (ratings: [Int: Int], notes: [Int: String]) {
+    private static func load(from url: URL) -> (ratings: [Int: Double], notes: [Int: String]) {
         guard let data = try? Data(contentsOf: url) else {
             return ([:], [:])
         }
@@ -148,18 +159,29 @@ final class UserRatingManager {
             )
         }
 
+        if let store = try? JSONDecoder().decode(LegacyRatingStore.self, from: data) {
+            return (
+                ratings: parseRatings(store.ratings.mapValues(Double.init)),
+                notes: parseNotes(store.notes)
+            )
+        }
+
         // Legacy format was just [tmdbId: rating].
-        if let legacyRatings = try? JSONDecoder().decode([String: Int].self, from: data) {
+        if let legacyRatings = try? JSONDecoder().decode([String: Double].self, from: data) {
             return (parseRatings(legacyRatings), [:])
+        }
+
+        if let legacyRatings = try? JSONDecoder().decode([String: Int].self, from: data) {
+            return (parseRatings(legacyRatings.mapValues(Double.init)), [:])
         }
 
         return ([:], [:])
     }
 
-    private static func parseRatings(_ source: [String: Int]) -> [Int: Int] {
+    private static func parseRatings(_ source: [String: Double]) -> [Int: Double] {
         Dictionary(uniqueKeysWithValues: source.compactMap { key, value in
             guard let intKey = Int(key) else { return nil }
-            return (intKey, max(1, min(10, value)))
+            return (intKey, normalizedRating(value))
         })
     }
 
@@ -170,5 +192,11 @@ final class UserRatingManager {
             guard !trimmed.isEmpty else { return nil }
             return (intKey, value)
         })
+    }
+
+    private static func normalizedRating(_ value: Double) -> Double {
+        let finiteValue = value.isFinite ? value : 0.5
+        let halfStepValue = (finiteValue * 2).rounded() / 2
+        return max(0.5, min(10, halfStepValue))
     }
 }

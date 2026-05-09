@@ -90,6 +90,9 @@ class BackupRepository(
         val exportedRatings = ratingsRepository.exportRatings()
             .takeIf { it.isNotEmpty() }
             ?: payload?.userRatings.orEmpty()
+        val exportedRatingNotes = ratingsRepository.exportNotes()
+            .takeIf { it.isNotEmpty() }
+            ?: payload?.userRatingNotes.orEmpty()
         val exportedCollections = libraryRepository.exportCollections()
             .takeIf { it.isNotEmpty() }
             ?: payload?.collections.orEmpty()
@@ -108,6 +111,7 @@ class BackupRepository(
                 version = payload?.version ?: "1.0",
                 createdDate = Instant.now().toString(),
                 accentColor = settings.accentColor,
+                settingsGradientColor = settings.settingsGradientColor,
                 tmdbLanguage = settings.tmdbLanguage,
                 selectedAppearance = settings.selectedAppearance,
                 enableSubtitlesByDefault = settings.enableSubtitlesByDefault,
@@ -117,6 +121,8 @@ class BackupRepository(
                 inAppPlayer = settings.inAppPlayer,
                 showScheduleTab = settings.showScheduleTab,
                 showLocalScheduleTime = settings.showLocalScheduleTime,
+                useClassicScheduleUI = settings.useClassicScheduleUI,
+                defaultPlaybackSpeed = settings.defaultPlaybackSpeed,
                 holdSpeedPlayer = settings.holdSpeedPlayer,
                 externalPlayer = settings.externalPlayer,
                 alwaysLandscape = settings.alwaysLandscape,
@@ -125,6 +131,14 @@ class BackupRepository(
                 showNextEpisodeButton = settings.showNextEpisodeButton,
                 nextEpisodeThreshold = settings.nextEpisodeThreshold / 100.0,
                 vlcHeaderProxyEnabled = settings.vlcHeaderProxyEnabled,
+                vlcBrightnessGestureEnabled = settings.vlcBrightnessGestureEnabled,
+                vlcVolumeGestureEnabled = settings.vlcVolumeGestureEnabled,
+                playerTwoFingerTapPlayPauseEnabled = settings.playerTwoFingerTapPlayPauseEnabled,
+                vlcDoubleTapSeekEnabled = settings.vlcDoubleTapSeekEnabled,
+                vlcDoubleTapSeekSeconds = settings.vlcDoubleTapSeekSeconds,
+                vlcPiPEnabled = settings.vlcPiPEnabled,
+                vlcOpenSubtitlesEnabled = settings.vlcOpenSubtitlesEnabled,
+                vlcOpenSubtitlesAutoFallbackEnabled = settings.vlcOpenSubtitlesAutoFallbackEnabled,
                 subtitleForegroundColor = settings.subtitleForegroundColor,
                 subtitleStrokeColor = settings.subtitleStrokeColor,
                 subtitleStrokeWidth = settings.subtitleStrokeWidth,
@@ -168,6 +182,7 @@ class BackupRepository(
                 kanzenModules = exportedKanzenModules,
                 recommendationCache = exportedRecommendationCache,
                 userRatings = exportedRatings,
+                userRatingNotes = exportedRatingNotes,
             ),
             unknownKeys = existing?.unknownKeys.orEmpty(),
         )
@@ -179,7 +194,7 @@ class BackupRepository(
         progressRepository.restoreFromBackup(payload.progressData).getOrThrow()
         catalogRepository.restoreFromBackup(payload.catalogs).getOrThrow()
         trackerRepository.restoreFromBackup(payload.trackerState).getOrThrow()
-        ratingsRepository.restoreFromBackup(payload.userRatings).getOrThrow()
+        ratingsRepository.restoreFromBackup(payload.userRatings, payload.userRatingNotes).getOrThrow()
         recommendationRepository.restoreFromBackup(payload.recommendationCache).getOrThrow()
         kanzenRepository.restoreFromBackup(payload.kanzenModules).getOrThrow()
         mangaStore.write(payload.toMangaLibrarySnapshot())

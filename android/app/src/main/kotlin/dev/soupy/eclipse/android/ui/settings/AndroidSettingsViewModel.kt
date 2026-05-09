@@ -8,6 +8,7 @@ import dev.soupy.eclipse.android.core.model.SimilarityAlgorithm
 import dev.soupy.eclipse.android.core.model.TrackerAccountSnapshot
 import dev.soupy.eclipse.android.core.model.TrackerStateSnapshot
 import dev.soupy.eclipse.android.core.network.AniListService
+import dev.soupy.eclipse.android.core.network.MyAnimeListService
 import dev.soupy.eclipse.android.core.network.NetworkResult
 import dev.soupy.eclipse.android.core.storage.AppSettings
 import dev.soupy.eclipse.android.core.storage.SettingsStore
@@ -50,12 +51,14 @@ class AndroidSettingsViewModel(
     private val libraryRepository: LibraryRepository,
     private val mangaRepository: MangaRepository,
     private val aniListService: AniListService,
+    private val myAnimeListService: MyAnimeListService,
     private val releaseRepository: ReleaseRepository,
     private val servicesRepository: ServicesRepository,
 ) : ViewModel() {
     private val _state = MutableStateFlow(
         SettingsScreenState(
             aniListOAuthUrl = trackerRepository.authorizationUrl("AniList").orEmpty(),
+            myAnimeListOAuthUrl = trackerRepository.authorizationUrl("MyAnimeList").orEmpty(),
             traktOAuthUrl = trackerRepository.authorizationUrl("Trakt").orEmpty(),
         ),
     )
@@ -66,6 +69,7 @@ class AndroidSettingsViewModel(
             settingsStore.settings.collect { settings ->
                 _state.value = _state.value.copy(
                     accentColor = settings.accentColor,
+                    settingsGradientColor = settings.settingsGradientColor,
                     tmdbLanguage = settings.tmdbLanguage,
                     selectedAppearance = settings.selectedAppearance,
                     autoModeEnabled = settings.autoModeEnabled,
@@ -76,12 +80,22 @@ class AndroidSettingsViewModel(
                     nextEpisodeThreshold = settings.nextEpisodeThreshold,
                     inAppPlayer = settings.inAppPlayer,
                     enableSubtitlesByDefault = settings.enableSubtitlesByDefault,
+                    enableVLCSubtitleEditMenu = settings.enableVLCSubtitleEditMenu,
                     defaultSubtitleLanguage = settings.defaultSubtitleLanguage,
                     preferredAnimeAudioLanguage = settings.preferredAnimeAudioLanguage,
+                    defaultPlaybackSpeed = settings.defaultPlaybackSpeed,
                     holdSpeedPlayer = settings.holdSpeedPlayer,
                     externalPlayer = settings.externalPlayer,
                     alwaysLandscape = settings.alwaysLandscape,
                     vlcHeaderProxyEnabled = settings.vlcHeaderProxyEnabled,
+                    vlcBrightnessGestureEnabled = settings.vlcBrightnessGestureEnabled,
+                    vlcVolumeGestureEnabled = settings.vlcVolumeGestureEnabled,
+                    playerTwoFingerTapPlayPauseEnabled = settings.playerTwoFingerTapPlayPauseEnabled,
+                    vlcDoubleTapSeekEnabled = settings.vlcDoubleTapSeekEnabled,
+                    vlcDoubleTapSeekSeconds = settings.vlcDoubleTapSeekSeconds,
+                    vlcPiPEnabled = settings.vlcPiPEnabled,
+                    vlcOpenSubtitlesEnabled = settings.vlcOpenSubtitlesEnabled,
+                    vlcOpenSubtitlesAutoFallbackEnabled = settings.vlcOpenSubtitlesAutoFallbackEnabled,
                     subtitleForegroundColor = settings.subtitleForegroundColor,
                     subtitleStrokeColor = settings.subtitleStrokeColor,
                     subtitleStrokeWidth = settings.subtitleStrokeWidth,
@@ -93,6 +107,8 @@ class AndroidSettingsViewModel(
                     skip85sEnabled = settings.skip85sEnabled,
                     skip85sAlwaysVisible = settings.skip85sAlwaysVisible,
                     showScheduleTab = settings.showScheduleTab,
+                    showLocalScheduleTime = settings.showLocalScheduleTime,
+                    useClassicScheduleUI = settings.useClassicScheduleUI,
                     showKanzen = settings.showKanzen,
                     seasonMenu = settings.seasonMenu,
                     horizontalEpisodeList = settings.horizontalEpisodeList,
@@ -106,6 +122,7 @@ class AndroidSettingsViewModel(
                     readerLineSpacing = settings.readerLineSpacing,
                     readerMargin = settings.readerMargin,
                     readerTextAlignment = settings.readerTextAlignment,
+                    kanzenAutoMode = settings.kanzenAutoMode,
                     kanzenAutoUpdateModules = settings.kanzenAutoUpdateModules,
                     autoClearCacheEnabled = settings.autoClearCacheEnabled,
                     autoClearCacheThresholdMB = settings.autoClearCacheThresholdMB,
@@ -133,6 +150,17 @@ class AndroidSettingsViewModel(
         val current = _state.value
         updateAppearance(
             accentColor = value,
+            settingsGradientColor = current.settingsGradientColor,
+            tmdbLanguage = current.tmdbLanguage,
+            selectedAppearance = current.selectedAppearance,
+        )
+    }
+
+    fun setSettingsGradientColor(value: String) {
+        val current = _state.value
+        updateAppearance(
+            accentColor = current.accentColor,
+            settingsGradientColor = value,
             tmdbLanguage = current.tmdbLanguage,
             selectedAppearance = current.selectedAppearance,
         )
@@ -142,6 +170,7 @@ class AndroidSettingsViewModel(
         val current = _state.value
         updateAppearance(
             accentColor = current.accentColor,
+            settingsGradientColor = current.settingsGradientColor,
             tmdbLanguage = value,
             selectedAppearance = current.selectedAppearance,
         )
@@ -151,6 +180,7 @@ class AndroidSettingsViewModel(
         val current = _state.value
         updateAppearance(
             accentColor = current.accentColor,
+            settingsGradientColor = current.settingsGradientColor,
             tmdbLanguage = current.tmdbLanguage,
             selectedAppearance = value,
         )
@@ -161,6 +191,22 @@ class AndroidSettingsViewModel(
         updateNavigation(
             showScheduleTab = enabled,
             showKanzen = current.showKanzen,
+        )
+    }
+
+    fun setShowLocalScheduleTime(enabled: Boolean) {
+        val current = _state.value
+        updateScheduleOptions(
+            showLocalScheduleTime = enabled,
+            useClassicScheduleUI = current.useClassicScheduleUI,
+        )
+    }
+
+    fun setUseClassicScheduleUi(enabled: Boolean) {
+        val current = _state.value
+        updateScheduleOptions(
+            showLocalScheduleTime = current.showLocalScheduleTime,
+            useClassicScheduleUI = enabled,
         )
     }
 
@@ -407,8 +453,25 @@ class AndroidSettingsViewModel(
         val current = _state.value
         updatePlayerPreferences(
             enableSubtitlesByDefault = enabled,
+            enableVLCSubtitleEditMenu = current.enableVLCSubtitleEditMenu,
             defaultSubtitleLanguage = current.defaultSubtitleLanguage,
             preferredAnimeAudioLanguage = current.preferredAnimeAudioLanguage,
+            defaultPlaybackSpeed = current.defaultPlaybackSpeed,
+            holdSpeedPlayer = current.holdSpeedPlayer,
+            externalPlayer = current.externalPlayer,
+            alwaysLandscape = current.alwaysLandscape,
+            vlcHeaderProxyEnabled = current.vlcHeaderProxyEnabled,
+        )
+    }
+
+    fun setEnableVLCSubtitleEditMenu(enabled: Boolean) {
+        val current = _state.value
+        updatePlayerPreferences(
+            enableSubtitlesByDefault = current.enableSubtitlesByDefault,
+            enableVLCSubtitleEditMenu = enabled,
+            defaultSubtitleLanguage = current.defaultSubtitleLanguage,
+            preferredAnimeAudioLanguage = current.preferredAnimeAudioLanguage,
+            defaultPlaybackSpeed = current.defaultPlaybackSpeed,
             holdSpeedPlayer = current.holdSpeedPlayer,
             externalPlayer = current.externalPlayer,
             alwaysLandscape = current.alwaysLandscape,
@@ -420,8 +483,10 @@ class AndroidSettingsViewModel(
         val current = _state.value
         updatePlayerPreferences(
             enableSubtitlesByDefault = current.enableSubtitlesByDefault,
+            enableVLCSubtitleEditMenu = current.enableVLCSubtitleEditMenu,
             defaultSubtitleLanguage = language,
             preferredAnimeAudioLanguage = current.preferredAnimeAudioLanguage,
+            defaultPlaybackSpeed = current.defaultPlaybackSpeed,
             holdSpeedPlayer = current.holdSpeedPlayer,
             externalPlayer = current.externalPlayer,
             alwaysLandscape = current.alwaysLandscape,
@@ -433,8 +498,25 @@ class AndroidSettingsViewModel(
         val current = _state.value
         updatePlayerPreferences(
             enableSubtitlesByDefault = current.enableSubtitlesByDefault,
+            enableVLCSubtitleEditMenu = current.enableVLCSubtitleEditMenu,
             defaultSubtitleLanguage = current.defaultSubtitleLanguage,
             preferredAnimeAudioLanguage = language,
+            defaultPlaybackSpeed = current.defaultPlaybackSpeed,
+            holdSpeedPlayer = current.holdSpeedPlayer,
+            externalPlayer = current.externalPlayer,
+            alwaysLandscape = current.alwaysLandscape,
+            vlcHeaderProxyEnabled = current.vlcHeaderProxyEnabled,
+        )
+    }
+
+    fun setDefaultPlaybackSpeed(value: Double) {
+        val current = _state.value
+        updatePlayerPreferences(
+            enableSubtitlesByDefault = current.enableSubtitlesByDefault,
+            enableVLCSubtitleEditMenu = current.enableVLCSubtitleEditMenu,
+            defaultSubtitleLanguage = current.defaultSubtitleLanguage,
+            preferredAnimeAudioLanguage = current.preferredAnimeAudioLanguage,
+            defaultPlaybackSpeed = value,
             holdSpeedPlayer = current.holdSpeedPlayer,
             externalPlayer = current.externalPlayer,
             alwaysLandscape = current.alwaysLandscape,
@@ -446,8 +528,10 @@ class AndroidSettingsViewModel(
         val current = _state.value
         updatePlayerPreferences(
             enableSubtitlesByDefault = current.enableSubtitlesByDefault,
+            enableVLCSubtitleEditMenu = current.enableVLCSubtitleEditMenu,
             defaultSubtitleLanguage = current.defaultSubtitleLanguage,
             preferredAnimeAudioLanguage = current.preferredAnimeAudioLanguage,
+            defaultPlaybackSpeed = current.defaultPlaybackSpeed,
             holdSpeedPlayer = value,
             externalPlayer = current.externalPlayer,
             alwaysLandscape = current.alwaysLandscape,
@@ -459,8 +543,10 @@ class AndroidSettingsViewModel(
         val current = _state.value
         updatePlayerPreferences(
             enableSubtitlesByDefault = current.enableSubtitlesByDefault,
+            enableVLCSubtitleEditMenu = current.enableVLCSubtitleEditMenu,
             defaultSubtitleLanguage = current.defaultSubtitleLanguage,
             preferredAnimeAudioLanguage = current.preferredAnimeAudioLanguage,
+            defaultPlaybackSpeed = current.defaultPlaybackSpeed,
             holdSpeedPlayer = current.holdSpeedPlayer,
             externalPlayer = value,
             alwaysLandscape = current.alwaysLandscape,
@@ -472,8 +558,10 @@ class AndroidSettingsViewModel(
         val current = _state.value
         updatePlayerPreferences(
             enableSubtitlesByDefault = current.enableSubtitlesByDefault,
+            enableVLCSubtitleEditMenu = current.enableVLCSubtitleEditMenu,
             defaultSubtitleLanguage = current.defaultSubtitleLanguage,
             preferredAnimeAudioLanguage = current.preferredAnimeAudioLanguage,
+            defaultPlaybackSpeed = current.defaultPlaybackSpeed,
             holdSpeedPlayer = current.holdSpeedPlayer,
             externalPlayer = current.externalPlayer,
             alwaysLandscape = enabled,
@@ -485,13 +573,55 @@ class AndroidSettingsViewModel(
         val current = _state.value
         updatePlayerPreferences(
             enableSubtitlesByDefault = current.enableSubtitlesByDefault,
+            enableVLCSubtitleEditMenu = current.enableVLCSubtitleEditMenu,
             defaultSubtitleLanguage = current.defaultSubtitleLanguage,
             preferredAnimeAudioLanguage = current.preferredAnimeAudioLanguage,
+            defaultPlaybackSpeed = current.defaultPlaybackSpeed,
             holdSpeedPlayer = current.holdSpeedPlayer,
             externalPlayer = current.externalPlayer,
             alwaysLandscape = current.alwaysLandscape,
             vlcHeaderProxyEnabled = enabled,
         )
+    }
+
+    fun setVlcBrightnessGestureEnabled(enabled: Boolean) {
+        val current = _state.value
+        updatePlayerGestures(current.copy(vlcBrightnessGestureEnabled = enabled))
+    }
+
+    fun setVlcVolumeGestureEnabled(enabled: Boolean) {
+        val current = _state.value
+        updatePlayerGestures(current.copy(vlcVolumeGestureEnabled = enabled))
+    }
+
+    fun setPlayerTwoFingerTapPlayPauseEnabled(enabled: Boolean) {
+        val current = _state.value
+        updatePlayerGestures(current.copy(playerTwoFingerTapPlayPauseEnabled = enabled))
+    }
+
+    fun setVlcDoubleTapSeekEnabled(enabled: Boolean) {
+        val current = _state.value
+        updatePlayerGestures(current.copy(vlcDoubleTapSeekEnabled = enabled))
+    }
+
+    fun setVlcDoubleTapSeekSeconds(value: Double) {
+        val current = _state.value
+        updatePlayerGestures(current.copy(vlcDoubleTapSeekSeconds = value))
+    }
+
+    fun setVlcPiPEnabled(enabled: Boolean) {
+        val current = _state.value
+        updatePlayerGestures(current.copy(vlcPiPEnabled = enabled))
+    }
+
+    fun setVlcOpenSubtitlesEnabled(enabled: Boolean) {
+        val current = _state.value
+        updatePlayerGestures(current.copy(vlcOpenSubtitlesEnabled = enabled))
+    }
+
+    fun setVlcOpenSubtitlesAutoFallbackEnabled(enabled: Boolean) {
+        val current = _state.value
+        updatePlayerGestures(current.copy(vlcOpenSubtitlesAutoFallbackEnabled = enabled))
     }
 
     fun setSubtitleForegroundColor(value: String?) {
@@ -551,8 +681,10 @@ class AndroidSettingsViewModel(
 
     private fun updatePlayerPreferences(
         enableSubtitlesByDefault: Boolean,
+        enableVLCSubtitleEditMenu: Boolean,
         defaultSubtitleLanguage: String,
         preferredAnimeAudioLanguage: String,
+        defaultPlaybackSpeed: Double,
         holdSpeedPlayer: Double,
         externalPlayer: String,
         alwaysLandscape: Boolean,
@@ -561,12 +693,29 @@ class AndroidSettingsViewModel(
         viewModelScope.launch {
             settingsStore.updatePlayerPreferences(
                 enableSubtitlesByDefault = enableSubtitlesByDefault,
+                enableVLCSubtitleEditMenu = enableVLCSubtitleEditMenu,
                 defaultSubtitleLanguage = defaultSubtitleLanguage,
                 preferredAnimeAudioLanguage = preferredAnimeAudioLanguage,
+                defaultPlaybackSpeed = defaultPlaybackSpeed,
                 holdSpeedPlayer = holdSpeedPlayer,
                 externalPlayer = externalPlayer,
                 alwaysLandscape = alwaysLandscape,
                 vlcHeaderProxyEnabled = vlcHeaderProxyEnabled,
+            )
+        }
+    }
+
+    private fun updatePlayerGestures(state: SettingsScreenState) {
+        viewModelScope.launch {
+            settingsStore.updatePlayerGestures(
+                vlcBrightnessGestureEnabled = state.vlcBrightnessGestureEnabled,
+                vlcVolumeGestureEnabled = state.vlcVolumeGestureEnabled,
+                playerTwoFingerTapPlayPauseEnabled = state.playerTwoFingerTapPlayPauseEnabled,
+                vlcDoubleTapSeekEnabled = state.vlcDoubleTapSeekEnabled,
+                vlcDoubleTapSeekSeconds = state.vlcDoubleTapSeekSeconds,
+                vlcPiPEnabled = state.vlcPiPEnabled,
+                vlcOpenSubtitlesEnabled = state.vlcOpenSubtitlesEnabled,
+                vlcOpenSubtitlesAutoFallbackEnabled = state.vlcOpenSubtitlesAutoFallbackEnabled,
             )
         }
     }
@@ -707,6 +856,12 @@ class AndroidSettingsViewModel(
         }
     }
 
+    fun setKanzenAutoMode(enabled: Boolean) {
+        viewModelScope.launch {
+            settingsStore.setKanzenAutoMode(enabled)
+        }
+    }
+
     private fun updateReader(
         readingMode: Int,
         readerFontSize: Double,
@@ -745,12 +900,14 @@ class AndroidSettingsViewModel(
 
     private fun updateAppearance(
         accentColor: String,
+        settingsGradientColor: String,
         tmdbLanguage: String,
         selectedAppearance: String,
     ) {
         viewModelScope.launch {
             settingsStore.updateAppearance(
                 accentColor = accentColor,
+                settingsGradientColor = settingsGradientColor,
                 tmdbLanguage = tmdbLanguage,
                 selectedAppearance = selectedAppearance,
             )
@@ -765,6 +922,18 @@ class AndroidSettingsViewModel(
             settingsStore.updateNavigation(
                 showScheduleTab = showScheduleTab,
                 showKanzen = showKanzen,
+            )
+        }
+    }
+
+    private fun updateScheduleOptions(
+        showLocalScheduleTime: Boolean,
+        useClassicScheduleUI: Boolean,
+    ) {
+        viewModelScope.launch {
+            settingsStore.updateScheduleOptions(
+                showLocalScheduleTime = showLocalScheduleTime,
+                useClassicScheduleUI = useClassicScheduleUI,
             )
         }
     }
@@ -999,6 +1168,23 @@ class AndroidSettingsViewModel(
         }
     }
 
+    fun setAutoSyncRatings(enabled: Boolean) {
+        viewModelScope.launch {
+            trackerRepository.setAutoSyncRatings(enabled)
+                .onSuccess { snapshot ->
+                    _state.value = _state.value.withTrackerState(
+                        snapshot = snapshot,
+                        status = if (enabled) "Auto rating sync enabled." else "Auto rating sync disabled.",
+                    )
+                }
+                .onFailure { error ->
+                    _state.value = _state.value.copy(
+                        trackerStatus = error.message ?: "Could not update rating sync.",
+                    )
+                }
+        }
+    }
+
     fun disconnectTracker(service: String) {
         viewModelScope.launch {
             trackerRepository.disconnect(service)
@@ -1175,6 +1361,108 @@ class AndroidSettingsViewModel(
                     )
                 }
             }
+        }
+    }
+
+    fun importMyAnimeListLibrary(onImported: () -> Unit = {}) {
+        viewModelScope.launch {
+            val account = trackerRepository.loadSnapshot()
+                .getOrNull()
+                ?.myAnimeListAccount()
+            if (account == null) {
+                _state.value = _state.value.copy(
+                    trackerStatus = "Connect a MyAnimeList tracker account before importing your MAL library.",
+                )
+                return@launch
+            }
+
+            _state.value = _state.value.copy(trackerStatus = "Fetching your MyAnimeList library...")
+            val animeEntries = when (val result = myAnimeListService.fetchAnimeLibrary(account.accessToken)) {
+                is NetworkResult.Success -> result.value
+                is NetworkResult.Failure -> {
+                    _state.value = _state.value.copy(
+                        trackerStatus = result.toStatusMessage("MAL anime import failed."),
+                    )
+                    return@launch
+                }
+            }
+            val mangaEntries = when (val result = myAnimeListService.fetchMangaLibrary(account.accessToken)) {
+                is NetworkResult.Success -> result.value
+                is NetworkResult.Failure -> {
+                    _state.value = _state.value.copy(
+                        trackerStatus = result.toStatusMessage("MAL manga import failed."),
+                    )
+                    return@launch
+                }
+            }
+
+            _state.value = _state.value.copy(trackerStatus = "Matching MAL entries to AniList...")
+            val animeByMalId = when (val result = aniListService.mediaByMalIds(animeEntries.map { it.malId }, mediaType = "ANIME")) {
+                is NetworkResult.Success -> result.value
+                is NetworkResult.Failure -> {
+                    _state.value = _state.value.copy(
+                        trackerStatus = result.toStatusMessage("MAL anime matching failed."),
+                    )
+                    return@launch
+                }
+            }
+            val mangaByMalId = when (val result = aniListService.mediaByMalIds(mangaEntries.map { it.malId }, mediaType = "MANGA")) {
+                is NetworkResult.Success -> result.value
+                is NetworkResult.Failure -> {
+                    _state.value = _state.value.copy(
+                        trackerStatus = result.toStatusMessage("MAL manga matching failed."),
+                    )
+                    return@launch
+                }
+            }
+
+            val animeDrafts = animeEntries.mapNotNull { entry ->
+                val media = animeByMalId[entry.malId] ?: return@mapNotNull null
+                AniListLibraryImportDraft(
+                    media = media,
+                    status = entry.status,
+                    progress = entry.watchedForImport(),
+                    sourceName = "MAL",
+                )
+            }
+            val mangaDrafts = mangaEntries.mapNotNull { entry ->
+                val media = mangaByMalId[entry.malId] ?: return@mapNotNull null
+                AniListMangaLibraryImportDraft(
+                    media = media,
+                    status = entry.status,
+                    progress = entry.readForImport(),
+                    sourceName = "MAL",
+                )
+            }
+            val skippedAnime = animeEntries.size - animeDrafts.size
+            val skippedManga = mangaEntries.size - mangaDrafts.size
+
+            _state.value = _state.value.copy(
+                trackerStatus = "Importing ${animeDrafts.size} MAL anime and ${mangaDrafts.size} MAL manga matches...",
+            )
+            libraryRepository.importAniListAnime(animeDrafts)
+                .onFailure { error ->
+                    _state.value = _state.value.copy(
+                        trackerStatus = error.message ?: "Could not import MAL anime library.",
+                    )
+                    return@launch
+                }
+            mangaRepository.importAniListManga(mangaDrafts)
+                .onSuccess { summary ->
+                    val importedAnime = animeDrafts.size
+                    val skipped = skippedAnime + skippedManga
+                    _state.value = _state.value.copy(
+                        trackerStatus = "Imported $importedAnime MAL anime item${importedAnime.pluralSuffix()} and ${summary.importedItems} MAL manga item${summary.importedItems.pluralSuffix()} with ${summary.importedProgress} reader progress entr${if (summary.importedProgress == 1) "y" else "ies"}${if (skipped > 0) "; skipped $skipped unmapped item${skipped.pluralSuffix()}." else "."}",
+                    )
+                    loggerRepository.log("Trackers", "Imported MyAnimeList library into Android Library and Manga/Novel.")
+                    refreshLogs()
+                    onImported()
+                }
+                .onFailure { error ->
+                    _state.value = _state.value.copy(
+                        trackerStatus = error.message ?: "Could not import MAL manga library.",
+                    )
+                }
         }
     }
 
@@ -1362,6 +1650,7 @@ private fun SettingsScreenState.withTrackerState(
     }
     return copy(
         trackerSyncEnabled = snapshot.syncEnabled,
+        autoSyncRatings = snapshot.autoSyncRatings,
         trackerRows = rows,
         trackerStatus = trackerStatus,
     )
@@ -1390,15 +1679,52 @@ private fun TrackerStateSnapshot.aniListAccount(): TrackerAccountSnapshot? {
     }
 }
 
+private fun TrackerStateSnapshot.myAnimeListAccount(): TrackerAccountSnapshot? {
+    val modern = accounts.firstOrNull { account ->
+        account.isConnected &&
+            account.accessToken.isNotBlank() &&
+            account.service.isMyAnimeListService()
+    }
+    if (modern != null) return modern
+
+    val provider = provider ?: return null
+    val token = accessToken ?: return null
+    return if (provider.isMyAnimeListService() && token.isNotBlank()) {
+        TrackerAccountSnapshot(
+            service = provider,
+            username = userName.orEmpty(),
+            accessToken = token,
+            refreshToken = refreshToken,
+            isConnected = true,
+        )
+    } else {
+        null
+    }
+}
+
+private fun MyAnimeListService.AnimeLibraryEntry.watchedForImport(): Int =
+    if (status.equals("completed", ignoreCase = true)) {
+        maxOf(progress, totalEpisodes ?: 0)
+    } else {
+        progress.coerceAtLeast(0)
+    }
+
+private fun MyAnimeListService.MangaLibraryEntry.readForImport(): Int =
+    if (status.equals("completed", ignoreCase = true)) {
+        maxOf(progress, totalChapters ?: 0)
+    } else {
+        progress.coerceAtLeast(0)
+    }
+
 private fun NetworkResult.Failure.toStatusMessage(prefix: String): String = when (this) {
     is NetworkResult.Failure.Http -> "$prefix HTTP $code${body?.takeIf { it.isNotBlank() }?.let { ": $it" }.orEmpty()}"
     is NetworkResult.Failure.Connectivity -> "$prefix ${throwable.message ?: "network unavailable"}"
-    is NetworkResult.Failure.Serialization -> "$prefix ${throwable.message ?: "unexpected AniList response"}"
+    is NetworkResult.Failure.Serialization -> "$prefix ${throwable.message ?: "unexpected tracker response"}"
 }
 
 private fun TrackerSyncSummary.toMangaSyncStatusMessage(): String = when {
-    attemptedAccounts == 0 -> "No connected AniList account is ready to sync manga progress."
-    attemptedItems == 0 -> "No AniList manga progress is ready to sync yet."
+    attemptedAccounts == 0 -> "No connected AniList or MyAnimeList account is ready to sync manga progress."
+    attemptedItems == 0 -> "No tracker-backed manga progress is ready to sync yet."
     failures.isNotEmpty() && syncedItems == 0 -> "Manga progress sync failed: ${failures.first()}"
     failures.isNotEmpty() -> "Synced $syncedItems manga item${syncedItems.pluralSuffix()} with ${failures.size} issue${failures.size.pluralSuffix()}."
     syncedItems > 0 -> "Synced $syncedItems manga item${syncedItems.pluralSuffix()} to AniList."
@@ -1413,6 +1739,11 @@ private fun String.toTokenPreview(): String =
         length <= 8 -> "token saved"
         else -> "${take(4)}...${takeLast(4)}"
     }
+
+private fun String.isMyAnimeListService(): Boolean {
+    val normalized = lowercase().replace(Regex("[^a-z0-9]+"), "")
+    return normalized == "myanimelist" || normalized == "mal"
+}
 
 private fun Long.toByteCountLabel(): String {
     val units = listOf("B", "KB", "MB", "GB")

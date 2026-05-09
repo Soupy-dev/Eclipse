@@ -70,6 +70,16 @@ private actor TrackerRequestScheduler {
     }
 }
 
+private struct AniListRatingSyncResponse {
+    let statusCode: Int
+    let bodyPreview: String
+    let graphQLError: String?
+
+    var succeeded: Bool {
+        (200...299).contains(statusCode) && graphQLError == nil
+    }
+}
+
 private struct RemoteAnimeProgress {
     let anilistId: Int?
     let malId: Int?
@@ -1023,8 +1033,30 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    func syncUserRating(tmdbId: Int, ratingOutOf10: Int, isAnime: Bool) {
-        let clampedRating = max(1, min(10, ratingOutOf10))
+    private static func normalizedRatingOutOf10(_ rating: Double) -> Double {
+        let finiteValue = rating.isFinite ? rating : 0.5
+        let halfStepValue = (finiteValue * 2).rounded() / 2
+        return max(0.5, min(10, halfStepValue))
+    }
+
+    private static func aniListScoreRaw(from rating: Double) -> Int {
+        Int((normalizedRatingOutOf10(rating) * 10).rounded())
+    }
+
+    private static func myAnimeListScore(from rating: Double) -> Int {
+        max(1, min(10, Int(normalizedRatingOutOf10(rating).rounded())))
+    }
+
+    private static func ratingDisplayString(_ rating: Double) -> String {
+        let normalized = normalizedRatingOutOf10(rating)
+        if normalized.truncatingRemainder(dividingBy: 1) == 0 {
+            return String(Int(normalized))
+        }
+        return String(format: "%.1f", normalized)
+    }
+
+    func syncUserRating(tmdbId: Int, ratingOutOf10: Double, isAnime: Bool) {
+        let clampedRating = Self.normalizedRatingOutOf10(ratingOutOf10)
 
         guard trackerState.autoSyncRatings else {
             Logger.shared.log("Skipping auto rating sync (auto sync ratings disabled) for TMDB \(tmdbId)", type: "Tracker")
@@ -1079,8 +1111,8 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    func syncRatingAndNote(tmdbId: Int, ratingOutOf10: Int, note: String, service: TrackerService, isAnime: Bool) {
-        let clampedRating = max(1, min(10, ratingOutOf10))
+    func syncRatingAndNote(tmdbId: Int, ratingOutOf10: Double, note: String, service: TrackerService, isAnime: Bool) {
+        let clampedRating = Self.normalizedRatingOutOf10(ratingOutOf10)
 
         guard isAnime else {
             Logger.shared.log("Skipping rating note sync for non-anime TMDB \(tmdbId)", type: "Tracker")
@@ -1127,16 +1159,69 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    private func saveAniListRatingAndNote(account: TrackerAccount, anilistId: Int, rating: Int, note: String?) async {
-        let clampedRating = max(1, min(10, rating))
+    private func saveAniListRatingAndNote(account: TrackerAccount, anilistId: Int, rating: Double, note: String?) async {
+        let clampedRating = Self.normalizedRatingOutOf10(rating)
+        let displayRating = Self.ratingDisplayString(clampedRating)
+        do {
+            let firstResult = try await sendAniListRatingAndNoteRequest(
+                account: account,
+                anilistId: anilistId,
+                rating: clampedRating,
+                note: note,
+                includeCurrentStatus: false
+            )
+
+            if firstResult.succeeded {
+                Logger.shared.log("Synced AniList rating \(displayRating)/10\(note == nil ? "" : " and notes") for mediaId \(anilistId)", type: "Tracker")
+                return
+            }
+
+            if firstResult.statusCode == 400 {
+                Logger.shared.log("AniList rating sync returned 400; retrying with CURRENT status for mediaId \(anilistId): \(firstResult.bodyPreview)", type: "Tracker")
+                let retryResult = try await sendAniListRatingAndNoteRequest(
+                    account: account,
+                    anilistId: anilistId,
+                    rating: clampedRating,
+                    note: note,
+                    includeCurrentStatus: true
+                )
+
+                if retryResult.succeeded {
+                    Logger.shared.log("Synced AniList rating \(displayRating)/10\(note == nil ? "" : " and notes") for mediaId \(anilistId) after creating a list entry", type: "Tracker")
+                } else if let graphQLError = retryResult.graphQLError {
+                    Logger.shared.log("AniList rating sync error after retry: \(graphQLError)", type: "Tracker")
+                } else {
+                    Logger.shared.log("AniList rating sync returned status \(retryResult.statusCode) after retry: \(retryResult.bodyPreview)", type: "Tracker")
+                }
+                return
+            }
+
+            if let graphQLError = firstResult.graphQLError {
+                Logger.shared.log("AniList rating sync error: \(graphQLError)", type: "Tracker")
+            } else {
+                Logger.shared.log("AniList rating sync returned status \(firstResult.statusCode): \(firstResult.bodyPreview)", type: "Tracker")
+            }
+        } catch {
+            Logger.shared.log("Failed to sync AniList rating \(anilistId): \(error.localizedDescription)", type: "Error")
+        }
+    }
+
+    private func sendAniListRatingAndNoteRequest(
+        account: TrackerAccount,
+        anilistId: Int,
+        rating: Double,
+        note: String?,
+        includeCurrentStatus: Bool
+    ) async throws -> AniListRatingSyncResponse {
         let variableDeclaration = note == nil
             ? "($mediaId: Int, $scoreRaw: Int)"
             : "($mediaId: Int, $scoreRaw: Int, $notes: String)"
+        let statusArgument = includeCurrentStatus ? ",\n                status: CURRENT" : ""
         let notesArgument = note == nil ? "" : ",\n                notes: $notes"
         let mutation = """
         mutation \(variableDeclaration) {
             SaveMediaListEntry(
-                mediaId: $mediaId,
+                mediaId: $mediaId\(statusArgument),
                 scoreRaw: $scoreRaw\(notesArgument)
             ) {
                 id
@@ -1147,44 +1232,47 @@ final class TrackerManager: NSObject, ObservableObject {
         """
         var variables: [String: Any] = [
             "mediaId": anilistId,
-            "scoreRaw": clampedRating * 10
+            "scoreRaw": Self.aniListScoreRaw(from: rating)
         ]
         if let note {
             variables["notes"] = note
         }
 
-        do {
-            let url = URL(string: "https://graphql.anilist.co")!
-            var request = URLRequest(url: url)
-            request.httpMethod = "POST"
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.setValue("Bearer \(account.accessToken)", forHTTPHeaderField: "Authorization")
-            request.httpBody = try JSONSerialization.data(withJSONObject: ["query": mutation, "variables": variables])
+        let url = URL(string: "https://graphql.anilist.co")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(account.accessToken)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["query": mutation, "variables": variables])
 
-            let (data, response) = try await sendTrackerRequest(request, provider: .anilist)
-            if response.statusCode == 200,
-               let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let errors = json["errors"] as? [[String: Any]], !errors.isEmpty {
-                Logger.shared.log("AniList rating sync error: \(errors.first?["message"] as? String ?? "Unknown error")", type: "Tracker")
-            } else if response.statusCode == 200 {
-                Logger.shared.log("Synced AniList rating \(clampedRating)/10\(note == nil ? "" : " and notes") for mediaId \(anilistId)", type: "Tracker")
-            } else {
-                Logger.shared.log("AniList rating sync returned status \(response.statusCode)", type: "Tracker")
+        let (data, response) = try await sendTrackerRequest(request, provider: .anilist)
+        let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+        let graphQLError = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+            .flatMap { json -> String? in
+                guard let errors = json["errors"] as? [[String: Any]], !errors.isEmpty else {
+                    return nil
+                }
+                return errors.first?["message"] as? String ?? "Unknown error"
             }
-        } catch {
-            Logger.shared.log("Failed to sync AniList rating \(anilistId): \(error.localizedDescription)", type: "Error")
-        }
+
+        return AniListRatingSyncResponse(
+            statusCode: response.statusCode,
+            bodyPreview: bodyPreview,
+            graphQLError: graphQLError
+        )
     }
 
-    private func saveMALAnimeRatingAndNote(account: TrackerAccount, malId: Int, rating: Int, note: String?) async {
-        let clampedRating = max(1, min(10, rating))
+    private func saveMALAnimeRatingAndNote(account: TrackerAccount, malId: Int, rating: Double, note: String?) async {
+        let clampedRating = Self.normalizedRatingOutOf10(rating)
+        let malRating = Self.myAnimeListScore(from: clampedRating)
+        let displayRating = Self.ratingDisplayString(clampedRating)
         let url = URL(string: "https://api.myanimelist.net/v2/anime/\(malId)/my_list_status")!
         var request = URLRequest(url: url)
         request.httpMethod = "PATCH"
         request.setValue("Bearer \(account.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         var values = [
-            "score": String(clampedRating)
+            "score": String(malRating)
         ]
         if let note {
             values["comments"] = note
@@ -1194,7 +1282,10 @@ final class TrackerManager: NSObject, ObservableObject {
         do {
             let (data, response) = try await sendTrackerRequest(request, provider: .myAnimeList)
             if (200...299).contains(response.statusCode) {
-                Logger.shared.log("Synced MAL rating \(clampedRating)/10\(note == nil ? "" : " and comments") for animeId \(malId)", type: "Tracker")
+                let malSuffix = malRating == Int(clampedRating) && clampedRating.truncatingRemainder(dividingBy: 1) == 0
+                    ? ""
+                    : " as \(malRating)/10"
+                Logger.shared.log("Synced MAL rating \(displayRating)/10\(malSuffix)\(note == nil ? "" : " and comments") for animeId \(malId)", type: "Tracker")
             } else {
                 let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
                 Logger.shared.log("MAL rating sync returned status \(response.statusCode): \(bodyPreview)", type: "Tracker")

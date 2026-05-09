@@ -151,6 +151,43 @@ class AniListService(
         }
     }
 
+    suspend fun mediaByMalIds(
+        malIds: List<Int>,
+        mediaType: String,
+    ): NetworkResult<Map<Int, AniListMedia>> {
+        val uniqueIds = malIds.filter { it > 0 }.distinct()
+        if (uniqueIds.isEmpty()) return NetworkResult.Success(emptyMap())
+
+        val resolved = mutableMapOf<Int, AniListMedia>()
+        uniqueIds.chunked(50).forEach { chunk ->
+            val query = mediaByMalIdsQuery(
+                malIds = chunk,
+                mediaType = mediaType.safeAniListMediaType(),
+            )
+            val body = EclipseJson.encodeToString(
+                AniListRequest.serializer(),
+                AniListRequest(
+                    query = query,
+                    variables = AniListVariables(),
+                ),
+            )
+            when (val result = httpClient.postJson(baseUrl, body)) {
+                is NetworkResult.Success -> {
+                    try {
+                        val response = EclipseJson.decodeFromString(AniListEnvelope.serializer(), result.value)
+                        response.data.page.media.forEach { media ->
+                            media.idMal?.let { malId -> resolved[malId] = media }
+                        }
+                    } catch (error: SerializationException) {
+                        return NetworkResult.Failure.Serialization(error)
+                    }
+                }
+                is NetworkResult.Failure -> return result
+            }
+        }
+        return NetworkResult.Success(resolved)
+    }
+
     suspend fun specialMappingsForTmdbShow(tmdbShowId: Int): NetworkResult<List<AniMapSpecialMapping>> {
         aniMapSpecialCacheByTmdbShowId[tmdbShowId]?.let { return NetworkResult.Success(it) }
 
@@ -1253,6 +1290,57 @@ class AniListService(
         """
     }
 }
+
+private fun mediaByMalIdsQuery(
+    malIds: List<Int>,
+    mediaType: String,
+): String {
+    val idList = malIds.joinToString(", ")
+    return """
+        query MediaByMalIds {
+          Page(page: 1, perPage: ${malIds.size.coerceAtLeast(1)}) {
+            media(type: $mediaType, idMal_in: [$idList]) {
+              id
+              idMal
+              description(asHtml: false)
+              format
+              season
+              seasonYear
+              episodes
+              chapters
+              volumes
+              duration
+              status
+              bannerImage
+              isAdult
+              type
+              synonyms
+              genres
+              title {
+                romaji
+                english
+                native
+                userPreferred
+              }
+              coverImage {
+                extraLarge
+                large
+                medium
+                color
+              }
+              nextAiringEpisode {
+                episode
+                timeUntilAiring
+                airingAt
+              }
+            }
+          }
+        }
+    """.trimIndent()
+}
+
+private fun String.safeAniListMediaType(): String =
+    if (equals("MANGA", ignoreCase = true)) "MANGA" else "ANIME"
 
 private fun String.authorizationHeaders(): Map<String, String> =
     mapOf("Authorization" to "Bearer ${trim()}")
