@@ -65,6 +65,8 @@ fun SearchRoute(
     onQueryChange: (String) -> Unit,
     onSearch: () -> Unit,
     onRecentQuery: (String) -> Unit,
+    onClearRecentQueries: () -> Unit,
+    onRemoveRecentQuery: (String) -> Unit,
     onSourceSelected: (String) -> Unit,
     onSelect: (DetailTarget) -> Unit,
 ) {
@@ -161,13 +163,35 @@ fun SearchRoute(
         if (state.query.isBlank() && state.recentQueries.isNotEmpty()) {
             item {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    SectionHeading(
-                        title = "Recent Searches",
-                    )
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        items(state.recentQueries, key = { it }) { query ->
-                            Button(onClick = { onRecentQuery(query) }) {
-                                Text(query)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        SectionHeading(
+                            title = "Recent Searches",
+                            modifier = Modifier.weight(1f),
+                        )
+                        androidx.compose.material3.OutlinedButton(onClick = onClearRecentQueries) {
+                            Text("Clear")
+                        }
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        state.recentQueries.forEach { query ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Button(
+                                    onClick = { onRecentQuery(query) },
+                                    modifier = Modifier.weight(1f),
+                                ) {
+                                    Text(query)
+                                }
+                                androidx.compose.material3.OutlinedButton(
+                                    onClick = { onRemoveRecentQuery(query) },
+                                ) {
+                                    Text("Remove")
+                                }
                             }
                         }
                     }

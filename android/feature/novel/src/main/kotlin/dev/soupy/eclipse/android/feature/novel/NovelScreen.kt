@@ -1,9 +1,12 @@
 package dev.soupy.eclipse.android.feature.novel
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -18,13 +21,11 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -36,18 +37,16 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 import dev.soupy.eclipse.android.core.design.GlassPanel
 import dev.soupy.eclipse.android.core.design.HeroBackdrop
 import dev.soupy.eclipse.android.core.design.PosterImage
@@ -935,19 +934,10 @@ private fun NovelReaderPanel(
     val targetChapter = chapterInput.toIntOrNull()
         ?.coerceAtLeast(1)
         ?.let { chapter -> reader.totalChapters?.let { chapter.coerceAtMost(it) } ?: chapter }
-    val readerTextStyle = MaterialTheme.typography.bodyLarge.copy(
-        fontSize = readerSettings.readerFontSize.coerceIn(12.0, 32.0).sp,
-        fontFamily = readerSettings.fontFamily(),
-        fontWeight = readerSettings.fontWeight(),
-        lineHeight = (readerSettings.readerFontSize.coerceIn(12.0, 32.0) *
-            readerSettings.readerLineSpacing.coerceIn(1.0, 3.0)).sp,
-        textAlign = readerSettings.textAlign(),
-    )
     var controlsVisible by rememberSaveable(reader.aniListId) { mutableStateOf(true) }
     var autoScrollEnabled by rememberSaveable(reader.aniListId, reader.currentChapter) { mutableStateOf(false) }
     var autoScrollSpeed by rememberSaveable(reader.aniListId) { mutableStateOf(2) }
     var orientationLocked by rememberSaveable(reader.aniListId) { mutableStateOf(false) }
-    val textScrollState = rememberScrollState()
     val activity = LocalContext.current.findActivity()
 
     DisposableEffect(activity, orientationLocked) {
@@ -958,18 +948,6 @@ private fun NovelReaderPanel(
         onDispose {
             if (orientationLocked && previousOrientation != null) {
                 activity.requestedOrientation = previousOrientation
-            }
-        }
-    }
-
-    LaunchedEffect(autoScrollEnabled, autoScrollSpeed, reader.textContent) {
-        while (autoScrollEnabled) {
-            delay(90L)
-            if (textScrollState.maxValue <= 0) continue
-            val next = (textScrollState.value + autoScrollSpeed).coerceAtMost(textScrollState.maxValue)
-            textScrollState.scrollTo(next)
-            if (next >= textScrollState.maxValue) {
-                autoScrollEnabled = false
             }
         }
     }
@@ -1136,24 +1114,129 @@ private fun NovelReaderPanel(
                 )
             }
             reader.textContent?.takeIf { it.isNotBlank() }?.let { content ->
-                Column(
-                    modifier = Modifier
-                        .heightIn(max = 680.dp)
-                        .background(readerSettings.readerBackgroundColor())
-                        .verticalScroll(textScrollState)
-                        .padding(
-                            horizontal = readerSettings.horizontalPadding(),
-                            vertical = 16.dp,
-                        ),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    content.readerParagraphs().forEach { paragraph ->
-                        Text(
-                            text = paragraph,
-                            style = readerTextStyle,
-                            color = readerSettings.readerTextColor(),
-                        )
+                NovelHtmlReader(
+                    content = content,
+                    chapterKey = "${reader.aniListId}_${reader.currentChapter}",
+                    readerSettings = readerSettings,
+                    autoScrollEnabled = autoScrollEnabled,
+                    autoScrollSpeed = autoScrollSpeed,
+                    onAutoScrollFinished = { autoScrollEnabled = false },
+                )
+            }
+        }
+    }
+}
+
+@SuppressLint("SetJavaScriptEnabled")
+@Composable
+private fun NovelHtmlReader(
+    content: String,
+    chapterKey: String,
+    readerSettings: NovelReaderSettingsRow,
+    autoScrollEnabled: Boolean,
+    autoScrollSpeed: Int,
+    onAutoScrollFinished: () -> Unit,
+) {
+    var webView by remember { mutableStateOf<WebView?>(null) }
+    val context = LocalContext.current
+    val scrollStore = remember(context) {
+        context.getSharedPreferences("novel_reader_scroll", Context.MODE_PRIVATE)
+    }
+    val scrollKey = remember(chapterKey) { "novelScrollPos_$chapterKey" }
+    val html = remember(content, readerSettings) {
+        content.toNovelReaderHtml(readerSettings)
+    }
+    val restoreScrollScript = remember(scrollKey) {
+        val saved = scrollStore.getFloat(scrollKey, 0f).coerceIn(0f, 1f)
+        if (saved > 0.01f) {
+            "window.scrollTo(0, document.documentElement.scrollHeight * $saved);"
+        } else {
+            null
+        }
+    }
+
+    AndroidView(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 420.dp, max = 680.dp)
+            .background(readerSettings.readerBackgroundColor()),
+        factory = { context ->
+            WebView(context).apply {
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                webViewClient = object : WebViewClient() {
+                    override fun onPageFinished(view: WebView, url: String?) {
+                        restoreScrollScript?.let { script ->
+                            view.postDelayed({ view.evaluateJavascript(script, null) }, 200L)
+                        }
                     }
+                }
+                tag = html
+                loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+                webView = this
+            }
+        },
+        update = { view ->
+            webView = view
+            view.webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView, url: String?) {
+                    restoreScrollScript?.let { script ->
+                        view.postDelayed({ view.evaluateJavascript(script, null) }, 200L)
+                    }
+                }
+            }
+            if (view.tag != html) {
+                view.tag = html
+                view.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
+            }
+        },
+    )
+
+    DisposableEffect(Unit) {
+        onDispose {
+            webView = null
+        }
+    }
+
+    LaunchedEffect(webView, scrollKey, content) {
+        val activeWebView = webView ?: return@LaunchedEffect
+        while (true) {
+            delay(500L)
+            activeWebView.evaluateJavascript(
+                """
+                    (function() {
+                      var sh = document.documentElement.scrollHeight || document.body.scrollHeight || 0;
+                      var st = window.pageYOffset || document.documentElement.scrollTop || 0;
+                      if (!sh) return 0;
+                      return Math.max(0, Math.min(1, st / sh));
+                    })();
+                """.trimIndent(),
+            ) { raw ->
+                raw.trim('"')
+                    .toFloatOrNull()
+                    ?.takeIf { it.isFinite() }
+                    ?.coerceIn(0f, 1f)
+                    ?.let { position ->
+                        scrollStore.edit().putFloat(scrollKey, position).apply()
+                    }
+            }
+        }
+    }
+
+    LaunchedEffect(autoScrollEnabled, autoScrollSpeed, content, chapterKey) {
+        while (autoScrollEnabled) {
+            delay(90L)
+            val speed = autoScrollSpeed.coerceIn(1, 8)
+            webView?.evaluateJavascript(
+                """
+                    (function() {
+                      window.scrollBy(0, $speed);
+                      return (window.innerHeight + window.scrollY) >= (document.body.scrollHeight - 4);
+                    })();
+                """.trimIndent(),
+            ) { atBottom ->
+                if (atBottom == "true") {
+                    onAutoScrollFinished()
                 }
             }
         }
@@ -1172,38 +1255,6 @@ private fun NovelReaderSettingsRow.modeLabel(): String =
         else -> "Auto"
     }
 
-private fun NovelReaderSettingsRow.horizontalPadding() =
-    readerMargin.coerceIn(0.0, 30.0).dp
-
-private fun NovelReaderSettingsRow.textAlign(): TextAlign =
-    when (readerTextAlignment.lowercase()) {
-        "center" -> TextAlign.Center
-        "right" -> TextAlign.End
-        "justify" -> TextAlign.Justify
-        else -> TextAlign.Start
-    }
-
-private fun NovelReaderSettingsRow.fontFamily(): FontFamily =
-    when (readerFontFamily.lowercase()) {
-        "georgia",
-        "times new roman",
-        "charter",
-        "new york" -> FontFamily.Serif
-        "helvetica" -> FontFamily.SansSerif
-        else -> FontFamily.Default
-    }
-
-private fun NovelReaderSettingsRow.fontWeight(): FontWeight =
-    when (readerFontWeight.lowercase()) {
-        "300",
-        "light" -> FontWeight.Light
-        "600",
-        "semibold" -> FontWeight.SemiBold
-        "bold",
-        "700" -> FontWeight.Bold
-        else -> FontWeight.Normal
-    }
-
 private fun NovelReaderSettingsRow.readerBackgroundColor(): Color =
     when (readerColorPreset.coerceIn(0, 4)) {
         0 -> Color(0xFFFFFFFF)
@@ -1213,33 +1264,121 @@ private fun NovelReaderSettingsRow.readerBackgroundColor(): Color =
         else -> Color(0xFF000000)
     }
 
-private fun NovelReaderSettingsRow.readerTextColor(): Color =
-    when (readerColorPreset.coerceIn(0, 4)) {
-        0 -> Color(0xFF000000)
-        1 -> Color(0xFF4F321C)
-        2 -> Color(0xFFD7D7D8)
-        3 -> Color(0xFFEAEAEA)
-        else -> Color(0xFFFFFFFF)
-    }
-
 private tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this
     is ContextWrapper -> baseContext.findActivity()
     else -> null
 }
 
-private fun String.readerParagraphs(): List<String> =
-    replace(Regex("""(?i)<br\s*/?>"""), "\n")
-        .replace(Regex("""(?i)</p>"""), "\n\n")
-        .replace(Regex("""<[^>]+>"""), "")
-        .replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .split(Regex("""\n{2,}"""))
-        .map { paragraph -> paragraph.trim() }
-        .filter(String::isNotBlank)
-        .ifEmpty { listOf(trim()) }
+private fun String.toNovelReaderHtml(settings: NovelReaderSettingsRow): String {
+    val body = if (contains(Regex("""<[/a-zA-Z][^>]*>"""))) {
+        this
+    } else {
+        escapeHtml()
+            .split(Regex("""\n{2,}"""))
+            .map { paragraph -> paragraph.trim().replace("\n", "<br>") }
+            .filter(String::isNotBlank)
+            .joinToString(separator = "\n") { paragraph -> "<p>$paragraph</p>" }
+    }
+    return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+            <style>
+                html, body {
+                    font-family: ${settings.cssFontFamily()}, system-ui, sans-serif;
+                    font-size: ${settings.readerFontSize.coerceIn(12.0, 32.0)}px;
+                    font-weight: ${settings.cssFontWeight()};
+                    line-height: ${settings.readerLineSpacing.coerceIn(1.0, 3.0)};
+                    text-align: ${settings.cssTextAlign()};
+                    padding: ${settings.readerMargin.coerceIn(0.0, 30.0)}px;
+                    padding-top: ${settings.readerMargin.coerceIn(0.0, 30.0) + 20.0}px;
+                    margin: 0;
+                    color: ${settings.cssTextColor()};
+                    background-color: ${settings.cssBackgroundColor()};
+                    overflow-x: hidden;
+                    width: 100%;
+                    max-width: 100%;
+                    word-wrap: break-word;
+                    -webkit-user-select: text;
+                    -webkit-touch-callout: none;
+                    -webkit-tap-highlight-color: transparent;
+                }
+                body { box-sizing: border-box; }
+                p, div, span, h1, h2, h3, h4, h5, h6 {
+                    font-size: inherit;
+                    font-family: inherit;
+                    font-weight: inherit;
+                    line-height: inherit;
+                    text-align: inherit;
+                    color: inherit;
+                    max-width: 100%;
+                    word-wrap: break-word;
+                    overflow-wrap: break-word;
+                }
+                img, video, iframe { max-width: 100%; height: auto; }
+                * { max-width: 100%; box-sizing: border-box; }
+            </style>
+        </head>
+        <body>$body</body>
+        </html>
+    """.trimIndent()
+}
+
+private fun String.escapeHtml(): String =
+    replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\"", "&quot;")
+        .replace("'", "&#39;")
+
+private fun NovelReaderSettingsRow.cssFontFamily(): String =
+    when (readerFontFamily.lowercase()) {
+        "georgia" -> "Georgia"
+        "times new roman" -> "\"Times New Roman\""
+        "charter" -> "Georgia"
+        "new york" -> "Georgia"
+        "helvetica" -> "Helvetica"
+        else -> "system-ui"
+    }
+
+private fun NovelReaderSettingsRow.cssFontWeight(): String =
+    when (readerFontWeight.lowercase()) {
+        "300",
+        "light" -> "300"
+        "600",
+        "semibold" -> "600"
+        "bold",
+        "700" -> "700"
+        else -> "400"
+    }
+
+private fun NovelReaderSettingsRow.cssTextAlign(): String =
+    when (readerTextAlignment.lowercase()) {
+        "center" -> "center"
+        "right" -> "right"
+        "justify" -> "justify"
+        else -> "left"
+    }
+
+private fun NovelReaderSettingsRow.cssBackgroundColor(): String =
+    when (readerColorPreset.coerceIn(0, 4)) {
+        0 -> "#FFFFFF"
+        1 -> "#F9F1E4"
+        2 -> "#49494D"
+        3 -> "#121212"
+        else -> "#000000"
+    }
+
+private fun NovelReaderSettingsRow.cssTextColor(): String =
+    when (readerColorPreset.coerceIn(0, 4)) {
+        0 -> "#000000"
+        1 -> "#4F321C"
+        2 -> "#D7D7D8"
+        3 -> "#EAEAEA"
+        else -> "#FFFFFF"
+    }
 
 @Composable
 private fun NovelModuleCard(

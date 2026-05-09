@@ -1,5 +1,9 @@
 package dev.soupy.eclipse.android.feature.services
 
+import android.os.Handler
+import android.os.Looper
+import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.layout.Arrangement
@@ -45,11 +49,28 @@ data class ServiceSourceRow(
     val subtitle: String? = null,
     val configurationJson: String? = null,
     val configurationSummary: String? = null,
+    val settingRows: List<ServiceSettingRow> = emptyList(),
     val enabled: Boolean = true,
     val selectedInAutoMode: Boolean = false,
     val healthLabel: String = "Unchecked",
     val healthWarning: String? = null,
 )
+
+data class ServiceSettingRow(
+    val key: String,
+    val label: String,
+    val inputType: ServiceSettingInputType,
+    val defaultValue: String,
+    val comment: String? = null,
+    val options: List<String> = emptyList(),
+)
+
+enum class ServiceSettingInputType {
+    TEXT,
+    BOOLEAN,
+    NUMBER,
+    SELECT,
+}
 
 data class StremioAddonRow(
     val transportUrl: String,
@@ -109,6 +130,7 @@ fun ServicesRoute(
     onRefreshAddon: (String) -> Unit,
     onRefreshAllAddons: () -> Unit,
     onCheckSourceHealth: () -> Unit,
+    onReconfigureAddon: (String, String, String) -> Unit,
     onRemoveService: (String, String) -> Unit,
     onRemoveAddon: (String, String) -> Unit,
 ) {
@@ -116,10 +138,17 @@ fun ServicesRoute(
     var serviceScriptUrl by rememberSaveable { mutableStateOf("") }
     var serviceManifestUrl by rememberSaveable { mutableStateOf("") }
     var addonTransportUrl by rememberSaveable { mutableStateOf("") }
-    var activeConfigurationUrl by rememberSaveable { mutableStateOf<String?>(null) }
+    var activeConfigurationTransportUrl by rememberSaveable { mutableStateOf<String?>(null) }
+    var activeReconfigureTransportUrl by rememberSaveable { mutableStateOf<String?>(null) }
     var activeServiceConfigurationId by rememberSaveable { mutableStateOf<String?>(null) }
     val uriHandler = LocalUriHandler.current
     val activeServiceConfiguration = state.services.firstOrNull { service -> service.id == activeServiceConfigurationId }
+    val activeConfigurationAddon = state.stremioAddons.firstOrNull { addon ->
+        addon.transportUrl == activeConfigurationTransportUrl
+    }
+    val activeReconfigureAddon = state.stremioAddons.firstOrNull { addon ->
+        addon.transportUrl == activeReconfigureTransportUrl
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -167,12 +196,31 @@ fun ServicesRoute(
             }
         }
 
-        activeConfigurationUrl?.let { configurationUrl ->
+        activeConfigurationAddon?.let { addon ->
             item {
                 StremioConfigurationPanel(
-                    configurationUrl = configurationUrl,
-                    onOpenExternal = { uriHandler.openUri(configurationUrl) },
-                    onClose = { activeConfigurationUrl = null },
+                    addon = addon,
+                    onConfigured = { configuredUrl ->
+                        onReconfigureAddon(addon.transportUrl, addon.autoModeId, configuredUrl)
+                        activeConfigurationTransportUrl = null
+                    },
+                    onOpenExternal = {
+                        addon.configurationUrl?.let(uriHandler::openUri)
+                    },
+                    onClose = { activeConfigurationTransportUrl = null },
+                )
+            }
+        }
+
+        activeReconfigureAddon?.let { addon ->
+            item {
+                StremioManualReconfigurePanel(
+                    addon = addon,
+                    onSave = { configuredUrl ->
+                        onReconfigureAddon(addon.transportUrl, addon.autoModeId, configuredUrl)
+                        activeReconfigureTransportUrl = null
+                    },
+                    onClose = { activeReconfigureTransportUrl = null },
                 )
             }
         }
@@ -290,7 +338,7 @@ fun ServicesRoute(
                                 serviceScriptUrl = ""
                                 serviceManifestUrl = ""
                             },
-                            enabled = !state.isMutating && serviceName.isNotBlank() && serviceScriptUrl.isNotBlank(),
+                            enabled = !state.isMutating && serviceScriptUrl.isNotBlank(),
                         ) {
                             Text("Save Service")
                         }
@@ -452,8 +500,9 @@ fun ServicesRoute(
                     onMoveUp = { onMoveAddonUp(addon.transportUrl) },
                     onMoveDown = { onMoveAddonDown(addon.transportUrl) },
                     onConfigure = addon.configurationUrl?.let { configurationUrl ->
-                        { activeConfigurationUrl = configurationUrl }
+                        { activeConfigurationTransportUrl = addon.transportUrl }
                     },
+                    onReconfigure = { activeReconfigureTransportUrl = addon.transportUrl },
                     onRefresh = { onRefreshAddon(addon.transportUrl) },
                     onRemove = { onRemoveAddon(addon.transportUrl, addon.autoModeId) },
                 )
@@ -504,10 +553,13 @@ private fun AutoModeOrderCard(
 
 @Composable
 private fun StremioConfigurationPanel(
-    configurationUrl: String,
+    addon: StremioAddonRow,
+    onConfigured: (String) -> Unit,
     onOpenExternal: () -> Unit,
     onClose: () -> Unit,
 ) {
+    val configurationUrl = addon.configurationUrl.orEmpty()
+    var manualUrl by rememberSaveable(addon.transportUrl) { mutableStateOf("") }
     GlassPanel {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(
@@ -524,7 +576,7 @@ private fun StremioConfigurationPanel(
                         color = MaterialTheme.colorScheme.onSurface,
                     )
                     Text(
-                        text = configurationUrl,
+                        text = configurationUrl.ifBlank { addon.transportUrl },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.tertiary,
                         maxLines = 2,
@@ -542,7 +594,37 @@ private fun StremioConfigurationPanel(
                 factory = { context ->
                     WebView(context).apply {
                         tag = configurationUrl
-                        webViewClient = WebViewClient()
+                        addJavascriptInterface(StremioInstallBridge(onConfigured), "EclipseStremioInstall")
+                        webViewClient = object : WebViewClient() {
+                            override fun shouldOverrideUrlLoading(
+                                view: WebView?,
+                                request: WebResourceRequest?,
+                            ): Boolean {
+                                val url = request?.url?.toString().orEmpty()
+                                if (url.startsWith("stremio://", ignoreCase = true)) {
+                                    onConfigured(url.toConfiguredStremioTransportUrl())
+                                    return true
+                                }
+                                return false
+                            }
+
+                            @Suppress("OVERRIDE_DEPRECATION")
+                            override fun shouldOverrideUrlLoading(
+                                view: WebView?,
+                                url: String?,
+                            ): Boolean {
+                                val candidate = url.orEmpty()
+                                if (candidate.startsWith("stremio://", ignoreCase = true)) {
+                                    onConfigured(candidate.toConfiguredStremioTransportUrl())
+                                    return true
+                                }
+                                return false
+                            }
+
+                            override fun onPageFinished(view: WebView?, url: String?) {
+                                view?.evaluateJavascript(StremioInstallCaptureScript, null)
+                            }
+                        }
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
                         loadUrl(configurationUrl)
@@ -555,6 +637,20 @@ private fun StremioConfigurationPanel(
                     }
                 },
             )
+            OutlinedTextField(
+                value = manualUrl,
+                onValueChange = { manualUrl = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Configured addon URL") },
+                singleLine = true,
+            )
+            Button(
+                onClick = { onConfigured(manualUrl) },
+                enabled = manualUrl.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Save Configured URL")
+            }
             OutlinedButton(
                 onClick = onOpenExternal,
                 modifier = Modifier.fillMaxWidth(),
@@ -563,6 +659,104 @@ private fun StremioConfigurationPanel(
             }
         }
     }
+}
+
+@Composable
+private fun StremioManualReconfigurePanel(
+    addon: StremioAddonRow,
+    onSave: (String) -> Unit,
+    onClose: () -> Unit,
+) {
+    var addonUrl by rememberSaveable(addon.transportUrl) { mutableStateOf("") }
+    GlassPanel {
+        Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Column(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Text(
+                        text = "Update Addon URL",
+                        style = MaterialTheme.typography.titleLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = addon.name,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.tertiary,
+                    )
+                }
+                OutlinedButton(onClick = onClose) {
+                    Text("Close")
+                }
+            }
+            OutlinedTextField(
+                value = addonUrl,
+                onValueChange = { addonUrl = it },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("New addon URL") },
+                singleLine = true,
+            )
+            Button(
+                onClick = { onSave(addonUrl) },
+                enabled = addonUrl.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Save")
+            }
+        }
+    }
+}
+
+private class StremioInstallBridge(
+    private val onConfigured: (String) -> Unit,
+) {
+    private val mainHandler = Handler(Looper.getMainLooper())
+
+    @JavascriptInterface
+    fun postMessage(url: String) {
+        mainHandler.post {
+            onConfigured(url.toConfiguredStremioTransportUrl())
+        }
+    }
+}
+
+private const val StremioInstallCaptureScript = """
+    (function() {
+      if (window.__eclipseStremioInstallCapture) return;
+      window.__eclipseStremioInstallCapture = true;
+      function notify(url) {
+        if (typeof url === 'string' && url.toLowerCase().indexOf('stremio://') === 0) {
+          window.EclipseStremioInstall.postMessage(url);
+          return true;
+        }
+        return false;
+      }
+      document.addEventListener('click', function(event) {
+        var target = event.target;
+        while (target && target.tagName !== 'A') target = target.parentElement;
+        if (target && notify(target.href)) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      }, true);
+      var originalAssign = window.location.assign;
+      window.location.assign = function(url) {
+        if (!notify(url)) originalAssign.call(window.location, url);
+      };
+    })();
+"""
+
+private fun String.toConfiguredStremioTransportUrl(): String {
+    var cleaned = trim()
+    if (cleaned.startsWith("stremio://", ignoreCase = true)) {
+        cleaned = "https://" + cleaned.drop("stremio://".length)
+    }
+    cleaned = cleaned.removeSuffix("/manifest.json").removeSuffix("/")
+    return cleaned
 }
 
 private data class ConfigFormRow(
@@ -579,7 +773,11 @@ private fun CustomServiceConfigurationPanel(
     var rows by remember(service.id, service.configurationJson) {
         mutableStateOf(service.configurationJson.toConfigRows())
     }
+    var typedValues by remember(service.id, service.configurationJson, service.settingRows) {
+        mutableStateOf(service.configurationJson.toConfigValueMap(service.settingRows))
+    }
     val hasRows = rows.any { row -> row.key.isNotBlank() || row.value.isNotBlank() }
+    val hasTypedSettings = service.settingRows.isNotEmpty()
 
     GlassPanel {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -607,50 +805,150 @@ private fun CustomServiceConfigurationPanel(
                 }
             }
 
-            rows.forEachIndexed { index, row ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    OutlinedTextField(
-                        value = row.key,
+            if (hasTypedSettings) {
+                service.settingRows.forEach { setting ->
+                    ServiceSettingInput(
+                        setting = setting,
+                        value = typedValues[setting.key] ?: setting.defaultValue,
                         onValueChange = { value ->
-                            rows = rows.updated(index, row.copy(key = value))
+                            typedValues = typedValues + (setting.key to value)
                         },
-                        modifier = Modifier.weight(0.42f),
-                        label = { Text("Key") },
-                        singleLine = true,
                     )
-                    OutlinedTextField(
-                        value = row.value,
-                        onValueChange = { value ->
-                            rows = rows.updated(index, row.copy(value = value))
-                        },
-                        modifier = Modifier.weight(0.58f),
-                        label = { Text("Value") },
-                        singleLine = true,
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedButton(
+                        onClick = { typedValues = service.settingRows.associate { it.key to it.defaultValue } },
+                    ) {
+                        Text("Reset")
+                    }
+                    Button(
+                        onClick = { onSave(typedValues.toConfigurationJson(service.settingRows)) },
+                    ) {
+                        Text("Save")
+                    }
+                }
+            } else {
+                rows.forEachIndexed { index, row ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        OutlinedTextField(
+                            value = row.key,
+                            onValueChange = { value ->
+                                rows = rows.updated(index, row.copy(key = value))
+                            },
+                            modifier = Modifier.weight(0.42f),
+                            label = { Text("Key") },
+                            singleLine = true,
+                        )
+                        OutlinedTextField(
+                            value = row.value,
+                            onValueChange = { value ->
+                                rows = rows.updated(index, row.copy(value = value))
+                            },
+                            modifier = Modifier.weight(0.58f),
+                            label = { Text("Value") },
+                            singleLine = true,
+                        )
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedButton(
+                        onClick = { rows = rows + ConfigFormRow() },
+                        enabled = rows.size < 24,
+                    ) {
+                        Text("Add Setting")
+                    }
+                    OutlinedButton(
+                        onClick = { rows = listOf(ConfigFormRow()) },
+                        enabled = hasRows,
+                    ) {
+                        Text("Clear")
+                    }
+                    Button(
+                        onClick = { onSave(rows.toConfigurationJson()) },
+                    ) {
+                        Text("Save")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ServiceSettingInput(
+    setting: ServiceSettingRow,
+    value: String,
+    onValueChange: (String) -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    text = setting.label.ifBlank { setting.key },
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+                setting.comment?.let { comment ->
+                    Text(
+                        text = comment,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
                     )
                 }
             }
+            if (setting.inputType == ServiceSettingInputType.BOOLEAN) {
+                Switch(
+                    checked = value.equals("true", ignoreCase = true),
+                    onCheckedChange = { enabled -> onValueChange(enabled.toString()) },
+                )
+            }
+        }
 
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedButton(
-                    onClick = { rows = rows + ConfigFormRow() },
-                    enabled = rows.size < 24,
-                ) {
-                    Text("Add Setting")
+        when (setting.inputType) {
+            ServiceSettingInputType.BOOLEAN -> Unit
+            ServiceSettingInputType.SELECT -> {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    setting.options.forEach { option ->
+                        FilterChip(
+                            selected = value == option,
+                            onClick = { onValueChange(option) },
+                            label = { Text(option) },
+                        )
+                    }
                 }
-                OutlinedButton(
-                    onClick = { rows = listOf(ConfigFormRow()) },
-                    enabled = hasRows,
-                ) {
-                    Text("Clear")
-                }
-                Button(
-                    onClick = { onSave(rows.toConfigurationJson()) },
-                ) {
-                    Text("Save")
-                }
+            }
+            ServiceSettingInputType.NUMBER -> {
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = { candidate ->
+                        if (candidate.isBlank() || candidate.toDoubleOrNull() != null || candidate == "-" || candidate == ".") {
+                            onValueChange(candidate)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(setting.key) },
+                    singleLine = true,
+                )
+            }
+            ServiceSettingInputType.TEXT -> {
+                OutlinedTextField(
+                    value = value,
+                    onValueChange = onValueChange,
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text(setting.key) },
+                    singleLine = true,
+                )
             }
         }
     }
@@ -669,6 +967,7 @@ private fun ServiceCard(
     onMoveUp: () -> Unit,
     onMoveDown: () -> Unit,
     onConfigure: (() -> Unit)? = null,
+    onReconfigure: (() -> Unit)? = null,
     onRefresh: (() -> Unit)? = null,
     onRemove: () -> Unit,
 ) {
@@ -735,6 +1034,11 @@ private fun ServiceCard(
                         Text("Configure")
                     }
                 }
+                onReconfigure?.let { reconfigure ->
+                    OutlinedButton(onClick = reconfigure) {
+                        Text("Update URL")
+                    }
+                }
                 OutlinedButton(onClick = onRemove) {
                     Text("Remove")
                 }
@@ -762,6 +1066,22 @@ private fun String?.toConfigRows(): List<ConfigFormRow> {
     return parsed.ifEmpty { listOf(ConfigFormRow()) }
 }
 
+private fun String?.toConfigValueMap(settings: List<ServiceSettingRow>): Map<String, String> {
+    val defaults = settings.associate { setting -> setting.key to setting.defaultValue }
+    val raw = this?.takeIf { it.isNotBlank() } ?: return defaults
+    val saved = runCatching {
+        val json = JSONObject(raw)
+        settings.associate { setting ->
+            val value = json.opt(setting.key)
+                ?.takeUnless { it == JSONObject.NULL }
+                ?.toString()
+                ?: setting.defaultValue
+            setting.key to value
+        }
+    }.getOrDefault(emptyMap())
+    return defaults + saved
+}
+
 private fun List<ConfigFormRow>.updated(
     index: Int,
     row: ConfigFormRow,
@@ -778,6 +1098,15 @@ private fun List<ConfigFormRow>.toConfigurationJson(): String? {
     return json.takeIf { it.length() > 0 }?.toString()
 }
 
+private fun Map<String, String>.toConfigurationJson(settings: List<ServiceSettingRow>): String? {
+    val json = JSONObject()
+    settings.forEach { setting ->
+        val value = this[setting.key] ?: setting.defaultValue
+        json.put(setting.key, value.typedJsonValue(setting.inputType))
+    }
+    return json.takeIf { it.length() > 0 }?.toString()
+}
+
 private fun String.typedJsonValue(): Any {
     val clean = trim()
     return when {
@@ -786,6 +1115,16 @@ private fun String.typedJsonValue(): Any {
         clean.toLongOrNull() != null -> clean.toLong()
         clean.toDoubleOrNull() != null -> clean.toDouble()
         else -> this
+    }
+}
+
+private fun String.typedJsonValue(inputType: ServiceSettingInputType): Any {
+    val clean = trim()
+    return when (inputType) {
+        ServiceSettingInputType.BOOLEAN -> clean.equals("true", ignoreCase = true)
+        ServiceSettingInputType.NUMBER -> clean.toLongOrNull() ?: clean.toDoubleOrNull() ?: clean
+        ServiceSettingInputType.SELECT,
+        ServiceSettingInputType.TEXT -> this
     }
 }
 

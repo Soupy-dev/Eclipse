@@ -2,6 +2,8 @@ package dev.soupy.eclipse.android.ui.services
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import dev.soupy.eclipse.android.core.js.ServiceSettingDescriptor
+import dev.soupy.eclipse.android.core.js.ServiceSettingType
 import dev.soupy.eclipse.android.core.model.SourceHealthSnapshot
 import dev.soupy.eclipse.android.core.model.displayStateFor
 import dev.soupy.eclipse.android.core.storage.AppSettings
@@ -13,6 +15,8 @@ import dev.soupy.eclipse.android.data.ServicesSnapshot
 import dev.soupy.eclipse.android.data.SourceHealthRepository
 import dev.soupy.eclipse.android.data.StremioAddonRecord
 import dev.soupy.eclipse.android.feature.services.AutoModeSourceOrderRow
+import dev.soupy.eclipse.android.feature.services.ServiceSettingInputType
+import dev.soupy.eclipse.android.feature.services.ServiceSettingRow
 import dev.soupy.eclipse.android.feature.services.ServiceSourceRow
 import dev.soupy.eclipse.android.feature.services.ServicesScreenState
 import dev.soupy.eclipse.android.feature.services.StremioAddonRow
@@ -164,6 +168,23 @@ class AndroidServicesViewModel(
         repository.refreshStremioAddon(transportUrl).getOrThrow()
     }
 
+    fun reconfigureAddon(
+        transportUrl: String,
+        autoModeId: String,
+        newTransportUrl: String,
+    ) = mutate(
+        successMessage = "Updated Stremio addon URL.",
+    ) {
+        val wasSelected = _state.value.stremioAddons.firstOrNull { addon ->
+            addon.transportUrl == transportUrl
+        }?.selectedInAutoMode == true
+        val newAutoModeId = repository.reconfigureStremioAddon(transportUrl, newTransportUrl).getOrThrow()
+        settingsStore.removeAutoModeSource(autoModeId)
+        if (wasSelected) {
+            settingsStore.setAutoModeSourceEnabled(newAutoModeId, enabled = true)
+        }
+    }
+
     fun refreshAllAddons() = mutate(
         successMessage = "Updated service sources.",
     ) {
@@ -305,12 +326,27 @@ private fun ServiceSourceRecord.toUiRow(
         subtitle = subtitle,
         configurationJson = configurationJson,
         configurationSummary = configurationSummary,
+        settingRows = settingDescriptors.map(ServiceSettingDescriptor::toUiRow),
         enabled = enabled,
         selectedInAutoMode = autoModeId in selectedSourceIds,
         healthLabel = health.label,
         healthWarning = health.warningText,
     )
 }
+
+private fun ServiceSettingDescriptor.toUiRow(): ServiceSettingRow = ServiceSettingRow(
+    key = key,
+    label = label,
+    inputType = when (type) {
+        ServiceSettingType.TEXT -> ServiceSettingInputType.TEXT
+        ServiceSettingType.BOOLEAN -> ServiceSettingInputType.BOOLEAN
+        ServiceSettingType.NUMBER -> ServiceSettingInputType.NUMBER
+        ServiceSettingType.SELECT -> ServiceSettingInputType.SELECT
+    },
+    defaultValue = defaultValue,
+    comment = comment,
+    options = options,
+)
 
 private fun StremioAddonRecord.toUiRow(
     selectedSourceIds: Set<String>,

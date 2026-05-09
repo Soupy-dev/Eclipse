@@ -102,9 +102,11 @@ fun LibraryRoute(
     onRemoveFromCollection: (String, String) -> Unit,
 ) {
     var collectionName by rememberSaveable { mutableStateOf("") }
+    var selectedCollectionId by rememberSaveable { mutableStateOf<String?>(null) }
     val bookmarks = state.collections.firstOrNull { it.name.equals("Bookmarks", ignoreCase = true) }
     val bookmarkItems = bookmarks?.items?.takeIf { it.isNotEmpty() } ?: state.savedItems
     val visibleCollections = state.collections.filterNot { it.name.equals("Bookmarks", ignoreCase = true) }
+    val selectedCollection = selectedCollectionId?.let { id -> state.collections.firstOrNull { it.id == id } }
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -112,7 +114,24 @@ fun LibraryRoute(
         verticalArrangement = Arrangement.spacedBy(18.dp),
         contentPadding = PaddingValues(horizontal = 20.dp, vertical = 18.dp),
     ) {
-        if (state.isLoading) {
+        if (selectedCollection != null) {
+            item {
+                OutlinedButton(onClick = { selectedCollectionId = null }) {
+                    Text("Back to Library")
+                }
+            }
+            item {
+                CollectionCard(
+                    row = selectedCollection,
+                    onSelect = onSelect,
+                    onDelete = {
+                        onDeleteCollection(selectedCollection.id)
+                        selectedCollectionId = null
+                    },
+                    onRemoveItem = { itemId -> onRemoveFromCollection(selectedCollection.id, itemId) },
+                )
+            }
+        } else if (state.isLoading) {
             item {
                 LoadingPanel(
                     title = "Loading library",
@@ -220,9 +239,7 @@ fun LibraryRoute(
                     items(visibleCollections, key = { it.id }) { collection ->
                         CollectionPreviewCard(
                             row = collection,
-                            onOpen = {
-                                collection.items.firstOrNull()?.detailTarget?.let(onSelect)
-                            },
+                            onOpen = { selectedCollectionId = collection.id },
                             onDelete = { onDeleteCollection(collection.id) },
                         )
                     }
@@ -306,7 +323,7 @@ private fun CollectionPreviewCard(
     GlassPanel(
         modifier = Modifier
             .width(250.dp)
-            .clickable(enabled = row.items.isNotEmpty(), onClick = onOpen),
+            .clickable(onClick = onOpen),
         contentPadding = PaddingValues(12.dp),
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {

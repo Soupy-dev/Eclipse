@@ -3,10 +3,12 @@ package dev.soupy.eclipse.android.ui.settings
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import dev.soupy.eclipse.android.core.model.AniListMedia
 import dev.soupy.eclipse.android.core.model.InAppPlayer
 import dev.soupy.eclipse.android.core.model.SimilarityAlgorithm
 import dev.soupy.eclipse.android.core.model.TrackerAccountSnapshot
 import dev.soupy.eclipse.android.core.model.TrackerStateSnapshot
+import dev.soupy.eclipse.android.core.model.displayTitle
 import dev.soupy.eclipse.android.core.network.AniListService
 import dev.soupy.eclipse.android.core.network.MyAnimeListService
 import dev.soupy.eclipse.android.core.network.NetworkResult
@@ -24,16 +26,27 @@ import dev.soupy.eclipse.android.data.MangaRepository
 import dev.soupy.eclipse.android.data.ReleaseRepository
 import dev.soupy.eclipse.android.data.ServicesRepository
 import dev.soupy.eclipse.android.data.TrackerAccountDraft
+import dev.soupy.eclipse.android.data.TrackerRemoteAnimeProgress
+import dev.soupy.eclipse.android.data.TrackerRemoteMangaProgress
 import dev.soupy.eclipse.android.data.TrackerRepository
 import dev.soupy.eclipse.android.data.TrackerSyncSummary
 import dev.soupy.eclipse.android.feature.settings.CatalogSettingsRow
 import dev.soupy.eclipse.android.feature.settings.LogSettingsRow
 import dev.soupy.eclipse.android.feature.settings.SettingsScreenState
 import dev.soupy.eclipse.android.feature.settings.StorageMetricRow
+import dev.soupy.eclipse.android.feature.settings.TrackerSyncToolPreviewRow
+import dev.soupy.eclipse.android.feature.settings.TrackerToolFillAniList
+import dev.soupy.eclipse.android.feature.settings.TrackerToolFillMAL
+import dev.soupy.eclipse.android.feature.settings.TrackerToolPortAniListToMAL
+import dev.soupy.eclipse.android.feature.settings.TrackerToolPortMALToAniList
+import dev.soupy.eclipse.android.feature.settings.TrackerToolPushAniList
+import dev.soupy.eclipse.android.feature.settings.TrackerToolPushMAL
 import dev.soupy.eclipse.android.feature.settings.TrackerSettingsRow
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import java.util.concurrent.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -63,6 +76,7 @@ class AndroidSettingsViewModel(
         ),
     )
     val state: StateFlow<SettingsScreenState> = _state.asStateFlow()
+    private var trackerSyncToolJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -1466,6 +1480,533 @@ class AndroidSettingsViewModel(
         }
     }
 
+    fun previewTrackerSyncTool(actionId: String) {
+        if (_state.value.isTrackerSyncToolRunning) return
+        trackerSyncToolJob?.cancel()
+        trackerSyncToolJob = viewModelScope.launch {
+            beginTrackerSyncTool(actionId, "Building preview...")
+            runCatching { buildTrackerSyncToolPreview(actionId) }
+                .onSuccess { preview ->
+                    _state.value = _state.value
+                        .withTrackerSyncToolPreview(actionId, preview)
+                        .copy(
+                            isTrackerSyncToolRunning = false,
+                            trackerStatus = "Preview ready",
+                            trackerSyncToolProgressCompleted = 0,
+                            trackerSyncToolProgressTotal = 0,
+                            trackerSyncToolProgressDetail = "Preview ready",
+                        )
+                }
+                .onFailure { error ->
+                    if (error is CancellationException) {
+                        finishCanceledSyncTool(actionId)
+                    } else {
+                        finishFailedSyncTool("Preview failed: ${error.message ?: "Could not build preview."}")
+                    }
+                }
+            trackerSyncToolJob = null
+        }
+    }
+
+    fun runTrackerSyncTool(
+        actionId: String,
+        onImported: () -> Unit = {},
+    ) {
+        if (_state.value.isTrackerSyncToolRunning) return
+        trackerSyncToolJob?.cancel()
+        trackerSyncToolJob = viewModelScope.launch {
+            beginTrackerSyncTool(actionId, "Running ${actionId.syncToolTitle()}...")
+            runCatching { performTrackerSyncTool(actionId, onImported) }
+                .onSuccess { preview ->
+                    _state.value = _state.value
+                        .withTrackerSyncToolPreview(actionId, preview)
+                        .copy(
+                            isTrackerSyncToolRunning = false,
+                            trackerStatus = "Finished ${actionId.syncToolTitle()}",
+                            trackerSyncToolProgressCompleted = _state.value.trackerSyncToolProgressTotal,
+                            trackerSyncToolProgressDetail = "Finished",
+                        )
+                    refreshLogs()
+                }
+                .onFailure { error ->
+                    if (error is CancellationException) {
+                        finishCanceledSyncTool(actionId)
+                    } else {
+                        finishFailedSyncTool("Sync failed: ${error.message ?: "Could not finish sync tool."}")
+                    }
+                }
+            trackerSyncToolJob = null
+        }
+    }
+
+    fun cancelTrackerSyncTool() {
+        trackerSyncToolJob?.cancel()
+        _state.value = _state.value.copy(
+            trackerStatus = "Canceling sync...",
+            trackerSyncToolProgressDetail = "Stopping after the current request...",
+        )
+    }
+
+    private suspend fun buildTrackerSyncToolPreview(actionId: String): TrackerSyncToolPreviewRow =
+        when (actionId) {
+            TrackerToolFillAniList -> previewFillAniList()
+            TrackerToolFillMAL -> previewFillMAL()
+            TrackerToolPushAniList -> previewPushTo("AniList")
+            TrackerToolPushMAL -> previewPushTo("MyAnimeList")
+            TrackerToolPortAniListToMAL -> buildAniListToMALPortPlan().preview
+            TrackerToolPortMALToAniList -> buildMALToAniListPortPlan().preview
+            else -> error("Unsupported sync tool.")
+        }
+
+    private suspend fun performTrackerSyncTool(
+        actionId: String,
+        onImported: () -> Unit,
+    ): TrackerSyncToolPreviewRow {
+        val preview = buildTrackerSyncToolPreview(actionId)
+        _state.value = _state.value
+            .withTrackerSyncToolPreview(actionId, preview)
+            .copy(
+                trackerSyncToolProgressTotal = preview.syncOperationCount(),
+                trackerSyncToolProgressCompleted = 0,
+                trackerSyncToolProgressDetail = if (preview.syncOperationCount() > 0) {
+                    "0 of ${preview.syncOperationCount()} operations complete"
+                } else {
+                    "No write operations needed"
+                },
+            )
+        return when (actionId) {
+            TrackerToolFillAniList -> fillEclipseFromAniListForTool(onImported)
+            TrackerToolFillMAL -> fillEclipseFromMALForTool(onImported)
+            TrackerToolPushAniList -> pushEclipseProgressTo("AniList")
+            TrackerToolPushMAL -> pushEclipseProgressTo("MyAnimeList")
+            TrackerToolPortAniListToMAL -> portAniListToMAL()
+            TrackerToolPortMALToAniList -> portMALToAniList()
+            else -> error("Unsupported sync tool.")
+        }
+    }
+
+    private suspend fun previewFillAniList(): TrackerSyncToolPreviewRow {
+        val account = trackerRepository.loadSnapshot().getOrThrow().aniListAccount()
+            ?: error("Connect AniList first.")
+        val animeEntries = fetchAniListAnimeLibrary(account)
+        val mangaEntries = fetchAniListMangaLibrary(account)
+        return TrackerSyncToolPreviewRow(
+            itemsToAdd = animeEntries.size + mangaEntries.size,
+            itemsToAdvance = animeEntries.count { it.animeProgressForSync() > 0 } +
+                mangaEntries.count { it.mangaProgressForSync() > 0 },
+            skipped = 0,
+            unmapped = (animeEntries + mangaEntries).count { it.media.id <= 0 },
+            estimatedApiCalls = 2,
+            notes = listOf("AniList fill reuses Android Library and Manga/Novel import paths; local progress is never deleted or downgraded."),
+        )
+    }
+
+    private suspend fun previewFillMAL(): TrackerSyncToolPreviewRow {
+        val mapped = fetchMappedMALLibraries()
+        val mappedAnime = mapped.animeEntries.count { entry -> mapped.animeByMalId[entry.malId] != null }
+        val mappedManga = mapped.mangaEntries.count { entry -> mapped.mangaByMalId[entry.malId] != null }
+        val unmapped = mapped.animeEntries.size + mapped.mangaEntries.size - mappedAnime - mappedManga
+        return TrackerSyncToolPreviewRow(
+            itemsToAdd = mappedAnime + mappedManga,
+            itemsToAdvance = mapped.animeEntries.count { entry ->
+                mapped.animeByMalId[entry.malId] != null && entry.watchedForImport() > 0
+            } + mapped.mangaEntries.count { entry ->
+                mapped.mangaByMalId[entry.malId] != null && entry.readForImport() > 0
+            },
+            skipped = unmapped,
+            unmapped = unmapped,
+            estimatedApiCalls = 4,
+            notes = listOf("MAL IDs are resolved in batches through AniList, then imported without overwrites."),
+        )
+    }
+
+    private suspend fun previewPushTo(service: String): TrackerSyncToolPreviewRow {
+        val snapshot = trackerRepository.loadSnapshot().getOrThrow()
+        require(snapshot.syncToolAccount(service) != null) { "Connect ${service.syncToolDisplayName()} first." }
+        val mangaSnapshot = mangaRepository.loadSnapshot().getOrThrow()
+        val counts = trackerRepository.localSyncCandidateCounts(mangaSnapshot).getOrThrow()
+        return TrackerSyncToolPreviewRow(
+            itemsToAdd = 0,
+            itemsToAdvance = counts.totalItems,
+            skipped = 0,
+            unmapped = 0,
+            estimatedApiCalls = if (service.isMyAnimeListService()) {
+                counts.animeItems * 4 + counts.mangaItems * 2
+            } else {
+                counts.animeItems * 3 + counts.mangaItems
+            },
+            notes = listOf("Local Eclipse progress will only push watched/read progress; it will not delete or downgrade ${service.syncToolDisplayName()}."),
+        )
+    }
+
+    private suspend fun fillEclipseFromAniListForTool(onImported: () -> Unit): TrackerSyncToolPreviewRow {
+        val account = trackerRepository.loadSnapshot().getOrThrow().aniListAccount()
+            ?: error("Connect AniList first.")
+        setTrackerSyncToolProgress("Filling Eclipse anime from AniList...")
+        val animeEntries = fetchAniListAnimeLibrary(account)
+        val animeSummary = libraryRepository.importAniListAnime(
+            animeEntries.map { entry ->
+                AniListLibraryImportDraft(
+                    media = entry.media,
+                    status = entry.status,
+                    progress = entry.progress,
+                    score = entry.score,
+                    updatedAtEpochSeconds = entry.updatedAtEpochSeconds,
+                )
+            },
+        ).getOrThrow()
+        advanceTrackerSyncToolProgress(animeEntries.size, "Finished AniList anime fill")
+
+        setTrackerSyncToolProgress("Filling Eclipse manga from AniList...")
+        val mangaEntries = fetchAniListMangaLibrary(account)
+        val mangaSummary = mangaRepository.importAniListManga(
+            mangaEntries.map { entry ->
+                AniListMangaLibraryImportDraft(
+                    media = entry.media,
+                    status = entry.status,
+                    progress = entry.progress,
+                    progressVolumes = entry.progressVolumes,
+                    score = entry.score,
+                    updatedAtEpochSeconds = entry.updatedAtEpochSeconds,
+                )
+            },
+        ).getOrThrow()
+        advanceTrackerSyncToolProgress(mangaEntries.size, "Finished AniList manga fill")
+        loggerRepository.log("Trackers", "Filled Eclipse from AniList sync tools.")
+        onImported()
+        return TrackerSyncToolPreviewRow(
+            itemsToAdd = animeSummary.importedItems + mangaSummary.importedItems,
+            itemsToAdvance = animeSummary.importedContinueWatching + mangaSummary.importedProgress,
+            skipped = 0,
+            unmapped = 0,
+            estimatedApiCalls = 0,
+            notes = listOf("AniList fill completed without deleting or downgrading local progress."),
+        )
+    }
+
+    private suspend fun fillEclipseFromMALForTool(onImported: () -> Unit): TrackerSyncToolPreviewRow {
+        setTrackerSyncToolProgress("Matching MAL entries to AniList...")
+        val mapped = fetchMappedMALLibraries()
+        val animeDrafts = mapped.animeEntries.mapNotNull { entry ->
+            val media = mapped.animeByMalId[entry.malId] ?: return@mapNotNull null
+            AniListLibraryImportDraft(
+                media = media,
+                status = entry.status,
+                progress = entry.watchedForImport(),
+                sourceName = "MAL",
+            )
+        }
+        val mangaDrafts = mapped.mangaEntries.mapNotNull { entry ->
+            val media = mapped.mangaByMalId[entry.malId] ?: return@mapNotNull null
+            AniListMangaLibraryImportDraft(
+                media = media,
+                status = entry.status,
+                progress = entry.readForImport(),
+                sourceName = "MAL",
+            )
+        }
+        val skipped = mapped.animeEntries.size + mapped.mangaEntries.size - animeDrafts.size - mangaDrafts.size
+
+        setTrackerSyncToolProgress("Filling Eclipse anime from MAL...")
+        libraryRepository.importAniListAnime(animeDrafts).getOrThrow()
+        advanceTrackerSyncToolProgress(animeDrafts.size, "Finished MAL anime fill")
+        setTrackerSyncToolProgress("Filling Eclipse manga from MAL...")
+        val mangaSummary = mangaRepository.importAniListManga(mangaDrafts).getOrThrow()
+        advanceTrackerSyncToolProgress(mangaDrafts.size, "Finished MAL manga fill")
+        loggerRepository.log("Trackers", "Filled Eclipse from MyAnimeList sync tools.")
+        onImported()
+        return TrackerSyncToolPreviewRow(
+            itemsToAdd = animeDrafts.size + mangaSummary.importedItems,
+            itemsToAdvance = animeDrafts.count { it.progress > 0 } + mangaSummary.importedProgress,
+            skipped = skipped,
+            unmapped = skipped,
+            estimatedApiCalls = 0,
+            notes = listOf("MAL fill completed without deleting or downgrading local progress."),
+        )
+    }
+
+    private suspend fun pushEclipseProgressTo(service: String): TrackerSyncToolPreviewRow {
+        val snapshot = trackerRepository.loadSnapshot().getOrThrow()
+        require(snapshot.syncToolAccount(service) != null) { "Connect ${service.syncToolDisplayName()} first." }
+        val mangaSnapshot = mangaRepository.loadSnapshot().getOrThrow()
+        setTrackerSyncToolProgress("Pushing watched progress to ${service.syncToolDisplayName()}...")
+        val animeSummary = trackerRepository.syncStoredProgress(
+            targetService = service,
+            respectSyncEnabled = false,
+        ).getOrThrow()
+        _state.value = _state.value.withTrackerState(animeSummary.state)
+        advanceTrackerSyncToolProgress(animeSummary.attemptedItems, "Finished anime progress push")
+        setTrackerSyncToolProgress("Pushing manga progress to ${service.syncToolDisplayName()}...")
+        val mangaSummary = trackerRepository.syncStoredMangaProgress(
+            snapshot = mangaSnapshot,
+            targetService = service,
+            respectSyncEnabled = false,
+        ).getOrThrow()
+        _state.value = _state.value.withTrackerState(mangaSummary.state)
+        advanceTrackerSyncToolProgress(mangaSummary.attemptedItems, "Finished manga progress push")
+        val synced = animeSummary.syncedItems + mangaSummary.syncedItems
+        val skipped = animeSummary.skippedItems + mangaSummary.skippedItems
+        val failures = animeSummary.failures + mangaSummary.failures
+        loggerRepository.log("Trackers", "Pushed Eclipse progress to ${service.syncToolDisplayName()}: $synced synced, $skipped skipped.")
+        return TrackerSyncToolPreviewRow(
+            itemsToAdd = 0,
+            itemsToAdvance = synced,
+            skipped = skipped,
+            unmapped = failures.size,
+            estimatedApiCalls = 0,
+            notes = listOf(
+                if (failures.isEmpty()) {
+                    "Eclipse progress push completed."
+                } else {
+                    "Eclipse progress push completed with ${failures.size} issue${failures.size.pluralSuffix()}."
+                },
+            ),
+        )
+    }
+
+    private suspend fun portAniListToMAL(): TrackerSyncToolPreviewRow {
+        val plan = buildAniListToMALPortPlan()
+        setTrackerSyncToolProgress("Writing AniList anime progress to MAL...")
+        val animeSummary = trackerRepository.syncRemoteAnimeProgress("MyAnimeList", plan.animeEntries).getOrThrow()
+        _state.value = _state.value.withTrackerState(animeSummary.state)
+        advanceTrackerSyncToolProgress(animeSummary.attemptedItems, "Finished AniList anime to MAL")
+        setTrackerSyncToolProgress("Writing AniList manga progress to MAL...")
+        val mangaSummary = trackerRepository.syncRemoteMangaProgress("MyAnimeList", plan.mangaEntries).getOrThrow()
+        _state.value = _state.value.withTrackerState(mangaSummary.state)
+        advanceTrackerSyncToolProgress(mangaSummary.attemptedItems, "Finished AniList manga to MAL")
+        loggerRepository.log("Trackers", "Ported AniList progress to MyAnimeList.")
+        return plan.preview.copy(
+            itemsToAdvance = animeSummary.syncedItems + mangaSummary.syncedItems,
+            skipped = animeSummary.skippedItems + mangaSummary.skippedItems + plan.preview.skipped,
+            estimatedApiCalls = 0,
+            notes = listOf("AniList to MAL port finished. No entries were deleted."),
+        )
+    }
+
+    private suspend fun portMALToAniList(): TrackerSyncToolPreviewRow {
+        val plan = buildMALToAniListPortPlan()
+        setTrackerSyncToolProgress("Writing MAL anime progress to AniList...")
+        val animeSummary = trackerRepository.syncRemoteAnimeProgress("AniList", plan.animeEntries).getOrThrow()
+        _state.value = _state.value.withTrackerState(animeSummary.state)
+        advanceTrackerSyncToolProgress(animeSummary.attemptedItems, "Finished MAL anime to AniList")
+        setTrackerSyncToolProgress("Writing MAL manga progress to AniList...")
+        val mangaSummary = trackerRepository.syncRemoteMangaProgress("AniList", plan.mangaEntries).getOrThrow()
+        _state.value = _state.value.withTrackerState(mangaSummary.state)
+        advanceTrackerSyncToolProgress(mangaSummary.attemptedItems, "Finished MAL manga to AniList")
+        loggerRepository.log("Trackers", "Ported MyAnimeList progress to AniList.")
+        return plan.preview.copy(
+            itemsToAdvance = animeSummary.syncedItems + mangaSummary.syncedItems,
+            skipped = animeSummary.skippedItems + mangaSummary.skippedItems + plan.preview.skipped,
+            estimatedApiCalls = 0,
+            notes = listOf("MAL to AniList port finished. No entries were deleted."),
+        )
+    }
+
+    private fun beginTrackerSyncTool(
+        actionId: String,
+        detail: String,
+    ) {
+        _state.value = _state.value.copy(
+            activeTrackerSyncToolId = actionId,
+            isTrackerSyncToolRunning = true,
+            trackerStatus = detail,
+            trackerSyncToolProgressCompleted = 0,
+            trackerSyncToolProgressTotal = 0,
+            trackerSyncToolProgressDetail = detail,
+        )
+    }
+
+    private fun setTrackerSyncToolProgress(detail: String) {
+        _state.value = _state.value.copy(
+            trackerStatus = detail,
+            trackerSyncToolProgressDetail = detail,
+        )
+    }
+
+    private fun advanceTrackerSyncToolProgress(
+        amount: Int,
+        detail: String,
+    ) {
+        val current = _state.value
+        _state.value = current.copy(
+            trackerSyncToolProgressCompleted = (current.trackerSyncToolProgressCompleted + amount)
+                .coerceAtMost(current.trackerSyncToolProgressTotal.coerceAtLeast(0)),
+            trackerSyncToolProgressDetail = detail,
+        )
+    }
+
+    private fun finishCanceledSyncTool(actionId: String) {
+        _state.value = _state.value.copy(
+            activeTrackerSyncToolId = actionId,
+            isTrackerSyncToolRunning = false,
+            trackerStatus = "Canceled ${actionId.syncToolTitle()}",
+            trackerSyncToolProgressDetail = "Canceled",
+        )
+    }
+
+    private fun finishFailedSyncTool(message: String) {
+        _state.value = _state.value.copy(
+            isTrackerSyncToolRunning = false,
+            trackerStatus = message,
+            trackerSyncToolProgressDetail = message,
+        )
+    }
+
+    private suspend fun fetchAniListAnimeLibrary(account: TrackerAccountSnapshot): List<AniListService.LibraryEntry> =
+        when (
+            val result = aniListService.fetchAnimeLibrary(
+                accessToken = account.accessToken,
+                username = account.username.takeIf(String::isNotBlank),
+            )
+        ) {
+            is NetworkResult.Success -> result.value
+            is NetworkResult.Failure -> error(result.toStatusMessage("AniList anime library fetch failed."))
+        }
+
+    private suspend fun fetchAniListMangaLibrary(account: TrackerAccountSnapshot): List<AniListService.LibraryEntry> =
+        when (
+            val result = aniListService.fetchMangaLibrary(
+                accessToken = account.accessToken,
+                username = account.username.takeIf(String::isNotBlank),
+            )
+        ) {
+            is NetworkResult.Success -> result.value
+            is NetworkResult.Failure -> error(result.toStatusMessage("AniList manga library fetch failed."))
+        }
+
+    private suspend fun fetchMALAnimeLibrary(account: TrackerAccountSnapshot): List<MyAnimeListService.AnimeLibraryEntry> =
+        when (val result = myAnimeListService.fetchAnimeLibrary(account.accessToken)) {
+            is NetworkResult.Success -> result.value
+            is NetworkResult.Failure -> error(result.toStatusMessage("MAL anime library fetch failed."))
+        }
+
+    private suspend fun fetchMALMangaLibrary(account: TrackerAccountSnapshot): List<MyAnimeListService.MangaLibraryEntry> =
+        when (val result = myAnimeListService.fetchMangaLibrary(account.accessToken)) {
+            is NetworkResult.Success -> result.value
+            is NetworkResult.Failure -> error(result.toStatusMessage("MAL manga library fetch failed."))
+        }
+
+    private suspend fun fetchMappedMALLibraries(): MappedMALLibraries {
+        val account = trackerRepository.loadSnapshot().getOrThrow().myAnimeListAccount()
+            ?: error("Connect MyAnimeList first.")
+        val animeEntries = fetchMALAnimeLibrary(account)
+        val mangaEntries = fetchMALMangaLibrary(account)
+        val animeByMalId = when (val result = aniListService.mediaByMalIds(animeEntries.map { it.malId }, mediaType = "ANIME")) {
+            is NetworkResult.Success -> result.value
+            is NetworkResult.Failure -> error(result.toStatusMessage("MAL anime matching failed."))
+        }
+        val mangaByMalId = when (val result = aniListService.mediaByMalIds(mangaEntries.map { it.malId }, mediaType = "MANGA")) {
+            is NetworkResult.Success -> result.value
+            is NetworkResult.Failure -> error(result.toStatusMessage("MAL manga matching failed."))
+        }
+        return MappedMALLibraries(
+            animeEntries = animeEntries,
+            mangaEntries = mangaEntries,
+            animeByMalId = animeByMalId,
+            mangaByMalId = mangaByMalId,
+        )
+    }
+
+    private suspend fun buildAniListToMALPortPlan(): TrackerPortPlan {
+        val snapshot = trackerRepository.loadSnapshot().getOrThrow()
+        val aniListAccount = snapshot.aniListAccount() ?: error("Connect AniList first.")
+        snapshot.myAnimeListAccount() ?: error("Connect MyAnimeList first.")
+        val sourceAnime = fetchAniListAnimeLibrary(aniListAccount)
+        val sourceManga = fetchAniListMangaLibrary(aniListAccount)
+        val malAccount = snapshot.myAnimeListAccount() ?: error("Connect MyAnimeList first.")
+        val destinationAnimeByMalId = fetchMALAnimeLibrary(malAccount).associateBy { it.malId }
+        val destinationMangaByMalId = fetchMALMangaLibrary(malAccount).associateBy { it.malId }
+        val mappedAnime = sourceAnime.filter { entry -> entry.media.idMal != null }
+        val mappedManga = sourceManga.filter { entry -> entry.media.idMal != null }
+        val animeEntries = mappedAnime.mapNotNull { entry ->
+            val malId = entry.media.idMal ?: return@mapNotNull null
+            val progress = entry.animeProgressForSync()
+            val destinationProgress = destinationAnimeByMalId[malId]?.watchedForImport() ?: 0
+            if (progress <= destinationProgress) return@mapNotNull null
+            TrackerRemoteAnimeProgress(
+                aniListId = entry.media.id,
+                title = entry.media.displayTitle,
+                progress = progress,
+                isComplete = entry.isAnimeComplete(),
+            )
+        }
+        val mangaEntries = mappedManga.mapNotNull { entry ->
+            val malId = entry.media.idMal ?: return@mapNotNull null
+            val progress = entry.mangaProgressForSync()
+            val destinationProgress = destinationMangaByMalId[malId]?.readForImport() ?: 0
+            if (progress <= destinationProgress) return@mapNotNull null
+            TrackerRemoteMangaProgress(
+                aniListId = entry.media.id,
+                progress = progress,
+                isComplete = entry.isMangaComplete(),
+            )
+        }
+        val total = sourceAnime.size + sourceManga.size
+        val mapped = mappedAnime.size + mappedManga.size
+        val advancing = animeEntries.size + mangaEntries.size
+        val unmapped = total - mapped
+        return TrackerPortPlan(
+            preview = TrackerSyncToolPreviewRow(
+                itemsToAdd = 0,
+                itemsToAdvance = advancing,
+                skipped = total - advancing,
+                unmapped = unmapped,
+                estimatedApiCalls = total + advancing,
+                notes = listOf("Only entries that advance MAL are written; already-current destination entries are skipped."),
+            ),
+            animeEntries = animeEntries,
+            mangaEntries = mangaEntries,
+        )
+    }
+
+    private suspend fun buildMALToAniListPortPlan(): TrackerPortPlan {
+        val snapshot = trackerRepository.loadSnapshot().getOrThrow()
+        val mapped = fetchMappedMALLibraries()
+        val aniListAccount = snapshot.aniListAccount() ?: error("Connect AniList first.")
+        val destinationAnimeByAniListId = fetchAniListAnimeLibrary(aniListAccount).associateBy { it.media.id }
+        val destinationMangaByAniListId = fetchAniListMangaLibrary(aniListAccount).associateBy { it.media.id }
+        val animeEntries = mapped.animeEntries.mapNotNull { entry ->
+            val media = mapped.animeByMalId[entry.malId] ?: return@mapNotNull null
+            val progress = entry.watchedForImport()
+            val destinationProgress = destinationAnimeByAniListId[media.id]?.animeProgressForSync() ?: 0
+            if (progress <= destinationProgress) return@mapNotNull null
+            TrackerRemoteAnimeProgress(
+                aniListId = media.id,
+                title = media.displayTitle,
+                progress = progress,
+                isComplete = entry.isAnimeComplete(),
+            )
+        }
+        val mangaEntries = mapped.mangaEntries.mapNotNull { entry ->
+            val media = mapped.mangaByMalId[entry.malId] ?: return@mapNotNull null
+            val progress = entry.readForImport()
+            val destinationProgress = destinationMangaByAniListId[media.id]?.mangaProgressForSync() ?: 0
+            if (progress <= destinationProgress) return@mapNotNull null
+            TrackerRemoteMangaProgress(
+                aniListId = media.id,
+                progress = progress,
+                isComplete = entry.isMangaComplete(),
+            )
+        }
+        val total = mapped.animeEntries.size + mapped.mangaEntries.size
+        val mappedCount = mapped.animeEntries.count { entry -> mapped.animeByMalId[entry.malId] != null } +
+            mapped.mangaEntries.count { entry -> mapped.mangaByMalId[entry.malId] != null }
+        val advancing = animeEntries.size + mangaEntries.size
+        val unmapped = total - mappedCount
+        return TrackerPortPlan(
+            preview = TrackerSyncToolPreviewRow(
+                itemsToAdd = 0,
+                itemsToAdvance = advancing,
+                skipped = total - advancing,
+                unmapped = unmapped,
+                estimatedApiCalls = total + advancing,
+                notes = listOf("MAL IDs are resolved in batches, and only entries that advance AniList are written."),
+            ),
+            animeEntries = animeEntries,
+            mangaEntries = mangaEntries,
+        )
+    }
+
     private fun moveCatalog(id: String, direction: Int) {
         viewModelScope.launch {
             catalogRepository.moveCatalog(id, direction)
@@ -1656,6 +2197,36 @@ private fun SettingsScreenState.withTrackerState(
     )
 }
 
+private fun SettingsScreenState.withTrackerSyncToolPreview(
+    actionId: String,
+    preview: TrackerSyncToolPreviewRow,
+): SettingsScreenState =
+    copy(
+        activeTrackerSyncToolId = actionId,
+        trackerSyncTools = trackerSyncTools.map { tool ->
+            if (tool.id == actionId) tool.copy(preview = preview) else tool
+        },
+    )
+
+private fun TrackerSyncToolPreviewRow.syncOperationCount(): Int =
+    (itemsToAdd + itemsToAdvance + skipped).coerceAtLeast(0)
+
+private fun String.syncToolTitle(): String = when (this) {
+    TrackerToolFillAniList -> "Fill Eclipse From AniList"
+    TrackerToolFillMAL -> "Fill Eclipse From MAL"
+    TrackerToolPushAniList -> "Push Eclipse To AniList"
+    TrackerToolPushMAL -> "Push Eclipse To MAL"
+    TrackerToolPortAniListToMAL -> "Port AniList To MAL"
+    TrackerToolPortMALToAniList -> "Port MAL To AniList"
+    else -> "Sync Tool"
+}
+
+private fun String.syncToolDisplayName(): String =
+    if (isMyAnimeListService()) "MyAnimeList" else this
+
+private fun TrackerStateSnapshot.syncToolAccount(service: String): TrackerAccountSnapshot? =
+    if (service.isMyAnimeListService()) myAnimeListAccount() else aniListAccount()
+
 private fun TrackerStateSnapshot.aniListAccount(): TrackerAccountSnapshot? {
     val modern = accounts.firstOrNull { account ->
         account.isConnected &&
@@ -1701,6 +2272,49 @@ private fun TrackerStateSnapshot.myAnimeListAccount(): TrackerAccountSnapshot? {
         null
     }
 }
+
+private data class MappedMALLibraries(
+    val animeEntries: List<MyAnimeListService.AnimeLibraryEntry>,
+    val mangaEntries: List<MyAnimeListService.MangaLibraryEntry>,
+    val animeByMalId: Map<Int, AniListMedia>,
+    val mangaByMalId: Map<Int, AniListMedia>,
+)
+
+private data class TrackerPortPlan(
+    val preview: TrackerSyncToolPreviewRow,
+    val animeEntries: List<TrackerRemoteAnimeProgress>,
+    val mangaEntries: List<TrackerRemoteMangaProgress>,
+)
+
+private fun AniListService.LibraryEntry.animeProgressForSync(): Int =
+    if (status?.equals("COMPLETED", ignoreCase = true) == true) {
+        maxOf(progress, media.episodes ?: 0)
+    } else {
+        progress.coerceAtLeast(0)
+    }
+
+private fun AniListService.LibraryEntry.mangaProgressForSync(): Int =
+    if (status?.equals("COMPLETED", ignoreCase = true) == true) {
+        maxOf(progress, media.chapters ?: 0)
+    } else {
+        progress.coerceAtLeast(0)
+    }
+
+private fun AniListService.LibraryEntry.isAnimeComplete(): Boolean =
+    status?.equals("COMPLETED", ignoreCase = true) == true ||
+        media.episodes?.takeIf { it > 0 }?.let { animeProgressForSync() >= it } == true
+
+private fun AniListService.LibraryEntry.isMangaComplete(): Boolean =
+    status?.equals("COMPLETED", ignoreCase = true) == true ||
+        media.chapters?.takeIf { it > 0 }?.let { mangaProgressForSync() >= it } == true
+
+private fun MyAnimeListService.AnimeLibraryEntry.isAnimeComplete(): Boolean =
+    status.equals("completed", ignoreCase = true) ||
+        totalEpisodes?.takeIf { it > 0 }?.let { watchedForImport() >= it } == true
+
+private fun MyAnimeListService.MangaLibraryEntry.isMangaComplete(): Boolean =
+    status.equals("completed", ignoreCase = true) ||
+        totalChapters?.takeIf { it > 0 }?.let { readForImport() >= it } == true
 
 private fun MyAnimeListService.AnimeLibraryEntry.watchedForImport(): Int =
     if (status.equals("completed", ignoreCase = true)) {

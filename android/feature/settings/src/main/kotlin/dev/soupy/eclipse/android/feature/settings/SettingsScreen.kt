@@ -21,13 +21,16 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -58,7 +61,7 @@ data class SettingsScreenState(
     val selectedSimilarityAlgorithm: SimilarityAlgorithm = SimilarityAlgorithm.HYBRID,
     val showNextEpisodeButton: Boolean = true,
     val nextEpisodeThreshold: Int = 90,
-    val inAppPlayer: InAppPlayer = InAppPlayer.NORMAL,
+    val inAppPlayer: InAppPlayer = InAppPlayer.VLC,
     val enableSubtitlesByDefault: Boolean = false,
     val enableVLCSubtitleEditMenu: Boolean = true,
     val defaultSubtitleLanguage: String = "eng",
@@ -119,6 +122,12 @@ data class SettingsScreenState(
     val autoSyncRatings: Boolean = false,
     val trackerRows: List<TrackerSettingsRow> = emptyList(),
     val trackerStatus: String = "No tracker accounts connected yet.",
+    val trackerSyncTools: List<TrackerSyncToolRow> = DefaultTrackerSyncToolRows,
+    val activeTrackerSyncToolId: String? = null,
+    val isTrackerSyncToolRunning: Boolean = false,
+    val trackerSyncToolProgressCompleted: Int = 0,
+    val trackerSyncToolProgressTotal: Int = 0,
+    val trackerSyncToolProgressDetail: String? = null,
     val aniListOAuthUrl: String = "",
     val myAnimeListOAuthUrl: String = "",
     val traktOAuthUrl: String = "",
@@ -159,6 +168,65 @@ data class TrackerSettingsRow(
     val username: String,
     val tokenPreview: String,
     val isConnected: Boolean,
+)
+
+data class TrackerSyncToolPreviewRow(
+    val itemsToAdd: Int = 0,
+    val itemsToAdvance: Int = 0,
+    val skipped: Int = 0,
+    val unmapped: Int = 0,
+    val estimatedApiCalls: Int = 0,
+    val notes: List<String> = emptyList(),
+)
+
+data class TrackerSyncToolRow(
+    val id: String,
+    val title: String,
+    val subtitle: String,
+    val isProviderPort: Boolean = false,
+    val preview: TrackerSyncToolPreviewRow? = null,
+)
+
+const val TrackerToolFillAniList = "fill-eclipse-anilist"
+const val TrackerToolFillMAL = "fill-eclipse-mal"
+const val TrackerToolPushAniList = "push-eclipse-anilist"
+const val TrackerToolPushMAL = "push-eclipse-mal"
+const val TrackerToolPortAniListToMAL = "port-anilist-mal"
+const val TrackerToolPortMALToAniList = "port-mal-anilist"
+
+val DefaultTrackerSyncToolRows = listOf(
+    TrackerSyncToolRow(
+        id = TrackerToolFillAniList,
+        title = "Fill Eclipse From AniList",
+        subtitle = "Import AniList anime, manga, novel, and reader progress without downgrading local progress.",
+    ),
+    TrackerSyncToolRow(
+        id = TrackerToolFillMAL,
+        title = "Fill Eclipse From MAL",
+        subtitle = "Resolve MAL IDs through AniList, then import matched anime, manga, novel, and reader progress.",
+    ),
+    TrackerSyncToolRow(
+        id = TrackerToolPushAniList,
+        title = "Push Eclipse To AniList",
+        subtitle = "Push local watched/read progress to AniList without deleting or lowering remote entries.",
+    ),
+    TrackerSyncToolRow(
+        id = TrackerToolPushMAL,
+        title = "Push Eclipse To MAL",
+        subtitle = "Resolve AniList IDs to MAL, then push local watched/read progress.",
+    ),
+    TrackerSyncToolRow(
+        id = TrackerToolPortAniListToMAL,
+        title = "Port AniList To MAL",
+        subtitle = "Copy AniList progress into MAL only when it advances the destination.",
+        isProviderPort = true,
+    ),
+    TrackerSyncToolRow(
+        id = TrackerToolPortMALToAniList,
+        title = "Port MAL To AniList",
+        subtitle = "Copy MAL progress into AniList only when it advances the destination.",
+        isProviderPort = true,
+    ),
 )
 
 private val AppearanceOptions = listOf(
@@ -289,6 +357,9 @@ fun SettingsRoute(
     onAniListImportMangaLibrary: () -> Unit,
     onMyAnimeListImportLibrary: () -> Unit,
     onAniListSyncMangaProgress: () -> Unit,
+    onTrackerSyncToolPreview: (String) -> Unit,
+    onTrackerSyncToolRun: (String) -> Unit,
+    onTrackerSyncToolCancel: () -> Unit,
     onExportBackup: (Uri) -> Unit,
     onImportBackup: (Uri) -> Unit,
     onHighQualityThresholdChanged: (Double) -> Unit,
@@ -653,6 +724,9 @@ fun SettingsRoute(
                 onAniListImportMangaLibrary = onAniListImportMangaLibrary,
                 onMyAnimeListImportLibrary = onMyAnimeListImportLibrary,
                 onAniListSyncMangaProgress = onAniListSyncMangaProgress,
+                onTrackerSyncToolPreview = onTrackerSyncToolPreview,
+                onTrackerSyncToolRun = onTrackerSyncToolRun,
+                onTrackerSyncToolCancel = onTrackerSyncToolCancel,
             )
         }
         }
@@ -1476,6 +1550,9 @@ private fun TrackerSettingsCard(
     onAniListImportMangaLibrary: () -> Unit,
     onMyAnimeListImportLibrary: () -> Unit,
     onAniListSyncMangaProgress: () -> Unit,
+    onTrackerSyncToolPreview: (String) -> Unit,
+    onTrackerSyncToolRun: (String) -> Unit,
+    onTrackerSyncToolCancel: () -> Unit,
 ) {
     val hasAniListAccount = state.trackerRows.any { row ->
         row.isConnected && row.service.equals("AniList", ignoreCase = true)
@@ -1484,6 +1561,36 @@ private fun TrackerSettingsCard(
         row.isConnected && row.service.isMyAnimeListService()
     }
     val uriHandler = LocalUriHandler.current
+    var confirmSyncToolId by rememberSaveable { mutableStateOf<String?>(null) }
+    val confirmingTool = state.trackerSyncTools.firstOrNull { tool -> tool.id == confirmSyncToolId }
+    if (confirmingTool != null) {
+        AlertDialog(
+            onDismissRequest = {
+                if (!state.isTrackerSyncToolRunning) {
+                    confirmSyncToolId = null
+                }
+            },
+            title = { Text("Run Sync Tool?") },
+            text = {
+                Text("This writes progress to the selected destination but never deletes entries or downgrades progress.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onTrackerSyncToolRun(confirmingTool.id)
+                        confirmSyncToolId = null
+                    },
+                ) {
+                    Text("Run")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmSyncToolId = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
     GlassPanel {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(
@@ -1608,6 +1715,19 @@ private fun TrackerSettingsCard(
                 Text("Sync Manga Progress")
             }
 
+            TrackerSyncToolsPanel(
+                state = state,
+                onPreview = onTrackerSyncToolPreview,
+                onRun = { tool ->
+                    if (tool.isProviderPort) {
+                        confirmSyncToolId = tool.id
+                    } else {
+                        onTrackerSyncToolRun(tool.id)
+                    }
+                },
+                onCancel = onTrackerSyncToolCancel,
+            )
+
             state.trackerRows.forEach { row ->
                 TrackerAccountRow(
                     row = row,
@@ -1615,6 +1735,170 @@ private fun TrackerSettingsCard(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun TrackerSyncToolsPanel(
+    state: SettingsScreenState,
+    onPreview: (String) -> Unit,
+    onRun: (TrackerSyncToolRow) -> Unit,
+    onCancel: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text(
+            text = "Sync Tools",
+            style = MaterialTheme.typography.titleLarge,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+
+        if (state.isTrackerSyncToolRunning || state.trackerSyncToolProgressDetail != null) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.42f), MaterialTheme.shapes.small)
+                    .padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = state.trackerSyncToolProgressDetail ?: state.trackerStatus,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f),
+                        modifier = Modifier.weight(1f),
+                    )
+                    if (state.isTrackerSyncToolRunning) {
+                        OutlinedButton(onClick = onCancel) {
+                            Text("Cancel")
+                        }
+                    }
+                }
+                if (state.trackerSyncToolProgressTotal > 0) {
+                    LinearProgressIndicator(
+                        progress = {
+                            state.trackerSyncToolProgressCompleted.toFloat() /
+                                state.trackerSyncToolProgressTotal.toFloat().coerceAtLeast(1f)
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Text(
+                        text = "${state.trackerSyncToolProgressCompleted} / ${state.trackerSyncToolProgressTotal}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.tertiary,
+                    )
+                }
+            }
+        }
+
+        state.trackerSyncTools.forEach { tool ->
+            TrackerSyncToolCard(
+                tool = tool,
+                isRunning = state.isTrackerSyncToolRunning,
+                isActive = state.activeTrackerSyncToolId == tool.id,
+                onPreview = { onPreview(tool.id) },
+                onRun = { onRun(tool) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun TrackerSyncToolCard(
+    tool: TrackerSyncToolRow,
+    isRunning: Boolean,
+    isActive: Boolean,
+    onPreview: () -> Unit,
+    onRun: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                MaterialTheme.colorScheme.surface.copy(alpha = if (isActive) 0.56f else 0.32f),
+                MaterialTheme.shapes.small,
+            )
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(
+            text = tool.title,
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Text(
+            text = tool.subtitle,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
+        )
+
+        tool.preview?.let { preview ->
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.24f), MaterialTheme.shapes.small)
+                    .padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                TrackerPreviewMetric("Add", preview.itemsToAdd)
+                TrackerPreviewMetric("Advance", preview.itemsToAdvance)
+                TrackerPreviewMetric("Skipped", preview.skipped)
+                TrackerPreviewMetric("Unmapped", preview.unmapped)
+                TrackerPreviewMetric("API calls", preview.estimatedApiCalls)
+                preview.notes.forEach { note ->
+                    Text(
+                        text = note,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.tertiary,
+                    )
+                }
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            OutlinedButton(
+                onClick = onPreview,
+                enabled = !isRunning,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("Preview")
+            }
+            Button(
+                onClick = onRun,
+                enabled = !isRunning && tool.preview != null,
+                modifier = Modifier.weight(1f),
+            ) {
+                Text(if (tool.isProviderPort) "Confirm & Run" else "Run")
+            }
+        }
+    }
+}
+
+@Composable
+private fun TrackerPreviewMetric(
+    label: String,
+    value: Int,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+        )
+        Text(
+            text = value.toString(),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
     }
 }
 

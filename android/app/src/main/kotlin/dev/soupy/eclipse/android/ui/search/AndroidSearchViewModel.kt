@@ -81,6 +81,20 @@ class AndroidSearchViewModel(
         search()
     }
 
+    fun clearRecentQueries() {
+        viewModelScope.launch {
+            val recent = repository.clearRecentQueries()
+            _state.update { it.copy(recentQueries = recent) }
+        }
+    }
+
+    fun removeRecentQuery(query: String) {
+        viewModelScope.launch {
+            val recent = repository.removeRecentQuery(query)
+            _state.update { it.copy(recentQueries = recent) }
+        }
+    }
+
     fun search() {
         val query = _state.value.query.trim()
         if (query.isBlank()) {

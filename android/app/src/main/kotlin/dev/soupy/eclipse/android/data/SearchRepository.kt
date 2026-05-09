@@ -40,6 +40,21 @@ class SearchRepository(
 ) {
     suspend fun recentQueries(): List<String> = searchHistoryStore.read().queries
 
+    suspend fun clearRecentQueries(): List<String> {
+        searchHistoryStore.write(dev.soupy.eclipse.android.core.model.SearchHistorySnapshot())
+        return emptyList()
+    }
+
+    suspend fun removeRecentQuery(query: String): List<String> {
+        val updated = searchHistoryStore.read().let { snapshot ->
+            snapshot.copy(
+                queries = snapshot.queries.filterNot { it.equals(query, ignoreCase = true) },
+            )
+        }
+        searchHistoryStore.write(updated)
+        return updated.queries
+    }
+
     fun observeSearchSources(): Flow<List<SearchSourceOption>> =
         servicesRepository.observeSnapshot().map { snapshot ->
             buildList {

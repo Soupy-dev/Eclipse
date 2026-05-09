@@ -43,6 +43,27 @@ private data class AniListMangaProgressSyncItem(
     val isComplete: Boolean,
 )
 
+data class TrackerLocalSyncCandidateCounts(
+    val animeItems: Int = 0,
+    val mangaItems: Int = 0,
+) {
+    val totalItems: Int
+        get() = animeItems + mangaItems
+}
+
+data class TrackerRemoteAnimeProgress(
+    val aniListId: Int,
+    val title: String = "",
+    val progress: Int,
+    val isComplete: Boolean = false,
+)
+
+data class TrackerRemoteMangaProgress(
+    val aniListId: Int,
+    val progress: Int,
+    val isComplete: Boolean = false,
+)
+
 class TrackerRepository(
     private val trackerStore: TrackerStore,
     private val progressRepository: ProgressRepository,
@@ -160,7 +181,10 @@ class TrackerRepository(
         syncItems(listOf(draft.toTrackerSyncItem()))
     }
 
-    suspend fun syncStoredProgress(): Result<TrackerSyncSummary> = runCatching {
+    suspend fun syncStoredProgress(
+        targetService: String? = null,
+        respectSyncEnabled: Boolean = true,
+    ): Result<TrackerSyncSummary> = runCatching {
         val progress = progressRepository.loadSnapshot().getOrThrow()
         val showTitles = progress.showMetadata.mapValues { (_, metadata) -> metadata.title }
         val items = progress.movieProgress
@@ -170,23 +194,42 @@ class TrackerRepository(
                 .filter { it.isWatched || it.progressPercent >= TrackerWatchedThreshold }
                 .map { episode -> episode.toTrackerSyncItem(showTitles[episode.showId.toString()]) }
 
-        syncItems(items)
+        syncItems(
+            items = items,
+            targetService = targetService,
+            respectSyncEnabled = respectSyncEnabled,
+        )
     }
 
-    suspend fun syncStoredMangaProgress(snapshot: MangaLibrarySnapshot): Result<TrackerSyncSummary> = runCatching {
+    suspend fun localSyncCandidateCounts(snapshot: MangaLibrarySnapshot): Result<TrackerLocalSyncCandidateCounts> = runCatching {
+        val progress = progressRepository.loadSnapshot().getOrThrow()
+        val animeItems = progress.movieProgress.count { it.isWatched || it.progressPercent >= TrackerWatchedThreshold } +
+            progress.episodeProgress.count { it.isWatched || it.progressPercent >= TrackerWatchedThreshold }
+        TrackerLocalSyncCandidateCounts(
+            animeItems = animeItems,
+            mangaItems = snapshot.toAniListMangaProgressSyncItems().size,
+        )
+    }
+
+    suspend fun syncStoredMangaProgress(
+        snapshot: MangaLibrarySnapshot,
+        targetService: String? = null,
+        respectSyncEnabled: Boolean = true,
+    ): Result<TrackerSyncSummary> = runCatching {
         val state = trackerStore.read()
-        val originalAccounts = state.connectedAccounts().filter { account ->
-            account.service.normalizedTrackerService() in MangaTrackerServices
-        }
+        val connectedAccounts = state.connectedAccounts()
+        val originalAccounts = connectedAccounts
+            .filter { account -> account.service.normalizedTrackerService() in MangaTrackerServices }
+            .filter { account -> targetService == null || account.service.matchesTrackerService(targetService) }
         val accounts = originalAccounts.toMutableList()
         val items = snapshot.toAniListMangaProgressSyncItems()
 
-        if (!state.syncEnabled || accounts.isEmpty() || items.isEmpty()) {
+        if ((respectSyncEnabled && !state.syncEnabled) || accounts.isEmpty() || items.isEmpty()) {
             return@runCatching TrackerSyncSummary(
                 state = state,
-                attemptedAccounts = if (state.syncEnabled) accounts.size else 0,
+                attemptedAccounts = if (!respectSyncEnabled || state.syncEnabled) accounts.size else 0,
                 attemptedItems = items.size,
-                skippedItems = if (!state.syncEnabled) items.size else 0,
+                skippedItems = if (respectSyncEnabled && !state.syncEnabled) items.size else 0,
             )
         }
 
@@ -222,10 +265,114 @@ class TrackerRepository(
         }
 
         val refreshedState = if (accounts != originalAccounts) {
-            state.withAccounts(
-                accounts = state.connectedAccounts()
-                    .filterNot { account -> account.service.normalizedTrackerService() in MangaTrackerServices } + accounts,
+            state.withAccounts(connectedAccounts.replaceAccounts(originalAccounts, accounts))
+        } else {
+            state
+        }
+        val updatedState = if (syncedItems > 0 || failures.isNotEmpty()) {
+            refreshedState.copy(lastSyncDate = Instant.now().toString())
+        } else {
+            refreshedState
+        }
+        if (updatedState != state) {
+            trackerStore.write(updatedState)
+        }
+
+        TrackerSyncSummary(
+            state = updatedState,
+            attemptedAccounts = accounts.size,
+            attemptedItems = items.size,
+            syncedItems = syncedItems,
+            skippedItems = skippedItems,
+            failures = failures,
+        )
+    }
+
+    suspend fun syncRemoteAnimeProgress(
+        targetService: String,
+        entries: List<TrackerRemoteAnimeProgress>,
+    ): Result<TrackerSyncSummary> = runCatching {
+        val items = entries
+            .filter { entry -> entry.aniListId > 0 && entry.progress > 0 }
+            .map { entry ->
+                TrackerSyncItem(
+                    target = DetailTarget.AniListMediaTarget(entry.aniListId),
+                    title = entry.title,
+                    anilistMediaId = entry.aniListId,
+                    anilistEpisodeNumber = entry.progress,
+                    progressPercent = 1.0,
+                    isFinished = entry.isComplete,
+                )
+            }
+        syncItems(
+            items = items,
+            targetService = targetService,
+            respectSyncEnabled = false,
+        )
+    }
+
+    suspend fun syncRemoteMangaProgress(
+        targetService: String,
+        entries: List<TrackerRemoteMangaProgress>,
+    ): Result<TrackerSyncSummary> = runCatching {
+        val state = trackerStore.read()
+        val connectedAccounts = state.connectedAccounts()
+        val originalAccounts = connectedAccounts
+            .filter { account -> account.service.normalizedTrackerService() in MangaTrackerServices }
+            .filter { account -> account.service.matchesTrackerService(targetService) }
+        val accounts = originalAccounts.toMutableList()
+        val items = entries
+            .filter { entry -> entry.aniListId > 0 && entry.progress > 0 }
+            .map { entry ->
+                AniListMangaProgressSyncItem(
+                    mediaId = entry.aniListId,
+                    progress = entry.progress,
+                    isComplete = entry.isComplete,
+                )
+            }
+
+        if (accounts.isEmpty() || items.isEmpty()) {
+            return@runCatching TrackerSyncSummary(
+                state = state,
+                attemptedAccounts = accounts.size,
+                attemptedItems = items.size,
+                skippedItems = 0,
             )
+        }
+
+        var syncedItems = 0
+        var skippedItems = 0
+        val failures = mutableListOf<String>()
+
+        accounts.indices.forEach { accountIndex ->
+            var account = accounts[accountIndex].refreshIfNeeded()
+                .onFailure { error -> failures += error.message ?: "Token refresh failed for ${accounts[accountIndex].service}." }
+                .getOrDefault(accounts[accountIndex])
+            accounts[accountIndex] = account
+            items.forEach { item ->
+                var result = syncMangaProgress(account, item)
+                if (result.isAuthFailure && !account.refreshToken.isNullOrBlank()) {
+                    account.refreshIfNeeded(force = true)
+                        .onSuccess { refreshed ->
+                            account = refreshed
+                            accounts[accountIndex] = refreshed
+                            result = syncMangaProgress(refreshed, item)
+                        }
+                        .onFailure { error ->
+                            failures += error.message ?: "Token refresh failed for ${account.service}."
+                        }
+                }
+                when {
+                    result.synced -> syncedItems += 1
+                    result.skipped -> skippedItems += 1
+                    result.message != null -> failures += result.message
+                    else -> skippedItems += 1
+                }
+            }
+        }
+
+        val refreshedState = if (accounts != originalAccounts) {
+            state.withAccounts(connectedAccounts.replaceAccounts(originalAccounts, accounts))
         } else {
             state
         }
@@ -426,16 +573,22 @@ class TrackerRepository(
         }
     }
 
-    private suspend fun syncItems(items: List<TrackerSyncItem>): TrackerSyncSummary {
+    private suspend fun syncItems(
+        items: List<TrackerSyncItem>,
+        targetService: String? = null,
+        respectSyncEnabled: Boolean = true,
+    ): TrackerSyncSummary {
         val state = trackerStore.read()
-        val originalAccounts = state.connectedAccounts()
+        val connectedAccounts = state.connectedAccounts()
+        val originalAccounts = connectedAccounts
+            .filter { account -> targetService == null || account.service.matchesTrackerService(targetService) }
         val accounts = originalAccounts.toMutableList()
-        if (!state.syncEnabled || accounts.isEmpty() || items.isEmpty()) {
+        if ((respectSyncEnabled && !state.syncEnabled) || accounts.isEmpty() || items.isEmpty()) {
             return TrackerSyncSummary(
                 state = state,
-                attemptedAccounts = if (state.syncEnabled) accounts.size else 0,
+                attemptedAccounts = if (!respectSyncEnabled || state.syncEnabled) accounts.size else 0,
                 attemptedItems = items.size,
-                skippedItems = if (!state.syncEnabled) items.size else 0,
+                skippedItems = if (respectSyncEnabled && !state.syncEnabled) items.size else 0,
             )
         }
 
@@ -471,7 +624,7 @@ class TrackerRepository(
         }
 
         val refreshedState = if (accounts != originalAccounts) {
-            state.withAccounts(accounts)
+            state.withAccounts(connectedAccounts.replaceAccounts(originalAccounts, accounts))
         } else {
             state
         }
@@ -1095,6 +1248,15 @@ private fun TrackerAccountSnapshot.shouldRefreshToken(now: Instant = Instant.now
         ?.isBefore(now.plusSeconds(300))
         ?: false
 
+private fun List<TrackerAccountSnapshot>.replaceAccounts(
+    originals: List<TrackerAccountSnapshot>,
+    replacements: List<TrackerAccountSnapshot>,
+): List<TrackerAccountSnapshot> {
+    if (originals.isEmpty()) return this
+    val originalServices = originals.map { account -> account.service.normalizedTrackerService() }.toSet()
+    return filterNot { account -> account.service.normalizedTrackerService() in originalServices } + replacements
+}
+
 private fun MangaLibrarySnapshot.toAniListMangaProgressSyncItems(): List<AniListMangaProgressSyncItem> =
     readingProgress.mapNotNull { (progressId, progress) ->
         val mediaId = progress.aniListMediaId(progressId) ?: return@mapNotNull null
@@ -1175,7 +1337,7 @@ private fun aniListRatingMutation(
                 scoreRaw: ${ratingOutOf10.toAniListScoreRaw()}$notesArgument
             ) {
                 id
-                scoreRaw
+                score
                 notes
             }
         }

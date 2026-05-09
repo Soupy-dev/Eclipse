@@ -49,6 +49,7 @@ class WebViewKanzenModuleRuntime(
         val session = KanzenWebViewSession(
             context = appContext,
             module = module,
+            isNovel = isNovel,
         )
         session.load(script = script)
         sessions[module.id]?.destroy()
@@ -103,6 +104,7 @@ class WebViewKanzenModuleRuntime(
 private class KanzenWebViewSession(
     private val context: Context,
     private val module: ModuleManifest,
+    private val isNovel: Boolean,
 ) {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val pendingCalls = ConcurrentHashMap<String, CompletableDeferred<String>>()
@@ -126,7 +128,7 @@ private class KanzenWebViewSession(
                 "__AndroidKanzenFetch",
             )
             view.awaitBlankPage()
-            view.evaluateRaw(fetchBootstrap())
+            view.evaluateRaw(fetchBootstrap(isNovel = isNovel))
             view.evaluateRaw(script)
             val readiness = callFunction("(() => ({ search: typeof searchResults, chapters: typeof extractChapters, images: typeof extractImages, text: typeof extractText, details: typeof extractDetails }))")
                 .asObjectOrEmpty()
@@ -311,8 +313,9 @@ private suspend fun WebView.evaluateRaw(script: String): String =
         }
     }
 
-private fun fetchBootstrap(): String = """
+private fun fetchBootstrap(isNovel: Boolean): String = """
     (function() {
+      const __androidKanzenIsNovel = ${if (isNovel) "true" else "false"};
       window.__androidKanzenFetchCallbacks = {};
       window.__androidKanzenResolveFetch = function(id, payload) {
         const callback = window.__androidKanzenFetchCallbacks[id];
@@ -327,6 +330,7 @@ private fun fetchBootstrap(): String = """
           ok: payload.status >= 200 && payload.status < 300,
           status: payload.status,
           url: payload.url || "",
+          rawHeaders: headers,
           headers: {
             get: function(name) { return headers[String(name).toLowerCase()] || null; }
           },
@@ -334,7 +338,7 @@ private fun fetchBootstrap(): String = """
           json: function() { return Promise.resolve(JSON.parse(payload.body || "null")); }
         });
       };
-      window.fetch = function(input, init) {
+      window.__androidKanzenFetchResponse = function(input, init) {
         init = init || {};
         const id = String(Date.now()) + "-" + String(Math.random()).slice(2);
         const url = typeof input === "string" ? input : String(input && input.url || input);
@@ -353,6 +357,108 @@ private fun fetchBootstrap(): String = """
           window.__androidKanzenFetchCallbacks[id] = { resolve: resolve, reject: reject };
           __AndroidKanzenFetch.request(id, url, method, JSON.stringify(normalizedHeaders), body);
         });
+      };
+      if (__androidKanzenIsNovel) {
+        window.fetch = function(url, headers) {
+          return window.__androidKanzenFetchResponse(url, {
+            method: "GET",
+            headers: headers || {}
+          }).then(function(response) {
+            return response.text();
+          });
+        };
+      } else {
+        window.fetch = window.__androidKanzenFetchResponse;
+      }
+      window.fetchv2 = function(url, headers, method, body, redirect, encoding) {
+        const finalMethod = method || "GET";
+        const processedBody = finalMethod === "GET" ? null : (body && typeof body === "object" ? JSON.stringify(body) : body);
+        return window.__androidKanzenFetchResponse(url, {
+          method: finalMethod,
+          headers: headers || {},
+          body: processedBody
+        }).then(function(response) {
+          return response.text().then(function(text) {
+            return {
+              headers: response.rawHeaders || {},
+              status: response.status || 0,
+              _data: text,
+              text: function() { return Promise.resolve(text); },
+              json: function() {
+                try {
+                  return Promise.resolve(JSON.parse(text));
+                } catch (error) {
+                  return Promise.reject("JSON parse error: " + error.message);
+                }
+              }
+            };
+          });
+        });
+      };
+      function kanzenFetchHtmlLike(url, options) {
+        options = options || {};
+        return window.fetchv2(url, options.headers || {}, "GET", null, options.redirect !== false, options.encoding || "utf-8")
+          .then(function(response) {
+            return response.text().then(function(body) {
+              return {
+                originalUrl: String(url),
+                requests: [String(url)],
+                html: options.returnHTML === false ? null : body,
+                cookies: null,
+                success: response.status >= 200 && response.status < 400,
+                status: response.status,
+                error: response.status >= 400 ? ("HTTP " + response.status) : null,
+                htmlCaptured: options.returnHTML !== false,
+                cookiesCaptured: false,
+                elementsClicked: [],
+                waitResults: {}
+              };
+            });
+          });
+      }
+      window.networkFetchSimple = function(url, options) {
+        return kanzenFetchHtmlLike(url, options || {});
+      };
+      window.networkFetch = function(url, options) {
+        return kanzenFetchHtmlLike(url, options || {});
+      };
+      window.getElementsByTag = function(html, tag) {
+        const regex = new RegExp("<" + tag + "[^>]*>([\\s\\S]*?)<\\/" + tag + ">", "gi");
+        const result = [];
+        let match;
+        while ((match = regex.exec(html)) !== null) result.push(match[1]);
+        return result;
+      };
+      window.getAttribute = function(html, tag, attr) {
+        const regex = new RegExp("<" + tag + "[^>]*" + attr + "=[\"']?([^\"' >]+)[\"']?[^>]*>", "i");
+        const match = regex.exec(html);
+        return match ? match[1] : null;
+      };
+      window.getInnerText = function(html) {
+        return String(html || "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+      };
+      window.extractBetween = function(str, start, end) {
+        const value = String(str || "");
+        const s = value.indexOf(start);
+        if (s === -1) return "";
+        const e = value.indexOf(end, s + start.length);
+        if (e === -1) return "";
+        return value.substring(s + start.length, e);
+      };
+      window.stripHtml = function(html) { return String(html || "").replace(/<[^>]+>/g, ""); };
+      window.normalizeWhitespace = function(str) { return String(str || "").replace(/\s+/g, " ").trim(); };
+      window.urlEncode = function(str) { return encodeURIComponent(str); };
+      window.urlDecode = function(str) {
+        try { return decodeURIComponent(str); } catch (error) { return str; }
+      };
+      window.htmlEntityDecode = function(str) {
+        return String(str || "").replace(/&([a-zA-Z]+);/g, function(match, entity) {
+          const entities = { quot: "\"", apos: "'", amp: "&", lt: "<", gt: ">" };
+          return entities[entity] || match;
+        });
+      };
+      window.transformResponse = function(response, fn) {
+        try { return fn(response); } catch (error) { return response; }
       };
     })();
 """.trimIndent()

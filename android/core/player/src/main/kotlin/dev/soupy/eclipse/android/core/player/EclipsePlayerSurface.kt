@@ -93,7 +93,7 @@ data class PlaybackProgressSnapshot(
 fun EclipsePlayerSurface(
     modifier: Modifier = Modifier,
     source: PlayerSource? = null,
-    preferredPlayer: InAppPlayer = InAppPlayer.NORMAL,
+    preferredPlayer: InAppPlayer = InAppPlayer.VLC,
     settings: PlaybackSettingsSnapshot = PlaybackSettingsSnapshot(),
     skipSegments: List<SkipSegment> = emptyList(),
     nextEpisodeLabel: String? = null,
@@ -1576,7 +1576,7 @@ enum class PlayerBackend {
 
 data class PlaybackSessionState(
     val backend: PlayerBackend = PlayerBackend.NORMAL,
-    val preferredInAppPlayer: InAppPlayer = InAppPlayer.NORMAL,
+    val preferredInAppPlayer: InAppPlayer = InAppPlayer.VLC,
     val currentSource: PlayerSource? = null,
 )
 

@@ -46,6 +46,7 @@ data class ServiceSettingDescriptor(
     val label: String,
     val type: ServiceSettingType,
     val defaultValue: String,
+    val comment: String? = null,
     val options: List<String> = emptyList(),
 )
 

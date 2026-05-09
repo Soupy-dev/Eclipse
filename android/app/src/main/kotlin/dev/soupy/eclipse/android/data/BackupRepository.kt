@@ -214,12 +214,20 @@ class BackupRepository(
         val imported = backups.mapIndexed { index, backup ->
             val id = backup.id.ifBlank { backup.resolvedName.slugified() }
             val currentEntity = currentById[id]
-            val inferredScriptUrl = backup.resolvedScriptUrl ?: backup.resolvedManifestUrl?.takeIf {
-                backup.sourceKind.equals("script", ignoreCase = true)
-            }
+            val inlineScript = backup.jsScript
+                ?.takeIf(String::isNotBlank)
+                ?.let { script ->
+                    backup.resolvedScriptUrl?.takeIf(String::isRemoteUrl)?.let(script::withCachedSourceUrl) ?: script
+                }
+            val inferredScriptUrl = inlineScript
+                ?: backup.resolvedScriptUrl
+                ?: backup.resolvedManifestUrl?.takeIf {
+                    backup.sourceKind?.contains("script", ignoreCase = true) == true
+                }
             val manifestUrl = backup.resolvedManifestUrl?.takeUnless {
                 inferredScriptUrl != null &&
-                    backup.sourceKind.equals("script", ignoreCase = true) &&
+                    inlineScript == null &&
+                    backup.sourceKind?.contains("script", ignoreCase = true) == true &&
                     it == inferredScriptUrl
             }
             val scriptUrl = inferredScriptUrl
@@ -295,13 +303,34 @@ private fun ServiceEntity.toBackup(): ServiceBackup = ServiceBackup(
     id = id,
     name = name,
     manifestUrl = manifestUrl,
-    scriptUrl = scriptUrl,
+    scriptUrl = scriptUrl?.cachedSourceUrl() ?: scriptUrl?.takeUnless(String::looksInlineScript),
+    url = manifestUrl ?: scriptUrl?.cachedSourceUrl() ?: scriptUrl?.takeUnless(String::looksInlineScript),
+    jsScript = scriptUrl?.takeIf(String::looksInlineScript),
     enabled = enabled,
     isActive = enabled,
     sortIndex = sortIndex.toLong(),
     sourceKind = sourceKind,
     configurationJson = configurationJson,
 )
+
+private fun String.looksInlineScript(): Boolean =
+    contains('\n') || contains("function ") || contains("searchResults") || contains("extractStreamUrl")
+
+private fun String.cachedSourceUrl(): String? =
+    lineSequence()
+        .firstOrNull()
+        ?.trim()
+        ?.removePrefix("// Eclipse-Android-Cached-Source:")
+        ?.trim()
+        ?.takeIf { it.startsWith("http://", ignoreCase = true) || it.startsWith("https://", ignoreCase = true) }
+
+private fun String.isRemoteUrl(): Boolean =
+    startsWith("http://", ignoreCase = true) || startsWith("https://", ignoreCase = true)
+
+private fun String.withCachedSourceUrl(sourceUrl: String): String {
+    if (cachedSourceUrl() != null) return this
+    return "// Eclipse-Android-Cached-Source: $sourceUrl\n$this"
+}
 
 private fun StremioAddonEntity.toBackup(): StremioAddonBackup = StremioAddonBackup(
     id = manifestId,

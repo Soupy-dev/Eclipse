@@ -30,7 +30,7 @@ data class AppSettings(
     val defaultSubtitleLanguage: String = "eng",
     val enableVLCSubtitleEditMenu: Boolean = true,
     val preferredAnimeAudioLanguage: String = "jpn",
-    val inAppPlayer: InAppPlayer = InAppPlayer.NORMAL,
+    val inAppPlayer: InAppPlayer = InAppPlayer.VLC,
     val autoModeEnabled: Boolean = true,
     val autoModeSourceIds: Set<String> = emptySet(),
     val autoModeSourceOrderIds: List<String> = emptyList(),
@@ -506,7 +506,7 @@ class SettingsStore(
         defaultSubtitleLanguage = preferences[Keys.defaultSubtitleLanguage] ?: "eng",
         enableVLCSubtitleEditMenu = preferences[Keys.enableVLCSubtitleEditMenu] ?: true,
         preferredAnimeAudioLanguage = preferences[Keys.preferredAnimeAudioLanguage] ?: "jpn",
-        inAppPlayer = preferences[Keys.inAppPlayer]?.toInAppPlayer() ?: InAppPlayer.NORMAL,
+        inAppPlayer = preferences[Keys.inAppPlayer]?.toInAppPlayer() ?: InAppPlayer.VLC,
         autoModeEnabled = preferences[Keys.autoModeEnabled] ?: true,
         autoModeSourceIds = preferences[Keys.autoModeSourceIds] ?: emptySet(),
         autoModeSourceOrderIds = preferences[Keys.autoModeSourceOrderIds].toStoredList(),
@@ -647,7 +647,7 @@ private fun String.toInAppPlayer(): InAppPlayer = when (trim().lowercase()) {
     "mpv" -> InAppPlayer.EXTERNAL
     "external", "outplayer", "outside" -> InAppPlayer.EXTERNAL
     "normal", "default", "media3", "exoplayer" -> InAppPlayer.NORMAL
-    else -> runCatching { InAppPlayer.valueOf(this) }.getOrDefault(InAppPlayer.NORMAL)
+    else -> runCatching { InAppPlayer.valueOf(this) }.getOrDefault(InAppPlayer.VLC)
 }
 
 private fun String.normalizedLanguageCode(fallback: String): String =

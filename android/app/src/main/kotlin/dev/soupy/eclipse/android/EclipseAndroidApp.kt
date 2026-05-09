@@ -330,7 +330,7 @@ fun EclipseAndroidApp(
                 containerColor = androidx.compose.ui.graphics.Color.Transparent,
                 contentWindowInsets = WindowInsets(0.dp),
                 floatingActionButton = {
-                    if (!settingsState.showKanzen && currentRoute in lunaDestinations.map { it.route }) {
+                    if (!settingsState.showKanzen && currentRoute in setOf("home", "schedule")) {
                         FloatingActionButton(
                             onClick = {
                                 settingsReturnRoute = currentRoute ?: "home"
@@ -401,6 +401,8 @@ fun EclipseAndroidApp(
                             onQueryChange = searchViewModel::updateQuery,
                             onSearch = searchViewModel::search,
                             onRecentQuery = searchViewModel::selectRecentQuery,
+                            onClearRecentQueries = searchViewModel::clearRecentQueries,
+                            onRemoveRecentQuery = searchViewModel::removeRecentQuery,
                             onSourceSelected = searchViewModel::selectSource,
                             onSelect = { target ->
                                 selectedDetailTarget = target
@@ -429,8 +431,18 @@ fun EclipseAndroidApp(
                                 detailViewModel.currentLibraryItemDraft()?.let(libraryViewModel::toggleSaved)
                             },
                             onAddToCollection = { collectionId ->
-                                detailViewModel.currentLibraryItemDraft()
-                                    ?.let { draft -> libraryViewModel.saveToCollection(collectionId, draft) }
+                                detailViewModel.currentLibraryItemDraft()?.let { draft ->
+                                    val existingItemId = libraryState.collections
+                                        .firstOrNull { collection -> collection.id == collectionId }
+                                        ?.items
+                                        ?.firstOrNull { item -> item.detailTarget == draft.detailTarget }
+                                        ?.id
+                                    if (existingItemId != null) {
+                                        libraryViewModel.removeFromCollection(collectionId, existingItemId)
+                                    } else {
+                                        libraryViewModel.saveToCollection(collectionId, draft)
+                                    }
+                                }
                             },
                             onQueueResume = {
                                 detailViewModel.currentContinueWatchingDraft()
@@ -513,6 +525,7 @@ fun EclipseAndroidApp(
                             onRefreshAddon = servicesViewModel::refreshAddon,
                             onRefreshAllAddons = servicesViewModel::refreshAllAddons,
                             onCheckSourceHealth = servicesViewModel::checkSourceHealthNow,
+                            onReconfigureAddon = servicesViewModel::reconfigureAddon,
                             onRemoveService = servicesViewModel::removeService,
                             onRemoveAddon = servicesViewModel::removeAddon,
                         )
@@ -663,6 +676,15 @@ fun EclipseAndroidApp(
                                 }
                             },
                             onAniListSyncMangaProgress = settingsViewModel::syncMangaProgressNow,
+                            onTrackerSyncToolPreview = settingsViewModel::previewTrackerSyncTool,
+                            onTrackerSyncToolRun = { actionId ->
+                                settingsViewModel.runTrackerSyncTool(actionId) {
+                                    libraryViewModel.refresh()
+                                    mangaViewModel.refresh()
+                                    novelViewModel.refresh()
+                                }
+                            },
+                            onTrackerSyncToolCancel = settingsViewModel::cancelTrackerSyncTool,
                             onExportBackup = settingsViewModel::exportBackup,
                             onImportBackup = settingsViewModel::importBackup,
                             onHighQualityThresholdChanged = settingsViewModel::setHighQualityThreshold,

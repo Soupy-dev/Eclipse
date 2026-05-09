@@ -1,6 +1,7 @@
 package dev.soupy.eclipse.android.data
 
 import dev.soupy.eclipse.android.core.js.ServiceEpisodeLink
+import dev.soupy.eclipse.android.core.js.ServiceSettingDescriptor
 import dev.soupy.eclipse.android.core.js.ServiceRuntime
 import dev.soupy.eclipse.android.core.js.ServiceRuntimeSource
 import dev.soupy.eclipse.android.core.js.ServiceSearchRequest
@@ -33,6 +34,14 @@ data class ServiceDraft(
     val manifestUrl: String? = null,
 )
 
+private data class ResolvedServiceDraft(
+    val name: String,
+    val script: String,
+    val manifestUrl: String? = null,
+    val sourceKind: String,
+    val idHint: String,
+)
+
 data class ServiceSourceRecord(
     val id: String,
     val autoModeId: String,
@@ -40,6 +49,7 @@ data class ServiceSourceRecord(
     val subtitle: String? = null,
     val configurationJson: String? = null,
     val configurationSummary: String? = null,
+    val settingDescriptors: List<ServiceSettingDescriptor> = emptyList(),
     val enabled: Boolean = true,
     val sortIndex: Int = 0,
 )
@@ -116,6 +126,10 @@ class ServicesRepository(
                     subtitle = buildServiceSubtitle(entity),
                     configurationJson = entity.configurationJson,
                     configurationSummary = entity.configurationSummary(),
+                    settingDescriptors = entity.scriptUrl
+                        ?.takeIf(String::looksInlineScript)
+                        ?.let(serviceRuntime::parseSettings)
+                        .orEmpty(),
                     enabled = entity.enabled,
                     sortIndex = entity.sortIndex,
                 )
@@ -147,29 +161,27 @@ class ServicesRepository(
     }
 
     suspend fun addService(draft: ServiceDraft): Result<Unit> = runCatching {
-        val normalizedName = draft.name.trim()
-        val normalizedScript = draft.scriptUrl.trim()
-        require(normalizedName.isNotEmpty()) { "Give the service a name." }
-        require(normalizedScript.isNotEmpty()) { "Provide a script URL for the service." }
+        val resolved = resolveServiceDraft(draft)
 
         val current = serviceDao.observeAll().first()
         val existing = current.firstOrNull {
-            it.name.equals(normalizedName, ignoreCase = true) ||
-                it.scriptUrl.equals(normalizedScript, ignoreCase = true)
+            it.id.equals(resolved.idHint, ignoreCase = true) ||
+                it.name.equals(resolved.name, ignoreCase = true) ||
+                (!resolved.manifestUrl.isNullOrBlank() && it.manifestUrl.equals(resolved.manifestUrl, ignoreCase = true))
         }
         val now = System.currentTimeMillis()
-        val id = existing?.id ?: normalizedName.slugified()
+        val id = existing?.id ?: resolved.idHint.slugified()
         val nextSortIndex = existing?.sortIndex ?: current.maxOfOrNull(ServiceEntity::sortIndex)?.plus(1) ?: 0
 
         serviceDao.upsert(
             ServiceEntity(
                 id = id,
-                name = normalizedName,
-                manifestUrl = draft.manifestUrl?.trim()?.takeIf { it.isNotEmpty() },
-                scriptUrl = normalizedScript,
+                name = resolved.name,
+                manifestUrl = resolved.manifestUrl,
+                scriptUrl = resolved.script,
                 enabled = existing?.enabled ?: true,
                 sortIndex = nextSortIndex,
-                sourceKind = if (draft.manifestUrl.isNullOrBlank()) "script" else "manifest+script",
+                sourceKind = resolved.sourceKind,
                 configurationJson = existing?.configurationJson,
                 createdAt = existing?.createdAt ?: now,
                 updatedAt = now,
@@ -220,6 +232,35 @@ class ServicesRepository(
         )
     }
 
+    suspend fun reconfigureStremioAddon(
+        transportUrl: String,
+        rawNewTransportUrl: String,
+    ): Result<String> = runCatching {
+        val newTransportUrl = rawNewTransportUrl.normalizedTransportUrl()
+        require(newTransportUrl.isNotEmpty()) { "Paste the configured Stremio addon URL first." }
+        val current = stremioAddonDao.observeAll().first()
+        val existing = current.firstOrNull { it.transportUrl == transportUrl }
+            ?: error("Stremio addon was not found.")
+        val manifest = stremioService.fetchManifest(newTransportUrl).orThrow()
+        val configured = !manifest.behaviorHints.configurationRequired
+        val updated = StremioAddonEntity(
+            transportUrl = newTransportUrl,
+            manifestId = manifest.id.ifBlank { newTransportUrl },
+            name = manifest.name.ifBlank { existing.name },
+            enabled = existing.enabled && configured,
+            sortIndex = existing.sortIndex,
+            configured = configured,
+            manifestJson = EclipseJson.encodeToString(manifest),
+            createdAt = existing.createdAt,
+            updatedAt = System.currentTimeMillis(),
+        )
+        stremioAddonDao.upsert(updated)
+        if (!newTransportUrl.equals(existing.transportUrl, ignoreCase = true)) {
+            stremioAddonDao.delete(existing)
+        }
+        updated.autoModeId
+    }
+
     suspend fun refreshAllAddons(): Result<ServicesUpdateSummary> = runCatching {
         val addons = stremioAddonDao.observeAll().first()
         var refreshed = 0
@@ -256,9 +297,10 @@ class ServicesRepository(
     suspend fun refreshService(id: String): Result<Unit> = runCatching {
         val service = serviceDao.observeAll().first().firstOrNull { it.id == id }
             ?: error("Service was not found.")
-        val script = service.fetchScript()
-        serviceRuntime.load(service.toRuntimeSource(script)).getOrThrow()
-        serviceDao.upsert(service.copy(updatedAt = System.currentTimeMillis()))
+        val refreshed = service.refreshedService()
+        val script = refreshed.fetchScript()
+        serviceRuntime.load(refreshed.toRuntimeSource(script)).getOrThrow()
+        serviceDao.upsert(refreshed.copy(updatedAt = System.currentTimeMillis()))
     }
 
     suspend fun activeSearchSources(): List<ServiceSourceRecord> =
@@ -420,28 +462,88 @@ class ServicesRepository(
     }
 }
 
+private suspend fun resolveServiceDraft(draft: ServiceDraft): ResolvedServiceDraft {
+    val normalizedName = draft.name.trim()
+    val scriptCandidate = draft.scriptUrl.trim()
+    val manifestCandidate = draft.manifestUrl?.trim()?.takeIf(String::isNotBlank)
+    val importUrl = manifestCandidate ?: scriptCandidate.takeIf(String::looksRemoteUrl)
+    require(scriptCandidate.isNotBlank() || manifestCandidate != null) {
+        "Provide a service manifest URL, script URL, or pasted JavaScript."
+    }
+
+    if (manifestCandidate != null || scriptCandidate.looksManifestUrl()) {
+        val manifestUrl = manifestCandidate ?: scriptCandidate
+        val manifest = fetchJsonObject(manifestUrl)
+        val remoteScriptUrl = manifest.firstString("scriptUrl", "scriptURL")
+            ?: error("Service manifest does not include a script URL.")
+        val absoluteScriptUrl = remoteScriptUrl.absoluteTo(manifestUrl)
+        val script = fetchText(absoluteScriptUrl, "service script").withCachedSourceUrl(absoluteScriptUrl)
+        val manifestName = manifest.firstString("sourceName", "name", "id")
+        val version = manifest.firstString("version")
+        val author = (manifest["author"] as? JsonObject)?.firstString("name")
+        val idHint = listOfNotNull(manifestName, author, version)
+            .joinToString("-")
+            .ifBlank { manifestUrl }
+        return ResolvedServiceDraft(
+            name = normalizedName.ifBlank { manifestName ?: manifestUrl.urlTail() },
+            manifestUrl = manifestUrl,
+            script = script,
+            sourceKind = "manifest+script",
+            idHint = idHint,
+        )
+    }
+
+    if (importUrl != null) {
+        val script = fetchText(importUrl, "service script").withCachedSourceUrl(importUrl)
+        return ResolvedServiceDraft(
+            name = normalizedName.ifBlank { importUrl.urlTail() },
+            manifestUrl = importUrl,
+            script = script,
+            sourceKind = "script+cache",
+            idHint = normalizedName.ifBlank { importUrl },
+        )
+    }
+
+    return ResolvedServiceDraft(
+        name = normalizedName.ifBlank { "Pasted Service" },
+        manifestUrl = null,
+        script = scriptCandidate,
+        sourceKind = "script",
+        idHint = normalizedName.ifBlank { scriptCandidate.take(64) },
+    )
+}
+
+private suspend fun ServiceEntity.refreshedService(): ServiceEntity {
+    val updateUrl = manifestUrl?.trim()?.takeIf(String::isNotBlank)
+    if (updateUrl == null) return this
+
+    val body = fetchText(updateUrl, "service manifest")
+    val manifest = runCatching { EclipseJson.parseToJsonElement(body) as? JsonObject }.getOrNull()
+    val remoteScriptUrl = manifest?.firstString("scriptUrl", "scriptURL")
+    val refreshedScript = if (remoteScriptUrl != null) {
+        val absoluteScriptUrl = remoteScriptUrl.absoluteTo(updateUrl)
+        fetchText(absoluteScriptUrl, "service script").withCachedSourceUrl(absoluteScriptUrl)
+    } else {
+        body.withCachedSourceUrl(updateUrl)
+    }
+    val refreshedName = manifest
+        ?.firstString("sourceName", "name", "id")
+        ?.takeIf(String::isNotBlank)
+        ?: name
+    return copy(
+        name = refreshedName,
+        scriptUrl = refreshedScript,
+        sourceKind = if (remoteScriptUrl != null) "manifest+script" else sourceKind,
+    )
+}
+
 private suspend fun ServiceEntity.fetchScript(): String {
     val candidate = scriptUrl?.trim().orEmpty()
     require(candidate.isNotBlank()) { "Service ${name} does not have a script URL." }
-    if (candidate.contains('\n') || candidate.contains("function ") || candidate.contains("searchResults")) {
+    if (candidate.looksInlineScript()) {
         return candidate
     }
-    return withContext(Dispatchers.IO) {
-        val connection = (URL(candidate).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 15_000
-            readTimeout = 20_000
-            requestMethod = "GET"
-            setRequestProperty("User-Agent", "Eclipse-Android")
-        }
-        try {
-            require(connection.responseCode in 200..299) {
-                "Could not download ${name}'s script (${connection.responseCode})."
-            }
-            connection.inputStream.bufferedReader().use { it.readText() }
-        } finally {
-            connection.disconnect()
-        }
-    }
+    return fetchText(candidate, "${name}'s script")
 }
 
 private fun ServiceEntity.toRuntimeSource(script: String): ServiceRuntimeSource {
@@ -449,17 +551,27 @@ private fun ServiceEntity.toRuntimeSource(script: String): ServiceRuntimeSource 
         ?.takeIf { it.isNotBlank() }
         ?.let { raw -> runCatching { EclipseJson.decodeFromString<JsonObject>(raw) }.getOrNull() }
         ?: JsonObject(emptyMap())
+    val storedScript = scriptUrl
+    val cachedSourceUrl = storedScript?.cachedSourceUrl()
     return ServiceRuntimeSource(
         id = id,
         name = name,
         script = script,
-        baseUrl = scriptUrl?.substringBeforeLast('/', missingDelimiterValue = scriptUrl ?: ""),
+        baseUrl = when {
+            storedScript?.looksInlineScript() == true -> cachedSourceUrl
+                ?.substringBeforeLast('/', missingDelimiterValue = cachedSourceUrl)
+                ?: manifestUrl?.substringBeforeLast('/', missingDelimiterValue = manifestUrl ?: "")
+            else -> storedScript?.substringBeforeLast('/', missingDelimiterValue = storedScript)
+        },
         settings = settings,
     )
 }
 
 private fun JsonObject.stringValue(key: String): String? =
     this[key]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+
+private fun JsonObject.firstString(vararg keys: String): String? =
+    keys.firstNotNullOfOrNull { key -> stringValue(key) }
 
 private val ServiceEntity.autoModeId: String
     get() = "service:$id"
@@ -468,6 +580,9 @@ private val StremioAddonEntity.autoModeId: String
     get() = "stremio:$transportUrl"
 
 private fun buildServiceSubtitle(entity: ServiceEntity): String? = when {
+    entity.scriptUrl?.looksInlineScript() == true && !entity.manifestUrl.isNullOrBlank() ->
+        "${entity.manifestUrl} | cached JavaScript"
+    entity.scriptUrl?.looksInlineScript() == true -> "Local JavaScript"
     !entity.scriptUrl.isNullOrBlank() && !entity.manifestUrl.isNullOrBlank() ->
         "${entity.scriptUrl} | ${entity.manifestUrl}"
     !entity.scriptUrl.isNullOrBlank() -> entity.scriptUrl
@@ -491,6 +606,28 @@ private fun StremioAddonEntity.manifest(): StremioManifest? = manifestJson?.runC
     EclipseJson.decodeFromString<StremioManifest>(this)
 }?.getOrNull()
 
+private suspend fun fetchJsonObject(url: String): JsonObject =
+    runCatching { EclipseJson.parseToJsonElement(fetchText(url, "service manifest")) as? JsonObject }
+        .getOrNull()
+        ?: error("Service manifest is not valid JSON.")
+
+private suspend fun fetchText(url: String, label: String): String = withContext(Dispatchers.IO) {
+    val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+        connectTimeout = 15_000
+        readTimeout = 20_000
+        requestMethod = "GET"
+        setRequestProperty("User-Agent", "Eclipse-Android")
+    }
+    try {
+        require(connection.responseCode in 200..299) {
+            "Could not download $label (${connection.responseCode})."
+        }
+        connection.inputStream.bufferedReader().use { it.readText() }
+    } finally {
+        connection.disconnect()
+    }
+}
+
 private fun String.slugified(): String = trim()
     .lowercase()
     .replace(Regex("[^a-z0-9]+"), "-")
@@ -500,6 +637,38 @@ private fun String.slugified(): String = trim()
 private fun String.normalizedTransportUrl(): String = trim()
     .removeSuffix("/manifest.json")
     .removeSuffix("/")
+
+private fun String.looksInlineScript(): Boolean =
+    contains('\n') || contains("function ") || contains("searchResults") || contains("extractStreamUrl")
+
+private fun String.looksRemoteUrl(): Boolean =
+    startsWith("http://", ignoreCase = true) || startsWith("https://", ignoreCase = true)
+
+private fun String.looksManifestUrl(): Boolean =
+    looksRemoteUrl() && (substringBefore('?').endsWith(".json", ignoreCase = true) || contains("manifest", ignoreCase = true))
+
+private fun String.absoluteTo(baseUrl: String): String =
+    runCatching { URL(URL(baseUrl), this).toString() }.getOrElse { this }
+
+private fun String.withCachedSourceUrl(sourceUrl: String): String {
+    if (cachedSourceUrl() != null) return this
+    return "// Eclipse-Android-Cached-Source: $sourceUrl\n$this"
+}
+
+private fun String.cachedSourceUrl(): String? =
+    lineSequence()
+        .firstOrNull()
+        ?.trim()
+        ?.removePrefix("// Eclipse-Android-Cached-Source:")
+        ?.trim()
+        ?.takeIf { it.looksRemoteUrl() }
+
+private fun String.urlTail(): String = trim()
+    .substringBefore('?')
+    .trimEnd('/')
+    .substringAfterLast('/')
+    .substringBeforeLast('.', missingDelimiterValue = substringAfterLast('/'))
+    .ifBlank { this }
 
 private fun String.configurationUrl(): String =
     trim()

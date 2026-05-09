@@ -1225,7 +1225,7 @@ final class TrackerManager: NSObject, ObservableObject {
                 scoreRaw: $scoreRaw\(notesArgument)
             ) {
                 id
-                scoreRaw
+                score
                 notes
             }
         }
