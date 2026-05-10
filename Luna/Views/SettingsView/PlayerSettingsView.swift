@@ -110,6 +110,14 @@ final class PlayerSettingsStore: ObservableObject {
         didSet { UserDefaults.standard.set(showNextEpisodeButton, forKey: "showNextEpisodeButton") }
     }
 
+    @Published var showVLCEpisodeBrowserButton: Bool {
+        didSet { UserDefaults.standard.set(showVLCEpisodeBrowserButton, forKey: "showVLCEpisodeBrowserButton") }
+    }
+
+    @Published var showNextEpisodePosterButton: Bool {
+        didSet { UserDefaults.standard.set(showNextEpisodePosterButton, forKey: "showNextEpisodePosterButton") }
+    }
+
     @Published var nextEpisodeThreshold: Double {
         didSet { UserDefaults.standard.set(nextEpisodeThreshold, forKey: "nextEpisodeThreshold") }
     }
@@ -186,6 +194,14 @@ final class PlayerSettingsStore: ObservableObject {
         } else {
             self.showNextEpisodeButton = UserDefaults.standard.bool(forKey: "showNextEpisodeButton")
         }
+
+        if UserDefaults.standard.object(forKey: "showVLCEpisodeBrowserButton") == nil {
+            self.showVLCEpisodeBrowserButton = true
+        } else {
+            self.showVLCEpisodeBrowserButton = UserDefaults.standard.bool(forKey: "showVLCEpisodeBrowserButton")
+        }
+
+        self.showNextEpisodePosterButton = UserDefaults.standard.bool(forKey: "showNextEpisodePosterButton")
 
         let savedThreshold = UserDefaults.standard.double(forKey: "nextEpisodeThreshold")
         self.nextEpisodeThreshold = savedThreshold > 0 ? savedThreshold : 0.90
@@ -683,12 +699,24 @@ struct PlayerSettingsView: View {
 
                     DisclosureGroup {
                         settingsToggleRow(
+                            title: "Episode Browser Button",
+                            detail: "Show the VLC episode drawer button over the player.",
+                            binding: $store.showVLCEpisodeBrowserButton
+                        )
+
+                        settingsToggleRow(
                             title: "Show Next Episode Button",
                             detail: "Display a button near the end of an episode to quickly open stream search for the next episode.",
                             binding: $store.showNextEpisodeButton
                         )
 
                         if store.showNextEpisodeButton {
+                            settingsToggleRow(
+                                title: "Use Episode Poster",
+                                detail: "Show the next episode image, number, and title when available.",
+                                binding: $store.showNextEpisodePosterButton
+                            )
+
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("Appearance Threshold")

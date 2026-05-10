@@ -35,6 +35,8 @@ struct BackupData: Codable {
     var aniSkipAutoSkip: Bool = false
     var skip85sEnabled: Bool = false
     var showNextEpisodeButton: Bool = true
+    var showVLCEpisodeBrowserButton: Bool = true
+    var showNextEpisodePosterButton: Bool = false
     var nextEpisodeThreshold: Double = 0.90
     var vlcHeaderProxyEnabled: Bool = true
     var vlcBrightnessGestureEnabled: Bool = false
@@ -114,7 +116,7 @@ struct BackupData: Codable {
     enum CodingKeys: String, CodingKey {
         case version, createdDate
         case accentColor, tmdbLanguage, selectedAppearance, enableSubtitlesByDefault, defaultSubtitleLanguage, enableVLCSubtitleEditMenu, preferredAnimeAudioLanguage, inAppPlayer, playerChoice, showScheduleTab, showLocalScheduleTime
-        case defaultPlaybackSpeed, holdSpeedPlayer, externalPlayer, alwaysLandscape, aniSkipAutoSkip, skip85sEnabled, showNextEpisodeButton, nextEpisodeThreshold, vlcHeaderProxyEnabled
+        case defaultPlaybackSpeed, holdSpeedPlayer, externalPlayer, alwaysLandscape, aniSkipAutoSkip, skip85sEnabled, showNextEpisodeButton, showVLCEpisodeBrowserButton, showNextEpisodePosterButton, nextEpisodeThreshold, vlcHeaderProxyEnabled
         case vlcBrightnessGestureEnabled, vlcVolumeGestureEnabled, playerTwoFingerTapPlayPauseEnabled, vlcDoubleTapSeekEnabled, vlcDoubleTapSeekSeconds, vlcPiPEnabled, vlcOpenSubtitlesEnabled, vlcOpenSubtitlesAutoFallbackEnabled
         case subtitleForegroundColor, subtitleStrokeColor, subtitleStrokeWidth, subtitleFontSize, subtitleVerticalOffset
         case showKanzen, kanzenAutoMode, kanzenAutoUpdateModules, seasonMenu, horizontalEpisodeList, useClassicScheduleUI, mediaColumnsPortrait, mediaColumnsLandscape
@@ -155,6 +157,8 @@ struct BackupData: Codable {
         aniSkipAutoSkip = try container.decodeIfPresent(Bool.self, forKey: .aniSkipAutoSkip) ?? false
         skip85sEnabled = try container.decodeIfPresent(Bool.self, forKey: .skip85sEnabled) ?? false
         showNextEpisodeButton = try container.decodeIfPresent(Bool.self, forKey: .showNextEpisodeButton) ?? true
+        showVLCEpisodeBrowserButton = try container.decodeIfPresent(Bool.self, forKey: .showVLCEpisodeBrowserButton) ?? true
+        showNextEpisodePosterButton = try container.decodeIfPresent(Bool.self, forKey: .showNextEpisodePosterButton) ?? false
         nextEpisodeThreshold = try container.decodeIfPresent(Double.self, forKey: .nextEpisodeThreshold) ?? 0.90
         vlcHeaderProxyEnabled = try container.decodeIfPresent(Bool.self, forKey: .vlcHeaderProxyEnabled) ?? true
         vlcBrightnessGestureEnabled = try container.decodeIfPresent(Bool.self, forKey: .vlcBrightnessGestureEnabled) ?? false
@@ -295,6 +299,8 @@ struct BackupData: Codable {
         try container.encode(aniSkipAutoSkip, forKey: .aniSkipAutoSkip)
         try container.encode(skip85sEnabled, forKey: .skip85sEnabled)
         try container.encode(showNextEpisodeButton, forKey: .showNextEpisodeButton)
+        try container.encode(showVLCEpisodeBrowserButton, forKey: .showVLCEpisodeBrowserButton)
+        try container.encode(showNextEpisodePosterButton, forKey: .showNextEpisodePosterButton)
         try container.encode(nextEpisodeThreshold, forKey: .nextEpisodeThreshold)
         try container.encode(vlcHeaderProxyEnabled, forKey: .vlcHeaderProxyEnabled)
         try container.encode(vlcBrightnessGestureEnabled, forKey: .vlcBrightnessGestureEnabled)
@@ -378,6 +384,8 @@ struct BackupData: Codable {
         aniSkipAutoSkip: Bool = false,
         skip85sEnabled: Bool = false,
         showNextEpisodeButton: Bool = true,
+        showVLCEpisodeBrowserButton: Bool = true,
+        showNextEpisodePosterButton: Bool = false,
         nextEpisodeThreshold: Double = 0.90,
         vlcHeaderProxyEnabled: Bool = true,
         vlcBrightnessGestureEnabled: Bool = false,
@@ -458,6 +466,8 @@ struct BackupData: Codable {
         self.aniSkipAutoSkip = aniSkipAutoSkip
         self.skip85sEnabled = skip85sEnabled
         self.showNextEpisodeButton = showNextEpisodeButton
+        self.showVLCEpisodeBrowserButton = showVLCEpisodeBrowserButton
+        self.showNextEpisodePosterButton = showNextEpisodePosterButton
         self.nextEpisodeThreshold = nextEpisodeThreshold
         self.vlcHeaderProxyEnabled = vlcHeaderProxyEnabled
         self.vlcBrightnessGestureEnabled = vlcBrightnessGestureEnabled
@@ -699,6 +709,8 @@ class BackupManager {
         let aniSkipAutoSkip = userDefaults.bool(forKey: "aniSkipAutoSkip")
         let skip85sEnabled = userDefaults.bool(forKey: "skip85sEnabled")
         let showNextEpisodeButton = userDefaults.object(forKey: "showNextEpisodeButton") == nil ? true : userDefaults.bool(forKey: "showNextEpisodeButton")
+        let showVLCEpisodeBrowserButton = userDefaults.object(forKey: "showVLCEpisodeBrowserButton") == nil ? true : userDefaults.bool(forKey: "showVLCEpisodeBrowserButton")
+        let showNextEpisodePosterButton = userDefaults.bool(forKey: "showNextEpisodePosterButton")
         let savedNextThreshold = userDefaults.double(forKey: "nextEpisodeThreshold")
         let nextEpisodeThreshold = savedNextThreshold > 0 ? savedNextThreshold : 0.90
         let vlcHeaderProxyEnabled = userDefaults.object(forKey: "vlcHeaderProxyEnabled") as? Bool ?? true
@@ -861,6 +873,8 @@ class BackupManager {
             aniSkipAutoSkip: aniSkipAutoSkip,
             skip85sEnabled: skip85sEnabled,
             showNextEpisodeButton: showNextEpisodeButton,
+            showVLCEpisodeBrowserButton: showVLCEpisodeBrowserButton,
+            showNextEpisodePosterButton: showNextEpisodePosterButton,
             nextEpisodeThreshold: nextEpisodeThreshold,
             vlcHeaderProxyEnabled: vlcHeaderProxyEnabled,
             vlcBrightnessGestureEnabled: vlcBrightnessGestureEnabled,
@@ -991,6 +1005,8 @@ class BackupManager {
         let aniSkipAutoSkip = json["aniSkipAutoSkip"] as? Bool ?? false
         let skip85sEnabled = json["skip85sEnabled"] as? Bool ?? false
         let showNextEpisodeButton = json["showNextEpisodeButton"] as? Bool ?? true
+        let showVLCEpisodeBrowserButton = json["showVLCEpisodeBrowserButton"] as? Bool ?? true
+        let showNextEpisodePosterButton = json["showNextEpisodePosterButton"] as? Bool ?? false
         let nextEpisodeThreshold = json["nextEpisodeThreshold"] as? Double ?? 0.90
         let vlcHeaderProxyEnabled = json["vlcHeaderProxyEnabled"] as? Bool ?? true
         let vlcBrightnessGestureEnabled = json["vlcBrightnessGestureEnabled"] as? Bool ?? false
@@ -1188,6 +1204,8 @@ class BackupManager {
             aniSkipAutoSkip: aniSkipAutoSkip,
             skip85sEnabled: skip85sEnabled,
             showNextEpisodeButton: showNextEpisodeButton,
+            showVLCEpisodeBrowserButton: showVLCEpisodeBrowserButton,
+            showNextEpisodePosterButton: showNextEpisodePosterButton,
             nextEpisodeThreshold: nextEpisodeThreshold,
             vlcHeaderProxyEnabled: vlcHeaderProxyEnabled,
             vlcBrightnessGestureEnabled: vlcBrightnessGestureEnabled,
@@ -1272,6 +1290,8 @@ class BackupManager {
         userDefaults.set(backup.aniSkipAutoSkip, forKey: "aniSkipAutoSkip")
         userDefaults.set(backup.skip85sEnabled, forKey: "skip85sEnabled")
         userDefaults.set(backup.showNextEpisodeButton, forKey: "showNextEpisodeButton")
+        userDefaults.set(backup.showVLCEpisodeBrowserButton, forKey: "showVLCEpisodeBrowserButton")
+        userDefaults.set(backup.showNextEpisodePosterButton, forKey: "showNextEpisodePosterButton")
         userDefaults.set(backup.nextEpisodeThreshold, forKey: "nextEpisodeThreshold")
         // Forced on by app policy: backup value is intentionally ignored here and this flag remains enabled.
         userDefaults.set(true, forKey: "vlcHeaderProxyEnabled")

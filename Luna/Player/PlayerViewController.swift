@@ -250,6 +250,18 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return b
     }()
 
+    private let episodeBrowserButton: UIButton = {
+        let b = UIButton(type: .system)
+        b.translatesAutoresizingMaskIntoConstraints = false
+        let cfg = UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
+        let img = UIImage(systemName: "list.bullet.rectangle", withConfiguration: cfg)
+        b.setImage(img, for: .normal)
+        b.tintColor = .white
+        b.alpha = 0.0
+        b.isHidden = true
+        return b
+    }()
+
     private let vlcSubtitleOverlayLabel: UILabel = {
         let label = UILabel()
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -481,6 +493,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         btn.layer.shadowOpacity = 0.3
         btn.layer.shadowOffset = CGSize(width: 0, height: 2)
         btn.layer.shadowRadius = 4
+        btn.titleLabel?.lineBreakMode = .byTruncatingTail
+        btn.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         return btn
     }()
 
@@ -559,6 +573,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var audioMenuDebounceTimer: Timer?
     private var subtitleMenuDebounceTimer: Timer?
     private var vlcSubtitleOverlayBottomConstraint: NSLayoutConstraint?
+    private var subtitleTrailingToProgressConstraint: NSLayoutConstraint?
+    private var subtitleTrailingToEpisodeBrowserConstraint: NSLayoutConstraint?
+    private var episodeBrowserHostingController: UIHostingController<AnyView>?
+    private var isEpisodeBrowserVisible = false
+    private var nextEpisodePreview: PlayerEpisodeBrowserItem?
+    private var nextEpisodePreviewKey: String?
+    private var nextEpisodePreviewTask: Task<Void, Never>?
+    private var nextEpisodePreviewUnavailableKeys: Set<String> = []
+    private var nextEpisodeArtworkTask: URLSessionDataTask?
+    private var nextEpisodeArtworkKey: String?
 #if !os(tvOS)
     private var volumeTopConstraint: NSLayoutConstraint?
     private var volumeWidthConstraint: NSLayoutConstraint?
@@ -1137,6 +1161,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             // even before track discovery finishes.
             subtitleButton.showsMenuAsPrimaryAction = true
             updateSubtitleTracksMenu()
+            updateEpisodeBrowserButtonVisibility()
         }
 
         NotificationCenter.default.addObserver(self, selector: #selector(handleLoggerNotification(_:)), name: NSNotification.Name("LoggerNotification"), object: nil)
@@ -1266,6 +1291,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             vlcRenderer?.stopPictureInPicture()
         }
         openSubtitlesFetchTask?.cancel()
+        nextEpisodePreviewTask?.cancel()
+        nextEpisodeArtworkTask?.cancel()
+        dismissEpisodeBrowser(animated: false)
         pipController?.invalidate()
         rendererStop()
         
@@ -1310,6 +1338,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
         updatePiPButtonVisibility()
         updatePlayerTitle()
+        updateEpisodeBrowserButtonVisibility()
         let mediaInfoLabel: String = {
             guard let info = mediaInfo else { return "nil" }
             switch info {
@@ -1584,6 +1613,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         videoContainer.addSubview(vlcSubtitleOverlayLabel)
         videoContainer.addSubview(subtitleButton)
         if isVLCPlayer {
+            videoContainer.addSubview(episodeBrowserButton)
             videoContainer.addSubview(speedButton)
             videoContainer.addSubview(audioButton)
         }
@@ -1673,16 +1703,24 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             vlcSubtitleOverlayLabel.leadingAnchor.constraint(equalTo: progressContainer.leadingAnchor, constant: 12),
             vlcSubtitleOverlayLabel.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor, constant: -12),
             
-            subtitleButton.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor, constant: 0),
             subtitleButton.bottomAnchor.constraint(equalTo: progressContainer.topAnchor, constant: -8),
             subtitleButton.widthAnchor.constraint(equalToConstant: 32),
             subtitleButton.heightAnchor.constraint(equalToConstant: 32)
         ])
 
+        subtitleTrailingToProgressConstraint = subtitleButton.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor, constant: 0)
+        subtitleTrailingToProgressConstraint?.isActive = true
+
         vlcSubtitleOverlayBottomConstraint = vlcSubtitleOverlayLabel.bottomAnchor.constraint(equalTo: progressContainer.topAnchor, constant: vlcSubtitleOverlayBottomConstant)
         vlcSubtitleOverlayBottomConstraint?.isActive = true
         if isVLCPlayer {
+            subtitleTrailingToEpisodeBrowserConstraint = subtitleButton.trailingAnchor.constraint(equalTo: episodeBrowserButton.leadingAnchor, constant: -8)
             NSLayoutConstraint.activate([
+                episodeBrowserButton.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor, constant: 0),
+                episodeBrowserButton.centerYAnchor.constraint(equalTo: subtitleButton.centerYAnchor),
+                episodeBrowserButton.widthAnchor.constraint(equalToConstant: 32),
+                episodeBrowserButton.heightAnchor.constraint(equalToConstant: 32),
+
                 speedButton.trailingAnchor.constraint(equalTo: subtitleButton.leadingAnchor, constant: -8),
                 speedButton.centerYAnchor.constraint(equalTo: subtitleButton.centerYAnchor),
                 speedButton.widthAnchor.constraint(equalToConstant: 32),
@@ -1743,6 +1781,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 skipButton.bottomAnchor.constraint(equalTo: subtitleButton.topAnchor, constant: -12),
 
                 nextEpisodeButton.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor),
+                nextEpisodeButton.leadingAnchor.constraint(greaterThanOrEqualTo: progressContainer.leadingAnchor),
                 nextEpisodeButton.bottomAnchor.constraint(equalTo: skipButton.topAnchor, constant: -10),
 
                 skip85sButton.leadingAnchor.constraint(equalTo: progressContainer.leadingAnchor),
@@ -1788,12 +1827,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
         if isVLCPlayer {
             subtitleButton.addTarget(self, action: #selector(subtitleButtonTapped), for: .touchUpInside)
+            episodeBrowserButton.addTarget(self, action: #selector(episodeBrowserButtonTapped), for: .touchUpInside)
         }
         
         // Ensure buttons work with VLC
         if vlcRenderer != nil {
             [centerPlayPauseButton, closeButton, pipButton, skipBackwardButton,
-             skipForwardButton, subtitleButton, speedButton, audioButton].forEach {
+             skipForwardButton, subtitleButton, episodeBrowserButton, speedButton, audioButton].forEach {
                 $0.isUserInteractionEnabled = true
             }
         }
@@ -2409,6 +2449,256 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func setSubtitleVisible(_ visible: Bool, persist: Bool = true) {
         subtitleModel.setVisible(visible, persist: persist)
     }
+
+    private var isVLCEpisodeBrowserButtonSettingEnabled: Bool {
+        if UserDefaults.standard.object(forKey: "showVLCEpisodeBrowserButton") == nil {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: "showVLCEpisodeBrowserButton")
+    }
+
+    private func updateEpisodeBrowserButtonVisibility() {
+        let shouldShow: Bool
+        if isVLCPlayer,
+           isVLCEpisodeBrowserButtonSettingEnabled,
+           case .episode = mediaInfo {
+            shouldShow = true
+        } else {
+            shouldShow = false
+        }
+
+        episodeBrowserButton.isHidden = !shouldShow
+        if !shouldShow {
+            episodeBrowserButton.alpha = 0.0
+            if isEpisodeBrowserVisible {
+                dismissEpisodeBrowser(animated: true)
+            }
+        } else if controlsVisible {
+            episodeBrowserButton.alpha = 1.0
+        }
+
+        if shouldShow {
+            subtitleTrailingToProgressConstraint?.isActive = false
+            subtitleTrailingToEpisodeBrowserConstraint?.isActive = true
+        } else {
+            subtitleTrailingToEpisodeBrowserConstraint?.isActive = false
+            subtitleTrailingToProgressConstraint?.isActive = true
+        }
+    }
+
+    @objc private func episodeBrowserButtonTapped() {
+        guard let seed = makeEpisodeBrowserSeed() else { return }
+        if isEpisodeBrowserVisible {
+            dismissEpisodeBrowser(animated: true)
+            return
+        }
+        showEpisodeBrowser(seed: seed)
+    }
+
+    private func makeEpisodeBrowserSeed() -> PlayerEpisodeBrowserSeed? {
+        guard case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, let showPosterURL, let isAnime) = mediaInfo else {
+            return nil
+        }
+
+        let fallbackTitle = playerTitleOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedTitle = showTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = [resolvedTitle, fallbackTitle]
+            .compactMap { $0 }
+            .first(where: { !$0.isEmpty }) ?? "Show"
+
+        return PlayerEpisodeBrowserSeed(
+            showId: showId,
+            showTitle: title,
+            showPosterURL: showPosterURL,
+            currentSeasonNumber: seasonNumber,
+            currentEpisodeNumber: episodeNumber,
+            isAnime: isAnime || isAnimeContent(),
+            imdbId: imdbId,
+            currentPlaybackContext: episodePlaybackContext
+        )
+    }
+
+    private func showEpisodeBrowser(seed: PlayerEpisodeBrowserSeed) {
+        controlsHideWorkItem?.cancel()
+        isEpisodeBrowserVisible = true
+        let drawer = PlayerEpisodeBrowserDrawer(
+            seed: seed,
+            onClose: { [weak self] in
+                self?.dismissEpisodeBrowser(animated: true)
+            },
+            onEpisodeSelected: { [weak self] item in
+                self?.handleEpisodeBrowserSelection(item)
+            }
+        )
+        let host = UIHostingController(rootView: AnyView(drawer))
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+        host.view.backgroundColor = .clear
+        addChild(host)
+        videoContainer.addSubview(host.view)
+        NSLayoutConstraint.activate([
+            host.view.topAnchor.constraint(equalTo: videoContainer.topAnchor),
+            host.view.bottomAnchor.constraint(equalTo: videoContainer.bottomAnchor),
+            host.view.leadingAnchor.constraint(equalTo: videoContainer.leadingAnchor),
+            host.view.trailingAnchor.constraint(equalTo: videoContainer.trailingAnchor)
+        ])
+        host.didMove(toParent: self)
+        episodeBrowserHostingController = host
+        videoContainer.bringSubviewToFront(host.view)
+    }
+
+    private func dismissEpisodeBrowser(animated: Bool) {
+        guard let host = episodeBrowserHostingController else {
+            isEpisodeBrowserVisible = false
+            return
+        }
+        isEpisodeBrowserVisible = false
+        let removeHost = {
+            host.willMove(toParent: nil)
+            host.view.removeFromSuperview()
+            host.removeFromParent()
+        }
+        if animated {
+            UIView.animate(withDuration: 0.2) {
+                host.view.alpha = 0.0
+            } completion: { _ in
+                removeHost()
+            }
+        } else {
+            removeHost()
+        }
+        episodeBrowserHostingController = nil
+    }
+
+    private func handleEpisodeBrowserSelection(_ item: PlayerEpisodeBrowserItem) {
+        guard !item.isCurrent else { return }
+
+        if UserDefaults.standard.bool(forKey: "preferDownloadedMedia"),
+           let request = downloadedPlaybackRequest(for: item) {
+            dismissEpisodeBrowser(animated: true)
+            replacePlayback(with: request)
+            return
+        }
+
+        presentEpisodeSourceSheet(for: item)
+    }
+
+    private func downloadedPlaybackRequest(for item: PlayerEpisodeBrowserItem) -> PlayerResolvedPlaybackRequest? {
+        guard let downloadItem = item.downloadItem,
+              let fileURL = DownloadManager.shared.localFileURL(for: downloadItem) else {
+            return nil
+        }
+        let subtitleArray = DownloadManager.shared.localSubtitleURL(for: downloadItem).map { [$0.absoluteString] }
+        let preset = PlayerPreset.presets.first ?? PlayerPreset(id: .sdrRec709, title: "Default", summary: "", stream: nil, commands: [])
+        return PlayerResolvedPlaybackRequest(
+            url: fileURL,
+            preset: preset,
+            headers: [:],
+            subtitles: subtitleArray,
+            subtitleNames: nil,
+            mediaInfo: downloadItem.mediaInfo,
+            imdbId: item.imdbId,
+            isAnimeHint: downloadItem.isAnime,
+            originalTMDBSeasonNumber: item.originalTMDBSeasonNumber,
+            originalTMDBEpisodeNumber: item.originalTMDBEpisodeNumber,
+            episodePlaybackContext: downloadItem.episodePlaybackContext ?? item.playbackContext,
+            launchContext: nil
+        )
+    }
+
+    private func presentEpisodeSourceSheet(for item: PlayerEpisodeBrowserItem) {
+        guard presentedViewController == nil else { return }
+        let sheet = ModulesSearchResultsSheet(
+            mediaTitle: item.mediaTitle,
+            seasonTitleOverride: item.seasonTitleOverride,
+            originalTitle: item.originalTitle,
+            isMovie: false,
+            isAnimeContent: item.isAnime,
+            selectedEpisode: item.episode,
+            tmdbId: item.showId,
+            animeSeasonTitle: item.animeSeasonTitle,
+            posterPath: item.posterURL ?? item.showPosterURL,
+            imdbId: item.imdbId,
+            originalTMDBSeasonNumber: item.originalTMDBSeasonNumber,
+            originalTMDBEpisodeNumber: item.originalTMDBEpisodeNumber,
+            specialTitleOnlySearch: item.playbackContext?.titleOnlySearch ?? false,
+            episodePlaybackContext: item.playbackContext,
+            autoModeOnly: UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"),
+            onResolvedPlaybackRequest: { [weak self] request in
+                self?.replacePlayback(with: request)
+            }
+        )
+        let host = UIHostingController(rootView: sheet)
+        present(host, animated: true, completion: nil)
+    }
+
+    private func replacePlayback(with request: PlayerResolvedPlaybackRequest) {
+        guard isVLCPlayer else { return }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.dismissEpisodeBrowser(animated: true)
+            self.controlsHideWorkItem?.cancel()
+            self.playbackStartupWorkItem?.cancel()
+            self.playbackDidStart = false
+            self.playbackFailureHandled = false
+            self.playbackSlowProbeCount = 0
+            self.vlcProxyFallbackTried = false
+            self.didDispatchNextEpisodeRequest = false
+            self.pendingNextEpisodeRequest = nil
+#if !os(tvOS)
+            self.nextEpisodeButton.isEnabled = true
+#endif
+            self.resetTimedEpisodeStateForNewPlayback()
+
+            self.initialPreset = request.preset
+            self.initialHeaders = request.headers
+            self.initialSubtitles = request.subtitles
+            self.initialSubtitleNames = request.subtitleNames
+            self.mediaInfo = request.mediaInfo
+            self.imdbId = request.imdbId
+            self.isAnimeHint = request.isAnimeHint
+            self.originalTMDBSeasonNumber = request.originalTMDBSeasonNumber
+            self.originalTMDBEpisodeNumber = request.originalTMDBEpisodeNumber
+            self.episodePlaybackContext = request.episodePlaybackContext
+            self.playbackLaunchContext = request.launchContext
+
+            self.rendererStop()
+            self.updatePlayerTitle()
+            self.updateEpisodeBrowserButtonVisibility()
+            self.load(url: request.url, preset: request.preset, headers: request.headers)
+            self.showControlsTemporarily()
+        }
+    }
+
+    private func resetTimedEpisodeStateForNewPlayback() {
+#if !os(tvOS)
+        skipSegments.removeAll()
+        skipDataFetched = false
+        autoSkippedSegments.removeAll()
+        currentActiveSkipSegment = nil
+        skipButton.alpha = 0.0
+        skipButton.isHidden = true
+        nextEpisodeButton.alpha = 0.0
+        nextEpisodeButton.isHidden = true
+        nextEpisodeButtonShown = false
+        skip85sButton.alpha = 0.0
+        skip85sButton.isHidden = true
+        skip85sButtonShown = false
+#endif
+        progressModel.skipSegments = []
+        nextEpisodePreview = nil
+        nextEpisodePreviewKey = nil
+        nextEpisodePreviewUnavailableKeys.removeAll()
+        nextEpisodePreviewTask?.cancel()
+        nextEpisodePreviewTask = nil
+        nextEpisodeArtworkTask?.cancel()
+        nextEpisodeArtworkTask = nil
+        nextEpisodeArtworkKey = nil
+#if !os(tvOS)
+        nextEpisodeButton.configuration?.title = "Next Episode"
+        nextEpisodeButton.configuration?.subtitle = nil
+        nextEpisodeButton.configuration?.image = UIImage(systemName: "forward.end.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold))
+#endif
+    }
     
     private func updateSpeedMenu() {
         let currentSpeed = rendererGetSpeed()
@@ -2842,9 +3132,112 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
     }
 
+    private func nextEpisodeKey(seasonNumber: Int, episodeNumber: Int) -> String {
+        guard case .episode(let showId, _, _, _, _, _) = mediaInfo else {
+            return "none"
+        }
+        return "\(showId):\(seasonNumber):\(episodeNumber)"
+    }
+
+    private var shouldUsePosterNextEpisodeButton: Bool {
+        UserDefaults.standard.bool(forKey: "showNextEpisodePosterButton")
+    }
+
+    private func resolveNextEpisodePreviewIfNeeded(seasonNumber: Int, episodeNumber: Int) {
+        let key = nextEpisodeKey(seasonNumber: seasonNumber, episodeNumber: episodeNumber)
+        guard nextEpisodePreviewKey != key,
+              !nextEpisodePreviewUnavailableKeys.contains(key),
+              nextEpisodePreviewTask == nil else {
+            return
+        }
+        guard let seed = makeEpisodeBrowserSeed() else {
+            nextEpisodePreviewUnavailableKeys.insert(key)
+            return
+        }
+
+        nextEpisodePreviewTask = Task { @MainActor [weak self] in
+            let model = PlayerEpisodeBrowserViewModel(seed: seed)
+            let item = await model.itemAfterCurrent()
+            guard let self else { return }
+            self.nextEpisodePreviewTask = nil
+            guard self.nextEpisodeKey(seasonNumber: seasonNumber, episodeNumber: episodeNumber) == key else { return }
+            if let item {
+                self.nextEpisodePreview = item
+                self.nextEpisodePreviewKey = key
+                self.applyNextEpisodeButtonAppearance()
+            } else {
+                self.nextEpisodePreview = nil
+                self.nextEpisodePreviewKey = nil
+                self.nextEpisodePreviewUnavailableKeys.insert(key)
+                self.hideNextEpisodeButton()
+            }
+        }
+    }
+
+    private func applyNextEpisodeButtonAppearance() {
+        if shouldUsePosterNextEpisodeButton, let preview = nextEpisodePreview, preview.imageURL != nil {
+            applyPosterNextEpisodeButton(preview)
+        } else {
+            applyTextNextEpisodeButton()
+        }
+    }
+
+    private func applyTextNextEpisodeButton() {
+        var config = nextEpisodeButton.configuration ?? UIButton.Configuration.filled()
+        config.cornerStyle = .capsule
+        config.baseBackgroundColor = UIColor.white.withAlphaComponent(0.2)
+        config.baseForegroundColor = UIColor.white
+        config.image = UIImage(systemName: "forward.end.fill", withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold))
+        config.imagePlacement = .leading
+        config.imagePadding = 6
+        config.contentInsets = NSDirectionalEdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 18)
+        config.title = "Next Episode"
+        config.subtitle = nil
+        nextEpisodeButton.configuration = config
+    }
+
+    private func applyPosterNextEpisodeButton(_ item: PlayerEpisodeBrowserItem) {
+        var config = nextEpisodeButton.configuration ?? UIButton.Configuration.filled()
+        config.cornerStyle = .capsule
+        config.baseBackgroundColor = UIColor.black.withAlphaComponent(0.58)
+        config.baseForegroundColor = UIColor.white
+        config.imagePlacement = .leading
+        config.imagePadding = 8
+        config.image = UIImage(systemName: "photo")
+        config.title = "\(item.displayCode)  \(item.displayTitle)"
+        config.subtitle = "Next Episode"
+        config.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 10, bottom: 8, trailing: 14)
+        nextEpisodeButton.configuration = config
+
+        guard let imageURL = item.imageURL,
+              nextEpisodeArtworkKey != imageURL,
+              let url = URL(string: imageURL) else {
+            return
+        }
+
+        nextEpisodeArtworkTask?.cancel()
+        nextEpisodeArtworkKey = imageURL
+        let task = URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            guard let data,
+                  let rawImage = UIImage(data: data) else { return }
+            let image = (rawImage.resized(to: CGSize(width: 58, height: 34), contentMode: .scaleAspectFill) ?? rawImage)
+                .withRenderingMode(.alwaysOriginal)
+            DispatchQueue.main.async {
+                guard let self,
+                      self.nextEpisodeArtworkKey == imageURL,
+                      self.shouldUsePosterNextEpisodeButton else { return }
+                var current = self.nextEpisodeButton.configuration ?? UIButton.Configuration.filled()
+                current.image = image
+                self.nextEpisodeButton.configuration = current
+            }
+        }
+        nextEpisodeArtworkTask = task
+        task.resume()
+    }
+
     private func updateNextEpisodeState(position: Double, duration: Double) {
         guard isVLCPlayer, duration > 0 else { return }
-        guard case .episode(_, _, _, _, _, _) = mediaInfo else { return }
+        guard case .episode(_, let seasonNumber, let episodeNumber, _, _, _) = mediaInfo else { return }
 
         let enabled: Bool
         if UserDefaults.standard.object(forKey: "showNextEpisodeButton") == nil {
@@ -2862,10 +3255,24 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         threshold = savedThreshold > 0 ? savedThreshold : 0.90
 
         let progress = position / duration
+        let previewKey = nextEpisodeKey(seasonNumber: seasonNumber, episodeNumber: episodeNumber)
         if progress >= threshold, !nextEpisodeButtonShown {
+            resolveNextEpisodePreviewIfNeeded(seasonNumber: seasonNumber, episodeNumber: episodeNumber)
+            if nextEpisodePreviewUnavailableKeys.contains(previewKey) {
+                hideNextEpisodeButton()
+                return
+            }
+            applyNextEpisodeButtonAppearance()
             showNextEpisodeButton()
         } else if progress < threshold, nextEpisodeButtonShown {
             hideNextEpisodeButton()
+        } else if progress >= threshold, nextEpisodeButtonShown {
+            resolveNextEpisodePreviewIfNeeded(seasonNumber: seasonNumber, episodeNumber: episodeNumber)
+            if nextEpisodePreviewUnavailableKeys.contains(previewKey) {
+                hideNextEpisodeButton()
+            } else {
+                applyNextEpisodeButtonAppearance()
+            }
         }
     }
 
@@ -2884,6 +3291,21 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         let nextEpisodeNumber = episodeNumber + 1
         Logger.shared.log("NextEpisode: User requested S\(seasonNumber)E\(nextEpisodeNumber)", type: "Player")
+        if let preview = nextEpisodePreview {
+            hideNextEpisodeButton()
+            handleEpisodeBrowserSelection(preview)
+            return
+        }
+
+        if nextEpisodePreviewTask != nil {
+            return
+        }
+
+        if nextEpisodePreviewUnavailableKeys.contains(nextEpisodeKey(seasonNumber: seasonNumber, episodeNumber: episodeNumber)) {
+            hideNextEpisodeButton()
+            return
+        }
+
         pendingNextEpisodeRequest = (seasonNumber, nextEpisodeNumber)
         nextEpisodeButton.isEnabled = false
         hideNextEpisodeButton()
@@ -3633,6 +4055,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             updateBrightnessControlVisibility()
             updateVolumeControlVisibility()
 #endif
+            updateEpisodeBrowserButtonVisibility()
             return
         }
         Logger.shared.log("[PlayerVC.Settings] UserDefaults changed; evaluating VLC subtitle mode", type: "Player")
@@ -3640,6 +4063,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         applyVLCSubtitleOverlayPositionSetting()
         vlcRenderer?.handlePictureInPictureSettingChanged()
         updatePiPButtonVisibility()
+        updateEpisodeBrowserButtonVisibility()
         updateSubtitleTracksMenu()
         prefetchOpenSubtitlesIfEnabled(reason: "settings")
 #if !os(tvOS)
@@ -4198,6 +4622,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         videoContainer.bringSubviewToFront(speedIndicatorLabel)
         videoContainer.bringSubviewToFront(subtitleButton)
         if isVLCPlayer {
+            videoContainer.bringSubviewToFront(episodeBrowserButton)
             videoContainer.bringSubviewToFront(speedButton)
             videoContainer.bringSubviewToFront(audioButton)
         }
@@ -4206,6 +4631,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         videoContainer.bringSubviewToFront(volumeContainer)
         bringTimedActionButtonsToFront()
 #endif
+        if let browserView = episodeBrowserHostingController?.view {
+            videoContainer.bringSubviewToFront(browserView)
+        }
         
         DispatchQueue.main.async {
             self.controlsOverlayView.isHidden = false
@@ -4222,6 +4650,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     self.subtitleButton.alpha = 1.0
                 }
                 if self.isVLCPlayer {
+                    if !self.episodeBrowserButton.isHidden {
+                        self.episodeBrowserButton.alpha = 1.0
+                    }
                     self.speedButton.alpha = 1.0
                     if !self.audioButton.isHidden {
                         self.audioButton.alpha = 1.0
@@ -4263,6 +4694,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 self.skipForwardButton.alpha = 0.0
                 self.subtitleButton.alpha = 0.0
                 if self.isVLCPlayer {
+                    self.episodeBrowserButton.alpha = 0.0
                     self.speedButton.alpha = 0.0
                     self.audioButton.alpha = 0.0
                 }
@@ -4292,6 +4724,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        if isEpisodeBrowserVisible {
+            return false
+        }
+
         #if !os(tvOS)
         if isBrightnessControlEnabled && !brightnessContainer.isHidden && brightnessContainer.alpha > 0.01 {
             let location = touch.location(in: brightnessContainer)
@@ -4321,6 +4757,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        if isEpisodeBrowserVisible {
+            return false
+        }
+
 #if !os(tvOS)
         if gestureRecognizer === brightnessPanGesture {
             guard isBrightnessControlEnabled else { return false }
@@ -4356,6 +4796,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         isClosing = true
         let isAnyPiPActive = rendererIsPictureInPictureActive()
         logMPV("closeTapped; pipActive=\(isAnyPiPActive); mediaInfo=\(String(describing: mediaInfo))")
+        dismissEpisodeBrowser(animated: false)
         closeButton.isEnabled = false
         view.isUserInteractionEnabled = false
 
@@ -4646,6 +5087,669 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             lastVLCUIProgressAnomalyLogTime = now
             logVLCUI("progress anomaly \(anomaly)", type: "Error")
         }
+    }
+}
+
+struct PlayerEpisodeBrowserSeed {
+    let showId: Int
+    let showTitle: String
+    let showPosterURL: String?
+    let currentSeasonNumber: Int
+    let currentEpisodeNumber: Int
+    let isAnime: Bool
+    let imdbId: String?
+    let currentPlaybackContext: EpisodePlaybackContext?
+}
+
+struct PlayerEpisodeBrowserSeason: Identifiable {
+    let id: String
+    let title: String
+    let subtitle: String?
+    let posterURL: String?
+    let episodes: [PlayerEpisodeBrowserItem]
+}
+
+struct PlayerEpisodeBrowserItem: Identifiable {
+    let id: String
+    let showId: Int
+    let showTitle: String
+    let showPosterURL: String?
+    let mediaTitle: String
+    let seasonTitleOverride: String?
+    let animeSeasonTitle: String?
+    let originalTitle: String?
+    let posterURL: String?
+    let imdbId: String?
+    let episode: TMDBEpisode
+    let isAnime: Bool
+    let isSpecial: Bool
+    let playbackContext: EpisodePlaybackContext?
+    let originalTMDBSeasonNumber: Int?
+    let originalTMDBEpisodeNumber: Int?
+    let progress: Double
+    let isDownloaded: Bool
+    let downloadItem: DownloadItem?
+    let isCurrent: Bool
+
+    var imageURL: String? {
+        PlayerEpisodeBrowserViewModel.fullImageURL(from: episode.stillPath)
+            ?? posterURL
+            ?? showPosterURL
+    }
+
+    var displayCode: String {
+        if isSpecial {
+            return episode.episodeNumber > 1 ? "Special \(episode.episodeNumber)" : "Special"
+        }
+        if isAnime {
+            return "E\(episode.episodeNumber)"
+        }
+        return "S\(episode.seasonNumber)E\(episode.episodeNumber)"
+    }
+
+    var displayTitle: String {
+        let name = episode.name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? "Episode \(episode.episodeNumber)" : name
+    }
+}
+
+@MainActor
+final class PlayerEpisodeBrowserViewModel: ObservableObject {
+    @Published var seasons: [PlayerEpisodeBrowserSeason] = []
+    @Published var isLoading = false
+    @Published var errorMessage: String?
+    @Published var currentItemID: String?
+
+    let seed: PlayerEpisodeBrowserSeed
+    private var didLoad = false
+
+    init(seed: PlayerEpisodeBrowserSeed) {
+        self.seed = seed
+    }
+
+    func loadIfNeeded() async {
+        guard !didLoad else { return }
+        didLoad = true
+        await load()
+    }
+
+    func itemAfterCurrent() async -> PlayerEpisodeBrowserItem? {
+        if !didLoad {
+            await load()
+        }
+        let allItems = seasons.flatMap(\.episodes).sorted { lhs, rhs in
+            if lhs.episode.seasonNumber == rhs.episode.seasonNumber {
+                return lhs.episode.episodeNumber < rhs.episode.episodeNumber
+            }
+            return lhs.episode.seasonNumber < rhs.episode.seasonNumber
+        }
+        guard let index = allItems.firstIndex(where: { $0.isCurrent }) else { return nil }
+        let nextIndex = allItems.index(after: index)
+        guard nextIndex < allItems.endIndex else { return nil }
+        return allItems[nextIndex]
+    }
+
+    private func load() async {
+        didLoad = true
+        isLoading = true
+        errorMessage = nil
+        seasons = []
+        currentItemID = nil
+
+        do {
+            let tmdbService = TMDBService.shared
+            let tvShow = try await tmdbService.getTVShowWithSeasons(id: seed.showId)
+            let showTitle = tvShow.name.isEmpty ? seed.showTitle : tvShow.name
+            let showPosterURL = seed.showPosterURL ?? tvShow.fullPosterURL
+            let resolvedImdbId = seed.imdbId ?? tvShow.externalIds?.imdbId
+            var animeData: AniListAnimeWithSeasons?
+            var specialContexts: [SpecialEpisodeListContext] = []
+
+            if seed.isAnime {
+                animeData = try? await AniListService.shared.fetchAnimeDetailsWithEpisodes(
+                    title: seed.showTitle,
+                    tmdbShowId: seed.showId,
+                    tmdbService: tmdbService,
+                    tmdbShowPoster: showPosterURL,
+                    token: nil
+                )
+                if let animeData {
+                    let mappings = animeData.seasons.map { (seasonNumber: $0.seasonNumber, anilistId: $0.anilistId) }
+                    TrackerManager.shared.registerAniListAnimeData(tmdbId: seed.showId, seasons: mappings)
+                }
+
+                let specialEntries = await AniListService.shared.fetchSpecialSearchEntries(
+                    tmdbShowId: seed.showId,
+                    fallbackPosterURL: showPosterURL,
+                    baseAniListIds: animeData?.seasons.map(\.anilistId) ?? [],
+                    tmdbService: tmdbService
+                )
+                specialContexts = specialEntries.compactMap {
+                    SpecialEpisodeListContext(entry: $0, tmdbShowId: seed.showId)
+                }
+            }
+
+            var loaded: [PlayerEpisodeBrowserSeason] = []
+
+            if let currentSpecial = currentSpecialContext(from: specialContexts) {
+                loaded.append(buildSpecialSeason(
+                    context: currentSpecial,
+                    showTitle: showTitle,
+                    showPosterURL: showPosterURL,
+                    fallbackImdbId: resolvedImdbId
+                ))
+                seasons = loaded
+            } else if seed.isAnime,
+                      let animeSeason = animeData?.seasons.first(where: { $0.seasonNumber == seed.currentSeasonNumber }) {
+                loaded.append(buildAnimeSeason(
+                    animeSeason,
+                    showTitle: showTitle,
+                    showPosterURL: showPosterURL,
+                    imdbId: resolvedImdbId
+                ))
+                seasons = loaded
+            } else if let currentTMDBSeason = tvShow.seasons.first(where: { $0.seasonNumber == seed.currentSeasonNumber }),
+                      let detail = try? await tmdbService.getSeasonDetails(tvShowId: seed.showId, seasonNumber: currentTMDBSeason.seasonNumber) {
+                loaded.append(buildTMDBSeason(
+                    summary: currentTMDBSeason,
+                    detail: detail,
+                    showTitle: showTitle,
+                    showPosterURL: showPosterURL,
+                    imdbId: resolvedImdbId,
+                    isSpecial: currentTMDBSeason.seasonNumber == 0
+                ))
+                seasons = loaded
+            }
+
+            if seed.isAnime, let animeData {
+                for season in animeData.seasons.sorted(by: { $0.seasonNumber < $1.seasonNumber }) where season.seasonNumber != seed.currentSeasonNumber {
+                    loaded.append(buildAnimeSeason(
+                        season,
+                        showTitle: showTitle,
+                        showPosterURL: showPosterURL,
+                        imdbId: resolvedImdbId
+                    ))
+                    seasons = loaded
+                }
+            } else {
+                let orderedSeasons = tvShow.seasons
+                    .filter { $0.episodeCount > 0 }
+                    .sorted { lhs, rhs in
+                        if lhs.seasonNumber == 0 { return false }
+                        if rhs.seasonNumber == 0 { return true }
+                        return lhs.seasonNumber < rhs.seasonNumber
+                    }
+                for season in orderedSeasons where season.seasonNumber != seed.currentSeasonNumber {
+                    guard let detail = try? await tmdbService.getSeasonDetails(tvShowId: seed.showId, seasonNumber: season.seasonNumber) else {
+                        continue
+                    }
+                    loaded.append(buildTMDBSeason(
+                        summary: season,
+                        detail: detail,
+                        showTitle: showTitle,
+                        showPosterURL: showPosterURL,
+                        imdbId: resolvedImdbId,
+                        isSpecial: season.seasonNumber == 0
+                    ))
+                    seasons = loaded
+                }
+            }
+
+            for context in specialContexts where !loaded.contains(where: { $0.id == "special-\(context.id)" }) {
+                loaded.append(buildSpecialSeason(
+                    context: context,
+                    showTitle: showTitle,
+                    showPosterURL: showPosterURL,
+                    fallbackImdbId: resolvedImdbId
+                ))
+                seasons = loaded
+            }
+
+            if let current = loaded.flatMap(\.episodes).first(where: { $0.isCurrent }) {
+                currentItemID = current.id
+            }
+            seasons = loaded
+            isLoading = false
+        } catch {
+            isLoading = false
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func currentSpecialContext(from contexts: [SpecialEpisodeListContext]) -> SpecialEpisodeListContext? {
+        guard let current = seed.currentPlaybackContext, current.isSpecial else { return nil }
+        return contexts.first {
+            $0.anilistId == current.anilistMediaId ||
+            $0.localSeasonNumber == current.localSeasonNumber
+        }
+    }
+
+    private func buildAnimeSeason(_ season: AniListSeasonWithPoster, showTitle: String, showPosterURL: String?, imdbId: String?) -> PlayerEpisodeBrowserSeason {
+        let title = season.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Season \(season.seasonNumber)" : season.title
+        let items = season.episodes
+            .sorted { $0.number < $1.number }
+            .map { aniEpisode -> PlayerEpisodeBrowserItem in
+                let episode = TMDBEpisode(
+                    id: seed.showId * 1000 + season.seasonNumber * 100 + aniEpisode.number,
+                    name: aniEpisode.title,
+                    overview: aniEpisode.description,
+                    stillPath: aniEpisode.stillPath,
+                    episodeNumber: aniEpisode.number,
+                    seasonNumber: season.seasonNumber,
+                    airDate: aniEpisode.airDate,
+                    runtime: aniEpisode.runtime,
+                    voteAverage: 0,
+                    voteCount: 0
+                )
+                let context = EpisodePlaybackContext(
+                    localSeasonNumber: season.seasonNumber,
+                    localEpisodeNumber: aniEpisode.number,
+                    anilistMediaId: season.anilistId,
+                    tmdbSeasonNumber: aniEpisode.tmdbSeasonNumber,
+                    tmdbEpisodeNumber: aniEpisode.tmdbEpisodeNumber,
+                    tmdbEpisodeOffset: nil,
+                    isSpecial: false,
+                    titleOnlySearch: false
+                )
+                return buildItem(
+                    episode: episode,
+                    showTitle: showTitle,
+                    showPosterURL: showPosterURL,
+                    mediaTitle: title,
+                    seasonTitleOverride: title,
+                    animeSeasonTitle: title,
+                    originalTitle: nil,
+                    posterURL: season.posterUrl ?? showPosterURL,
+                    imdbId: imdbId,
+                    isAnime: true,
+                    isSpecial: false,
+                    playbackContext: context,
+                    originalTMDBSeasonNumber: context.resolvedTMDBSeasonNumber,
+                    originalTMDBEpisodeNumber: context.resolvedTMDBEpisodeNumber
+                )
+            }
+        return PlayerEpisodeBrowserSeason(
+            id: "anime-\(season.seasonNumber)-\(season.anilistId)",
+            title: title,
+            subtitle: "Season \(season.seasonNumber)",
+            posterURL: season.posterUrl ?? showPosterURL,
+            episodes: items
+        )
+    }
+
+    private func buildTMDBSeason(summary: TMDBSeason, detail: TMDBSeasonDetail, showTitle: String, showPosterURL: String?, imdbId: String?, isSpecial: Bool) -> PlayerEpisodeBrowserSeason {
+        let title = isSpecial ? "Specials" : (summary.name.isEmpty ? "Season \(summary.seasonNumber)" : summary.name)
+        let posterURL = detail.fullPosterURL ?? summary.fullPosterURL ?? showPosterURL
+        let items = detail.episodes
+            .sorted { $0.episodeNumber < $1.episodeNumber }
+            .map { episode in
+                buildItem(
+                    episode: episode,
+                    showTitle: showTitle,
+                    showPosterURL: showPosterURL,
+                    mediaTitle: showTitle,
+                    seasonTitleOverride: nil,
+                    animeSeasonTitle: nil,
+                    originalTitle: nil,
+                    posterURL: posterURL,
+                    imdbId: imdbId,
+                    isAnime: false,
+                    isSpecial: isSpecial,
+                    playbackContext: nil,
+                    originalTMDBSeasonNumber: nil,
+                    originalTMDBEpisodeNumber: nil
+                )
+            }
+        return PlayerEpisodeBrowserSeason(
+            id: "tmdb-\(summary.seasonNumber)-\(summary.id)",
+            title: title,
+            subtitle: isSpecial ? nil : "Season \(summary.seasonNumber)",
+            posterURL: posterURL,
+            episodes: items
+        )
+    }
+
+    private func buildSpecialSeason(context: SpecialEpisodeListContext, showTitle: String, showPosterURL: String?, fallbackImdbId: String?) -> PlayerEpisodeBrowserSeason {
+        let posterURL = context.posterUrl ?? showPosterURL
+        let items = context.episodes.map { episode -> PlayerEpisodeBrowserItem in
+            let playbackContext = context.playbackContext(for: episode)
+            return buildItem(
+                episode: episode,
+                showTitle: showTitle,
+                showPosterURL: showPosterURL,
+                mediaTitle: context.title,
+                seasonTitleOverride: context.title,
+                animeSeasonTitle: context.title,
+                originalTitle: context.alternateTitle,
+                posterURL: posterURL,
+                imdbId: context.imdbId ?? fallbackImdbId,
+                isAnime: true,
+                isSpecial: true,
+                playbackContext: playbackContext,
+                originalTMDBSeasonNumber: playbackContext.resolvedTMDBSeasonNumber,
+                originalTMDBEpisodeNumber: playbackContext.resolvedTMDBEpisodeNumber
+            )
+        }
+        return PlayerEpisodeBrowserSeason(
+            id: "special-\(context.id)",
+            title: context.title,
+            subtitle: context.formatLabel,
+            posterURL: posterURL,
+            episodes: items
+        )
+    }
+
+    private func buildItem(
+        episode: TMDBEpisode,
+        showTitle: String,
+        showPosterURL: String?,
+        mediaTitle: String,
+        seasonTitleOverride: String?,
+        animeSeasonTitle: String?,
+        originalTitle: String?,
+        posterURL: String?,
+        imdbId: String?,
+        isAnime: Bool,
+        isSpecial: Bool,
+        playbackContext: EpisodePlaybackContext?,
+        originalTMDBSeasonNumber: Int?,
+        originalTMDBEpisodeNumber: Int?
+    ) -> PlayerEpisodeBrowserItem {
+        let progress = ProgressManager.shared.getEpisodeProgress(
+            showId: seed.showId,
+            seasonNumber: episode.seasonNumber,
+            episodeNumber: episode.episodeNumber
+        )
+        let download = DownloadManager.shared.completedDownloadItem(
+            tmdbId: seed.showId,
+            isMovie: false,
+            seasonNumber: episode.seasonNumber,
+            episodeNumber: episode.episodeNumber
+        )
+        let isCurrent = episode.seasonNumber == seed.currentSeasonNumber
+            && episode.episodeNumber == seed.currentEpisodeNumber
+        let id = "\(episode.seasonNumber)-\(episode.episodeNumber)-\(episode.id)-\(isSpecial ? "special" : "main")"
+        return PlayerEpisodeBrowserItem(
+            id: id,
+            showId: seed.showId,
+            showTitle: showTitle,
+            showPosterURL: showPosterURL,
+            mediaTitle: mediaTitle,
+            seasonTitleOverride: seasonTitleOverride,
+            animeSeasonTitle: animeSeasonTitle,
+            originalTitle: originalTitle,
+            posterURL: posterURL,
+            imdbId: imdbId,
+            episode: episode,
+            isAnime: isAnime,
+            isSpecial: isSpecial,
+            playbackContext: playbackContext,
+            originalTMDBSeasonNumber: originalTMDBSeasonNumber,
+            originalTMDBEpisodeNumber: originalTMDBEpisodeNumber,
+            progress: progress,
+            isDownloaded: download != nil,
+            downloadItem: download,
+            isCurrent: isCurrent
+        )
+    }
+
+    static func fullImageURL(from path: String?) -> String? {
+        guard let path, !path.isEmpty else { return nil }
+        if path.hasPrefix("http") { return path }
+        return "\(TMDBService.tmdbImageBaseURL)\(path)"
+    }
+}
+
+struct PlayerEpisodeBrowserDrawer: View {
+    @StateObject private var viewModel: PlayerEpisodeBrowserViewModel
+    let onClose: () -> Void
+    let onEpisodeSelected: (PlayerEpisodeBrowserItem) -> Void
+
+    init(
+        seed: PlayerEpisodeBrowserSeed,
+        onClose: @escaping () -> Void,
+        onEpisodeSelected: @escaping (PlayerEpisodeBrowserItem) -> Void
+    ) {
+        _viewModel = StateObject(wrappedValue: PlayerEpisodeBrowserViewModel(seed: seed))
+        self.onClose = onClose
+        self.onEpisodeSelected = onEpisodeSelected
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .trailing) {
+                Color.black.opacity(0.35)
+                    .ignoresSafeArea()
+                    .onTapGesture(perform: onClose)
+
+                drawerContent
+                    .frame(width: drawerWidth(for: proxy.size.width), height: proxy.size.height)
+                    .background(Color.black.opacity(0.86))
+                    .overlay(alignment: .leading) {
+                        Rectangle()
+                            .fill(Color.white.opacity(0.12))
+                            .frame(width: 1)
+                    }
+            }
+        }
+        .task {
+            await viewModel.loadIfNeeded()
+        }
+    }
+
+    private var drawerContent: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Episodes")
+                        .font(.headline)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.white)
+                    Text(viewModel.seed.showTitle)
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.68))
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(width: 34, height: 34)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 18)
+            .padding(.top, 18)
+            .padding(.bottom, 12)
+
+            Divider()
+                .background(Color.white.opacity(0.12))
+
+            if viewModel.isLoading && viewModel.seasons.isEmpty {
+                Spacer()
+                ProgressView()
+                    .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                Spacer()
+            } else if let error = viewModel.errorMessage, viewModel.seasons.isEmpty {
+                Spacer()
+                Text(error)
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.7))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 24)
+                Spacer()
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 18, pinnedViews: []) {
+                            ForEach(viewModel.seasons) { season in
+                                seasonSection(season)
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 14)
+                    }
+                    .onChange(of: viewModel.currentItemID) { id in
+                        guard let id else { return }
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                            withAnimation(.easeOut(duration: 0.25)) {
+                                proxy.scrollTo(id, anchor: .center)
+                            }
+                        }
+                    }
+                    .onAppear {
+                        if let id = viewModel.currentItemID {
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                                proxy.scrollTo(id, anchor: .center)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func seasonSection(_ season: PlayerEpisodeBrowserSeason) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text(season.title)
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                if let subtitle = season.subtitle {
+                    Text(subtitle)
+                        .font(.caption2)
+                        .foregroundColor(.white.opacity(0.55))
+                        .lineLimit(1)
+                }
+                Spacer()
+            }
+            .padding(.horizontal, 4)
+
+            ForEach(season.episodes) { item in
+                episodeRow(item)
+                    .id(item.id)
+            }
+        }
+    }
+
+    private func episodeRow(_ item: PlayerEpisodeBrowserItem) -> some View {
+        Button {
+            onEpisodeSelected(item)
+        } label: {
+            HStack(alignment: .top, spacing: 12) {
+                episodeImage(item)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        Text(item.displayCode)
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(.white.opacity(0.72))
+
+                        if item.isCurrent {
+                            Text("Now Playing")
+                                .font(.caption2)
+                                .fontWeight(.semibold)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(Color.accentColor.opacity(0.25))
+                                .foregroundColor(.white)
+                                .clipShape(Capsule())
+                        } else if item.isDownloaded {
+                            Image(systemName: "arrow.down.circle.fill")
+                                .font(.caption)
+                                .foregroundColor(.green)
+                        }
+
+                        Spacer(minLength: 0)
+                    }
+
+                    Text(item.displayTitle)
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.white)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+
+                    if let overview = item.episode.overview, !overview.isEmpty {
+                        Text(overview)
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.58))
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                    }
+
+                    HStack(spacing: 8) {
+                        if let runtime = item.episode.runtime, runtime > 0 {
+                            Text("\(runtime)m")
+                                .font(.caption2)
+                                .foregroundColor(.white.opacity(0.58))
+                        }
+                        if item.episode.voteAverage > 0 {
+                            Label(String(format: "%.1f", item.episode.voteAverage), systemImage: "star.fill")
+                                .font(.caption2)
+                                .foregroundColor(.yellow.opacity(0.9))
+                        }
+                        Spacer(minLength: 0)
+                    }
+
+                    if item.progress > 0 && item.progress < 0.95 {
+                        ProgressView(value: item.progress)
+                            .progressViewStyle(LinearProgressViewStyle(tint: .accentColor))
+                            .frame(height: 3)
+                    }
+                }
+            }
+            .padding(8)
+            .background(item.isCurrent ? Color.white.opacity(0.12) : Color.white.opacity(0.05))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay {
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(item.isCurrent ? Color.accentColor.opacity(0.7) : Color.white.opacity(0.06), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(item.isCurrent)
+    }
+
+    private func episodeImage(_ item: PlayerEpisodeBrowserItem) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 8)
+                .fill(Color.white.opacity(0.1))
+
+            if let imageURL = item.imageURL, let url = URL(string: imageURL) {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .aspectRatio(contentMode: .fill)
+                    default:
+                        Image(systemName: item.isSpecial ? "sparkles" : "tv")
+                            .font(.title3)
+                            .foregroundColor(.white.opacity(0.55))
+                    }
+                }
+            } else {
+                Image(systemName: item.isSpecial ? "sparkles" : "tv")
+                    .font(.title3)
+                    .foregroundColor(.white.opacity(0.55))
+            }
+        }
+        .frame(width: 92, height: 52)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func drawerWidth(for totalWidth: CGFloat) -> CGFloat {
+        if totalWidth < 700 {
+            return min(totalWidth, max(300, totalWidth * 0.86))
+        }
+        return min(460, max(360, totalWidth * 0.42))
     }
 }
 

@@ -21,6 +21,21 @@ struct StreamOption: Identifiable {
     let subtitle: String?
 }
 
+struct PlayerResolvedPlaybackRequest {
+    let url: URL
+    let preset: PlayerPreset
+    let headers: [String: String]?
+    let subtitles: [String]?
+    let subtitleNames: [String]?
+    let mediaInfo: MediaInfo?
+    let imdbId: String?
+    let isAnimeHint: Bool
+    let originalTMDBSeasonNumber: Int?
+    let originalTMDBEpisodeNumber: Int?
+    let episodePlaybackContext: EpisodePlaybackContext?
+    let launchContext: PlaybackLaunchContext?
+}
+
 @MainActor
 final class ModulesSearchResultsViewModel: ObservableObject {
     @Published var moduleResults: [UUID: [SearchItem]] = [:]
@@ -125,6 +140,8 @@ struct ModulesSearchResultsSheet: View {
     var onDownloadEnqueued: (() -> Void)? = nil
     /// Called when user taps "Skip" (for Download All flow)
     var onSkipRequested: (() -> Void)? = nil
+    /// When provided, selecting a source resolves a request instead of presenting a new player.
+    var onResolvedPlaybackRequest: ((PlayerResolvedPlaybackRequest) -> Void)? = nil
     
     @Environment(\.presentationMode) var presentationMode
     @StateObject private var viewModel = ModulesSearchResultsViewModel()
@@ -990,6 +1007,23 @@ struct ModulesSearchResultsSheet: View {
 
     private var shouldDismissAutoModeSheetBeforePlayback: Bool {
         autoModeOnly && !showManualPicker
+    }
+
+    @MainActor
+    private func finishResolvedPlayback(_ request: PlayerResolvedPlaybackRequest) {
+        guard let onResolvedPlaybackRequest else { return }
+
+        if shouldDismissAutoModeSheetBeforePlayback {
+            dismissAutoModeSheetBeforePlaybackIfNeeded { _ in
+                onResolvedPlaybackRequest(request)
+            }
+            return
+        }
+
+        presentationMode.wrappedValue.dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            onResolvedPlaybackRequest(request)
+        }
     }
 
     @MainActor
@@ -2043,7 +2077,9 @@ struct ModulesSearchResultsSheet: View {
             let external = ExternalPlayer(rawValue: externalRaw) ?? .none
             let schemeUrl = external.schemeURL(for: url)
 
-            if let scheme = schemeUrl, UIApplication.shared.canOpenURL(scheme) {
+            if onResolvedPlaybackRequest == nil,
+               let scheme = schemeUrl,
+               UIApplication.shared.canOpenURL(scheme) {
                 dismissAutoModeSheetBeforePlaybackIfNeeded { _ in
                     UIApplication.shared.open(scheme, options: [:], completionHandler: nil)
                     Logger.shared.log("Stremio: Opening external player with scheme: \(scheme)", type: "General")
@@ -2072,6 +2108,40 @@ struct ModulesSearchResultsSheet: View {
                 playerMediaInfo = .movie(id: tmdbId, title: playerMediaTitle, posterURL: posterURL, isAnime: isAnimeContent)
             } else if let episode = selectedEpisode {
                 playerMediaInfo = .episode(showId: tmdbId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, showTitle: playerMediaTitle, showPosterURL: posterURL, isAnime: isAnimeContent)
+            }
+
+            let resolvedSubtitleArray: [String]? = subtitles.isEmpty ? nil : subtitles
+            let resolvedPreset = PlayerPreset.presets.first ?? PlayerPreset(id: .sdrRec709, title: "Default", summary: "", stream: nil, commands: [])
+            let resolvedLaunchContext = PlaybackLaunchContext(
+                sourceId: SourceHealth.stremioId(addon),
+                sourceName: addon.manifest.name,
+                sourceKind: .stremio,
+                autoMode: autoModeLaunch,
+                streamURL: url,
+                headers: finalHeaders,
+                subtitles: resolvedSubtitleArray ?? [],
+                subtitleNames: subtitleNames,
+                retryCount: retryCount
+            )
+            let resolvedAnimeHint = isAnimeContent || animeSeasonTitle != nil || TrackerManager.shared.cachedAniListId(for: tmdbId) != nil
+
+            if onResolvedPlaybackRequest != nil {
+                let request = PlayerResolvedPlaybackRequest(
+                    url: streamURL,
+                    preset: resolvedPreset,
+                    headers: finalHeaders,
+                    subtitles: resolvedSubtitleArray,
+                    subtitleNames: subtitleNames.isEmpty ? nil : subtitleNames,
+                    mediaInfo: playerMediaInfo,
+                    imdbId: imdbId,
+                    isAnimeHint: resolvedAnimeHint,
+                    originalTMDBSeasonNumber: effectivePlaybackContext?.resolvedTMDBSeasonNumber ?? originalTMDBSeasonNumber,
+                    originalTMDBEpisodeNumber: effectivePlaybackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBEpisodeNumber,
+                    episodePlaybackContext: effectivePlaybackContext,
+                    launchContext: resolvedLaunchContext
+                )
+                finishResolvedPlayback(request)
+                return
             }
 
             if inAppPlayer == "mpv" || inAppPlayer == "VLC" {
@@ -2675,7 +2745,9 @@ struct ModulesSearchResultsSheet: View {
             let external = ExternalPlayer(rawValue: externalRaw) ?? .none
             let schemeUrl = external.schemeURL(for: url)
             
-            if let scheme = schemeUrl, UIApplication.shared.canOpenURL(scheme) {
+            if onResolvedPlaybackRequest == nil,
+               let scheme = schemeUrl,
+               UIApplication.shared.canOpenURL(scheme) {
                 dismissAutoModeSheetBeforePlaybackIfNeeded { _ in
                     UIApplication.shared.open(scheme, options: [:], completionHandler: nil)
                     Logger.shared.log("Opening external player with scheme: \(scheme)", type: "General")
@@ -2721,6 +2793,47 @@ struct ModulesSearchResultsSheet: View {
                 }
             }
             
+            let posterURL = resolvedPosterURL
+            var resolvedPlayerMediaInfo: MediaInfo? = nil
+            if isMovie {
+                resolvedPlayerMediaInfo = .movie(id: tmdbId, title: playerMediaTitle, posterURL: posterURL, isAnime: isAnimeContent)
+            } else if let episode = selectedEpisode {
+                resolvedPlayerMediaInfo = .episode(showId: tmdbId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, showTitle: playerMediaTitle, showPosterURL: posterURL, isAnime: isAnimeContent)
+            }
+            let resolvedSubtitleArray: [String]? = subtitle.map { [$0] }
+            let resolvedPreset = PlayerPreset.presets.first ?? PlayerPreset(id: .sdrRec709, title: "Default", summary: "", stream: nil, commands: [])
+            let resolvedLaunchContext = PlaybackLaunchContext(
+                sourceId: SourceHealth.serviceId(service),
+                sourceName: service.metadata.sourceName,
+                sourceKind: .service,
+                autoMode: autoModeLaunch,
+                streamURL: url,
+                headers: finalHeaders,
+                subtitles: resolvedSubtitleArray ?? [],
+                subtitleNames: nil,
+                retryCount: retryCount
+            )
+            let resolvedAnimeHint = isAnimeContent || animeSeasonTitle != nil || TrackerManager.shared.cachedAniListId(for: tmdbId) != nil
+
+            if onResolvedPlaybackRequest != nil {
+                let request = PlayerResolvedPlaybackRequest(
+                    url: streamURL,
+                    preset: resolvedPreset,
+                    headers: finalHeaders,
+                    subtitles: resolvedSubtitleArray,
+                    subtitleNames: nil,
+                    mediaInfo: resolvedPlayerMediaInfo,
+                    imdbId: imdbId,
+                    isAnimeHint: resolvedAnimeHint,
+                    originalTMDBSeasonNumber: effectivePlaybackContext?.resolvedTMDBSeasonNumber ?? originalTMDBSeasonNumber,
+                    originalTMDBEpisodeNumber: effectivePlaybackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBEpisodeNumber,
+                    episodePlaybackContext: effectivePlaybackContext,
+                    launchContext: resolvedLaunchContext
+                )
+                finishResolvedPlayback(request)
+                return
+            }
+
             if inAppPlayer == "mpv" {
                 let preset = PlayerPreset.presets.first
                 let subtitleArray: [String]? = subtitle.map { [$0] }
