@@ -23,6 +23,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -34,6 +35,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
@@ -250,6 +254,20 @@ fun EclipseAndroidApp(
 
     var selectedDetailTarget by remember { mutableStateOf<DetailTarget?>(null) }
     var settingsReturnRoute by remember { mutableStateOf("home") }
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    DisposableEffect(lifecycleOwner, settingsViewModel, servicesViewModel) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                settingsViewModel.runBackgroundAutoChecks()
+                servicesViewModel.runDailySourceHealthCheckIfNeeded()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
 
     LaunchedEffect(selectedDetailTarget) {
         detailViewModel.load(selectedDetailTarget)
@@ -609,20 +627,17 @@ fun EclipseAndroidApp(
                             onNextEpisodeThresholdChanged = settingsViewModel::setNextEpisodeThreshold,
                             onPlayerSelected = settingsViewModel::setInAppPlayer,
                             onEnableSubtitlesByDefaultChanged = settingsViewModel::setEnableSubtitlesByDefault,
-                            onEnableVLCSubtitleEditMenuChanged = settingsViewModel::setEnableVLCSubtitleEditMenu,
                             onDefaultSubtitleLanguageChanged = settingsViewModel::setDefaultSubtitleLanguage,
                             onPreferredAnimeAudioLanguageChanged = settingsViewModel::setPreferredAnimeAudioLanguage,
                             onDefaultPlaybackSpeedChanged = settingsViewModel::setDefaultPlaybackSpeed,
                             onHoldSpeedChanged = settingsViewModel::setHoldSpeed,
                             onExternalPlayerChanged = settingsViewModel::setExternalPlayer,
                             onAlwaysLandscapeChanged = settingsViewModel::setAlwaysLandscape,
-                            onVlcHeaderProxyChanged = settingsViewModel::setVlcHeaderProxyEnabled,
                             onVlcBrightnessGestureChanged = settingsViewModel::setVlcBrightnessGestureEnabled,
                             onVlcVolumeGestureChanged = settingsViewModel::setVlcVolumeGestureEnabled,
                             onPlayerTwoFingerTapPlayPauseChanged = settingsViewModel::setPlayerTwoFingerTapPlayPauseEnabled,
                             onVlcDoubleTapSeekEnabledChanged = settingsViewModel::setVlcDoubleTapSeekEnabled,
                             onVlcDoubleTapSeekSecondsChanged = settingsViewModel::setVlcDoubleTapSeekSeconds,
-                            onVlcPiPChanged = settingsViewModel::setVlcPiPEnabled,
                             onVlcOpenSubtitlesChanged = settingsViewModel::setVlcOpenSubtitlesEnabled,
                             onVlcOpenSubtitlesAutoFallbackChanged = settingsViewModel::setVlcOpenSubtitlesAutoFallbackEnabled,
                             onSubtitleForegroundColorChanged = settingsViewModel::setSubtitleForegroundColor,

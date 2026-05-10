@@ -39,13 +39,7 @@ class AndroidServicesViewModel(
     private val noticeMessage = MutableStateFlow<String?>(null)
 
     init {
-        viewModelScope.launch {
-            sourceHealthRepository.load()
-            val summary = sourceHealthRepository.runDailyEnabledSourceChecksIfNeeded()
-            if (!summary.skipped) {
-                noticeMessage.value = summary.message
-            }
-        }
+        runDailySourceHealthCheckIfNeeded()
         viewModelScope.launch {
             val sourceState = combine(
                 repository.observeSnapshot(),
@@ -73,6 +67,16 @@ class AndroidServicesViewModel(
                 )
             }.collect { state ->
                 _state.value = state
+            }
+        }
+    }
+
+    fun runDailySourceHealthCheckIfNeeded() {
+        viewModelScope.launch {
+            sourceHealthRepository.load()
+            val summary = sourceHealthRepository.runDailyEnabledSourceChecksIfNeeded()
+            if (!summary.skipped) {
+                noticeMessage.value = summary.message
             }
         }
     }

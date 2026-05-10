@@ -1,41 +1,9 @@
 package dev.soupy.eclipse.android.data
 
 import dev.soupy.eclipse.android.core.model.SimilarityAlgorithm
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
-
-private val noiseTokens = setOf(
-    "2160p",
-    "1080p",
-    "720p",
-    "480p",
-    "4k",
-    "uhd",
-    "hdr",
-    "dv",
-    "hevc",
-    "x264",
-    "x265",
-    "h264",
-    "h265",
-    "web",
-    "webdl",
-    "webrip",
-    "bluray",
-    "bdrip",
-    "remux",
-    "proper",
-    "repack",
-    "multi",
-    "dual",
-    "audio",
-    "sub",
-    "subs",
-    "dub",
-    "cam",
-    "hdcam",
-    "ts",
-)
 
 internal fun titleMatchScore(
     expectedTitles: List<String>,
@@ -65,35 +33,43 @@ private fun String.similarityTo(other: String, algorithm: SimilarityAlgorithm): 
 private fun hybridSimilarity(left: String, right: String): Double {
     val jaroScore = jaroWinkler(left, right)
     val editScore = normalizedLevenshtein(left, right)
-    val averageLength = (left.length + right.length) / 2
-    val lengthDifference = kotlin.math.abs(left.length - right.length)
+    val averageLength = (left.length + right.length) / 2.0
+    val lengthDifference = abs(left.length - right.length)
+    val lengthRatio = if (averageLength > 0.0) lengthDifference / averageLength else 0.0
+    val prefixSimilarity = prefixSimilarity(left, right)
 
     val (jaroWeight, editWeight) = when {
-        averageLength < 10 -> 0.7 to 0.3
-        averageLength > 30 -> 0.3 to 0.7
-        lengthDifference > 10 -> 0.4 to 0.6
+        averageLength < 10.0 || prefixSimilarity > 0.7 -> 0.7 to 0.3
+        averageLength > 50.0 -> 0.3 to 0.7
+        lengthRatio > 0.5 -> 0.4 to 0.6
         else -> 0.5 to 0.5
     }
     val weighted = jaroScore * jaroWeight + editScore * editWeight
-    val agreementBonus = if (1.0 - kotlin.math.abs(jaroScore - editScore) > 0.8) 0.05 else 0.0
+    val agreementBonus = if (1.0 - abs(jaroScore - editScore) > 0.8) 0.05 else 0.0
+    val averageScore = (jaroScore + editScore) / 2.0
+    val lowScorePenalty = if (averageScore < 0.3) 0.05 else 0.0
 
-    return max(weighted + agreementBonus, (jaroScore + editScore) / 2.0).coerceIn(0.0, 1.0)
+    return (weighted + agreementBonus - lowScorePenalty).coerceIn(0.0, 1.0)
 }
 
 private fun String.normalizedForMatching(): String =
-    lowercase()
-        .replace(Regex("[^a-z0-9]+"), " ")
-        .split(' ')
-        .asSequence()
-        .map(String::trim)
-        .filter { token ->
-            token.isNotBlank() &&
-                token !in noiseTokens &&
-                token != "s" &&
-                !token.matches(Regex("s\\d+e\\d+")) &&
-                !token.matches(Regex("\\d+x\\d+"))
+    trim()
+        .lowercase()
+        .replace(Regex("[^a-z0-9\\s]"), "")
+
+private fun prefixSimilarity(left: String, right: String): Double {
+    val minLength = min(left.length, right.length)
+    if (minLength == 0) return 0.0
+    var commonPrefixLength = 0
+    for (index in 0 until min(minLength, 10)) {
+        if (left[index] == right[index]) {
+            commonPrefixLength += 1
+        } else {
+            break
         }
-        .joinToString(" ")
+    }
+    return commonPrefixLength.toDouble() / min(minLength, 10).toDouble()
+}
 
 private fun normalizedLevenshtein(left: String, right: String): Double {
     if (left == right) return 1.0

@@ -156,6 +156,10 @@ class AndroidSettingsViewModel(
         refreshLogs()
         refreshTrackers()
         runStartupCacheMaintenance()
+        runBackgroundAutoChecks()
+    }
+
+    fun runBackgroundAutoChecks() {
         checkGitHubReleaseIfNeeded()
         autoUpdateServicesIfNeeded()
     }

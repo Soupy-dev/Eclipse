@@ -11,17 +11,17 @@ enum class SimilarityAlgorithm(
     HYBRID(
         id = "hybrid",
         displayName = "Hybrid",
-        description = "Balances prefix similarity and edit distance for mixed media titles.",
+        description = "Combines both algorithms for optimal matching across different string types and lengths.",
     ),
     JARO_WINKLER(
         id = "jaro_winkler",
-        displayName = "Jaro-Winkler",
-        description = "Prefers short names and titles that share the same beginning.",
+        displayName = "Jaro-Winkler Similarity",
+        description = "When matching names, titles, or short strings where prefix similarity are important.",
     ),
     LEVENSHTEIN(
         id = "levenshtein",
-        displayName = "Levenshtein",
-        description = "Prefers titles with the fewest edits between them.",
+        displayName = "Levenshtein Distance",
+        description = "When you need precise differences across all text available.",
     );
 
     companion object {

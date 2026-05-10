@@ -153,14 +153,14 @@ class SettingsStore(
     ) {
         context.dataStore.edit { prefs ->
             prefs[Keys.enableSubtitlesByDefault] = enableSubtitlesByDefault
-            prefs[Keys.enableVLCSubtitleEditMenu] = enableVLCSubtitleEditMenu
+            prefs[Keys.enableVLCSubtitleEditMenu] = true
             prefs[Keys.defaultSubtitleLanguage] = defaultSubtitleLanguage.normalizedLanguageCode("eng")
             prefs[Keys.preferredAnimeAudioLanguage] = preferredAnimeAudioLanguage.normalizedLanguageCode("jpn")
             prefs[Keys.defaultPlaybackSpeed] = defaultPlaybackSpeed.coerceIn(0.25, 2.0)
             prefs[Keys.holdSpeedPlayer] = holdSpeedPlayer.coerceIn(0.1, 3.0)
             prefs[Keys.externalPlayer] = externalPlayer.trim().ifBlank { "none" }
             prefs[Keys.alwaysLandscape] = alwaysLandscape
-            prefs[Keys.vlcHeaderProxyEnabled] = vlcHeaderProxyEnabled
+            prefs[Keys.vlcHeaderProxyEnabled] = true
         }
     }
 
@@ -180,7 +180,7 @@ class SettingsStore(
             prefs[Keys.playerTwoFingerTapPlayPauseEnabled] = playerTwoFingerTapPlayPauseEnabled
             prefs[Keys.vlcDoubleTapSeekEnabled] = vlcDoubleTapSeekEnabled
             prefs[Keys.vlcDoubleTapSeekSeconds] = vlcDoubleTapSeekSeconds.coerceIn(5.0, 60.0)
-            prefs[Keys.vlcPiPEnabled] = vlcPiPEnabled
+            prefs[Keys.vlcPiPEnabled] = false
             prefs[Keys.vlcOpenSubtitlesEnabled] = vlcOpenSubtitlesEnabled
             prefs[Keys.vlcOpenSubtitlesAutoFallbackEnabled] = vlcOpenSubtitlesAutoFallbackEnabled
         }
@@ -426,7 +426,7 @@ class SettingsStore(
             prefs[Keys.selectedAppearance] = payload.selectedAppearance
             prefs[Keys.enableSubtitlesByDefault] = payload.enableSubtitlesByDefault
             prefs[Keys.defaultSubtitleLanguage] = payload.defaultSubtitleLanguage
-            prefs[Keys.enableVLCSubtitleEditMenu] = payload.enableVLCSubtitleEditMenu
+            prefs[Keys.enableVLCSubtitleEditMenu] = true
             prefs[Keys.preferredAnimeAudioLanguage] = payload.preferredAnimeAudioLanguage
             prefs[Keys.inAppPlayer] = payload.resolvedInAppPlayer.name
             prefs[Keys.showScheduleTab] = payload.showScheduleTab
@@ -443,22 +443,22 @@ class SettingsStore(
             prefs[Keys.skip85sAlwaysVisible] = payload.skip85sAlwaysVisible
             prefs[Keys.showNextEpisodeButton] = payload.showNextEpisodeButton
             prefs[Keys.nextEpisodeThreshold] = payload.nextEpisodeThresholdPercent()
-            prefs[Keys.vlcHeaderProxyEnabled] = payload.vlcHeaderProxyEnabled
+            prefs[Keys.vlcHeaderProxyEnabled] = true
             prefs[Keys.vlcBrightnessGestureEnabled] = payload.vlcBrightnessGestureEnabled
             prefs[Keys.vlcVolumeGestureEnabled] = payload.vlcVolumeGestureEnabled
             prefs[Keys.playerTwoFingerTapPlayPauseEnabled] = payload.playerTwoFingerTapPlayPauseEnabled
             prefs[Keys.vlcDoubleTapSeekEnabled] = payload.vlcDoubleTapSeekEnabled
             prefs[Keys.vlcDoubleTapSeekSeconds] = payload.vlcDoubleTapSeekSeconds
-            prefs[Keys.vlcPiPEnabled] = payload.vlcPiPEnabled
+            prefs[Keys.vlcPiPEnabled] = false
             prefs[Keys.vlcOpenSubtitlesEnabled] = payload.vlcOpenSubtitlesEnabled
             prefs[Keys.vlcOpenSubtitlesAutoFallbackEnabled] = payload.vlcOpenSubtitlesAutoFallbackEnabled
-            val subtitleForegroundColor = payload.subtitleForegroundColor
+            val subtitleForegroundColor = payload.subtitleForegroundColor.normalizedOptionalColor()
             if (subtitleForegroundColor != null) {
                 prefs[Keys.subtitleForegroundColor] = subtitleForegroundColor
             } else {
                 prefs.remove(Keys.subtitleForegroundColor)
             }
-            val subtitleStrokeColor = payload.subtitleStrokeColor
+            val subtitleStrokeColor = payload.subtitleStrokeColor.normalizedOptionalColor()
             if (subtitleStrokeColor != null) {
                 prefs[Keys.subtitleStrokeColor] = subtitleStrokeColor
             } else {
@@ -507,7 +507,7 @@ class SettingsStore(
         selectedAppearance = preferences[Keys.selectedAppearance] ?: "system",
         enableSubtitlesByDefault = preferences[Keys.enableSubtitlesByDefault] ?: false,
         defaultSubtitleLanguage = preferences[Keys.defaultSubtitleLanguage] ?: "eng",
-        enableVLCSubtitleEditMenu = preferences[Keys.enableVLCSubtitleEditMenu] ?: true,
+        enableVLCSubtitleEditMenu = true,
         preferredAnimeAudioLanguage = preferences[Keys.preferredAnimeAudioLanguage] ?: "jpn",
         inAppPlayer = preferences[Keys.inAppPlayer]?.toInAppPlayer() ?: InAppPlayer.VLC,
         autoModeEnabled = preferences[Keys.autoModeEnabled] ?: true,
@@ -527,13 +527,13 @@ class SettingsStore(
         skip85sAlwaysVisible = preferences[Keys.skip85sAlwaysVisible] ?: false,
         showNextEpisodeButton = preferences[Keys.showNextEpisodeButton] ?: true,
         nextEpisodeThreshold = preferences[Keys.nextEpisodeThreshold] ?: 90,
-        vlcHeaderProxyEnabled = preferences[Keys.vlcHeaderProxyEnabled] ?: true,
+        vlcHeaderProxyEnabled = true,
         vlcBrightnessGestureEnabled = preferences[Keys.vlcBrightnessGestureEnabled] ?: false,
         vlcVolumeGestureEnabled = preferences[Keys.vlcVolumeGestureEnabled] ?: false,
         playerTwoFingerTapPlayPauseEnabled = preferences[Keys.playerTwoFingerTapPlayPauseEnabled] ?: true,
         vlcDoubleTapSeekEnabled = preferences[Keys.vlcDoubleTapSeekEnabled] ?: true,
         vlcDoubleTapSeekSeconds = preferences[Keys.vlcDoubleTapSeekSeconds] ?: 10.0,
-        vlcPiPEnabled = preferences[Keys.vlcPiPEnabled] ?: false,
+        vlcPiPEnabled = false,
         vlcOpenSubtitlesEnabled = preferences[Keys.vlcOpenSubtitlesEnabled] ?: false,
         vlcOpenSubtitlesAutoFallbackEnabled = preferences[Keys.vlcOpenSubtitlesAutoFallbackEnabled] ?: true,
         subtitleForegroundColor = preferences[Keys.subtitleForegroundColor],
@@ -685,9 +685,14 @@ private fun String.normalizedTextAlignment(): String =
 
 private fun String?.normalizedOptionalColor(): String? =
     this?.trim()
-        ?.takeIf { it.isNotBlank() && it != "none" }
+        ?.takeIf { it.isNotBlank() && !it.equals("none", ignoreCase = true) }
         ?.let { value ->
-            if (value.startsWith("#")) value else "#$value"
+            val raw = value.removePrefix("#")
+            if ((raw.length == 6 || raw.length == 8) && raw.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) {
+                "#${raw.uppercase()}"
+            } else {
+                null
+            }
         }
 
 private fun String?.toStoredList(): List<String> =

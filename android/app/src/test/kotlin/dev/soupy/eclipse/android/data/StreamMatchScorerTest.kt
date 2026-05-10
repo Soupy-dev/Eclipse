@@ -6,14 +6,19 @@ import kotlin.test.assertTrue
 
 class StreamMatchScorerTest {
     @Test
-    fun hybridScoreIgnoresReleaseQualityNoise() {
-        val score = titleMatchScore(
-            expectedTitles = listOf("Frieren Beyond Journey's End"),
-            candidateText = "Frieren.Beyond.Journeys.End.S01E01.1080p.WEB-DL.x265",
+    fun hybridScoreKeepsIosReleaseTitleBehavior() {
+        val cleanScore = titleMatchScore(
+            expectedTitles = listOf("Frieren Beyond Journeys End"),
+            candidateText = "Frieren Beyond Journeys End",
+            algorithm = SimilarityAlgorithm.HYBRID,
+        )
+        val releaseTitleScore = titleMatchScore(
+            expectedTitles = listOf("Frieren Beyond Journeys End"),
+            candidateText = "Frieren Beyond Journeys End S01E01 1080p WEB DL x265",
             algorithm = SimilarityAlgorithm.HYBRID,
         )
 
-        assertTrue(score > 0.85)
+        assertTrue(cleanScore > releaseTitleScore)
     }
 
     @Test

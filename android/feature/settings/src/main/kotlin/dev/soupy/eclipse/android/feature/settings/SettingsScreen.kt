@@ -259,6 +259,44 @@ private val ReaderFontWeights = listOf(
     "bold" to "Bold",
 )
 
+private val VlcLanguageOptions = listOf(
+    "eng" to "English",
+    "jpn" to "Japanese",
+    "zho" to "Chinese",
+    "kor" to "Korean",
+    "spa" to "Spanish",
+    "fra" to "French",
+    "deu" to "German",
+    "ita" to "Italian",
+    "por" to "Portuguese",
+    "rus" to "Russian",
+)
+
+private val SubtitleTextColorOptions = listOf(
+    "#FFFFFF" to "White",
+    "#FFFF00" to "Yellow",
+    "#00FFFF" to "Cyan",
+    "#00FF00" to "Green",
+    "#FF00FF" to "Magenta",
+)
+
+private val SubtitleStrokeColorOptions = listOf(
+    "#000000" to "Black",
+    "#555555" to "Dark Gray",
+    "#FFFFFF" to "White",
+    "#00000000" to "None",
+)
+
+private val SubtitleFontSizeOptions = listOf(
+    "20" to "Very Small",
+    "24" to "Small",
+    "30" to "Medium",
+    "34" to "Large",
+    "38" to "Extra Large",
+    "42" to "Huge",
+    "46" to "Extra Huge",
+)
+
 private val ReaderColorPresets = listOf(
     "Pure",
     "Warm",
@@ -303,20 +341,17 @@ fun SettingsRoute(
     onNextEpisodeThresholdChanged: (Int) -> Unit,
     onPlayerSelected: (InAppPlayer) -> Unit,
     onEnableSubtitlesByDefaultChanged: (Boolean) -> Unit,
-    onEnableVLCSubtitleEditMenuChanged: (Boolean) -> Unit,
     onDefaultSubtitleLanguageChanged: (String) -> Unit,
     onPreferredAnimeAudioLanguageChanged: (String) -> Unit,
     onDefaultPlaybackSpeedChanged: (Double) -> Unit,
     onHoldSpeedChanged: (Double) -> Unit,
     onExternalPlayerChanged: (String) -> Unit,
     onAlwaysLandscapeChanged: (Boolean) -> Unit,
-    onVlcHeaderProxyChanged: (Boolean) -> Unit,
     onVlcBrightnessGestureChanged: (Boolean) -> Unit,
     onVlcVolumeGestureChanged: (Boolean) -> Unit,
     onPlayerTwoFingerTapPlayPauseChanged: (Boolean) -> Unit,
     onVlcDoubleTapSeekEnabledChanged: (Boolean) -> Unit,
     onVlcDoubleTapSeekSecondsChanged: (Double) -> Unit,
-    onVlcPiPChanged: (Boolean) -> Unit,
     onVlcOpenSubtitlesChanged: (Boolean) -> Unit,
     onVlcOpenSubtitlesAutoFallbackChanged: (Boolean) -> Unit,
     onSubtitleForegroundColorChanged: (String?) -> Unit,
@@ -578,20 +613,17 @@ fun SettingsRoute(
             PlayerPreferencesCard(
                 state = state,
                 onEnableSubtitlesByDefaultChanged = onEnableSubtitlesByDefaultChanged,
-                onEnableVLCSubtitleEditMenuChanged = onEnableVLCSubtitleEditMenuChanged,
                 onDefaultSubtitleLanguageChanged = onDefaultSubtitleLanguageChanged,
                 onPreferredAnimeAudioLanguageChanged = onPreferredAnimeAudioLanguageChanged,
                 onDefaultPlaybackSpeedChanged = onDefaultPlaybackSpeedChanged,
                 onHoldSpeedChanged = onHoldSpeedChanged,
                 onExternalPlayerChanged = onExternalPlayerChanged,
                 onAlwaysLandscapeChanged = onAlwaysLandscapeChanged,
-                onVlcHeaderProxyChanged = onVlcHeaderProxyChanged,
                 onVlcBrightnessGestureChanged = onVlcBrightnessGestureChanged,
                 onVlcVolumeGestureChanged = onVlcVolumeGestureChanged,
                 onPlayerTwoFingerTapPlayPauseChanged = onPlayerTwoFingerTapPlayPauseChanged,
                 onVlcDoubleTapSeekEnabledChanged = onVlcDoubleTapSeekEnabledChanged,
                 onVlcDoubleTapSeekSecondsChanged = onVlcDoubleTapSeekSecondsChanged,
-                onVlcPiPChanged = onVlcPiPChanged,
                 onVlcOpenSubtitlesChanged = onVlcOpenSubtitlesChanged,
                 onVlcOpenSubtitlesAutoFallbackChanged = onVlcOpenSubtitlesAutoFallbackChanged,
             )
@@ -830,7 +862,7 @@ private fun SettingsOverview(
             )
             SettingsMenuRow(
                 title = "Matching Algorithm",
-                subtitle = state.selectedSimilarityAlgorithm.name.lowercase().replaceFirstChar { it.titlecase() },
+                subtitle = state.selectedSimilarityAlgorithm.displayName,
                 onClick = { onSelected(SettingsSection.DISCOVERY) },
             )
             SettingsMenuRow(
@@ -1274,20 +1306,17 @@ private fun SimilarityAlgorithmCard(
 private fun PlayerPreferencesCard(
     state: SettingsScreenState,
     onEnableSubtitlesByDefaultChanged: (Boolean) -> Unit,
-    onEnableVLCSubtitleEditMenuChanged: (Boolean) -> Unit,
     onDefaultSubtitleLanguageChanged: (String) -> Unit,
     onPreferredAnimeAudioLanguageChanged: (String) -> Unit,
     onDefaultPlaybackSpeedChanged: (Double) -> Unit,
     onHoldSpeedChanged: (Double) -> Unit,
     onExternalPlayerChanged: (String) -> Unit,
     onAlwaysLandscapeChanged: (Boolean) -> Unit,
-    onVlcHeaderProxyChanged: (Boolean) -> Unit,
     onVlcBrightnessGestureChanged: (Boolean) -> Unit,
     onVlcVolumeGestureChanged: (Boolean) -> Unit,
     onPlayerTwoFingerTapPlayPauseChanged: (Boolean) -> Unit,
     onVlcDoubleTapSeekEnabledChanged: (Boolean) -> Unit,
     onVlcDoubleTapSeekSecondsChanged: (Double) -> Unit,
-    onVlcPiPChanged: (Boolean) -> Unit,
     onVlcOpenSubtitlesChanged: (Boolean) -> Unit,
     onVlcOpenSubtitlesAutoFallbackChanged: (Boolean) -> Unit,
 ) {
@@ -1303,24 +1332,17 @@ private fun PlayerPreferencesCard(
                 checked = state.enableSubtitlesByDefault,
                 onCheckedChange = onEnableSubtitlesByDefaultChanged,
             )
-            SettingInlineToggle(
-                title = "VLC Subtitle Edit Menu",
-                checked = state.enableVLCSubtitleEditMenu,
-                onCheckedChange = onEnableVLCSubtitleEditMenuChanged,
+            ReaderOptionButtons(
+                title = "Default Subtitle Language",
+                selected = state.defaultSubtitleLanguage,
+                options = VlcLanguageOptions,
+                onSelected = onDefaultSubtitleLanguageChanged,
             )
-            OutlinedTextField(
-                value = state.defaultSubtitleLanguage,
-                onValueChange = onDefaultSubtitleLanguageChanged,
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("Default Subtitle Language") },
-                singleLine = true,
-            )
-            OutlinedTextField(
-                value = state.preferredAnimeAudioLanguage,
-                onValueChange = onPreferredAnimeAudioLanguageChanged,
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("Preferred Anime Audio") },
-                singleLine = true,
+            ReaderOptionButtons(
+                title = "Preferred Anime Audio",
+                selected = state.preferredAnimeAudioLanguage,
+                options = VlcLanguageOptions,
+                onSelected = onPreferredAnimeAudioLanguageChanged,
             )
             OutlinedTextField(
                 value = state.externalPlayer,
@@ -1349,11 +1371,6 @@ private fun PlayerPreferencesCard(
                 onCheckedChange = onAlwaysLandscapeChanged,
             )
             SettingInlineToggle(
-                title = "VLC Header Proxy",
-                checked = state.vlcHeaderProxyEnabled,
-                onCheckedChange = onVlcHeaderProxyChanged,
-            )
-            SettingInlineToggle(
                 title = "Brightness Gesture",
                 checked = state.vlcBrightnessGestureEnabled,
                 onCheckedChange = onVlcBrightnessGestureChanged,
@@ -1379,11 +1396,6 @@ private fun PlayerPreferencesCard(
                 value = state.vlcDoubleTapSeekSeconds.coerceIn(5.0, 60.0).toFloat(),
                 valueRange = 5f..60f,
                 onValueChange = { onVlcDoubleTapSeekSecondsChanged(roundedToFiveStep(it).toDouble()) },
-            )
-            SettingInlineToggle(
-                title = "Picture in Picture",
-                checked = state.vlcPiPEnabled,
-                onCheckedChange = onVlcPiPChanged,
             )
             SettingInlineToggle(
                 title = "OpenSubtitles",
@@ -1415,26 +1427,23 @@ private fun SubtitleSettingsCard(
                 style = MaterialTheme.typography.titleLarge,
                 color = MaterialTheme.colorScheme.onSurface,
             )
-            OutlinedTextField(
-                value = state.subtitleForegroundColor.orEmpty(),
-                onValueChange = { onSubtitleForegroundColorChanged(it) },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("Text Color") },
-                singleLine = true,
+            ReaderOptionButtons(
+                title = "Subtitle Text Color",
+                selected = state.subtitleForegroundColor ?: "#FFFFFF",
+                options = SubtitleTextColorOptions,
+                onSelected = onSubtitleForegroundColorChanged,
             )
-            OutlinedTextField(
-                value = state.subtitleStrokeColor.orEmpty(),
-                onValueChange = { onSubtitleStrokeColorChanged(it) },
-                modifier = Modifier.fillMaxWidth(),
-                label = { Text("Outline Color") },
-                singleLine = true,
+            ReaderOptionButtons(
+                title = "Subtitle Stroke Color",
+                selected = state.subtitleStrokeColor ?: "#000000",
+                options = SubtitleStrokeColorOptions,
+                onSelected = onSubtitleStrokeColorChanged,
             )
-            ReaderValueSlider(
+            ReaderOptionButtons(
                 title = "Font Size",
-                valueLabel = "${state.subtitleFontSize.toInt()} sp",
-                value = state.subtitleFontSize.coerceIn(20.0, 46.0).toFloat(),
-                valueRange = 20f..46f,
-                onValueChange = { onSubtitleFontSizeChanged(closestSubtitleFontSize(it).toDouble()) },
+                selected = closestSubtitleFontSize(state.subtitleFontSize.toFloat()).toInt().toString(),
+                options = SubtitleFontSizeOptions,
+                onSelected = { onSubtitleFontSizeChanged(it.toDoubleOrNull() ?: 30.0) },
             )
             ReaderValueSlider(
                 title = "Outline Width",
