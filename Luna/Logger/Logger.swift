@@ -377,12 +377,25 @@ class Logger: @unchecked Sendable {
             return true
         }
 
+        if message.contains("playerheaderproxy") {
+            return true
+        }
+
         guard category == "mpv" else { return false }
 
         return message.contains("startup watchdog")
             || message.contains("declaring stalled")
+            || message.contains("startup monitor armed")
+            || message.contains("loading initial url")
+            || message.contains("load url=")
+            || message.contains("rendererload url=")
+            || message.contains("load start gen=")
+            || message.contains("applying mpv raw http headers")
+            || message.contains("clearing http headers")
+            || message.contains("command loadfile")
             || message.contains("delegate didfailwitherror")
             || message.contains("playback issue")
+            || message.contains("playbackstart")
             || message.contains("loadfile command failed")
             || message.contains("event end-file")
             || message.contains("event file-loaded")

@@ -573,6 +573,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var pendingInitialResumeTarget: Double?
     private var pendingInitialResumeDeadline: Date?
     private var vlcProxyFallbackTried = false
+    private var mpvTransportBridgeFallbackTried = false
     
     // Debounce timers for menu updates to avoid excessive rebuilds
     private var audioMenuDebounceTimer: Timer?
@@ -600,6 +601,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func rendererLoad(url: URL, preset: PlayerPreset, headers: [String: String]?) {
         if vlcRenderer != nil {
             logVLCUI("rendererLoad url=\(url.absoluteString) preset=\(preset.id.rawValue) headers=\(headers?.count ?? 0) pendingSeek=\(secondsText(pendingSeekTime)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))", type: "Stream")
+        } else {
+            logMPV("rendererLoad url=\(url.absoluteString) preset=\(preset.id.rawValue) headers=\(headers?.count ?? 0) pendingSeek=\(secondsText(pendingSeekTime)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))")
         }
         renderer.load(url: url, with: preset, headers: headers)
     }
@@ -1341,6 +1344,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         userSelectedSubtitleTrack = false
         if !isLocalProxyURL(url) {
             vlcProxyFallbackTried = false
+            mpvTransportBridgeFallbackTried = false
         }
         pendingSeekTime = nil
         pendingInitialResumeTarget = nil
@@ -1350,7 +1354,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
         logVLCUI("load resume prepared pendingSeek=\(secondsText(pendingSeekTime)) progressCached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) launchContext=\(String(describing: playbackLaunchContext))", type: "Progress")
         rendererPrepareInitialSeek(to: pendingSeekTime)
-        let playbackRequest = prepareVLCHeaderProxyIfNeeded(originalURL: url, headers: headers)
+        let playbackRequest = preparePlayerHeaderProxyIfNeeded(originalURL: url, headers: headers)
         if !isVLCPlayer {
             preparePlaybackStartupMonitoring(for: playbackRequest.url, headers: playbackRequest.headers ?? headers ?? [:])
         }
@@ -1442,7 +1446,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         guard let context = playbackLaunchContext else {
             Logger.shared.log("[PlayerVC.PlaybackStart] startup failed without launch context: \(message)", type: "MPV")
-            showErrorBanner(message)
+            if isVLCPlayer {
+                showErrorBanner(message)
+            }
             return
         }
 
@@ -1455,7 +1461,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         let report = PlaybackFailureReport(context: context, message: message, isSourceFailure: isSourceFailure)
         if context.autoMode {
-            showErrorBanner("\(context.sourceName) failed. Retrying another stream...")
+            if isVLCPlayer {
+                showErrorBanner("\(context.sourceName) failed. Retrying another stream...")
+            } else {
+                Logger.shared.log("[PlayerVC.PlaybackStart] MPV auto mode handing failure back without top banner", type: "MPV")
+            }
             dismissAfterPlaybackFailure(report)
         } else {
             showManualPlaybackFailureAlert(report)
@@ -3446,7 +3456,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return baseHeaders
     }
 
-    private var isVLCHeaderProxyEnabled: Bool {
+    private var isPlayerHeaderProxyEnabled: Bool {
         UserDefaults.standard.object(forKey: "vlcHeaderProxyEnabled") as? Bool ?? true
     }
 
@@ -3455,14 +3465,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return scheme == "http" || scheme == "https"
     }
 
-    private func prepareVLCHeaderProxyIfNeeded(originalURL: URL, headers: [String: String]?) -> (url: URL, headers: [String: String]?) {
+    private func preparePlayerHeaderProxyIfNeeded(originalURL: URL, headers: [String: String]?) -> (url: URL, headers: [String: String]?) {
         guard isVLCPlayer else { return (originalURL, headers) }
-        guard isVLCHeaderProxyEnabled else { return (originalURL, headers) }
+        guard isPlayerHeaderProxyEnabled else { return (originalURL, headers) }
         guard isRemoteHTTPURL(originalURL), !isLocalProxyURL(originalURL) else { return (originalURL, headers) }
         guard let headers, !headers.isEmpty else { return (originalURL, headers) }
 
         let proxyHeaders = buildProxyHeaders(for: originalURL, baseHeaders: headers)
-        guard let proxyURL = VLCHeaderProxy.shared.makeProxyURL(for: originalURL, headers: proxyHeaders) else {
+        guard let proxyURL = PlayerHeaderProxy.shared.makeProxyURL(for: originalURL, headers: proxyHeaders) else {
             Logger.shared.log("PlayerViewController: proactive VLC proxy URL creation failed; using direct VLC headers", type: "Stream")
             return (originalURL, headers)
         }
@@ -3494,7 +3504,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
 
             let proxyHeaders = buildProxyHeaders(for: url, baseHeaders: headers)
-            guard let proxiedURL = VLCHeaderProxy.shared.makeProxyURL(for: url, headers: proxyHeaders) else {
+            guard let proxiedURL = PlayerHeaderProxy.shared.makeProxyURL(for: url, headers: proxyHeaders) else {
                 Logger.shared.log("PlayerViewController: subtitle proxy URL creation failed", type: "Stream")
                 return nil
             }
@@ -3513,7 +3523,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         guard let preset = initialPreset else { return false }
 
         let proxyHeaders = buildProxyHeaders(for: originalURL, baseHeaders: headers)
-        guard let proxyURL = VLCHeaderProxy.shared.makeProxyURL(for: originalURL, headers: proxyHeaders) else {
+        guard let proxyURL = PlayerHeaderProxy.shared.makeProxyURL(for: originalURL, headers: proxyHeaders) else {
             return false
         }
 
@@ -3540,12 +3550,45 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return true
     }
 
+    private func isMPVTransportBridgeCandidate(_ message: String) -> Bool {
+        let lower = message.lowercased()
+        return lower.contains("unexpected tls packet")
+            || (lower.contains("tls") && lower.contains("failed to open"))
+    }
+
+    private func attemptMPVTransportBridgeFallbackIfNeeded(after message: String) -> Bool {
+        guard mpvRenderer != nil else { return false }
+        guard isMPVTransportBridgeCandidate(message) else { return false }
+        guard !mpvTransportBridgeFallbackTried else { return false }
+        guard let originalURL = initialURL,
+              isRemoteHTTPURL(originalURL),
+              !isLocalProxyURL(originalURL),
+              let preset = initialPreset else {
+            return false
+        }
+
+        let proxyHeaders = buildProxyHeaders(for: originalURL, baseHeaders: initialHeaders ?? [:])
+        guard let proxyURL = PlayerHeaderProxy.shared.makeProxyURL(for: originalURL, headers: proxyHeaders) else {
+            Logger.shared.log("[PlayerVC.PlaybackStart] MPV transport bridge URL creation failed; keeping direct failure", type: "MPV")
+            return false
+        }
+
+        mpvTransportBridgeFallbackTried = true
+        Logger.shared.log("[PlayerVC.PlaybackStart] MPV transport bridge activated after TLS failure target=\(originalURL.absoluteString) headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "MPV")
+        load(url: proxyURL, preset: preset, headers: nil)
+        return true
+    }
+
     #else
-    private func prepareVLCHeaderProxyIfNeeded(originalURL: URL, headers: [String: String]?) -> (url: URL, headers: [String: String]?) {
+    private func preparePlayerHeaderProxyIfNeeded(originalURL: URL, headers: [String: String]?) -> (url: URL, headers: [String: String]?) {
         return (originalURL, headers)
     }
 
     private func attemptVlcProxyFallbackIfNeeded() -> Bool {
+        return false
+    }
+
+    private func attemptMPVTransportBridgeFallbackIfNeeded(after _: String) -> Bool {
         return false
     }
 
@@ -5835,6 +5878,12 @@ extension PlayerViewController: MPVNativeRendererDelegate {
         if isClosing { return }
         logMPV("delegate didFailWithError message=\(message)")
         Logger.shared.log("PlayerViewController: MPV playback issue: \(message)", type: "MPV")
+        if attemptMPVTransportBridgeFallbackIfNeeded(after: message) {
+            return
+        }
+        if !playbackDidStart {
+            handlePlaybackStartupFailure(message, isSourceFailure: true)
+        }
     }
 
     func rendererDidChangeTracks(_ renderer: MPVNativeRenderer) {

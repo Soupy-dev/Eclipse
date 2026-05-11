@@ -481,7 +481,6 @@ final class MPVNativeRenderer: PlayerRenderer {
         setOption(name: "profile", value: "fast")
         setOption(name: "hwdec", value: "videotoolbox")
         setOption(name: "vd-lavc-dr", value: "yes")
-        setOption(name: "network-timeout", value: "8")
         setOption(name: "demuxer-thread", value: "yes")
         setOption(name: "cache", value: "yes")
         setOption(name: "demuxer-max-bytes", value: "80M")
@@ -909,14 +908,19 @@ final class MPVNativeRenderer: PlayerRenderer {
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty {
                     let lower = trimmed.lowercased()
-                    if lower.contains("http error")
+                    if lower.contains("tls") {
+                        lastPlaybackErrorMessage = trimmed
+                    } else if lower.contains("http error")
                         || lower.contains("failed to open")
                         || lower.contains("error opening")
-                        || lower.contains("tls")
                         || lower.contains("403")
                         || lower.contains("404")
                         || lower.contains("502") {
-                        lastPlaybackErrorMessage = trimmed
+                        if let existing = lastPlaybackErrorMessage, existing.lowercased().contains("tls") {
+                            lastPlaybackErrorMessage = "\(existing) \(trimmed)"
+                        } else {
+                            lastPlaybackErrorMessage = trimmed
+                        }
                     }
                     logMPV("mpv[\(component)] \(level): \(trimmed)")
                 }
@@ -1136,7 +1140,7 @@ final class MPVNativeRenderer: PlayerRenderer {
         guard !args.isEmpty else { return 0 }
         logMPV("command \(sanitizedCommand(args))")
         let status = withCStringArray(args) { pointer in
-            mpv_command(handle, pointer)
+            mpv_command_async(handle, 0, pointer)
         }
         if status < 0 {
             logMPV("command failed status=\(status) command=\(sanitizedCommand(args))")

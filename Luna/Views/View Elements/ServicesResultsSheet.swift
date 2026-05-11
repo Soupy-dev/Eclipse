@@ -1335,13 +1335,21 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private func configurePlaybackRecovery(_ player: PlayerViewController, context: PlaybackLaunchContext) {
-        player.playbackLaunchContext = nil
-        player.onPlaybackStartupFailure = nil
+        player.playbackLaunchContext = context
+        player.onPlaybackStartupFailure = { report in
+            Task { @MainActor in
+                handlePlaybackStartupFailure(report)
+            }
+        }
     }
 
     private func configurePlaybackRecovery(_ player: NormalPlayer, context: PlaybackLaunchContext) {
-        player.playbackLaunchContext = nil
-        player.onPlaybackStartupFailure = nil
+        player.playbackLaunchContext = context
+        player.onPlaybackStartupFailure = { report in
+            Task { @MainActor in
+                handlePlaybackStartupFailure(report)
+            }
+        }
     }
 
     @MainActor
