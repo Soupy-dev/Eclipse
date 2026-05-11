@@ -54,7 +54,7 @@ enum InAppPlayer: String, CaseIterable, Identifiable {
         case .vlc:
             return rawValue
         case .mpv:
-            return "\(rawValue) (Not recommended)"
+            return "MPV"
         case .normal:
             return "Normal AVPlayer (Not recommended)"
         }
@@ -382,8 +382,8 @@ struct PlayerSettingsView: View {
                 }
             }
             
-            if store.inAppPlayer == .vlc {
-                Section(header: Text("VLC Player"), footer: Text("VLC-only playback, subtitle, and gesture settings.")) {
+            if store.inAppPlayer == .vlc || store.inAppPlayer == .mpv {
+                Section(header: Text(store.inAppPlayer == .mpv ? "MPV Player" : "VLC Player"), footer: Text("In-app playback, subtitle, and gesture settings.")) {
                     DisclosureGroup {
                         settingsToggleRow(
                             title: "Enable Subtitles by Default",
@@ -456,7 +456,7 @@ struct PlayerSettingsView: View {
                                     .font(.subheadline)
                                     .fontWeight(.medium)
 
-                                Text("Default color for custom subtitle rendering.")
+                                Text("Default color for in-app subtitle rendering.")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
@@ -477,7 +477,7 @@ struct PlayerSettingsView: View {
                                     .font(.subheadline)
                                     .fontWeight(.medium)
 
-                                Text("Outline color for custom subtitle rendering.")
+                                Text("Outline color for in-app subtitle rendering.")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
@@ -498,7 +498,7 @@ struct PlayerSettingsView: View {
                                     .font(.subheadline)
                                     .fontWeight(.medium)
 
-                                Text("Outline thickness for custom subtitle rendering.")
+                                Text("Outline thickness for in-app subtitle rendering.")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
@@ -525,7 +525,7 @@ struct PlayerSettingsView: View {
                                     .font(.subheadline)
                                     .fontWeight(.medium)
 
-                                Text("Named size presets for custom subtitle rendering.")
+                                Text("Named size presets for in-app subtitle rendering.")
                                     .font(.caption)
                                     .foregroundColor(.secondary)
                             }
@@ -648,7 +648,7 @@ struct PlayerSettingsView: View {
                     DisclosureGroup {
                         settingsToggleRow(
                             title: "OpenSubtitles",
-                            detail: "Enable VLC subtitle search through the Stremio OpenSubtitles v3 add-on.",
+                            detail: "Enable subtitle search through the Stremio OpenSubtitles v3 add-on.",
                             binding: $store.vlcOpenSubtitlesEnabled
                         )
 
@@ -700,7 +700,7 @@ struct PlayerSettingsView: View {
                     DisclosureGroup {
                         settingsToggleRow(
                             title: "Episode Browser Button",
-                            detail: "Show the VLC episode drawer button over the player.",
+                            detail: "Show the episode drawer button over the player.",
                             binding: $store.showVLCEpisodeBrowserButton
                         )
 
@@ -759,7 +759,7 @@ struct PlayerSettingsView: View {
         .onAppear {
             let subtitleEditMenuKey = "enableVLCSubtitleEditMenu"
             let headerProxyKey = "vlcHeaderProxyEnabled"
-            // Enforce these VLC flags on launch, including for previously disabled states.
+            // Enforce these in-app player flags on launch, including for previously disabled states.
             if UserDefaults.standard.object(forKey: subtitleEditMenuKey) as? Bool != true {
                 UserDefaults.standard.set(true, forKey: subtitleEditMenuKey)
             }

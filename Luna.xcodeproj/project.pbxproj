@@ -28,7 +28,7 @@
 		12E7AF5E2EB7FDB7003B7664 /* FakeWebKit in Frameworks */ = {isa = PBXBuildFile; productRef = 12E7AF5D2EB7FDB7003B7664 /* FakeWebKit */; };
 		12E7AF602EB80775003B7664 /* Platform.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12E7AF5F2EB80771003B7664 /* Platform.swift */; };
 		1324E7BB2E940BD70036B5F5 /* PlayerPreset.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1324E7B32E940BD70036B5F5 /* PlayerPreset.swift */; };
-		1324E7BC2E940BD70036B5F5 /* MPVSoftwareRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1324E7B42E940BD70036B5F5 /* MPVSoftwareRenderer.swift */; };
+		1324E7BC2E940BD70036B5F5 /* MPVNativeRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1324E7B42E940BD70036B5F5 /* MPVNativeRenderer.swift */; };
 		1324E7BD2E940BD70036B5F5 /* PlayerViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1324E7B52E940BD70036B5F5 /* PlayerViewController.swift */; };
 		1324E7BE2E940BD70036B5F5 /* SampleBufferDisplayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1324E7B62E940BD70036B5F5 /* SampleBufferDisplayView.swift */; };
 		1324E7BF2E940BD70036B5F5 /* MusicProgressSlider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1324E7B82E940BD70036B5F5 /* MusicProgressSlider.swift */; };
@@ -207,7 +207,7 @@
 		12DF1FC12F040D6500E80375 /* AdaptiveConfirmationDialog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdaptiveConfirmationDialog.swift; sourceTree = "<group>"; };
 		12E7AF5F2EB80771003B7664 /* Platform.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Platform.swift; sourceTree = "<group>"; };
 		1324E7B32E940BD70036B5F5 /* PlayerPreset.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = PlayerPreset.swift; sourceTree = "<group>"; };
-		1324E7B42E940BD70036B5F5 /* MPVSoftwareRenderer.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MPVSoftwareRenderer.swift; sourceTree = "<group>"; };
+		1324E7B42E940BD70036B5F5 /* MPVNativeRenderer.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MPVNativeRenderer.swift; sourceTree = "<group>"; };
 		1324E7B52E940BD70036B5F5 /* PlayerViewController.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = PlayerViewController.swift; sourceTree = "<group>"; };
 		1324E7B62E940BD70036B5F5 /* SampleBufferDisplayView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SampleBufferDisplayView.swift; sourceTree = "<group>"; };
 		1324E7B82E940BD70036B5F5 /* MusicProgressSlider.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MusicProgressSlider.swift; sourceTree = "<group>"; };
@@ -373,7 +373,7 @@
 				1324E7BA2E940BD70036B5F5 /* PiPController.swift */,
 				13F315AF2EAD03F70025BD7A /* SubtitleLoader.swift */,
 				1324E7B52E940BD70036B5F5 /* PlayerViewController.swift */,
-				1324E7B42E940BD70036B5F5 /* MPVSoftwareRenderer.swift */,
+				1324E7B42E940BD70036B5F5 /* MPVNativeRenderer.swift */,
 				1324E7B62E940BD70036B5F5 /* SampleBufferDisplayView.swift */,
 				BB7777702F20000000BB7770 /* VLCRenderer.swift */,
 				CC8888802FA0000000CC8880 /* AniSkipService.swift */,
@@ -1119,7 +1119,7 @@
 				13E1EDE22ED9E66000087629 /* chapterList.swift in Sources */,
 				13F072AA2E4B2D9200EF90EB /* CircularProgressBar.swift in Sources */,
 				13F072B52E4B2D9200EF90EB /* URLSession.swift in Sources */,
-				1324E7BC2E940BD70036B5F5 /* MPVSoftwareRenderer.swift in Sources */,
+				1324E7BC2E940BD70036B5F5 /* MPVNativeRenderer.swift in Sources */,
 				13E1EDE12ED9E66000087629 /* readerManagerView.swift in Sources */,
 				1324E7BF2E940BD70036B5F5 /* MusicProgressSlider.swift in Sources */,
 				13E1EDD92ED9E65F00087629 /* pageData.swift in Sources */,

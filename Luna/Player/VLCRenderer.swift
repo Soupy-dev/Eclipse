@@ -3,7 +3,7 @@
 //  Luna
 //
 //  VLC player renderer using VLCKitSPM for GPU-accelerated playback
-//  Provides same interface as MPVSoftwareRenderer for thermal optimization
+//  Provides the same PlayerRenderer surface as MPVNativeRenderer
 //
 //  DEPENDENCY: VLCKitSPM via Swift Package Manager.
 
@@ -33,7 +33,7 @@ private extension Notification.Name {
     static let lunaVLCMediaPlayerStateChanged = Notification.Name("VLCMediaPlayerStateChanged")
 }
 
-final class VLCRenderer: NSObject {
+final class VLCRenderer: NSObject, PlayerRenderer {
     enum RendererError: Error {
         case vlcInitializationFailed
         case mediaCreationFailed
@@ -1315,7 +1315,7 @@ protocol VLCRendererDelegate: AnyObject {
     func rendererDidChangeTracks(_ renderer: VLCRenderer)
 }
 
-final class VLCRenderer {
+final class VLCRenderer: PlayerRenderer {
     enum RendererError: Error {
         case vlcInitializationFailed
     }
