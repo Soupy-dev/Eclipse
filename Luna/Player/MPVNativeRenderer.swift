@@ -487,7 +487,6 @@ final class MPVNativeRenderer: PlayerRenderer {
         setOption(name: "cache", value: "yes")
         setOption(name: "demuxer-max-bytes", value: "80M")
         setOption(name: "demuxer-readahead-secs", value: "10")
-        setOption(name: "force-seekable", value: "yes")
         setOption(name: "video-sync", value: "audio")
         setOption(name: "interpolation", value: "no")
         setOption(name: "sub-auto", value: "fuzzy")

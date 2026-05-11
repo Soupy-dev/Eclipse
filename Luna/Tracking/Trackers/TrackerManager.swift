@@ -259,6 +259,36 @@ final class TrackerManager: NSObject, ObservableObject {
         throw lastError ?? NSError(domain: "TrackerNetwork", code: -1, userInfo: [NSLocalizedDescriptionKey: "Tracker request failed"])
     }
 
+    private func graphQLErrorMessage(from data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let errors = json["errors"] as? [[String: Any]],
+              let first = errors.first else {
+            return nil
+        }
+        return first["message"] as? String
+    }
+
+    private func responseBodyPreview(from data: Data, limit: Int = 500) -> String {
+        let raw = String(data: data, encoding: .utf8) ?? "<non-utf8 response>"
+        guard raw.count > limit else { return raw }
+        return String(raw.prefix(limit)) + "..."
+    }
+
+    private func aniListFailureDescription(_ prefix: String, response: HTTPURLResponse, data: Data) -> String {
+        if let graphQLError = graphQLErrorMessage(from: data) {
+            return "\(prefix) (\(response.statusCode)): \(graphQLError)"
+        }
+        return "\(prefix) (\(response.statusCode)): \(responseBodyPreview(from: data))"
+    }
+
+    private func resolvedAniListUserId(for account: TrackerAccount) async throws -> Int {
+        if let userId = Int(account.userId), userId > 0 {
+            return userId
+        }
+        let viewer = try await fetchAniListUser(token: account.accessToken)
+        return viewer.id
+    }
+
     private func connectedMALAccount() async throws -> TrackerAccount {
         let account = try connectedAccount(.myAnimeList)
         return try await refreshedMALAccountIfNeeded(account)
@@ -2495,17 +2525,17 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     private func fetchAniListAnimeProgressEntries(account: TrackerAccount) async throws -> [RemoteAnimeProgress] {
-        let userId = Int(account.userId) ?? 0
+        let userId = try await resolvedAniListUserId(for: account)
         var entries: [RemoteAnimeProgress] = []
         var page = 1
         var hasNext = true
 
         while hasNext {
             let query = """
-            query {
-                Page(page: \(page), perPage: 50) {
+            query($userId: Int!, $page: Int!) {
+                Page(page: $page, perPage: 50) {
                     pageInfo { hasNextPage }
-                    mediaList(userId: \(userId), type: ANIME) {
+                    mediaList(userId: $userId, type: ANIME) {
                         status
                         progress
                         media {
@@ -2549,11 +2579,19 @@ final class TrackerManager: NSObject, ObservableObject {
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("Bearer \(account.accessToken)", forHTTPHeaderField: "Authorization")
-            request.httpBody = try JSONSerialization.data(withJSONObject: ["query": query])
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "query": query,
+                "variables": [
+                    "userId": userId,
+                    "page": page
+                ]
+            ])
 
             let (data, response) = try await sendTrackerRequest(request, provider: .anilist)
             guard response.statusCode == 200 else {
-                throw NSError(domain: "AniList", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "AniList list fetch failed"])
+                let message = aniListFailureDescription("AniList anime list fetch failed", response: response, data: data)
+                Logger.shared.log(message, type: "Tracker")
+                throw NSError(domain: "AniList", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: message])
             }
 
             let decoded = try JSONDecoder().decode(Response.self, from: data)
@@ -2661,17 +2699,17 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     private func fetchAniListMangaProgressEntries(account: TrackerAccount) async throws -> [RemoteMangaProgress] {
-        let userId = Int(account.userId) ?? 0
+        let userId = try await resolvedAniListUserId(for: account)
         var entries: [RemoteMangaProgress] = []
         var page = 1
         var hasNext = true
 
         while hasNext {
             let query = """
-            query {
-                Page(page: \(page), perPage: 50) {
+            query($userId: Int!, $page: Int!) {
+                Page(page: $page, perPage: 50) {
                     pageInfo { hasNextPage }
-                    mediaList(userId: \(userId), type: MANGA) {
+                    mediaList(userId: $userId, type: MANGA) {
                         status
                         progress
                         media {
@@ -2715,11 +2753,19 @@ final class TrackerManager: NSObject, ObservableObject {
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("Bearer \(account.accessToken)", forHTTPHeaderField: "Authorization")
-            request.httpBody = try JSONSerialization.data(withJSONObject: ["query": query])
+            request.httpBody = try JSONSerialization.data(withJSONObject: [
+                "query": query,
+                "variables": [
+                    "userId": userId,
+                    "page": page
+                ]
+            ])
 
             let (data, response) = try await sendTrackerRequest(request, provider: .anilist)
             guard response.statusCode == 200 else {
-                throw NSError(domain: "AniList", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "AniList manga list fetch failed"])
+                let message = aniListFailureDescription("AniList manga list fetch failed", response: response, data: data)
+                Logger.shared.log(message, type: "Tracker")
+                throw NSError(domain: "AniList", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: message])
             }
 
             let decoded = try JSONDecoder().decode(Response.self, from: data)

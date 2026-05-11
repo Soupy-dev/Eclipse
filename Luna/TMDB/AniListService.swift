@@ -1904,7 +1904,7 @@ final class AniListService {
         let uniqueIds = Array(Set(ids))
         guard !uniqueIds.isEmpty else { return [:] }
 
-        let nodes = await batchFetchAniListNodes(ids: uniqueIds)
+        let nodes = await batchFetchAniListImportNodes(ids: uniqueIds)
         return await batchMapAniListToTMDB(Array(nodes.values), tmdbService: tmdbService)
     }
 
@@ -2073,8 +2073,9 @@ final class AniListService {
                     continue
                 }
                 
-                let error = "AniList error (HTTP \(httpResponse.statusCode))"
-                Logger.shared.log("AniListService: GraphQL request failed with HTTP \(httpResponse.statusCode)", type: "Error")
+                let details = graphQLErrorMessage(from: data) ?? responseBodyPreview(from: data)
+                let error = "AniList error (HTTP \(httpResponse.statusCode)): \(details)"
+                Logger.shared.log("AniListService: GraphQL request failed with HTTP \(httpResponse.statusCode): \(details)", type: "Error")
                 throw NSError(domain: "AniList", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: error])
             }
             
@@ -2082,6 +2083,78 @@ final class AniListService {
         }
         
         throw lastError ?? NSError(domain: "AniList", code: 429, userInfo: [NSLocalizedDescriptionKey: "AniList rate limited after \(maxRetries) retries"])
+    }
+
+    private func graphQLErrorMessage(from data: Data) -> String? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let errors = json["errors"] as? [[String: Any]],
+              let first = errors.first else {
+            return nil
+        }
+        return first["message"] as? String
+    }
+
+    private func responseBodyPreview(from data: Data, limit: Int = 500) -> String {
+        let raw = String(data: data, encoding: .utf8) ?? "<non-utf8 response>"
+        guard raw.count > limit else { return raw }
+        return String(raw.prefix(limit)) + "..."
+    }
+
+    /// Import mapping can involve hundreds of library IDs, so keep each GraphQL
+    /// request small and avoid the nested relation payload used by detail flows.
+    private func batchFetchAniListImportNodes(ids: [Int]) async -> [Int: AniListAnime] {
+        guard !ids.isEmpty else { return [:] }
+
+        let fragment = """
+            id
+            idMal
+            title { romaji english native }
+            episodes
+            status
+            seasonYear
+            season
+            format
+            type
+            coverImage { large medium }
+        """
+
+        let uniqueIds = Array(Set(ids))
+        let chunkSize = 25
+        var result: [Int: AniListAnime] = [:]
+        var start = 0
+
+        while start < uniqueIds.count {
+            let chunk = Array(uniqueIds[start..<min(start + chunkSize, uniqueIds.count)])
+            let aliases = chunk.enumerated().map { index, id in
+                "m\(index): Media(id: \(id), type: ANIME) { \(fragment) }"
+            }.joined(separator: "\n")
+            let query = "query { \(aliases) }"
+
+            do {
+                let data = try await executeGraphQLQuery(query, token: nil)
+                let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                guard let dataDict = json?["data"] as? [String: Any] else {
+                    start += chunkSize
+                    continue
+                }
+
+                for (index, id) in chunk.enumerated() {
+                    let key = "m\(index)"
+                    if let mediaJSON = dataDict[key],
+                       !(mediaJSON is NSNull),
+                       let mediaData = try? JSONSerialization.data(withJSONObject: mediaJSON),
+                       let anime = try? JSONDecoder().decode(AniListAnime.self, from: mediaData) {
+                        result[id] = anime
+                    }
+                }
+            } catch {
+                Logger.shared.log("AniListService: Import batch fetch failed for \(chunk.count) nodes: \(error.localizedDescription)", type: "AniList")
+            }
+
+            start += chunkSize
+        }
+
+        return result
     }
 
     /// Batch-fetch multiple anime nodes with relations in a single aliased GraphQL query

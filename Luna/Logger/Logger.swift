@@ -377,7 +377,7 @@ class Logger: @unchecked Sendable {
             return true
         }
 
-        if message.contains("playerheaderproxy") {
+        if message.contains("playerheaderproxy") || message.contains("mpvheaderproxy") {
             return true
         }
 

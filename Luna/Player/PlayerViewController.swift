@@ -1620,6 +1620,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 vlcView.trailingAnchor.constraint(equalTo: videoContainer.trailingAnchor)
             ])
         }
+
+        videoContainer.addSubview(tapOverlayView)
+        NSLayoutConstraint.activate([
+            tapOverlayView.topAnchor.constraint(equalTo: videoContainer.topAnchor),
+            tapOverlayView.leadingAnchor.constraint(equalTo: videoContainer.leadingAnchor),
+            tapOverlayView.trailingAnchor.constraint(equalTo: videoContainer.trailingAnchor),
+            tapOverlayView.bottomAnchor.constraint(equalTo: videoContainer.bottomAnchor)
+        ])
         
         videoContainer.addSubview(dimmingView)
         videoContainer.addSubview(controlsOverlayView)
@@ -1823,14 +1831,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             vlcView.isExclusiveTouch = false
             #endif
             
-            // Add transparent tap overlay on top to guarantee tap detection
-            videoContainer.addSubview(tapOverlayView)
-            NSLayoutConstraint.activate([
-                tapOverlayView.topAnchor.constraint(equalTo: videoContainer.topAnchor),
-                tapOverlayView.leadingAnchor.constraint(equalTo: videoContainer.leadingAnchor),
-                tapOverlayView.trailingAnchor.constraint(equalTo: videoContainer.trailingAnchor),
-                tapOverlayView.bottomAnchor.constraint(equalTo: videoContainer.bottomAnchor)
-            ])
+            videoContainer.bringSubviewToFront(tapOverlayView)
         }
     }
     
@@ -1866,11 +1867,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         tap.cancelsTouchesInView = false
         tap.delaysTouchesBegan = false
         tap.delaysTouchesEnded = false
-        if vlcRenderer != nil {
-            tapOverlayView.addGestureRecognizer(tap)
-        } else {
-            videoContainer.addGestureRecognizer(tap)
-        }
+        tapOverlayView.addGestureRecognizer(tap)
         containerTapGesture = tap
     }
 
@@ -1882,7 +1879,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         holdGesture = UILongPressGestureRecognizer(target: self, action: #selector(handleHoldGesture(_:)))
         holdGesture?.minimumPressDuration = 0.5
         if let holdGesture = holdGesture {
-            videoContainer.addGestureRecognizer(holdGesture)
+            tapOverlayView.addGestureRecognizer(holdGesture)
         }
     }
     
@@ -1891,13 +1888,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         leftDoubleTap.numberOfTapsRequired = 2
         leftDoubleTap.delegate = self
         leftDoubleTapGesture = leftDoubleTap
-        videoContainer.addGestureRecognizer(leftDoubleTap)
+        tapOverlayView.addGestureRecognizer(leftDoubleTap)
         
         let rightDoubleTap = UITapGestureRecognizer(target: self, action: #selector(rightSideDoubleTapped))
         rightDoubleTap.numberOfTapsRequired = 2
         rightDoubleTap.delegate = self
         rightDoubleTapGesture = rightDoubleTap
-        videoContainer.addGestureRecognizer(rightDoubleTap)
+        tapOverlayView.addGestureRecognizer(rightDoubleTap)
         
         if let tap = containerTapGesture {
             tap.require(toFail: leftDoubleTap)
@@ -1909,7 +1906,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             let twoFingerTap = UITapGestureRecognizer(target: self, action: #selector(twoFingerTapped))
             twoFingerTap.numberOfTouchesRequired = 2
             twoFingerTap.delegate = self
-            videoContainer.addGestureRecognizer(twoFingerTap)
+            tapOverlayView.addGestureRecognizer(twoFingerTap)
         }
         #endif
     }
@@ -1919,6 +1916,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let location = gesture.location(in: videoContainer)
         let isLeftSide = location.x < videoContainer.bounds.width / 2
         guard isLeftSide else { return }
+        logMPV("left double-tap seek by -\(String(format: "%.1f", doubleTapSeekSeconds))")
         rendererSeek(by: -doubleTapSeekSeconds)
         animateButtonTap(skipBackwardButton)
     }
@@ -1928,12 +1926,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let location = gesture.location(in: videoContainer)
         let isRightSide = location.x >= videoContainer.bounds.width / 2
         guard isRightSide else { return }
+        logMPV("right double-tap seek by \(String(format: "%.1f", doubleTapSeekSeconds))")
         rendererSeek(by: doubleTapSeekSeconds)
         animateButtonTap(skipForwardButton)
     }
 
     @objc private func twoFingerTapped(_ gesture: UITapGestureRecognizer) {
         // Two-finger tap: toggle play/pause without showing UI
+        logMPV("two-finger tap toggle pause currentPaused=\(rendererIsPausedState())")
         if rendererIsPausedState() {
             rendererPlay()
             updatePlayPauseButton(isPaused: false, shouldShowControls: false)
@@ -2262,12 +2262,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
     
     @objc private func skipBackwardTapped() {
+        logMPV("skip backward button tapped")
         rendererSeek(by: isVLCPlayer ? -10 : -15)
         animateButtonTap(skipBackwardButton)
         showControlsTemporarily()
     }
     
     @objc private func skipForwardTapped() {
+        logMPV("skip forward button tapped")
         rendererSeek(by: isVLCPlayer ? 10 : 15)
         animateButtonTap(skipForwardButton)
         showControlsTemporarily()
@@ -3573,7 +3575,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 
         let proxyHeaders = buildProxyHeaders(for: originalURL, baseHeaders: initialHeaders ?? [:])
-        guard let proxyURL = PlayerHeaderProxy.shared.makeProxyURL(for: originalURL, headers: proxyHeaders, logType: "MPV") else {
+        guard let proxyURL = MPVHeaderProxy.shared.makeProxyURL(for: originalURL, headers: proxyHeaders, logType: "MPV") else {
             Logger.shared.log("[PlayerVC.PlaybackStart] MPV transport bridge URL creation failed; keeping direct failure", type: "MPV")
             return false
         }
@@ -4641,6 +4643,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
     
     @objc private func containerTapped() {
+        logMPV("container tapped controlsVisible=\(controlsVisible)")
         if controlsVisible {
             hideControls()
         } else {
@@ -4986,7 +4989,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             && duration.isFinite
             && duration > 0
             && duration < 60
-            && safePosition > 0.1
         let reportedDurationIsReliable = duration.isFinite
             && duration >= minimumReliableDuration
             && safePosition <= duration + 2.0
