@@ -98,7 +98,7 @@ class Logger: @unchecked Sendable {
             let now = entry.timestamp
             var entriesToRecord = self.rolloverNoisyWindowIfNeeded(now: now)
 
-            if !self.shouldRecordInNoisyWindow(type: entry.type) {
+            if !self.shouldRecordInNoisyWindow(entry) {
                 self.suppressedTypeCounts[entry.type, default: 0] += 1
                 return
             }
@@ -357,11 +357,38 @@ class Logger: @unchecked Sendable {
         return summaries
     }
 
-    private func shouldRecordInNoisyWindow(type: String) -> Bool {
+    private func shouldRecordInNoisyWindow(_ entry: LogEntry) -> Bool {
+        if shouldBypassNoisySuppression(entry) {
+            return true
+        }
+
+        let type = entry.type
         guard noisyTypes.contains(type) else { return true }
         let next = noisyTypeCounts[type, default: 0] + 1
         noisyTypeCounts[type] = next
         return next <= noisyTypeBurstLimit
+    }
+
+    private func shouldBypassNoisySuppression(_ entry: LogEntry) -> Bool {
+        let category = Self.displayCategory(for: entry.type).lowercased()
+        let message = entry.message.lowercased()
+
+        if category == "error" {
+            return true
+        }
+
+        guard category == "mpv" else { return false }
+
+        return message.contains("startup watchdog")
+            || message.contains("declaring stalled")
+            || message.contains("delegate didfailwitherror")
+            || message.contains("playback issue")
+            || message.contains("loadfile command failed")
+            || message.contains("event end-file")
+            || message.contains("event file-loaded")
+            || message.contains("http error")
+            || message.contains("failed")
+            || (message.contains("mpv[") && (message.contains(" error:") || message.contains(" warn:")))
     }
 
     private func appendToDisk(_ entry: LogEntry) {

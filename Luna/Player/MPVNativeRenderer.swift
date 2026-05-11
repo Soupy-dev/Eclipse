@@ -474,13 +474,14 @@ final class MPVNativeRenderer: PlayerRenderer {
         mpv = handle
 
         setOption(name: "terminal", value: "no")
-        setOption(name: "msg-level", value: "status")
+        setOption(name: "msg-level", value: "all=warn,cplayer=v,ffmpeg=v,demux=v,stream=v")
         setOption(name: "keep-open", value: "yes")
         setOption(name: "idle", value: "yes")
         setOption(name: "vo", value: "libmpv")
         setOption(name: "profile", value: "fast")
         setOption(name: "hwdec", value: "videotoolbox")
         setOption(name: "vd-lavc-dr", value: "yes")
+        setOption(name: "network-timeout", value: "8")
         setOption(name: "demuxer-thread", value: "yes")
         setOption(name: "cache", value: "yes")
         setOption(name: "demuxer-max-bytes", value: "80M")
@@ -503,7 +504,7 @@ final class MPVNativeRenderer: PlayerRenderer {
 
         isRunning = true
         currentMode = .openGL
-        mpv_request_log_messages(handle, "info")
+        mpv_request_log_messages(handle, "v")
         do {
             try createOpenGLRenderContext()
             observeProperties()
@@ -1071,10 +1072,13 @@ final class MPVNativeRenderer: PlayerRenderer {
 
     private func setOption(name: String, value: String) {
         guard let handle = mpv else { return }
-        _ = value.withCString { valuePointer in
+        let status = value.withCString { valuePointer in
             name.withCString { namePointer in
                 mpv_set_option_string(handle, namePointer, valuePointer)
             }
+        }
+        if status < 0 {
+            logMPV("failed to set option \(name)=\(redactIfSensitive(name: name, value: value)) status=\(status)")
         }
     }
 
@@ -1103,12 +1107,16 @@ final class MPVNativeRenderer: PlayerRenderer {
     private func updateHTTPHeaders(_ headers: [String: String]?) {
         guard let headers, !headers.isEmpty else {
             logMPV("clearing HTTP headers")
+            clearDedicatedHTTPHeaderOptions()
             setHTTPHeaderFields([])
             return
         }
 
+        applyDedicatedHTTPHeaderOptions(headers)
+
+        let dedicatedHeaderNames: Set<String> = ["user-agent", "referer", "referrer"]
         let fields = headers
-            .filter { !$0.key.isEmpty && !$0.value.isEmpty }
+            .filter { !$0.key.isEmpty && !$0.value.isEmpty && !dedicatedHeaderNames.contains($0.key.lowercased()) }
             .map { key, value in "\(key): \(value)" }
 
         if fields.isEmpty {
@@ -1118,6 +1126,40 @@ final class MPVNativeRenderer: PlayerRenderer {
             logMPV("applying HTTP headers count=\(headers.count) keys=[\(headers.keys.sorted().joined(separator: ","))]")
             setHTTPHeaderFields(fields)
         }
+    }
+
+    private func applyDedicatedHTTPHeaderOptions(_ headers: [String: String]) {
+        let userAgent = headerValue(in: headers, named: ["User-Agent"])
+        let referer = headerValue(in: headers, named: ["Referer", "Referrer"])
+
+        if let userAgent {
+            setProperty(name: "user-agent", value: userAgent)
+        } else {
+            clearProperty(name: "user-agent")
+        }
+
+        if let referer {
+            setProperty(name: "referrer", value: referer)
+        } else {
+            clearProperty(name: "referrer")
+        }
+
+        logMPV("dedicated HTTP options userAgent=\(userAgent != nil) referer=\(referer != nil) extraHeaderKeys=[\(headers.keys.filter { !["user-agent", "referer", "referrer"].contains($0.lowercased()) }.sorted().joined(separator: ","))]")
+    }
+
+    private func clearDedicatedHTTPHeaderOptions() {
+        clearProperty(name: "user-agent")
+        clearProperty(name: "referrer")
+    }
+
+    private func headerValue(in headers: [String: String], named names: [String]) -> String? {
+        for name in names {
+            if let match = headers.first(where: { $0.key.caseInsensitiveCompare(name) == .orderedSame })?.value.trimmingCharacters(in: .whitespacesAndNewlines),
+               !match.isEmpty {
+                return match
+            }
+        }
+        return nil
     }
 
     private func setHTTPHeaderFields(_ fields: [String]) {
@@ -1213,12 +1255,16 @@ final class MPVNativeRenderer: PlayerRenderer {
             let videoSize = self.currentVideoSize()
             let coreIdle = self.mpv.flatMap { self.getStringProperty(handle: $0, name: "core-idle") } ?? "nil"
             let idleActive = self.mpv.flatMap { self.getStringProperty(handle: $0, name: "idle-active") } ?? "nil"
-            self.logMPV("startup watchdog gen=\(generation) delay=\(String(format: "%.0f", delay))s elapsed=\(elapsed)s loading=\(self.isLoading) ready=\(self.isReadyToSeek) paused=\(self.isPaused) pos=\(String(format: "%.2f", self.cachedPosition)) dur=\(String(format: "%.2f", self.cachedDuration)) video=\(String(format: "%.0fx%.0f", videoSize.width, videoSize.height)) glBounds=\(String(format: "%.0fx%.0f", self.glView.bounds.width, self.glView.bounds.height)) coreIdle=\(coreIdle) idleActive=\(idleActive) url=\(self.currentURL.map { self.describe(url: $0) } ?? "nil")")
+            let streamOpen = self.mpv.flatMap { self.getStringProperty(handle: $0, name: "stream-open-filename") } ?? "nil"
+            let path = self.mpv.flatMap { self.getStringProperty(handle: $0, name: "path") } ?? "nil"
+            let pausedForCache = self.mpv.flatMap { self.getStringProperty(handle: $0, name: "paused-for-cache") } ?? "nil"
+            let cacheState = self.mpv.flatMap { self.getStringProperty(handle: $0, name: "cache-buffering-state") } ?? "nil"
+            self.logMPV("startup watchdog gen=\(generation) delay=\(String(format: "%.0f", delay))s elapsed=\(elapsed)s loading=\(self.isLoading) ready=\(self.isReadyToSeek) paused=\(self.isPaused) pausedForCache=\(pausedForCache) cache=\(cacheState) pos=\(String(format: "%.2f", self.cachedPosition)) dur=\(String(format: "%.2f", self.cachedDuration)) video=\(String(format: "%.0fx%.0f", videoSize.width, videoSize.height)) glBounds=\(String(format: "%.0fx%.0f", self.glView.bounds.width, self.glView.bounds.height)) coreIdle=\(coreIdle) idleActive=\(idleActive) streamOpen=\(self.shortText(streamOpen, limit: 120)) path=\(self.shortText(path, limit: 120)) url=\(self.currentURL.map { self.describe(url: $0) } ?? "nil")")
             if let handle = self.mpv {
                 mpv_wakeup(handle)
             }
             self.scheduleRender()
-            if delay >= 20, coreIdle == "yes", idleActive == "yes" {
+            if delay >= 8, coreIdle == "yes", idleActive == "yes" {
                 self.logMPV("startup watchdog declaring stalled load gen=\(generation); mpv stayed idle after loadfile")
                 self.setLoading(false)
                 self.delegate?.renderer(self, didFailWithError: "MPV stayed idle after the stream was submitted")
