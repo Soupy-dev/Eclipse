@@ -573,7 +573,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var pendingInitialResumeTarget: Double?
     private var pendingInitialResumeDeadline: Date?
     private var vlcProxyFallbackTried = false
-    private var mpvProxyFallbackTried = false
     
     // Debounce timers for menu updates to avoid excessive rebuilds
     private var audioMenuDebounceTimer: Timer?
@@ -1342,7 +1341,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         userSelectedSubtitleTrack = false
         if !isLocalProxyURL(url) {
             vlcProxyFallbackTried = false
-            mpvProxyFallbackTried = false
         }
         pendingSeekTime = nil
         pendingInitialResumeTarget = nil
@@ -1491,7 +1489,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         playbackFailureHandled = false
         playbackSlowProbeCount = 0
         vlcProxyFallbackTried = false
-        mpvProxyFallbackTried = false
         initialSubtitles = context.subtitles.isEmpty ? nil : context.subtitles
         initialSubtitleNames = context.subtitleNames
         load(url: url, preset: preset, headers: context.headers)
@@ -2648,7 +2645,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self.playbackFailureHandled = false
             self.playbackSlowProbeCount = 0
             self.vlcProxyFallbackTried = false
-            self.mpvProxyFallbackTried = false
             self.didDispatchNextEpisodeRequest = false
             self.pendingNextEpisodeRequest = nil
 #if !os(tvOS)
@@ -3544,35 +3540,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return true
     }
 
-    private func attemptMPVProxyFallbackIfNeeded(reason: String) -> Bool {
-        guard mpvRenderer != nil else { return false }
-        guard !mpvProxyFallbackTried else { return false }
-        guard let originalURL = initialURL, !isLocalProxyURL(originalURL) else { return false }
-        guard let headers = initialHeaders, !headers.isEmpty else { return false }
-        guard let preset = initialPreset else { return false }
-
-        let proxyHeaders = buildProxyHeaders(for: originalURL, baseHeaders: headers)
-        guard let proxyURL = VLCHeaderProxy.shared.makeProxyURL(for: originalURL, headers: proxyHeaders) else {
-            logMPV("proxy fallback unavailable reason=\(reason)")
-            return false
-        }
-
-        let fallbackSubtitles: [String]?
-        if let subs = initialSubtitles, !subs.isEmpty {
-            let proxiedSubs = proxySubtitleURLs(subs, headers: headers)
-            fallbackSubtitles = proxiedSubs.count == subs.count ? proxiedSubs : subs
-            logMPV("proxy fallback subtitle proxy count=\(proxiedSubs.count) of \(subs.count)")
-        } else {
-            fallbackSubtitles = nil
-        }
-
-        mpvProxyFallbackTried = true
-        initialSubtitles = fallbackSubtitles
-
-        logMPV("proxy fallback activated reason=\(reason) headerKeys=[\(headers.keys.sorted().joined(separator: ","))]")
-        load(url: proxyURL, preset: preset, headers: nil)
-        return true
-    }
     #else
     private func prepareVLCHeaderProxyIfNeeded(originalURL: URL, headers: [String: String]?) -> (url: URL, headers: [String: String]?) {
         return (originalURL, headers)
@@ -3582,9 +3549,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return false
     }
 
-    private func attemptMPVProxyFallbackIfNeeded(reason: String) -> Bool {
-        return false
-    }
     #endif
     
     private func updateSubtitleTracksMenu() {
@@ -5870,9 +5834,6 @@ extension PlayerViewController: MPVNativeRendererDelegate {
     func renderer(_ renderer: MPVNativeRenderer, didFailWithError message: String) {
         if isClosing { return }
         logMPV("delegate didFailWithError message=\(message)")
-        if attemptMPVProxyFallbackIfNeeded(reason: message) {
-            return
-        }
         Logger.shared.log("PlayerViewController: MPV playback issue: \(message)", type: "MPV")
     }
 
