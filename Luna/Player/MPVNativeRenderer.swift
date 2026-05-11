@@ -589,7 +589,13 @@ final class MPVNativeRenderer: PlayerRenderer {
         applySubtitleStyle(lastAppliedSubtitleStyle)
 
         let target = url.isFileURL ? url.path : url.absoluteString
-        command(handle, ["loadfile", target, "replace"])
+        let loadStatus = command(handle, ["loadfile", target, "replace"])
+        if loadStatus < 0 {
+            logMPV("loadfile command failed gen=\(generation) status=\(loadStatus)")
+            setLoading(false)
+            delegate?.renderer(self, didFailWithError: "MPV rejected the media load command (\(loadStatus))")
+            return
+        }
         mpv_wakeup(handle)
         scheduleRender()
         scheduleLoadWatchdog(generation: generation, delay: 8)
@@ -867,12 +873,17 @@ final class MPVNativeRenderer: PlayerRenderer {
 
     private func handleEvent(_ event: mpv_event) {
         switch event.event_id {
+        case MPV_EVENT_START_FILE:
+            logMPV("event start-file gen=\(loadGeneration)")
+            setLoading(true)
         case MPV_EVENT_VIDEO_RECONFIG:
             logMPV("event video-reconfig")
             refreshVideoState()
         case MPV_EVENT_FILE_LOADED:
             logMPV("event file-loaded gen=\(loadGeneration)")
             handleFileLoaded()
+        case MPV_EVENT_END_FILE:
+            logMPV("event end-file gen=\(loadGeneration) ready=\(isReadyToSeek) loading=\(isLoading) pos=\(String(format: "%.2f", cachedPosition)) dur=\(String(format: "%.2f", cachedDuration))")
         case MPV_EVENT_PROPERTY_CHANGE:
             if let property = event.data?.assumingMemoryBound(to: mpv_event_property.self).pointee.name {
                 refreshProperty(named: String(cString: property))
@@ -1096,12 +1107,17 @@ final class MPVNativeRenderer: PlayerRenderer {
         }
     }
 
-    private func command(_ handle: OpaquePointer, _ args: [String]) {
-        guard !args.isEmpty else { return }
+    @discardableResult
+    private func command(_ handle: OpaquePointer, _ args: [String]) -> Int32 {
+        guard !args.isEmpty else { return 0 }
         logMPV("command \(sanitizedCommand(args))")
-        _ = withCStringArray(args) { pointer in
-            mpv_command_async(handle, 0, pointer)
+        let status = withCStringArray(args) { pointer in
+            mpv_command(handle, pointer)
         }
+        if status < 0 {
+            logMPV("command failed status=\(status) command=\(sanitizedCommand(args))")
+        }
+        return status
     }
 
     private func getStringProperty(handle: OpaquePointer, name: String) -> String? {
@@ -1143,6 +1159,11 @@ final class MPVNativeRenderer: PlayerRenderer {
                 mpv_wakeup(handle)
             }
             self.scheduleRender()
+            if delay >= 20, coreIdle == "yes", idleActive == "yes" {
+                self.logMPV("startup watchdog declaring stalled load gen=\(generation); mpv stayed idle after loadfile")
+                self.setLoading(false)
+                self.delegate?.renderer(self, didFailWithError: "MPV stayed idle after the stream was submitted")
+            }
         }
     }
 

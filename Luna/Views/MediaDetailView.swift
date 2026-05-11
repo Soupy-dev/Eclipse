@@ -210,7 +210,7 @@ struct MediaDetailView: View {
         }
         .navigationBarHidden(true)
 #if !os(tvOS)
-        .highPriorityGesture(edgeBackSwipeGesture)
+        .simultaneousGesture(edgeBackSwipeGesture)
 #else
         .onExitCommand {
             presentationMode.wrappedValue.dismiss()
