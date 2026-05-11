@@ -278,20 +278,21 @@ final class TrackerManager: NSObject, ObservableObject {
         }
 
         let token = try await refreshMALToken(refreshToken)
-        var refreshed = account
-        refreshed.updateTokens(
+        var refreshedAccount = account
+        refreshedAccount.updateTokens(
             access: token.accessToken,
             refresh: token.refreshToken ?? refreshToken,
             expiresAt: token.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) }
                 ?? Date().addingTimeInterval(30 * 24 * 60 * 60)
         )
+        let accountToSave = refreshedAccount
 
         await MainActor.run {
-            self.trackerState.addOrUpdateAccount(refreshed)
+            self.trackerState.addOrUpdateAccount(accountToSave)
             self.saveTrackerState()
         }
         Logger.shared.log("MAL token refreshed before tracker library operation", type: "Tracker")
-        return refreshed
+        return accountToSave
     }
 
     private func formURLEncodedBody(_ values: [String: String]) -> Data? {

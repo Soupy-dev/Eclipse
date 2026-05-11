@@ -806,6 +806,11 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         return result
     }
 
+    func getCurrentSubtitleTrackId() -> Int {
+        guard let player = mediaPlayer else { return -1 }
+        return Int(player.currentVideoSubTitleIndex)
+    }
+
     func setSubtitleTrack(id: Int) {
         guard let player = mediaPlayer else { return }
 
@@ -899,11 +904,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         return String(format: "%02X%02X%02X", ri, gi, bi)
     }
     
-    func getCurrentSubtitleTrackId() -> Int {
-        guard let player = mediaPlayer else { return -1 }
-        return Int(player.currentVideoSubTitleIndex)
-    }
-
     // MARK: - Event Handlers
     
     @objc private func mediaPlayerTimeChanged() {

@@ -83,6 +83,7 @@ struct EpisodeProgressEntry: Codable, Identifiable {
     var lastUpdated: Date = Date()
     var lastServiceId: UUID? = nil
     var lastHref: String? = nil
+    var playbackContext: EpisodePlaybackContext? = nil
 
     var progress: Double {
         guard totalDuration > 0 else { return 0 }
@@ -110,6 +111,7 @@ struct ContinueWatchingItem: Identifiable {
     let episodeNumber: Int?
     let currentTime: Double
     let totalDuration: Double
+    let playbackContext: EpisodePlaybackContext?
     
     var remainingTime: String {
         let remaining = max(0, totalDuration - currentTime)
@@ -404,6 +406,7 @@ final class ProgressManager: ObservableObject {
             entry.currentTime = times.currentTime
             entry.totalDuration = times.totalDuration
             entry.lastUpdated = Date()
+            entry.playbackContext = playbackContext
 
             if entry.progress >= 0.85 {
                 entry.isWatched = true
@@ -604,7 +607,8 @@ final class ProgressManager: ObservableObject {
                         seasonNumber: nil,
                         episodeNumber: nil,
                         currentTime: movie.currentTime,
-                        totalDuration: movie.totalDuration
+                        totalDuration: movie.totalDuration,
+                        playbackContext: nil
                     )
                 }
             
@@ -634,7 +638,8 @@ final class ProgressManager: ObservableObject {
                     seasonNumber: episode.seasonNumber,
                     episodeNumber: episode.episodeNumber,
                     currentTime: episode.currentTime,
-                    totalDuration: episode.totalDuration
+                    totalDuration: episode.totalDuration,
+                    playbackContext: episode.playbackContext
                 )
             }
             

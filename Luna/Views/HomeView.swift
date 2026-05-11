@@ -935,8 +935,10 @@ struct ContinueWatchingCard: View {
                 async let detailsTask = tmdbService.getTVShowDetails(id: item.tmdbId)
                 async let imagesTask = tmdbService.getTVShowImages(id: item.tmdbId, preferredLanguage: selectedLanguage)
                 async let romajiTask = tmdbService.getRomajiTitle(for: "tv", id: item.tmdbId)
+                async let episodeArtworkTask = resolveEpisodeArtworkURL()
 
-                let (details, images, romaji) = try await (detailsTask, imagesTask, romajiTask)
+                let (details, images, romaji, episodeArtworkURL) = try await (detailsTask, imagesTask, romajiTask, episodeArtworkTask)
+                let showArtworkURL = details.fullBackdropURL ?? details.fullPosterURL ?? item.posterURL
 
                 // Anime detection: same logic as MediaDetailView
                 let isJapanese = details.originCountry?.contains("JP") ?? false
@@ -946,7 +948,7 @@ struct ContinueWatchingCard: View {
                 // Set visual details immediately
                 await MainActor.run {
                     self.title = details.name
-                    self.backdropURL = details.fullBackdropURL ?? details.fullPosterURL ?? item.posterURL
+                    self.backdropURL = episodeArtworkURL ?? showArtworkURL
                     if let logo = tmdbService.getBestLogo(from: images, preferredLanguage: selectedLanguage) {
                         self.logoURL = logo.fullURL
                     }
@@ -965,6 +967,7 @@ struct ContinueWatchingCard: View {
                             tmdbShowPoster: details.fullPosterURL,
                             token: nil
                         )
+                        let animeEpisodeArtworkURL = resolveAnimeEpisodeArtworkURL(from: animeData)
 
                         // Register AniList season IDs for tracker sync (same as MediaDetailView)
                         let seasonMappings = animeData.seasons.map { (seasonNumber: $0.seasonNumber, anilistId: $0.anilistId) }
@@ -980,6 +983,7 @@ struct ContinueWatchingCard: View {
                         await MainActor.run {
                             self.isAnimeContent = true
                             self.animeSeasonTitle = matchedSeasonTitle
+                            self.backdropURL = animeEpisodeArtworkURL ?? episodeArtworkURL ?? showArtworkURL
                             self.isMetadataReady = true
                             if self.pendingOpenSheet {
                                 self.pendingOpenSheet = false
@@ -1026,6 +1030,41 @@ struct ContinueWatchingCard: View {
                 }
             }
         }
+    }
+
+    private func resolveEpisodeArtworkURL() async -> String? {
+        guard !item.isMovie else { return nil }
+        let seasonNumber = item.playbackContext?.resolvedTMDBSeasonNumber ?? item.seasonNumber
+        let episodeNumber = item.playbackContext?.resolvedTMDBEpisodeNumber ?? item.episodeNumber
+        guard let seasonNumber, let episodeNumber else { return nil }
+
+        do {
+            let detail = try await tmdbService.getSeasonDetails(tvShowId: item.tmdbId, seasonNumber: seasonNumber)
+            return detail.episodes.first(where: { $0.episodeNumber == episodeNumber })?.fullStillURL
+                ?? detail.fullPosterURL
+        } catch {
+            Logger.shared.log("ContinueWatchingCard: Episode artwork fetch failed showId=\(item.tmdbId) season=\(seasonNumber) episode=\(episodeNumber): \(error.localizedDescription)", type: "TMDB")
+            return nil
+        }
+    }
+
+    private func resolveAnimeEpisodeArtworkURL(from animeData: AniListAnimeWithSeasons) -> String? {
+        guard let localSeasonNumber = item.seasonNumber,
+              let localEpisodeNumber = item.episodeNumber else {
+            return nil
+        }
+
+        let season = animeData.seasons.first(where: { $0.seasonNumber == localSeasonNumber })
+            ?? animeData.seasons.first
+        let episode = season?.episodes.first(where: { $0.number == localEpisodeNumber })
+        return fullImageURL(from: episode?.stillPath)
+            ?? season?.posterUrl
+    }
+
+    private func fullImageURL(from path: String?) -> String? {
+        guard let path, !path.isEmpty else { return nil }
+        if path.hasPrefix("http") { return path }
+        return "\(TMDBService.tmdbImageBaseURL)\(path)"
     }
 
     private func markAsWatched() {

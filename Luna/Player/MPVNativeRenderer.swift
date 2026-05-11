@@ -435,7 +435,7 @@ final class MPVNativeRenderer: PlayerRenderer {
         glView.drawableColorFormat = .RGBA8888
         glView.drawableDepthFormat = .format24
         glView.drawableStencilFormat = .format8
-        glView.drawableMultisample = .none
+        glView.drawableMultisample = .multisampleNone
 
         displayLayer.videoGravity = .resizeAspect
         displayLayer.backgroundColor = UIColor.black.cgColor
@@ -835,8 +835,8 @@ final class MPVNativeRenderer: PlayerRenderer {
     private func handleFileLoaded() {
         isReadyToSeek = true
         setLoading(false)
-        if let seek = pendingInitialSeek {
-            seek(to: seek)
+        if let initialSeek = pendingInitialSeek {
+            seek(to: initialSeek)
             pendingInitialSeek = nil
         }
         DispatchQueue.main.async { [weak self] in
