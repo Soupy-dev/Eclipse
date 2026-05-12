@@ -308,8 +308,13 @@ final class PlayerHeaderProxy {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
-        if playlistMode == .normalizeRewrittenPlaylist, isLikelyPlaylistURL(targetURL) {
-            request.setValue(nil, forHTTPHeaderField: "Range")
+        if playlistMode == .normalizeRewrittenPlaylist {
+            let normalizedRange = request.value(forHTTPHeaderField: "Range")?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            if isLikelyPlaylistURL(targetURL) || normalizedRange == "bytes=0-" {
+                request.setValue(nil, forHTTPHeaderField: "Range")
+            }
         }
 
         let upstreamRange = request.value(forHTTPHeaderField: "Range") ?? "nil"

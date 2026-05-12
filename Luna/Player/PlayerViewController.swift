@@ -558,6 +558,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var canMutateVLCSubtitleTracks = false
     private var pipController: PiPController?
     private var mpvPiPStartAttemptID = 0
+    private var mpvAppExitPiPStartRequested = false
     private var initialURL: URL?
     private var initialPreset: PlayerPreset?
     private var initialHeaders: [String: String]?
@@ -839,6 +840,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func rendererPrimePictureInPictureFrames(reason: String) {
         mpvRenderer?.primePictureInPictureFrames(reason: reason)
+    }
+
+    private func rendererActivatePictureInPictureLayer() {
+        mpvRenderer?.activatePictureInPictureLayer()
     }
 
     private func rendererIsPictureInPicturePrimed() -> Bool {
@@ -1203,6 +1208,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         updateSpeedMenu()
         
         NotificationCenter.default.addObserver(self, selector: #selector(appDidEnterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(appWillResignActive), name: UIApplication.willResignActiveNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appWillEnterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appDidBecomeActive), name: UIApplication.didBecomeActiveNotification, object: nil)
     }
@@ -5050,13 +5056,23 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if pip.isPictureInPictureActive {
             logPictureInPicture("stopping PiP from button")
             pip.stopPictureInPicture()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self, weak pip] in
+                guard let self, let pip, !pip.isPictureInPictureActive else { return }
+                self.logPictureInPicture("MPV PiP stop timeout reached inactive state; restoring foreground")
+                self.rendererFinishPictureInPicture()
+                self.updatePiPButtonVisibility()
+            }
         } else {
             startMPVPictureInPictureWhenPossible(source: "button")
         }
     }
 
     private func startMPVPictureInPictureWhenPossible(source: String) {
-        guard pipController != nil else { return }
+        guard let pip = pipController else { return }
+        guard !pip.isPictureInPictureActive else {
+            logPictureInPicture("start ignored source=\(source): PiP already active")
+            return
+        }
         mpvPiPStartAttemptID += 1
         let attemptID = mpvPiPStartAttemptID
         logPictureInPicture("prepare MPV PiP source=\(source) attemptID=\(attemptID)")
@@ -5074,7 +5090,18 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         if pip.isPictureInPicturePossible && primed && !pip.isPictureInPictureActive {
             logPictureInPicture("starting MPV PiP source=\(source) attempt=\(attempt)")
+            rendererActivatePictureInPictureLayer()
             pip.startPictureInPicture()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self, weak pip] in
+                guard let self,
+                      attemptID == self.mpvPiPStartAttemptID,
+                      let pip,
+                      !pip.isPictureInPictureActive else { return }
+                self.logPictureInPicture("MPV PiP start timed out without active state source=\(source) attempt=\(attempt); restoring foreground")
+                self.mpvAppExitPiPStartRequested = false
+                self.rendererFinishPictureInPicture()
+                self.updatePiPButtonVisibility()
+            }
             return
         }
 
@@ -6249,12 +6276,14 @@ extension PlayerViewController: PiPControllerDelegate {
     func pipController(_ controller: PiPController, willStartPictureInPicture: Bool) {
         logPictureInPicture("delegate willStart possible=\(controller.isPictureInPicturePossible)")
         rendererPreparePictureInPictureStart()
+        rendererActivatePictureInPictureLayer()
         pipController?.updatePlaybackState()
     }
     func pipController(_ controller: PiPController, didStartPictureInPicture: Bool) {
         logPictureInPicture("delegate didStart success=\(didStartPictureInPicture) possible=\(controller.isPictureInPicturePossible) active=\(controller.isPictureInPictureActive)")
         if !didStartPictureInPicture {
             mpvPiPStartAttemptID += 1
+            mpvAppExitPiPStartRequested = false
             rendererFinishPictureInPicture()
         }
         pipController?.updatePlaybackState()
@@ -6266,6 +6295,7 @@ extension PlayerViewController: PiPControllerDelegate {
     func pipController(_ controller: PiPController, didStopPictureInPicture: Bool) {
         logPictureInPicture("delegate didStop")
         mpvPiPStartAttemptID += 1
+        mpvAppExitPiPStartRequested = false
         rendererFinishPictureInPicture()
         updatePiPButtonVisibility()
     }
@@ -6295,6 +6325,63 @@ extension PlayerViewController: PiPControllerDelegate {
     }
     func pipControllerDuration(_ controller: PiPController) -> Double { return cachedDuration }
     func pipControllerCurrentTime(_ controller: PiPController) -> Double { return cachedPosition }
+
+    @objc private func appWillResignActive() {
+        DispatchQueue.main.async { [weak self] in
+            self?.attemptMPVAppExitPictureInPictureStart(source: "will-resign-active")
+        }
+    }
+
+    private func attemptMPVAppExitPictureInPictureStart(source: String) {
+        guard !isVLCPlayer, mpvRenderer != nil else { return }
+        guard let pip = pipController else {
+            logPictureInPicture("app-exit auto PiP skipped source=\(source): controller missing")
+            return
+        }
+
+        let paused = rendererIsPausedState()
+        let playbackReady = playbackDidStart || cachedPosition > 0.1
+        let active = pip.isPictureInPictureActive
+        let supported = pip.isPictureInPictureSupported
+        let possible = pip.isPictureInPicturePossible
+
+        let shouldStart = isRunning
+            && !isClosing
+            && !active
+            && !paused
+            && playbackReady
+            && supported
+
+        let skipReason: String
+        if shouldStart {
+            skipReason = "none"
+        } else if !isRunning {
+            skipReason = "not-running"
+        } else if isClosing {
+            skipReason = "closing"
+        } else if active {
+            skipReason = "already-active"
+        } else if paused {
+            skipReason = "paused"
+        } else if !playbackReady {
+            skipReason = "playback-not-started"
+        } else if !supported {
+            skipReason = "unsupported"
+        } else {
+            skipReason = "unknown"
+        }
+
+        logPictureInPicture("MPV app-exit auto PiP check source=\(source) shouldStart=\(shouldStart) skipReason=\(skipReason) active=\(active) possible=\(possible) supported=\(supported) paused=\(paused) ready=\(playbackReady) loading=\(isRendererLoading) requested=\(mpvAppExitPiPStartRequested)")
+
+        guard shouldStart else { return }
+        guard !mpvAppExitPiPStartRequested else {
+            logPictureInPicture("MPV app-exit auto PiP already requested; ignoring duplicate source=\(source)")
+            return
+        }
+
+        mpvAppExitPiPStartRequested = true
+        startMPVPictureInPictureWhenPossible(source: source)
+    }
     
     @objc private func appDidEnterBackground() {
         DispatchQueue.main.async { [weak self] in
@@ -6330,11 +6417,7 @@ extension PlayerViewController: PiPControllerDelegate {
                 return
             }
 
-            guard let pip = self.pipController else { return }
-            self.logMPV("background PiP check active=\(pip.isPictureInPictureActive) possible=\(pip.isPictureInPicturePossible) supported=\(pip.isPictureInPictureSupported)")
-            if !pip.isPictureInPictureActive {
-                self.startMPVPictureInPictureWhenPossible(source: "background")
-            }
+            self.attemptMPVAppExitPictureInPictureStart(source: "did-enter-background")
         }
     }
     
@@ -6361,6 +6444,7 @@ extension PlayerViewController: PiPControllerDelegate {
             }
             guard let pip = self.pipController else { return }
             self.mpvPiPStartAttemptID += 1
+            self.mpvAppExitPiPStartRequested = false
             if pip.isPictureInPictureActive {
                 self.logMPV("Returning to foreground; stopping PiP")
                 pip.stopPictureInPicture()

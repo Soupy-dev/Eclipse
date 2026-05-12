@@ -674,7 +674,7 @@ final class MPVNativeRenderer: PlayerRenderer {
             // worst, not a black player.
             self.glView.isHidden = false
             self.displayLayer.isHidden = false
-            self.displayLayer.opacity = 0.01
+            self.displayLayer.opacity = 1.0
             self.displayLayer.zPosition = -1
         }
         do {
@@ -688,6 +688,7 @@ final class MPVNativeRenderer: PlayerRenderer {
                 guard let self else { return }
                 self.displayLayer.isHidden = true
                 self.displayLayer.opacity = 0.0
+                self.displayLayer.zPosition = -1
                 self.glView.isHidden = false
             }
             do {
@@ -714,6 +715,7 @@ final class MPVNativeRenderer: PlayerRenderer {
             guard let self else { return }
             self.displayLayer.isHidden = true
             self.displayLayer.opacity = 0.0
+            self.displayLayer.zPosition = -1
             self.glView.isHidden = false
         }
         do {
@@ -728,6 +730,19 @@ final class MPVNativeRenderer: PlayerRenderer {
     func primePictureInPictureFrames(reason: String) {
         guard isRunning, currentMode == .pictureInPicture else { return }
         requestRenderBurst(reason: "pip-prime-\(reason)", count: 6, interval: 0.06)
+    }
+
+    func activatePictureInPictureLayer() {
+        guard isRunning, currentMode == .pictureInPicture else { return }
+        logMPV("activating sample-buffer PiP layer")
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isRunning, !self.isStopping, self.currentMode == .pictureInPicture else { return }
+            self.displayLayer.isHidden = false
+            self.displayLayer.opacity = 1.0
+            self.displayLayer.zPosition = 1
+            self.glView.isHidden = true
+        }
+        requestRenderBurst(reason: "pip-layer-active", count: 4, interval: 0.06)
     }
 
     func isPictureInPicturePrimed() -> Bool {
@@ -746,6 +761,7 @@ final class MPVNativeRenderer: PlayerRenderer {
             guard let self, self.isRunning, !self.isStopping, self.currentMode == .openGL else { return }
             self.displayLayer.isHidden = true
             self.displayLayer.opacity = 0.0
+            self.displayLayer.zPosition = -1
             self.glView.isHidden = false
             self.glView.setNeedsLayout()
             EAGLContext.setCurrent(self.glContext)
@@ -957,7 +973,7 @@ final class MPVNativeRenderer: PlayerRenderer {
                 fbo: Int32(framebuffer),
                 w: Int32(glView.drawableWidth),
                 h: Int32(glView.drawableHeight),
-                internal_format: 0
+                internal_format: Int32(GL_RGBA)
             )
             var flipY: Int32 = 1
 
@@ -1720,6 +1736,7 @@ final class MPVNativeRenderer: PlayerRenderer {
     func prepareForPictureInPictureStart() { }
     func finishPictureInPicture() { }
     func primePictureInPictureFrames(reason: String) { }
+    func activatePictureInPictureLayer() { }
     func isPictureInPicturePrimed() -> Bool { false }
     func resumeForegroundRendering(reason: String) { }
     func play() { }
