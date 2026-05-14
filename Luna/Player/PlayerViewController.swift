@@ -2980,13 +2980,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func isAnimeContent() -> Bool {
         if let hint = isAnimeHint, hint == true { return true }
+        if episodePlaybackContext?.anilistMediaId != nil { return true }
         guard let info = mediaInfo else { return false }
         switch info {
         case .movie(_, _, _, let isAnime):
             return isAnime
-        case .episode(let showId, _, _, _, _, let isAnime):
-            if isAnime { return true }
-            return trackerManager.cachedAniListId(for: showId) != nil
+        case .episode(_, _, _, _, _, let isAnime):
+            return isAnime
         }
     }
 
@@ -5319,7 +5319,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         switch info {
         case .movie(let id, let title, _, _):
             ProgressManager.shared.updateMovieProgress(movieId: id, title: title, currentTime: persistPosition, totalDuration: effectiveDuration)
-        case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, let showPosterURL, _):
+        case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, let showPosterURL, let isAnime):
             ProgressManager.shared.updateEpisodeProgress(
                 showId: showId,
                 seasonNumber: seasonNumber,
@@ -5328,7 +5328,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 totalDuration: effectiveDuration,
                 showTitle: showTitle,
                 showPosterURL: showPosterURL,
-                playbackContext: episodePlaybackContext?.forEpisodeNumber(episodeNumber)
+                playbackContext: episodePlaybackContext?.forEpisodeNumber(episodeNumber),
+                isAnime: isAnime || episodePlaybackContext?.anilistMediaId != nil
             )
         }
     }

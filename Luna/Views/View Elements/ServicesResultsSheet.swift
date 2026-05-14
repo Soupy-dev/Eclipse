@@ -1667,8 +1667,8 @@ struct ModulesSearchResultsSheet: View {
             return
         }
         
-        // Check if anime via TrackerManager (for logging)
-        let isAnime = TrackerManager.shared.cachedAniListId(for: tmdbId) != nil
+        // Check if this search has explicit anime context for logging.
+        let isAnime = isAnimeContent || animeSeasonTitle != nil || effectivePlaybackContext?.anilistMediaId != nil
         
         // Build search query
         let searchQuery: String
@@ -2238,7 +2238,7 @@ struct ModulesSearchResultsSheet: View {
                 subtitleNames: subtitleNames,
                 retryCount: retryCount
             )
-            let resolvedAnimeHint = isAnimeContent || animeSeasonTitle != nil || TrackerManager.shared.cachedAniListId(for: tmdbId) != nil
+            let resolvedAnimeHint = isAnimeContent || animeSeasonTitle != nil || effectivePlaybackContext?.anilistMediaId != nil
 
             if onResolvedPlaybackRequest != nil {
                 let request = PlayerResolvedPlaybackRequest(
@@ -2284,7 +2284,7 @@ struct ModulesSearchResultsSheet: View {
                     retryCount: retryCount
                 )
                 configurePlaybackRecovery(pvc, context: launchContext)
-                let isAnimeHint = isAnimeContent || animeSeasonTitle != nil || TrackerManager.shared.cachedAniListId(for: tmdbId) != nil
+                let isAnimeHint = isAnimeContent || animeSeasonTitle != nil || effectivePlaybackContext?.anilistMediaId != nil
                 pvc.isAnimeHint = isAnimeHint
                 pvc.originalTMDBSeasonNumber = effectivePlaybackContext?.resolvedTMDBSeasonNumber ?? originalTMDBSeasonNumber
                 pvc.originalTMDBEpisodeNumber = effectivePlaybackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBEpisodeNumber
@@ -2928,7 +2928,7 @@ struct ModulesSearchResultsSheet: View {
                 subtitleNames: nil,
                 retryCount: retryCount
             )
-            let resolvedAnimeHint = isAnimeContent || animeSeasonTitle != nil || TrackerManager.shared.cachedAniListId(for: tmdbId) != nil
+            let resolvedAnimeHint = isAnimeContent || animeSeasonTitle != nil || effectivePlaybackContext?.anilistMediaId != nil
 
             if onResolvedPlaybackRequest != nil {
                 let request = PlayerResolvedPlaybackRequest(
@@ -2982,7 +2982,7 @@ struct ModulesSearchResultsSheet: View {
                     retryCount: retryCount
                 )
                 configurePlaybackRecovery(pvc, context: launchContext)
-                let isAnimeHint = isAnimeContent || animeSeasonTitle != nil || TrackerManager.shared.cachedAniListId(for: tmdbId) != nil
+                let isAnimeHint = isAnimeContent || animeSeasonTitle != nil || effectivePlaybackContext?.anilistMediaId != nil
                 pvc.isAnimeHint = isAnimeHint
                 pvc.originalTMDBSeasonNumber = effectivePlaybackContext?.resolvedTMDBSeasonNumber ?? originalTMDBSeasonNumber
                 pvc.originalTMDBEpisodeNumber = effectivePlaybackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBEpisodeNumber
@@ -3052,7 +3052,7 @@ struct ModulesSearchResultsSheet: View {
                     retryCount: retryCount
                 )
                 configurePlaybackRecovery(pvc, context: launchContext)
-                let isAnimeHint = isAnimeContent || animeSeasonTitle != nil || TrackerManager.shared.cachedAniListId(for: tmdbId) != nil
+                let isAnimeHint = isAnimeContent || animeSeasonTitle != nil || effectivePlaybackContext?.anilistMediaId != nil
                 pvc.isAnimeHint = isAnimeHint
                 pvc.originalTMDBSeasonNumber = effectivePlaybackContext?.resolvedTMDBSeasonNumber ?? originalTMDBSeasonNumber
                 pvc.originalTMDBEpisodeNumber = effectivePlaybackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBEpisodeNumber

@@ -1123,13 +1123,7 @@ final class AniListService {
         }
 
         return entries.sorted { lhs, rhs in
-            if lhs.sortSeason != rhs.sortSeason {
-                return lhs.sortSeason < rhs.sortSeason
-            }
-            if lhs.formatLabel != rhs.formatLabel {
-                return lhs.formatLabel < rhs.formatLabel
-            }
-            return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+            lhs.isOrderedBeforeSpecialEntry(rhs)
         }
     }
 
@@ -1183,6 +1177,11 @@ final class AniListService {
                 tmdbEpisodeNumber: mappedEpisodeNumber
             )
         }
+        let exactEpisodeDate = episodes.compactMap(\.airDate).min()
+        let releaseDate = node?.startDate?.exactDateString
+            ?? exactEpisodeDate
+            ?? node?.startDate?.approximateDateString
+            ?? AniListDate.approximateDateString(year: node?.seasonYear, season: node?.season)
 
         return AniListSpecialSearchEntry(
             id: anilistId,
@@ -1200,6 +1199,7 @@ final class AniListService {
             tvdbSeasonNumber: mapping?.tvdbSeason,
             episodeOffset: mapping?.tvdbEpisodeOffset,
             imdbId: mapping?.imdbId,
+            releaseDate: releaseDate,
             episodes: episodes
         )
     }
@@ -2183,6 +2183,7 @@ final class AniListService {
                         title { romaji english native }
                         episodes
                         status
+                        startDate { year month day }
                         seasonYear
                         season
                         format
@@ -2196,6 +2197,7 @@ final class AniListService {
                                     title { romaji english native }
                                     episodes
                                     status
+                                    startDate { year month day }
                                     seasonYear
                                     season
                                     format
@@ -2245,6 +2247,7 @@ final class AniListService {
                 title { romaji english native }
                 episodes
                 status
+                startDate { year month day }
                 seasonYear
                 season
                 format
@@ -2258,6 +2261,7 @@ final class AniListService {
                             title { romaji english native }
                             episodes
                             status
+                            startDate { year month day }
                             seasonYear
                             season
                             format
@@ -2342,6 +2346,7 @@ struct AniListSpecialSearchEntry: Identifiable {
     let tvdbSeasonNumber: Int?
     let episodeOffset: Int?
     let imdbId: String?
+    let releaseDate: String?
     let episodes: [AniListEpisode]
 
     var formatLabel: String {
@@ -2355,6 +2360,27 @@ struct AniListSpecialSearchEntry: Identifiable {
 
     var sortSeason: Int {
         displaySeasonNumber
+    }
+
+    func isOrderedBeforeSpecialEntry(_ other: AniListSpecialSearchEntry) -> Bool {
+        switch (releaseDate, other.releaseDate) {
+        case let (lhsDate?, rhsDate?) where lhsDate != rhsDate:
+            return lhsDate < rhsDate
+        case (_?, nil):
+            return true
+        case (nil, _?):
+            return false
+        default:
+            break
+        }
+
+        if sortSeason != other.sortSeason {
+            return sortSeason < other.sortSeason
+        }
+        if formatLabel != other.formatLabel {
+            return formatLabel < other.formatLabel
+        }
+        return title.localizedCaseInsensitiveCompare(other.title) == .orderedAscending
     }
 
     var titleCandidates: [String] {
@@ -2419,12 +2445,47 @@ struct AniListAnimeWithSeasons {
 
 // MARK: - AniList Codable Models
 
+struct AniListDate: Codable {
+    let year: Int?
+    let month: Int?
+    let day: Int?
+
+    var exactDateString: String? {
+        guard let year, let month, let day else { return nil }
+        return String(format: "%04d-%02d-%02d", year, month, day)
+    }
+
+    var approximateDateString: String? {
+        guard let year else { return nil }
+        return String(format: "%04d-%02d-%02d", year, month ?? 1, day ?? 1)
+    }
+
+    static func approximateDateString(year: Int?, season: String?) -> String? {
+        guard let year else { return nil }
+        let month: Int
+        switch season?.uppercased() {
+        case "WINTER":
+            month = 1
+        case "SPRING":
+            month = 4
+        case "SUMMER":
+            month = 7
+        case "FALL":
+            month = 10
+        default:
+            month = 1
+        }
+        return String(format: "%04d-%02d-01", year, month)
+    }
+}
+
 struct AniListAnime: Codable {
     let id: Int
     let idMal: Int?
     let title: AniListTitle
     let episodes: Int?
     let status: String?
+    let startDate: AniListDate?
     let seasonYear: Int?
     let season: String?
     let coverImage: AniListCoverImage?
@@ -2463,6 +2524,7 @@ struct AniListAnime: Codable {
         let title: AniListTitle
         let episodes: Int?
         let status: String?
+        let startDate: AniListDate?
         let seasonYear: Int?
         let season: String?
         let format: String?
@@ -2477,6 +2539,7 @@ struct AniListAnime: Codable {
                 title: title,
                 episodes: episodes,
                 status: status,
+                startDate: startDate,
                 seasonYear: seasonYear,
                 season: season,
                 coverImage: coverImage,

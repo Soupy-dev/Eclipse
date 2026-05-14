@@ -559,7 +559,8 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                         Logger.shared.log("TVShowSeasonsSection episode download blocked no sources: showId=\(tvShow.id) episode=S\(episode.seasonNumber)E\(episode.episodeNumber)", type: "CrashProbe")
                     }
                 },
-                playbackContext: playbackContext
+                playbackContext: playbackContext,
+                isAnimeContent: isAnime
             )
         } else {
             EmptyView()
@@ -727,7 +728,8 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             showId: tvShow.id,
             seasonNumber: episode.seasonNumber,
             episodeNumber: episode.episodeNumber,
-            playbackContext: playbackContext
+            playbackContext: playbackContext,
+            isAnime: isAnime
         )
     }
     

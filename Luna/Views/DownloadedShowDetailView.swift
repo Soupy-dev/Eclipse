@@ -299,7 +299,8 @@ struct DownloadedShowDetailView: View {
             showId: item.tmdbId,
             seasonNumber: item.seasonNumber ?? 1,
             episodeNumber: item.episodeNumber ?? 1,
-            playbackContext: item.episodePlaybackContext
+            playbackContext: item.episodePlaybackContext,
+            isAnime: item.isAnime
         )
     }
     

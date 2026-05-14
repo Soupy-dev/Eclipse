@@ -84,6 +84,7 @@ struct EpisodeProgressEntry: Codable, Identifiable {
     var lastServiceId: UUID? = nil
     var lastHref: String? = nil
     var playbackContext: EpisodePlaybackContext? = nil
+    var isAnime: Bool? = nil
 
     var progress: Double {
         guard totalDuration > 0 else { return 0 }
@@ -112,6 +113,7 @@ struct ContinueWatchingItem: Identifiable {
     let currentTime: Double
     let totalDuration: Double
     let playbackContext: EpisodePlaybackContext?
+    let isAnime: Bool
     
     var remainingTime: String {
         let remaining = max(0, totalDuration - currentTime)
@@ -385,7 +387,7 @@ final class ProgressManager: ObservableObject {
 
     // MARK: - Episode Progress
 
-    func updateEpisodeProgress(showId: Int, seasonNumber: Int, episodeNumber: Int, currentTime: Double, totalDuration: Double, showTitle: String? = nil, showPosterURL: String? = nil, playbackContext: EpisodePlaybackContext? = nil) {
+    func updateEpisodeProgress(showId: Int, seasonNumber: Int, episodeNumber: Int, currentTime: Double, totalDuration: Double, showTitle: String? = nil, showPosterURL: String? = nil, playbackContext: EpisodePlaybackContext? = nil, isAnime: Bool = false) {
         guard currentTime.isFinite, totalDuration.isFinite, currentTime >= 0, totalDuration > 0 else {
             Logger.shared.log("Invalid progress values for episode S\(seasonNumber)E\(episodeNumber): currentTime=\(currentTime), totalDuration=\(totalDuration)", type: "Warning")       
             return
@@ -407,6 +409,7 @@ final class ProgressManager: ObservableObject {
             entry.totalDuration = times.totalDuration
             entry.lastUpdated = Date()
             entry.playbackContext = playbackContext
+            entry.isAnime = isAnime || playbackContext?.anilistMediaId != nil
 
             if entry.progress >= 0.85 {
                 entry.isWatched = true
@@ -429,6 +432,7 @@ final class ProgressManager: ObservableObject {
                         seasonNumber: seasonNumber,
                         episodeNumber: episodeNumber,
                         progress: entry.progress,
+                        isAnime: entry.isAnime == true,
                         playbackContext: playbackContext?.forEpisodeNumber(episodeNumber)
                     )
                 }
@@ -476,7 +480,7 @@ final class ProgressManager: ObservableObject {
         return result
     }
 
-    func markEpisodeAsWatched(showId: Int, seasonNumber: Int, episodeNumber: Int, playbackContext: EpisodePlaybackContext? = nil) {
+    func markEpisodeAsWatched(showId: Int, seasonNumber: Int, episodeNumber: Int, playbackContext: EpisodePlaybackContext? = nil, isAnime: Bool = false) {
         accessQueue.async(flags: .barrier) { [weak self] in
             guard let self = self else { return }
             var entry = self.progressData.findEpisode(showId: showId, season: seasonNumber, episode: episodeNumber)
@@ -486,6 +490,8 @@ final class ProgressManager: ObservableObject {
             entry.isWatched = true
             entry.currentTime = safeDuration
             entry.lastUpdated = Date()
+            entry.playbackContext = playbackContext
+            entry.isAnime = isAnime || playbackContext?.anilistMediaId != nil
             self.progressData.updateEpisode(entry)
             self.publishCurrentData()
             Logger.shared.log("Marked episode as watched: S\(seasonNumber)E\(episodeNumber)", type: "Progress")
@@ -497,6 +503,7 @@ final class ProgressManager: ObservableObject {
                     seasonNumber: seasonNumber,
                     episodeNumber: episodeNumber,
                     progress: 1.0,
+                    isAnime: entry.isAnime == true,
                     playbackContext: playbackContext?.forEpisodeNumber(episodeNumber)
                 )
             }
@@ -519,7 +526,7 @@ final class ProgressManager: ObservableObject {
         saveProgressData()
     }
 
-    func markPreviousEpisodesAsWatched(showId: Int, seasonNumber: Int, episodeNumber: Int, playbackContext: EpisodePlaybackContext? = nil) {
+    func markPreviousEpisodesAsWatched(showId: Int, seasonNumber: Int, episodeNumber: Int, playbackContext: EpisodePlaybackContext? = nil, isAnime: Bool = false) {
         guard episodeNumber > 1 else { return }
 
         accessQueue.async(flags: .barrier) { [weak self] in
@@ -532,6 +539,8 @@ final class ProgressManager: ObservableObject {
                 entry.isWatched = true
                 entry.currentTime = safeDuration
                 entry.lastUpdated = Date()
+                entry.playbackContext = playbackContext?.forEpisodeNumber(e)
+                entry.isAnime = isAnime || playbackContext?.anilistMediaId != nil
                 self.progressData.updateEpisode(entry)
             }
             self.publishCurrentData()
@@ -545,6 +554,7 @@ final class ProgressManager: ObservableObject {
                     seasonNumber: seasonNumber,
                     episodeNumber: highestEpisode,
                     progress: 1.0,
+                    isAnime: isAnime || playbackContext?.anilistMediaId != nil,
                     playbackContext: playbackContext?.forEpisodeNumber(highestEpisode)
                 )
             }
@@ -608,7 +618,8 @@ final class ProgressManager: ObservableObject {
                         episodeNumber: nil,
                         currentTime: movie.currentTime,
                         totalDuration: movie.totalDuration,
-                        playbackContext: nil
+                        playbackContext: nil,
+                        isAnime: false
                     )
                 }
             
@@ -639,7 +650,8 @@ final class ProgressManager: ObservableObject {
                     episodeNumber: episode.episodeNumber,
                     currentTime: episode.currentTime,
                     totalDuration: episode.totalDuration,
-                    playbackContext: episode.playbackContext
+                    playbackContext: episode.playbackContext,
+                    isAnime: episode.isAnime == true || episode.playbackContext?.anilistMediaId != nil
                 )
             }
             
@@ -679,7 +691,14 @@ final class ProgressManager: ObservableObject {
                 Logger.shared.log("Marked continue-watching episode as watched: showId=\(item.tmdbId) S\(seasonNumber)E\(episodeNumber)", type: "Progress")
 
                 DispatchQueue.main.async {
-                    TrackerManager.shared.syncWatchProgress(showId: item.tmdbId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, progress: 1.0)
+                    TrackerManager.shared.syncWatchProgress(
+                        showId: item.tmdbId,
+                        seasonNumber: seasonNumber,
+                        episodeNumber: episodeNumber,
+                        progress: 1.0,
+                        isAnime: item.isAnime,
+                        playbackContext: item.playbackContext?.forEpisodeNumber(episodeNumber)
+                    )
                 }
             }
 
@@ -739,7 +758,7 @@ final class ProgressManager: ObservableObject {
             case .movie(let id, let title, let posterURL, _):
                 self.updateMovieProgress(movieId: id, title: title, currentTime: currentTime, totalDuration: duration, posterURL: posterURL)
 
-            case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, let showPosterURL, _):
+            case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, let showPosterURL, let isAnime):
                 self.updateEpisodeProgress(
                     showId: showId,
                     seasonNumber: seasonNumber,
@@ -748,7 +767,8 @@ final class ProgressManager: ObservableObject {
                     totalDuration: duration,
                     showTitle: showTitle,
                     showPosterURL: showPosterURL,
-                    playbackContext: playbackContext?.forEpisodeNumber(episodeNumber)
+                    playbackContext: playbackContext?.forEpisodeNumber(episodeNumber),
+                    isAnime: isAnime || playbackContext?.anilistMediaId != nil
                 )
             }
         }

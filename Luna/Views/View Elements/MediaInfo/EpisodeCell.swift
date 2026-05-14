@@ -20,6 +20,7 @@ struct EpisodeCell: View {
     let onResetProgress: () -> Void
     var onDownload: (() -> Void)? = nil
     var playbackContext: EpisodePlaybackContext? = nil
+    var isAnimeContent: Bool = false
     
     @State private var isWatched: Bool = false
     @State private var progressValue: Double = 0
@@ -346,7 +347,8 @@ struct EpisodeCell: View {
                         showId: showId,
                         seasonNumber: episode.seasonNumber,
                         episodeNumber: episode.episodeNumber,
-                        playbackContext: playbackContext
+                        playbackContext: playbackContext,
+                        isAnime: isAnimeContent
                     )
                     refreshProgressState()
                 }) {
@@ -380,12 +382,6 @@ struct EpisodeCell: View {
                 }
             } else {
                 Button(action: {
-                    ProgressManager.shared.markEpisodeAsWatched(
-                        showId: showId,
-                        seasonNumber: episode.seasonNumber,
-                        episodeNumber: episode.episodeNumber,
-                        playbackContext: playbackContext
-                    )
                     onMarkWatched()
                     isWatched = true
                     progressValue = 1

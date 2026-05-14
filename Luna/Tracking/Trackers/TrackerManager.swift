@@ -1377,7 +1377,7 @@ final class TrackerManager: NSObject, ObservableObject {
         await saveMALMangaProgress(account: account, malId: malId, chaptersRead: chapterNumber, status: "reading")
     }
 
-    func syncWatchProgress(showId: Int, seasonNumber: Int, episodeNumber: Int, progress: Double, isMovie: Bool = false, playbackContext: EpisodePlaybackContext? = nil) {
+    func syncWatchProgress(showId: Int, seasonNumber: Int, episodeNumber: Int, progress: Double, isMovie: Bool = false, isAnime: Bool = false, playbackContext: EpisodePlaybackContext? = nil) {
         guard !isBackupRestoreSyncSuppressed() else {
             Logger.shared.log("Skipping watch sync (backup restore in progress) for TMDB \(showId) S\(seasonNumber)E\(episodeNumber) \(Int(progress))%", type: "Tracker")
             return
@@ -1394,6 +1394,7 @@ final class TrackerManager: NSObject, ObservableObject {
             return
         }
 
+        let canSyncAnimeTrackers = isAnime || playbackContext?.anilistMediaId != nil
         Logger.shared.log("Starting watch sync for TMDB \(showId) S\(seasonNumber)E\(episodeNumber) \(Int(progress))% across \(connectedAccounts.count) account(s)", type: "Tracker")     
 
         Task {
@@ -1401,6 +1402,10 @@ final class TrackerManager: NSObject, ObservableObject {
                 Logger.shared.log("Syncing \(account.service) account \(account.username) for TMDB \(showId) S\(seasonNumber)E\(episodeNumber)", type: "Tracker")
                 switch account.service {
                 case .anilist:
+                    guard canSyncAnimeTrackers else {
+                        Logger.shared.log("Skipping AniList watch sync for non-anime TMDB \(showId) S\(seasonNumber)E\(episodeNumber)", type: "Tracker")
+                        continue
+                    }
                     if let playbackContext,
                        let anilistMediaId = playbackContext.anilistMediaId {
                         await syncToAniListMediaId(
@@ -1415,6 +1420,10 @@ final class TrackerManager: NSObject, ObservableObject {
                         await syncToAniList(account: account, showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, progress: progress)
                     }
                 case .myAnimeList:
+                    guard canSyncAnimeTrackers else {
+                        Logger.shared.log("Skipping MAL anime watch sync for non-anime TMDB \(showId) S\(seasonNumber)E\(episodeNumber)", type: "Tracker")
+                        continue
+                    }
                     if let playbackContext,
                        let anilistMediaId = playbackContext.anilistMediaId {
                         await syncToMyAnimeList(
@@ -3229,7 +3238,10 @@ final class TrackerManager: NSObject, ObservableObject {
 
     private func localHighestWatchedEpisodes() -> [EpisodeProgressEntry] {
         let eligible = ProgressManager.shared.getProgressData().episodeProgress
-            .filter { $0.isWatched || $0.progress >= 0.85 }
+            .filter {
+                ($0.isWatched || $0.progress >= 0.85) &&
+                ($0.isAnime == true || $0.playbackContext?.anilistMediaId != nil)
+            }
 
         var bestBySeason: [String: EpisodeProgressEntry] = [:]
         for entry in eligible {
