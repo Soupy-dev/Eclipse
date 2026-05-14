@@ -129,8 +129,8 @@ struct AniListMediaListEntry: Codable {
     let progress: Int
     let progressVolumes: Int?
     let score: Int?
-    let startedAt: AniListDate?
-    let completedAt: AniListDate?
+    let startedAt: AniListTrackerDate?
+    let completedAt: AniListTrackerDate?
 
     enum CodingKeys: String, CodingKey {
         case id, status, progress, score
@@ -140,7 +140,7 @@ struct AniListMediaListEntry: Codable {
     }
 }
 
-struct AniListDate: Codable {
+struct AniListTrackerDate: Codable {
     let year: Int?
     let month: Int?
     let day: Int?
