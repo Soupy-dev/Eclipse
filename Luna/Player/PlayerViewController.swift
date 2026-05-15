@@ -8,6 +8,9 @@
 import UIKit
 import SwiftUI
 import AVFoundation
+#if canImport(Kingfisher)
+import Kingfisher
+#endif
 #if canImport(AVKit)
 import AVKit
 #endif
@@ -520,6 +523,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         btn.layer.shadowOpacity = 0.3
         btn.layer.shadowOffset = CGSize(width: 0, height: 2)
         btn.layer.shadowRadius = 4
+        btn.titleLabel?.lineBreakMode = .byTruncatingTail
+        btn.titleLabel?.numberOfLines = 1
+        btn.setContentHuggingPriority(.required, for: .horizontal)
         return btn
     }()
 
@@ -594,10 +600,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var nextEpisodePreviewUnavailableKeys: Set<String> = []
     private var nextEpisodeArtworkTask: URLSessionDataTask?
     private var nextEpisodeArtworkKey: String?
+    private var nextEpisodeArtworkImage: UIImage?
 #if !os(tvOS)
     private var volumeTopConstraint: NSLayoutConstraint?
     private var volumeWidthConstraint: NSLayoutConstraint?
     private var volumeHeightConstraint: NSLayoutConstraint?
+    private var nextEpisodeButtonMaxWidthConstraint: NSLayoutConstraint?
 #endif
     
     // MARK: - Renderer Wrapper Methods
@@ -1282,6 +1290,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         volumeWidthConstraint?.constant = isPortrait ? 154 : 220
         volumeHeightConstraint?.constant = isPortrait ? 32 : 36
         volumeTopConstraint?.constant = isPortrait ? 62 : 12
+
+        let availableWidth = max(videoContainer.bounds.width, view.bounds.width)
+        let compactLimit = max(220, availableWidth - 32)
+        let landscapeLimit = min(420, max(260, availableWidth * 0.44))
+        nextEpisodeButtonMaxWidthConstraint?.constant = isPortrait ? min(320, compactLimit) : landscapeLimit
     }
 #endif
     
@@ -1866,13 +1879,18 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         ])
 #endif
         if supportsSharedPlayerControls {
+            let nextEpisodeButtonMaxWidth = nextEpisodeButton.widthAnchor.constraint(lessThanOrEqualToConstant: 420)
+            nextEpisodeButtonMaxWidth.priority = .required
+            nextEpisodeButtonMaxWidthConstraint = nextEpisodeButtonMaxWidth
+
             NSLayoutConstraint.activate([
                 skipButton.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor),
                 skipButton.bottomAnchor.constraint(equalTo: subtitleButton.topAnchor, constant: -12),
 
                 nextEpisodeButton.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor),
-                nextEpisodeButton.leadingAnchor.constraint(greaterThanOrEqualTo: progressContainer.leadingAnchor),
+                nextEpisodeButton.leadingAnchor.constraint(greaterThanOrEqualTo: videoContainer.safeAreaLayoutGuide.leadingAnchor, constant: 16),
                 nextEpisodeButton.bottomAnchor.constraint(equalTo: skipButton.topAnchor, constant: -10),
+                nextEpisodeButtonMaxWidth,
 
                 skip85sButton.leadingAnchor.constraint(equalTo: progressContainer.leadingAnchor),
                 skip85sButton.bottomAnchor.constraint(equalTo: progressContainer.topAnchor, constant: -12),
@@ -2809,6 +2827,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         nextEpisodeArtworkTask?.cancel()
         nextEpisodeArtworkTask = nil
         nextEpisodeArtworkKey = nil
+        nextEpisodeArtworkImage = nil
 #if !os(tvOS)
         nextEpisodeButton.configuration?.title = "Next Episode"
         nextEpisodeButton.configuration?.subtitle = nil
@@ -3284,7 +3303,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func applyNextEpisodeButtonAppearance() {
-        if shouldUsePosterNextEpisodeButton, let preview = nextEpisodePreview, preview.imageURL != nil {
+        if shouldUsePosterNextEpisodeButton, let preview = nextEpisodePreview, !preview.artworkURLs.isEmpty {
             applyPosterNextEpisodeButton(preview)
         } else {
             applyTextNextEpisodeButton()
@@ -3292,6 +3311,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func applyTextNextEpisodeButton() {
+        nextEpisodeArtworkTask?.cancel()
+        nextEpisodeArtworkTask = nil
+        nextEpisodeArtworkKey = nil
+        nextEpisodeArtworkImage = nil
+
         var config = nextEpisodeButton.configuration ?? UIButton.Configuration.filled()
         config.cornerStyle = .capsule
         config.baseBackgroundColor = UIColor.white.withAlphaComponent(0.2)
@@ -3302,46 +3326,115 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         config.contentInsets = NSDirectionalEdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 18)
         config.title = "Next Episode"
         config.subtitle = nil
+        config.titleLineBreakMode = .byTruncatingTail
         nextEpisodeButton.configuration = config
     }
 
     private func applyPosterNextEpisodeButton(_ item: PlayerEpisodeBrowserItem) {
+        let imageURLs = item.artworkURLs
+        let imageKey = imageURLs.joined(separator: "|")
+        let isSameArtwork = nextEpisodeArtworkKey == imageKey
+        let placeholderImage = UIImage(systemName: "photo")
+
         var config = nextEpisodeButton.configuration ?? UIButton.Configuration.filled()
         config.cornerStyle = .capsule
         config.baseBackgroundColor = UIColor.black.withAlphaComponent(0.58)
         config.baseForegroundColor = UIColor.white
         config.imagePlacement = .leading
         config.imagePadding = 8
-        config.image = UIImage(systemName: "photo")
+        config.image = isSameArtwork ? (nextEpisodeArtworkImage ?? placeholderImage) : placeholderImage
         config.title = "\(item.displayCode)  \(item.displayTitle)"
         config.subtitle = "Next Episode"
         config.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 10, bottom: 8, trailing: 14)
+        config.titleLineBreakMode = .byTruncatingTail
+        config.subtitleLineBreakMode = .byTruncatingTail
         nextEpisodeButton.configuration = config
 
-        guard let imageURL = item.imageURL,
-              nextEpisodeArtworkKey != imageURL,
-              let url = URL(string: imageURL) else {
+        guard !isSameArtwork else {
             return
         }
 
         nextEpisodeArtworkTask?.cancel()
-        nextEpisodeArtworkKey = imageURL
-        let task = URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-            guard let data,
-                  let rawImage = UIImage(data: data) else { return }
-            let image = (rawImage.resized(to: CGSize(width: 58, height: 34), contentMode: .scaleAspectFill) ?? rawImage)
-                .withRenderingMode(.alwaysOriginal)
+        nextEpisodeArtworkTask = nil
+        nextEpisodeArtworkKey = imageKey
+        nextEpisodeArtworkImage = nil
+        loadNextEpisodeArtwork(from: imageURLs, key: imageKey)
+    }
+
+    private func loadNextEpisodeArtwork(from imageURLs: [String], key: String, index: Int = 0) {
+        guard index < imageURLs.count else { return }
+        guard let url = URL(string: imageURLs[index]) else {
+            loadNextEpisodeArtwork(from: imageURLs, key: key, index: index + 1)
+            return
+        }
+
+#if canImport(Kingfisher)
+        KingfisherManager.shared.retrieveImage(with: url) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self,
-                      self.nextEpisodeArtworkKey == imageURL,
+                      self.nextEpisodeArtworkKey == key,
                       self.shouldUsePosterNextEpisodeButton else { return }
-                var current = self.nextEpisodeButton.configuration ?? UIButton.Configuration.filled()
-                current.image = image
-                self.nextEpisodeButton.configuration = current
+
+                switch result {
+                case .success(let value):
+                    self.applyNextEpisodeArtworkImage(value.image, key: key)
+                case .failure:
+                    self.loadNextEpisodeArtwork(from: imageURLs, key: key, index: index + 1)
+                }
+            }
+        }
+#else
+        let task = URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+            let rawImage = data.flatMap { UIImage(data: $0) }
+            DispatchQueue.main.async {
+                guard let self,
+                      self.nextEpisodeArtworkKey == key,
+                      self.shouldUsePosterNextEpisodeButton else { return }
+
+                if let rawImage {
+                    self.applyNextEpisodeArtworkImage(rawImage, key: key)
+                } else {
+                    self.loadNextEpisodeArtwork(from: imageURLs, key: key, index: index + 1)
+                }
             }
         }
         nextEpisodeArtworkTask = task
         task.resume()
+#endif
+    }
+
+    private func applyNextEpisodeArtworkImage(_ rawImage: UIImage, key: String) {
+        guard nextEpisodeArtworkKey == key else { return }
+        let image = makeNextEpisodeArtworkImage(from: rawImage)
+        nextEpisodeArtworkImage = image
+
+        var current = nextEpisodeButton.configuration ?? UIButton.Configuration.filled()
+        current.image = image
+        nextEpisodeButton.configuration = current
+    }
+
+    private func makeNextEpisodeArtworkImage(from rawImage: UIImage) -> UIImage {
+        let targetSize = CGSize(width: 58, height: 34)
+        guard rawImage.size.width > 0, rawImage.size.height > 0 else {
+            return rawImage.withRenderingMode(.alwaysOriginal)
+        }
+
+        let scale = max(targetSize.width / rawImage.size.width, targetSize.height / rawImage.size.height)
+        let drawSize = CGSize(width: rawImage.size.width * scale, height: rawImage.size.height * scale)
+        let drawRect = CGRect(
+            x: (targetSize.width - drawSize.width) / 2,
+            y: (targetSize.height - drawSize.height) / 2,
+            width: drawSize.width,
+            height: drawSize.height
+        )
+
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = UIScreen.main.scale
+        let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
+        return renderer.image { _ in
+            UIBezierPath(roundedRect: CGRect(origin: .zero, size: targetSize), cornerRadius: 6).addClip()
+            rawImage.draw(in: drawRect)
+        }.withRenderingMode(.alwaysOriginal)
     }
 
     private func updateNextEpisodeState(position: Double, duration: Double) {
@@ -5408,6 +5501,24 @@ struct PlayerEpisodeBrowserItem: Identifiable {
         PlayerEpisodeBrowserViewModel.fullImageURL(from: episode.stillPath)
             ?? posterURL
             ?? showPosterURL
+    }
+
+    var artworkURLs: [String] {
+        var urls: [String] = []
+        for candidate in [
+            PlayerEpisodeBrowserViewModel.fullImageURL(from: episode.stillPath),
+            posterURL,
+            showPosterURL,
+            downloadItem?.posterURL
+        ] {
+            guard let value = candidate?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty,
+                  !urls.contains(value) else {
+                continue
+            }
+            urls.append(value)
+        }
+        return urls
     }
 
     var displayCode: String {
