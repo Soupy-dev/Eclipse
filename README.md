@@ -95,12 +95,12 @@ Configured keys include:
 
 ## Notes
 
-- VLC is the preferred in-app player in this fork.
+- VLC is the preferred in-app player in this fork. MPV is undergoing a rewrite to make it up to standard.
 - VLC uses the Swift Package Manager `VLCKitSPM` build.
 - Picture in Picture is not enabled for VLC because of current VLCKit stability limits.
 - Use GitHub Issues for feature requests and bug reports.
 - The app does use AI for development. As I don't know swift well (learning other languages like Java and soon C, not swift). Just for transparency. The app gets tested a ton, and I do try to make sure the code looks okay
-- Patreon support is optional and I will never paywall any feature.
+- Patreon support is optional and I will never paywall any feature or version.
 
 ## Support
 
