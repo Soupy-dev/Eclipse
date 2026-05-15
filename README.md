@@ -1,12 +1,6 @@
 # Eclipse
 
 <p align="center">
-  <img src="docs/screenshots/home-featured.jpeg" width="220" alt="Eclipse home screen">
-  <img src="docs/screenshots/schedule.jpeg" width="220" alt="Eclipse anime schedule screen">
-  <img src="docs/screenshots/library-collections.jpeg" width="220" alt="Eclipse library collections screen">
-</p>
-
-<p align="center">
   <strong>A media hub for anime, movies, shows, manga, light novels, downloads, tracker sync, and in-app playback.</strong>
 </p>
 
