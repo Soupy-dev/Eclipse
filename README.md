@@ -4,6 +4,8 @@ Eclipse is a feature-rich fork of Luna for iOS, built for anime, movies, shows, 
 
 Eclipse is a modified fork of Luna, originally developed at `https://github.com/cranci1/Luna`. Eclipse is not affiliated with the original Luna project. The app does not include content services, addons, or media. Users are responsible for the services and addons they choose to add. The app and dev do not support piracy.
 
+If you don't know how to sideload, dont worry! Here's a recommended guide https://gist.github.com/sinceohsix/688637ac04695d1ff38f844acc8ba7f3, if you don't want to use SideStore there are other options too, google and reddit r/sideloaded have great guides.
+
 ## Why Eclipse
 
 Eclipse was designed to bridge the gap between Luna services and stremio addons. It brings streaming sources, Stremio addons, local downloads, anime metadata, manga reading, light novels, playback progress, ratings, and tracker sync into a single app with a modern interface.
