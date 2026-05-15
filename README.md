@@ -25,7 +25,7 @@ Eclipse was designed to bridge Luna services with Stremio addons in one polished
   </a>
 </p>
 
-
+(The app isn't laggy, just GitHub gif stuff don't worry)
 ## Screenshots
 
 <table>
