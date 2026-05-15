@@ -20,14 +20,11 @@ Eclipse was designed to bridge Luna services with Stremio addons in one polished
 ## Preview
 
 <p align="center">
-  <video src="docs/media/app-preview.mov" controls width="320">
-    <a href="docs/media/app-preview.mov">Watch the app preview</a>
-  </video>
+  <a href="docs/media/app-preview.mov">
+    <img src="docs/media/app-preview.gif" width="320" alt="Eclipse app preview">
+  </a>
 </p>
 
-<p align="center">
-  <a href="docs/media/app-preview.mov">Open the app preview recording</a>
-</p>
 
 ## Screenshots
 
