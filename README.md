@@ -5,15 +5,29 @@
 </p>
 
 <p align="center">
+  <a href="#preview">Preview</a> |
   <a href="#screenshots">Screenshots</a> |
   <a href="#features">Features</a> |
   <a href="#install">Install</a> |
   <a href="#build-configuration">Build</a> |
   <a href="#license">License</a>
 </p>
+
 ## Why Eclipse
 
 Eclipse was designed to bridge Luna services with Stremio addons in one polished app. The goal is simple: search faster, pick the right result with better metadata, watch with stronger controls, keep progress synced, and continue across anime, movies, shows, manga, and novels.
+
+## Preview
+
+<p align="center">
+  <video src="docs/media/app-preview.mov" controls width="320">
+    <a href="docs/media/app-preview.mov">Watch the app preview</a>
+  </video>
+</p>
+
+<p align="center">
+  <a href="docs/media/app-preview.mov">Open the app preview recording</a>
+</p>
 
 ## Screenshots
 
@@ -81,12 +95,12 @@ https://www.patreon.com/c/soupy698
 
 ## Notes
 
-- VLC is the preferred in-app player in this fork. MPV is undergoing a rewrite to make it up to standard.
+- VLC is the preferred in-app player in this fork.
 - VLC uses the Swift Package Manager `VLCKitSPM` build.
 - Picture in Picture is not enabled for VLC because of current VLCKit stability limits.
 - Use GitHub Issues for feature requests and bug reports.
 - The app does use AI for development. As I don't know swift well (learning other languages like Java and soon C, not swift). Just for transparency. The app gets tested a ton, and I do try to make sure the code looks okay
-- Patreon support is optional and I will never paywall any feature or version.
+- Patreon support is optional and I will never paywall any feature.
 
 
 ## License
