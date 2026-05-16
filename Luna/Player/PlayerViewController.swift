@@ -871,6 +871,38 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func rendererResumeForegroundRendering(reason: String) {
         mpvRenderer?.resumeForegroundRendering(reason: reason)
     }
+
+    private func rendererPictureInPictureDebugSnapshot() -> String {
+        mpvRenderer?.pictureInPictureDebugSnapshot() ?? "mpvRenderer=nil"
+    }
+
+    private func subtitlePictureInPictureDebugSnapshot() -> String {
+        let rendererTracks = rendererGetSubtitleTracks()
+        let selectedTrack = rendererGetCurrentSubtitleTrackId()
+        let currentURLState: String
+        if currentSubtitleIndex < subtitleURLs.count {
+            currentURLState = "currentURL=yes"
+        } else {
+            currentURLState = "currentURL=no"
+        }
+        return "visible=\(subtitleModel.isVisible) entries=\(subtitleEntries.count) urls=\(subtitleURLs.count) index=\(currentSubtitleIndex) \(currentURLState) selection=\(vlcSubtitleSelection) rendererTracks=\(rendererTracks.count) rendererSelected=\(selectedTrack)"
+    }
+
+    private func prepareMPVRenderedSubtitlesForPictureInPicture(source: String) {
+        guard !isVLCPlayer else { return }
+        Logger.shared.log("[PlayerVC.PiP] subtitle prepare begin source=\(source) subs={\(subtitlePictureInPictureDebugSnapshot())}", type: "Player")
+        if subtitleModel.isVisible {
+            let rendererSelectedTrack = rendererGetCurrentSubtitleTrackId()
+            if (!subtitleEntries.isEmpty || rendererSelectedTrack < 0), currentSubtitleIndex < subtitleURLs.count {
+                fallbackCurrentSubtitleToRenderer(reason: "pip-\(source)")
+            } else {
+                rendererApplySubtitleStyle(currentSubtitleStyle(visible: true))
+            }
+        } else {
+            rendererApplySubtitleStyle(currentSubtitleStyle(visible: false))
+        }
+        Logger.shared.log("[PlayerVC.PiP] subtitle prepare end source=\(source) subs={\(subtitlePictureInPictureDebugSnapshot())}", type: "Player")
+    }
     
     private var subtitleURLs: [String] = []
     private var subtitleNames: [String] = []
@@ -5254,6 +5286,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             logPictureInPicture("start ignored source=\(source): PiP already active")
             return
         }
+        prepareMPVRenderedSubtitlesForPictureInPicture(source: source)
         mpvPiPStartAttemptID += 1
         let attemptID = mpvPiPStartAttemptID
         let appState: String
@@ -5263,7 +5296,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         case .background: appState = "background"
         @unknown default: appState = "unknown"
         }
-        logPictureInPicture("prepare MPV PiP source=\(source) attemptID=\(attemptID) appState=\(appState) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) ready=\(playbackDidStart)")
+        logPictureInPicture("prepare MPV PiP source=\(source) attemptID=\(attemptID) appState=\(appState) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) ready=\(playbackDidStart) subs={\(subtitlePictureInPictureDebugSnapshot())} renderer={\(rendererPictureInPictureDebugSnapshot())}")
         rendererPreparePictureInPictureStart()
         attemptMPVPictureInPictureStart(source: source, attemptID: attemptID, attempt: 0)
     }
@@ -5274,7 +5307,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         rendererPrimePictureInPictureFrames(reason: "\(source)-attempt-\(attempt)")
         pip.updatePlaybackState()
         let primed = rendererIsPictureInPicturePrimed()
-        logPictureInPicture("MPV PiP attempt source=\(source) attempt=\(attempt) active=\(pip.isPictureInPictureActive) possible=\(pip.isPictureInPicturePossible) supported=\(pip.isPictureInPictureSupported) primed=\(primed)")
+        let snapshot = (attempt <= 2 || attempt % 5 == 0) ? " renderer={\(rendererPictureInPictureDebugSnapshot())}" : ""
+        logPictureInPicture("MPV PiP attempt source=\(source) attempt=\(attempt) active=\(pip.isPictureInPictureActive) possible=\(pip.isPictureInPicturePossible) supported=\(pip.isPictureInPictureSupported) primed=\(primed)\(snapshot)")
 
         if pip.isPictureInPicturePossible && primed && !pip.isPictureInPictureActive {
             logPictureInPicture("starting MPV PiP source=\(source) attempt=\(attempt)")
@@ -5299,7 +5333,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 
         guard attempt < 18 else {
-            logPictureInPicture("MPV start blocked after retries source=\(source) possible=\(pip.isPictureInPicturePossible) supported=\(pip.isPictureInPictureSupported) primed=\(primed)")
+            logPictureInPicture("MPV start blocked after retries source=\(source) possible=\(pip.isPictureInPicturePossible) supported=\(pip.isPictureInPictureSupported) primed=\(primed) renderer={\(rendererPictureInPictureDebugSnapshot())}")
             rendererFinishPictureInPicture()
             return
         }
@@ -6656,13 +6690,14 @@ extension PlayerViewController: VLCRendererDelegate {
 // MARK: - PiP Support
 extension PlayerViewController: PiPControllerDelegate {
     func pipController(_ controller: PiPController, willStartPictureInPicture: Bool) {
-        logPictureInPicture("delegate willStart possible=\(controller.isPictureInPicturePossible)")
+        logPictureInPicture("delegate willStart possible=\(controller.isPictureInPicturePossible) subs={\(subtitlePictureInPictureDebugSnapshot())} renderer={\(rendererPictureInPictureDebugSnapshot())}")
+        prepareMPVRenderedSubtitlesForPictureInPicture(source: "delegate-willStart")
         rendererPreparePictureInPictureStart()
         rendererActivatePictureInPictureLayer()
         pipController?.updatePlaybackState()
     }
     func pipController(_ controller: PiPController, didStartPictureInPicture: Bool) {
-        logPictureInPicture("delegate didStart success=\(didStartPictureInPicture) possible=\(controller.isPictureInPicturePossible) active=\(controller.isPictureInPictureActive)")
+        logPictureInPicture("delegate didStart success=\(didStartPictureInPicture) possible=\(controller.isPictureInPicturePossible) active=\(controller.isPictureInPictureActive) renderer={\(rendererPictureInPictureDebugSnapshot())}")
         if !didStartPictureInPicture {
             mpvPiPStartAttemptID += 1
             mpvAppExitPiPStartRequested = false
@@ -6672,19 +6707,21 @@ extension PlayerViewController: PiPControllerDelegate {
         updatePiPButtonVisibility()
     }
     func pipController(_ controller: PiPController, willStopPictureInPicture: Bool) {
-        logPictureInPicture("delegate willStop")
+        logPictureInPicture("delegate willStop renderer={\(rendererPictureInPictureDebugSnapshot())}")
     }
     func pipController(_ controller: PiPController, didStopPictureInPicture: Bool) {
-        logPictureInPicture("delegate didStop")
+        logPictureInPicture("delegate didStop renderer={\(rendererPictureInPictureDebugSnapshot())}")
         mpvPiPStartAttemptID += 1
         mpvAppExitPiPStartRequested = false
         rendererFinishPictureInPicture()
         updatePiPButtonVisibility()
     }
     func pipController(_ controller: PiPController, restoreUserInterfaceForPictureInPictureStop completionHandler: @escaping (Bool) -> Void) {
+        logPictureInPicture("delegate restoreUI begin renderer={\(rendererPictureInPictureDebugSnapshot())}")
         let completeRestore: () -> Void = { [weak self] in
             self?.rendererFinishPictureInPicture()
             self?.updatePiPButtonVisibility()
+            self?.logPictureInPicture("delegate restoreUI complete renderer={\(self?.rendererPictureInPictureDebugSnapshot() ?? "nil")}")
             completionHandler(true)
         }
         if presentedViewController != nil {
@@ -6806,7 +6843,7 @@ extension PlayerViewController: PiPControllerDelegate {
             skipReason = "unknown"
         }
 
-        logPictureInPicture("MPV app-exit auto PiP check source=\(source) shouldStart=\(shouldStart) skipReason=\(skipReason) appState=\(appState) active=\(active) possible=\(possible) supported=\(supported) paused=\(paused) ready=\(playbackReady) loading=\(isRendererLoading) requested=\(mpvAppExitPiPStartRequested)")
+        logPictureInPicture("MPV app-exit auto PiP check source=\(source) shouldStart=\(shouldStart) skipReason=\(skipReason) appState=\(appState) active=\(active) possible=\(possible) supported=\(supported) paused=\(paused) ready=\(playbackReady) loading=\(isRendererLoading) requested=\(mpvAppExitPiPStartRequested) subs={\(subtitlePictureInPictureDebugSnapshot())} renderer={\(rendererPictureInPictureDebugSnapshot())}")
 
         if source.contains("background") || appState == "background" {
             scheduleMPVBackgroundAudioFallback(source: source)
@@ -6861,7 +6898,7 @@ extension PlayerViewController: PiPControllerDelegate {
                 self.scheduleMPVBackgroundAudioFallback(source: source, delay: 1.25, force: true)
                 return
             }
-            self.logPictureInPicture("MPV background fallback pause source=\(source) active=\(active) requested=\(self.mpvAppExitPiPStartRequested)")
+            self.logPictureInPicture("MPV background fallback pause source=\(source) active=\(active) requested=\(self.mpvAppExitPiPStartRequested) renderer={\(self.rendererPictureInPictureDebugSnapshot())}")
             self.mpvAppExitPiPStartRequested = false
             self.rendererPausePlayback()
         }
@@ -6932,7 +6969,7 @@ extension PlayerViewController: PiPControllerDelegate {
             self.mpvPiPStartAttemptID += 1
             self.mpvAppExitPiPStartRequested = false
             if pip.isPictureInPictureActive {
-                self.logMPV("Returning to foreground; stopping PiP")
+                self.logMPV("Returning to foreground; stopping PiP renderer={\(self.rendererPictureInPictureDebugSnapshot())}")
                 pip.stopPictureInPicture()
             } else {
                 self.rendererFinishPictureInPicture()
@@ -6948,10 +6985,10 @@ extension PlayerViewController: PiPControllerDelegate {
             self.mpvPiPStartAttemptID += 1
             self.mpvAppExitPiPStartRequested = false
             if pip.isPictureInPictureActive {
-                self.logMPV("\(source): stopping MPV PiP for foreground return")
+                self.logMPV("\(source): stopping MPV PiP for foreground return renderer={\(self.rendererPictureInPictureDebugSnapshot())}")
                 pip.stopPictureInPicture()
             } else {
-                self.logMPV("\(source): PiP inactive; restoring MPV foreground render path")
+                self.logMPV("\(source): PiP inactive; restoring MPV foreground render path renderer={\(self.rendererPictureInPictureDebugSnapshot())}")
                 self.rendererFinishPictureInPicture()
             }
         }
@@ -6964,7 +7001,7 @@ extension PlayerViewController: PiPControllerDelegate {
     @objc private func appDidBecomeActive() {
         DispatchQueue.main.async { [weak self] in
             guard let self, self.vlcRenderer == nil else { return }
-            self.logMPV("appDidBecomeActive foreground render recovery")
+            self.logMPV("appDidBecomeActive foreground render recovery renderer={\(self.rendererPictureInPictureDebugSnapshot())}")
             self.rendererResumeForegroundRendering(reason: "app-did-become-active")
         }
     }
