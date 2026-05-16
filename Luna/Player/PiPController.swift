@@ -67,9 +67,9 @@ final class PiPController: NSObject {
         pipController?.delegate = self
         pipController?.requiresLinearPlayback = false
         #if !os(tvOS)
-        pipController?.canStartPictureInPictureAutomaticallyFromInline = true
+        pipController?.canStartPictureInPictureAutomaticallyFromInline = false
         #endif
-        Logger.shared.log("[PiPController] initialized supported=\(isPictureInPictureSupported) possible=\(pipController?.isPictureInPicturePossible ?? false) autoInline=true", type: "MPV")
+        Logger.shared.log("[PiPController] initialized supported=\(isPictureInPictureSupported) possible=\(pipController?.isPictureInPicturePossible ?? false) autoInline=false", type: "MPV")
     }
 
     func startPictureInPicture() {
@@ -123,8 +123,11 @@ extension PiPController: AVPictureInPictureControllerDelegate {
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
         isStartRequestPending = false
         let nsError = error as NSError
-        Logger.shared.log("[PiPController] failedToStart error=\(nsError.domain)#\(nsError.code) desc=\(nsError.localizedDescription) active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending)", type: "MPV")
-        delegate?.pipController(self, didStartPictureInPicture: false)
+        Logger.shared.log("[PiPController] failedToStart error=\(nsError.domain)#\(nsError.code) desc=\(nsError.localizedDescription) active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) hasDelegate=\(delegate != nil)", type: "MPV")
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.delegate?.pipController(self, didStartPictureInPicture: false)
+        }
     }
     
     func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {

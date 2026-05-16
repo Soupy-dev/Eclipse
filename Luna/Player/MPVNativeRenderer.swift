@@ -199,6 +199,10 @@ private final class MPVPiPBridge {
         }
     }
 
+    func renderImmediately(context: OpaquePointer, videoSize: CGSize) {
+        renderOnQueue(context: context, videoSize: videoSize)
+    }
+
     private func renderOnQueue(context: OpaquePointer, videoSize: CGSize) {
         guard let targetSize = targetRenderSize(for: videoSize) else { return }
         let width = Int(targetSize.width)
@@ -252,6 +256,7 @@ private final class MPVPiPBridge {
         dimensionsArray[1] = Int32(height)
         let stride = Int32(CVPixelBufferGetBytesPerRow(buffer))
 
+        var renderResult: Int32 = -1
         dimensionsArray.withUnsafeMutableBufferPointer { dimsPointer in
             bgraFormatCString.withUnsafeBufferPointer { formatPointer in
                 withUnsafePointer(to: stride) { stridePointer in
@@ -260,17 +265,18 @@ private final class MPVPiPBridge {
                     renderParams[2] = mpv_render_param(type: MPV_RENDER_PARAM_SW_STRIDE, data: UnsafeMutableRawPointer(mutating: stridePointer))
                     renderParams[3] = mpv_render_param(type: MPV_RENDER_PARAM_SW_POINTER, data: baseAddress)
                     renderParams[4] = mpv_render_param(type: MPV_RENDER_PARAM_INVALID, data: nil)
-                    let result = renderParams.withUnsafeMutableBufferPointer { buffer -> Int32 in
+                    renderResult = renderParams.withUnsafeMutableBufferPointer { buffer -> Int32 in
                         guard let baseAddress = buffer.baseAddress else { return -1 }
                         return mpv_render_context_render(context, baseAddress)
                     }
-                    if result < 0 {
-                        Logger.shared.log("[MPVPiPBridge] mpv software PiP render failed \(result)", type: "MPV")
+                    if renderResult < 0 {
+                        Logger.shared.log("[MPVPiPBridge] mpv software PiP render failed \(renderResult)", type: "MPV")
                     }
                 }
             }
         }
         CVPixelBufferUnlockBaseAddress(buffer, [])
+        guard renderResult >= 0 else { return }
         enqueue(buffer: buffer)
     }
 
@@ -346,7 +352,7 @@ private final class MPVPiPBridge {
             )
         }
 
-        DispatchQueue.main.async { [weak self] in
+        let enqueueOnMain = { [weak self] in
             guard let self else { return }
             if needsFlush {
                 if #available(iOS 18.0, *) {
@@ -382,6 +388,11 @@ private final class MPVPiPBridge {
             if self.enqueuedFrameCount <= 3 {
                 Logger.shared.log("[MPVPiPBridge] enqueued sample frame count=\(self.enqueuedFrameCount) layerReady=\(self.displayLayer.isReadyForMoreMediaData)", type: "MPV")
             }
+        }
+        if Thread.isMainThread {
+            enqueueOnMain()
+        } else {
+            DispatchQueue.main.async(execute: enqueueOnMain)
         }
     }
 
@@ -633,7 +644,7 @@ final class MPVNativeRenderer: PlayerRenderer {
         lastDurationLogValue = -1
         lastTrackSummary = ""
         lastPlaybackErrorMessage = nil
-        updateVideoSize(width: 0, height: 0)
+        updateVideoSize(width: 0, height: 0, allowZero: true)
         isStopping = false
         logMPV("stop completed")
     }
@@ -644,6 +655,7 @@ final class MPVNativeRenderer: PlayerRenderer {
         currentHeaders = headers
         cachedPosition = 0
         cachedDuration = 0
+        updateVideoSize(width: 0, height: 0, allowZero: true)
         isReadyToSeek = false
         loadGeneration += 1
         currentLoadStartedAt = Date()
@@ -719,6 +731,9 @@ final class MPVNativeRenderer: PlayerRenderer {
             refreshVideoState()
             try createSoftwareRenderContext()
             restoreSelectedVideoTrack(reason: "enter-pip")
+            refreshVideoState()
+            renderPiPFrame(force: true, immediate: true)
+            logMPV("PiP immediate prime complete primed=\(pipBridge.hasEnqueuedFrame())")
             startPiPRenderLoop(reason: "enter-pip")
             requestRenderBurst(reason: "enter-pip", count: 8, interval: 0.06)
         } catch {
@@ -773,6 +788,8 @@ final class MPVNativeRenderer: PlayerRenderer {
 
     func primePictureInPictureFrames(reason: String) {
         guard isRunning, currentMode == .pictureInPicture else { return }
+        renderPiPFrame(force: true, immediate: true)
+        logMPV("PiP prime requested reason=\(reason) primed=\(pipBridge.hasEnqueuedFrame())")
         requestRenderBurst(reason: "pip-prime-\(reason)", count: 6, interval: 0.06)
     }
 
@@ -967,7 +984,7 @@ final class MPVNativeRenderer: PlayerRenderer {
     }
 
     private func startPiPRenderLoop(reason: String) {
-        DispatchQueue.main.async { [weak self] in
+        let start = { [weak self] in
             guard let self,
                   self.isRunning,
                   !self.isStopping,
@@ -993,6 +1010,11 @@ final class MPVNativeRenderer: PlayerRenderer {
             self.pipRenderTimer = timer
             timer.resume()
             self.logMPV("PiP render loop started reason=\(reason) fps=24")
+        }
+        if Thread.isMainThread {
+            start()
+        } else {
+            DispatchQueue.main.async(execute: start)
         }
     }
 
@@ -1136,7 +1158,7 @@ final class MPVNativeRenderer: PlayerRenderer {
         }
     }
 
-    private func renderPiPFrame(force: Bool = false) {
+    private func renderPiPFrame(force: Bool = false, immediate: Bool = false) {
         guard isRunning, !isStopping, currentMode == .pictureInPicture, let context = renderContext else { return }
         lastPiPRenderTime = CACurrentMediaTime()
         let updateFlags = UInt32(mpv_render_context_update(context))
@@ -1145,7 +1167,12 @@ final class MPVNativeRenderer: PlayerRenderer {
             forcedPiPRenderCount = max(0, forcedPiPRenderCount - 1)
         }
         if updateFlags & MPV_RENDER_UPDATE_FRAME.rawValue != 0 || shouldForceRender {
-            pipBridge.render(context: context, videoSize: currentPiPRenderSize())
+            let renderSize = currentPiPRenderSize()
+            if immediate {
+                pipBridge.renderImmediately(context: context, videoSize: renderSize)
+            } else {
+                pipBridge.render(context: context, videoSize: renderSize)
+            }
         }
         if updateFlags > 0 {
             scheduleRender()
@@ -1254,7 +1281,8 @@ final class MPVNativeRenderer: PlayerRenderer {
         getProperty(handle: handle, name: "dwidth", format: MPV_FORMAT_INT64, value: &width)
         getProperty(handle: handle, name: "dheight", format: MPV_FORMAT_INT64, value: &height)
         updateVideoSize(width: Int(width), height: Int(height))
-        logMPV("video state width=\(width) height=\(height) glBounds=\(String(format: "%.0fx%.0f", glView.bounds.width, glView.bounds.height)) drawable=\(glView.drawableWidth)x\(glView.drawableHeight)")
+        let cachedVideoSize = currentVideoSize()
+        logMPV("video state width=\(width) height=\(height) cached=\(String(format: "%.0fx%.0f", cachedVideoSize.width, cachedVideoSize.height)) glBounds=\(String(format: "%.0fx%.0f", glView.bounds.width, glView.bounds.height)) drawable=\(glView.drawableWidth)x\(glView.drawableHeight)")
         if width <= 0 || height <= 0 {
             restoreSelectedVideoTrack(reason: "zero-video-size-\(currentMode)")
         }
@@ -1307,6 +1335,8 @@ final class MPVNativeRenderer: PlayerRenderer {
                 }
                 publishProgress()
             }
+        case "dwidth", "dheight":
+            refreshVideoState()
         case "pause":
             var flag: Int32 = 0
             if getProperty(handle: handle, name: name, format: MPV_FORMAT_FLAG, value: &flag) >= 0 {
@@ -1364,9 +1394,10 @@ final class MPVNativeRenderer: PlayerRenderer {
         }
     }
 
-    private func updateVideoSize(width: Int, height: Int) {
+    private func updateVideoSize(width: Int, height: Int, allowZero: Bool = false) {
+        guard (width > 0 && height > 0) || allowZero else { return }
         let size = CGSize(width: max(width, 0), height: max(height, 0))
-        stateQueue.async(flags: .barrier) {
+        stateQueue.sync(flags: .barrier) {
             self.videoSize = size
         }
     }
