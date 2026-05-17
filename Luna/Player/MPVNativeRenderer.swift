@@ -243,11 +243,12 @@ private final class MPVPiPBridge {
         context: OpaquePointer,
         glContext: EAGLContext,
         videoSize: CGSize,
+        playbackPosition: Double,
         render: @escaping (inout LunaMPVOpenGLFBO, inout Int32) -> Int32
     ) {
         if !Thread.isMainThread {
             DispatchQueue.main.async { [weak self] in
-                self?.renderOpenGL(context: context, glContext: glContext, videoSize: videoSize, render: render)
+                self?.renderOpenGL(context: context, glContext: glContext, videoSize: videoSize, playbackPosition: playbackPosition, render: render)
             }
             return
         }
@@ -394,7 +395,7 @@ private final class MPVPiPBridge {
             return
         }
         renderSuccessCount += 1
-        enqueue(buffer: buffer)
+        enqueue(buffer: buffer, playbackPosition: playbackPosition)
     }
 
     private func targetRenderSize(for videoSize: CGSize) -> CGSize? {
@@ -438,12 +439,14 @@ private final class MPVPiPBridge {
         }
     }
 
-    private func enqueue(buffer: CVPixelBuffer) {
+    private func enqueue(buffer: CVPixelBuffer, playbackPosition: Double) {
         let needsFlush = updateFormatDescriptionIfNeeded(for: buffer)
         guard let description = formatDescription else { return }
 
-        let presentationTime = CMClockGetTime(CMClockGetHostTimeClock())
-        var timing = CMSampleTimingInfo(duration: .invalid, presentationTimeStamp: presentationTime, decodeTimeStamp: .invalid)
+        let mediaSeconds = playbackPosition.isFinite ? max(0, playbackPosition) : 0
+        let presentationTime = CMTime(seconds: mediaSeconds, preferredTimescale: 1000)
+        let frameDuration = CMTime(seconds: 1.0 / 24.0, preferredTimescale: 1000)
+        var timing = CMSampleTimingInfo(duration: frameDuration, presentationTimeStamp: presentationTime, decodeTimeStamp: .invalid)
         var sampleBuffer: CMSampleBuffer?
         let result = CMSampleBufferCreateForImageBuffer(
             allocator: kCFAllocatorDefault,
@@ -491,10 +494,13 @@ private final class MPVPiPBridge {
             if self.displayLayer.controlTimebase == nil {
                 var timebase: CMTimebase?
                 if CMTimebaseCreateWithSourceClock(allocator: kCFAllocatorDefault, sourceClock: CMClockGetHostTimeClock(), timebaseOut: &timebase) == noErr, let timebase {
-                    CMTimebaseSetRate(timebase, rate: 1.0)
                     CMTimebaseSetTime(timebase, time: presentationTime)
+                    CMTimebaseSetRate(timebase, rate: 1.0)
                     self.displayLayer.controlTimebase = timebase
                 }
+            } else if let timebase = self.displayLayer.controlTimebase {
+                CMTimebaseSetTime(timebase, time: presentationTime)
+                CMTimebaseSetRate(timebase, rate: 1.0)
             }
 
             if #available(iOS 18.0, *) {
@@ -511,7 +517,7 @@ private final class MPVPiPBridge {
                 self.performanceWindowEnqueuedCount = self.enqueuedFrameCount
             }
             if self.enqueuedFrameCount <= 5 || self.enqueuedFrameCount % 60 == 0 {
-                Logger.shared.log("[MPVPiPBridge] enqueued sample frame count=\(self.enqueuedFrameCount) layerReady=\(self.displayLayer.isReadyForMoreMediaData) status=\(self.layerStatusName(self.displayLayer.status))", type: "MPV")
+                Logger.shared.log("[MPVPiPBridge] enqueued sample frame count=\(self.enqueuedFrameCount) pts=\(String(format: "%.2f", mediaSeconds)) layerReady=\(self.displayLayer.isReadyForMoreMediaData) status=\(self.layerStatusName(self.displayLayer.status))", type: "MPV")
             }
         }
         if Thread.isMainThread {
@@ -913,10 +919,8 @@ final class MPVNativeRenderer: PlayerRenderer {
     }
 
     func performanceOverlaySnapshot() -> String {
-        let speed = getSpeed()
-        let size = currentVideoSize()
         let pipSummary = pipBridge.performanceSnapshot()
-        return "MPV \(currentMode) \(isPaused ? "paused" : "playing")\(isLoading ? " loading" : "")\npos \(String(format: "%.1f", cachedPosition))/\(String(format: "%.1f", cachedDuration)) speed \(String(format: "%.2fx", speed))\nfg \(foregroundFramesPerSecond)fps target PiP 24fps target\nvideo \(String(format: "%.0fx%.0f", size.width, size.height)) drawable \(glView.drawableWidth)x\(glView.drawableHeight)\n\(pipSummary)"
+        return "MPV \(currentMode) \(isPaused ? "paused" : "playing")\(isLoading ? " loading" : "")\npos \(String(format: "%.1f", cachedPosition))/\(String(format: "%.1f", cachedDuration))\nfg \(foregroundFramesPerSecond)fps target PiP 24fps target\nvideo \(String(format: "%.0fx%.0f", videoSize.width, videoSize.height))\n\(pipSummary)"
     }
 
     func prepareForPictureInPictureStart() {
@@ -1390,7 +1394,7 @@ final class MPVNativeRenderer: PlayerRenderer {
             if pipRenderRequestCount <= 5 || pipRenderRequestCount % 60 == 0 {
                 logMPV("PiP render frame request count=\(pipRenderRequestCount) immediate=\(immediate) force=\(force) flags=\(updateFlags) size=\(String(format: "%.0fx%.0f", renderSize.width, renderSize.height)) \(pipDebugSnapshot())")
             }
-            pipBridge.renderOpenGL(context: context, glContext: glContext, videoSize: renderSize) { [weak self] fbo, flipY in
+            pipBridge.renderOpenGL(context: context, glContext: glContext, videoSize: renderSize, playbackPosition: cachedPosition) { [weak self] fbo, flipY in
                 guard let self else { return -1 }
                 return self.renderOpenGLFrame(context: context, fbo: &fbo, flipY: &flipY, reportSwap: true)
             }

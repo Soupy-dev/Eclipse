@@ -207,7 +207,7 @@ final class VLCRenderer: NSObject, PlayerRenderer {
     }
 
     func performanceOverlaySnapshot() -> String {
-        "VLC \(playerSnapshot())"
+        "VLC \(isPaused ? "paused" : "playing")\(isLoading ? " loading" : "") ready=\(isReadyToSeek)\npos=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) speed=\(String(format: "%.2f", currentPlaybackSpeed)) pending=\(secondsText(pendingAbsoluteSeek)) app=\(appStateText())"
     }
 
     private func logDrawableSnapshot(_ event: String) {

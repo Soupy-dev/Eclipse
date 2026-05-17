@@ -6932,7 +6932,7 @@ extension PlayerViewController: PiPControllerDelegate {
         logPictureInPicture("skip requested=\(String(format: "%.1f", requestedSeconds)) applying=\(String(format: "%.1f", seconds)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) optimistic=\(secondsText(target))")
         cachedPosition = target
         progressModel.position = target
-        rendererSeek(by: seconds)
+        rendererSeek(to: target)
         rendererPrimePictureInPictureFrames(reason: "pip-skip")
         pipController?.updatePlaybackState()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in

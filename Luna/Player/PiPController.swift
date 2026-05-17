@@ -200,7 +200,8 @@ extension PiPController: AVPictureInPictureSampleBufferPlaybackDelegate {
     
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, skipByInterval skipInterval: CMTime, completion completionHandler: @escaping () -> Void) {
         let seconds = CMTimeGetSeconds(skipInterval)
-        Logger.shared.log("[PiPController] skip callback interval=\(String(format: "%.2f", seconds)) active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) layer={\(layerSnapshot())}", type: "MPV")
+        let times = sanitizedPlaybackTimes()
+        Logger.shared.log("[PiPController] skip callback interval=\(String(format: "%.2f", seconds)) current=\(String(format: "%.2f", times.currentTime)) duration=\(String(format: "%.2f", times.duration)) rawDuration=\(String(format: "%.2f", times.rawDuration)) synthesized=\(times.synthesizedDuration) active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) layer={\(layerSnapshot())}", type: "MPV")
         delegate?.pipController(self, skipByInterval: skipInterval)
         DispatchQueue.main.async { [weak self] in
             self?.pipController?.invalidatePlaybackState()
