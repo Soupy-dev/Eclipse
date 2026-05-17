@@ -47,6 +47,7 @@ struct BackupData: Codable {
     var vlcPiPEnabled: Bool = false
     var vlcOpenSubtitlesEnabled: Bool = false
     var vlcOpenSubtitlesAutoFallbackEnabled: Bool = true
+    var playerPerformanceOverlayEnabled: Bool = false
 
     // Subtitle Styling
     var subtitleForegroundColor: Data?
@@ -117,7 +118,7 @@ struct BackupData: Codable {
         case version, createdDate
         case accentColor, tmdbLanguage, selectedAppearance, enableSubtitlesByDefault, defaultSubtitleLanguage, enableVLCSubtitleEditMenu, preferredAnimeAudioLanguage, inAppPlayer, playerChoice, showScheduleTab, showLocalScheduleTime
         case defaultPlaybackSpeed, holdSpeedPlayer, externalPlayer, alwaysLandscape, aniSkipAutoSkip, skip85sEnabled, showNextEpisodeButton, showVLCEpisodeBrowserButton, showNextEpisodePosterButton, nextEpisodeThreshold, vlcHeaderProxyEnabled
-        case vlcBrightnessGestureEnabled, vlcVolumeGestureEnabled, playerTwoFingerTapPlayPauseEnabled, vlcDoubleTapSeekEnabled, vlcDoubleTapSeekSeconds, vlcPiPEnabled, vlcOpenSubtitlesEnabled, vlcOpenSubtitlesAutoFallbackEnabled
+        case vlcBrightnessGestureEnabled, vlcVolumeGestureEnabled, playerTwoFingerTapPlayPauseEnabled, vlcDoubleTapSeekEnabled, vlcDoubleTapSeekSeconds, vlcPiPEnabled, vlcOpenSubtitlesEnabled, vlcOpenSubtitlesAutoFallbackEnabled, playerPerformanceOverlayEnabled
         case subtitleForegroundColor, subtitleStrokeColor, subtitleStrokeWidth, subtitleFontSize, subtitleVerticalOffset
         case showKanzen, kanzenAutoMode, kanzenAutoUpdateModules, seasonMenu, horizontalEpisodeList, useClassicScheduleUI, mediaColumnsPortrait, mediaColumnsLandscape
         case readingMode
@@ -170,6 +171,7 @@ struct BackupData: Codable {
         vlcPiPEnabled = false
         vlcOpenSubtitlesEnabled = try container.decodeIfPresent(Bool.self, forKey: .vlcOpenSubtitlesEnabled) ?? false
         vlcOpenSubtitlesAutoFallbackEnabled = try container.decodeIfPresent(Bool.self, forKey: .vlcOpenSubtitlesAutoFallbackEnabled) ?? true
+        playerPerformanceOverlayEnabled = try container.decodeIfPresent(Bool.self, forKey: .playerPerformanceOverlayEnabled) ?? false
 
         // Subtitle styling
         subtitleForegroundColor = try Self.decodeColorData(from: container, forKey: .subtitleForegroundColor)
@@ -311,6 +313,7 @@ struct BackupData: Codable {
         try container.encode(vlcPiPEnabled, forKey: .vlcPiPEnabled)
         try container.encode(vlcOpenSubtitlesEnabled, forKey: .vlcOpenSubtitlesEnabled)
         try container.encode(vlcOpenSubtitlesAutoFallbackEnabled, forKey: .vlcOpenSubtitlesAutoFallbackEnabled)
+        try container.encode(playerPerformanceOverlayEnabled, forKey: .playerPerformanceOverlayEnabled)
 
         // Subtitle styling
         try container.encodeIfPresent(subtitleForegroundColor, forKey: .subtitleForegroundColor)
@@ -396,6 +399,7 @@ struct BackupData: Codable {
         vlcPiPEnabled: Bool = false,
         vlcOpenSubtitlesEnabled: Bool = false,
         vlcOpenSubtitlesAutoFallbackEnabled: Bool = true,
+        playerPerformanceOverlayEnabled: Bool = false,
 
         // Subtitle styling
         subtitleForegroundColor: Data? = nil,
@@ -478,6 +482,7 @@ struct BackupData: Codable {
         self.vlcPiPEnabled = false
         self.vlcOpenSubtitlesEnabled = vlcOpenSubtitlesEnabled
         self.vlcOpenSubtitlesAutoFallbackEnabled = vlcOpenSubtitlesAutoFallbackEnabled
+        self.playerPerformanceOverlayEnabled = playerPerformanceOverlayEnabled
 
         self.subtitleForegroundColor = subtitleForegroundColor
         self.subtitleStrokeColor = subtitleStrokeColor
@@ -728,6 +733,7 @@ class BackupManager {
         let vlcPiPEnabled = false
         let vlcOpenSubtitlesEnabled = userDefaults.bool(forKey: "vlcOpenSubtitlesEnabled")
         let vlcOpenSubtitlesAutoFallbackEnabled = userDefaults.object(forKey: "vlcOpenSubtitlesAutoFallbackEnabled") == nil ? true : userDefaults.bool(forKey: "vlcOpenSubtitlesAutoFallbackEnabled")
+        let playerPerformanceOverlayEnabled = userDefaults.bool(forKey: "playerPerformanceOverlayEnabled")
 
         // Subtitle styling
         let subtitleForegroundColor = userDefaults.data(forKey: "subtitles_foregroundColor")
@@ -885,6 +891,7 @@ class BackupManager {
             vlcPiPEnabled: vlcPiPEnabled,
             vlcOpenSubtitlesEnabled: vlcOpenSubtitlesEnabled,
             vlcOpenSubtitlesAutoFallbackEnabled: vlcOpenSubtitlesAutoFallbackEnabled,
+            playerPerformanceOverlayEnabled: playerPerformanceOverlayEnabled,
 
             subtitleForegroundColor: subtitleForegroundColor,
             subtitleStrokeColor: subtitleStrokeColor,
@@ -1017,6 +1024,7 @@ class BackupManager {
         let vlcPiPEnabled = false
         let vlcOpenSubtitlesEnabled = json["vlcOpenSubtitlesEnabled"] as? Bool ?? false
         let vlcOpenSubtitlesAutoFallbackEnabled = json["vlcOpenSubtitlesAutoFallbackEnabled"] as? Bool ?? true
+        let playerPerformanceOverlayEnabled = json["playerPerformanceOverlayEnabled"] as? Bool ?? false
 
         // Subtitle styling
         let subtitleForegroundColor = BackupData.backupColorData(from: json["subtitleForegroundColor"])
@@ -1216,6 +1224,7 @@ class BackupManager {
             vlcPiPEnabled: vlcPiPEnabled,
             vlcOpenSubtitlesEnabled: vlcOpenSubtitlesEnabled,
             vlcOpenSubtitlesAutoFallbackEnabled: vlcOpenSubtitlesAutoFallbackEnabled,
+            playerPerformanceOverlayEnabled: playerPerformanceOverlayEnabled,
             subtitleForegroundColor: subtitleForegroundColor,
             subtitleStrokeColor: subtitleStrokeColor,
             subtitleStrokeWidth: subtitleStrokeWidth,
@@ -1304,6 +1313,7 @@ class BackupManager {
         userDefaults.set(false, forKey: "vlcPiPEnabled")
         userDefaults.set(backup.vlcOpenSubtitlesEnabled, forKey: "vlcOpenSubtitlesEnabled")
         userDefaults.set(backup.vlcOpenSubtitlesAutoFallbackEnabled, forKey: "vlcOpenSubtitlesAutoFallbackEnabled")
+        userDefaults.set(backup.playerPerformanceOverlayEnabled, forKey: "playerPerformanceOverlayEnabled")
 
         // Subtitle styling
         if let fgColor = backup.subtitleForegroundColor {

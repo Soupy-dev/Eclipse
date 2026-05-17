@@ -154,6 +154,10 @@ final class PlayerSettingsStore: ObservableObject {
         didSet { UserDefaults.standard.set(vlcOpenSubtitlesAutoFallbackEnabled, forKey: "vlcOpenSubtitlesAutoFallbackEnabled") }
     }
 
+    @Published var playerPerformanceOverlayEnabled: Bool {
+        didSet { UserDefaults.standard.set(playerPerformanceOverlayEnabled, forKey: "playerPerformanceOverlayEnabled") }
+    }
+
     init() {
         let savedDefaultSpeed = UserDefaults.standard.double(forKey: "defaultPlaybackSpeed")
         self.defaultPlaybackSpeed = savedDefaultSpeed > 0 ? savedDefaultSpeed : 1.0
@@ -242,6 +246,8 @@ final class PlayerSettingsStore: ObservableObject {
         } else {
             self.vlcOpenSubtitlesAutoFallbackEnabled = UserDefaults.standard.bool(forKey: "vlcOpenSubtitlesAutoFallbackEnabled")
         }
+
+        self.playerPerformanceOverlayEnabled = UserDefaults.standard.bool(forKey: "playerPerformanceOverlayEnabled")
     }
 }
 
@@ -659,6 +665,16 @@ struct PlayerSettingsView: View {
                         }
                     } label: {
                         Label("OpenSubtitles", systemImage: "globe")
+                    }
+
+                    DisclosureGroup {
+                        settingsToggleRow(
+                            title: "Performance Overlay",
+                            detail: "Show live CPU, memory, thermal, playback, renderer, and PiP frame counters over the in-app player.",
+                            binding: $store.playerPerformanceOverlayEnabled
+                        )
+                    } label: {
+                        Label("Debugger", systemImage: "speedometer")
                     }
 
                     DisclosureGroup {

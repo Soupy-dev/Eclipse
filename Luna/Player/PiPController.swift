@@ -89,8 +89,14 @@ final class PiPController: NSObject {
             return
         }
         isStartRequestPending = true
+        pipController.requiresLinearPlayback = false
+        pipController.invalidatePlaybackState()
         Logger.shared.log("[PiPController] start requested active=\(pipController.isPictureInPictureActive) possible=\(pipController.isPictureInPicturePossible) supported=\(isPictureInPictureSupported) pending=\(isStartRequestPending) layer={\(layerSnapshot())}", type: "MPV")
         pipController.startPictureInPicture()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+            self?.pipController?.requiresLinearPlayback = false
+            self?.pipController?.invalidatePlaybackState()
+        }
     }
     
     func stopPictureInPicture() {
@@ -184,9 +190,14 @@ extension PiPController: AVPictureInPictureSampleBufferPlaybackDelegate {
     }
     
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, skipByInterval skipInterval: CMTime, completion completionHandler: @escaping () -> Void) {
+        let seconds = CMTimeGetSeconds(skipInterval)
+        Logger.shared.log("[PiPController] skip callback interval=\(String(format: "%.2f", seconds)) active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) layer={\(layerSnapshot())}", type: "MPV")
         delegate?.pipController(self, skipByInterval: skipInterval)
         DispatchQueue.main.async { [weak self] in
             self?.pipController?.invalidatePlaybackState()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                self?.pipController?.invalidatePlaybackState()
+            }
         }
         completionHandler()
     }

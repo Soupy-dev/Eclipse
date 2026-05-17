@@ -121,6 +121,11 @@ class Settings: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: "vlcOpenSubtitlesAutoFallbackEnabled") }
     }
 
+    var playerPerformanceOverlayEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "playerPerformanceOverlayEnabled") }
+        set { UserDefaults.standard.set(newValue, forKey: "playerPerformanceOverlayEnabled") }
+    }
+
     var enableVLCSubtitleEditMenu: Bool {
         get {
             UserDefaults.standard.object(forKey: "enableVLCSubtitleEditMenu") as? Bool ?? true

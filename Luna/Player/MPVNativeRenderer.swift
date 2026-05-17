@@ -21,6 +21,7 @@ protocol PlayerRenderer: AnyObject {
     func reloadCurrentItem()
     func applyPreset(_ preset: PlayerPreset)
     func prepareInitialSeek(to seconds: Double?)
+    func performanceOverlaySnapshot() -> String
 
     func play()
     func pausePlayback()
@@ -146,6 +147,9 @@ private final class MPVPiPBridge {
     private var lastRenderTargetSize: CGSize = .zero
     private var lastRenderTimestamp: CFTimeInterval = 0
     private var lastEnqueueTimestamp: CFTimeInterval = 0
+    private var performanceWindowStart: CFTimeInterval = CACurrentMediaTime()
+    private var performanceWindowEnqueuedCount = 0
+    private var lastEnqueueFramesPerSecond: Double = 0
 
     init(displayLayer: AVSampleBufferDisplayLayer) {
         self.displayLayer = displayLayer
@@ -208,6 +212,9 @@ private final class MPVPiPBridge {
         lastRenderTargetSize = .zero
         lastRenderTimestamp = 0
         lastEnqueueTimestamp = 0
+        performanceWindowStart = CACurrentMediaTime()
+        performanceWindowEnqueuedCount = 0
+        lastEnqueueFramesPerSecond = 0
     }
 
     func waitForPendingRenders() {
@@ -497,6 +504,12 @@ private final class MPVPiPBridge {
             }
             self.enqueuedFrameCount += 1
             self.lastEnqueueTimestamp = CACurrentMediaTime()
+            let elapsed = max(0, self.lastEnqueueTimestamp - self.performanceWindowStart)
+            if elapsed >= 1.0 {
+                self.lastEnqueueFramesPerSecond = Double(self.enqueuedFrameCount - self.performanceWindowEnqueuedCount) / elapsed
+                self.performanceWindowStart = self.lastEnqueueTimestamp
+                self.performanceWindowEnqueuedCount = self.enqueuedFrameCount
+            }
             if self.enqueuedFrameCount <= 5 || self.enqueuedFrameCount % 60 == 0 {
                 Logger.shared.log("[MPVPiPBridge] enqueued sample frame count=\(self.enqueuedFrameCount) layerReady=\(self.displayLayer.isReadyForMoreMediaData) status=\(self.layerStatusName(self.displayLayer.status))", type: "MPV")
             }
@@ -557,6 +570,35 @@ private final class MPVPiPBridge {
             let nsError = self.displayLayer.error.map { $0 as NSError }
             let errorText = nsError.map { "\($0.domain)#\($0.code)" } ?? "nil"
             return "attempts=\(self.renderAttemptCount) ok=\(self.renderSuccessCount) failures=\(self.renderFailureCount) skips=\(self.renderSkipCount) allocFailures=\(self.allocationFailureCount) textureFailures=\(self.textureFailureCount) framebufferFailures=\(self.framebufferFailureCount) lastResult=\(self.lastRenderResult) source=\(String(format: "%.0fx%.0f", self.lastRenderSourceSize.width, self.lastRenderSourceSize.height)) target=\(String(format: "%.0fx%.0f", self.lastRenderTargetSize.width, self.lastRenderTargetSize.height)) lastRender=\(String(format: "%.2f", self.lastRenderTimestamp)) lastEnqueue=\(String(format: "%.2f", self.lastEnqueueTimestamp)) enqueued=\(self.enqueuedFrameCount) ready=\(self.displayLayer.isReadyForMoreMediaData) status=\(self.layerStatusName(self.displayLayer.status)) error=\(errorText) hidden=\(self.displayLayer.isHidden) opacity=\(String(format: "%.2f", self.displayLayer.opacity)) frame=\(String(format: "%.0fx%.0f", self.displayLayer.bounds.width, self.displayLayer.bounds.height)) timebase=\(self.displayLayer.controlTimebase != nil)"
+        }
+        if Thread.isMainThread {
+            return collectSnapshot()
+        }
+        var snapshot = ""
+        DispatchQueue.main.sync {
+            snapshot = collectSnapshot()
+        }
+        return snapshot
+    }
+
+    func performanceSnapshot() -> String {
+        let collectSnapshot = {
+            let nsError = self.displayLayer.error.map { $0 as NSError }
+            let errorText = nsError.map { "\($0.domain)#\($0.code)" } ?? "nil"
+            let now = CACurrentMediaTime()
+            let enqueueAge = self.lastEnqueueTimestamp > 0 ? now - self.lastEnqueueTimestamp : 0
+            let frameHealth: String
+            if self.enqueuedFrameCount == 0 {
+                frameHealth = "waiting"
+            } else if enqueueAge > 1.0 {
+                frameHealth = "stale"
+            } else if enqueueAge > 0.25 {
+                frameHealth = "late"
+            } else {
+                frameHealth = "ok"
+            }
+            let missedFrames = self.renderFailureCount + self.renderSkipCount
+            return "pipFPS=\(String(format: "%.1f", self.lastEnqueueFramesPerSecond)) frameAge=\(String(format: "%.2fs", enqueueAge)) health=\(frameHealth)\nenq=\(self.enqueuedFrameCount) ok=\(self.renderSuccessCount) missed=\(missedFrames) fail=\(self.renderFailureCount) skip=\(self.renderSkipCount)\ntexFail=\(self.textureFailureCount) fboFail=\(self.framebufferFailureCount) target=\(String(format: "%.0fx%.0f", self.lastRenderTargetSize.width, self.lastRenderTargetSize.height))\nlayer=\(self.layerStatusName(self.displayLayer.status)) ready=\(self.displayLayer.isReadyForMoreMediaData) err=\(errorText)"
         }
         if Thread.isMainThread {
             return collectSnapshot()
@@ -868,6 +910,13 @@ final class MPVNativeRenderer: PlayerRenderer {
 
     func pictureInPictureDebugSnapshot() -> String {
         pipDebugSnapshot()
+    }
+
+    func performanceOverlaySnapshot() -> String {
+        let speed = getSpeed()
+        let size = currentVideoSize()
+        let pipSummary = pipBridge.performanceSnapshot()
+        return "MPV \(currentMode) \(isPaused ? "paused" : "playing")\(isLoading ? " loading" : "")\npos \(String(format: "%.1f", cachedPosition))/\(String(format: "%.1f", cachedDuration)) speed \(String(format: "%.2fx", speed))\nfg \(foregroundFramesPerSecond)fps target PiP 24fps target\nvideo \(String(format: "%.0fx%.0f", size.width, size.height)) drawable \(glView.drawableWidth)x\(glView.drawableHeight)\n\(pipSummary)"
     }
 
     func prepareForPictureInPictureStart() {
@@ -2133,6 +2182,7 @@ final class MPVNativeRenderer: PlayerRenderer {
     func activatePictureInPictureLayer() { }
     func isPictureInPicturePrimed() -> Bool { false }
     func resumeForegroundRendering(reason: String) { }
+    func performanceOverlaySnapshot() -> String { "MPV unavailable" }
     func play() { }
     func pausePlayback() { }
     func togglePause() { }

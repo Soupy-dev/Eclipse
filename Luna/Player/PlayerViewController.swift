@@ -8,6 +8,9 @@
 import UIKit
 import SwiftUI
 import AVFoundation
+#if canImport(Darwin)
+import Darwin
+#endif
 #if canImport(Kingfisher)
 import Kingfisher
 #endif
@@ -113,6 +116,22 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         v.isUserInteractionEnabled = false
         v.isHidden = true
         return v
+    }()
+
+    private let performanceOverlayLabel: UILabel = {
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.backgroundColor = UIColor.black.withAlphaComponent(0.62)
+        label.textColor = UIColor.systemGreen
+        label.font = .monospacedSystemFont(ofSize: 11, weight: .medium)
+        label.numberOfLines = 0
+        label.lineBreakMode = .byWordWrapping
+        label.layer.cornerRadius = 8
+        label.layer.masksToBounds = true
+        label.alpha = 0.0
+        label.isHidden = true
+        label.isUserInteractionEnabled = false
+        return label
     }()
     
     private lazy var errorBanner: UIView = {
@@ -423,6 +442,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private let legacyTwoFingerSettingKey = "mpvTwoFingerTapEnabled"
     private let doubleTapSeekEnabledKey = "vlcDoubleTapSeekEnabled"
     private let playerSeekSecondsKey = "vlcDoubleTapSeekSeconds"
+    private let playerPerformanceOverlayKey = "playerPerformanceOverlayEnabled"
     private let brightnessLevelKey = "mpvBrightnessLevel"
     
     private lazy var renderer: PlayerRenderer = {
@@ -1224,6 +1244,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var isVolumeControlEnabled: Bool {
         return UserDefaults.standard.bool(forKey: "vlcVolumeGestureEnabled")
     }
+    private var isPerformanceOverlayEnabled: Bool {
+        return UserDefaults.standard.bool(forKey: playerPerformanceOverlayKey)
+    }
     
     private var originalSpeed: Double = 1.0
     private var holdGesture: UILongPressGestureRecognizer?
@@ -1232,6 +1255,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var controlsVisible: Bool = true
     private var pendingSeekTime: Double?
     private var defaultPlaybackSpeedApplied = false
+    private var performanceOverlayTimer: Timer?
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -1292,6 +1316,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         
         updateProgressHostingController()
         updateSpeedMenu()
+        updatePerformanceOverlayVisibility()
         
         NotificationCenter.default.addObserver(self, selector: #selector(appDidEnterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appWillResignActive), name: UIApplication.willResignActiveNotification, object: nil)
@@ -1385,6 +1410,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         isClosing = true
         audioMenuDebounceTimer?.invalidate()
         subtitleMenuDebounceTimer?.invalidate()
+        performanceOverlayTimer?.invalidate()
         playbackStartupWorkItem?.cancel()
 #if !os(tvOS)
         outputVolumeObservation?.invalidate()
@@ -1796,6 +1822,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         videoContainer.addSubview(skipBackwardButton)
         videoContainer.addSubview(skipForwardButton)
         videoContainer.addSubview(speedIndicatorLabel)
+        videoContainer.addSubview(performanceOverlayLabel)
         videoContainer.addSubview(vlcSubtitleOverlayLabel)
         videoContainer.addSubview(subtitleButton)
         if supportsSharedPlayerControls {
@@ -1883,6 +1910,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             
             speedIndicatorLabel.topAnchor.constraint(equalTo: videoContainer.safeAreaLayoutGuide.topAnchor, constant: 20),
             speedIndicatorLabel.centerXAnchor.constraint(equalTo: videoContainer.centerXAnchor),
+
+            performanceOverlayLabel.topAnchor.constraint(equalTo: videoContainer.safeAreaLayoutGuide.topAnchor, constant: 64),
+            performanceOverlayLabel.trailingAnchor.constraint(equalTo: videoContainer.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            performanceOverlayLabel.widthAnchor.constraint(lessThanOrEqualTo: videoContainer.safeAreaLayoutGuide.widthAnchor, multiplier: 0.72),
             speedIndicatorLabel.widthAnchor.constraint(equalToConstant: 100),
             speedIndicatorLabel.heightAnchor.constraint(equalToConstant: 40),
 
@@ -2015,6 +2046,114 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         skipForwardButton.setImage(forwardImage, for: .normal)
         skipBackwardButton.accessibilityLabel = "Seek Back \(seconds) Seconds"
         skipForwardButton.accessibilityLabel = "Seek Forward \(seconds) Seconds"
+    }
+
+    private func updatePerformanceOverlayVisibility() {
+        let enabled = supportsSharedPlayerControls && isPerformanceOverlayEnabled
+        performanceOverlayLabel.isHidden = !enabled
+        performanceOverlayLabel.alpha = enabled ? 1.0 : 0.0
+        if enabled {
+            videoContainer.bringSubviewToFront(performanceOverlayLabel)
+            updatePerformanceOverlayText()
+            startPerformanceOverlayTimerIfNeeded()
+        } else {
+            stopPerformanceOverlayTimer()
+        }
+    }
+
+    private func startPerformanceOverlayTimerIfNeeded() {
+        guard performanceOverlayTimer == nil else { return }
+        let timer = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
+            self?.updatePerformanceOverlayText()
+        }
+        performanceOverlayTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopPerformanceOverlayTimer() {
+        performanceOverlayTimer?.invalidate()
+        performanceOverlayTimer = nil
+    }
+
+    private func updatePerformanceOverlayText() {
+        guard supportsSharedPlayerControls, isPerformanceOverlayEnabled else { return }
+        let pipState = rendererIsPictureInPictureActive() ? "PiP" : "Inline"
+        let playState = rendererIsPausedState() ? "Paused" : "Playing"
+        let header = "\(isVLCPlayer ? "VLC" : "MPV") \(pipState) \(playState)"
+        let progress = "pos \(secondsText(cachedPosition))/\(secondsText(cachedDuration))"
+        performanceOverlayLabel.text = "\(header)\n\(systemPerformanceOverlayLine())\n\(progress)\n\(renderer.performanceOverlaySnapshot())"
+        videoContainer.bringSubviewToFront(performanceOverlayLabel)
+    }
+
+    private func systemPerformanceOverlayLine() -> String {
+        let cpuText = processCPUUsagePercent().map { String(format: "%.0f%%", $0) } ?? "n/a"
+        let memoryText = processMemoryFootprintBytes().map(formatByteCount) ?? "n/a"
+        return "CPU \(cpuText) mem \(memoryText) thermal \(thermalStateText())"
+    }
+
+    private func thermalStateText() -> String {
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: return "nominal"
+        case .fair: return "fair"
+        case .serious: return "serious"
+        case .critical: return "critical"
+        @unknown default: return "unknown"
+        }
+    }
+
+    private func formatByteCount(_ bytes: UInt64) -> String {
+        let megabytes = Double(bytes) / 1_048_576.0
+        if megabytes >= 1024 {
+            return String(format: "%.2fGB", megabytes / 1024.0)
+        }
+        return String(format: "%.0fMB", megabytes)
+    }
+
+    private func processMemoryFootprintBytes() -> UInt64? {
+#if canImport(Darwin)
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { reboundPointer in
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), reboundPointer, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return nil }
+        return UInt64(info.phys_footprint)
+#else
+        return nil
+#endif
+    }
+
+    private func processCPUUsagePercent() -> Double? {
+#if canImport(Darwin)
+        var threadList: thread_act_array_t?
+        var threadCount = mach_msg_type_number_t(0)
+        let result = task_threads(mach_task_self_, &threadList, &threadCount)
+        guard result == KERN_SUCCESS, let threadList else { return nil }
+        defer {
+            let byteCount = vm_size_t(Int(threadCount) * MemoryLayout<thread_t>.stride)
+            vm_deallocate(mach_task_self_, vm_address_t(UInt(bitPattern: threadList)), byteCount)
+        }
+
+        var totalCPU: Double = 0
+        for index in 0..<Int(threadCount) {
+            var info = thread_basic_info_data_t()
+            var infoCount = mach_msg_type_number_t(MemoryLayout<thread_basic_info_data_t>.size / MemoryLayout<integer_t>.size)
+            let infoResult = withUnsafeMutablePointer(to: &info) { pointer in
+                pointer.withMemoryRebound(to: integer_t.self, capacity: Int(infoCount)) { reboundPointer in
+                    thread_info(threadList[index], thread_flavor_t(THREAD_BASIC_INFO), reboundPointer, &infoCount)
+                }
+            }
+            guard infoResult == KERN_SUCCESS else { continue }
+            if (info.flags & TH_FLAGS_IDLE) == 0 {
+                totalCPU += Double(info.cpu_usage) / Double(TH_USAGE_SCALE) * 100.0
+            }
+        }
+        return totalCPU
+#else
+        return nil
+#endif
     }
 
     private func setupActions() {
@@ -4401,6 +4540,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             updateVolumeControlVisibility()
 #endif
             updateEpisodeBrowserButtonVisibility()
+            updatePerformanceOverlayVisibility()
             return
         }
         Logger.shared.log("[PlayerVC.Settings] UserDefaults changed; evaluating in-app player subtitle mode", type: "Player")
@@ -4414,6 +4554,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         vlcRenderer?.handlePictureInPictureSettingChanged()
         updatePiPButtonVisibility()
         updateEpisodeBrowserButtonVisibility()
+        updatePerformanceOverlayVisibility()
         updateSubtitleTracksMenu()
         prefetchOpenSubtitlesIfEnabled(reason: "settings")
 #if !os(tvOS)
@@ -5022,6 +5163,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         videoContainer.bringSubviewToFront(skipBackwardButton)
         videoContainer.bringSubviewToFront(skipForwardButton)
         videoContainer.bringSubviewToFront(speedIndicatorLabel)
+        videoContainer.bringSubviewToFront(performanceOverlayLabel)
         videoContainer.bringSubviewToFront(subtitleButton)
         if supportsSharedPlayerControls {
             videoContainer.bringSubviewToFront(episodeBrowserButton)
@@ -6782,11 +6924,20 @@ extension PlayerViewController: PiPControllerDelegate {
     }
     func pipController(_ controller: PiPController, skipByInterval interval: CMTime) {
         let requestedSeconds = CMTimeGetSeconds(interval)
-        let seconds = requestedSeconds < 0 ? -playerSeekSeconds : playerSeekSeconds
-        logMPV("PiP skip requested=\(String(format: "%.1f", requestedSeconds)) applying=\(String(format: "%.1f", seconds))")
-        let target = max(0, cachedPosition + seconds)
-        rendererSeek(to: target)
+        let direction = requestedSeconds < 0 ? -1.0 : 1.0
+        let seconds = direction * playerSeekSeconds
+        let target = max(0, min(cachedDuration > 0 ? cachedDuration : .greatestFiniteMagnitude, cachedPosition + seconds))
+        logPictureInPicture("skip requested=\(String(format: "%.1f", requestedSeconds)) applying=\(String(format: "%.1f", seconds)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) optimistic=\(secondsText(target))")
+        cachedPosition = target
+        progressModel.position = target
+        rendererSeek(by: seconds)
+        rendererPrimePictureInPictureFrames(reason: "pip-skip")
         pipController?.updatePlaybackState()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self else { return }
+            self.rendererPrimePictureInPictureFrames(reason: "pip-skip-followup")
+            self.pipController?.updatePlaybackState()
+        }
     }
     func pipControllerIsPlaying(_ controller: PiPController) -> Bool {
         return !rendererIsPausedState()

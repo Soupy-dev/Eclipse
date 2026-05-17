@@ -206,6 +206,10 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         return "state=\(describeState(player.state))(\(stateCode(player.state))) playing=\(isPlayerActivelyPlaying(player)) pausedFlag=\(isPaused) loading=\(isLoading) ready=\(isReadyToSeek) raw=\(secondsText(rawPosition))/\(secondsText(rawDuration)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pending=\(secondsText(pendingAbsoluteSeek)) speed=\(String(format: "%.2f", currentPlaybackSpeed)) pipAvailable=false pipActive=false app=\(appStateText())"
     }
 
+    func performanceOverlaySnapshot() -> String {
+        "VLC \(playerSnapshot())"
+    }
+
     private func logDrawableSnapshot(_ event: String) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -1333,6 +1337,7 @@ final class VLCRenderer: PlayerRenderer {
     func reloadCurrentItem() { }
     func applyPreset(_ preset: PlayerPreset) { }
     func play() { }
+    func performanceOverlaySnapshot() -> String { "VLC unavailable" }
     func pausePlayback() { }
     func togglePause() { }
     func seek(to seconds: Double) { }
