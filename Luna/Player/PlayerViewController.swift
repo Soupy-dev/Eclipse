@@ -1256,6 +1256,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var pendingSeekTime: Double?
     private var defaultPlaybackSpeedApplied = false
     private var performanceOverlayTimer: Timer?
+    private var lastCPUProcessTime: TimeInterval?
+    private var lastCPUWallTime: CFTimeInterval?
+    private var lastCPUUsagePercent: Double?
     
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -2111,15 +2114,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func processMemoryFootprintBytes() -> UInt64? {
 #if canImport(Darwin)
-        var info = task_vm_info_data_t()
-        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<integer_t>.size)
-        let result = withUnsafeMutablePointer(to: &info) { pointer in
-            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { reboundPointer in
-                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), reboundPointer, &count)
-            }
-        }
-        guard result == KERN_SUCCESS else { return nil }
-        return UInt64(info.phys_footprint)
+        var usage = rusage()
+        guard getrusage(RUSAGE_SELF, &usage) == 0, usage.ru_maxrss > 0 else { return nil }
+        return UInt64(usage.ru_maxrss)
 #else
         return nil
 #endif
@@ -2127,30 +2124,33 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func processCPUUsagePercent() -> Double? {
 #if canImport(Darwin)
-        var threadList: thread_act_array_t?
-        var threadCount = mach_msg_type_number_t(0)
-        let result = task_threads(mach_task_self_, &threadList, &threadCount)
-        guard result == KERN_SUCCESS, let threadList else { return nil }
-        defer {
-            let byteCount = vm_size_t(Int(threadCount) * MemoryLayout<thread_t>.stride)
-            vm_deallocate(mach_task_self_, vm_address_t(UInt(bitPattern: threadList)), byteCount)
+        var usage = rusage()
+        guard getrusage(RUSAGE_SELF, &usage) == 0 else { return nil }
+
+        let userTime = TimeInterval(usage.ru_utime.tv_sec) + TimeInterval(usage.ru_utime.tv_usec) / 1_000_000.0
+        let systemTime = TimeInterval(usage.ru_stime.tv_sec) + TimeInterval(usage.ru_stime.tv_usec) / 1_000_000.0
+        let processTime = userTime + systemTime
+        let wallTime = CACurrentMediaTime()
+
+        guard let previousProcessTime = lastCPUProcessTime,
+              let previousWallTime = lastCPUWallTime else {
+            lastCPUProcessTime = processTime
+            lastCPUWallTime = wallTime
+            lastCPUUsagePercent = 0
+            return 0
         }
 
-        var totalCPU: Double = 0
-        for index in 0..<Int(threadCount) {
-            var info = thread_basic_info_data_t()
-            var infoCount = mach_msg_type_number_t(MemoryLayout<thread_basic_info_data_t>.size / MemoryLayout<integer_t>.size)
-            let infoResult = withUnsafeMutablePointer(to: &info) { pointer in
-                pointer.withMemoryRebound(to: integer_t.self, capacity: Int(infoCount)) { reboundPointer in
-                    thread_info(threadList[index], thread_flavor_t(THREAD_BASIC_INFO), reboundPointer, &infoCount)
-                }
-            }
-            guard infoResult == KERN_SUCCESS else { continue }
-            if (info.flags & TH_FLAGS_IDLE) == 0 {
-                totalCPU += Double(info.cpu_usage) / Double(TH_USAGE_SCALE) * 100.0
-            }
+        let wallDelta = wallTime - previousWallTime
+        let processDelta = processTime - previousProcessTime
+        lastCPUProcessTime = processTime
+        lastCPUWallTime = wallTime
+        guard wallDelta > 0.05, processDelta >= 0 else {
+            return lastCPUUsagePercent
         }
-        return totalCPU
+
+        let percent = min(max((processDelta / wallDelta) * 100.0, 0), 999)
+        lastCPUUsagePercent = percent
+        return percent
 #else
         return nil
 #endif
@@ -6926,7 +6926,9 @@ extension PlayerViewController: PiPControllerDelegate {
         let requestedSeconds = CMTimeGetSeconds(interval)
         let direction = requestedSeconds < 0 ? -1.0 : 1.0
         let seconds = direction * playerSeekSeconds
-        let target = max(0, min(cachedDuration > 0 ? cachedDuration : .greatestFiniteMagnitude, cachedPosition + seconds))
+        let canClampToDuration = cachedDuration.isFinite && cachedDuration > 5 && cachedDuration > cachedPosition + 1
+        let targetLimit = canClampToDuration ? cachedDuration : .greatestFiniteMagnitude
+        let target = max(0, min(targetLimit, cachedPosition + seconds))
         logPictureInPicture("skip requested=\(String(format: "%.1f", requestedSeconds)) applying=\(String(format: "%.1f", seconds)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) optimistic=\(secondsText(target))")
         cachedPosition = target
         progressModel.position = target

@@ -128,6 +128,15 @@ final class PiPController: NSObject {
         @unknown default: return "unknown"
         }
     }
+
+    private func sanitizedPlaybackTimes() -> (currentTime: Double, duration: Double, rawDuration: Double, synthesizedDuration: Bool) {
+        let rawCurrentTime = delegate?.pipControllerCurrentTime(self) ?? 0
+        let rawDuration = delegate?.pipControllerDuration(self) ?? 0
+        let currentTime = rawCurrentTime.isFinite ? max(0, rawCurrentTime) : 0
+        let durationIsUsable = rawDuration.isFinite && rawDuration > max(5, currentTime + 1.0)
+        let duration = durationIsUsable ? rawDuration : max(600, currentTime + 600)
+        return (min(currentTime, max(0, duration - 0.5)), duration, rawDuration, !durationIsUsable)
+    }
 }
 
 // MARK: - AVPictureInPictureControllerDelegate
@@ -203,12 +212,8 @@ extension PiPController: AVPictureInPictureSampleBufferPlaybackDelegate {
     }
     
     func pictureInPictureControllerTimeRangeForPlayback(_ pictureInPictureController: AVPictureInPictureController) -> CMTimeRange {
-        let duration = delegate?.pipControllerDuration(self) ?? 0
-        if duration > 0 {
-            let cmDuration = CMTime(seconds: duration, preferredTimescale: 1000)
-            return CMTimeRange(start: .zero, duration: cmDuration)
-        }
-        return CMTimeRange(start: .zero, duration: .positiveInfinity)
+        let times = sanitizedPlaybackTimes()
+        return CMTimeRange(start: .zero, duration: CMTime(seconds: times.duration, preferredTimescale: 1000))
     }
     
     func pictureInPictureControllerIsPlaybackPaused(_ pictureInPictureController: AVPictureInPictureController) -> Bool {
@@ -228,24 +233,20 @@ extension PiPController: AVPictureInPictureSampleBufferPlaybackDelegate {
     }
     
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, timeRangeForPlayback sampleBufferDisplayLayer: AVSampleBufferDisplayLayer) -> CMTimeRange {
-        let duration = delegate?.pipControllerDuration(self) ?? 0
+        let times = sanitizedPlaybackTimes()
         timeRangeRequestCount += 1
         if timeRangeRequestCount <= 3 || timeRangeRequestCount % 30 == 0 {
-            Logger.shared.log("[PiPController] playback timeRange request count=\(timeRangeRequestCount) duration=\(String(format: "%.2f", duration)) layer={\(layerSnapshot())}", type: "MPV")
+            Logger.shared.log("[PiPController] playback timeRange request count=\(timeRangeRequestCount) current=\(String(format: "%.2f", times.currentTime)) rawDuration=\(String(format: "%.2f", times.rawDuration)) duration=\(String(format: "%.2f", times.duration)) synthesized=\(times.synthesizedDuration) layer={\(layerSnapshot())}", type: "MPV")
         }
-        if duration > 0 {
-            let cmDuration = CMTime(seconds: duration, preferredTimescale: 1000)
-            return CMTimeRange(start: .zero, duration: cmDuration)
-        }
-        return CMTimeRange(start: .zero, duration: .positiveInfinity)
+        return CMTimeRange(start: .zero, duration: CMTime(seconds: times.duration, preferredTimescale: 1000))
     }
     
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, currentTimeFor sampleBufferDisplayLayer: AVSampleBufferDisplayLayer) -> CMTime {
-        let currentTime = delegate?.pipControllerCurrentTime(self) ?? 0
+        let times = sanitizedPlaybackTimes()
         currentTimeRequestCount += 1
         if currentTimeRequestCount <= 3 || currentTimeRequestCount % 30 == 0 {
-            Logger.shared.log("[PiPController] playback currentTime request count=\(currentTimeRequestCount) time=\(String(format: "%.2f", currentTime)) layer={\(layerSnapshot())}", type: "MPV")
+            Logger.shared.log("[PiPController] playback currentTime request count=\(currentTimeRequestCount) time=\(String(format: "%.2f", times.currentTime)) duration=\(String(format: "%.2f", times.duration)) synthesized=\(times.synthesizedDuration) layer={\(layerSnapshot())}", type: "MPV")
         }
-        return CMTime(seconds: currentTime, preferredTimescale: 1000)
+        return CMTime(seconds: times.currentTime, preferredTimescale: 1000)
     }
 }
