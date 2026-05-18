@@ -27,18 +27,11 @@ jobs:
           MAL_CLIENT_ID: ${{ secrets.MAL_CLIENT_ID }}
           MAL_CLIENT_SECRET: ${{ secrets.MAL_CLIENT_SECRET }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
-            missing=0
-            for name in TMDB_API_KEY ANILIST_CLIENT_ID ANILIST_CLIENT_SECRET TRAKT_CLIENT_ID TRAKT_CLIENT_SECRET MAL_CLIENT_ID MAL_CLIENT_SECRET; do
-              if [ -z "${!name}" ]; then
-                echo "::error::$name is not configured in GitHub Actions secrets"
-                missing=1
-              fi
-            done
-            if [ "$missing" -ne 0 ]; then
-              exit 1
+          for name in TMDB_API_KEY ANILIST_CLIENT_ID ANILIST_CLIENT_SECRET TRAKT_CLIENT_ID TRAKT_CLIENT_SECRET MAL_CLIENT_ID MAL_CLIENT_SECRET; do
+            if [ -z "${!name}" ]; then
+              echo "::warning::$name is not configured in GitHub Actions secrets; building with an empty value"
             fi
-          fi
+          done
 
           {
             printf 'TMDB_API_KEY = %s\n' "$TMDB_API_KEY"

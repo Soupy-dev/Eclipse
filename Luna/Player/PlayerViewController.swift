@@ -3459,7 +3459,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         // Find if current position is inside any skip segment
         let activeSegment = skipSegments.first { seg in
             guard seg.startTime.isFinite, seg.endTime.isFinite else { return false }
-            position >= seg.startTime && position <= seg.endTime
+            return position >= seg.startTime && position <= seg.endTime
         }
 
         if let seg = activeSegment {
