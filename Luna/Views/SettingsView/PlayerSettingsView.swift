@@ -162,6 +162,10 @@ final class PlayerSettingsStore: ObservableObject {
         didSet { UserDefaults.standard.set(mpvForegroundFPS == 60 ? 60 : 30, forKey: "mpvForegroundFPS") }
     }
 
+    @Published var mpvRenderBackend: MPVRenderBackend {
+        didSet { UserDefaults.standard.set(mpvRenderBackend.rawValue, forKey: "mpvRenderBackend") }
+    }
+
     init() {
         let savedDefaultSpeed = UserDefaults.standard.double(forKey: "defaultPlaybackSpeed")
         self.defaultPlaybackSpeed = savedDefaultSpeed > 0 ? savedDefaultSpeed : 1.0
@@ -254,6 +258,8 @@ final class PlayerSettingsStore: ObservableObject {
         self.playerPerformanceOverlayEnabled = UserDefaults.standard.bool(forKey: "playerPerformanceOverlayEnabled")
 
         self.mpvForegroundFPS = UserDefaults.standard.integer(forKey: "mpvForegroundFPS") == 60 ? 60 : 30
+        let backendRaw = UserDefaults.standard.string(forKey: "mpvRenderBackend") ?? MPVRenderBackend.defaultBackend.rawValue
+        self.mpvRenderBackend = MPVRenderBackend(rawValue: backendRaw) ?? .defaultBackend
     }
 }
 
@@ -603,6 +609,35 @@ struct PlayerSettingsView: View {
 
                     if store.inAppPlayer == .mpv {
                         DisclosureGroup {
+                            if MPVRenderBackendSupport.metalIsFullySupported {
+                                HStack {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("Render Backend")
+                                            .font(.subheadline)
+                                            .fontWeight(.medium)
+
+                                        Text(MPVRenderBackendSupport.settingsDescription)
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                            .multilineTextAlignment(.leading)
+
+                                        Text(MPVRenderBackendSupport.settingsStatusLine)
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                            .multilineTextAlignment(.leading)
+                                    }
+
+                                    Spacer()
+
+                                    Picker("", selection: $store.mpvRenderBackend) {
+                                        ForEach(MPVRenderBackend.allCases) { backend in
+                                            Text(backend.displayName).tag(backend)
+                                        }
+                                    }
+                                    .pickerStyle(.menu)
+                                }
+                            }
+
                             HStack {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text("Inline Frame Rate")

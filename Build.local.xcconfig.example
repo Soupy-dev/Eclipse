@@ -11,3 +11,9 @@ TRAKT_REDIRECT_URI = luna:/$()/trakt-callback
 MAL_CLIENT_ID =
 MAL_CLIENT_SECRET =
 MAL_REDIRECT_URI = luna:/$()/mal-callback
+
+// MPV Metal fork testing flags.
+// Only uncomment these when using an MPVKit fork that exposes Metal sample-buffer PiP frames.
+// SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+// Add this only after PGS, VobSub, DVB, and XSUB are validated on the Metal path.
+// SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED LUNA_MPVKIT_METAL_BITMAP_SUBTITLES_VALIDATED

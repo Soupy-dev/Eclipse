@@ -877,6 +877,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             guard Settings.shared.vlcPiPEnabled else { return false }
             return vlc.isPictureInPictureAvailable
         }
+        if let mpv = mpvRenderer, !mpv.canStartSampleBufferPictureInPicture() {
+            return false
+        }
         return PiPController.isPictureInPictureSupported
     }
 
@@ -4271,7 +4274,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func canAutoSelectNativeSubtitleTrack(_ track: SubtitleTrackDescriptor) -> Bool {
-        guard mpvRenderer != nil else { return true }
+        guard let mpvRenderer else { return true }
+        if mpvRenderer.supportsBitmapSubtitleTracks { return true }
         return !isMPVBitmapSubtitleTrack(track)
     }
 

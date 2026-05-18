@@ -11,6 +11,102 @@ enum Appearance: String, CaseIterable, Identifiable {
     
     var id: String { self.rawValue }
 }
+
+enum MPVRenderBackend: String, CaseIterable, Identifiable {
+    case openGL = "opengl"
+    case metal = "metal"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .openGL:
+            return "OpenGL"
+        case .metal:
+            return "Metal"
+        }
+    }
+
+    static let defaultBackend: MPVRenderBackend = .openGL
+}
+
+struct MPVRenderBackendSupport {
+    static let bundledMPVKitVersion = "0.41.0"
+    static let bundledMPVKitRevision = "613c0ccc3acf70e136aaff880a9b5fe8fdfaf5b8"
+    static let bundledMPVKitSupportsMoltenVKInlineRendering = true
+
+    #if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP
+    static let forkExposesMetalSampleBufferPictureInPicture = true
+    #else
+    static let forkExposesMetalSampleBufferPictureInPicture = false
+    #endif
+
+    #if LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+    static let lunaImplementsMetalSampleBufferPictureInPicture = true
+    #else
+    static let lunaImplementsMetalSampleBufferPictureInPicture = false
+    #endif
+
+    #if LUNA_MPVKIT_METAL_BITMAP_SUBTITLES_VALIDATED
+    static let metalBitmapSubtitlesValidated = true
+    #else
+    static let metalBitmapSubtitlesValidated = false
+    #endif
+
+    static var metalSampleBufferPictureInPictureAvailable: Bool {
+        bundledMPVKitSupportsMoltenVKInlineRendering
+            && forkExposesMetalSampleBufferPictureInPicture
+            && lunaImplementsMetalSampleBufferPictureInPicture
+    }
+
+    static var metalIsFullySupported: Bool {
+        metalSampleBufferPictureInPictureAvailable
+    }
+
+    static var diagnosticsSummary: String {
+        [
+            "mpvKit=\(bundledMPVKitVersion)",
+            "revision=\(bundledMPVKitRevision)",
+            "moltenVKInline=\(bundledMPVKitSupportsMoltenVKInlineRendering)",
+            "forkMetalSampleBufferPiP=\(forkExposesMetalSampleBufferPictureInPicture)",
+            "lunaMetalPiP=\(lunaImplementsMetalSampleBufferPictureInPicture)",
+            "bitmapSubsValidated=\(metalBitmapSubtitlesValidated)"
+        ].joined(separator: " ")
+    }
+
+    static var settingsDescription: String {
+        if metalIsFullySupported {
+            return "Applies to the next player session. Metal is available in this build; switch back to OpenGL if a stream misbehaves."
+        }
+        return "Applies to the next player session. OpenGL is active in this build; Metal is remembered but falls back until the MPVKit fork exposes full sample-buffer PiP."
+    }
+
+    static var settingsStatusLine: String {
+        if metalIsFullySupported {
+            return "Metal backend: available"
+        }
+        return "Metal backend: waiting for MPVKit fork sample-buffer PiP"
+    }
+
+    static func effectiveBackend(requested: MPVRenderBackend, hasMetalDevice: Bool) -> MPVRenderBackend {
+        guard requested == .metal else { return .openGL }
+        guard hasMetalDevice, metalIsFullySupported else { return .openGL }
+        return .metal
+    }
+
+    static func fallbackReason(requested: MPVRenderBackend, hasMetalDevice: Bool) -> String? {
+        guard requested == .metal else { return nil }
+        guard hasMetalDevice else { return "Metal device unavailable" }
+        guard forkExposesMetalSampleBufferPictureInPicture else {
+            return "MPVKit \(bundledMPVKitVersion) bundled in this build does not expose Metal sample-buffer PiP frames"
+        }
+        guard lunaImplementsMetalSampleBufferPictureInPicture else {
+            return "Luna Metal sample-buffer PiP adapter is not enabled in this build"
+        }
+        return nil
+    }
+}
+
 class Settings: ObservableObject {
     static let shared = Settings()
     
@@ -132,6 +228,17 @@ class Settings: ObservableObject {
         }
         set {
             UserDefaults.standard.set(newValue == 60 ? 60 : 30, forKey: "mpvForegroundFPS")
+        }
+    }
+
+    var mpvRenderBackend: MPVRenderBackend {
+        get {
+            let raw = UserDefaults.standard.string(forKey: "mpvRenderBackend")
+                ?? MPVRenderBackend.defaultBackend.rawValue
+            return MPVRenderBackend(rawValue: raw) ?? .defaultBackend
+        }
+        set {
+            UserDefaults.standard.set(newValue.rawValue, forKey: "mpvRenderBackend")
         }
     }
 
