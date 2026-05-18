@@ -73,9 +73,7 @@ protocol MPVNativeRendererDelegate: AnyObject {
 
 #if os(iOS)
 import GLKit
-import Metal
 import OpenGLES
-import QuartzCore
 import Darwin
 
 private typealias MPVOpenGLGetProcAddress = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?) -> UnsafeMutableRawPointer?
@@ -106,51 +104,6 @@ private final class MPVOpenGLView: GLKView {
 
     override func draw(_ rect: CGRect) {
         renderer?.drawOpenGLFrame()
-    }
-}
-
-private final class MPVMetalView: UIView {
-    override class var layerClass: AnyClass {
-        CAMetalLayer.self
-    }
-
-    var metalLayer: CAMetalLayer {
-        layer as! CAMetalLayer
-    }
-
-    let device: MTLDevice?
-
-    override init(frame: CGRect) {
-        self.device = MTLCreateSystemDefaultDevice()
-        super.init(frame: frame)
-        configureLayer()
-    }
-
-    required init?(coder: NSCoder) {
-        self.device = MTLCreateSystemDefaultDevice()
-        super.init(coder: coder)
-        configureLayer()
-    }
-
-    private func configureLayer() {
-        backgroundColor = .black
-        isOpaque = true
-        isUserInteractionEnabled = false
-        metalLayer.device = device
-        metalLayer.pixelFormat = .bgra8Unorm
-        metalLayer.framebufferOnly = true
-        metalLayer.contentsScale = UIScreen.main.scale
-        metalLayer.backgroundColor = UIColor.black.cgColor
-    }
-
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        let scale = window?.screen.scale ?? UIScreen.main.scale
-        metalLayer.contentsScale = scale
-        metalLayer.drawableSize = CGSize(
-            width: max(1, bounds.width * scale),
-            height: max(1, bounds.height * scale)
-        )
     }
 }
 
@@ -683,7 +636,6 @@ final class MPVNativeRenderer: PlayerRenderer {
 
     private enum RenderMode {
         case openGL
-        case metal
         case pictureInPicture
     }
 
@@ -702,11 +654,7 @@ final class MPVNativeRenderer: PlayerRenderer {
     private let displayLayer: AVSampleBufferDisplayLayer
     private let glContext: EAGLContext
     private let glView: MPVOpenGLView
-    private let metalView: MPVMetalView
     private let pipBridge: MPVPiPBridge
-    private let requestedRenderBackend: MPVRenderBackend
-    private let activeRenderBackend: MPVRenderBackend
-    private let renderBackendFallbackReason: String?
     private let eventQueue = DispatchQueue(label: "mpv.native.events", qos: .utility)
     private let stateQueue = DispatchQueue(label: "mpv.native.state", attributes: .concurrent)
     private let eventQueueGroup = DispatchGroup()
@@ -759,8 +707,7 @@ final class MPVNativeRenderer: PlayerRenderer {
     }
 
     var supportsBitmapSubtitleTracks: Bool {
-        activeRenderBackend == .openGL
-            || (activeRenderBackend == .metal && MPVRenderBackendSupport.metalBitmapSubtitlesValidated)
+        true
     }
 
     private func logMPV(_ message: String) {
@@ -776,26 +723,10 @@ final class MPVNativeRenderer: PlayerRenderer {
             fatalError("Unable to create EAGL context for MPV")
         }
 
-        let requestedBackend = Settings.shared.mpvRenderBackend
-        let metalView = MPVMetalView(frame: .zero)
-        let hasMetalDevice = metalView.device != nil
-        let activeBackend = MPVRenderBackendSupport.effectiveBackend(
-            requested: requestedBackend,
-            hasMetalDevice: hasMetalDevice
-        )
-        let fallbackReason = MPVRenderBackendSupport.fallbackReason(
-            requested: requestedBackend,
-            hasMetalDevice: hasMetalDevice
-        )
-
         self.displayLayer = displayLayer
         self.glContext = context
         self.glView = MPVOpenGLView(frame: .zero, context: context)
-        self.metalView = metalView
         self.pipBridge = MPVPiPBridge(displayLayer: displayLayer)
-        self.requestedRenderBackend = requestedBackend
-        self.activeRenderBackend = activeBackend
-        self.renderBackendFallbackReason = fallbackReason
 
         let screen = UIApplication.shared.connectedScenes
             .compactMap { ($0 as? UIWindowScene)?.screen }
@@ -814,8 +745,6 @@ final class MPVNativeRenderer: PlayerRenderer {
         glView.drawableStencilFormat = .format8
         glView.drawableMultisample = .multisampleNone
         glView.isUserInteractionEnabled = false
-        glView.isHidden = activeBackend != .openGL
-        metalView.isHidden = activeBackend != .metal
 
         displayLayer.videoGravity = .resizeAspect
         displayLayer.backgroundColor = UIColor.black.cgColor
@@ -828,12 +757,7 @@ final class MPVNativeRenderer: PlayerRenderer {
     }
 
     func getRenderingView() -> UIView {
-        switch activeRenderBackend {
-        case .metal:
-            return metalView
-        case .openGL:
-            return glView
-        }
+        glView
     }
 
     func start() throws {
@@ -847,17 +771,13 @@ final class MPVNativeRenderer: PlayerRenderer {
             throw RendererError.mpvCreationFailed
         }
         mpv = handle
-        logMPVCrashProbe("diagnostics marker version=mpv-ios-fbo-rgba8-sid-no-nv12 backendRequested=\(requestedRenderBackend.rawValue) backendEffective=\(activeRenderBackend.rawValue) backendSupport={\(MPVRenderBackendSupport.diagnosticsSummary)}")
-        logMPV("MPV render backend capabilities \(MPVRenderBackendSupport.diagnosticsSummary)")
-        if let renderBackendFallbackReason {
-            logMPV("MPV render backend fallback requested=\(requestedRenderBackend.rawValue) effective=\(activeRenderBackend.rawValue) reason=\(renderBackendFallbackReason)")
-            logMPVCrashProbe("render backend fallback requested=\(requestedRenderBackend.rawValue) effective=\(activeRenderBackend.rawValue) reason=\(renderBackendFallbackReason)")
-        }
+        logMPVCrashProbe("diagnostics marker version=mpv-ios-opengl-36f621b-behavior backend=openGL")
 
         setOption(name: "terminal", value: "no")
         setOption(name: "msg-level", value: "all=warn,cplayer=v,ffmpeg=v,demux=v,stream=v")
         setOption(name: "keep-open", value: "yes")
         setOption(name: "idle", value: "yes")
+        setOption(name: "vo", value: "libmpv")
         setOption(name: "profile", value: "fast")
         setOption(name: "hwdec", value: "videotoolbox-copy")
         setOption(name: "vd-lavc-dr", value: "no")
@@ -869,22 +789,10 @@ final class MPVNativeRenderer: PlayerRenderer {
         setOption(name: "video-sync", value: "audio")
         setOption(name: "framedrop", value: "vo")
         setOption(name: "interpolation", value: "no")
-        setOption(name: "sid", value: "no")
         setOption(name: "sub-auto", value: "fuzzy")
         setOption(name: "subs-fallback", value: "yes")
         setOption(name: "sub-ass-override", value: "yes")
         setOption(name: "sub-use-margins", value: "yes")
-        switch activeRenderBackend {
-        case .openGL:
-            setOption(name: "vo", value: "libmpv")
-            setOption(name: "fbo-format", value: "rgba8")
-        case .metal:
-            setOption(name: "vo", value: "gpu")
-            setOption(name: "gpu-api", value: "vulkan")
-            setOption(name: "gpu-context", value: "moltenvk")
-            setOption(name: "gpu-sw", value: "yes")
-            applyMetalWindowID(handle: handle)
-        }
         applySubtitleStyle(lastAppliedSubtitleStyle)
 
         let initStatus = mpv_initialize(handle)
@@ -896,16 +804,14 @@ final class MPVNativeRenderer: PlayerRenderer {
         }
 
         isRunning = true
-        currentMode = activeRenderBackend == .metal ? .metal : .openGL
+        currentMode = .openGL
         mpv_request_log_messages(handle, "v")
         do {
-            if activeRenderBackend == .openGL {
-                try createOpenGLRenderContext()
-            }
+            try createOpenGLRenderContext()
             observeProperties()
             installWakeupHandler()
             ensureAudioSessionActive()
-            logMPV("start completed mode=\(currentMode) backendRequested=\(requestedRenderBackend.rawValue) backendEffective=\(activeRenderBackend.rawValue) hwdec=videotoolbox-copy dr=no softwareFallback=no")
+            logMPV("start completed mode=openGL hwdec=videotoolbox-copy dr=no softwareFallback=no")
             scheduleRender()
         } catch {
             logMPV("start failed after mpv_initialize: \(error)")
@@ -928,7 +834,7 @@ final class MPVNativeRenderer: PlayerRenderer {
 
         destroyRenderContext()
         pipBridge.reset(removingDisplayedImage: true)
-        currentMode = activeRenderBackend == .metal ? .metal : .openGL
+        currentMode = .openGL
 
         var handleForShutdown: OpaquePointer?
         handleForShutdown = mpv
@@ -987,11 +893,9 @@ final class MPVNativeRenderer: PlayerRenderer {
 
         apply(commands: preset.commands, on: handle)
         command(handle, ["stop"])
-        logMPVCrashProbe("configured iOS MPV video path target=\(describe(url: url)) hwdec=videotoolbox-copy softwareFallback=no backend=\(activeRenderBackend.rawValue)")
-        setProperty(name: "sid", value: "no")
+        logMPVCrashProbe("configured iOS MPV video path target=\(describe(url: url)) hwdec=videotoolbox-copy softwareFallback=no backend=openGL")
         updateHTTPHeaders(headers)
         applySubtitleStyle(lastAppliedSubtitleStyle)
-        setProperty(name: "sid", value: "no")
 
         let target = url.isFileURL ? url.path : url.absoluteString
         let loadStatus = command(handle, ["loadfile", target, "replace"])
@@ -1023,12 +927,7 @@ final class MPVNativeRenderer: PlayerRenderer {
     }
 
     func canStartSampleBufferPictureInPicture() -> Bool {
-        switch activeRenderBackend {
-        case .openGL:
-            return true
-        case .metal:
-            return MPVRenderBackendSupport.metalSampleBufferPictureInPictureAvailable
-        }
+        true
     }
 
     func pictureInPictureDebugSnapshot() -> String {
@@ -1036,20 +935,12 @@ final class MPVNativeRenderer: PlayerRenderer {
     }
 
     func performanceOverlaySnapshot() -> String {
+        let size = currentVideoSize()
         let pipSummary = pipBridge.performanceSnapshot()
-        let fallback = renderBackendFallbackReason.map { "\nfallback \($0)" } ?? ""
-        return "MPV \(currentMode) \(isPaused ? "paused" : "playing")\(isLoading ? " loading" : "")\nbackend \(activeRenderBackend.displayName) requested \(requestedRenderBackend.displayName)\npos \(String(format: "%.1f", cachedPosition))/\(String(format: "%.1f", cachedDuration))\nfg \(foregroundFramesPerSecond)fps target PiP 24fps target\nvideo \(String(format: "%.0fx%.0f", videoSize.width, videoSize.height))\(fallback)\n\(pipSummary)"
+        return "MPV \(currentMode) \(isPaused ? "paused" : "playing")\(isLoading ? " loading" : "")\npos \(String(format: "%.1f", cachedPosition))/\(String(format: "%.1f", cachedDuration))\nfg \(foregroundFramesPerSecond)fps target PiP 24fps target\nvideo \(String(format: "%.0fx%.0f", size.width, size.height))\n\(pipSummary)"
     }
 
     func prepareForPictureInPictureStart() {
-        guard canStartSampleBufferPictureInPicture() else {
-            logMPV("PiP prepare skipped backend=\(activeRenderBackend.rawValue): sample-buffer PiP unavailable support={\(MPVRenderBackendSupport.diagnosticsSummary)}")
-            return
-        }
-        guard activeRenderBackend == .openGL else {
-            logMPV("PiP prepare skipped backend=\(activeRenderBackend.rawValue): Metal PiP adapter is not implemented in this renderer")
-            return
-        }
         guard isRunning, currentMode != .pictureInPicture else { return }
         pipTransitionID += 1
         pipRenderRequestCount = 0
@@ -1081,14 +972,6 @@ final class MPVNativeRenderer: PlayerRenderer {
 
     func finishPictureInPicture() {
         guard isRunning else { return }
-        guard canStartSampleBufferPictureInPicture() else {
-            logMPV("PiP finish skipped backend=\(activeRenderBackend.rawValue): sample-buffer PiP unavailable")
-            return
-        }
-        guard activeRenderBackend == .openGL else {
-            logMPV("PiP finish skipped backend=\(activeRenderBackend.rawValue): Metal PiP adapter is not implemented in this renderer")
-            return
-        }
         guard currentMode != .openGL else {
             resumeForegroundRendering(reason: "finish-pip-already-openGL")
             return
@@ -1113,14 +996,6 @@ final class MPVNativeRenderer: PlayerRenderer {
     }
 
     func primePictureInPictureFrames(reason: String) {
-        guard canStartSampleBufferPictureInPicture() else {
-            logMPV("PiP prime skipped reason=\(reason) backend=\(activeRenderBackend.rawValue): sample-buffer PiP unavailable")
-            return
-        }
-        guard activeRenderBackend == .openGL else {
-            logMPV("PiP prime skipped reason=\(reason) backend=\(activeRenderBackend.rawValue): Metal PiP adapter is not implemented in this renderer")
-            return
-        }
         guard isRunning, currentMode == .pictureInPicture else { return }
         renderPiPFrame(force: true, immediate: true)
         logMPV("PiP prime requested reason=\(reason) primed=\(pipBridge.hasEnqueuedFrame()) \(pipDebugSnapshot())")
@@ -1128,14 +1003,6 @@ final class MPVNativeRenderer: PlayerRenderer {
     }
 
     func activatePictureInPictureLayer() {
-        guard canStartSampleBufferPictureInPicture() else {
-            logMPV("PiP layer activation skipped backend=\(activeRenderBackend.rawValue): sample-buffer PiP unavailable")
-            return
-        }
-        guard activeRenderBackend == .openGL else {
-            logMPV("PiP layer activation skipped backend=\(activeRenderBackend.rawValue): Metal PiP adapter is not implemented in this renderer")
-            return
-        }
         guard isRunning, currentMode == .pictureInPicture else { return }
         logMPV("activating sample-buffer PiP layer \(pipDebugSnapshot())")
         DispatchQueue.main.async { [weak self] in
@@ -1156,10 +1023,6 @@ final class MPVNativeRenderer: PlayerRenderer {
 
     func resumeForegroundRendering(reason: String) {
         guard isRunning else { return }
-        guard activeRenderBackend == .openGL else {
-            logMPV("foreground render recovery skipped reason=\(reason) backend=\(activeRenderBackend.rawValue)")
-            return
-        }
         guard currentMode == .openGL else {
             logMPV("foreground render recovery skipped reason=\(reason) mode=\(currentMode)")
             return
@@ -1218,8 +1081,7 @@ final class MPVNativeRenderer: PlayerRenderer {
         let subVisibility = mpv.flatMap { getStringProperty(handle: $0, name: "sub-visibility") } ?? "nil"
         let voConfigured = mpv.flatMap { getStringProperty(handle: $0, name: "vo-configured") } ?? "nil"
         let hwdec = mpv.flatMap { getStringProperty(handle: $0, name: "hwdec-current") } ?? "nil"
-        let fallback = renderBackendFallbackReason.map { " fallback=\($0)" } ?? ""
-        return "mode=\(currentMode) backend=\(activeRenderBackend.rawValue) requestedBackend=\(requestedRenderBackend.rawValue)\(fallback) running=\(isRunning) stopping=\(isStopping) context=\(renderContext != nil) paused=\(isPaused) loading=\(isLoading) ready=\(isReadyToSeek) pos=\(String(format: "%.2f", cachedPosition))/\(String(format: "%.2f", cachedDuration)) video=\(String(format: "%.0fx%.0f", size.width, size.height)) glBounds=\(String(format: "%.0fx%.0f", glView.bounds.width, glView.bounds.height)) metalBounds=\(String(format: "%.0fx%.0f", metalView.bounds.width, metalView.bounds.height)) drawable=\(glView.drawableWidth)x\(glView.drawableHeight) metalDrawable=\(String(format: "%.0fx%.0f", metalView.metalLayer.drawableSize.width, metalView.metalLayer.drawableSize.height)) vid=\(vid) sid=\(sid) subVisible=\(subVisibility) vo=\(voConfigured) hwdec=\(hwdec) tracksVideo=\(videoCount) selectedVideo=\(selectedVideo) tracksSub=\(subtitleCount) selectedSub=\(selectedSubtitle) selectedVideoMemory=\(selectedVideoTrackID.map(String.init) ?? "nil") trackPreview=\(trackPreview) bridge={\(pipBridge.debugSnapshot())}"
+        return "mode=\(currentMode) running=\(isRunning) stopping=\(isStopping) context=\(renderContext != nil) paused=\(isPaused) loading=\(isLoading) ready=\(isReadyToSeek) pos=\(String(format: "%.2f", cachedPosition))/\(String(format: "%.2f", cachedDuration)) video=\(String(format: "%.0fx%.0f", size.width, size.height)) glBounds=\(String(format: "%.0fx%.0f", glView.bounds.width, glView.bounds.height)) drawable=\(glView.drawableWidth)x\(glView.drawableHeight) vid=\(vid) sid=\(sid) subVisible=\(subVisibility) vo=\(voConfigured) hwdec=\(hwdec) tracksVideo=\(videoCount) selectedVideo=\(selectedVideo) tracksSub=\(subtitleCount) selectedSub=\(selectedSubtitle) selectedVideoMemory=\(selectedVideoTrackID.map(String.init) ?? "nil") trackPreview=\(trackPreview) bridge={\(pipBridge.debugSnapshot())}"
     }
 
     private func createOpenGLRenderContext() throws {
@@ -1411,8 +1273,6 @@ final class MPVNativeRenderer: PlayerRenderer {
                 switch self.currentMode {
                 case .openGL:
                     self.forcedOpenGLRenderCount = max(self.forcedOpenGLRenderCount, 1)
-                case .metal:
-                    break
                 case .pictureInPicture:
                     self.forcedPiPRenderCount = max(self.forcedPiPRenderCount, 1)
                 }
@@ -1423,8 +1283,6 @@ final class MPVNativeRenderer: PlayerRenderer {
         switch currentMode {
         case .openGL:
             scheduleOpenGLRender()
-        case .metal:
-            break
         case .pictureInPicture:
             schedulePiPRender()
         }
@@ -1818,18 +1676,6 @@ final class MPVNativeRenderer: PlayerRenderer {
         }
     }
 
-    private func applyMetalWindowID(handle: OpaquePointer) {
-        var wid = Int64(Int(bitPattern: Unmanaged.passUnretained(metalView.metalLayer).toOpaque()))
-        let status = "wid".withCString { namePointer in
-            mpv_set_option(handle, namePointer, MPV_FORMAT_INT64, &wid)
-        }
-        if status < 0 {
-            logMPV("failed to set Metal CAMetalLayer wid status=\(status)")
-        } else {
-            logMPV("configured Metal CAMetalLayer wid=\(wid) drawable=\(String(format: "%.0fx%.0f", metalView.metalLayer.drawableSize.width, metalView.metalLayer.drawableSize.height))")
-        }
-    }
-
     private func setProperty(name: String, value: String) {
         guard let handle = mpv else { return }
         let status = value.withCString { valuePointer in
@@ -2018,7 +1864,7 @@ final class MPVNativeRenderer: PlayerRenderer {
     private func logPlaybackDiagnostics(reason: String) {
         lastPlaybackDiagnosticsBucket = Int(cachedPosition / 10.0)
         let size = currentVideoSize()
-        logMPVCrashProbe("diagnostics checkpoint reason=\(reason) gen=\(loadGeneration) mode=\(currentMode) backend=\(activeRenderBackend.rawValue) requestedBackend=\(requestedRenderBackend.rawValue) pos=\(String(format: "%.2f", cachedPosition))/\(String(format: "%.2f", cachedDuration)) loading=\(isLoading) ready=\(isReadyToSeek) paused=\(isPaused) running=\(isRunning) stopping=\(isStopping) video=\(String(format: "%.0fx%.0f", size.width, size.height)) lastTracks={\(shortText(lastTrackSummary, limit: 260))}")
+        logMPVCrashProbe("diagnostics checkpoint reason=\(reason) gen=\(loadGeneration) mode=\(currentMode) backend=openGL pos=\(String(format: "%.2f", cachedPosition))/\(String(format: "%.2f", cachedDuration)) loading=\(isLoading) ready=\(isReadyToSeek) paused=\(isPaused) running=\(isRunning) stopping=\(isStopping) video=\(String(format: "%.0fx%.0f", size.width, size.height)) lastTracks={\(shortText(lastTrackSummary, limit: 260))}")
         guard let handle = mpv else {
             logMPVCrashProbe("diagnostics values reason=\(reason) skipped: mpv handle nil")
             return
@@ -2038,7 +1884,7 @@ final class MPVNativeRenderer: PlayerRenderer {
             ?? "nil"
         let voDrops = getStringProperty(handle: handle, name: "vo-drop-frame-count") ?? "nil"
         let decoderDrops = getStringProperty(handle: handle, name: "decoder-frame-drop-count") ?? "nil"
-        logMPVCrashProbe("diagnostics values reason=\(reason) backend=\(activeRenderBackend.rawValue) requestedBackend=\(requestedRenderBackend.rawValue) codecV=\(videoCodec) codecA=\(audioCodec) hwdec=\(hwdec) hwdecImage=\(hwdecImageFormat) videoFormat=\(videoFormat) pixelFormat=\(pixelFormat) hwPixelFormat=\(hwPixelFormat) vf=\(videoFilter) fps=\(fps) voDrops=\(voDrops) decoderDrops=\(decoderDrops)")
+        logMPVCrashProbe("diagnostics values reason=\(reason) backend=openGL codecV=\(videoCodec) codecA=\(audioCodec) hwdec=\(hwdec) hwdecImage=\(hwdecImageFormat) videoFormat=\(videoFormat) pixelFormat=\(pixelFormat) hwPixelFormat=\(hwPixelFormat) vf=\(videoFilter) fps=\(fps) voDrops=\(voDrops) decoderDrops=\(decoderDrops)")
     }
 
     private func describe(url: URL) -> String {
