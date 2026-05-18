@@ -81,6 +81,7 @@ final class ModulesSearchResultsViewModel: ObservableObject {
     var pendingResult: SearchItem?
     var pendingJSController: JSController?
     var pendingStreamURL: String?
+    var pendingStreamName: String?
     var pendingHeaders: [String: String]?
     var pendingServiceHref: String?
     var pendingPlaybackAutoMode = false
@@ -106,6 +107,7 @@ final class ModulesSearchResultsViewModel: ObservableObject {
         pendingSubtitles = nil
         pendingService = nil
         pendingServiceHref = nil
+        pendingStreamName = nil
         pendingPlaybackAutoMode = false
         pendingPlaybackRetryCount = 0
     }
@@ -679,6 +681,7 @@ struct ModulesSearchResultsSheet: View {
                         service: service,
                         streamURL: option.url,
                         headers: option.headers,
+                        streamName: option.name,
                         serviceHref: viewModel.pendingServiceHref
                     )
                 }
@@ -742,7 +745,7 @@ struct ModulesSearchResultsSheet: View {
                 viewModel.showingSubtitlePicker = false
                 if let service = viewModel.pendingService,
                    let streamURL = viewModel.pendingStreamURL {
-                    dispatchStreamAction(streamURL, service: service, subtitle: option.url, headers: viewModel.pendingHeaders, serviceHref: viewModel.pendingServiceHref)
+                    dispatchStreamAction(streamURL, service: service, subtitle: option.url, headers: viewModel.pendingHeaders, streamName: viewModel.pendingStreamName, serviceHref: viewModel.pendingServiceHref)
                 }
             }
         }
@@ -750,7 +753,7 @@ struct ModulesSearchResultsSheet: View {
             viewModel.showingSubtitlePicker = false
             if let service = viewModel.pendingService,
                let streamURL = viewModel.pendingStreamURL {
-                dispatchStreamAction(streamURL, service: service, subtitle: nil, headers: viewModel.pendingHeaders, serviceHref: viewModel.pendingServiceHref)
+                dispatchStreamAction(streamURL, service: service, subtitle: nil, headers: viewModel.pendingHeaders, streamName: viewModel.pendingStreamName, serviceHref: viewModel.pendingServiceHref)
             }
         }
         Button("Cancel", role: .cancel) {
@@ -2041,6 +2044,19 @@ struct ModulesSearchResultsSheet: View {
         return parts.isEmpty ? "Stream" : parts.joined(separator: " · ")
     }
 
+    private func smartPlayerMetadata(for stream: StremioStream) -> String {
+        [
+            stream.name,
+            stream.title,
+            stream.description,
+            stream.behaviorHints?.filename,
+            stremioStreamLabel(for: stream)
+        ]
+        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .filter { !$0.isEmpty }
+        .joined(separator: " ")
+    }
+
     private func extractQualityTags(from lines: [String]) -> String {
         let resolutionPatterns = ["4k", "2160p", "1080p", "720p", "480p", "360p"]
         let qualityPatterns = ["bluray", "blu-ray", "bdrip", "brrip", "dvdrip", "dvd", "webrip", "web-dl", "webdl", "web", "hdtv", "hdrip", "cam", "ts", "hdcam", "remux"]
@@ -2165,11 +2181,11 @@ struct ModulesSearchResultsSheet: View {
         if downloadMode {
             downloadStremioStream(urlString, addon: addon, subtitle: subtitleURLs.first, headers: stream.proxyHeaders)
         } else {
-            playStremioStreamURL(urlString, addon: addon, subtitles: subtitleURLs, subtitleNames: subtitleNames, headers: stream.proxyHeaders, autoModeLaunch: autoModeLaunch, retryCount: retryCount)
+            playStremioStreamURL(urlString, addon: addon, subtitles: subtitleURLs, subtitleNames: subtitleNames, headers: stream.proxyHeaders, streamName: smartPlayerMetadata(for: stream), autoModeLaunch: autoModeLaunch, retryCount: retryCount)
         }
     }
 
-    private func playStremioStreamURL(_ url: String, addon: StremioAddon, subtitles: [String], subtitleNames: [String], headers: [String: String]?, autoModeLaunch: Bool = false, retryCount: Int = 0) {
+    private func playStremioStreamURL(_ url: String, addon: StremioAddon, subtitles: [String], subtitleNames: [String], headers: [String: String]?, streamName: String? = nil, autoModeLaunch: Bool = false, retryCount: Int = 0) {
         viewModel.resetStreamState()
 
         Task { @MainActor in
@@ -2233,6 +2249,7 @@ struct ModulesSearchResultsSheet: View {
                 sourceKind: .stremio,
                 autoMode: autoModeLaunch,
                 streamURL: url,
+                streamName: streamName,
                 headers: finalHeaders,
                 subtitles: resolvedSubtitleArray ?? [],
                 subtitleNames: subtitleNames,
@@ -2278,6 +2295,7 @@ struct ModulesSearchResultsSheet: View {
                     sourceKind: .stremio,
                     autoMode: autoModeLaunch,
                     streamURL: url,
+                    streamName: streamName,
                     headers: finalHeaders,
                     subtitles: subtitleArray ?? [],
                     subtitleNames: subtitleNames,
@@ -2325,6 +2343,7 @@ struct ModulesSearchResultsSheet: View {
                 sourceKind: .stremio,
                 autoMode: autoModeLaunch,
                 streamURL: url,
+                streamName: streamName,
                 headers: finalHeaders,
                 subtitles: subtitles,
                 subtitleNames: subtitleNames,
@@ -2680,6 +2699,7 @@ struct ModulesSearchResultsSheet: View {
                 service: service,
                 streamURL: firstStream.url,
                 headers: firstStream.headers,
+                streamName: firstStream.name,
                 serviceHref: viewModel.pendingServiceHref
             )
         } else if let streamURL = extractSingleStreamURL(streams: streams, sources: sources) {
@@ -2770,20 +2790,20 @@ struct ModulesSearchResultsSheet: View {
     }
     
     @MainActor
-    private func resolveSubtitleSelection(subtitles: [String]?, defaultSubtitle: String?, service: Service, streamURL: String, headers: [String: String]?, serviceHref: String? = nil) {
+    private func resolveSubtitleSelection(subtitles: [String]?, defaultSubtitle: String?, service: Service, streamURL: String, headers: [String: String]?, streamName: String? = nil, serviceHref: String? = nil) {
         guard let subtitles = subtitles, !subtitles.isEmpty else {
-            dispatchStreamAction(streamURL, service: service, subtitle: defaultSubtitle, headers: headers, serviceHref: serviceHref)
+            dispatchStreamAction(streamURL, service: service, subtitle: defaultSubtitle, headers: headers, streamName: streamName, serviceHref: serviceHref)
             return
         }
         
         let options = parseSubtitleOptions(from: subtitles)
         guard !options.isEmpty else {
-            dispatchStreamAction(streamURL, service: service, subtitle: defaultSubtitle, headers: headers, serviceHref: serviceHref)
+            dispatchStreamAction(streamURL, service: service, subtitle: defaultSubtitle, headers: headers, streamName: streamName, serviceHref: serviceHref)
             return
         }
         
         if options.count == 1 {
-            dispatchStreamAction(streamURL, service: service, subtitle: options[0].url, headers: headers, serviceHref: serviceHref)
+            dispatchStreamAction(streamURL, service: service, subtitle: options[0].url, headers: headers, streamName: streamName, serviceHref: serviceHref)
             return
         }
         
@@ -2792,12 +2812,13 @@ struct ModulesSearchResultsSheet: View {
         viewModel.pendingHeaders = headers
         viewModel.pendingService = service
         viewModel.pendingServiceHref = serviceHref
+        viewModel.pendingStreamName = streamName
         viewModel.isFetchingStreams = false
         viewModel.showingSubtitlePicker = true
     }
     
     /// Routes to either play or download based on downloadMode
-    private func dispatchStreamAction(_ url: String, service: Service, subtitle: String?, headers: [String: String]?, serviceHref: String? = nil) {
+    private func dispatchStreamAction(_ url: String, service: Service, subtitle: String?, headers: [String: String]?, streamName: String? = nil, serviceHref: String? = nil) {
         if downloadMode {
             downloadStreamURL(url, service: service, subtitle: subtitle, headers: headers)
         } else {
@@ -2806,6 +2827,7 @@ struct ModulesSearchResultsSheet: View {
                 service: service,
                 subtitle: subtitle,
                 headers: headers,
+                streamName: streamName,
                 serviceHref: serviceHref,
                 autoModeLaunch: viewModel.pendingPlaybackAutoMode,
                 retryCount: viewModel.pendingPlaybackRetryCount
@@ -2838,7 +2860,7 @@ struct ModulesSearchResultsSheet: View {
         return options
     }
     
-    private func playStreamURL(_ url: String, service: Service, subtitle: String?, headers: [String: String]?, serviceHref: String? = nil, autoModeLaunch: Bool = false, retryCount: Int = 0) {
+    private func playStreamURL(_ url: String, service: Service, subtitle: String?, headers: [String: String]?, streamName: String? = nil, serviceHref: String? = nil, autoModeLaunch: Bool = false, retryCount: Int = 0) {
         viewModel.resetStreamState()
         
         Task { @MainActor in
@@ -2923,6 +2945,7 @@ struct ModulesSearchResultsSheet: View {
                 sourceKind: .service,
                 autoMode: autoModeLaunch,
                 streamURL: url,
+                streamName: streamName,
                 headers: finalHeaders,
                 subtitles: resolvedSubtitleArray ?? [],
                 subtitleNames: nil,
@@ -2976,6 +2999,7 @@ struct ModulesSearchResultsSheet: View {
                     sourceKind: .service,
                     autoMode: autoModeLaunch,
                     streamURL: url,
+                    streamName: streamName,
                     headers: finalHeaders,
                     subtitles: subtitleArray ?? [],
                     subtitleNames: nil,
@@ -3046,6 +3070,7 @@ struct ModulesSearchResultsSheet: View {
                     sourceKind: .service,
                     autoMode: autoModeLaunch,
                     streamURL: url,
+                    streamName: streamName,
                     headers: finalHeaders,
                     subtitles: subtitleArray ?? [],
                     subtitleNames: nil,
@@ -3099,6 +3124,7 @@ struct ModulesSearchResultsSheet: View {
                     sourceKind: .service,
                     autoMode: autoModeLaunch,
                     streamURL: url,
+                    streamName: streamName,
                     headers: finalHeaders,
                     subtitles: subtitle.map { [$0] } ?? [],
                     subtitleNames: nil,

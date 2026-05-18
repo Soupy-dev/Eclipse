@@ -50,7 +50,7 @@ struct BackupData: Codable {
     var playerPerformanceOverlayEnabled: Bool = false
     var mpvForegroundFPS: Int = 30
     var mpvRenderBackend: String = MPVRenderBackend.defaultBackend.rawValue
-    var smartInAppPlayerChoosingEnabled: Bool = false
+    var smartInAppPlayerChoosingEnabled: Bool = true
 
     // Subtitle Styling
     var subtitleForegroundColor: Data?
@@ -177,7 +177,7 @@ struct BackupData: Codable {
         playerPerformanceOverlayEnabled = try container.decodeIfPresent(Bool.self, forKey: .playerPerformanceOverlayEnabled) ?? false
         mpvForegroundFPS = Self.sanitizedMPVForegroundFPS(try container.decodeIfPresent(Int.self, forKey: .mpvForegroundFPS) ?? 30)
         mpvRenderBackend = Self.sanitizedMPVRenderBackend(try container.decodeIfPresent(String.self, forKey: .mpvRenderBackend))
-        smartInAppPlayerChoosingEnabled = try container.decodeIfPresent(Bool.self, forKey: .smartInAppPlayerChoosingEnabled) ?? false
+        smartInAppPlayerChoosingEnabled = try container.decodeIfPresent(Bool.self, forKey: .smartInAppPlayerChoosingEnabled) ?? true
 
         // Subtitle styling
         subtitleForegroundColor = try Self.decodeColorData(from: container, forKey: .subtitleForegroundColor)
@@ -411,7 +411,7 @@ struct BackupData: Codable {
         playerPerformanceOverlayEnabled: Bool = false,
         mpvForegroundFPS: Int = 30,
         mpvRenderBackend: String = MPVRenderBackend.defaultBackend.rawValue,
-        smartInAppPlayerChoosingEnabled: Bool = false,
+        smartInAppPlayerChoosingEnabled: Bool = true,
 
         // Subtitle styling
         subtitleForegroundColor: Data? = nil,
@@ -763,7 +763,7 @@ class BackupManager {
         let playerPerformanceOverlayEnabled = userDefaults.bool(forKey: "playerPerformanceOverlayEnabled")
         let mpvForegroundFPS = userDefaults.integer(forKey: "mpvForegroundFPS") == 60 ? 60 : 30
         let mpvRenderBackend = BackupData.sanitizedMPVRenderBackend(userDefaults.string(forKey: "mpvRenderBackend"))
-        let smartInAppPlayerChoosingEnabled = userDefaults.bool(forKey: "smartInAppPlayerChoosingEnabled")
+        let smartInAppPlayerChoosingEnabled = userDefaults.object(forKey: "smartInAppPlayerChoosingEnabled") as? Bool ?? true
 
         // Subtitle styling
         let subtitleForegroundColor = userDefaults.data(forKey: "subtitles_foregroundColor")
@@ -1061,7 +1061,7 @@ class BackupManager {
         let mpvForegroundFPSRaw = json["mpvForegroundFPS"] as? Int ?? (json["mpvForegroundFPS"] as? Double).map(Int.init) ?? 30
         let mpvForegroundFPS = mpvForegroundFPSRaw == 60 ? 60 : 30
         let mpvRenderBackend = BackupData.sanitizedMPVRenderBackend(json["mpvRenderBackend"] as? String)
-        let smartInAppPlayerChoosingEnabled = json["smartInAppPlayerChoosingEnabled"] as? Bool ?? false
+        let smartInAppPlayerChoosingEnabled = json["smartInAppPlayerChoosingEnabled"] as? Bool ?? true
 
         // Subtitle styling
         let subtitleForegroundColor = BackupData.backupColorData(from: json["subtitleForegroundColor"])

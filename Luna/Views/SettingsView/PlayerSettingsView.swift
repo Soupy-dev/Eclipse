@@ -184,7 +184,7 @@ final class PlayerSettingsStore: ObservableObject {
         
         let inAppRaw = UserDefaults.standard.string(forKey: "inAppPlayer") ?? InAppPlayer.vlc.rawValue
         self.inAppPlayer = InAppPlayer(rawValue: inAppRaw) ?? .vlc
-        self.smartInAppPlayerChoosingEnabled = UserDefaults.standard.bool(forKey: "smartInAppPlayerChoosingEnabled")
+        self.smartInAppPlayerChoosingEnabled = UserDefaults.standard.object(forKey: "smartInAppPlayerChoosingEnabled") as? Bool ?? true
 
         self.preferDownloadedMedia = UserDefaults.standard.bool(forKey: "preferDownloadedMedia")
 
@@ -393,7 +393,7 @@ struct PlayerSettingsView: View {
                             .font(.subheadline)
                             .fontWeight(.medium)
 
-                        Text("When MPV is selected, automatically use VLC for higher quality streams or risky downloaded files that MPV's current OpenGL path may not handle cleanly.")
+                        Text("Automatically uses VLC for risky 10-bit, HDR, remux, or bitmap-subtitle media that MPV may crash or heat on. If VLC is selected, clearly safe videos use MPV instead so PiP stays available. Turning this off can make MPV open risky media and can keep VLC on safe media without PiP.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.leading)

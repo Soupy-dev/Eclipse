@@ -243,7 +243,9 @@ class Settings: ObservableObject {
     }
 
     var smartInAppPlayerChoosingEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: "smartInAppPlayerChoosingEnabled") }
+        get {
+            UserDefaults.standard.object(forKey: "smartInAppPlayerChoosingEnabled") as? Bool ?? true
+        }
         set { UserDefaults.standard.set(newValue, forKey: "smartInAppPlayerChoosingEnabled") }
     }
 

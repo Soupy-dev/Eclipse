@@ -32,6 +32,7 @@ struct PlaybackLaunchContext {
     let sourceKind: PlaybackSourceKind
     let autoMode: Bool
     let streamURL: String
+    let streamName: String? = nil
     let headers: [String: String]
     let subtitles: [String]
     let subtitleNames: [String]?
@@ -452,12 +453,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         
         if playerChoice == .vlc {
             if let reason = smartChoice.reason {
-                Logger.shared.log("[PlayerVC.SmartPlayer] using VLC instead of MPV reason=\(reason)", type: "Player")
+                Logger.shared.log("[PlayerVC.SmartPlayer] using \(playerChoiceName(playerChoice)) instead of \(playerChoiceName(requestedPlayerChoice)) reason=\(reason)", type: "Player")
             }
             let r = VLCRenderer(displayLayer: displayLayer)
             r.delegate = self
             return r
         } else {
+            if let reason = smartChoice.reason {
+                Logger.shared.log("[PlayerVC.SmartPlayer] using \(playerChoiceName(playerChoice)) instead of \(playerChoiceName(requestedPlayerChoice)) reason=\(reason)", type: "Player")
+            }
             let r = MPVNativeRenderer(displayLayer: displayLayer)
             r.delegate = self
             return r
@@ -474,22 +478,44 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func smartInAppPlayerChoice(requested: Settings.PlayerChoice) -> (choice: Settings.PlayerChoice, reason: String?) {
-        guard requested == .mpv, Settings.shared.smartInAppPlayerChoosingEnabled else {
+        guard Settings.shared.smartInAppPlayerChoosingEnabled else {
             return (requested, nil)
         }
 
-        guard let reason = smartPlayerVLCFallbackReason() else {
-            return (requested, nil)
+        let classification = smartPlayerMediaClassification()
+        switch requested {
+        case .mpv:
+            if let riskReason = classification.riskReason {
+                return (.vlc, riskReason)
+            }
+        case .vlc:
+            if classification.riskReason == nil, let safeReason = classification.safeReason {
+                return (.mpv, safeReason)
+            }
         }
 
-        return (.vlc, reason)
+        return (requested, nil)
     }
 
-    private func smartPlayerVLCFallbackReason() -> String? {
+    private func playerChoiceName(_ choice: Settings.PlayerChoice) -> String {
+        switch choice {
+        case .mpv:
+            return "MPV"
+        case .vlc:
+            return "VLC"
+        }
+    }
+
+    private func smartPlayerMediaClassification() -> (riskReason: String?, safeReason: String?) {
         let candidates = [
             initialURL?.absoluteString,
             initialURL?.lastPathComponent,
             playbackLaunchContext?.streamURL,
+            playbackLaunchContext?.streamName,
+            playbackLaunchContext?.sourceName,
+            playbackLaunchContext?.subtitleNames?.joined(separator: " "),
+            initialSubtitleNames?.joined(separator: " "),
+            smartPlayerMediaInfoText(),
             playerTitleOverride
         ]
         let mediaText = candidates
@@ -497,7 +523,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             .map { ($0.removingPercentEncoding ?? $0).lowercased() }
             .joined(separator: " ")
 
-        guard !mediaText.isEmpty else { return nil }
+        guard !mediaText.isEmpty else { return (nil, nil) }
+        let normalizedMediaText = mediaText.replacingOccurrences(
+            of: #"[^a-z0-9\.\+\-]+"#,
+            with: " ",
+            options: .regularExpression
+        )
+        let paddedMediaText = " \(normalizedMediaText) "
 
         let riskyTokens: [(token: String, reason: String)] = [
             ("10bit", "10-bit video"),
@@ -506,27 +538,78 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             ("main10", "10-bit video"),
             ("hi10", "10-bit video"),
             ("hi10p", "10-bit video"),
+            ("yuv420p10", "10-bit video"),
+            ("yuv422p10", "10-bit video"),
+            ("yuv444p10", "10-bit video"),
             ("p010", "10-bit/P010 video"),
             ("p016", "10-bit/P016 video"),
             ("2160p", "4K stream"),
             ("4k", "4K stream"),
             ("uhd", "UHD stream"),
             ("remux", "remux stream"),
+            ("bdremux", "remux stream"),
             ("dolbyvision", "Dolby Vision stream"),
             ("dolby vision", "Dolby Vision stream"),
             ("dovi", "Dolby Vision stream"),
+            ("dvhe", "Dolby Vision stream"),
+            ("hdr10+", "HDR stream"),
             ("hdr10", "HDR stream"),
-            ("hdr", "HDR stream")
+            ("hdr", "HDR stream"),
+            ("av1", "AV1 stream"),
+            ("pgs", "bitmap subtitle stream"),
+            ("hdmv", "bitmap subtitle stream"),
+            ("vobsub", "bitmap subtitle stream"),
+            ("dvbsub", "bitmap subtitle stream"),
+            ("xsub", "bitmap subtitle stream")
         ]
 
-        guard let matched = riskyTokens.first(where: { mediaText.contains($0.token) }) else {
-            return nil
+        if let matched = riskyTokens.first(where: { smartPlayerText(normalizedMediaText, paddedMediaText: paddedMediaText, contains: $0.token) }) {
+            if initialURL?.isFileURL == true {
+                return ("downloaded/local \(matched.reason)", nil)
+            }
+            return (matched.reason, nil)
         }
 
-        if initialURL?.isFileURL == true {
-            return "downloaded/local \(matched.reason)"
+        let explicitlyModernCodecTokens = ["hevc", "h265", "h.265", "x265", "av1", "vp9"]
+        let safeCodecTokens = ["h264", "h.264", "x264", "avc"]
+        if safeCodecTokens.contains(where: { normalizedMediaText.contains($0) }),
+           !explicitlyModernCodecTokens.contains(where: { normalizedMediaText.contains($0) }) {
+            return (nil, "H.264/AVC video")
         }
-        return matched.reason
+
+        let conservativeWebSources = ["web-dl", "webdl", "webrip", "web rip", "hdtv"]
+        let moderateResolutionTokens = ["1080p", "720p", "480p", "360p"]
+        if conservativeWebSources.contains(where: { normalizedMediaText.contains($0) }),
+           moderateResolutionTokens.contains(where: { normalizedMediaText.contains($0) }),
+           !explicitlyModernCodecTokens.contains(where: { normalizedMediaText.contains($0) }) {
+            return (nil, "SDR web stream")
+        }
+
+        if isAnimeContent() || isAnimeHint == true {
+            return (nil, "anime playback without risky stream markers")
+        }
+
+        return (nil, nil)
+    }
+
+    private func smartPlayerText(_ normalizedText: String, paddedMediaText: String, contains token: String) -> Bool {
+        switch token {
+        case "4k", "uhd", "hdr", "av1", "pgs", "xsub":
+            return paddedMediaText.contains(" \(token) ")
+        default:
+            return normalizedText.contains(token)
+        }
+    }
+
+    private func smartPlayerMediaInfoText() -> String? {
+        guard let mediaInfo else { return nil }
+        switch mediaInfo {
+        case .movie(_, let title, _, let isAnime):
+            return "\(title) \(isAnime ? "anime" : "")"
+        case .episode(_, let seasonNumber, let episodeNumber, let showTitle, _, let isAnime):
+            let title = showTitle ?? ""
+            return "\(title) s\(seasonNumber)e\(episodeNumber) \(isAnime ? "anime" : "")"
+        }
     }
 
     private var isVLCPlayer: Bool {
@@ -4361,9 +4444,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func canAutoSelectNativeSubtitleTrack(_ track: SubtitleTrackDescriptor) -> Bool {
         guard let mpvRenderer else { return true }
-        if isMPVBitmapSubtitleTrack(track), mpvRenderer.shouldAvoidBitmapSubtitleTracksForCurrentItem {
-            return false
-        }
         if mpvRenderer.supportsBitmapSubtitleTracks { return true }
         return !isMPVBitmapSubtitleTrack(track)
     }
@@ -4399,10 +4479,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         guard summary != lastSkippedMPVBitmapSubtitleSummary else { return }
         lastSkippedMPVBitmapSubtitleSummary = summary
         guard !summary.isEmpty else { return }
-        let reason = mpvRenderer?.shouldAvoidBitmapSubtitleTracksForCurrentItem == true
-            ? "risky OpenGL 10-bit/software path"
-            : "unsupported renderer path"
-        Logger.shared.log("[PlayerVC.Subtitles] skipping MPV bitmap subtitle tracks for default/manual selection reason=\(reason): \(summary)", type: "Player")
+        Logger.shared.log("[PlayerVC.Subtitles] skipping MPV bitmap subtitle tracks for default/manual selection reason=unsupported renderer path: \(summary)", type: "Player")
     }
 
     private func preferredDefaultSubtitleTrack(from tracks: [(Int, String)], preferredLang: String) -> (Int, String)? {
@@ -4538,9 +4615,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if let deadline = vlcExternalSubtitlePriorityDeadline, Date() < deadline {
             return false
         }
-        let forceMPVBitmapSafetyFallback = mpvRenderer?.shouldAvoidBitmapSubtitleTracksForCurrentItem == true
         return isVLCOpenSubtitlesEnabled
-            && (Settings.shared.vlcOpenSubtitlesAutoFallbackEnabled || forceMPVBitmapSafetyFallback)
+            && Settings.shared.vlcOpenSubtitlesAutoFallbackEnabled
             && Settings.shared.enableSubtitlesByDefault
             && !userSelectedSubtitleTrack
     }

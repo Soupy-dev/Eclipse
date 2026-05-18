@@ -751,7 +751,6 @@ final class MPVNativeRenderer: PlayerRenderer {
     private var selectedVideoTrackID: Int?
     private var pipTransitionID = 0
     private var pipRenderRequestCount = 0
-    private var forceSoftwareDecodeForCurrentItem = false
 
     weak var delegate: MPVNativeRendererDelegate?
 
@@ -762,10 +761,6 @@ final class MPVNativeRenderer: PlayerRenderer {
     var supportsBitmapSubtitleTracks: Bool {
         activeRenderBackend == .openGL
             || (activeRenderBackend == .metal && MPVRenderBackendSupport.metalBitmapSubtitlesValidated)
-    }
-
-    var shouldAvoidBitmapSubtitleTracksForCurrentItem: Bool {
-        activeRenderBackend == .openGL && forceSoftwareDecodeForCurrentItem
     }
 
     private func logMPV(_ message: String) {
@@ -865,11 +860,8 @@ final class MPVNativeRenderer: PlayerRenderer {
         setOption(name: "idle", value: "yes")
         setOption(name: "profile", value: "fast")
         setOption(name: "hwdec", value: "videotoolbox-copy")
-        setOption(name: "hwdec-image-format", value: "nv12")
         setOption(name: "vd-lavc-dr", value: "no")
-        setOption(name: "vd-lavc-software-fallback", value: "yes")
-        setOption(name: "hwdec-software-fallback", value: "yes")
-        setOption(name: "sws-allow-zimg", value: "yes")
+        setOption(name: "vd-lavc-software-fallback", value: "no")
         setOption(name: "demuxer-thread", value: "yes")
         setOption(name: "cache", value: "yes")
         setOption(name: "demuxer-max-bytes", value: "80M")
@@ -886,7 +878,6 @@ final class MPVNativeRenderer: PlayerRenderer {
         case .openGL:
             setOption(name: "vo", value: "libmpv")
             setOption(name: "fbo-format", value: "rgba8")
-            setOption(name: "vf", value: "format=fmt=nv12")
         case .metal:
             setOption(name: "vo", value: "gpu")
             setOption(name: "gpu-api", value: "vulkan")
@@ -914,7 +905,7 @@ final class MPVNativeRenderer: PlayerRenderer {
             observeProperties()
             installWakeupHandler()
             ensureAudioSessionActive()
-            logMPV("start completed mode=\(currentMode) backendRequested=\(requestedRenderBackend.rawValue) backendEffective=\(activeRenderBackend.rawValue) hwdec=videotoolbox-copy imageFormat=nv12 vf=\(activeRenderBackend == .openGL ? "format=fmt=nv12" : "none") dr=no softwareFallback=yes")
+            logMPV("start completed mode=\(currentMode) backendRequested=\(requestedRenderBackend.rawValue) backendEffective=\(activeRenderBackend.rawValue) hwdec=videotoolbox-copy dr=no softwareFallback=no")
             scheduleRender()
         } catch {
             logMPV("start failed after mpv_initialize: \(error)")
@@ -969,12 +960,6 @@ final class MPVNativeRenderer: PlayerRenderer {
     }
 
     func load(url: URL, with preset: PlayerPreset, headers: [String: String]? = nil) {
-        let isSameMedia = currentURL == url
-        if !isSameMedia {
-            forceSoftwareDecodeForCurrentItem = shouldPreferSoftwareDecodeForOpenGL(url: url)
-        } else if shouldPreferSoftwareDecodeForOpenGL(url: url) {
-            forceSoftwareDecodeForCurrentItem = true
-        }
         currentPreset = preset
         currentURL = url
         currentHeaders = headers
@@ -1002,9 +987,7 @@ final class MPVNativeRenderer: PlayerRenderer {
 
         apply(commands: preset.commands, on: handle)
         command(handle, ["stop"])
-        if activeRenderBackend == .openGL {
-            applyIOSOpenGLVideoStabilityOptions(for: url)
-        }
+        logMPVCrashProbe("configured iOS MPV video path target=\(describe(url: url)) hwdec=videotoolbox-copy softwareFallback=no backend=\(activeRenderBackend.rawValue)")
         setProperty(name: "sid", value: "no")
         updateHTTPHeaders(headers)
         applySubtitleStyle(lastAppliedSubtitleStyle)
@@ -1647,9 +1630,6 @@ final class MPVNativeRenderer: PlayerRenderer {
         logMPV("file loaded gen=\(loadGeneration) elapsed=\(elapsed)s duration=\(String(format: "%.2f", cachedDuration)) position=\(String(format: "%.2f", cachedPosition))")
         logTrackSummaryIfChanged(reason: "file-loaded")
         logPlaybackDiagnostics(reason: "file-loaded")
-        if reloadOpenGLItemWithSoftwareDecodeIfNeeded(reason: "file-loaded") {
-            return
-        }
         startForegroundDisplayLink(reason: "file-loaded")
         if let initialSeek = pendingInitialSeek {
             logMPV("applying pending initial seek \(String(format: "%.2f", initialSeek))s")
@@ -1816,105 +1796,6 @@ final class MPVNativeRenderer: PlayerRenderer {
         stateQueue.sync { videoSize }
     }
 
-    private func shouldPreferSoftwareDecodeForOpenGL(url: URL) -> Bool {
-        guard activeRenderBackend == .openGL else { return false }
-        let text = openGLRiskInspectionText(for: url)
-        let riskyTokens = [
-            "10bit",
-            "10-bit",
-            "10 bit",
-            "main10",
-            "hi10",
-            "hi10p",
-            "p010",
-            "p016"
-        ]
-        return riskyTokens.contains { text.contains($0) }
-    }
-
-    private func openGLRiskInspectionText(for url: URL) -> String {
-        var candidates = [
-            url.absoluteString,
-            url.lastPathComponent
-        ]
-
-        if let decodedProxyTarget = decodedProxyTargetURLString(from: url) {
-            candidates.append(decodedProxyTarget)
-        }
-
-        return candidates
-            .map { ($0.removingPercentEncoding ?? $0).lowercased() }
-            .joined(separator: " ")
-    }
-
-    private func decodedProxyTargetURLString(from url: URL) -> String? {
-        guard let host = url.host,
-              host == "127.0.0.1" || host == "localhost",
-              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
-              let encodedTarget = components.queryItems?.first(where: { $0.name == "url" })?.value else {
-            return nil
-        }
-
-        var normalizedTarget = encodedTarget
-            .replacingOccurrences(of: " ", with: "+")
-            .replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/")
-        while normalizedTarget.count % 4 != 0 {
-            normalizedTarget.append("=")
-        }
-
-        guard let data = Data(base64Encoded: normalizedTarget),
-              let decoded = String(data: data, encoding: .utf8),
-              !decoded.isEmpty else {
-            return nil
-        }
-
-        return decoded
-    }
-
-    private func isOpenGLRiskyVideoPixelFormat(_ value: String) -> Bool {
-        let lower = value.lowercased()
-        return lower.contains("p010")
-            || lower.contains("p016")
-            || lower.contains("yuv420p10")
-            || lower.contains("yuv420p12")
-            || lower.contains("yuv422p10")
-            || lower.contains("yuv422p12")
-            || lower.contains("yuv444p10")
-            || lower.contains("yuv444p12")
-    }
-
-    private func currentVideoPixelFormatDescription(handle: OpaquePointer) -> String {
-        getStringProperty(handle: handle, name: "video-params/pixelformat")
-            ?? getStringProperty(handle: handle, name: "video-params/format")
-            ?? "nil"
-    }
-
-    private func reloadOpenGLItemWithSoftwareDecodeIfNeeded(reason: String) -> Bool {
-        guard activeRenderBackend == .openGL,
-              !forceSoftwareDecodeForCurrentItem,
-              let handle = mpv,
-              let url = currentURL,
-              let preset = currentPreset else {
-            return false
-        }
-
-        let pixelFormat = currentVideoPixelFormatDescription(handle: handle)
-        let videoFormat = getStringProperty(handle: handle, name: "video-format") ?? "nil"
-        guard isOpenGLRiskyVideoPixelFormat(pixelFormat) || isOpenGLRiskyVideoPixelFormat(videoFormat) else {
-            return false
-        }
-
-        forceSoftwareDecodeForCurrentItem = true
-        let headers = currentHeaders
-        logMPVCrashProbe("detected risky iOS OpenGL pixel format reason=\(reason) videoFormat=\(videoFormat) pixelFormat=\(pixelFormat); reloading with software decode")
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.load(url: url, with: preset, headers: headers)
-        }
-        return true
-    }
-
     private func ensureAudioSessionActive() {
         do {
             let session = AVAudioSession.sharedInstance()
@@ -1958,25 +1839,6 @@ final class MPVNativeRenderer: PlayerRenderer {
         }
         if status < 0 {
             logMPV("failed to set property \(name)=\(redactIfSensitive(name: name, value: value)) status=\(status)")
-        }
-    }
-
-    private func applyIOSOpenGLVideoStabilityOptions(for url: URL) {
-        setProperty(name: "sws-allow-zimg", value: "yes")
-        setProperty(name: "vd-lavc-dr", value: "no")
-        setProperty(name: "vd-lavc-software-fallback", value: "yes")
-        setProperty(name: "hwdec-software-fallback", value: "yes")
-
-        if forceSoftwareDecodeForCurrentItem {
-            setProperty(name: "hwdec", value: "no")
-            setProperty(name: "dither-depth", value: "8")
-            setProperty(name: "vf", value: "scale,format=fmt=rgba")
-            logMPVCrashProbe("configured iOS OpenGL software video path reason=10bit-or-p010-risk target=\(describe(url: url)) hwdec=no dither=8 vf=scale,format=fmt=rgba")
-        } else {
-            setProperty(name: "hwdec", value: "videotoolbox-copy")
-            setProperty(name: "hwdec-image-format", value: "nv12")
-            setProperty(name: "vf", value: "format=fmt=nv12")
-            logMPVCrashProbe("configured iOS OpenGL stability video path hwdec=videotoolbox-copy hwdecImage=nv12 vf=format=fmt=nv12")
         }
     }
 
