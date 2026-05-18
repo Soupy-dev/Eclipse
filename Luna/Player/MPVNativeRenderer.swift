@@ -764,6 +764,10 @@ final class MPVNativeRenderer: PlayerRenderer {
             || (activeRenderBackend == .metal && MPVRenderBackendSupport.metalBitmapSubtitlesValidated)
     }
 
+    var shouldAvoidBitmapSubtitleTracksForCurrentItem: Bool {
+        activeRenderBackend == .openGL && forceSoftwareDecodeForCurrentItem
+    }
+
     private func logMPV(_ message: String) {
         Logger.shared.log("[MPVNativeRenderer] \(message)", type: "MPV")
     }

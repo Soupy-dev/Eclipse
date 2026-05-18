@@ -4361,6 +4361,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func canAutoSelectNativeSubtitleTrack(_ track: SubtitleTrackDescriptor) -> Bool {
         guard let mpvRenderer else { return true }
+        if isMPVBitmapSubtitleTrack(track), mpvRenderer.shouldAvoidBitmapSubtitleTracksForCurrentItem {
+            return false
+        }
         if mpvRenderer.supportsBitmapSubtitleTracks { return true }
         return !isMPVBitmapSubtitleTrack(track)
     }
@@ -4396,7 +4399,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         guard summary != lastSkippedMPVBitmapSubtitleSummary else { return }
         lastSkippedMPVBitmapSubtitleSummary = summary
         guard !summary.isEmpty else { return }
-        Logger.shared.log("[PlayerVC.Subtitles] skipping MPV bitmap subtitle tracks for default/manual selection: \(summary)", type: "Player")
+        let reason = mpvRenderer?.shouldAvoidBitmapSubtitleTracksForCurrentItem == true
+            ? "risky OpenGL 10-bit/software path"
+            : "unsupported renderer path"
+        Logger.shared.log("[PlayerVC.Subtitles] skipping MPV bitmap subtitle tracks for default/manual selection reason=\(reason): \(summary)", type: "Player")
     }
 
     private func preferredDefaultSubtitleTrack(from tracks: [(Int, String)], preferredLang: String) -> (Int, String)? {
@@ -4532,8 +4538,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if let deadline = vlcExternalSubtitlePriorityDeadline, Date() < deadline {
             return false
         }
+        let forceMPVBitmapSafetyFallback = mpvRenderer?.shouldAvoidBitmapSubtitleTracksForCurrentItem == true
         return isVLCOpenSubtitlesEnabled
-            && Settings.shared.vlcOpenSubtitlesAutoFallbackEnabled
+            && (Settings.shared.vlcOpenSubtitlesAutoFallbackEnabled || forceMPVBitmapSafetyFallback)
             && Settings.shared.enableSubtitlesByDefault
             && !userSelectedSubtitleTrack
     }
