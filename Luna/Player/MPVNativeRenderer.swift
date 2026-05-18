@@ -225,6 +225,22 @@ private final class MPVOpenGLView: UIView {
     }
 }
 
+private final class MPVForegroundDisplayLinkTarget: NSObject {
+    weak var renderer: MPVNativeRenderer?
+
+    init(renderer: MPVNativeRenderer) {
+        self.renderer = renderer
+    }
+
+    @objc func displayLinkDidFire(_ link: CADisplayLink) {
+        guard let renderer else {
+            link.invalidate()
+            return
+        }
+        renderer.handleForegroundDisplayLink(link)
+    }
+}
+
 private final class MPVPiPBridge {
     private let displayLayer: AVSampleBufferDisplayLayer
     private var pixelBufferPool: CVPixelBufferPool?
@@ -762,7 +778,8 @@ final class MPVNativeRenderer: PlayerRenderer {
     private let renderQueueKey = DispatchSpecificKey<Bool>()
     private let stateQueue = DispatchQueue(label: "mpv.native.state", attributes: .concurrent)
     private let eventQueueGroup = DispatchGroup()
-    private var foregroundRenderTimer: DispatchSourceTimer?
+    private var foregroundDisplayLink: CADisplayLink?
+    private var foregroundDisplayLinkTarget: MPVForegroundDisplayLinkTarget?
     private var pipRenderTimer: DispatchSourceTimer?
 
     private var mpv: OpaquePointer?
@@ -1281,42 +1298,47 @@ final class MPVNativeRenderer: PlayerRenderer {
     }
 
     private func startForegroundDisplayLink(reason: String) {
-        performOnRenderQueueAsync { [weak self] in
+        DispatchQueue.main.async { [weak self] in
             guard let self,
                   self.isRunning,
                   !self.isStopping,
-                  self.currentMode == .openGL,
-                  self.foregroundRenderTimer == nil else {
+                  self.currentMode == .openGL else {
                 return
             }
-
-            let timer = DispatchSource.makeTimerSource(queue: self.renderQueue)
-            timer.schedule(
-                deadline: .now(),
-                repeating: self.foregroundFrameInterval,
-                leeway: .milliseconds(3)
-            )
-            timer.setEventHandler { [weak self] in
-                self?.handleForegroundRenderTick()
+            guard self.foregroundDisplayLink == nil else { return }
+            let target = MPVForegroundDisplayLinkTarget(renderer: self)
+            let link = CADisplayLink(target: target, selector: #selector(MPVForegroundDisplayLinkTarget.displayLinkDidFire(_:)))
+            if #available(iOS 15.0, *) {
+                link.preferredFrameRateRange = CAFrameRateRange(
+                    minimum: Float(min(24, self.foregroundFramesPerSecond)),
+                    maximum: Float(self.foregroundFramesPerSecond),
+                    preferred: Float(self.foregroundFramesPerSecond)
+                )
+            } else {
+                link.preferredFramesPerSecond = self.foregroundFramesPerSecond
             }
-            self.foregroundRenderTimer = timer
-            timer.resume()
-            self.logMPV("foreground render queue started reason=\(reason) fps=\(self.foregroundFramesPerSecond)")
+            link.add(to: .main, forMode: .common)
+            self.foregroundDisplayLinkTarget = target
+            self.foregroundDisplayLink = link
+            self.logMPV("foreground display link started reason=\(reason) fps=\(self.foregroundFramesPerSecond) renderQueue=enabled")
         }
     }
 
     private func stopForegroundDisplayLink(reason: String) {
-        let stop = { [weak self] in
-            guard let self, let timer = self.foregroundRenderTimer else { return }
-            timer.setEventHandler {}
-            timer.cancel()
-            self.foregroundRenderTimer = nil
-            self.logMPV("foreground render queue stopped reason=\(reason)")
+        let stopDisplayLink = { [weak self] in
+            guard let self, let link = self.foregroundDisplayLink else { return }
+            link.invalidate()
+            self.foregroundDisplayLink = nil
+            self.foregroundDisplayLinkTarget = nil
+            self.logMPV("foreground display link stopped reason=\(reason)")
         }
-        if DispatchQueue.getSpecific(key: renderQueueKey) == true {
-            stop()
+        if Thread.isMainThread {
+            stopDisplayLink()
         } else {
-            renderQueue.sync(execute: stop)
+            DispatchQueue.main.sync(execute: stopDisplayLink)
+        }
+        performOnRenderQueueSync {
+            isRenderScheduled = false
         }
     }
 
@@ -1371,13 +1393,23 @@ final class MPVNativeRenderer: PlayerRenderer {
         }
     }
 
-    private func handleForegroundRenderTick() {
+    fileprivate func handleForegroundDisplayLink(_ link: CADisplayLink) {
         guard isRunning, !isStopping, currentMode == .openGL else {
             stopForegroundDisplayLink(reason: "not-openGL")
             return
         }
         guard !isPaused || isLoading || forcedOpenGLRenderCount > 0 else { return }
-        drawOpenGLFrame()
+        enqueueForegroundRender(reason: "display-link")
+    }
+
+    private func enqueueForegroundRender(reason: String) {
+        performOnRenderQueueAsync { [weak self] in
+            guard let self, self.isRunning, !self.isStopping, self.currentMode == .openGL else { return }
+            guard !self.isRenderScheduled else { return }
+            self.isRenderScheduled = true
+            self.drawOpenGLFrame()
+            self.isRenderScheduled = false
+        }
     }
 
     private func scheduleRender(force: Bool = false) {
@@ -1429,7 +1461,7 @@ final class MPVNativeRenderer: PlayerRenderer {
     private func scheduleOpenGLRender() {
         performOnRenderQueueAsync { [weak self] in
             guard let self, self.isRunning, !self.isStopping, self.currentMode == .openGL else { return }
-            if self.foregroundRenderTimer != nil, self.forcedOpenGLRenderCount == 0 {
+            if self.foregroundDisplayLink != nil, self.forcedOpenGLRenderCount == 0 {
                 return
             }
             guard !self.isRenderScheduled else { return }
