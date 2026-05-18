@@ -667,6 +667,7 @@ final class MPVNativeRenderer: PlayerRenderer {
     private var currentMode: RenderMode = .openGL
     private var openGLAPIType = Array("opengl\0".utf8CString)
     private var openGLRenderParams = [mpv_render_param](repeating: mpv_render_param(type: MPV_RENDER_PARAM_INVALID, data: nil), count: 4)
+    private var blockForTargetTime: Int32 = 0
 
     private var currentPreset: PlayerPreset?
     private var currentURL: URL?
@@ -788,6 +789,7 @@ final class MPVNativeRenderer: PlayerRenderer {
         setOption(name: "demuxer-max-bytes", value: "80M")
         setOption(name: "demuxer-readahead-secs", value: "10")
         setOption(name: "video-sync", value: "audio")
+        setOption(name: "video-timing-offset", value: "0")
         setOption(name: "framedrop", value: "vo")
         setOption(name: "interpolation", value: "no")
         setOption(name: "sub-auto", value: "fuzzy")
@@ -1051,24 +1053,19 @@ final class MPVNativeRenderer: PlayerRenderer {
         requestRenderBurst(reason: reason, count: 6, interval: 0.08)
     }
 
-    func beginForegroundUIStallRecovery(reason: String, duration: TimeInterval = 8.0) {
+    func beginForegroundUIStallRecovery(reason: String, duration: TimeInterval = 1.2) {
         guard isRunning, !isStopping, currentMode == .openGL else { return }
         foregroundUIRecoveryGeneration += 1
         let generation = foregroundUIRecoveryGeneration
-        let recoveryDuration = max(1.0, duration)
-        logMPV("foreground UI recovery begin reason=\(reason) duration=\(String(format: "%.1f", recoveryDuration))s")
+        let recoveryDuration = min(2.0, max(0.4, duration))
+        logMPV("foreground UI render assist begin reason=\(reason) duration=\(String(format: "%.1f", recoveryDuration))s")
 
-        // UIKit menus can block GLKView presentation long enough for audio to
-        // run ahead. During that window, let mpv drop both VO and decoder
-        // frames when late so it can catch back up without changing the stable
-        // foreground renderer.
-        setProperty(name: "framedrop", value: "decoder+vo")
         if let handle = mpv {
             mpv_wakeup(handle)
         }
-        requestRenderBurst(reason: "ui-recovery-\(reason)", count: 4, interval: 0.08)
+        requestRenderBurst(reason: "ui-assist-\(reason)", count: 4, interval: 0.04)
 
-        for delay in [0.5, 1.2, 2.4, 4.0, 6.0] where delay < recoveryDuration {
+        for delay in [0.15, 0.35, 0.7, 1.1] where delay < recoveryDuration {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 guard let self,
                       self.isRunning,
@@ -1082,22 +1079,6 @@ final class MPVNativeRenderer: PlayerRenderer {
                 }
                 self.scheduleRender(force: true)
             }
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + recoveryDuration) { [weak self] in
-            guard let self,
-                  self.isRunning,
-                  !self.isStopping,
-                  self.currentMode == .openGL,
-                  generation == self.foregroundUIRecoveryGeneration else {
-                return
-            }
-            self.setProperty(name: "framedrop", value: "vo")
-            if !self.isPaused, let handle = self.mpv {
-                self.logMPV("foreground UI recovery resync reason=\(reason)")
-                self.command(handle, ["seek", "0", "relative", "exact"])
-            }
-            self.requestRenderBurst(reason: "ui-recovery-end-\(reason)", count: 4, interval: 0.06)
         }
     }
 
@@ -1441,7 +1422,8 @@ final class MPVNativeRenderer: PlayerRenderer {
             withUnsafeMutablePointer(to: &flipY) { flipPointer in
                 openGLRenderParams[0] = mpv_render_param(type: MPV_RENDER_PARAM_OPENGL_FBO, data: UnsafeMutableRawPointer(fboPointer))
                 openGLRenderParams[1] = mpv_render_param(type: MPV_RENDER_PARAM_FLIP_Y, data: UnsafeMutableRawPointer(flipPointer))
-                openGLRenderParams[2] = mpv_render_param(type: MPV_RENDER_PARAM_INVALID, data: nil)
+                openGLRenderParams[2] = mpv_render_param(type: MPV_RENDER_PARAM_BLOCK_FOR_TARGET_TIME, data: UnsafeMutableRawPointer(&blockForTargetTime))
+                openGLRenderParams[3] = mpv_render_param(type: MPV_RENDER_PARAM_INVALID, data: nil)
                 return openGLRenderParams.withUnsafeMutableBufferPointer { buffer -> Int32 in
                     guard let baseAddress = buffer.baseAddress else { return -1 }
                     return mpv_render_context_render(context, baseAddress)
