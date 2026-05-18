@@ -4214,7 +4214,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 let id = track.id
                 let name = track.name
                 let blocksMPVDefault = !canAutoSelectNativeSubtitleTrack(track)
-                UIAction(
+                return UIAction(
                     title: blocksMPVDefault ? "\(name) [\(subtitleBitmapCodecLabel(track.codec))]" : name,
                     image: UIImage(systemName: blocksMPVDefault ? "exclamationmark.triangle" : "captions.bubble"),
                     attributes: blocksMPVDefault ? .disabled : [],
