@@ -767,6 +767,7 @@ final class MPVNativeRenderer: PlayerRenderer {
             throw RendererError.mpvCreationFailed
         }
         mpv = handle
+        logMPVCrashProbe("diagnostics marker version=mpv-ios-fbo-rgba8")
 
         setOption(name: "terminal", value: "no")
         setOption(name: "msg-level", value: "all=warn,cplayer=v,ffmpeg=v,demux=v,stream=v")
@@ -774,6 +775,7 @@ final class MPVNativeRenderer: PlayerRenderer {
         setOption(name: "idle", value: "yes")
         setOption(name: "vo", value: "libmpv")
         setOption(name: "profile", value: "fast")
+        setOption(name: "fbo-format", value: "rgba8")
         setOption(name: "hwdec", value: "videotoolbox-copy")
         setOption(name: "vd-lavc-dr", value: "no")
         setOption(name: "vd-lavc-software-fallback", value: "yes")
