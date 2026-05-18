@@ -4210,7 +4210,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 }
             }
 
-            let embeddedSubtitleActions = nativeSubtitleTracks.map { track in
+            let embeddedSubtitleActions: [UIAction] = nativeSubtitleTracks.map { track -> UIAction in
                 let id = track.id
                 let name = track.name
                 let blocksMPVDefault = !canAutoSelectNativeSubtitleTrack(track)
