@@ -11,7 +11,12 @@ import AVKit
 
 struct TVShowDetailsSection: View {
     let tvShow: TMDBTVShowWithSeasons?
-    let ratingOverride: String? = nil
+    let ratingOverride: String?
+
+    init(tvShow: TMDBTVShowWithSeasons?, ratingOverride: String? = nil) {
+        self.tvShow = tvShow
+        self.ratingOverride = ratingOverride
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
