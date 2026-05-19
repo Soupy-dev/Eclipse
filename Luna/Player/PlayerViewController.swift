@@ -554,6 +554,23 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             if let reason = smartChoice.reason {
                 Logger.shared.log("[PlayerVC.SmartPlayer] using \(playerChoiceName(playerChoice)) instead of \(playerChoiceName(requestedPlayerChoice)) reason=\(reason)", type: "Player")
             }
+            let requestedBackend = Settings.shared.mpvRenderBackend
+#if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+            let effectiveBackend = MPVRenderBackendSupport.effectiveBackend(requested: requestedBackend, hasMetalDevice: MPVKitMetalRenderer.isAvailable)
+            if effectiveBackend == .metal {
+                Logger.shared.log("[PlayerVC.MPV] using Metal sample-buffer renderer \(MPVRenderBackendSupport.diagnosticsSummary)", type: "MPV")
+                let r = MPVKitMetalRenderer(displayLayer: displayLayer)
+                r.delegate = self
+                return r
+            }
+            if let fallback = MPVRenderBackendSupport.fallbackReason(requested: requestedBackend, hasMetalDevice: MPVKitMetalRenderer.isAvailable) {
+                Logger.shared.log("[PlayerVC.MPV] Metal renderer fallback to OpenGL reason=\(fallback) \(MPVRenderBackendSupport.diagnosticsSummary)", type: "MPV")
+            }
+#else
+            if let fallback = MPVRenderBackendSupport.fallbackReason(requested: requestedBackend, hasMetalDevice: false) {
+                Logger.shared.log("[PlayerVC.MPV] Metal renderer fallback to OpenGL reason=\(fallback) \(MPVRenderBackendSupport.diagnosticsSummary)", type: "MPV")
+            }
+#endif
             let r = MPVNativeRenderer(displayLayer: displayLayer)
             r.delegate = self
             return r
@@ -564,7 +581,21 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var mpvRenderer: MPVNativeRenderer? {
         return renderer as? MPVNativeRenderer
     }
-    
+
+#if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+    private var metalMPVRenderer: MPVKitMetalRenderer? {
+        return renderer as? MPVKitMetalRenderer
+    }
+#endif
+
+    private var isMPVRenderer: Bool {
+#if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+        return mpvRenderer != nil || metalMPVRenderer != nil
+#else
+        return mpvRenderer != nil
+#endif
+    }
+
     private var vlcRenderer: VLCRenderer? {
         return renderer as? VLCRenderer
     }
@@ -709,7 +740,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private var supportsSharedPlayerControls: Bool {
-        isVLCPlayer || mpvRenderer != nil
+        isVLCPlayer || isMPVRenderer
     }
     
     var mediaInfo: MediaInfo?
@@ -1012,6 +1043,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 SubtitleTrackDescriptor(id: $0.0, name: $0.1, codec: $0.2, isExternalNativeTrack: $0.3)
             }
         }
+#if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+        if let metalMPVRenderer {
+            return metalMPVRenderer.getSubtitleTracksDetailed().map {
+                SubtitleTrackDescriptor(id: $0.0, name: $0.1, codec: $0.2, isExternalNativeTrack: $0.3)
+            }
+        }
+#endif
 
         return rendererGetSubtitleTracks().map {
             SubtitleTrackDescriptor(id: $0.0, name: $0.1, codec: "", isExternalNativeTrack: false)
@@ -1114,10 +1152,22 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             guard Settings.shared.vlcPiPEnabled else { return false }
             return vlc.isPictureInPictureAvailable
         }
-        if let mpv = mpvRenderer, !mpv.canStartSampleBufferPictureInPicture() {
+        if !canStartMPVSampleBufferPictureInPicture() {
             return false
         }
         return PiPController.isPictureInPictureSupported
+    }
+
+    private func canStartMPVSampleBufferPictureInPicture() -> Bool {
+        if let mpv = mpvRenderer {
+            return mpv.canStartSampleBufferPictureInPicture()
+        }
+#if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+        if let metal = metalMPVRenderer {
+            return metal.canStartSampleBufferPictureInPicture()
+        }
+#endif
+        return true
     }
 
     private func rendererIsPictureInPictureActive() -> Bool {
@@ -1136,26 +1186,42 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func rendererPreparePictureInPictureStart() {
-        logPictureInPicture("renderer prepare call hasMPVRenderer=\(mpvRenderer != nil)")
+        logPictureInPicture("renderer prepare call hasMPVRenderer=\(isMPVRenderer)")
         mpvRenderer?.prepareForPictureInPictureStart()
+#if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+        metalMPVRenderer?.prepareForPictureInPictureStart()
+#endif
     }
 
     private func rendererFinishPictureInPicture() {
         mpvRenderer?.finishPictureInPicture()
+#if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+        metalMPVRenderer?.finishPictureInPicture()
+#endif
     }
 
     private func rendererPrimePictureInPictureFrames(reason: String) {
-        logPictureInPicture("renderer prime call reason=\(reason) hasMPVRenderer=\(mpvRenderer != nil)")
+        logPictureInPicture("renderer prime call reason=\(reason) hasMPVRenderer=\(isMPVRenderer)")
         mpvRenderer?.primePictureInPictureFrames(reason: reason)
+#if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+        metalMPVRenderer?.primePictureInPictureFrames(reason: reason)
+#endif
     }
 
     private func rendererActivatePictureInPictureLayer() {
-        logPictureInPicture("renderer activate layer call hasMPVRenderer=\(mpvRenderer != nil)")
+        logPictureInPicture("renderer activate layer call hasMPVRenderer=\(isMPVRenderer)")
         mpvRenderer?.activatePictureInPictureLayer()
+#if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+        metalMPVRenderer?.activatePictureInPictureLayer()
+#endif
     }
 
     private func rendererIsPictureInPicturePrimed() -> Bool {
-        mpvRenderer?.isPictureInPicturePrimed() ?? false
+        if mpvRenderer?.isPictureInPicturePrimed() == true { return true }
+#if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+        if metalMPVRenderer?.isPictureInPicturePrimed() == true { return true }
+#endif
+        return false
     }
 
     @discardableResult
@@ -1193,10 +1259,21 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func rendererResumeForegroundRendering(reason: String) {
         mpvRenderer?.resumeForegroundRendering(reason: reason)
+#if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+        metalMPVRenderer?.resumeForegroundRendering(reason: reason)
+#endif
     }
 
     private func rendererPictureInPictureDebugSnapshot() -> String {
-        mpvRenderer?.pictureInPictureDebugSnapshot() ?? "mpvRenderer=nil"
+        if let snapshot = mpvRenderer?.pictureInPictureDebugSnapshot() {
+            return snapshot
+        }
+#if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+        if let snapshot = metalMPVRenderer?.pictureInPictureDebugSnapshot() {
+            return snapshot
+        }
+#endif
+        return "mpvRenderer=nil"
     }
 
     private func subtitlePictureInPictureDebugSnapshot() -> String {
@@ -1256,7 +1333,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private var isVLCOpenSubtitlesEnabled: Bool {
-        return (isVLCPlayer || mpvRenderer != nil) && Settings.shared.vlcOpenSubtitlesEnabled
+        return (isVLCPlayer || isMPVRenderer) && Settings.shared.vlcOpenSubtitlesEnabled
     }
 
     private func updatePiPButtonVisibility() {
@@ -1566,7 +1643,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 
         NotificationCenter.default.addObserver(self, selector: #selector(handleLoggerNotification(_:)), name: NSNotification.Name("LoggerNotification"), object: nil)
-        if isVLCPlayer || mpvRenderer != nil {
+        if isVLCPlayer || isMPVRenderer {
             lastKnownVLCCustomSubtitleOverlayEnabled = isVLCCustomSubtitleOverlayEnabled
             NotificationCenter.default.addObserver(self, selector: #selector(handleUserDefaultsDidChange), name: UserDefaults.didChangeNotification, object: nil)
         }
@@ -1694,7 +1771,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
         if let mpv = mpvRenderer {
             mpv.delegate = nil
-        } else if let vlc = vlcRenderer {
+        }
+#if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+        if let metal = metalMPVRenderer {
+            metal.delegate = nil
+        }
+#endif
+        if let vlc = vlcRenderer {
             vlc.delegate = nil
         }
         logSharedPlayerControl("deinit; stopping renderer and restoring state")
@@ -2044,6 +2127,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             displayLayer.opacity = 0.0
             displayLayer.zPosition = -1
             videoContainer.layer.addSublayer(displayLayer)
+#if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+            if metalMPVRenderer != nil {
+                displayLayer.isHidden = false
+                displayLayer.opacity = 1.0
+                displayLayer.zPosition = 0
+                logMPV("setupLayout using AVSampleBufferDisplayLayer for Metal sample-buffer renderer")
+            }
+#endif
         }
         
         // Add native rendering view FIRST (before all UI elements) so it renders behind controls.
@@ -2338,7 +2429,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         // MPV's GL view can be aggressive about touch delivery on iOS. Attaching
         // background gestures to the container lets them see touches through the
         // overlay while the delegate still filters real controls.
-        return mpvRenderer != nil ? videoContainer : tapOverlayView
+        return isMPVRenderer ? videoContainer : tapOverlayView
     }
 
     private func configureSeekButtons() {
@@ -2534,7 +2625,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         rightDoubleTapGesture = rightDoubleTap
         playerGestureSurfaceView.addGestureRecognizer(rightDoubleTap)
         
-        if mpvRenderer == nil, let tap = containerTapGesture {
+        if !isMPVRenderer, let tap = containerTapGesture {
             tap.require(toFail: leftDoubleTap)
             tap.require(toFail: rightDoubleTap)
         }
@@ -3369,7 +3460,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     @objc private func playerMenuButtonTouchDown(_ sender: UIButton) {
-        guard let mpvRenderer else { return }
         let reason: String
         if sender === speedButton {
             reason = "speed-menu"
@@ -3380,7 +3470,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         } else {
             reason = "player-menu"
         }
-        mpvRenderer.beginForegroundUIStallRecovery(reason: reason)
+        mpvRenderer?.beginForegroundUIStallRecovery(reason: reason)
+#if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+        metalMPVRenderer?.beginForegroundUIStallRecovery(reason: reason)
+#endif
     }
 
     private func makeOverlayAction(
@@ -4415,7 +4508,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if isVLCPlayer {
             return prepareVLCHeaderProxyIfNeeded(originalURL: originalURL, headers: headers)
         }
-        if mpvRenderer != nil {
+        if isMPVRenderer {
             return prepareMPVHeaderProxyIfNeeded(originalURL: originalURL, headers: headers)
         }
         return (originalURL, headers)
@@ -4547,7 +4640,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func attemptMPVTransportBridgeFallbackIfNeeded(after message: String) -> Bool {
-        guard mpvRenderer != nil else { return false }
+        guard isMPVRenderer else { return false }
         guard isMPVTransportBridgeCandidate(message) else { return false }
         guard !mpvTransportBridgeFallbackTried else { return false }
         guard let originalURL = initialURL,
@@ -4997,9 +5090,25 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func canAutoSelectNativeSubtitleTrack(_ track: SubtitleTrackDescriptor) -> Bool {
-        guard let mpvRenderer else { return true }
-        if mpvRenderer.supportsBitmapSubtitleTracks { return true }
-        return !isMPVBitmapSubtitleTrack(track)
+        if let mpvRenderer {
+            if mpvRenderer.supportsBitmapSubtitleTracks { return true }
+            return !isMPVBitmapSubtitleTrack(track)
+        }
+#if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+        if let metalMPVRenderer {
+            if metalMPVRenderer.supportsBitmapSubtitleTracks { return true }
+            return !isMPVBitmapSubtitleTrack(track)
+        }
+#endif
+        return true
+    }
+
+    private func shouldLogSkippedMPVBitmapSubtitleTracks() -> Bool {
+        if mpvRenderer != nil { return true }
+#if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+        if metalMPVRenderer != nil { return true }
+#endif
+        return false
     }
 
     private func isMPVBitmapSubtitleTrack(_ track: SubtitleTrackDescriptor) -> Bool {
@@ -5026,7 +5135,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func logSkippedMPVBitmapSubtitleTracksIfNeeded(_ tracks: [SubtitleTrackDescriptor]) {
-        guard mpvRenderer != nil else { return }
+        guard shouldLogSkippedMPVBitmapSubtitleTracks() else { return }
         let summary = tracks
             .map { "#\($0.id):\($0.codec.isEmpty ? "unknown" : $0.codec):\($0.name)" }
             .joined(separator: "|")
@@ -5346,7 +5455,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     @objc private func handleUserDefaultsDidChange() {
-        guard isVLCPlayer || mpvRenderer != nil else { return }
+        guard isVLCPlayer || isMPVRenderer else { return }
         if isVLCPlaybackStartupInProgress {
             Logger.shared.log("[PlayerVC.Settings] UserDefaults changed during VLC startup; deferring subtitle/settings rebuild", type: "Player")
 #if !os(tvOS)
@@ -6198,7 +6307,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
             if let mpv = self.mpvRenderer {
                 mpv.delegate = nil
-            } else if let vlc = self.vlcRenderer {
+            }
+#if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+            if let metal = self.metalMPVRenderer {
+                metal.delegate = nil
+            }
+#endif
+            if let vlc = self.vlcRenderer {
                 vlc.delegate = nil
             }
 
@@ -7424,12 +7539,12 @@ struct PlayerEpisodeBrowserDrawer: View {
 
 // MARK: - MPVNativeRendererDelegate
 extension PlayerViewController: MPVNativeRendererDelegate {
-    func renderer(_ renderer: MPVNativeRenderer, didUpdatePosition position: Double, duration: Double) {
+    func renderer(_ renderer: PlayerRenderer, didUpdatePosition position: Double, duration: Double) {
         if isClosing { return }
         updatePosition(position, duration: duration)
     }
     
-    func renderer(_ renderer: MPVNativeRenderer, didChangePause isPaused: Bool) {
+    func renderer(_ renderer: PlayerRenderer, didChangePause isPaused: Bool) {
         if isClosing { return }
         if !isPaused {
             markPlaybackStarted(reason: "playing")
@@ -7452,7 +7567,7 @@ extension PlayerViewController: MPVNativeRendererDelegate {
         pipController?.updatePlaybackState()
     }
     
-    func renderer(_ renderer: MPVNativeRenderer, didChangeLoading isLoading: Bool) {
+    func renderer(_ renderer: PlayerRenderer, didChangeLoading isLoading: Bool) {
         if isClosing { return }
         isRendererLoading = isLoading
         DispatchQueue.main.async { [weak self] in
@@ -7470,7 +7585,7 @@ extension PlayerViewController: MPVNativeRendererDelegate {
         }
     }
     
-    func renderer(_ renderer: MPVNativeRenderer, didBecomeReadyToSeek: Bool) {
+    func renderer(_ renderer: PlayerRenderer, didBecomeReadyToSeek: Bool) {
         if isClosing { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -7494,7 +7609,7 @@ extension PlayerViewController: MPVNativeRendererDelegate {
         }
     }
 
-    func renderer(_ renderer: MPVNativeRenderer, didFailWithError message: String) {
+    func renderer(_ renderer: PlayerRenderer, didFailWithError message: String) {
         if isClosing { return }
         logMPV("delegate didFailWithError message=\(message)")
         Logger.shared.log("PlayerViewController: MPV playback issue: \(message)", type: "MPV")
@@ -7506,7 +7621,7 @@ extension PlayerViewController: MPVNativeRendererDelegate {
         }
     }
 
-    func rendererDidChangeTracks(_ renderer: MPVNativeRenderer) {
+    func rendererDidChangeTracks(_ renderer: PlayerRenderer) {
         if isClosing { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -7515,7 +7630,7 @@ extension PlayerViewController: MPVNativeRendererDelegate {
         }
     }
     
-    func renderer(_ renderer: MPVNativeRenderer, subtitleTrackDidChange trackId: Int) {
+    func renderer(_ renderer: PlayerRenderer, subtitleTrackDidChange trackId: Int) {
         if isClosing { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -7816,7 +7931,7 @@ extension PlayerViewController: PiPControllerDelegate {
             logPictureInPicture("app-exit auto PiP skipped source=\(source): VLC renderer active")
             return
         }
-        guard mpvRenderer != nil else {
+        guard isMPVRenderer else {
             logPictureInPicture("app-exit auto PiP skipped source=\(source): MPV renderer missing")
             return
         }

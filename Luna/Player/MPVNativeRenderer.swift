@@ -11,6 +11,9 @@ import Libmpv
 import AVFoundation
 import CoreMedia
 import CoreVideo
+#if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+import MPVKitSampleBufferGPL
+#endif
 
 protocol PlayerRenderer: AnyObject {
     var isPausedState: Bool { get }
@@ -62,13 +65,13 @@ struct SubtitleStyle {
 }
 
 protocol MPVNativeRendererDelegate: AnyObject {
-    func renderer(_ renderer: MPVNativeRenderer, didUpdatePosition position: Double, duration: Double)
-    func renderer(_ renderer: MPVNativeRenderer, didChangePause isPaused: Bool)
-    func renderer(_ renderer: MPVNativeRenderer, didChangeLoading isLoading: Bool)
-    func renderer(_ renderer: MPVNativeRenderer, didBecomeReadyToSeek: Bool)
-    func renderer(_ renderer: MPVNativeRenderer, didFailWithError message: String)
-    func rendererDidChangeTracks(_ renderer: MPVNativeRenderer)
-    func renderer(_ renderer: MPVNativeRenderer, subtitleTrackDidChange trackId: Int)
+    func renderer(_ renderer: PlayerRenderer, didUpdatePosition position: Double, duration: Double)
+    func renderer(_ renderer: PlayerRenderer, didChangePause isPaused: Bool)
+    func renderer(_ renderer: PlayerRenderer, didChangeLoading isLoading: Bool)
+    func renderer(_ renderer: PlayerRenderer, didBecomeReadyToSeek: Bool)
+    func renderer(_ renderer: PlayerRenderer, didFailWithError message: String)
+    func rendererDidChangeTracks(_ renderer: PlayerRenderer)
+    func renderer(_ renderer: PlayerRenderer, subtitleTrackDidChange trackId: Int)
 }
 
 #if os(iOS)
@@ -2353,6 +2356,295 @@ private func performOnMainSync(_ block: () -> Void) {
         DispatchQueue.main.sync(execute: block)
     }
 }
+
+#if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
+final class MPVKitMetalRenderer: PlayerRenderer {
+    enum RendererError: Error {
+        case sampleBufferUnavailable
+    }
+
+    static var isAvailable: Bool {
+        MPVMetalSampleBufferRenderer.isSupported
+    }
+
+    weak var delegate: MPVNativeRendererDelegate?
+
+    private let displayLayer: AVSampleBufferDisplayLayer
+    private let sampleRenderer: MPVMetalSampleBufferRenderer
+    private let placeholderView = UIView(frame: .zero)
+    private var currentPreset: PlayerPreset?
+    private var currentURL: URL?
+    private var currentHeaders: [String: String]?
+    private var pendingInitialSeek: Double?
+    private var lastAppliedSubtitleStyle: SubtitleStyle = .default
+    private var isRunning = false
+    private var isPaused = true
+    private var isReadyToSeek = false
+    private var isLoading = false
+
+    var isPausedState: Bool { isPaused }
+    var supportsBitmapSubtitleTracks: Bool {
+        MPVRenderBackendSupport.metalBitmapSubtitlesValidated
+    }
+
+    init(displayLayer: AVSampleBufferDisplayLayer) {
+        self.displayLayer = displayLayer
+        self.sampleRenderer = MPVMetalSampleBufferRenderer(displayLayer: displayLayer)
+        placeholderView.backgroundColor = .clear
+        placeholderView.isUserInteractionEnabled = false
+        displayLayer.videoGravity = .resizeAspect
+        displayLayer.backgroundColor = UIColor.black.cgColor
+    }
+
+    func getRenderingView() -> UIView {
+        placeholderView
+    }
+
+    func start() throws {
+        guard !isRunning else { return }
+        sampleRenderer.onStateChange = { [weak self] state in
+            DispatchQueue.main.async {
+                self?.handleSampleBufferState(state)
+            }
+        }
+        sampleRenderer.onFrame = { [weak self] _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.delegate?.renderer(self, didUpdatePosition: self.sampleRenderer.currentTime, duration: self.sampleRenderer.duration)
+            }
+        }
+        sampleRenderer.onError = { [weak self] message in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.delegate?.renderer(self, didFailWithError: message)
+            }
+        }
+        try sampleRenderer.start()
+        isRunning = true
+    }
+
+    func stop() {
+        sampleRenderer.stop()
+        isRunning = false
+        isReadyToSeek = false
+        isLoading = false
+    }
+
+    func load(url: URL, with preset: PlayerPreset, headers: [String: String]?) {
+        currentURL = url
+        currentPreset = preset
+        currentHeaders = headers
+        applyPreset(preset)
+        isLoading = true
+        delegate?.renderer(self, didChangeLoading: true)
+        sampleRenderer.load(url, headers: headers)
+        if let pendingInitialSeek {
+            sampleRenderer.seek(to: pendingInitialSeek)
+            self.pendingInitialSeek = nil
+        }
+        sampleRenderer.play()
+    }
+
+    func reloadCurrentItem() {
+        guard let currentURL, let currentPreset else { return }
+        load(url: currentURL, with: currentPreset, headers: currentHeaders)
+    }
+
+    func applyPreset(_ preset: PlayerPreset) {
+        currentPreset = preset
+        for command in preset.commands {
+            _ = sampleRenderer.command(command)
+        }
+    }
+
+    func prepareInitialSeek(to seconds: Double?) {
+        pendingInitialSeek = seconds.map { max(0, $0) }
+    }
+
+    func performanceOverlaySnapshot() -> String {
+        let snapshot = sampleRenderer.diagnosticsSnapshot()
+        return "MPV metal-sample-buffer \(isPaused ? "paused" : "playing")\(isLoading ? " loading" : "")\npos \(String(format: "%.1f", sampleRenderer.currentTime))/\(String(format: "%.1f", sampleRenderer.duration))\nframes \(snapshot.frameCount) attempts \(snapshot.renderAttemptCount) failures \(snapshot.renderFailureCount)\nlayer \(snapshot.displayLayerStatus) ready=\(snapshot.displayLayerReadyForMoreMediaData) metalProbe=\(snapshot.metalCompatibilityProbeSucceeded)"
+    }
+
+    func play() {
+        isPaused = false
+        sampleRenderer.play()
+        delegate?.renderer(self, didChangePause: false)
+    }
+
+    func pausePlayback() {
+        isPaused = true
+        sampleRenderer.pause()
+        delegate?.renderer(self, didChangePause: true)
+    }
+
+    func togglePause() {
+        isPaused ? play() : pausePlayback()
+    }
+
+    func seek(to seconds: Double) {
+        sampleRenderer.seek(to: seconds)
+    }
+
+    func seek(by seconds: Double) {
+        sampleRenderer.seek(by: seconds)
+    }
+
+    func setSpeed(_ speed: Double) {
+        sampleRenderer.setSpeed(speed)
+    }
+
+    func getSpeed() -> Double {
+        sampleRenderer.getSpeed()
+    }
+
+    func getAudioTracksDetailed() -> [(Int, String, String)] {
+        sampleRenderer.audioTracks().map { ($0.id, $0.title, $0.language) }
+    }
+
+    func getAudioTracks() -> [(Int, String)] {
+        sampleRenderer.audioTracks().map { ($0.id, $0.title) }
+    }
+
+    func getCurrentAudioTrackId() -> Int {
+        sampleRenderer.currentAudioTrackID()
+    }
+
+    func setAudioTrack(id: Int) {
+        sampleRenderer.setAudioTrack(id: id)
+        delegate?.rendererDidChangeTracks(self)
+    }
+
+    func getSubtitleTracks() -> [(Int, String)] {
+        sampleRenderer.subtitleTracks().map { ($0.id, $0.title) }
+    }
+
+    func getSubtitleTracksDetailed() -> [(Int, String, String, Bool)] {
+        sampleRenderer.subtitleTracks().map { ($0.id, $0.title, $0.codec, false) }
+    }
+
+    func getCurrentSubtitleTrackId() -> Int {
+        sampleRenderer.currentSubtitleTrackID()
+    }
+
+    func setSubtitleTrack(id: Int) {
+        sampleRenderer.setSubtitleTrack(id: id)
+        delegate?.renderer(self, subtitleTrackDidChange: id)
+        delegate?.rendererDidChangeTracks(self)
+    }
+
+    func disableSubtitles() {
+        sampleRenderer.disableSubtitles()
+        delegate?.renderer(self, subtitleTrackDidChange: -1)
+    }
+
+    func refreshSubtitleOverlay() {
+        applySubtitleStyle(lastAppliedSubtitleStyle)
+    }
+
+    func loadExternalSubtitles(urls: [String], names: [String]?, enforce: Bool) {
+        sampleRenderer.loadExternalSubtitles(urls: urls, names: names, selectFirst: enforce)
+        delegate?.rendererDidChangeTracks(self)
+    }
+
+    func applySubtitleStyle(_ style: SubtitleStyle) {
+        lastAppliedSubtitleStyle = style
+        sampleRenderer.applySubtitleStyle(
+            MPVMetalSampleBufferSubtitleStyle(
+                foregroundColor: style.foregroundColor.cgColor,
+                strokeColor: style.strokeColor.cgColor,
+                strokeWidth: style.strokeWidth,
+                fontSize: style.fontSize,
+                isVisible: style.isVisible
+            )
+        )
+    }
+
+    func canStartSampleBufferPictureInPicture() -> Bool {
+        true
+    }
+
+    func prepareForPictureInPictureStart() {
+        displayLayer.isHidden = false
+        displayLayer.opacity = 1.0
+        sampleRenderer.primeFrames(reason: "enter-pip", count: 8)
+    }
+
+    func finishPictureInPicture() {
+        displayLayer.isHidden = false
+        displayLayer.opacity = 1.0
+        displayLayer.zPosition = 0
+        sampleRenderer.primeFrames(reason: "finish-pip", count: 4)
+    }
+
+    func primePictureInPictureFrames(reason: String) {
+        sampleRenderer.primeFrames(reason: reason, count: 6)
+    }
+
+    func activatePictureInPictureLayer() {
+        displayLayer.isHidden = false
+        displayLayer.opacity = 1.0
+        displayLayer.zPosition = 1
+        sampleRenderer.primeFrames(reason: "activate-pip", count: 4)
+    }
+
+    func isPictureInPicturePrimed() -> Bool {
+        sampleRenderer.diagnosticsSnapshot().frameCount > 0
+    }
+
+    func resumeForegroundRendering(reason: String) {
+        _ = reason
+        displayLayer.isHidden = false
+        displayLayer.opacity = 1.0
+        displayLayer.zPosition = 0
+        sampleRenderer.primeFrames(reason: "foreground", count: 4)
+    }
+
+    func pictureInPictureDebugSnapshot() -> String {
+        let snapshot = sampleRenderer.diagnosticsSnapshot()
+        return "mode=metal-sample-buffer running=\(isRunning) paused=\(isPaused) loading=\(isLoading) ready=\(isReadyToSeek) pos=\(String(format: "%.2f", sampleRenderer.currentTime))/\(String(format: "%.2f", sampleRenderer.duration)) frames=\(snapshot.frameCount) attempts=\(snapshot.renderAttemptCount) failures=\(snapshot.renderFailureCount) layer=\(snapshot.displayLayerStatus) metalProbe=\(snapshot.metalCompatibilityProbeSucceeded)"
+    }
+
+    func beginForegroundUIStallRecovery(reason: String) {
+        sampleRenderer.primeFrames(reason: reason, count: 2)
+    }
+
+    private func handleSampleBufferState(_ state: MPVMetalSampleBufferRendererState) {
+        switch state {
+        case .loading, .starting:
+            isLoading = true
+            delegate?.renderer(self, didChangeLoading: true)
+        case .playing:
+            isLoading = false
+            isPaused = false
+            delegate?.renderer(self, didChangeLoading: false)
+            delegate?.renderer(self, didChangePause: false)
+            if !isReadyToSeek {
+                isReadyToSeek = true
+                delegate?.renderer(self, didBecomeReadyToSeek: true)
+            }
+        case .paused:
+            isLoading = false
+            isPaused = true
+            delegate?.renderer(self, didChangeLoading: false)
+            delegate?.renderer(self, didChangePause: true)
+        case .ready:
+            isLoading = false
+            delegate?.renderer(self, didChangeLoading: false)
+            if currentURL != nil, !isReadyToSeek {
+                isReadyToSeek = true
+                delegate?.renderer(self, didBecomeReadyToSeek: true)
+            }
+        case .failed(let message):
+            isLoading = false
+            delegate?.renderer(self, didChangeLoading: false)
+            delegate?.renderer(self, didFailWithError: message)
+        case .idle, .stopped:
+            break
+        }
+    }
+}
+#endif
 
 #else
 
