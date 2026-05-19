@@ -1003,8 +1003,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var lastVLCUIProgressAnomalyKey: String?
     private var lastVLCUIProgressAnomalyLogTime: CFTimeInterval = 0
     private var lastPiPButtonVisibilityLogKey: String?
-    private var lastNativeVLCPiPAvailability: Bool?
-    private var lastNativeVLCPiPActive: Bool?
 
     private var isRendererLoading: Bool = false
     private var isClosing = false
@@ -1824,13 +1822,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             Logger.shared.log("Failed to start \(rendererName) renderer: \(error)", type: "Error")
         }
 
-        if isVLCPlayer {
-            pipController = nil
-            logVLCUI("skipping MPV PiPController for native VLC PiP path", type: "Player")
-        } else {
-            pipController = PiPController(sampleBufferDisplayLayer: displayLayer)
-            pipController?.delegate = self
-        }
+        pipController = PiPController(sampleBufferDisplayLayer: displayLayer)
+        pipController?.delegate = self
         updatePiPButtonVisibility()
         
         showControlsTemporarily()
@@ -1908,17 +1901,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         CATransaction.setDisableActions(true)
         
         if isVLCPlayer {
-            displayLayer.frame = videoContainer.bounds
-            if displayLayer.superlayer == nil {
-                videoContainer.layer.addSublayer(displayLayer)
-            }
-            if vlcRenderer?.isUsingPictureInPictureSampleBufferOutput != true,
-               !displayLayer.isHidden || displayLayer.opacity != 0 || displayLayer.zPosition != -1 {
-                displayLayer.isHidden = true
-                displayLayer.opacity = 0.0
-                displayLayer.zPosition = -1
-                logVLCUI("viewDidLayout hid inactive VLC sample-buffer displayLayer", type: "Player")
-            }
+            displayLayer.removeFromSuperlayer()
+            displayLayer.isHidden = true
+            displayLayer.opacity = 0.0
+            displayLayer.zPosition = -1
         } else {
             displayLayer.frame = videoContainer.bounds
         }
@@ -2307,11 +2293,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
         displayLayer.backgroundColor = (vlcRenderer == nil) ? UIColor.black.cgColor : UIColor.clear.cgColor
         if isVLCPlayer {
+            displayLayer.removeFromSuperlayer()
             displayLayer.isHidden = true
             displayLayer.opacity = 0.0
-            displayLayer.zPosition = -1
-            videoContainer.layer.addSublayer(displayLayer)
-            logVLCUI("setupLayout attached hidden sample-buffer displayLayer for VLC PiP", type: "Player")
+            logVLCUI("setupLayout skipped sample-buffer displayLayer for VLC renderer", type: "Player")
         } else {
             displayLayer.isHidden = true
             displayLayer.opacity = 0.0
@@ -7994,12 +7979,8 @@ extension PlayerViewController: VLCRendererDelegate {
         if isClosing { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            let changed = self.lastNativeVLCPiPAvailability != isAvailable
-            self.lastNativeVLCPiPAvailability = isAvailable
-            if changed {
-                Logger.shared.log("[PlayerVC.PiP] native VLC availability changed available=\(isAvailable) enabled=\(Settings.shared.vlcPiPEnabled) active=\(renderer.isPictureInPictureActive) paused=\(self.rendererIsPausedState())", type: "Player")
-                self.logVLCUIViewSnapshot("delegate didChangePictureInPictureAvailability")
-            }
+            Logger.shared.log("[PlayerVC.PiP] native VLC availability changed available=\(isAvailable) enabled=\(Settings.shared.vlcPiPEnabled) active=\(renderer.isPictureInPictureActive) paused=\(self.rendererIsPausedState())", type: "Player")
+            self.logVLCUIViewSnapshot("delegate didChangePictureInPictureAvailability")
             self.updatePiPButtonVisibility()
         }
     }
@@ -8008,12 +7989,8 @@ extension PlayerViewController: VLCRendererDelegate {
         if isClosing { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            let changed = self.lastNativeVLCPiPActive != isActive
-            self.lastNativeVLCPiPActive = isActive
-            if changed {
-                Logger.shared.log("[PlayerVC.PiP] native VLC active changed active=\(isActive) enabled=\(Settings.shared.vlcPiPEnabled) available=\(renderer.isPictureInPictureAvailable) paused=\(self.rendererIsPausedState())", type: "Player")
-                self.logVLCUIViewSnapshot("delegate didChangePictureInPictureActive")
-            }
+            Logger.shared.log("[PlayerVC.PiP] native VLC active changed active=\(isActive) enabled=\(Settings.shared.vlcPiPEnabled) available=\(renderer.isPictureInPictureAvailable) paused=\(self.rendererIsPausedState())", type: "Player")
+            self.logVLCUIViewSnapshot("delegate didChangePictureInPictureActive")
             self.updatePiPButtonVisibility()
             renderer.updatePictureInPicturePlaybackState()
         }

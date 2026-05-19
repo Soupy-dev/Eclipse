@@ -378,9 +378,16 @@ class Settings: ObservableObject {
 
     var vlcPiPEnabled: Bool {
         get {
-            UserDefaults.standard.object(forKey: "vlcPiPEnabled") as? Bool ?? false
+            if UserDefaults.standard.object(forKey: "vlcPiPEnabled") as? Bool != false {
+                UserDefaults.standard.set(false, forKey: "vlcPiPEnabled")
+            }
+            return false
         }
-        set { UserDefaults.standard.set(newValue, forKey: "vlcPiPEnabled") }
+        set {
+            if UserDefaults.standard.object(forKey: "vlcPiPEnabled") as? Bool != false {
+                UserDefaults.standard.set(false, forKey: "vlcPiPEnabled")
+            }
+        }
     }
 
     var vlcOpenSubtitlesEnabled: Bool {

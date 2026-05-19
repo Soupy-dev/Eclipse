@@ -150,10 +150,6 @@ final class PlayerSettingsStore: ObservableObject {
         didSet { UserDefaults.standard.set(vlcDoubleTapSeekSeconds, forKey: "vlcDoubleTapSeekSeconds") }
     }
 
-    @Published var vlcPiPEnabled: Bool {
-        didSet { UserDefaults.standard.set(vlcPiPEnabled, forKey: "vlcPiPEnabled") }
-    }
-
     @Published var vlcOpenSubtitlesEnabled: Bool {
         didSet { UserDefaults.standard.set(vlcOpenSubtitlesEnabled, forKey: "vlcOpenSubtitlesEnabled") }
     }
@@ -261,8 +257,6 @@ final class PlayerSettingsStore: ObservableObject {
 
         let savedDoubleTapSeconds = UserDefaults.standard.double(forKey: "vlcDoubleTapSeekSeconds")
         self.vlcDoubleTapSeekSeconds = savedDoubleTapSeconds > 0 ? savedDoubleTapSeconds : 10.0
-
-        self.vlcPiPEnabled = UserDefaults.standard.object(forKey: "vlcPiPEnabled") as? Bool ?? false
 
         self.vlcOpenSubtitlesEnabled = UserDefaults.standard.bool(forKey: "vlcOpenSubtitlesEnabled")
 
@@ -645,18 +639,6 @@ struct PlayerSettingsView: View {
                         Label("Subtitle Appearance", systemImage: "textformat.size")
                     }
 
-                    if store.inAppPlayer == .vlc {
-                        DisclosureGroup {
-                            settingsToggleRow(
-                                title: "Picture in Picture",
-                                detail: "Use VLCKitSPM sample-buffer video output for VLC PiP. Applies to the next VLC playback session.",
-                                binding: $store.vlcPiPEnabled
-                            )
-                        } label: {
-                            Label("VLC Rendering", systemImage: "pip.enter")
-                        }
-                    }
-
                     if store.inAppPlayer == .mpv {
                         DisclosureGroup {
                             if MPVRenderBackendSupport.metalIsFullySupported {
@@ -924,6 +906,7 @@ struct PlayerSettingsView: View {
             if UserDefaults.standard.object(forKey: headerProxyKey) as? Bool != true {
                 UserDefaults.standard.set(true, forKey: headerProxyKey)
             }
+            UserDefaults.standard.set(false, forKey: "vlcPiPEnabled")
             refreshVLCSubtitleStyleStateFromDefaults()
         }
     }

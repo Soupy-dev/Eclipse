@@ -52,19 +52,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
     private var vlcInstance: VLCMediaList?
     private var mediaPlayer: VLCMediaPlayer?
     private var currentMedia: VLCMedia?
-
-    @available(iOS 15.0, *)
-    private var sampleBufferOutput: VLCKitSPMSampleBufferVideoOutput?
-    private var pictureInPictureMediaPlayer: VLCMediaPlayer?
-    private var pictureInPictureMedia: VLCMedia?
-    @available(iOS 15.0, *)
-    private var pictureInPictureSampleBufferOutput: VLCKitSPMSampleBufferVideoOutput?
-    @available(iOS 15.0, *)
-    private var nativePiPController: VLCKitSPMPictureInPictureController?
-    private var sampleBufferOutputHasPrimedFrame = false
-    private var sampleBufferOutputDisabledAfterStartupFailure = false
-    private var sampleBufferPictureInPictureStartAttemptID = 0
-    private var isPictureInPictureStartPending = false
     
     private var isPaused: Bool = true
     private var isLoading: Bool = false
@@ -83,8 +70,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
     private var isRunning = false
     private var isStopping = false
     private var currentPlaybackSpeed: Double = 1.0
-    private var startupRecoveryPlayAttempts = 0
-    private var startupRecoveryReloadGeneration: Int?
 
     private var currentSubtitleStyle: SubtitleStyle = .default
     private var lastLoggedStateCode: Int?
@@ -135,21 +120,10 @@ final class VLCRenderer: NSObject, PlayerRenderer {
     }
 
     private static func isPictureInPictureEnabledInDefaults() -> Bool {
-        UserDefaults.standard.object(forKey: "vlcPiPEnabled") as? Bool ?? false
-    }
-
-    private var isUsingSampleBufferOutput: Bool {
-        if #available(iOS 15.0, *) {
-            return sampleBufferOutput?.isAttached == true
+        if UserDefaults.standard.object(forKey: "vlcPiPEnabled") as? Bool != false {
+            UserDefaults.standard.set(false, forKey: "vlcPiPEnabled")
         }
         return false
-    }
-
-    var isUsingPictureInPictureSampleBufferOutput: Bool {
-        if #available(iOS 15.0, *) {
-            return isUsingSampleBufferOutput || pictureInPictureSampleBufferOutput?.isAttached == true
-        }
-        return isUsingSampleBufferOutput
     }
 
     private func desiredRenderingViewForCurrentSetting() -> UIView {
@@ -198,7 +172,7 @@ final class VLCRenderer: NSObject, PlayerRenderer {
             logVLC("kept VLC rendering view mode=\(renderingModeDescription()) reason=\(reason) setting=\(isPictureInPictureSettingEnabled)")
         }
 
-        if reassignPlayerDrawable, isRunning, !isStopping, !isUsingSampleBufferOutput {
+        if reassignPlayerDrawable, isRunning, !isStopping {
             mediaPlayer?.drawable = activeVLCView
             logDrawableSnapshot("sync rendering view drawable reassigned")
         }
@@ -224,31 +198,16 @@ final class VLCRenderer: NSObject, PlayerRenderer {
 
     private func playerSnapshot(_ player: VLCMediaPlayer? = nil) -> String {
         guard let player = player ?? mediaPlayer else {
-            return "player=nil pausedFlag=\(isPaused) loading=\(isLoading) ready=\(isReadyToSeek) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pending=\(secondsText(pendingAbsoluteSeek)) sampleBuffer=\(isUsingSampleBufferOutput) pipAvailable=\(isPictureInPictureAvailable) pipActive=\(isPictureInPictureActive) app=\(appStateText())"
+            return "player=nil pausedFlag=\(isPaused) loading=\(isLoading) ready=\(isReadyToSeek) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pending=\(secondsText(pendingAbsoluteSeek)) pipAvailable=false pipActive=false app=\(appStateText())"
         }
 
         let rawPosition = (player.time.value?.doubleValue ?? 0) / 1000.0
         let rawDuration = (player.media?.length.value?.doubleValue ?? 0) / 1000.0
-        return "state=\(describeState(player.state))(\(stateCode(player.state))) playing=\(isPlayerActivelyPlaying(player)) pausedFlag=\(isPaused) loading=\(isLoading) ready=\(isReadyToSeek) raw=\(secondsText(rawPosition))/\(secondsText(rawDuration)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pending=\(secondsText(pendingAbsoluteSeek)) speed=\(String(format: "%.2f", currentPlaybackSpeed)) sampleBuffer=\(isUsingSampleBufferOutput) primed=\(sampleBufferOutputHasPrimedFrame) pipAvailable=\(isPictureInPictureAvailable) pipActive=\(isPictureInPictureActive) app=\(appStateText())"
-    }
-
-    private func pictureInPicturePlayerSnapshot() -> String {
-        guard let player = pictureInPictureMediaPlayer else {
-            return "pipPlayer=nil outputAttached=false primed=\(sampleBufferOutputHasPrimedFrame)"
-        }
-        let rawPosition = (player.time.value?.doubleValue ?? 0) / 1000.0
-        let rawDuration = (player.media?.length.value?.doubleValue ?? 0) / 1000.0
-        let attached: Bool
-        if #available(iOS 15.0, *) {
-            attached = pictureInPictureSampleBufferOutput?.isAttached == true
-        } else {
-            attached = false
-        }
-        return "pipState=\(describeState(player.state))(\(stateCode(player.state))) playing=\(isPlayerActivelyPlaying(player)) raw=\(secondsText(rawPosition))/\(secondsText(rawDuration)) outputAttached=\(attached) primed=\(sampleBufferOutputHasPrimedFrame)"
+        return "state=\(describeState(player.state))(\(stateCode(player.state))) playing=\(isPlayerActivelyPlaying(player)) pausedFlag=\(isPaused) loading=\(isLoading) ready=\(isReadyToSeek) raw=\(secondsText(rawPosition))/\(secondsText(rawDuration)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pending=\(secondsText(pendingAbsoluteSeek)) speed=\(String(format: "%.2f", currentPlaybackSpeed)) pipAvailable=false pipActive=false app=\(appStateText())"
     }
 
     func performanceOverlaySnapshot() -> String {
-        "VLC \(isPaused ? "paused" : "playing")\(isLoading ? " loading" : "") ready=\(isReadyToSeek)\npos=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) speed=\(String(format: "%.2f", currentPlaybackSpeed)) pending=\(secondsText(pendingAbsoluteSeek)) sampleBuffer=\(isUsingSampleBufferOutput) pip=\(isPictureInPictureActive ? "active" : (isPictureInPictureAvailable ? "available" : "unavailable")) app=\(appStateText())"
+        "VLC \(isPaused ? "paused" : "playing")\(isLoading ? " loading" : "") ready=\(isReadyToSeek)\npos=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) speed=\(String(format: "%.2f", currentPlaybackSpeed)) pending=\(secondsText(pendingAbsoluteSeek)) app=\(appStateText())"
     }
 
     private func logDrawableSnapshot(_ event: String) {
@@ -277,11 +236,14 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         Self.isPictureInPictureEnabledInDefaults()
     }
 
+    var isUsingPictureInPictureSampleBufferOutput: Bool {
+        false
+    }
+
     private func reattachRenderingView() {
         logVLC("reattach drawable requested snapshot={\(playerSnapshot())}")
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            guard !self.isUsingSampleBufferOutput else { return }
             self.syncRenderingViewWithPictureInPictureSetting(reason: "reattach", reassignPlayerDrawable: false)
             self.mediaPlayer?.drawable = self.activeVLCView
             self.activeVLCView.setNeedsLayout()
@@ -329,10 +291,8 @@ final class VLCRenderer: NSObject, PlayerRenderer {
                 syncRenderingViewWithPictureInPictureSetting(reason: "start", reassignPlayerDrawable: false)
             }
 
+            // Render directly into the currently selected VLC drawable.
             mediaPlayer.drawable = activeVLCView
-            if isPictureInPictureSettingEnabled {
-                logVLC("start keeping VLC inline playback on drawable; sample-buffer PiP will attach only when PiP starts", type: "Stream")
-            }
             
             // Set up event handling
             NotificationCenter.default.addObserver(
@@ -402,23 +362,10 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         stopProgressPolling()
         delegate?.renderer(self, didChangePictureInPictureAvailability: false)
         delegate?.renderer(self, didChangePictureInPictureActive: false)
-        disableSampleBufferPictureInPicture(resetLayer: true)
 
         eventQueue.async { [weak self] in
             guard let self else { return }
             NotificationCenter.default.removeObserver(self)
-
-            if #available(iOS 15.0, *) {
-                self.nativePiPController?.stopPictureInPicture()
-                self.sampleBufferOutput?.detach()
-                self.pictureInPictureSampleBufferOutput?.detach()
-                self.nativePiPController = nil
-                self.sampleBufferOutput = nil
-                self.pictureInPictureSampleBufferOutput = nil
-            }
-            self.pictureInPictureMediaPlayer?.stop()
-            self.pictureInPictureMediaPlayer = nil
-            self.pictureInPictureMedia = nil
 
             if let player = self.mediaPlayer {
                 player.stop()
@@ -465,8 +412,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         lastLoggedStateCode = nil
         lastProgressLogBucket = -1
         lastProgressAnomalyKey = nil
-        startupRecoveryPlayAttempts = 0
-        startupRecoveryReloadGeneration = nil
 
         // Use provided headers as-is; they're already built correctly by the caller
         // (StreamURL domain should NOT be used for headers—service baseUrl should be)
@@ -485,25 +430,60 @@ final class VLCRenderer: NSObject, PlayerRenderer {
                 return 
             }
             
-            let media = self.makeMedia(url: url, preset: preset, headers: self.currentHeaders)
+            let media = VLCMedia(url: url)
+            if let headers = self.currentHeaders, !headers.isEmpty {
+                if let ua = headers["User-Agent"], !ua.isEmpty {
+                    media.addOption(":http-user-agent=\(ua)")
+                }
+                if let referer = headers["Referer"], !referer.isEmpty {
+                    media.addOption(":http-referrer=\(referer)")
+                    media.addOption(":http-header=Referer: \(referer)")
+                }
+                if let cookie = headers["Cookie"], !cookie.isEmpty {
+                    media.addOption(":http-cookie=\(cookie)")
+                }
+
+                media.addOption(":http-reconnect=true")
+
+                let skippedKeys: Set<String> = ["User-Agent", "Referer", "Cookie"]
+                for (key, value) in headers where !skippedKeys.contains(key) {
+                    guard !value.isEmpty else { continue }
+                    media.addOption(":http-header=\(key): \(value)")
+                }
+            }
+
+            // Keep reconnect enabled for flaky hosts
+            media.addOption(":http-reconnect=true")
+
+            // Apply subtitle styling options (best effort; depends on libvlc text renderer support)
+            self.applySubtitleStyleOptions(to: media)
+
             if let initialSeek, initialSeek > 0 {
                 Logger.shared.log("[VLCRenderer.load] queued initial seek \(Int(initialSeek))s", type: "Progress")
+            }
+
+            // Tune caching and demuxer for local vs. remote playback
+            if url.isFileURL {
+                media.addOption(":file-caching=300")
+                // Force MPEG-TS demuxer for .ts files (concatenated HLS segments)
+                let ext = url.pathExtension.lowercased()
+                if ext == "ts" || ext == "mts" || ext == "m2ts" {
+                    media.addOption(":demux=ts")
+                }
+            } else {
+                // Reduce buffering while keeping resume/start reasonably responsive
+                media.addOption(":network-caching=12000")  // ~12s
             }
 
             self.currentMedia = media
             
             player.media = media
-            if self.isUsingSampleBufferOutput {
-                player.drawable = nil
-            } else {
-                player.drawable = self.activeVLCView
-            }
+            player.drawable = self.activeVLCView
             self.ensureAudioSessionActive()
             self.logVLC("load configured media; calling play snapshot={\(self.playerSnapshot(player))}", type: "Stream")
             player.play()
             self.startProgressPolling()
             self.scheduleLoadingSanityChecks()
-            self.scheduleStartupPlaybackRecoveryChecks(initialSeek: initialSeek)
             self.updatePictureInPicturePlaybackState()
             self.logVLC("load submitted play snapshot={\(self.playerSnapshot(player))}", type: "Stream")
         }
@@ -545,13 +525,13 @@ final class VLCRenderer: NSObject, PlayerRenderer {
             self.delegate?.renderer(self, didChangePause: false)
         }
 
-        guard let player = activeControlPlayer() else { return }
+        guard let player = mediaPlayer else { return }
         ensureAudioSessionActive()
 
         // If VLC's media has stopped or ended (e.g. network timeout while backgrounded),
         // calling play() alone won't work — reload the stream and seek back.
         let state = player.state
-        if !isControllingPictureInPicturePlayer(player), isTerminalState(state), !isPlaybackActive(player) {
+        if isTerminalState(state), !isPlaybackActive(player) {
             Logger.shared.log("[VLCRenderer.play] Player in \(describeState(state)) state — reloading from position \(cachedPosition)s", type: "Stream")
             reloadAndSeekToLastPosition()
             return
@@ -581,7 +561,7 @@ final class VLCRenderer: NSObject, PlayerRenderer {
     }
 
     private func pausePlayback(forceSendToPlayer: Bool) {
-        let player = activeControlPlayer()
+        let player = mediaPlayer
         let shouldSendPause = player.map {
             forceSendToPlayer || isPlayerActivelyPlaying($0) || isPlayingState($0.state) || (!isPaused && !isVLCPlayerPausedState($0.state) && !isTerminalState($0.state))
         } ?? !isPaused
@@ -610,49 +590,25 @@ final class VLCRenderer: NSObject, PlayerRenderer {
     func seek(to seconds: Double) {
         logVLC("seek(to:) requested target=\(secondsText(seconds)) snapshot={\(playerSnapshot())}", type: "Progress")
         eventQueue.async { [weak self] in
-            guard let self, let player = self.activeControlPlayer() else {
+            guard let self, let player = self.mediaPlayer else {
                 Logger.shared.log("[VLCRenderer] seek(to:) dropped: mediaPlayer missing target=\(seconds)", type: "Error")
                 return
             }
-            if self.isControllingPictureInPicturePlayer(player) {
-                self.seekPictureInPicturePlayer(player, to: seconds)
-            } else {
-                self.applySeek(to: seconds, on: player)
-            }
+            self.applySeek(to: seconds, on: player)
         }
     }
 
     func seek(by seconds: Double) {
         logVLC("seek(by:) requested delta=\(secondsText(seconds)) snapshot={\(playerSnapshot())}", type: "Progress")
         eventQueue.async { [weak self] in
-            guard let self, let player = self.activeControlPlayer() else {
+            guard let self, let player = self.mediaPlayer else {
                 Logger.shared.log("[VLCRenderer] seek(by:) dropped: mediaPlayer missing delta=\(seconds)", type: "Error")
                 return
             }
             let currentPosition = self.resolvedPlaybackProgress(from: player).position
             self.logVLC("seek(by:) resolved current=\(self.secondsText(currentPosition)) target=\(self.secondsText(currentPosition + seconds))", type: "Progress")
-            if self.isControllingPictureInPicturePlayer(player) {
-                self.seekPictureInPicturePlayer(player, to: currentPosition + seconds)
-            } else {
-                self.applySeek(to: currentPosition + seconds, on: player)
-            }
+            self.applySeek(to: currentPosition + seconds, on: player)
         }
-    }
-
-    private func activeControlPlayer() -> VLCMediaPlayer? {
-        if #available(iOS 15.0, *),
-           nativePiPController?.isPictureInPictureActive == true,
-           let pictureInPictureMediaPlayer {
-            return pictureInPictureMediaPlayer
-        }
-        return mediaPlayer
-    }
-
-    private func isControllingPictureInPicturePlayer(_ player: VLCMediaPlayer) -> Bool {
-        if let pictureInPictureMediaPlayer {
-            return player === pictureInPictureMediaPlayer
-        }
-        return false
     }
 
     private func applySeek(to seconds: Double, on player: VLCMediaPlayer, refreshVideoOutput: Bool = true) {
@@ -718,7 +674,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         logVLC("refreshVideoOutputAfterSeek shouldResume=\(shouldResumePlayback) snapshot={\(playerSnapshot(player))}", type: "Progress")
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isRunning, !self.isStopping else { return }
-            guard !self.isUsingSampleBufferOutput else { return }
             self.syncRenderingViewWithPictureInPictureSetting(reason: "seek refresh", reassignPlayerDrawable: false)
             self.mediaPlayer?.drawable = self.activeVLCView
             self.activeVLCView.isHidden = false
@@ -742,85 +697,12 @@ final class VLCRenderer: NSObject, PlayerRenderer {
             } else if self.isTerminalState(player.state), !self.isPlaybackActive(player) {
                 self.logVLC("refreshVideoOutputAfterSeek skipped paused frame refresh because player is terminal snapshot={\(self.playerSnapshot(player))}", type: "Progress")
             } else {
-                self.logVLC("refreshVideoOutputAfterSeek paused seek kept current VLC video output snapshot={\(self.playerSnapshot(player))}", type: "Progress")
+                self.logVLC("refreshVideoOutputAfterSeek paused seek on stable VLCKitSPM path; drawable already refreshed snapshot={\(self.playerSnapshot(player))}", type: "Progress")
             }
             self.clearLoadingState()
             self.publishPlaybackProgress(from: player)
             self.logVLC("refreshVideoOutputAfterSeek follow-up snapshot={\(self.playerSnapshot(player))}", type: "Progress")
         }
-    }
-
-    private func scheduleStartupPlaybackRecoveryChecks(initialSeek: Double?) {
-        let generation = loadGeneration
-        let targetSeek = initialSeek.map { max(0, $0) }
-        let delays: [Double] = [0.6, 1.4, 2.8, 4.8]
-        logVLC("startup recovery scheduled generation=\(generation) targetSeek=\(secondsText(targetSeek)) snapshot={\(playerSnapshot())}", type: "Stream")
-
-        for delay in delays {
-            eventQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
-                self?.runStartupPlaybackRecoveryCheck(generation: generation, targetSeek: targetSeek, delay: delay)
-            }
-        }
-    }
-
-    private func runStartupPlaybackRecoveryCheck(generation: Int, targetSeek: Double?, delay: Double) {
-        guard isRunning, !isStopping, loadGeneration == generation, let player = mediaPlayer else { return }
-        if isPictureInPictureActive || isPictureInPictureStartPending { return }
-
-        let rawPosition = max(0, (player.time.value?.doubleValue ?? 0) / 1000.0)
-        let rawDuration = max(0, (player.media?.length.value?.doubleValue ?? 0) / 1000.0)
-        let duration = max(reliableDuration(from: player), rawDuration, cachedDuration)
-        let desiredPosition = max(targetSeek ?? 0, cachedPosition)
-        let active = isPlaybackActive(player)
-        let terminal = isTerminalState(player.state)
-        let pausedState = isVLCPlayerPausedState(player.state) || isPaused
-        let hasTimeline = duration >= minimumReliableDuration
-        let movedEnough = rawPosition > 0.25 || cachedPosition > 0.25
-        let stillNeedsStartupHelp = hasTimeline && !active && (terminal || pausedState)
-        let resumeLooksOptimisticOnly = hasTimeline && desiredPosition > 1 && rawPosition < 0.25 && !active
-
-        logVLC("startup recovery check delay=\(String(format: "%.2f", delay)) generation=\(generation) active=\(active) terminal=\(terminal) pausedState=\(pausedState) moved=\(movedEnough) desired=\(secondsText(desiredPosition)) raw=\(secondsText(rawPosition))/\(secondsText(rawDuration)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) attempts=\(startupRecoveryPlayAttempts) reloadGeneration=\(startupRecoveryReloadGeneration.map(String.init) ?? "nil") snapshot={\(playerSnapshot(player))}", type: "Stream")
-
-        guard stillNeedsStartupHelp || resumeLooksOptimisticOnly else { return }
-
-        if terminal, startupRecoveryReloadGeneration != generation {
-            startupRecoveryReloadGeneration = generation
-            let resume = max(desiredPosition, rawPosition, cachedPosition)
-            logVLC("startup recovery reloading terminal VLC player resume=\(secondsText(resume)) delay=\(String(format: "%.2f", delay)) snapshot={\(playerSnapshot(player))}", type: "Error")
-            reloadCurrentItemPreservingPosition(resume)
-            return
-        }
-
-        guard startupRecoveryPlayAttempts < 3 else { return }
-        startupRecoveryPlayAttempts += 1
-        ensureAudioSessionActive()
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.syncRenderingViewWithPictureInPictureSetting(reason: "startup recovery", reassignPlayerDrawable: false)
-            self.mediaPlayer?.drawable = self.activeVLCView
-            self.activeVLCView.isHidden = false
-            self.activeVLCView.alpha = 1
-            self.logDrawableSnapshot("startup recovery drawable")
-        }
-        if desiredPosition > 1, duration >= minimumReliableDuration {
-            let normalized = min(max(desiredPosition / duration, 0), 1)
-            setNormalizedPosition(normalized, on: player)
-            pendingAbsoluteSeek = nil
-            cachedPosition = desiredPosition
-            logVLC("startup recovery refreshed seek normalized=\(String(format: "%.5f", normalized)) desired=\(secondsText(desiredPosition)) duration=\(secondsText(duration))", type: "Progress")
-        }
-        player.play()
-        if currentPlaybackSpeed != 1.0 {
-            player.rate = Float(currentPlaybackSpeed)
-        }
-        isPaused = false
-        startProgressPolling()
-        updatePictureInPicturePlaybackState()
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.delegate?.renderer(self, didChangePause: false)
-        }
-        logVLC("startup recovery play nudge attempt=\(startupRecoveryPlayAttempts) delay=\(String(format: "%.2f", delay)) snapshot={\(playerSnapshot(player))}", type: "Stream")
     }
 
     private func reliableDuration(from player: VLCMediaPlayer) -> Double {
@@ -841,7 +723,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
             self.currentPlaybackSpeed = max(0.1, speed)
             
             player.rate = Float(self.currentPlaybackSpeed)
-            self.pictureInPictureMediaPlayer?.rate = Float(self.currentPlaybackSpeed)
             self.logVLC("setSpeed applied=\(String(format: "%.2f", self.currentPlaybackSpeed)) snapshot={\(self.playerSnapshot(player))}")
         }
     }
@@ -1125,15 +1006,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
             let headerCount = currentHeaders?.count ?? 0
             logVLC("state error url=\(urlString) headers=\(headerCount) preset=\(currentPreset?.id.rawValue ?? "nil") snapshot={\(playerSnapshot(player))}", type: "Error")
         }
-
-        if #available(iOS 15.0, *),
-           nativePiPController?.isPictureInPictureActive == true,
-           pictureInPictureMediaPlayer != nil,
-           (isVLCPlayerPausedState(state) || isTerminalState(state)) {
-            logVLC("stateChanged \(describeState(state)) ignored for inline player while dedicated VLC PiP is active snapshot={\(playerSnapshot(player))}", type: "Stream")
-            updatePictureInPicturePlaybackState()
-            return
-        }
         
         if isPlaybackActive(player) {
             guard hasUsablePlaybackSignal(player) else {
@@ -1141,33 +1013,22 @@ final class VLCRenderer: NSObject, PlayerRenderer {
                 updatePictureInPicturePlaybackState()
                 return
             }
-            let wasPaused = isPaused
-            let becameReadyToSeek = !isReadyToSeek
             isPaused = false
             isReadyToSeek = true
             clearLoadingState()
             
-            if wasPaused || becameReadyToSeek {
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    if wasPaused {
-                        self.delegate?.renderer(self, didChangePause: false)
-                    }
-                    if becameReadyToSeek {
-                        self.delegate?.renderer(self, didBecomeReadyToSeek: true)
-                    }
-                }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.delegate?.renderer(self, didChangePause: false)
+                self.delegate?.renderer(self, didBecomeReadyToSeek: true)
             }
             
         } else if isVLCPlayerPausedState(state) {
-            let wasPaused = isPaused
             isPaused = true
             stopProgressPolling()
-            if !wasPaused {
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.delegate?.renderer(self, didChangePause: true)
-                }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.delegate?.renderer(self, didChangePause: true)
             }
             
         } else if isLoadingState(state) {
@@ -1180,34 +1041,21 @@ final class VLCRenderer: NSObject, PlayerRenderer {
                 updatePictureInPicturePlaybackState()
                 return
             }
-            let wasLoading = isLoading
             isLoading = true
-            if !wasLoading {
-                scheduleLoadingSanityChecks()
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    self.delegate?.renderer(self, didChangeLoading: true)
-                }
+            scheduleLoadingSanityChecks()
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.delegate?.renderer(self, didChangeLoading: true)
             }
 
-        } else if recoverFromSampleBufferStartupFailureIfNeeded(player, state: state) {
-            return
         } else if isTerminalState(state) {
-            let wasPaused = isPaused
-            let wasLoading = isLoading
             isPaused = true
             isLoading = false
             stopProgressPolling()
-            if !wasPaused || wasLoading {
-                DispatchQueue.main.async { [weak self] in
-                    guard let self else { return }
-                    if !wasPaused {
-                        self.delegate?.renderer(self, didChangePause: true)
-                    }
-                    if wasLoading {
-                        self.delegate?.renderer(self, didChangeLoading: false)
-                    }
-                }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.delegate?.renderer(self, didChangePause: true)
+                self.delegate?.renderer(self, didChangeLoading: false)
             }
             if isErrorState(state) {
                 DispatchQueue.main.async { [weak self] in
@@ -1268,21 +1116,12 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         let timer = DispatchSource.makeTimerSource(queue: eventQueue)
         timer.schedule(deadline: .now() + 0.25, repeating: 0.5)
         timer.setEventHandler { [weak self] in
-            guard let self, self.isRunning, let player = self.activeProgressPlayer() else { return }
+            guard let self, self.isRunning, let player = self.mediaPlayer else { return }
             self.publishPlaybackProgress(from: player)
         }
         progressTimer = timer
         timer.resume()
         logVLC("startProgressPolling snapshot={\(playerSnapshot())}", type: "Progress")
-    }
-
-    private func activeProgressPlayer() -> VLCMediaPlayer? {
-        if #available(iOS 15.0, *),
-           nativePiPController?.isPictureInPictureActive == true,
-           let pictureInPictureMediaPlayer {
-            return pictureInPictureMediaPlayer
-        }
-        return mediaPlayer
     }
 
     private func stopProgressPolling() {
@@ -1353,37 +1192,13 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         logDrawableSnapshot("appDidEnterBackground")
         scheduleDrawableSnapshots("appDidEnterBackground followup", delays: [0.5, 1.5])
 
-        if isUsingSampleBufferOutput, isPictureInPictureSettingEnabled {
-            Logger.shared.log("[VLCRenderer] entering background with VLC sample-buffer PiP enabled; keeping playback alive for PiP", type: "Player")
-            updatePictureInPicturePlaybackState()
-            return
-        }
-
-        if isPictureInPictureSettingEnabled, isPictureInPictureAvailable {
-            Logger.shared.log("[VLCRenderer] entering background with VLC PiP available; deferring pause so app-exit PiP can start", type: "Player")
-            eventQueue.asyncAfter(deadline: .now() + 1.2) { [weak self] in
-                guard let self,
-                      self.isRunning,
-                      !self.isStopping,
-                      UIApplication.shared.applicationState == .background,
-                      !self.isPictureInPictureActive,
-                      !self.isPictureInPictureStartPending else {
-                    return
-                }
-                Logger.shared.log("[VLCRenderer] deferred background pause after VLC PiP did not become active", type: "Player")
-                self.pausePlayback(forceSendToPlayer: true)
-                self.logDrawableSnapshot("appDidEnterBackground deferred no PiP detach")
-            }
-            return
-        }
-
-        Logger.shared.log("[VLCRenderer] entering background without VLC PiP; pausing playback and keeping drawable attached", type: "Player")
+        Logger.shared.log("[VLCRenderer] entering background on stable VLCKitSPM path; pausing playback and keeping drawable attached", type: "Player")
         pausePlayback(forceSendToPlayer: true)
-        logDrawableSnapshot("appDidEnterBackground no PiP detach")
+        logDrawableSnapshot("appDidEnterBackground stable SPM no detach")
     }
 
     @objc private func handleAppWillResignActive() {
-        logVLC("appWillResignActive snapshot={\(playerSnapshot())}", type: "Player")
+        logVLC("appWillResignActive stable VLCKitSPM path snapshot={\(playerSnapshot())}", type: "Player")
     }
     
     @objc private func handleAppWillEnterForeground() {
@@ -1391,9 +1206,7 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         logDrawableSnapshot("appWillEnterForeground")
         scheduleDrawableSnapshots("appWillEnterForeground followup")
         ensureAudioSessionActive()
-        if !isUsingSampleBufferOutput {
-            reattachRenderingView()
-        }
+        reattachRenderingView()
     }
 
     @objc private func handleAppDidBecomeActive() {
@@ -1402,445 +1215,36 @@ final class VLCRenderer: NSObject, PlayerRenderer {
 
     // MARK: - Picture in Picture
 
-    private func configureSampleBufferPictureInPictureIfNeeded(for player: VLCMediaPlayer) -> Bool {
-        sampleBufferOutputHasPrimedFrame = false
-        guard !sampleBufferOutputDisabledAfterStartupFailure else {
-            logVLC("VLC PiP sample-buffer output skipped after startup failure; using drawable for this session", type: "Player")
-            disableSampleBufferPictureInPicture(resetLayer: true)
-            return false
-        }
-
-        guard isPictureInPictureSettingEnabled else {
-            disableSampleBufferPictureInPicture(resetLayer: true)
-            return false
-        }
-
-        guard #available(iOS 15.0, *), VLCKitSPMPictureInPictureController.isPictureInPictureSupported else {
-            logVLC("VLC PiP requested but sample-buffer PiP is unavailable on this OS/device", type: "Player")
-            disableSampleBufferPictureInPicture(resetLayer: true)
-            return false
-        }
-
-        return configureAvailableSampleBufferPictureInPicture(for: player)
-    }
-
-    @available(iOS 15.0, *)
-    private func configureAvailableSampleBufferPictureInPicture(for player: VLCMediaPlayer) -> Bool {
-        let output = VLCKitSPMSampleBufferVideoOutput(displayLayer: displayLayer)
-        output.playbackTimeProvider = { [weak self] in
-            self?.cachedPosition ?? 0
-        }
-        output.subtitleOverlayProvider = { [weak self] request in
-            guard let self else { return nil }
-            return self.delegate?.renderer(self, getSubtitleForTime: request.presentationTime)
-        }
-        output.onFirstFrameEnqueued = { [weak self] in
-            guard let self else { return }
-            self.sampleBufferOutputHasPrimedFrame = true
-            self.showSampleBufferDisplayLayer(reason: "inline sample-buffer first frame")
-            self.delegate?.renderer(self, didChangePictureInPictureAvailability: self.isPictureInPictureAvailable)
-        }
-
-        output.onDebugEvent = { [weak self] event in
-            self?.logVLC("VLC PiP sample-buffer \(event)", type: "Player")
-        }
-
-        do {
-            try output.attach(to: player)
-            sampleBufferOutput = output
-            nativePiPController = VLCKitSPMPictureInPictureController(sampleBufferDisplayLayer: displayLayer)
-            nativePiPController?.delegate = self
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.hideSampleBufferDisplayLayer(reason: "inline sample-buffer awaiting first frame", flush: false)
-                self.displayLayer.videoGravity = .resizeAspect
-                self.delegate?.renderer(self, didChangePictureInPictureAvailability: self.isPictureInPictureAvailable)
-            }
-            return true
-        } catch {
-            logVLC("failed to attach VLCKitSPM sample-buffer PiP output: \(error); falling back to drawable", type: "Error")
-            output.detach()
-            sampleBufferOutput = nil
-            nativePiPController = nil
-            sampleBufferOutputHasPrimedFrame = false
-            return false
-        }
-    }
-
-    private func disableSampleBufferPictureInPicture(resetLayer: Bool) {
-        sampleBufferPictureInPictureStartAttemptID += 1
-        isPictureInPictureStartPending = false
-        if #available(iOS 15.0, *) {
-            if nativePiPController?.isPictureInPictureActive == true {
-                nativePiPController?.stopPictureInPicture()
-            }
-            sampleBufferOutput?.detach()
-            pictureInPictureSampleBufferOutput?.detach()
-            nativePiPController = nil
-            sampleBufferOutput = nil
-            pictureInPictureSampleBufferOutput = nil
-        }
-        pictureInPictureMediaPlayer?.stop()
-        pictureInPictureMediaPlayer = nil
-        pictureInPictureMedia = nil
-        sampleBufferOutputHasPrimedFrame = false
-        if resetLayer {
-            DispatchQueue.main.async { [displayLayer] in
-                displayLayer.isHidden = true
-                displayLayer.opacity = 0.0
-                displayLayer.zPosition = -1
-                displayLayer.flushAndRemoveImage()
-                displayLayer.controlTimebase = nil
-            }
-        }
-    }
-
-    private func showSampleBufferDisplayLayer(reason: String) {
-        let work = { [weak self] in
-            guard let self else { return }
-            self.displayLayer.isHidden = false
-            self.displayLayer.opacity = 1.0
-            self.displayLayer.zPosition = 0
-            self.displayLayer.videoGravity = .resizeAspect
-            self.logVLC("sample-buffer displayLayer shown reason=\(reason)", type: "Player")
-        }
-        if Thread.isMainThread {
-            work()
-        } else {
-            DispatchQueue.main.async(execute: work)
-        }
-    }
-
-    private func hideSampleBufferDisplayLayer(reason: String, flush: Bool) {
-        let work = { [weak self] in
-            guard let self else { return }
-            self.displayLayer.isHidden = true
-            self.displayLayer.opacity = 0.0
-            self.displayLayer.zPosition = -1
-            if flush {
-                self.displayLayer.flushAndRemoveImage()
-                self.displayLayer.controlTimebase = nil
-            }
-            self.logVLC("sample-buffer displayLayer hidden reason=\(reason) flush=\(flush)", type: "Player")
-        }
-        if Thread.isMainThread {
-            work()
-        } else {
-            DispatchQueue.main.async(execute: work)
-        }
-    }
-
-    private func makeMedia(url: URL, preset: PlayerPreset, headers: [String: String]?) -> VLCMedia {
-        let media = VLCMedia(url: url)
-        if let headers, !headers.isEmpty {
-            if let ua = headers["User-Agent"], !ua.isEmpty {
-                media.addOption(":http-user-agent=\(ua)")
-            }
-            if let referer = headers["Referer"], !referer.isEmpty {
-                media.addOption(":http-referrer=\(referer)")
-                media.addOption(":http-header=Referer: \(referer)")
-            }
-            if let cookie = headers["Cookie"], !cookie.isEmpty {
-                media.addOption(":http-cookie=\(cookie)")
-            }
-
-            media.addOption(":http-reconnect=true")
-
-            let skippedKeys: Set<String> = ["User-Agent", "Referer", "Cookie"]
-            for (key, value) in headers where !skippedKeys.contains(key) {
-                guard !value.isEmpty else { continue }
-                media.addOption(":http-header=\(key): \(value)")
-            }
-        }
-
-        // Keep reconnect enabled for flaky hosts.
-        media.addOption(":http-reconnect=true")
-
-        // Apply subtitle styling options (best effort; depends on libvlc text renderer support).
-        applySubtitleStyleOptions(to: media)
-
-        if url.isFileURL {
-            media.addOption(":file-caching=300")
-            let ext = url.pathExtension.lowercased()
-            if ext == "ts" || ext == "mts" || ext == "m2ts" {
-                media.addOption(":demux=ts")
-            }
-        } else {
-            media.addOption(":network-caching=12000")
-        }
-
-        return media
-    }
-
-    private func restoreDrawableRenderingAfterSampleBuffer(reason: String, disableForSession: Bool) {
-        if disableForSession {
-            sampleBufferOutputDisabledAfterStartupFailure = true
-        }
-        logVLC("restoring VLC drawable after sample-buffer output reason=\(reason) disableForSession=\(disableForSession) snapshot={\(playerSnapshot())}", type: "Player")
-        disableSampleBufferPictureInPicture(resetLayer: true)
-        delegate?.renderer(self, didChangePictureInPictureAvailability: isPictureInPictureAvailable)
-        delegate?.renderer(self, didChangePictureInPictureActive: false)
-
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.syncRenderingViewWithPictureInPictureSetting(reason: reason, reassignPlayerDrawable: true)
-            self.mediaPlayer?.drawable = self.activeVLCView
-            self.activeVLCView.isHidden = false
-            self.activeVLCView.alpha = 1
-            self.logDrawableSnapshot("sample-buffer restore drawable")
-        }
-    }
-
-    private func recoverFromSampleBufferStartupFailureIfNeeded(_ player: VLCMediaPlayer, state: VLCMediaPlayerState) -> Bool {
-        guard isUsingSampleBufferOutput,
-              !sampleBufferOutputHasPrimedFrame,
-              !sampleBufferOutputDisabledAfterStartupFailure,
-              isTerminalState(state),
-              currentURL != nil,
-              currentPreset != nil else {
-            return false
-        }
-
-        let duration = reliableDuration(from: player)
-        let resumePosition = max(0, pendingAbsoluteSeek ?? cachedPosition)
-        if duration >= minimumReliableDuration, resumePosition >= duration - 0.5 {
-            return false
-        }
-
-        logVLC("VLC PiP sample-buffer output reached \(describeState(state)) before first frame; falling back to drawable and reloading at \(secondsText(resumePosition))s snapshot={\(playerSnapshot(player))}", type: "Error")
-        restoreDrawableRenderingAfterSampleBuffer(reason: "sample-buffer startup fallback", disableForSession: true)
-        reloadCurrentItemPreservingPosition(resumePosition)
-        return true
-    }
-
     var isPictureInPictureAvailable: Bool {
-        guard isPictureInPictureSettingEnabled else { return false }
-        guard !sampleBufferOutputDisabledAfterStartupFailure else { return false }
-        guard #available(iOS 15.0, *) else { return false }
-        guard VLCKitSPMPictureInPictureController.isPictureInPictureSupported else { return false }
-        guard isRunning, mediaPlayer != nil else { return false }
-        return true
+        false
     }
 
     var isPictureInPictureActive: Bool {
-        if #available(iOS 15.0, *) {
-            return nativePiPController?.isPictureInPictureActive ?? false
-        }
-        return false
+        false
     }
 
     @discardableResult
     func startPictureInPicture() -> Bool {
-        guard isPictureInPictureSettingEnabled else {
-            Logger.shared.log("[VLCRenderer] VLC PiP start ignored: setting is off", type: "Player")
-            return false
-        }
-        guard #available(iOS 15.0, *), VLCKitSPMPictureInPictureController.isPictureInPictureSupported else {
-            Logger.shared.log("[VLCRenderer] VLC PiP start ignored: sample-buffer controller unavailable", type: "Player")
-            return false
-        }
-        guard !sampleBufferOutputDisabledAfterStartupFailure else {
-            Logger.shared.log("[VLCRenderer] VLC PiP start ignored: sample-buffer output disabled after startup failure", type: "Player")
-            return false
-        }
-        guard let player = mediaPlayer else {
-            Logger.shared.log("[VLCRenderer] VLC PiP start ignored: media player missing", type: "Player")
-            return false
-        }
-
-        if nativePiPController?.isPictureInPictureActive == true {
-            return true
-        }
-
-        if pictureInPictureSampleBufferOutput?.isAttached != true {
-            logVLC("VLC PiP preparing dedicated sample-buffer player snapshot={\(playerSnapshot(player))}", type: "Player")
-            guard configureDedicatedPictureInPicturePlayer(from: player) else {
-                restoreDrawableRenderingAfterSampleBuffer(reason: "dedicated sample-buffer attach failed", disableForSession: true)
-                return false
-            }
-        }
-
-        guard let controller = nativePiPController else { return false }
-        guard sampleBufferOutputHasPrimedFrame else {
-            sampleBufferPictureInPictureStartAttemptID += 1
-            let attemptID = sampleBufferPictureInPictureStartAttemptID
-            logVLC("VLC PiP waiting for first sample-buffer frame before start attemptID=\(attemptID) snapshot={\(playerSnapshot(player))}", type: "Player")
-            scheduleSampleBufferPictureInPictureStart(attemptID: attemptID, attempt: 0)
-            return true
-        }
-
-        DispatchQueue.main.async { [weak self, weak controller] in
-            guard let self, let controller else { return }
-            self.showSampleBufferDisplayLayer(reason: "sample-buffer immediate PiP start")
-            let started = controller.startPictureInPicture()
-            Logger.shared.log("[VLCRenderer] VLC PiP start requested result=\(started) possible=\(controller.isPictureInPicturePossible) active=\(controller.isPictureInPictureActive)", type: "Player")
-            if !started {
-                self.restoreDrawableRenderingAfterSampleBuffer(reason: "sample-buffer start rejected", disableForSession: true)
-            }
-        }
-        return true
-    }
-
-    @available(iOS 15.0, *)
-    private func configureDedicatedPictureInPicturePlayer(from inlinePlayer: VLCMediaPlayer) -> Bool {
-        guard let url = currentURL, let preset = currentPreset else {
-            logVLC("VLC PiP dedicated player skipped: current media identity missing", type: "Error")
-            return false
-        }
-
-        pictureInPictureSampleBufferOutput?.detach()
-        pictureInPictureMediaPlayer?.stop()
-        pictureInPictureSampleBufferOutput = nil
-        pictureInPictureMediaPlayer = nil
-        pictureInPictureMedia = nil
-        nativePiPController = nil
-        sampleBufferOutputHasPrimedFrame = false
-        isPictureInPictureStartPending = true
-
-        let startPosition = resolvedPlaybackProgress(from: inlinePlayer).position
-        let pipPlayer = VLCMediaPlayer()
-        let output = VLCKitSPMSampleBufferVideoOutput(displayLayer: displayLayer)
-        output.playbackTimeProvider = { [weak self, weak pipPlayer] in
-            guard let self else { return startPosition }
-            if let pipPlayer {
-                let rawPosition = (pipPlayer.time.value?.doubleValue ?? 0) / 1000.0
-                if rawPosition.isFinite, rawPosition > 0 {
-                    return rawPosition
-                }
-            }
-            return self.cachedPosition
-        }
-        output.subtitleOverlayProvider = { [weak self] request in
-            guard let self else { return nil }
-            return self.delegate?.renderer(self, getSubtitleForTime: request.presentationTime)
-        }
-        output.onFirstFrameEnqueued = { [weak self] in
-            guard let self else { return }
-            self.sampleBufferOutputHasPrimedFrame = true
-            self.showSampleBufferDisplayLayer(reason: "dedicated sample-buffer first frame")
-            self.delegate?.renderer(self, didChangePictureInPictureAvailability: self.isPictureInPictureAvailable)
-        }
-        output.onDebugEvent = { [weak self] event in
-            self?.logVLC("VLC PiP dedicated sample-buffer \(event)", type: "Player")
-        }
-
-        let media = makeMedia(url: url, preset: preset, headers: currentHeaders)
-        pictureInPictureMedia = media
-        pictureInPictureMediaPlayer = pipPlayer
-        pictureInPictureSampleBufferOutput = output
-        nativePiPController = VLCKitSPMPictureInPictureController(sampleBufferDisplayLayer: displayLayer)
-        nativePiPController?.delegate = self
-
-        pipPlayer.media = media
-        pipPlayer.rate = Float(currentPlaybackSpeed)
-        pipPlayer.drawable = nil
-
-        do {
-            try output.attach(to: pipPlayer)
-            logVLC("VLC PiP dedicated sample-buffer callbacks attached after media assignment", type: "Player")
-        } catch {
-            logVLC("failed to attach dedicated VLCKitSPM sample-buffer PiP output after media assignment: \(error); keeping drawable player active", type: "Error")
-            output.detach()
-            pictureInPictureMediaPlayer = nil
-            pictureInPictureMedia = nil
-            nativePiPController = nil
-            isPictureInPictureStartPending = false
-            return false
-        }
-
-        ensureAudioSessionActive()
-
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.hideSampleBufferDisplayLayer(reason: "dedicated sample-buffer awaiting first frame", flush: false)
-            self.displayLayer.videoGravity = .resizeAspect
-            self.delegate?.renderer(self, didChangePictureInPictureAvailability: self.isPictureInPictureAvailable)
-        }
-
-        logVLC("VLC PiP dedicated player starting at \(secondsText(startPosition))s pip={\(pictureInPicturePlayerSnapshot())}", type: "Player")
-        pipPlayer.play()
-        if startPosition > 0 {
-            eventQueue.asyncAfter(deadline: .now() + 0.2) { [weak self, weak pipPlayer] in
-                guard let self, let pipPlayer else { return }
-                self.seekPictureInPicturePlayer(pipPlayer, to: startPosition)
-            }
-        }
-        return true
-    }
-
-    private func seekPictureInPicturePlayer(_ player: VLCMediaPlayer, to seconds: Double) {
-        let duration = reliableDuration(from: player)
-        if duration >= minimumReliableDuration {
-            setNormalizedPosition(min(max(seconds / duration, 0), 1), on: player)
-        } else if cachedDuration >= minimumReliableDuration {
-            setNormalizedPosition(min(max(seconds / cachedDuration, 0), 1), on: player)
-        }
-        cachedPosition = max(0, seconds)
-        lastProgressHostTime = CACurrentMediaTime()
-        updatePictureInPicturePlaybackState()
-        logVLC("VLC PiP dedicated player seek target=\(secondsText(seconds)) duration=\(secondsText(max(duration, cachedDuration))) snapshot={\(playerSnapshot(player))}", type: "Progress")
-    }
-
-    @available(iOS 15.0, *)
-    private func scheduleSampleBufferPictureInPictureStart(attemptID: Int, attempt: Int) {
-        eventQueue.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-            guard let self,
-                  self.isRunning,
-                  !self.isStopping,
-                  self.sampleBufferPictureInPictureStartAttemptID == attemptID,
-                  (self.pictureInPictureSampleBufferOutput?.isAttached == true || self.isUsingSampleBufferOutput) else {
-                return
-            }
-
-            guard let controller = self.nativePiPController else {
-                self.restoreDrawableRenderingAfterSampleBuffer(reason: "sample-buffer controller disappeared", disableForSession: true)
-                return
-            }
-
-            if self.sampleBufferOutputHasPrimedFrame {
-                DispatchQueue.main.async { [weak self, weak controller] in
-                    guard let self, let controller else { return }
-                    self.showSampleBufferDisplayLayer(reason: "sample-buffer delayed PiP start")
-                    let started = controller.startPictureInPicture()
-                    self.logVLC("VLC PiP delayed start attempt=\(attempt) result=\(started) possible=\(controller.isPictureInPicturePossible) active=\(controller.isPictureInPictureActive) snapshot={\(self.playerSnapshot())} pip={\(self.pictureInPicturePlayerSnapshot())}", type: "Player")
-                    if !started {
-                        self.restoreDrawableRenderingAfterSampleBuffer(reason: "sample-buffer delayed start rejected", disableForSession: true)
-                    }
-                }
-                return
-            }
-
-            guard attempt < 12 else {
-                self.logVLC("VLC PiP timed out waiting for first sample-buffer frame; restoring drawable snapshot={\(self.playerSnapshot())} pip={\(self.pictureInPicturePlayerSnapshot())}", type: "Error")
-                self.restoreDrawableRenderingAfterSampleBuffer(reason: "sample-buffer frame timeout", disableForSession: true)
-                return
-            }
-
-            self.scheduleSampleBufferPictureInPictureStart(attemptID: attemptID, attempt: attempt + 1)
-        }
+        Logger.shared.log("[VLCRenderer] PiP start ignored: stable VLCKitSPM path does not expose VLC PiP", type: "Player")
+        return false
     }
 
     func stopPictureInPicture() {
-        if #available(iOS 15.0, *) {
-            nativePiPController?.stopPictureInPicture()
-        }
+        // No-op: VLC PiP is unavailable on the stable VLCKitSPM path.
     }
 
     func updatePictureInPicturePlaybackState() {
-        if #available(iOS 15.0, *) {
-            nativePiPController?.invalidatePlaybackState()
-        }
+        // No-op: VLC PiP is unavailable on the stable VLCKitSPM path.
     }
 
     func handlePictureInPictureSettingChanged() {
-        logVLC("handlePictureInPictureSettingChanged enabled=\(isPictureInPictureSettingEnabled) running=\(isRunning) sampleBuffer=\(isUsingSampleBufferOutput)", type: "Player")
-        if !isPictureInPictureSettingEnabled {
-            restoreDrawableRenderingAfterSampleBuffer(reason: "PiP disabled", disableForSession: false)
-        } else if isRunning, !isUsingSampleBufferOutput {
-            sampleBufferOutputDisabledAfterStartupFailure = false
-            logVLC("VLC PiP setting enabled; keeping inline drawable active and preparing sample-buffer only when PiP starts", type: "Player")
-            delegate?.renderer(self, didChangePictureInPictureAvailability: isPictureInPictureAvailable)
+        logVLC("handlePictureInPictureSettingChanged ignored; VLC PiP is disabled on stable VLCKitSPM path", type: "Player")
+        if UserDefaults.standard.object(forKey: "vlcPiPEnabled") as? Bool != false {
+            UserDefaults.standard.set(false, forKey: "vlcPiPEnabled")
         }
+        delegate?.renderer(self, didChangePictureInPictureAvailability: false)
+        delegate?.renderer(self, didChangePictureInPictureActive: false)
+        syncRenderingViewWithPictureInPictureSetting(reason: "PiP disabled stable SPM", reassignPlayerDrawable: true)
     }
 
     // MARK: - State Properties
@@ -1906,107 +1310,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
     }
 }
 
-@available(iOS 15.0, *)
-extension VLCRenderer: VLCKitSPMPictureInPictureControllerDelegate {
-    func pictureInPictureControllerWillStart(_ controller: VLCKitSPMPictureInPictureController) {
-        logVLC("native VLC PiP willStart snapshot={\(playerSnapshot())}", type: "Player")
-        delegate?.renderer(self, didChangePictureInPictureAvailability: isPictureInPictureAvailable)
-    }
-
-    func pictureInPictureControllerDidStart(_ controller: VLCKitSPMPictureInPictureController) {
-        logVLC("native VLC PiP didStart snapshot={\(playerSnapshot())}", type: "Player")
-        isPictureInPictureStartPending = false
-        if let inlinePlayer = mediaPlayer {
-            if let pipPlayer = pictureInPictureMediaPlayer, inlinePlayer === pipPlayer {
-                logVLC("native VLC PiP didStart using inline player as PiP source", type: "Player")
-            } else {
-                inlinePlayer.pause()
-                logVLC("native VLC PiP didStart paused inline drawable player; dedicated PiP player is active", type: "Player")
-            }
-        }
-        delegate?.renderer(self, didChangePictureInPictureActive: true)
-        startProgressPolling()
-        updatePictureInPicturePlaybackState()
-    }
-
-    func pictureInPictureController(_ controller: VLCKitSPMPictureInPictureController, failedToStart error: Error) {
-        logVLC("native VLC PiP failedToStart error=\(error) snapshot={\(playerSnapshot())}", type: "Error")
-        delegate?.renderer(self, didChangePictureInPictureActive: false)
-        restoreDrawableRenderingAfterSampleBuffer(reason: "native VLC PiP failedToStart", disableForSession: true)
-        updatePictureInPicturePlaybackState()
-    }
-
-    func pictureInPictureControllerWillStop(_ controller: VLCKitSPMPictureInPictureController) {
-        logVLC("native VLC PiP willStop snapshot={\(playerSnapshot())}", type: "Player")
-    }
-
-    func pictureInPictureControllerDidStop(_ controller: VLCKitSPMPictureInPictureController) {
-        logVLC("native VLC PiP didStop snapshot={\(playerSnapshot())}", type: "Player")
-        let resumePosition = cachedPosition
-        let shouldResumeInline = !isPaused
-        delegate?.renderer(self, didChangePictureInPictureActive: false)
-        restoreDrawableRenderingAfterSampleBuffer(reason: "native VLC PiP didStop", disableForSession: false)
-        if let inlinePlayer = mediaPlayer {
-            eventQueue.asyncAfter(deadline: .now() + 0.1) { [weak self, weak inlinePlayer] in
-                guard let self, let inlinePlayer, self.isRunning, !self.isStopping else { return }
-                if resumePosition > 0 {
-                    self.applySeek(to: resumePosition, on: inlinePlayer)
-                }
-                if shouldResumeInline {
-                    self.ensureAudioSessionActive()
-                    inlinePlayer.play()
-                    if self.currentPlaybackSpeed != 1.0 {
-                        inlinePlayer.rate = Float(self.currentPlaybackSpeed)
-                    }
-                    self.startProgressPolling()
-                }
-                self.logVLC("native VLC PiP didStop restored inline player resume=\(self.secondsText(resumePosition)) shouldResume=\(shouldResumeInline) snapshot={\(self.playerSnapshot(inlinePlayer))}", type: "Player")
-            }
-        }
-        updatePictureInPicturePlaybackState()
-    }
-
-    func pictureInPictureController(_ controller: VLCKitSPMPictureInPictureController, restoreUserInterface completionHandler: @escaping (Bool) -> Void) {
-        completionHandler(true)
-    }
-
-    func pictureInPictureControllerPlay(_ controller: VLCKitSPMPictureInPictureController) {
-        isPaused = false
-        if let pictureInPictureMediaPlayer {
-            ensureAudioSessionActive()
-            pictureInPictureMediaPlayer.play()
-            if currentPlaybackSpeed != 1.0 {
-                pictureInPictureMediaPlayer.rate = Float(currentPlaybackSpeed)
-            }
-            startProgressPolling()
-            delegate?.renderer(self, didChangePause: false)
-            updatePictureInPicturePlaybackState()
-        } else {
-            play()
-        }
-    }
-
-    func pictureInPictureControllerPause(_ controller: VLCKitSPMPictureInPictureController) {
-        if let pictureInPictureMediaPlayer {
-            isPaused = true
-            pictureInPictureMediaPlayer.pause()
-            stopProgressPolling()
-            delegate?.renderer(self, didChangePause: true)
-            updatePictureInPicturePlaybackState()
-        } else {
-            pausePlayback()
-        }
-    }
-
-    func pictureInPictureController(_ controller: VLCKitSPMPictureInPictureController, skipByInterval interval: CMTime) {
-        seek(by: CMTimeGetSeconds(interval))
-    }
-
-    func pictureInPictureControllerIsPlaying(_ controller: VLCKitSPMPictureInPictureController) -> Bool { !isPaused }
-    func pictureInPictureControllerDuration(_ controller: VLCKitSPMPictureInPictureController) -> TimeInterval { cachedDuration }
-    func pictureInPictureControllerCurrentTime(_ controller: VLCKitSPMPictureInPictureController) -> TimeInterval { cachedPosition }
-}
-
 #else  // Stub when VLCKit is not available
 
 // Minimal stub to allow compilation when VLCKit is not installed
@@ -2062,6 +1365,7 @@ final class VLCRenderer: PlayerRenderer {
     func startPictureInPicture() -> Bool { false }
     func stopPictureInPicture() { }
     func updatePictureInPicturePlaybackState() { }
+    var isUsingPictureInPictureSampleBufferOutput: Bool { false }
     var isPausedState: Bool { true }
     weak var delegate: VLCRendererDelegate?
 }

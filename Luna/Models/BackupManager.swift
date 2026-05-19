@@ -173,7 +173,8 @@ struct BackupData: Codable {
         playerTwoFingerTapPlayPauseEnabled = try container.decodeIfPresent(Bool.self, forKey: .playerTwoFingerTapPlayPauseEnabled) ?? true
         vlcDoubleTapSeekEnabled = try container.decodeIfPresent(Bool.self, forKey: .vlcDoubleTapSeekEnabled) ?? true
         vlcDoubleTapSeekSeconds = try container.decodeIfPresent(Double.self, forKey: .vlcDoubleTapSeekSeconds) ?? 10.0
-        vlcPiPEnabled = try container.decodeIfPresent(Bool.self, forKey: .vlcPiPEnabled) ?? false
+        _ = try container.decodeIfPresent(Bool.self, forKey: .vlcPiPEnabled)
+        vlcPiPEnabled = false
         vlcOpenSubtitlesEnabled = try container.decodeIfPresent(Bool.self, forKey: .vlcOpenSubtitlesEnabled) ?? false
         vlcOpenSubtitlesAutoFallbackEnabled = try container.decodeIfPresent(Bool.self, forKey: .vlcOpenSubtitlesAutoFallbackEnabled) ?? true
         playerPerformanceOverlayEnabled = try container.decodeIfPresent(Bool.self, forKey: .playerPerformanceOverlayEnabled) ?? false
@@ -321,7 +322,7 @@ struct BackupData: Codable {
         try container.encode(playerTwoFingerTapPlayPauseEnabled, forKey: .playerTwoFingerTapPlayPauseEnabled)
         try container.encode(vlcDoubleTapSeekEnabled, forKey: .vlcDoubleTapSeekEnabled)
         try container.encode(vlcDoubleTapSeekSeconds, forKey: .vlcDoubleTapSeekSeconds)
-        try container.encode(vlcPiPEnabled, forKey: .vlcPiPEnabled)
+        try container.encode(false, forKey: .vlcPiPEnabled)
         try container.encode(vlcOpenSubtitlesEnabled, forKey: .vlcOpenSubtitlesEnabled)
         try container.encode(vlcOpenSubtitlesAutoFallbackEnabled, forKey: .vlcOpenSubtitlesAutoFallbackEnabled)
         try container.encode(playerPerformanceOverlayEnabled, forKey: .playerPerformanceOverlayEnabled)
@@ -787,7 +788,7 @@ class BackupManager {
         let vlcDoubleTapSeekEnabled = userDefaults.object(forKey: "vlcDoubleTapSeekEnabled") == nil ? true : userDefaults.bool(forKey: "vlcDoubleTapSeekEnabled")
         let savedDoubleTapSeekSeconds = userDefaults.double(forKey: "vlcDoubleTapSeekSeconds")
         let vlcDoubleTapSeekSeconds = savedDoubleTapSeekSeconds > 0 ? savedDoubleTapSeekSeconds : 10.0
-        let vlcPiPEnabled = userDefaults.object(forKey: "vlcPiPEnabled") as? Bool ?? false
+        let vlcPiPEnabled = false
         let vlcOpenSubtitlesEnabled = userDefaults.bool(forKey: "vlcOpenSubtitlesEnabled")
         let vlcOpenSubtitlesAutoFallbackEnabled = userDefaults.object(forKey: "vlcOpenSubtitlesAutoFallbackEnabled") == nil ? true : userDefaults.bool(forKey: "vlcOpenSubtitlesAutoFallbackEnabled")
         let playerPerformanceOverlayEnabled = userDefaults.bool(forKey: "playerPerformanceOverlayEnabled")
@@ -1090,7 +1091,7 @@ class BackupManager {
         let playerTwoFingerTapPlayPauseEnabled = json["playerTwoFingerTapPlayPauseEnabled"] as? Bool ?? true
         let vlcDoubleTapSeekEnabled = json["vlcDoubleTapSeekEnabled"] as? Bool ?? true
         let vlcDoubleTapSeekSeconds = json["vlcDoubleTapSeekSeconds"] as? Double ?? 10.0
-        let vlcPiPEnabled = json["vlcPiPEnabled"] as? Bool ?? false
+        let vlcPiPEnabled = false
         let vlcOpenSubtitlesEnabled = json["vlcOpenSubtitlesEnabled"] as? Bool ?? false
         let vlcOpenSubtitlesAutoFallbackEnabled = json["vlcOpenSubtitlesAutoFallbackEnabled"] as? Bool ?? true
         let playerPerformanceOverlayEnabled = json["playerPerformanceOverlayEnabled"] as? Bool ?? false
@@ -1391,7 +1392,7 @@ class BackupManager {
         userDefaults.set(backup.playerTwoFingerTapPlayPauseEnabled, forKey: "playerTwoFingerTapPlayPauseEnabled")
         userDefaults.set(backup.vlcDoubleTapSeekEnabled, forKey: "vlcDoubleTapSeekEnabled")
         userDefaults.set(backup.vlcDoubleTapSeekSeconds, forKey: "vlcDoubleTapSeekSeconds")
-        userDefaults.set(backup.vlcPiPEnabled, forKey: "vlcPiPEnabled")
+        userDefaults.set(false, forKey: "vlcPiPEnabled")
         userDefaults.set(backup.vlcOpenSubtitlesEnabled, forKey: "vlcOpenSubtitlesEnabled")
         userDefaults.set(backup.vlcOpenSubtitlesAutoFallbackEnabled, forKey: "vlcOpenSubtitlesAutoFallbackEnabled")
         userDefaults.set(backup.playerPerformanceOverlayEnabled, forKey: "playerPerformanceOverlayEnabled")

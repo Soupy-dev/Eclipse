@@ -39,10 +39,10 @@
     {
       "identity" : "vlckit-spm",
       "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Soupy-dev/vlckit-spm",
+      "location" : "https://github.com/tylerjonesio/vlckit-spm",
       "state" : {
-        "branch" : "main",
-        "revision" : "5065abc7a9123eeb3de42f6a7aa1f9980c6ea261"
+        "revision" : "e932bbd488872fdb74f6654d28c2f291eae03daf",
+        "version" : "3.6.0"
       }
     }
   ],

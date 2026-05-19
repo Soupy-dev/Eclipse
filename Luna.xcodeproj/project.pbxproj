@@ -1489,10 +1489,10 @@
 		};
 		BB7777992F20000001BB7799 /* XCRemoteSwiftPackageReference "vlckit-spm" */ = {
 			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/Soupy-dev/vlckit-spm";
+			repositoryURL = "https://github.com/tylerjonesio/vlckit-spm";
 			requirement = {
-				branch = main;
-				kind = branch;
+				kind = upToNextMajorVersion;
+				minimumVersion = 3.6.0;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */
