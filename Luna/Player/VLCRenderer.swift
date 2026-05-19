@@ -58,6 +58,7 @@ final class VLCRenderer: NSObject, PlayerRenderer {
     @available(iOS 15.0, *)
     private var nativePiPController: VLCKitSPMPictureInPictureController?
     private var sampleBufferOutputHasPrimedFrame = false
+    private var sampleBufferOutputDisabledAfterStartupFailure = false
     
     private var isPaused: Bool = true
     private var isLoading: Bool = false
@@ -1071,6 +1072,8 @@ final class VLCRenderer: NSObject, PlayerRenderer {
                 self.delegate?.renderer(self, didChangeLoading: true)
             }
 
+        } else if recoverFromSampleBufferStartupFailureIfNeeded(player, state: state) {
+            return
         } else if isTerminalState(state) {
             isPaused = true
             isLoading = false
@@ -1248,6 +1251,12 @@ final class VLCRenderer: NSObject, PlayerRenderer {
 
     private func configureSampleBufferPictureInPictureIfNeeded(for player: VLCMediaPlayer) -> Bool {
         sampleBufferOutputHasPrimedFrame = false
+        guard !sampleBufferOutputDisabledAfterStartupFailure else {
+            logVLC("VLC PiP sample-buffer output skipped after startup failure; using drawable for this session", type: "Player")
+            disableSampleBufferPictureInPicture(resetLayer: true)
+            return false
+        }
+
         guard isPictureInPictureSettingEnabled else {
             disableSampleBufferPictureInPicture(resetLayer: true)
             return false
@@ -1319,6 +1328,40 @@ final class VLCRenderer: NSObject, PlayerRenderer {
                 displayLayer.controlTimebase = nil
             }
         }
+    }
+
+    private func recoverFromSampleBufferStartupFailureIfNeeded(_ player: VLCMediaPlayer, state: VLCMediaPlayerState) -> Bool {
+        guard isUsingSampleBufferOutput,
+              !sampleBufferOutputHasPrimedFrame,
+              !sampleBufferOutputDisabledAfterStartupFailure,
+              isTerminalState(state),
+              currentURL != nil,
+              currentPreset != nil else {
+            return false
+        }
+
+        let duration = reliableDuration(from: player)
+        let resumePosition = max(0, pendingAbsoluteSeek ?? cachedPosition)
+        if duration >= minimumReliableDuration, resumePosition >= duration - 0.5 {
+            return false
+        }
+
+        sampleBufferOutputDisabledAfterStartupFailure = true
+        logVLC("VLC PiP sample-buffer output reached \(describeState(state)) before first frame; falling back to drawable and reloading at \(secondsText(resumePosition))s snapshot={\(playerSnapshot(player))}", type: "Error")
+        disableSampleBufferPictureInPicture(resetLayer: true)
+        delegate?.renderer(self, didChangePictureInPictureAvailability: false)
+        delegate?.renderer(self, didChangePictureInPictureActive: false)
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.syncRenderingViewWithPictureInPictureSetting(reason: "sample-buffer startup fallback", reassignPlayerDrawable: true)
+            self.activeVLCView.isHidden = false
+            self.activeVLCView.alpha = 1
+            self.logDrawableSnapshot("sample-buffer startup fallback")
+        }
+
+        reloadCurrentItemPreservingPosition(resumePosition)
+        return true
     }
 
     var isPictureInPictureAvailable: Bool {
