@@ -1822,8 +1822,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             Logger.shared.log("Failed to start \(rendererName) renderer: \(error)", type: "Error")
         }
 
-        pipController = PiPController(sampleBufferDisplayLayer: displayLayer)
-        pipController?.delegate = self
+        if isMPVRenderer {
+            pipController = PiPController(sampleBufferDisplayLayer: displayLayer)
+            pipController?.delegate = self
+        } else {
+            pipController = nil
+            logVLCUI("skipping MPV sample-buffer PiPController for VLC renderer", type: "Player")
+        }
         updatePiPButtonVisibility()
         
         showControlsTemporarily()
@@ -6590,6 +6595,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func startMPVPictureInPictureWhenPossible(source: String) {
+        guard isMPVRenderer, !isVLCPlayer else {
+            logPictureInPicture("MPV PiP start ignored source=\(source): active renderer is not MPV")
+            return
+        }
         guard let pip = pipController else { return }
         guard !pip.isPictureInPictureActive else {
             logPictureInPicture("start ignored source=\(source): PiP already active")
@@ -6611,6 +6620,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func attemptMPVPictureInPictureStart(source: String, attemptID: Int, attempt: Int) {
+        guard isMPVRenderer, !isVLCPlayer else { return }
         guard attemptID == mpvPiPStartAttemptID else { return }
         guard let pip = pipController else { return }
         rendererPrimePictureInPictureFrames(reason: "\(source)-attempt-\(attempt)")
@@ -8000,11 +8010,20 @@ extension PlayerViewController: VLCRendererDelegate {
 // MARK: - PiP Support
 extension PlayerViewController: PiPControllerDelegate {
     func pipController(_ controller: PiPController, willStartPictureInPicture: Bool) {
+        guard !isVLCPlayer else {
+            Logger.shared.log("[PlayerVC.PiP] ignoring sample-buffer willStart while VLC renderer is active", type: "Player")
+            return
+        }
         logPictureInPicture("delegate willStart possible=\(controller.isPictureInPicturePossible) active=\(controller.isPictureInPictureActive)")
         let primed = prepareMPVPictureInPictureRenderer(source: "delegate-willStart", activateLayer: true)
         logPictureInPicture("delegate willStart prepared primed=\(primed) subs={\(subtitlePictureInPictureDebugSnapshot())}")
     }
     func pipController(_ controller: PiPController, didStartPictureInPicture: Bool) {
+        guard !isVLCPlayer else {
+            Logger.shared.log("[PlayerVC.PiP] ignoring sample-buffer didStart while VLC renderer is active", type: "Player")
+            updatePiPButtonVisibility()
+            return
+        }
         let primed = rendererIsPictureInPicturePrimed()
         logPictureInPicture("delegate didStart success=\(didStartPictureInPicture) possible=\(controller.isPictureInPicturePossible) active=\(controller.isPictureInPictureActive) primed=\(primed) renderer={\(rendererPictureInPictureDebugSnapshot())}")
         if didStartPictureInPicture {
@@ -8024,9 +8043,18 @@ extension PlayerViewController: PiPControllerDelegate {
         updatePiPButtonVisibility()
     }
     func pipController(_ controller: PiPController, willStopPictureInPicture: Bool) {
+        guard !isVLCPlayer else {
+            Logger.shared.log("[PlayerVC.PiP] ignoring sample-buffer willStop while VLC renderer is active", type: "Player")
+            return
+        }
         logPictureInPicture("delegate willStop renderer={\(rendererPictureInPictureDebugSnapshot())}")
     }
     func pipController(_ controller: PiPController, didStopPictureInPicture: Bool) {
+        guard !isVLCPlayer else {
+            Logger.shared.log("[PlayerVC.PiP] ignoring sample-buffer didStop while VLC renderer is active", type: "Player")
+            updatePiPButtonVisibility()
+            return
+        }
         logPictureInPicture("delegate didStop renderer={\(rendererPictureInPictureDebugSnapshot())}")
         mpvPiPStartAttemptID += 1
         mpvAppExitPiPStartRequested = false
@@ -8034,6 +8062,11 @@ extension PlayerViewController: PiPControllerDelegate {
         updatePiPButtonVisibility()
     }
     func pipController(_ controller: PiPController, restoreUserInterfaceForPictureInPictureStop completionHandler: @escaping (Bool) -> Void) {
+        guard !isVLCPlayer else {
+            Logger.shared.log("[PlayerVC.PiP] ignoring sample-buffer restoreUI while VLC renderer is active", type: "Player")
+            completionHandler(true)
+            return
+        }
         logPictureInPicture("delegate restoreUI begin renderer={\(rendererPictureInPictureDebugSnapshot())}")
         let completeRestore: () -> Void = { [weak self] in
             self?.rendererFinishPictureInPicture()
@@ -8054,6 +8087,7 @@ extension PlayerViewController: PiPControllerDelegate {
         rendererPausePlayback()
     }
     func pipController(_ controller: PiPController, skipByInterval interval: CMTime) {
+        guard !isVLCPlayer else { return }
         let requestedSeconds = CMTimeGetSeconds(interval)
         let direction = requestedSeconds < 0 ? -1.0 : 1.0
         let seconds = direction * playerSeekSeconds
@@ -8080,6 +8114,10 @@ extension PlayerViewController: PiPControllerDelegate {
 
     @objc private func appWillResignActive() {
         logPictureInPicture("lifecycle notification received source=will-resign-active")
+        if isVLCPlayer {
+            attemptVLCAppExitPictureInPictureStart(source: "will-resign-active")
+            return
+        }
         if Thread.isMainThread {
             attemptMPVAppExitPictureInPictureStart(source: "will-resign-active")
         } else {
@@ -8092,6 +8130,12 @@ extension PlayerViewController: PiPControllerDelegate {
     @objc private func appScenePhaseDidChange(_ notification: Notification) {
         let phase = notification.userInfo?["phase"] as? String ?? "unknown"
         logPictureInPicture("scenePhase notification received phase=\(phase)")
+        if isVLCPlayer {
+            if phase == "inactive" || phase == "background" {
+                attemptVLCAppExitPictureInPictureStart(source: "scene-phase-\(phase)")
+            }
+            return
+        }
         switch phase {
         case "inactive":
             if Thread.isMainThread {
@@ -8225,6 +8269,10 @@ extension PlayerViewController: PiPControllerDelegate {
 
     @objc private func sceneWillDeactivate() {
         logPictureInPicture("lifecycle notification received source=scene-will-deactivate")
+        if isVLCPlayer {
+            attemptVLCAppExitPictureInPictureStart(source: "scene-will-deactivate")
+            return
+        }
 #if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
         if metalMPVRenderer != nil {
             logPictureInPicture("scene-will-deactivate delaying Metal sample-buffer PiP start until later lifecycle signal")
@@ -8249,6 +8297,10 @@ extension PlayerViewController: PiPControllerDelegate {
 
     @objc private func sceneDidEnterBackground() {
         logPictureInPicture("lifecycle notification received source=scene-did-enter-background")
+        if isVLCPlayer {
+            attemptVLCAppExitPictureInPictureStart(source: "scene-did-enter-background")
+            return
+        }
         if Thread.isMainThread {
             attemptMPVAppExitPictureInPictureStart(source: "scene-did-enter-background")
             scheduleMPVBackgroundAudioFallback(source: "scene-did-enter-background")
