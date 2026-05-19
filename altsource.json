@@ -22,12 +22,12 @@
       "category": "entertainment",
       "versions": [
         {
-          "version": "1.0.2",
-          "buildVersion": "3",
-          "marketingVersion": "1.0.2",
+          "version": "1.0.3",
+          "buildVersion": "4",
+          "marketingVersion": "1.0.3",
           "date": "2026-05-08",
-          "localizedDescription": "Release build with MAL tracker sync tools, safer HLS download handling, reader-mode gradient fixes, and update metadata refresh.",
-          "downloadURL": "https://github.com/Soupy-dev/Eclipse/releases/download/v1.0.2/Eclipse.ipa",
+          "localizedDescription": "Updated stuff",
+          "downloadURL": "https://github.com/Soupy-dev/Eclipse/releases/download/v1.0.3/Eclipse.ipa",
           "size": 64963136,
           "minOSVersion": "15.0"
         }
