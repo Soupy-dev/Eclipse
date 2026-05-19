@@ -1026,6 +1026,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var mpvSilentStartupRetryKey: String?
     private var userSelectedAudioTrack = false
     private var userSelectedSubtitleTrack = false
+    private var attemptedAnimeAudioAutoSelectSignature: String?
+    private var lastAudioTracksMenuLogSignature: String?
+    private var lastSubtitleTracksMenuLogSignature: String?
+    private var lastVLCPauseLogSignature: String?
+    private var lastVLCPauseLogTime: CFTimeInterval = 0
     private var pendingInitialResumeTarget: Double?
     private var pendingInitialResumeDeadline: Date?
     private var vlcProxyFallbackTried = false
@@ -2041,6 +2046,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         
         userSelectedAudioTrack = false
         userSelectedSubtitleTrack = false
+        attemptedAnimeAudioAutoSelectSignature = nil
+        lastAudioTracksMenuLogSignature = nil
+        lastSubtitleTracksMenuLogSignature = nil
+        lastVLCPauseLogSignature = nil
+        lastVLCPauseLogTime = 0
         lastRequestedEmbeddedSubtitleTrackId = nil
         if !isLocalProxyURL(url) {
             vlcProxyFallbackTried = false
@@ -3909,19 +3919,36 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func updateAudioTracksMenu() {
         let detailedTracks = rendererGetAudioTracksDetailed()
         let tracks = detailedTracks.map { ($0.0, $0.1) }
+        let isAnime = isAnimeContent()
+        let currentAudioTrackId = rendererGetCurrentAudioTrackId()
         
         // Always show the audio button so the user can view the menu even when empty
         audioButton.isHidden = false
 
-        Logger.shared.log("PlayerViewController: audio tracks count=\(tracks.count) isAnime=\(isAnimeContent()) userSelected=\(userSelectedAudioTrack) renderer=\(vlcRenderer != nil ? "VLC" : "MPV")", type: "Player")
+        let trackSignature = detailedTracks.map { "\($0.0):\($0.1):\($0.2)" }.joined(separator: "|")
+        let audioLogSignature = "tracks=\(trackSignature)|anime=\(isAnime)|user=\(userSelectedAudioTrack)|current=\(currentAudioTrackId)|renderer=\(vlcRenderer != nil ? "VLC" : "MPV")"
+        if audioLogSignature != lastAudioTracksMenuLogSignature {
+            lastAudioTracksMenuLogSignature = audioLogSignature
+            Logger.shared.log("PlayerViewController: audio tracks count=\(tracks.count) isAnime=\(isAnime) userSelected=\(userSelectedAudioTrack) renderer=\(vlcRenderer != nil ? "VLC" : "MPV")", type: "Player")
+        }
 
-        let currentAudioTrackId = rendererGetCurrentAudioTrackId()
-        let shouldAutoSelectAnimeAudio = !tracks.isEmpty && isAnimeContent() && !userSelectedAudioTrack
+        let shouldAutoSelectAnimeAudio = !tracks.isEmpty && isAnime && !userSelectedAudioTrack
         if shouldAutoSelectAnimeAudio {
             let preferredLang = Settings.shared.preferredAnimeAudioLanguage.lowercased()
             let tokens = languageTokens(for: preferredLang)
+            let autoSelectSignature = "\(preferredLang)|\(trackSignature)"
+            let shouldAttemptAutoSelect = attemptedAnimeAudioAutoSelectSignature != autoSelectSignature
 
-            if !preferredLang.isEmpty {
+            if shouldAttemptAutoSelect {
+                attemptedAnimeAudioAutoSelectSignature = autoSelectSignature
+            } else {
+                if usesOverlayPlayerMenus {
+                    audioButton.menu = nil
+                    return
+                }
+            }
+
+            if shouldAttemptAutoSelect, !preferredLang.isEmpty {
                 Logger.shared.log("PlayerViewController: Auto anime audio - preferredLang=\(preferredLang), tokens=\(tokens.joined(separator: ",")), detailedTracks=\(detailedTracks.count)", type: "Player")
 
                 if let matching = detailedTracks.first(where: {
@@ -3937,13 +3964,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 } else {
                     Logger.shared.log("PlayerViewController: No matching anime audio track found for lang=\(preferredLang)", type: "Player")
                 }
-            } else {
+            } else if shouldAttemptAutoSelect {
                 Logger.shared.log("PlayerViewController: Auto anime audio skipped (preferred language empty)", type: "Player")
             }
-        } else if !isAnimeContent() {
-            Logger.shared.log("PlayerViewController: Auto anime audio skipped (isAnime=false)", type: "Player")
-        } else if userSelectedAudioTrack {
-            Logger.shared.log("PlayerViewController: Auto anime audio skipped (user already selected)", type: "Player")
         }
 
         if usesOverlayPlayerMenus {
@@ -5070,7 +5093,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let autoSelectableEmbeddedTracks = autoSelectableNativeTracks.map { ($0.id, $0.name) }
         logSkippedMPVBitmapSubtitleTracksIfNeeded(nativeSubtitleTracks.filter { !canAutoSelectNativeSubtitleTrack($0) })
 
-        Logger.shared.log("PlayerViewController: subtitle tracks external=\(externalTracks.count) embedded=\(embeddedTracks.count) autoSelectableNative=\(autoSelectableEmbeddedTracks.count) userSelected=\(userSelectedSubtitleTrack) renderer=\(vlcRenderer != nil ? "VLC" : "MPV")", type: "Player")
+        let subtitleTrackSignature = nativeSubtitleTracks.map { "\($0.id):\($0.name):\($0.codec)" }.joined(separator: "|")
+        let subtitleLogSignature = "external=\(externalTracks.count)|embedded=\(subtitleTrackSignature)|auto=\(autoSelectableEmbeddedTracks.count)|user=\(userSelectedSubtitleTrack)|renderer=\(vlcRenderer != nil ? "VLC" : "MPV")"
+        if subtitleLogSignature != lastSubtitleTracksMenuLogSignature {
+            lastSubtitleTracksMenuLogSignature = subtitleLogSignature
+            Logger.shared.log("PlayerViewController: subtitle tracks external=\(externalTracks.count) embedded=\(embeddedTracks.count) autoSelectableNative=\(autoSelectableEmbeddedTracks.count) userSelected=\(userSelectedSubtitleTrack) renderer=\(vlcRenderer != nil ? "VLC" : "MPV")", type: "Player")
+        }
 
         // Always show the subtitle button so the user can view the menu even when empty
         subtitleButton.isHidden = false
@@ -7857,7 +7885,13 @@ extension PlayerViewController: VLCRendererDelegate {
     
     func renderer(_ renderer: VLCRenderer, didChangePause isPaused: Bool) {
         if isClosing { return }
-        logVLCUI("delegate didChangePause isPaused=\(isPaused) loading=\(isRendererLoading) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pipActive=\(renderer.isPictureInPictureActive)", type: "Player")
+        let pauseLogSignature = "paused=\(isPaused)|loading=\(isRendererLoading)|pip=\(renderer.isPictureInPictureActive)"
+        let now = CACurrentMediaTime()
+        if pauseLogSignature != lastVLCPauseLogSignature || now - lastVLCPauseLogTime > 5 {
+            lastVLCPauseLogSignature = pauseLogSignature
+            lastVLCPauseLogTime = now
+            logVLCUI("delegate didChangePause isPaused=\(isPaused) loading=\(isRendererLoading) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pipActive=\(renderer.isPictureInPictureActive)", type: "Player")
+        }
 
         if !isPaused {
             markPlaybackStarted(reason: "playing")
