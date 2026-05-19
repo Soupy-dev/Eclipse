@@ -1901,11 +1901,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         CATransaction.setDisableActions(true)
         
         if isVLCPlayer {
-            if displayLayer.superlayer != nil || !displayLayer.isHidden || displayLayer.opacity != 0 {
-                displayLayer.removeFromSuperlayer()
+            displayLayer.frame = videoContainer.bounds
+            if displayLayer.superlayer == nil {
+                videoContainer.layer.addSublayer(displayLayer)
+            }
+            if vlcRenderer?.isUsingPictureInPictureSampleBufferOutput != true,
+               !displayLayer.isHidden || displayLayer.opacity != 0 || displayLayer.zPosition != -1 {
                 displayLayer.isHidden = true
                 displayLayer.opacity = 0.0
-                logVLCUI("viewDidLayout removed sample-buffer displayLayer from VLC stack", type: "Player")
+                displayLayer.zPosition = -1
+                logVLCUI("viewDidLayout hid inactive VLC sample-buffer displayLayer", type: "Player")
             }
         } else {
             displayLayer.frame = videoContainer.bounds
@@ -2295,10 +2300,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
         displayLayer.backgroundColor = (vlcRenderer == nil) ? UIColor.black.cgColor : UIColor.clear.cgColor
         if isVLCPlayer {
-            displayLayer.removeFromSuperlayer()
             displayLayer.isHidden = true
             displayLayer.opacity = 0.0
-            logVLCUI("setupLayout skipped sample-buffer displayLayer for VLC renderer", type: "Player")
+            displayLayer.zPosition = -1
+            videoContainer.layer.addSublayer(displayLayer)
+            logVLCUI("setupLayout attached hidden sample-buffer displayLayer for VLC PiP", type: "Player")
         } else {
             displayLayer.isHidden = true
             displayLayer.opacity = 0.0
