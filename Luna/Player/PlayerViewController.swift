@@ -8128,7 +8128,7 @@ extension PlayerViewController: PiPControllerDelegate {
 
     private func attemptMPVAppExitPictureInPictureStart(source: String) {
         guard !isVLCPlayer else {
-            logPictureInPicture("app-exit auto PiP skipped source=\(source): VLC renderer active")
+            attemptVLCAppExitPictureInPictureStart(source: source)
             return
         }
         guard isMPVRenderer else {
@@ -8193,6 +8193,42 @@ extension PlayerViewController: PiPControllerDelegate {
 
         mpvAppExitPiPStartRequested = true
         startMPVPictureInPictureWhenPossible(source: source)
+    }
+
+    private func attemptVLCAppExitPictureInPictureStart(source: String) {
+        guard let vlc = vlcRenderer else {
+            logPictureInPicture("VLC app-exit auto PiP skipped source=\(source): renderer missing")
+            return
+        }
+
+        let pipEnabled = Settings.shared.vlcPiPEnabled
+        let paused = rendererIsPausedState()
+        let active = vlc.isPictureInPictureActive
+        let available = vlc.isPictureInPictureAvailable
+        let shouldStartPiP = pipEnabled && available && !active && !paused && isRunning && !isClosing
+        let skipReason: String
+        if shouldStartPiP {
+            skipReason = "none"
+        } else if !pipEnabled {
+            skipReason = "setting-off"
+        } else if !isRunning {
+            skipReason = "not-running"
+        } else if isClosing {
+            skipReason = "closing"
+        } else if !available {
+            skipReason = "unavailable"
+        } else if active {
+            skipReason = "already-active"
+        } else if paused {
+            skipReason = "paused"
+        } else {
+            skipReason = "unknown"
+        }
+
+        logPictureInPicture("VLC app-exit auto PiP check source=\(source) active=\(active) available=\(available) paused=\(paused) enabled=\(pipEnabled) shouldStart=\(shouldStartPiP) skipReason=\(skipReason)")
+        guard shouldStartPiP else { return }
+        let started = vlc.startPictureInPicture()
+        logPictureInPicture("VLC app-exit auto-start requested source=\(source) result=\(started)")
     }
 
     @objc private func sceneWillDeactivate() {
