@@ -698,6 +698,9 @@ final class MPVNativeRenderer: PlayerRenderer {
     private var lastPlaybackDiagnosticsBucket = -1
     private var lastPlaybackErrorMessage: String?
     private var lastSlowOpenGLRenderLogAt: CFTimeInterval = 0
+    private var hardwareDecodeFailureWindowStart: Date?
+    private var hardwareDecodeFailureCount = 0
+    private var runtimeHardwareDecodeFallbackApplied = false
     private var selectedVideoTrackID: Int?
     private var pipTransitionID = 0
     private var pipRenderRequestCount = 0
@@ -783,7 +786,7 @@ final class MPVNativeRenderer: PlayerRenderer {
         setOption(name: "profile", value: "fast")
         setOption(name: "hwdec", value: "videotoolbox-copy")
         setOption(name: "vd-lavc-dr", value: "no")
-        setOption(name: "vd-lavc-software-fallback", value: "no")
+        setOption(name: "vd-lavc-software-fallback", value: "yes")
         setOption(name: "demuxer-thread", value: "yes")
         setOption(name: "cache", value: "yes")
         setOption(name: "demuxer-max-bytes", value: "80M")
@@ -814,7 +817,7 @@ final class MPVNativeRenderer: PlayerRenderer {
             observeProperties()
             installWakeupHandler()
             ensureAudioSessionActive()
-            logMPV("start completed mode=openGL hwdec=videotoolbox-copy dr=no softwareFallback=no")
+            logMPV("start completed mode=openGL hwdec=videotoolbox-copy dr=no softwareFallback=yes")
             scheduleRender()
         } catch {
             logMPV("start failed after mpv_initialize: \(error)")
@@ -863,6 +866,7 @@ final class MPVNativeRenderer: PlayerRenderer {
         lastDurationLogValue = -1
         lastTrackSummary = ""
         lastPlaybackErrorMessage = nil
+        resetHardwareDecodeFailureTracking()
         updateVideoSize(width: 0, height: 0, allowZero: true)
         isStopping = false
         logMPV("stop completed")
@@ -882,6 +886,7 @@ final class MPVNativeRenderer: PlayerRenderer {
         lastDurationLogValue = -1
         lastTrackSummary = ""
         lastPlaybackErrorMessage = nil
+        resetHardwareDecodeFailureTracking()
         let generation = loadGeneration
         logMPV("load start gen=\(generation) target=\(describe(url: url)) preset=\(preset.id.rawValue) headerKeys=[\((headers ?? [:]).keys.sorted().joined(separator: ","))] pendingInitialSeek=\(pendingInitialSeek.map { String(format: "%.2f", $0) } ?? "nil")")
         setLoading(true)
@@ -896,7 +901,7 @@ final class MPVNativeRenderer: PlayerRenderer {
 
         apply(commands: preset.commands, on: handle)
         command(handle, ["stop"])
-        logMPVCrashProbe("configured iOS MPV video path target=\(describe(url: url)) hwdec=videotoolbox-copy softwareFallback=no backend=openGL")
+        logMPVCrashProbe("configured iOS MPV video path target=\(describe(url: url)) hwdec=videotoolbox-copy softwareFallback=yes backend=openGL")
         updateHTTPHeaders(headers)
         applySubtitleStyle(lastAppliedSubtitleStyle)
 
@@ -1510,11 +1515,60 @@ final class MPVNativeRenderer: PlayerRenderer {
                         }
                     }
                     logMPV("mpv[\(component)] \(level): \(trimmed)")
+                    trackHardwareDecodeFailureIfNeeded(component: component, message: trimmed, lowercasedMessage: lower)
                 }
             }
         default:
             break
         }
+    }
+
+    private func trackHardwareDecodeFailureIfNeeded(component: String, message: String, lowercasedMessage lower: String) {
+        guard isRunning, !isStopping, !runtimeHardwareDecodeFallbackApplied else { return }
+        guard lower.contains("hardware accelerator failed to decode picture")
+            || lower.contains("error while decoding frame (hardware decoding)")
+            || lower.contains("vt decoder cb: output image buffer is null")
+            || lower.contains("no frame decoded") else {
+            return
+        }
+
+        let now = Date()
+        if let start = hardwareDecodeFailureWindowStart, now.timeIntervalSince(start) <= 5.0 {
+            hardwareDecodeFailureCount += 1
+        } else {
+            hardwareDecodeFailureWindowStart = now
+            hardwareDecodeFailureCount = 1
+        }
+
+        if hardwareDecodeFailureCount == 1 || hardwareDecodeFailureCount == 6 {
+            logMPV("hardware decode failure observed count=\(hardwareDecodeFailureCount) component=\(component) message=\(shortText(message, limit: 140))")
+        }
+
+        guard hardwareDecodeFailureCount >= 6 else { return }
+        applyRuntimeHardwareDecodeFallback(trigger: shortText(message, limit: 140))
+    }
+
+    private func applyRuntimeHardwareDecodeFallback(trigger: String) {
+        guard !runtimeHardwareDecodeFallbackApplied else { return }
+        runtimeHardwareDecodeFallbackApplied = true
+
+        let currentHWDec = mpv.flatMap { getStringProperty(handle: $0, name: "hwdec-current") } ?? "nil"
+        let videoCodec = mpv.flatMap { getStringProperty(handle: $0, name: "video-codec") } ?? "nil"
+        logMPV("hardware decode fallback applying count=\(hardwareDecodeFailureCount) codec=\(videoCodec) hwdec=\(currentHWDec) trigger=\(trigger)")
+        logMPVCrashProbe("hardware decode fallback applying codec=\(videoCodec) hwdec=\(currentHWDec) pos=\(String(format: "%.2f", cachedPosition)) trigger=\(trigger)")
+
+        setProperty(name: "vd-lavc-software-fallback", value: "yes")
+        setProperty(name: "hwdec", value: "no")
+        if let handle = mpv, isReadyToSeek {
+            command(handle, ["seek", "0", "relative", "exact"])
+        }
+        requestRenderBurst(reason: "hwdecode-fallback", count: 4, interval: 0.06)
+    }
+
+    private func resetHardwareDecodeFailureTracking() {
+        hardwareDecodeFailureWindowStart = nil
+        hardwareDecodeFailureCount = 0
+        runtimeHardwareDecodeFallbackApplied = false
     }
 
     private func handleFileLoaded() {
