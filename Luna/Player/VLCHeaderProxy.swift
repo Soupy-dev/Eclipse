@@ -106,6 +106,49 @@ final class VLCHeaderProxy {
         return "listener=\(listener != nil) port=\(portText) sessions=\(sessionCount()) activeRequests=\(active) completedRequests=\(completed) lastRequest={\(last)}"
     }
 
+    func restartListenerForExistingProxyURL(_ proxyURL: URL, reason: String) -> Bool {
+        guard let components = URLComponents(url: proxyURL, resolvingAgainstBaseURL: false),
+              let host = components.host?.lowercased(),
+              host == "127.0.0.1" || host == "localhost" || host == "::1",
+              let requestedPort = components.port,
+              requestedPort > 0,
+              requestedPort <= Int(UInt16.max) else {
+            Logger.shared.log("VLCHeaderProxy: existing-url listener restart skipped invalid proxy URL reason=\(reason)", type: "Error")
+            return false
+        }
+
+        let pathParts = components.path.split(separator: "/")
+        guard pathParts.count >= 2, pathParts[0] == "proxy" else {
+            Logger.shared.log("VLCHeaderProxy: existing-url listener restart skipped non-proxy path reason=\(reason)", type: "Error")
+            return false
+        }
+
+        let sessionId = String(pathParts[1])
+        let queryItems = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
+        guard queryItems["token"] == token,
+              touchSession(for: sessionId) != nil else {
+            Logger.shared.log("VLCHeaderProxy: existing-url listener restart skipped stale session reason=\(reason) session=\(String(sessionId.prefix(8)))", type: "Error")
+            return false
+        }
+
+        guard let endpointPort = NWEndpoint.Port(rawValue: UInt16(requestedPort)) else {
+            Logger.shared.log("VLCHeaderProxy: existing-url listener restart skipped invalid port=\(requestedPort) reason=\(reason)", type: "Error")
+            return false
+        }
+
+        let oldPort = port.map { String($0) } ?? "nil"
+        if let listener {
+            Logger.shared.log("VLCHeaderProxy: restarting listener on existing VLC URL port reason=\(reason) oldPort=\(oldPort) targetPort=\(requestedPort)", type: "Stream")
+            listener.cancel()
+            self.listener = nil
+            self.port = nil
+        } else {
+            Logger.shared.log("VLCHeaderProxy: restoring listener on existing VLC URL port reason=\(reason) targetPort=\(requestedPort)", type: "Stream")
+        }
+
+        return startListener(on: endpointPort, reason: "existing-url-\(reason)")
+    }
+
     private func logURLSummary(_ url: URL) -> String {
         var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         components?.query = nil
@@ -224,10 +267,14 @@ final class VLCHeaderProxy {
     private func ensureStarted() -> Bool {
         if listener != nil { return true }
 
+        return startListener(on: .any, reason: "ensure-started")
+    }
+
+    private func startListener(on port: NWEndpoint.Port, reason: String) -> Bool {
         do {
             let parameters = NWParameters.tcp
             parameters.allowLocalEndpointReuse = true
-            let listener = try NWListener(using: parameters, on: NWEndpoint.Port.any)
+            let listener = try NWListener(using: parameters, on: port)
             listener.newConnectionHandler = { [weak self] connection in
                 self?.handleConnection(connection)
             }
@@ -259,13 +306,13 @@ final class VLCHeaderProxy {
             let initialPort = listener.port?.rawValue ?? 0
             if initialPort > 0 {
                 self.port = initialPort
-                Logger.shared.log("VLCHeaderProxy: started on 127.0.0.1:\(initialPort)", type: "Info")
+                Logger.shared.log("VLCHeaderProxy: started on 127.0.0.1:\(initialPort) reason=\(reason)", type: "Info")
             } else {
-                Logger.shared.log("VLCHeaderProxy: started; awaiting port assignment", type: "Info")
+                Logger.shared.log("VLCHeaderProxy: started; awaiting port assignment reason=\(reason)", type: "Info")
             }
             return true
         } catch {
-            Logger.shared.log("VLCHeaderProxy: failed to start listener: \(error)", type: "Error")
+            Logger.shared.log("VLCHeaderProxy: failed to start listener reason=\(reason): \(error)", type: "Error")
             return false
         }
     }
