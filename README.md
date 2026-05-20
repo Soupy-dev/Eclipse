@@ -72,15 +72,6 @@ https://gist.github.com/sinceohsix/688637ac04695d1ff38f844acc8ba7f3
 SideStore is not required. Other sideloading options work too, and `r/sideloaded` has many community guides.
 
 
-## Support
-
-Patreon support is optional and does not unlock features, media, services, addons, or special access to content.
-
-Support development here:
-
-https://www.patreon.com/c/soupy698
-
-
 ## Notes
 
 - VLC is the preferred in-app player in this fork.
@@ -88,7 +79,7 @@ https://www.patreon.com/c/soupy698
 - Picture in Picture is not enabled for VLC because of current VLCKit stability limits.
 - Use GitHub Issues for feature requests and bug reports.
 - The app does use AI for development. As I don't know swift well (learning other languages like Java and soon C, not swift). Just for transparency. The app gets tested a ton, and I do try to make sure the code looks okay
-- Patreon support is optional and I will never paywall any feature.
+
 
 
 ## License
