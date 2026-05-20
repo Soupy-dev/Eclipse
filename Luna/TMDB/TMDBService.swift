@@ -47,8 +47,12 @@ class TMDBService: ObservableObject {
             probe("throttledData start path=\(url.path)")
         }
 
+        var request = URLRequest(url: url)
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+
         let result = try await rateLimiter.execute {
-            try await URLSession.shared.data(from: url)
+            try await URLSession.shared.data(for: request)
         }
 
         if let httpResponse = result.1 as? HTTPURLResponse,
@@ -92,7 +96,7 @@ class TMDBService: ObservableObject {
             return response
         } catch {
             Logger.shared.log(
-                "TMDBService: decode failed endpoint=\(endpoint) error=\(Self.decodeErrorDescription(error)) bytes=\(data.count)",
+                "TMDBService: decode failed endpoint=\(endpoint) error=\(Self.decodeErrorDescription(error)) bytes=\(data.count) sample=\(Self.responseBodySample(from: data))",
                 type: "Error"
             )
             throw error
@@ -150,6 +154,28 @@ class TMDBService: ObservableObject {
     private static func codingPathDescription(_ path: [CodingKey]) -> String {
         let pathDescription = path.map(\.stringValue).joined(separator: ".")
         return pathDescription.isEmpty ? "<root>" : pathDescription
+    }
+
+    private static func responseBodySample(from data: Data) -> String {
+        let hex = data.prefix(16)
+            .map { String(format: "%02X", $0) }
+            .joined(separator: " ")
+
+        let text = String(data: data.prefix(240), encoding: .utf8)?
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedText = text?.isEmpty == false ? text! : "<non-utf8>"
+        let encodingHint: String
+        if data.starts(with: [0x1f, 0x8b]) {
+            encodingHint = "gzip"
+        } else if data.starts(with: [0x78, 0x01]) || data.starts(with: [0x78, 0x9c]) || data.starts(with: [0x78, 0xda]) {
+            encodingHint = "zlib"
+        } else {
+            encodingHint = "plain-or-unknown"
+        }
+
+        return "encodingHint=\(encodingHint) firstBytes=[\(hex)] textPrefix='\(String(cleanedText.prefix(180)))'"
     }
     
     // MARK: - Multi Search (Movies and TV Shows)
