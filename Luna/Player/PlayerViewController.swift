@@ -11,6 +11,9 @@ import AVFoundation
 #if canImport(Darwin)
 import Darwin
 #endif
+#if canImport(ImageIO)
+import ImageIO
+#endif
 #if canImport(Kingfisher)
 import Kingfisher
 #endif
@@ -1060,6 +1063,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var nextEpisodeArtworkTask: URLSessionDataTask?
     private var nextEpisodeArtworkKey: String?
     private var nextEpisodeArtworkImage: UIImage?
+    private var nextEpisodeButtonAppearanceKey: String?
 #if !os(tvOS)
     private var volumeTopConstraint: NSLayoutConstraint?
     private var volumeWidthConstraint: NSLayoutConstraint?
@@ -1113,8 +1117,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
     
     private func rendererStop() {
-        if let vlc = vlcRenderer {
-            logVLCUI("rendererStop requested cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pipActive=\(vlc.isPictureInPictureActive)", type: "Stream")
+        if vlcRenderer != nil {
+            logVLCUI("rendererStop requested cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))", type: "Stream")
         } else {
             logMPV("rendererStop requested cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pipActive=\(pipController?.isPictureInPictureActive == true)")
         }
@@ -1328,9 +1332,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func rendererIsPictureInPictureAvailable() -> Bool {
-        if let vlc = vlcRenderer {
-            guard Settings.shared.vlcPiPEnabled else { return false }
-            return vlc.isPictureInPictureAvailable
+        if vlcRenderer != nil {
+            return false
         }
         if !canStartMPVSampleBufferPictureInPicture() {
             return false
@@ -1351,18 +1354,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func rendererIsPictureInPictureActive() -> Bool {
-        if let vlc = vlcRenderer {
-            return vlc.isPictureInPictureActive
+        if vlcRenderer != nil {
+            return false
         }
         return pipController?.isPictureInPictureActive == true
     }
 
     private func rendererUpdatePictureInPicturePlaybackState() {
-        if let vlc = vlcRenderer {
-            vlc.updatePictureInPicturePlaybackState()
-        } else {
-            pipController?.updatePlaybackState()
-        }
+        guard vlcRenderer == nil else { return }
+        pipController?.updatePlaybackState()
     }
 
     private func rendererPreparePictureInPictureStart() {
@@ -1522,11 +1522,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         pipButton.setImage(UIImage(systemName: imageName, withConfiguration: cfg), for: .normal)
 
         let isAvailable = rendererIsPictureInPictureAvailable()
-        let shouldShow = isAvailable && (!isVLCPlayer || Settings.shared.vlcPiPEnabled)
+        let shouldShow = isAvailable && !isVLCPlayer
         pipButton.isHidden = !shouldShow
         pipButton.isEnabled = shouldShow
         if isVLCPlayer {
-            let key = "available=\(isAvailable) show=\(shouldShow) hidden=\(pipButton.isHidden) active=\(rendererIsPictureInPictureActive()) enabled=\(Settings.shared.vlcPiPEnabled) image=\(imageName)"
+            let key = "available=false show=false hidden=\(pipButton.isHidden) active=false image=\(imageName)"
             if key != lastPiPButtonVisibilityLogKey {
                 lastPiPButtonVisibilityLogKey = key
                 logVLCUI("updatePiPButtonVisibility \(key)", type: "Player")
@@ -1618,8 +1618,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let viewBounds = view.bounds
         let videoBounds = videoContainer.bounds
         let windowBounds = view.window?.bounds ?? .zero
-        let pipActive = vlcRenderer?.isPictureInPictureActive ?? false
-        let pipAvailable = vlcRenderer?.isPictureInPictureAvailable ?? false
         let displayFrame = displayLayer.frame
         let displayBackground = displayLayer.backgroundColor.map { UIColor(cgColor: $0).description } ?? "nil"
         let vlcView = vlcRenderingView
@@ -1632,7 +1630,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             if subview === loadingIndicator { return "\(index):loading" }
             return "\(index):\(type(of: subview))"
         }.joined(separator: "|")
-        logVLCUI("\(event) ui app=\(appState) window=\(view.window != nil) presenting=\(presentingViewController != nil) closing=\(isClosing) running=\(isRunning) loading=\(isRendererLoading) controls=\(controlsVisible) paused=\(rendererIsPausedState()) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pipEnabled=\(Settings.shared.vlcPiPEnabled) pipAvailable=\(pipAvailable) pipActive=\(pipActive) view=\(String(format: "%.0fx%.0f", viewBounds.width, viewBounds.height)) video=\(String(format: "%.0fx%.0f", videoBounds.width, videoBounds.height)) windowBounds=\(String(format: "%.0fx%.0f", windowBounds.width, windowBounds.height)) vlcIndex=\(vlcIndex) vlcHidden=\(vlcView?.isHidden ?? true) vlcAlpha=\(String(format: "%.2f", vlcView?.alpha ?? 0)) displayAttached=\(displayLayer.superlayer != nil) displayHidden=\(displayLayer.isHidden) displayOpacity=\(String(format: "%.2f", displayLayer.opacity)) displayFrame=\(String(format: "%.0fx%.0f", displayFrame.width, displayFrame.height)) displayBg=\(displayBackground) browser={\(episodeBrowserStateSummary())} stack=\(subviewStack)", type: "Player")
+        logVLCUI("\(event) ui app=\(appState) window=\(view.window != nil) presenting=\(presentingViewController != nil) closing=\(isClosing) running=\(isRunning) loading=\(isRendererLoading) controls=\(controlsVisible) paused=\(rendererIsPausedState()) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) view=\(String(format: "%.0fx%.0f", viewBounds.width, viewBounds.height)) video=\(String(format: "%.0fx%.0f", videoBounds.width, videoBounds.height)) windowBounds=\(String(format: "%.0fx%.0f", windowBounds.width, windowBounds.height)) vlcIndex=\(vlcIndex) vlcHidden=\(vlcView?.isHidden ?? true) vlcAlpha=\(String(format: "%.2f", vlcView?.alpha ?? 0)) displayAttached=\(displayLayer.superlayer != nil) displayHidden=\(displayLayer.isHidden) displayOpacity=\(String(format: "%.2f", displayLayer.opacity)) displayFrame=\(String(format: "%.0fx%.0f", displayFrame.width, displayFrame.height)) displayBg=\(displayBackground) browser={\(episodeBrowserStateSummary())} stack=\(subviewStack)", type: "Player")
     }
 
     private func logVLCForegroundSnapshot(_ event: String, note: String? = nil) {
@@ -1660,9 +1658,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let displayFrame = displayLayer.frame
         let processInfo = ProcessInfo.processInfo
         let thermal = metalThermalStateName(processInfo.thermalState)
-        let pipEnabledStored = UserDefaults.standard.object(forKey: "vlcPiPEnabled") as? Bool ?? false
         let noteText = note.map { " note=\($0)" } ?? ""
-        logVLCUI("foreground \(event) safe app=\(appState) running=\(isRunning) closing=\(isClosing) loading=\(isRendererLoading) playbackStarted=\(playbackDidStart) controls=\(controlsVisible) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pendingSeek=\(secondsText(pendingSeekTime)) media={\(vlcMediaInfoLogLabel())} rendererPresent=\(vlcRenderer != nil) pipEnabledStored=\(pipEnabledStored) view=\(String(format: "%.0fx%.0f", viewBounds.width, viewBounds.height)) video=\(String(format: "%.0fx%.0f", videoBounds.width, videoBounds.height)) window=\(view.window != nil) windowBounds=\(String(format: "%.0fx%.0f", windowBounds.width, windowBounds.height)) vlcIndex=\(vlcIndex) vlcHidden=\(vlcView?.isHidden ?? true) vlcAlpha=\(String(format: "%.2f", vlcView?.alpha ?? 0)) displayAttached=\(displayLayer.superlayer != nil) displayHidden=\(displayLayer.isHidden) displayOpacity=\(String(format: "%.2f", displayLayer.opacity)) displayFrame=\(String(format: "%.0fx%.0f", displayFrame.width, displayFrame.height)) spinnerAnimating=\(loadingIndicator.isAnimating) spinnerAlpha=\(String(format: "%.2f", loadingIndicator.alpha)) browser={\(episodeBrowserStateSummary())} thermal=\(thermal) lowPower=\(processInfo.isLowPowerModeEnabled) proxy={\(vlcProxyDiagnosticsSummary())}\(noteText)", type: "VLCCrashProbe")
+        logVLCUI("foreground \(event) safe app=\(appState) running=\(isRunning) closing=\(isClosing) loading=\(isRendererLoading) playbackStarted=\(playbackDidStart) controls=\(controlsVisible) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pendingSeek=\(secondsText(pendingSeekTime)) media={\(vlcMediaInfoLogLabel())} rendererPresent=\(vlcRenderer != nil) view=\(String(format: "%.0fx%.0f", viewBounds.width, viewBounds.height)) video=\(String(format: "%.0fx%.0f", videoBounds.width, videoBounds.height)) window=\(view.window != nil) windowBounds=\(String(format: "%.0fx%.0f", windowBounds.width, windowBounds.height)) vlcIndex=\(vlcIndex) vlcHidden=\(vlcView?.isHidden ?? true) vlcAlpha=\(String(format: "%.2f", vlcView?.alpha ?? 0)) displayAttached=\(displayLayer.superlayer != nil) displayHidden=\(displayLayer.isHidden) displayOpacity=\(String(format: "%.2f", displayLayer.opacity)) displayFrame=\(String(format: "%.0fx%.0f", displayFrame.width, displayFrame.height)) spinnerAnimating=\(loadingIndicator.isAnimating) spinnerAlpha=\(String(format: "%.2f", loadingIndicator.alpha)) browser={\(episodeBrowserStateSummary())} thermal=\(thermal) lowPower=\(processInfo.isLowPowerModeEnabled) proxy={\(vlcProxyDiagnosticsSummary())}\(noteText)", type: "VLCCrashProbe")
     }
 
     private func episodeBrowserStateSummary(host explicitHost: UIHostingController<AnyView>? = nil) -> String {
@@ -2091,9 +2088,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         pipController?.delegate = nil
         if pipController?.isPictureInPictureActive == true {
             pipController?.stopPictureInPicture()
-        }
-        if vlcRenderer?.isPictureInPictureActive == true {
-            vlcRenderer?.stopPictureInPicture()
         }
         openSubtitlesFetchTask?.cancel()
         nextEpisodePreviewTask?.cancel()
@@ -3821,6 +3815,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         nextEpisodeArtworkTask = nil
         nextEpisodeArtworkKey = nil
         nextEpisodeArtworkImage = nil
+        nextEpisodeButtonAppearanceKey = nil
 #if !os(tvOS)
         nextEpisodeButton.configuration?.title = "Next Episode"
         nextEpisodeButton.configuration?.subtitle = nil
@@ -4530,6 +4525,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return
         }
 
+        logVLCUI("next episode preview resolve start key=\(key) posterSetting=\(shouldUsePosterNextEpisodeButton)", type: "VLCCrashProbe")
         nextEpisodePreviewTask = Task { @MainActor [weak self] in
             let model = PlayerEpisodeBrowserViewModel(seed: seed)
             let item = await model.itemAfterCurrent()
@@ -4537,10 +4533,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self.nextEpisodePreviewTask = nil
             guard self.nextEpisodeKey(seasonNumber: seasonNumber, episodeNumber: episodeNumber) == key else { return }
             if let item {
+                self.logVLCUI("next episode preview resolve success key=\(key) code=\(item.displayCode) artworkCount=\(item.artworkURLs.count)", type: "VLCCrashProbe")
                 self.nextEpisodePreview = item
                 self.nextEpisodePreviewKey = key
                 self.applyNextEpisodeButtonAppearance()
             } else {
+                self.logVLCUI("next episode preview resolve empty key=\(key)", type: "VLCCrashProbe")
                 self.nextEpisodePreview = nil
                 self.nextEpisodePreviewKey = nil
                 self.nextEpisodePreviewUnavailableKeys.insert(key)
@@ -4563,6 +4561,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         nextEpisodeArtworkKey = nil
         nextEpisodeArtworkImage = nil
 
+        let signature = "text"
+        guard nextEpisodeButtonAppearanceKey != signature else { return }
         var config = nextEpisodeButton.configuration ?? UIButton.Configuration.filled()
         config.cornerStyle = .capsule
         config.baseBackgroundColor = UIColor.white.withAlphaComponent(0.2)
@@ -4575,6 +4575,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         config.subtitle = nil
         config.titleLineBreakMode = .byTruncatingTail
         nextEpisodeButton.configuration = config
+        nextEpisodeButtonAppearanceKey = signature
     }
 
     private func applyPosterNextEpisodeButton(_ item: PlayerEpisodeBrowserItem) {
@@ -4582,20 +4583,26 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let imageKey = imageURLs.joined(separator: "|")
         let isSameArtwork = nextEpisodeArtworkKey == imageKey
         let placeholderImage = UIImage(systemName: "photo")
+        let imageReady = isSameArtwork && nextEpisodeArtworkImage != nil
+        let signature = "poster|\(imageKey)|\(item.displayCode)|\(item.displayTitle)|ready=\(imageReady)"
 
-        var config = nextEpisodeButton.configuration ?? UIButton.Configuration.filled()
-        config.cornerStyle = .capsule
-        config.baseBackgroundColor = UIColor.black.withAlphaComponent(0.58)
-        config.baseForegroundColor = UIColor.white
-        config.imagePlacement = .leading
-        config.imagePadding = 10
-        config.image = isSameArtwork ? (nextEpisodeArtworkImage ?? placeholderImage) : placeholderImage
-        config.title = "\(item.displayCode)  \(item.displayTitle)"
-        config.subtitle = "Next Episode"
-        config.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 14)
-        config.titleLineBreakMode = .byTruncatingTail
-        config.subtitleLineBreakMode = .byTruncatingTail
-        nextEpisodeButton.configuration = config
+        if nextEpisodeButtonAppearanceKey != signature {
+            var config = nextEpisodeButton.configuration ?? UIButton.Configuration.filled()
+            config.cornerStyle = .capsule
+            config.baseBackgroundColor = UIColor.black.withAlphaComponent(0.58)
+            config.baseForegroundColor = UIColor.white
+            config.imagePlacement = .leading
+            config.imagePadding = 10
+            config.image = isSameArtwork ? (nextEpisodeArtworkImage ?? placeholderImage) : placeholderImage
+            config.title = "\(item.displayCode)  \(item.displayTitle)"
+            config.subtitle = "Next Episode"
+            config.contentInsets = NSDirectionalEdgeInsets(top: 6, leading: 8, bottom: 6, trailing: 14)
+            config.titleLineBreakMode = .byTruncatingTail
+            config.subtitleLineBreakMode = .byTruncatingTail
+            nextEpisodeButton.configuration = config
+            nextEpisodeButtonAppearanceKey = signature
+            logVLCUI("next episode poster button configured key=\(nextEpisodePreviewKey ?? "nil") artworkReady=\(imageReady) imageURLs=\(imageURLs.count)", type: "VLCCrashProbe")
+        }
 
         guard !isSameArtwork else {
             return
@@ -4605,6 +4612,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         nextEpisodeArtworkTask = nil
         nextEpisodeArtworkKey = imageKey
         nextEpisodeArtworkImage = nil
+        nextEpisodeButtonAppearanceKey = nil
         loadNextEpisodeArtwork(from: imageURLs, key: imageKey)
     }
 
@@ -4615,8 +4623,19 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return
         }
 
+        if index == 0 {
+            logVLCUI("next episode artwork load begin candidates=\(imageURLs.count) keyHash=\(key.hashValue.magnitude)", type: "VLCCrashProbe")
+        }
 #if canImport(Kingfisher)
-        KingfisherManager.shared.retrieveImage(with: url) { [weak self] result in
+        let processor = DownsamplingImageProcessor(size: nextEpisodeArtworkDecodeSize)
+        KingfisherManager.shared.retrieveImage(
+            with: url,
+            options: [
+                .processor(processor),
+                .scaleFactor(UIScreen.main.scale),
+                .backgroundDecode
+            ]
+        ) { [weak self] result in
             DispatchQueue.main.async {
                 guard let self,
                       self.nextEpisodeArtworkKey == key,
@@ -4624,29 +4643,60 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
                 switch result {
                 case .success(let value):
+                    self.logVLCUI("next episode artwork load success source=kingfisher index=\(index) size=\(String(format: "%.0fx%.0f", value.image.size.width, value.image.size.height))", type: "VLCCrashProbe")
                     self.applyNextEpisodeArtworkImage(value.image, key: key)
-                case .failure:
+                case .failure(let error):
+                    self.logVLCUI("next episode artwork load failed source=kingfisher index=\(index) error=\(error.localizedDescription)", type: "VLCCrashProbe")
                     self.loadNextEpisodeArtwork(from: imageURLs, key: key, index: index + 1)
                 }
             }
         }
 #else
         let task = URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-            let rawImage = data.flatMap { UIImage(data: $0) }
+            let rawImage = data.flatMap { self?.makeNextEpisodeArtworkSourceImage(from: $0) }
             DispatchQueue.main.async {
                 guard let self,
                       self.nextEpisodeArtworkKey == key,
                       self.shouldUsePosterNextEpisodeButton else { return }
 
                 if let rawImage {
+                    self.logVLCUI("next episode artwork load success source=urlsession index=\(index) bytes=\(data?.count ?? 0) size=\(String(format: "%.0fx%.0f", rawImage.size.width, rawImage.size.height))", type: "VLCCrashProbe")
                     self.applyNextEpisodeArtworkImage(rawImage, key: key)
                 } else {
+                    self.logVLCUI("next episode artwork load failed source=urlsession index=\(index) bytes=\(data?.count ?? 0)", type: "VLCCrashProbe")
                     self.loadNextEpisodeArtwork(from: imageURLs, key: key, index: index + 1)
                 }
             }
         }
         nextEpisodeArtworkTask = task
         task.resume()
+#endif
+    }
+
+    private var nextEpisodeArtworkDecodeSize: CGSize {
+        CGSize(width: 128, height: 96)
+    }
+
+    private func makeNextEpisodeArtworkSourceImage(from data: Data) -> UIImage? {
+#if canImport(ImageIO)
+        let sourceOptions: [CFString: Any] = [
+            kCGImageSourceShouldCache: false
+        ]
+        guard let source = CGImageSourceCreateWithData(data as CFData, sourceOptions as CFDictionary) else {
+            return UIImage(data: data)
+        }
+        let thumbnailOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: 320
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions as CFDictionary) else {
+            return UIImage(data: data)
+        }
+        return UIImage(cgImage: cgImage)
+#else
+        return UIImage(data: data)
 #endif
     }
 
@@ -4658,6 +4708,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         var current = nextEpisodeButton.configuration ?? UIButton.Configuration.filled()
         current.image = image
         nextEpisodeButton.configuration = current
+        nextEpisodeButtonAppearanceKey = nil
+        logVLCUI("next episode artwork applied key=\(nextEpisodePreviewKey ?? "nil") source=\(String(format: "%.0fx%.0f", rawImage.size.width, rawImage.size.height)) rendered=\(String(format: "%.0fx%.0f", image.size.width, image.size.height))", type: "VLCCrashProbe")
     }
 
     private func makeNextEpisodeArtworkImage(from rawImage: UIImage) -> UIImage {
@@ -4825,6 +4877,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         nextEpisodeButton.isHidden = false
         videoContainer.bringSubviewToFront(nextEpisodeButton)
         bringTimedActionButtonsToFront()
+        logVLCUI("next episode button show automatic posterSetting=\(shouldUsePosterNextEpisodeButton) hasPreview=\(nextEpisodePreview != nil) artworkKey=\(nextEpisodeArtworkKey != nil) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))", type: "VLCCrashProbe")
         UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseOut]) {
             self.nextEpisodeButton.alpha = 1.0
         }
@@ -4833,6 +4886,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func hideNextEpisodeButton() {
         guard nextEpisodeButtonShown else { return }
         nextEpisodeButtonShown = false
+        logVLCUI("next episode button hide automatic cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))", type: "VLCCrashProbe")
         UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseIn]) {
             self.nextEpisodeButton.alpha = 0
         } completion: { _ in
@@ -5888,7 +5942,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         } else {
             rendererApplySubtitleStyle(currentSubtitleStyle())
         }
-        vlcRenderer?.handlePictureInPictureSettingChanged()
         updatePiPButtonVisibility()
         updateEpisodeBrowserButtonVisibility()
         updatePerformanceOverlayVisibility()
@@ -6513,7 +6566,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             showControlsTemporarily()
         }
     }
-    
+
     private func showControlsTemporarily() {
         controlsHideWorkItem?.cancel()
         controlsVisible = true
@@ -6760,9 +6813,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             if self.pipController?.isPictureInPictureActive == true {
                 self.pipController?.stopPictureInPicture()
             }
-            if self.vlcRenderer?.isPictureInPictureActive == true {
-                self.vlcRenderer?.stopPictureInPicture()
-            }
 
             self.rendererStop()
             self.logSharedPlayerControl("renderer.stop called from closeTapped")
@@ -6803,20 +6853,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
     
     @objc private func pipTapped() {
-        if let vlc = vlcRenderer {
-            guard Settings.shared.vlcPiPEnabled else {
-                Logger.shared.log("[PlayerVC.PiP] VLC button ignored because PiP setting is off", type: "Player")
-                updatePiPButtonVisibility()
-                return
-            }
-            Logger.shared.log("[PlayerVC.PiP] VLC button tap active=\(vlc.isPictureInPictureActive) available=\(vlc.isPictureInPictureAvailable)", type: "Player")
-            if vlc.isPictureInPictureActive {
-                vlc.stopPictureInPicture()
-            } else if vlc.isPictureInPictureAvailable {
-                _ = vlc.startPictureInPicture()
-            } else {
-                Logger.shared.log("[PlayerVC.PiP] VLC start blocked: native PiP controller not ready", type: "Player")
-            }
+        if vlcRenderer != nil {
+            Logger.shared.log("[PlayerVC.PiP] button ignored for VLC renderer: unavailable", type: "Player")
             updatePiPButtonVisibility()
             return
         }
@@ -8111,12 +8149,12 @@ extension PlayerViewController: VLCRendererDelegate {
     
     func renderer(_ renderer: VLCRenderer, didChangePause isPaused: Bool) {
         if isClosing { return }
-        let pauseLogSignature = "paused=\(isPaused)|loading=\(isRendererLoading)|pip=\(renderer.isPictureInPictureActive)"
+        let pauseLogSignature = "paused=\(isPaused)|loading=\(isRendererLoading)"
         let now = CACurrentMediaTime()
         if pauseLogSignature != lastVLCPauseLogSignature || now - lastVLCPauseLogTime > 5 {
             lastVLCPauseLogSignature = pauseLogSignature
             lastVLCPauseLogTime = now
-            logVLCUI("delegate didChangePause isPaused=\(isPaused) loading=\(isRendererLoading) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pipActive=\(renderer.isPictureInPictureActive)", type: "Player")
+            logVLCUI("delegate didChangePause isPaused=\(isPaused) loading=\(isRendererLoading) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))", type: "Player")
         }
 
         if !isPaused {
@@ -8132,11 +8170,9 @@ extension PlayerViewController: VLCRendererDelegate {
             }
         }
         if isRendererLoading {
-            renderer.updatePictureInPicturePlaybackState()
             return
         }
         updatePlayPauseButton(isPaused: isPaused)
-        renderer.updatePictureInPicturePlaybackState()
     }
     
     func renderer(_ renderer: VLCRenderer, didChangeLoading isLoading: Bool) {
@@ -8181,7 +8217,6 @@ extension PlayerViewController: VLCRendererDelegate {
             self.updateAudioTracksMenuWhenReady()
             self.updateSubtitleTracksMenuWhenReady()
             self.prefetchOpenSubtitlesIfEnabled(reason: "ready")
-            renderer.updatePictureInPicturePlaybackState()
             self.updatePiPButtonVisibility()
             
             if let seekTime = self.pendingSeekTime {
@@ -8253,26 +8288,6 @@ extension PlayerViewController: VLCRendererDelegate {
         }
     }
 
-    func renderer(_ renderer: VLCRenderer, didChangePictureInPictureAvailability isAvailable: Bool) {
-        if isClosing { return }
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            Logger.shared.log("[PlayerVC.PiP] native VLC availability changed available=\(isAvailable) enabled=\(Settings.shared.vlcPiPEnabled) active=\(renderer.isPictureInPictureActive) paused=\(self.rendererIsPausedState())", type: "Player")
-            self.logVLCUIViewSnapshot("delegate didChangePictureInPictureAvailability")
-            self.updatePiPButtonVisibility()
-        }
-    }
-
-    func renderer(_ renderer: VLCRenderer, didChangePictureInPictureActive isActive: Bool) {
-        if isClosing { return }
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            Logger.shared.log("[PlayerVC.PiP] native VLC active changed active=\(isActive) enabled=\(Settings.shared.vlcPiPEnabled) available=\(renderer.isPictureInPictureAvailable) paused=\(self.rendererIsPausedState())", type: "Player")
-            self.logVLCUIViewSnapshot("delegate didChangePictureInPictureActive")
-            self.updatePiPButtonVisibility()
-            renderer.updatePictureInPicturePlaybackState()
-        }
-    }
 }
 
 // MARK: - PiP Support
@@ -8392,7 +8407,7 @@ extension PlayerViewController: PiPControllerDelegate {
     @objc private func appWillResignActive() {
         logPictureInPicture("lifecycle notification received source=will-resign-active")
         if isVLCPlayer {
-            attemptVLCAppExitPictureInPictureStart(source: "will-resign-active")
+            logPictureInPicture("VLC app-exit PiP skipped source=will-resign-active: disabled")
             return
         }
         if Thread.isMainThread {
@@ -8413,7 +8428,7 @@ extension PlayerViewController: PiPControllerDelegate {
                 scheduleVLCForegroundSnapshots("scene-phase-active followup", delays: [0.10, 0.75])
             }
             if phase == "inactive" || phase == "background" {
-                attemptVLCAppExitPictureInPictureStart(source: "scene-phase-\(phase)")
+                logPictureInPicture("VLC app-exit PiP skipped source=scene-phase-\(phase): disabled")
             }
             return
         }
@@ -8445,7 +8460,7 @@ extension PlayerViewController: PiPControllerDelegate {
 
     private func attemptMPVAppExitPictureInPictureStart(source: String) {
         guard !isVLCPlayer else {
-            attemptVLCAppExitPictureInPictureStart(source: source)
+            logPictureInPicture("app-exit auto PiP skipped source=\(source): VLC renderer unavailable")
             return
         }
         guard isMPVRenderer else {
@@ -8512,46 +8527,10 @@ extension PlayerViewController: PiPControllerDelegate {
         startMPVPictureInPictureWhenPossible(source: source)
     }
 
-    private func attemptVLCAppExitPictureInPictureStart(source: String) {
-        guard let vlc = vlcRenderer else {
-            logPictureInPicture("VLC app-exit auto PiP skipped source=\(source): renderer missing")
-            return
-        }
-
-        let pipEnabled = Settings.shared.vlcPiPEnabled
-        let paused = rendererIsPausedState()
-        let active = vlc.isPictureInPictureActive
-        let available = vlc.isPictureInPictureAvailable
-        let shouldStartPiP = pipEnabled && available && !active && !paused && isRunning && !isClosing
-        let skipReason: String
-        if shouldStartPiP {
-            skipReason = "none"
-        } else if !pipEnabled {
-            skipReason = "setting-off"
-        } else if !isRunning {
-            skipReason = "not-running"
-        } else if isClosing {
-            skipReason = "closing"
-        } else if !available {
-            skipReason = "unavailable"
-        } else if active {
-            skipReason = "already-active"
-        } else if paused {
-            skipReason = "paused"
-        } else {
-            skipReason = "unknown"
-        }
-
-        logPictureInPicture("VLC app-exit auto PiP check source=\(source) active=\(active) available=\(available) paused=\(paused) enabled=\(pipEnabled) shouldStart=\(shouldStartPiP) skipReason=\(skipReason)")
-        guard shouldStartPiP else { return }
-        let started = vlc.startPictureInPicture()
-        logPictureInPicture("VLC app-exit auto-start requested source=\(source) result=\(started)")
-    }
-
     @objc private func sceneWillDeactivate() {
         logPictureInPicture("lifecycle notification received source=scene-will-deactivate")
         if isVLCPlayer {
-            attemptVLCAppExitPictureInPictureStart(source: "scene-will-deactivate")
+            logPictureInPicture("VLC app-exit PiP skipped source=scene-will-deactivate: disabled")
             return
         }
 #if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED
@@ -8579,7 +8558,7 @@ extension PlayerViewController: PiPControllerDelegate {
     @objc private func sceneDidEnterBackground() {
         logPictureInPicture("lifecycle notification received source=scene-did-enter-background")
         if isVLCPlayer {
-            attemptVLCAppExitPictureInPictureStart(source: "scene-did-enter-background")
+            logPictureInPicture("VLC app-exit PiP skipped source=scene-did-enter-background: disabled")
             return
         }
         if Thread.isMainThread {
@@ -8619,31 +8598,8 @@ extension PlayerViewController: PiPControllerDelegate {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.logVLCUIViewSnapshot("appDidEnterBackground async start")
-            if let vlc = self.vlcRenderer {
-                let pipEnabled = Settings.shared.vlcPiPEnabled
-                let paused = self.rendererIsPausedState()
-                let active = vlc.isPictureInPictureActive
-                let available = vlc.isPictureInPictureAvailable
-                let shouldStartPiP = pipEnabled && available && !active && !paused
-                let skipReason: String
-                if shouldStartPiP {
-                    skipReason = "none"
-                } else if !pipEnabled {
-                    skipReason = "setting-off"
-                } else if !available {
-                    skipReason = "unavailable"
-                } else if active {
-                    skipReason = "already-active"
-                } else if paused {
-                    skipReason = "paused"
-                } else {
-                    skipReason = "unknown"
-                }
-                Logger.shared.log("[PlayerVC.PiP] VLC background check active=\(active) available=\(available) paused=\(paused) enabled=\(pipEnabled) shouldStart=\(shouldStartPiP) skipReason=\(skipReason)", type: "Player")
-                if shouldStartPiP {
-                    let started = vlc.startPictureInPicture()
-                    Logger.shared.log("[PlayerVC.PiP] VLC background auto-start requested result=\(started)", type: "Player")
-                }
+            if self.vlcRenderer != nil {
+                Logger.shared.log("[PlayerVC.PiP] VLC background auto-start skipped: disabled", type: "Player")
                 self.logVLCUIViewSnapshot("appDidEnterBackground async end")
                 self.scheduleVLCUIViewSnapshots("appDidEnterBackground followup", delays: [0.5, 1.5])
                 return
@@ -8664,20 +8620,9 @@ extension PlayerViewController: PiPControllerDelegate {
                 self.refreshGestureControlLevels(animated: false)
             }
 #endif
-            if let vlc = self.vlcRenderer {
-                self.logVLCForegroundSnapshot("will-enter-foreground before live VLC PiP read", note: "about-to-read-pip-state")
-                let active = vlc.isPictureInPictureActive
-                let available = vlc.isPictureInPictureAvailable
-                let paused = self.rendererIsPausedState()
-                let pipEnabled = UserDefaults.standard.object(forKey: "vlcPiPEnabled") as? Bool ?? false
-                Logger.shared.log("[PlayerVC.PiP] VLC foreground live check active=\(active) available=\(available) enabled=\(pipEnabled) paused=\(paused)", type: "Player")
-                if active {
-                    Logger.shared.log("[PlayerVC.PiP] returning to foreground; stopping native VLC PiP", type: "Player")
-                    vlc.stopPictureInPicture()
-                } else {
-                    Logger.shared.log("[PlayerVC.PiP] foreground did not stop PiP because native VLC PiP was inactive", type: "Player")
-                }
-                self.logVLCForegroundSnapshot("will-enter-foreground async end", note: "livePipActive=\(active) livePipAvailable=\(available) livePaused=\(paused)")
+            if self.vlcRenderer != nil {
+                Logger.shared.log("[PlayerVC.PiP] VLC foreground PiP check skipped: disabled", type: "Player")
+                self.logVLCForegroundSnapshot("will-enter-foreground async end")
                 self.scheduleVLCForegroundSnapshots("will-enter-foreground followup", delays: [0.10, 0.50, 1.50, 3.00])
                 return
             }

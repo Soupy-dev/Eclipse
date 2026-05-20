@@ -906,7 +906,6 @@ struct PlayerSettingsView: View {
             if UserDefaults.standard.object(forKey: headerProxyKey) as? Bool != true {
                 UserDefaults.standard.set(true, forKey: headerProxyKey)
             }
-            UserDefaults.standard.set(false, forKey: "vlcPiPEnabled")
             refreshVLCSubtitleStyleStateFromDefaults()
         }
     }

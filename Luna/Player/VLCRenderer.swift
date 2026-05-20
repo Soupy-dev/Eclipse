@@ -23,8 +23,6 @@ protocol VLCRendererDelegate: AnyObject {
     func renderer(_ renderer: VLCRenderer, getSubtitleForTime time: Double) -> NSAttributedString?
     func renderer(_ renderer: VLCRenderer, getSubtitleStyle: Void) -> SubtitleStyle
     func renderer(_ renderer: VLCRenderer, subtitleTrackDidChange trackId: Int)
-    func renderer(_ renderer: VLCRenderer, didChangePictureInPictureAvailability isAvailable: Bool)
-    func renderer(_ renderer: VLCRenderer, didChangePictureInPictureActive isActive: Bool)
     func rendererDidChangeTracks(_ renderer: VLCRenderer)
 }
 
@@ -100,7 +98,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         self.plainVLCView = plainView
         self.activeVLCView = plainView
         super.init()
-        _ = VLCRenderer.isPictureInPictureEnabledInDefaults()
         setupVLCView()
     }
     
@@ -132,17 +129,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         view.isUserInteractionEnabled = false
     }
 
-    private static func isPictureInPictureEnabledInDefaults() -> Bool {
-        if UserDefaults.standard.object(forKey: "vlcPiPEnabled") as? Bool != false {
-            UserDefaults.standard.set(false, forKey: "vlcPiPEnabled")
-        }
-        return false
-    }
-
-    private func desiredRenderingViewForCurrentSetting() -> UIView {
-        plainVLCView
-    }
-
     private func renderingModeDescription(for view: UIView? = nil) -> String {
         let target = view ?? activeVLCView
         if target === plainVLCView { return "plain-view" }
@@ -166,31 +152,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         logVLC("attached VLC rendering view mode=\(renderingModeDescription()) reason=\(reason)")
     }
 
-    private func syncRenderingViewWithPictureInPictureSetting(reason: String, reassignPlayerDrawable: Bool) {
-        if !Thread.isMainThread {
-            DispatchQueue.main.async { [weak self] in
-                self?.syncRenderingViewWithPictureInPictureSetting(reason: reason, reassignPlayerDrawable: reassignPlayerDrawable)
-            }
-            return
-        }
-
-        let desiredView = desiredRenderingViewForCurrentSetting()
-        let oldMode = renderingModeDescription()
-        if activeVLCView !== desiredView {
-            activeVLCView = desiredView
-            attachActiveRenderingViewToContainer(reason: reason)
-            logVLC("switched VLC rendering view \(oldMode) -> \(renderingModeDescription()) reason=\(reason) setting=\(isPictureInPictureSettingEnabled)")
-        } else {
-            attachActiveRenderingViewToContainer(reason: reason)
-            logVLC("kept VLC rendering view mode=\(renderingModeDescription()) reason=\(reason) setting=\(isPictureInPictureSettingEnabled)")
-        }
-
-        if reassignPlayerDrawable, isRunning, !isStopping {
-            mediaPlayer?.drawable = activeVLCView
-            logDrawableSnapshot("sync rendering view drawable reassigned")
-        }
-    }
-
     private func logVLC(_ message: String, type: String = "Player") {
         Logger.shared.log("[VLCRenderer] \(message)", type: type)
     }
@@ -211,12 +172,12 @@ final class VLCRenderer: NSObject, PlayerRenderer {
 
     private func playerSnapshot(_ player: VLCMediaPlayer? = nil) -> String {
         guard let player = player ?? mediaPlayer else {
-            return "player=nil pausedFlag=\(isPaused) loading=\(isLoading) ready=\(isReadyToSeek) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pending=\(secondsText(pendingAbsoluteSeek)) pipAvailable=false pipActive=false app=\(appStateText())"
+            return "player=nil pausedFlag=\(isPaused) loading=\(isLoading) ready=\(isReadyToSeek) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pending=\(secondsText(pendingAbsoluteSeek)) app=\(appStateText())"
         }
 
         let rawPosition = (player.time.value?.doubleValue ?? 0) / 1000.0
         let rawDuration = (player.media?.length.value?.doubleValue ?? 0) / 1000.0
-        return "state=\(describeState(player.state))(\(stateCode(player.state))) playing=\(isPlayerActivelyPlaying(player)) pausedFlag=\(isPaused) loading=\(isLoading) ready=\(isReadyToSeek) raw=\(secondsText(rawPosition))/\(secondsText(rawDuration)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pending=\(secondsText(pendingAbsoluteSeek)) speed=\(String(format: "%.2f", currentPlaybackSpeed)) pipAvailable=false pipActive=false app=\(appStateText())"
+        return "state=\(describeState(player.state))(\(stateCode(player.state))) playing=\(isPlayerActivelyPlaying(player)) pausedFlag=\(isPaused) loading=\(isLoading) ready=\(isReadyToSeek) raw=\(secondsText(rawPosition))/\(secondsText(rawDuration)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pending=\(secondsText(pendingAbsoluteSeek)) speed=\(String(format: "%.2f", currentPlaybackSpeed)) app=\(appStateText())"
     }
 
     private func foregroundSafeSnapshot() -> String {
@@ -272,19 +233,11 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         }
     }
 
-    fileprivate var isPictureInPictureSettingEnabled: Bool {
-        Self.isPictureInPictureEnabledInDefaults()
-    }
-
-    var isUsingPictureInPictureSampleBufferOutput: Bool {
-        false
-    }
-
     private func reattachRenderingView() {
         logVLC("foreground reattach drawable requested safe={\(foregroundSafeSnapshot())}", type: "VLCCrashProbe")
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.syncRenderingViewWithPictureInPictureSetting(reason: "reattach", reassignPlayerDrawable: false)
+            self.attachActiveRenderingViewToContainer(reason: "reattach")
             self.mediaPlayer?.drawable = self.activeVLCView
             self.activeVLCView.setNeedsLayout()
             self.activeVLCView.layoutIfNeeded()
@@ -352,7 +305,7 @@ final class VLCRenderer: NSObject, PlayerRenderer {
             }
             
             if Thread.isMainThread {
-                syncRenderingViewWithPictureInPictureSetting(reason: "start", reassignPlayerDrawable: false)
+                attachActiveRenderingViewToContainer(reason: "start")
             }
 
             // Render directly into the currently selected VLC drawable.
@@ -418,8 +371,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         loadGeneration += 1
         proxyResumeAttemptID += 1
         stopProgressPolling()
-        delegate?.renderer(self, didChangePictureInPictureAvailability: false)
-        delegate?.renderer(self, didChangePictureInPictureActive: false)
 
         eventQueue.async { [weak self] in
             guard let self else { return }
@@ -574,7 +525,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
             player.play()
             self.startProgressPolling()
             self.scheduleLoadingSanityChecks()
-            self.updatePictureInPicturePlaybackState()
             self.logVLC("load submitted play snapshot={\(self.playerSnapshot(player))}", type: "Stream")
         }
     }
@@ -649,7 +599,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         if currentPlaybackSpeed != 1.0 {
             player.rate = Float(currentPlaybackSpeed)
         }
-        updatePictureInPicturePlaybackState()
         logVLC("play submitted snapshot={\(playerSnapshot(player))}", type: "Stream")
         logDrawableSnapshot("play submitted")
     }
@@ -668,7 +617,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         if currentPlaybackSpeed != 1.0 {
             player.rate = Float(currentPlaybackSpeed)
         }
-        updatePictureInPicturePlaybackState()
         logDrawableSnapshot("background proxy soft resume submitted")
 
         scheduleProxySoftResumeCheck(
@@ -830,7 +778,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         if currentPlaybackSpeed != 1.0 {
             player.rate = Float(currentPlaybackSpeed)
         }
-        updatePictureInPicturePlaybackState()
         logDrawableSnapshot("no-reload recovery submitted")
 
         DispatchQueue.main.async { [weak self] in
@@ -962,7 +909,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         }
         stopProgressPolling()
         resetPlaybackClockDiagnostics(reason: forceSendToPlayer ? "forced-pause" : "pause")
-        updatePictureInPicturePlaybackState()
         logVLC("pause completed snapshot={\(playerSnapshot(player))}", type: "Stream")
         logDrawableSnapshot("pause completed")
     }
@@ -1040,7 +986,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
             lastProgressHostTime = CACurrentMediaTime()
             startProgressPolling()
         }
-        updatePictureInPicturePlaybackState()
         if refreshVideoOutput {
             refreshVideoOutputAfterSeek(player, shouldResumePlayback: !isPaused)
         } else {
@@ -1048,7 +993,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
                 guard let self, self.isRunning, !self.isStopping, let player else { return }
                 self.clearLoadingState()
                 self.publishPlaybackProgress(from: player)
-                self.updatePictureInPicturePlaybackState()
                 self.logVLC("applySeek follow-up snapshot={\(self.playerSnapshot(player))}", type: "Progress")
             }
         }
@@ -1063,7 +1007,7 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         logVLC("refreshVideoOutputAfterSeek shouldResume=\(shouldResumePlayback) snapshot={\(playerSnapshot(player))}", type: "Progress")
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isRunning, !self.isStopping else { return }
-            self.syncRenderingViewWithPictureInPictureSetting(reason: "seek refresh", reassignPlayerDrawable: false)
+            self.attachActiveRenderingViewToContainer(reason: "seek refresh")
             self.mediaPlayer?.drawable = self.activeVLCView
             self.activeVLCView.isHidden = false
             self.activeVLCView.alpha = 1
@@ -1517,7 +1461,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         if isPlaybackActive(player) {
             guard hasUsablePlaybackSignal(player) else {
                 logVLC("state active without usable startup signal; keeping loading state snapshot={\(playerSnapshot(player))}", type: "Stream")
-                updatePictureInPicturePlaybackState()
                 return
             }
             let didChangePause = isPaused
@@ -1553,7 +1496,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
                 } else {
                     logVLC("loading state ignored active playback without usable signal snapshot={\(playerSnapshot(player))}", type: "Stream")
                 }
-                updatePictureInPicturePlaybackState()
                 return
             }
             isLoading = true
@@ -1579,7 +1521,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
                 }
             }
         }
-        updatePictureInPicturePlaybackState()
     }
 
     private func clearLoadingState() {
@@ -1744,40 +1685,6 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         scheduleForegroundSafeDrawableSnapshots("foreground did-become-active followup", delays: [0.10, 0.75, 2.00])
     }
 
-    // MARK: - Picture in Picture
-
-    var isPictureInPictureAvailable: Bool {
-        false
-    }
-
-    var isPictureInPictureActive: Bool {
-        false
-    }
-
-    @discardableResult
-    func startPictureInPicture() -> Bool {
-        Logger.shared.log("[VLCRenderer] PiP start ignored: stable VLCKitSPM path does not expose VLC PiP", type: "Player")
-        return false
-    }
-
-    func stopPictureInPicture() {
-        // No-op: VLC PiP is unavailable on the stable VLCKitSPM path.
-    }
-
-    func updatePictureInPicturePlaybackState() {
-        // No-op: VLC PiP is unavailable on the stable VLCKitSPM path.
-    }
-
-    func handlePictureInPictureSettingChanged() {
-        logVLC("handlePictureInPictureSettingChanged ignored; VLC PiP is disabled on stable VLCKitSPM path", type: "Player")
-        if UserDefaults.standard.object(forKey: "vlcPiPEnabled") as? Bool != false {
-            UserDefaults.standard.set(false, forKey: "vlcPiPEnabled")
-        }
-        delegate?.renderer(self, didChangePictureInPictureAvailability: false)
-        delegate?.renderer(self, didChangePictureInPictureActive: false)
-        syncRenderingViewWithPictureInPictureSetting(reason: "PiP disabled stable SPM", reassignPlayerDrawable: true)
-    }
-
     // MARK: - State Properties
     
     var isPausedState: Bool {
@@ -1857,8 +1764,6 @@ protocol VLCRendererDelegate: AnyObject {
     func renderer(_ renderer: VLCRenderer, getSubtitleForTime time: Double) -> NSAttributedString?
     func renderer(_ renderer: VLCRenderer, getSubtitleStyle: Void) -> SubtitleStyle
     func renderer(_ renderer: VLCRenderer, subtitleTrackDidChange trackId: Int)
-    func renderer(_ renderer: VLCRenderer, didChangePictureInPictureAvailability isAvailable: Bool)
-    func renderer(_ renderer: VLCRenderer, didChangePictureInPictureActive isActive: Bool)
     func rendererDidChangeTracks(_ renderer: VLCRenderer)
 }
 
@@ -1894,13 +1799,6 @@ final class VLCRenderer: PlayerRenderer {
     func refreshSubtitleOverlay() { }
     func loadExternalSubtitles(urls: [String], names: [String]? = nil, enforce: Bool = false) { }
     func applySubtitleStyle(_ style: SubtitleStyle) { }
-    var isPictureInPictureAvailable: Bool { false }
-    var isPictureInPictureActive: Bool { false }
-    @discardableResult
-    func startPictureInPicture() -> Bool { false }
-    func stopPictureInPicture() { }
-    func updatePictureInPicturePlaybackState() { }
-    var isUsingPictureInPictureSampleBufferOutput: Bool { false }
     var isPausedState: Bool { true }
     weak var delegate: VLCRendererDelegate?
 }
