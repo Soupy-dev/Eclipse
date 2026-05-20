@@ -29,7 +29,7 @@ extension JSController {
         }
         
         let thenBlock: @convention(block) (JSValue) -> Void = { [weak self] result in
-            guard self != nil else { return }
+            guard let self else { return }
             
             if result.isNull || result.isUndefined {
                 Logger.shared.log("Received null or undefined result from JavaScript", type: "Error")
@@ -63,19 +63,19 @@ extension JSController {
                     if let streamSources = json["streams"] as? [[String:Any]] {
                         streamUrlsAndHeaders = streamSources
                         Logger.shared.log("Found \(streamSources.count) streams and headers", type: "Stream")
-                        logStreamSourceDiagnostics(streamSources, serviceName: module.metadata.sourceName)
+                        self.logStreamSourceDiagnostics(streamSources, serviceName: module.metadata.sourceName)
                     } else if let streamSource = json["stream"] as? [String:Any] {
                         streamUrlsAndHeaders = [streamSource]
                         Logger.shared.log("Found single stream with headers", type: "Stream")
-                        logStreamSourceDiagnostics([streamSource], serviceName: module.metadata.sourceName)
+                        self.logStreamSourceDiagnostics([streamSource], serviceName: module.metadata.sourceName)
                     } else if let streamsArray = json["streams"] as? [String] {
                         streamUrls = streamsArray
                         Logger.shared.log("Found \(streamsArray.count) streams", type: "Stream")
-                        logPlainStreamDiagnostics(streamsArray, serviceName: module.metadata.sourceName)
+                        self.logPlainStreamDiagnostics(streamsArray, serviceName: module.metadata.sourceName)
                     } else if let streamUrl = json["stream"] as? String {
                         streamUrls = [streamUrl]
                         Logger.shared.log("Found single stream", type: "Stream")
-                        logPlainStreamDiagnostics([streamUrl], serviceName: module.metadata.sourceName)
+                        self.logPlainStreamDiagnostics([streamUrl], serviceName: module.metadata.sourceName)
                     }
                     
                     if let subsArray = json["subtitles"] as? [String] {

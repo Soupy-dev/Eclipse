@@ -2232,7 +2232,7 @@ struct ModulesSearchResultsSheet: View {
 
             let inAppRaw = UserDefaults.standard.string(forKey: "inAppPlayer") ?? "VLC"
             let inAppPlayer = inAppRaw
-            Logger.shared.log("Playback resolve diagnostics source=\(addon.manifest.name) kind=stremio player=\(inAppPlayer) host=\(streamURL.host ?? "nil") ext=\(streamURL.pathExtension.isEmpty ? "none" : streamURL.pathExtension) tail=\(streamURL.lastPathComponent.isEmpty ? "/" : streamURL.lastPathComponent) streamName=\(stream.name ?? "nil") headerKeys=[\(finalHeaders.keys.sorted().joined(separator: ","))] subtitles=\(subtitles.count) autoMode=\(autoModeLaunch)", type: "StreamDiagnostics")
+            Logger.shared.log("Playback resolve diagnostics source=\(addon.manifest.name) kind=stremio player=\(inAppPlayer) host=\(streamURL.host ?? "nil") ext=\(streamURL.pathExtension.isEmpty ? "none" : streamURL.pathExtension) tail=\(streamURL.lastPathComponent.isEmpty ? "/" : streamURL.lastPathComponent) streamName=\(streamName ?? "nil") headerKeys=[\(finalHeaders.keys.sorted().joined(separator: ","))] subtitles=\(subtitles.count) autoMode=\(autoModeLaunch)", type: "StreamDiagnostics")
 
             var playerMediaInfo: MediaInfo? = nil
             let posterURL = resolvedPosterURL
