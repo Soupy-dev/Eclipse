@@ -82,9 +82,12 @@ final class VLCRenderer: NSObject, PlayerRenderer {
     private var lastSlowPlaybackClockLogTime: CFTimeInterval = 0
     private var lastBufferingWhileAdvancingLogTime: CFTimeInterval = 0
     private var lastPositionRegressionLogTime: CFTimeInterval = 0
+    private var lastSteadyPlaybackHeartbeatLogTime: CFTimeInterval = 0
+    private var lastSteadyDrawableHeartbeatLogTime: CFTimeInterval = 0
     private var pendingSeekRequiresPlaybackClock = false
     private var pendingSeekDelayLogged = false
     private var needsProxyReloadAfterBackground = false
+    private var lifecycleObserversInstalled = false
     
     weak var delegate: VLCRendererDelegate?
     
@@ -285,6 +288,10 @@ final class VLCRenderer: NSObject, PlayerRenderer {
             logVLC("start ignored: already running snapshot={\(playerSnapshot())}", type: "Stream")
             return
         }
+
+        if isStopping {
+            logVLC("start requested while stop cleanup is pending snapshot={\(playerSnapshot())}", type: "VLCCrashProbe")
+        }
         
         do {
             logVLC("start initializing VLCMediaPlayer", type: "Stream")
@@ -317,31 +324,33 @@ final class VLCRenderer: NSObject, PlayerRenderer {
                 object: mediaPlayer
             )
             
-            // Observe app lifecycle
-            NotificationCenter.default.addObserver(
-                self,
-                selector: #selector(handleAppDidEnterBackground),
-                name: UIApplication.didEnterBackgroundNotification,
-                object: nil
-            )
-            NotificationCenter.default.addObserver(
-                self,
-                selector: #selector(handleAppWillResignActive),
-                name: UIApplication.willResignActiveNotification,
-                object: nil
-            )
-            NotificationCenter.default.addObserver(
-                self,
-                selector: #selector(handleAppWillEnterForeground),
-                name: UIApplication.willEnterForegroundNotification,
-                object: nil
-            )
-            NotificationCenter.default.addObserver(
-                self,
-                selector: #selector(handleAppDidBecomeActive),
-                name: UIApplication.didBecomeActiveNotification,
-                object: nil
-            )
+            if !lifecycleObserversInstalled {
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(handleAppDidEnterBackground),
+                    name: UIApplication.didEnterBackgroundNotification,
+                    object: nil
+                )
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(handleAppWillResignActive),
+                    name: UIApplication.willResignActiveNotification,
+                    object: nil
+                )
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(handleAppWillEnterForeground),
+                    name: UIApplication.willEnterForegroundNotification,
+                    object: nil
+                )
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(handleAppDidBecomeActive),
+                    name: UIApplication.didBecomeActiveNotification,
+                    object: nil
+                )
+                lifecycleObserversInstalled = true
+            }
             
             isRunning = true
             logVLC("start completed snapshot={\(playerSnapshot(mediaPlayer))}", type: "Stream")
@@ -365,6 +374,8 @@ final class VLCRenderer: NSObject, PlayerRenderer {
 
         
         logVLC("stop begin snapshot={\(playerSnapshot())}", type: "Stream")
+        let playerToStop = mediaPlayer
+        let stopGeneration = loadGeneration + 1
         isRunning = false
         isStopping = true
         loadGeneration += 1
@@ -374,20 +385,28 @@ final class VLCRenderer: NSObject, PlayerRenderer {
 
         eventQueue.async { [weak self] in
             guard let self else { return }
-            NotificationCenter.default.removeObserver(self)
-
-            if let player = self.mediaPlayer {
-                player.stop()
-                self.mediaPlayer = nil
+            if let playerToStop {
+                NotificationCenter.default.removeObserver(self, name: .lunaVLCMediaPlayerTimeChanged, object: playerToStop)
+                NotificationCenter.default.removeObserver(self, name: .lunaVLCMediaPlayerStateChanged, object: playerToStop)
             }
 
-            self.currentMedia = nil
-            self.isReadyToSeek = false
-            self.isPaused = true
-            self.isLoading = false
-            self.lastLoggedStateCode = nil
-            self.lastProgressLogBucket = -1
-            self.lastProgressAnomalyKey = nil
+            if let playerToStop {
+                playerToStop.stop()
+            }
+
+            if let playerToStop, self.mediaPlayer !== playerToStop {
+                self.logVLC("stop cleanup did not clear current player because playback already advanced generation=\(stopGeneration) currentGeneration=\(self.loadGeneration) snapshot={\(self.playerSnapshot())}", type: "VLCCrashProbe")
+            } else {
+                self.mediaPlayer = nil
+
+                self.currentMedia = nil
+                self.isReadyToSeek = false
+                self.isPaused = true
+                self.isLoading = false
+                self.lastLoggedStateCode = nil
+                self.lastProgressLogBucket = -1
+                self.lastProgressAnomalyKey = nil
+            }
 
             // Mark stop completion only after cleanup finishes to prevent reentrancy races
             self.isStopping = false
@@ -428,6 +447,8 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         lastSlowPlaybackClockLogTime = 0
         lastBufferingWhileAdvancingLogTime = 0
         lastPositionRegressionLogTime = 0
+        lastSteadyPlaybackHeartbeatLogTime = 0
+        lastSteadyDrawableHeartbeatLogTime = 0
 
         // Use provided headers as-is; they're already built correctly by the caller
         // (StreamURL domain should NOT be used for headers—service baseUrl should be)
@@ -1007,6 +1028,7 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         }
         logProgressSnapshotIfNeeded(player: player, position: position, duration: duration)
         logPlaybackClockDiagnosticsIfNeeded(player: player, position: position)
+        logSteadyPlaybackHeartbeatIfNeeded(player: player, position: position, duration: duration)
         let hasStartupSignal = hasUsablePlaybackSignal(player, position: position, duration: duration)
 
         if isPlaybackActive(player), hasStartupSignal, isPaused {
@@ -1121,6 +1143,32 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         lastPlaybackClockSampleHostTime = now
         lastPlaybackClockSamplePosition = position
     }
+
+    private func logSteadyPlaybackHeartbeatIfNeeded(player: VLCMediaPlayer, position: Double, duration: Double) {
+        guard isPlaybackActive(player),
+              hasUsablePlaybackSignal(player, position: position, duration: duration) else {
+            return
+        }
+
+        let now = CACurrentMediaTime()
+        guard now - lastSteadyPlaybackHeartbeatLogTime >= 20 else { return }
+        lastSteadyPlaybackHeartbeatLogTime = now
+
+        let normalized = normalizedPosition(from: player)
+        let audioTrackId = Int(player.currentAudioTrackIndex)
+        let subtitleTrackId = Int(player.currentVideoSubTitleIndex)
+        let audioTrackCount = (player.audioTrackIndexes as? [Int])?.count ?? -1
+        let subtitleTrackCount = (player.videoSubTitlesIndexes as? [Int])?.count ?? -1
+        let mediaLength = max(0, (player.media?.length.value?.doubleValue ?? 0) / 1000.0)
+        let proxyDiagnostics = VLCHeaderProxy.shared.diagnosticsSnapshot()
+
+        logVLC("steady heartbeat gen=\(loadGeneration) running=\(isRunning) stopping=\(isStopping) position=\(secondsText(position))/\(secondsText(duration)) mediaLength=\(secondsText(mediaLength)) normalized=\(String(format: "%.5f", normalized)) audioTrack=\(audioTrackId)/\(audioTrackCount) subtitleTrack=\(subtitleTrackId)/\(subtitleTrackCount) proxy={\(proxyDiagnostics)} snapshot={\(playerSnapshot(player))}", type: "VLCCrashProbe")
+
+        if now - lastSteadyDrawableHeartbeatLogTime >= 60 {
+            lastSteadyDrawableHeartbeatLogTime = now
+            logDrawableSnapshot("steady heartbeat")
+        }
+    }
     
     @objc private func mediaPlayerStateChanged() {
         guard let player = mediaPlayer else { return }
@@ -1144,14 +1192,22 @@ final class VLCRenderer: NSObject, PlayerRenderer {
                 updatePictureInPicturePlaybackState()
                 return
             }
+            let didChangePause = isPaused
+            let didBecomeReadyToSeek = !isReadyToSeek
             isPaused = false
             isReadyToSeek = true
             clearLoadingState()
             
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.delegate?.renderer(self, didChangePause: false)
-                self.delegate?.renderer(self, didBecomeReadyToSeek: true)
+            if didChangePause || didBecomeReadyToSeek {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    if didChangePause {
+                        self.delegate?.renderer(self, didChangePause: false)
+                    }
+                    if didBecomeReadyToSeek {
+                        self.delegate?.renderer(self, didBecomeReadyToSeek: true)
+                    }
+                }
             }
             
         } else if isVLCPlayerPausedState(state) {

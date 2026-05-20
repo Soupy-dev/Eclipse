@@ -1002,6 +1002,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var lastVLCUIProgressLogBucket = -1
     private var lastVLCUIProgressAnomalyKey: String?
     private var lastVLCUIProgressAnomalyLogTime: CFTimeInterval = 0
+    private var lastVLCUISteadyHeartbeatLogTime: CFTimeInterval = 0
+    private var lastVLCUIMemoryWarningLogTime: CFTimeInterval = 0
     private var lastPiPButtonVisibilityLogKey: String?
 
     private var isRendererLoading: Bool = false
@@ -1009,6 +1011,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var isRunning = false  // Track if renderer has been started
     private var isVLCPlaybackStartupInProgress = false
     private var canMutateVLCSubtitleTracks = false
+    private var didHandleVLCReadyToSeekForCurrentLoad = false
+    private var didLogDuplicateVLCReadyToSeekForCurrentLoad = false
+    private var playbackReplacementGeneration = 0
     private var pipController: PiPController?
     private var mpvPiPStartAttemptID = 0
     private var mpvAppExitPiPStartRequested = false
@@ -1116,6 +1121,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         isRunning = false
         isVLCPlaybackStartupInProgress = false
         canMutateVLCSubtitleTracks = false
+        didHandleVLCReadyToSeekForCurrentLoad = false
+        didLogDuplicateVLCReadyToSeekForCurrentLoad = false
     }
     
     private func rendererPlay() {
@@ -1627,6 +1634,63 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         logVLCUI("\(event) ui app=\(appState) window=\(view.window != nil) presenting=\(presentingViewController != nil) closing=\(isClosing) running=\(isRunning) loading=\(isRendererLoading) controls=\(controlsVisible) paused=\(rendererIsPausedState()) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pipEnabled=\(Settings.shared.vlcPiPEnabled) pipAvailable=\(pipAvailable) pipActive=\(pipActive) view=\(String(format: "%.0fx%.0f", viewBounds.width, viewBounds.height)) video=\(String(format: "%.0fx%.0f", videoBounds.width, videoBounds.height)) windowBounds=\(String(format: "%.0fx%.0f", windowBounds.width, windowBounds.height)) vlcIndex=\(vlcIndex) vlcHidden=\(vlcView?.isHidden ?? true) vlcAlpha=\(String(format: "%.2f", vlcView?.alpha ?? 0)) displayAttached=\(displayLayer.superlayer != nil) displayHidden=\(displayLayer.isHidden) displayOpacity=\(String(format: "%.2f", displayLayer.opacity)) displayFrame=\(String(format: "%.0fx%.0f", displayFrame.width, displayFrame.height)) displayBg=\(displayBackground) stack=\(subviewStack)", type: "Player")
     }
 
+    private func vlcMediaInfoLogLabel() -> String {
+        vlcMediaInfoLogLabel(for: mediaInfo)
+    }
+
+    private func vlcMediaInfoLogLabel(for mediaInfo: MediaInfo?) -> String {
+        guard let mediaInfo else { return "nil" }
+        switch mediaInfo {
+        case .movie(let id, let title, _, let isAnime):
+            return "movie id=\(id) title=\(title) isAnime=\(isAnime)"
+        case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, _, let isAnime):
+            return "episode showId=\(showId) s=\(seasonNumber) e=\(episodeNumber) title=\(showTitle ?? "nil") isAnime=\(isAnime)"
+        }
+    }
+
+    private func vlcAudioRouteSummary() -> String {
+        let outputs = AVAudioSession.sharedInstance().currentRoute.outputs
+        guard !outputs.isEmpty else { return "none" }
+        return outputs.map { output in
+            "\(output.portType.rawValue):\(output.portName)"
+        }
+        .joined(separator: "|")
+    }
+
+    private func vlcProxyDiagnosticsSummary() -> String {
+#if !os(tvOS)
+        return VLCHeaderProxy.shared.diagnosticsSnapshot()
+#else
+        return "unavailable"
+#endif
+    }
+
+    private func vlcSteadyEnvironmentSnapshot(safePosition: Double, effectiveDuration: Double, durationIsReliable: Bool) -> String {
+        let appState: String
+        switch UIApplication.shared.applicationState {
+        case .active: appState = "active"
+        case .inactive: appState = "inactive"
+        case .background: appState = "background"
+        @unknown default: appState = "unknown"
+        }
+        let processInfo = ProcessInfo.processInfo
+        let thermal = metalThermalStateName(processInfo.thermalState)
+        let viewBounds = view.bounds
+        let videoBounds = videoContainer.bounds
+        let vlcView = vlcRenderingView
+        let route = vlcAudioRouteSummary()
+        let proxy = vlcProxyDiagnosticsSummary()
+        return "app=\(appState) media={\(vlcMediaInfoLogLabel())} position=\(secondsText(safePosition))/\(secondsText(effectiveDuration)) reliable=\(durationIsReliable) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) running=\(isRunning) closing=\(isClosing) loading=\(isRendererLoading) playbackStarted=\(playbackDidStart) controls=\(controlsVisible) paused=\(rendererIsPausedState()) speed=\(String(format: "%.2f", rendererGetSpeed())) thermal=\(thermal) lowPower=\(processInfo.isLowPowerModeEnabled) route={\(route)} view=\(String(format: "%.0fx%.0f", viewBounds.width, viewBounds.height)) video=\(String(format: "%.0fx%.0f", videoBounds.width, videoBounds.height)) window=\(view.window != nil) vlcHidden=\(vlcView?.isHidden ?? true) vlcAlpha=\(String(format: "%.2f", vlcView?.alpha ?? 0)) spinnerAnimating=\(loadingIndicator.isAnimating) spinnerAlpha=\(String(format: "%.2f", loadingIndicator.alpha)) proxy={\(proxy)}"
+    }
+
+    private func logVLCUISteadyHeartbeatIfNeeded(safePosition: Double, effectiveDuration: Double, durationIsReliable: Bool) {
+        guard isVLCPlayer else { return }
+        let now = CACurrentMediaTime()
+        guard now - lastVLCUISteadyHeartbeatLogTime >= 30 else { return }
+        lastVLCUISteadyHeartbeatLogTime = now
+        logVLCUI("steady heartbeat \(vlcSteadyEnvironmentSnapshot(safePosition: safePosition, effectiveDuration: effectiveDuration, durationIsReliable: durationIsReliable))", type: "VLCCrashProbe")
+    }
+
     private func scheduleVLCUIViewSnapshots(_ event: String, delays: [TimeInterval] = [0.25, 1.0]) {
         guard isVLCPlayer else { return }
         for delay in delays {
@@ -1860,6 +1924,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         NotificationCenter.default.addObserver(self, selector: #selector(appWillResignActive), name: UIApplication.willResignActiveNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appWillEnterForeground), name: UIApplication.willEnterForegroundNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appDidBecomeActive), name: UIApplication.didBecomeActiveNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(appDidReceiveMemoryWarning), name: UIApplication.didReceiveMemoryWarningNotification, object: nil)
 #if LUNA_MPVKIT_FORK_EXPOSES_METAL_SAMPLE_BUFFER_PIP && LUNA_MPVKIT_METAL_SAMPLE_BUFFER_PIP_IMPLEMENTED && LUNA_MPVKIT_METAL_LIVE_QUALITY_RECONFIGURE
         NotificationCenter.default.addObserver(self, selector: #selector(metalThermalStateDidChange), name: ProcessInfo.thermalStateDidChangeNotification, object: nil)
 #endif
@@ -2025,6 +2090,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if isVLCPlayer {
             isVLCPlaybackStartupInProgress = true
             canMutateVLCSubtitleTracks = false
+            didHandleVLCReadyToSeekForCurrentLoad = false
+            didLogDuplicateVLCReadyToSeekForCurrentLoad = false
+            lastVLCUISteadyHeartbeatLogTime = 0
+            lastVLCUIMemoryWarningLogTime = 0
         }
         updatePiPButtonVisibility()
         updatePlayerTitle()
@@ -3511,17 +3580,18 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         episodeBrowserHostingController = nil
     }
 
-    private func handleEpisodeBrowserSelection(_ item: PlayerEpisodeBrowserItem) {
+    private func handleEpisodeBrowserSelection(_ item: PlayerEpisodeBrowserItem, reason: String = "episode-browser") {
         guard !item.isCurrent else { return }
+        logVLCUI("episode selection reason=\(reason) target=S\(item.episode.seasonNumber)E\(item.episode.episodeNumber) anime=\(item.isAnime) downloaded=\(item.isDownloaded) current=\(item.isCurrent)", type: "VLCCrashProbe")
 
         if UserDefaults.standard.bool(forKey: "preferDownloadedMedia"),
            let request = downloadedPlaybackRequest(for: item) {
             dismissEpisodeBrowser(animated: true)
-            replacePlayback(with: request)
+            replacePlayback(with: request, reason: "\(reason)-downloaded")
             return
         }
 
-        presentEpisodeSourceSheet(for: item)
+        presentEpisodeSourceSheet(for: item, reason: reason)
     }
 
     private func downloadedPlaybackRequest(for item: PlayerEpisodeBrowserItem) -> PlayerResolvedPlaybackRequest? {
@@ -3547,8 +3617,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         )
     }
 
-    private func presentEpisodeSourceSheet(for item: PlayerEpisodeBrowserItem) {
+    private func presentEpisodeSourceSheet(for item: PlayerEpisodeBrowserItem, reason: String = "episode-browser") {
         guard presentedViewController == nil else { return }
+        logVLCUI("present episode source sheet reason=\(reason) target=S\(item.episode.seasonNumber)E\(item.episode.episodeNumber) title=\(item.mediaTitle) autoOnly=\(UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"))", type: "VLCCrashProbe")
         let sheet = ModulesSearchResultsSheet(
             mediaTitle: item.mediaTitle,
             seasonTitleOverride: item.seasonTitleOverride,
@@ -3566,16 +3637,25 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             episodePlaybackContext: item.playbackContext,
             autoModeOnly: UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"),
             onResolvedPlaybackRequest: { [weak self] request in
-                self?.replacePlayback(with: request)
+                self?.replacePlayback(with: request, reason: "\(reason)-resolved-source")
             }
         )
         let host = UIHostingController(rootView: sheet)
         present(host, animated: true, completion: nil)
     }
 
-    private func replacePlayback(with request: PlayerResolvedPlaybackRequest) {
+    private func replacePlayback(with request: PlayerResolvedPlaybackRequest, reason: String = "episode-browser") {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            self.playbackReplacementGeneration += 1
+            let replacementGeneration = self.playbackReplacementGeneration
+            let transitionId = String(UUID().uuidString.prefix(8))
+            let wasVLC = self.isVLCPlayer
+            let previousMedia = self.vlcMediaInfoLogLabel()
+            let nextMedia = self.vlcMediaInfoLogLabel(for: request.mediaInfo)
+            if wasVLC {
+                self.logVLCUI("replacePlayback begin transition=\(transitionId) generation=\(replacementGeneration) reason=\(reason) from={\(previousMedia)} to={\(nextMedia)} cached=\(self.secondsText(self.cachedPosition))/\(self.secondsText(self.cachedDuration)) running=\(self.isRunning) loading=\(self.isRendererLoading)", type: "VLCCrashProbe")
+            }
             self.dismissEpisodeBrowser(animated: true)
             self.controlsHideWorkItem?.cancel()
             self.playbackStartupWorkItem?.cancel()
@@ -3605,8 +3685,28 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self.rendererStop()
             self.updatePlayerTitle()
             self.updateEpisodeBrowserButtonVisibility()
-            self.load(url: request.url, preset: request.preset, headers: request.headers)
-            self.showControlsTemporarily()
+
+            let startReplacementLoad = { [weak self] in
+                guard let self else { return }
+                guard self.playbackReplacementGeneration == replacementGeneration else {
+                    if wasVLC {
+                        self.logVLCUI("replacePlayback load skipped stale transition=\(transitionId) generation=\(replacementGeneration) currentGeneration=\(self.playbackReplacementGeneration)", type: "VLCCrashProbe")
+                    }
+                    return
+                }
+                if wasVLC {
+                    self.logVLCUI("replacePlayback load starting transition=\(transitionId) generation=\(replacementGeneration) reason=\(reason) url=\(request.url.absoluteString) headers=\(request.headers?.count ?? 0)", type: "VLCCrashProbe")
+                }
+                self.load(url: request.url, preset: request.preset, headers: request.headers)
+                self.showControlsTemporarily()
+            }
+
+            if wasVLC {
+                self.logVLCUI("replacePlayback waiting for VLC stop drain transition=\(transitionId) generation=\(replacementGeneration)", type: "VLCCrashProbe")
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.20, execute: startReplacementLoad)
+            } else {
+                startReplacementLoad()
+            }
         }
     }
 
@@ -4563,10 +4663,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         guard pendingNextEpisodeRequest == nil else { return }
 
         let nextEpisodeNumber = episodeNumber + 1
+        logVLCUI("next episode button tapped from=S\(seasonNumber)E\(episodeNumber) target=S\(seasonNumber)E\(nextEpisodeNumber) hasPreview=\(nextEpisodePreview != nil) previewTask=\(nextEpisodePreviewTask != nil) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))", type: "VLCCrashProbe")
         Logger.shared.log("NextEpisode: User requested S\(seasonNumber)E\(nextEpisodeNumber)", type: "Player")
         if let preview = nextEpisodePreview {
             hideNextEpisodeButton()
-            handleEpisodeBrowserSelection(preview)
+            handleEpisodeBrowserSelection(preview, reason: "next-episode-button-preview")
             return
         }
 
@@ -4582,6 +4683,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         pendingNextEpisodeRequest = (seasonNumber, nextEpisodeNumber)
         nextEpisodeButton.isEnabled = false
         hideNextEpisodeButton()
+        logVLCUI("next episode button closing player for detail-sheet fallback target=S\(seasonNumber)E\(nextEpisodeNumber)", type: "VLCCrashProbe")
         closeTapped()
     }
 
@@ -4659,6 +4761,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         didDispatchNextEpisodeRequest = true
         pendingNextEpisodeRequest = nil
+        logVLCUI("dispatching pending next episode request S\(request.seasonNumber)E\(request.episodeNumber)", type: "VLCCrashProbe")
         onRequestNextEpisode?(request.seasonNumber, request.episodeNumber)
     }
 
@@ -6907,6 +7010,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func logVLCUIProgressIfNeeded(rawPosition: Double, rawDuration: Double, safePosition: Double, effectiveDuration: Double, durationIsReliable: Bool, waitingForInitialResume: Bool) {
         guard isVLCPlayer else { return }
+        logVLCUISteadyHeartbeatIfNeeded(
+            safePosition: safePosition,
+            effectiveDuration: effectiveDuration,
+            durationIsReliable: durationIsReliable
+        )
+
         let bucket = Int(max(0, safePosition) / 10.0)
         if bucket != lastVLCUIProgressLogBucket {
             lastVLCUIProgressLogBucket = bucket
@@ -7964,10 +8073,18 @@ extension PlayerViewController: VLCRendererDelegate {
     
     func renderer(_ renderer: VLCRenderer, didBecomeReadyToSeek: Bool) {
         if isClosing { return }
-        logVLCUI("delegate didBecomeReadyToSeek cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) loading=\(isRendererLoading) pendingSeek=\(secondsText(pendingSeekTime))", type: "VLCPlayback")
-
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            guard !self.isClosing else { return }
+            if self.didHandleVLCReadyToSeekForCurrentLoad {
+                if !self.didLogDuplicateVLCReadyToSeekForCurrentLoad {
+                    self.didLogDuplicateVLCReadyToSeekForCurrentLoad = true
+                    self.logVLCUI("delegate didBecomeReadyToSeek ignored duplicate cached=\(self.secondsText(self.cachedPosition))/\(self.secondsText(self.cachedDuration)) loading=\(self.isRendererLoading) pendingSeek=\(self.secondsText(self.pendingSeekTime))", type: "VLCPlayback")
+                }
+                return
+            }
+            self.didHandleVLCReadyToSeekForCurrentLoad = true
+            self.logVLCUI("delegate didBecomeReadyToSeek cached=\(self.secondsText(self.cachedPosition))/\(self.secondsText(self.cachedDuration)) loading=\(self.isRendererLoading) pendingSeek=\(self.secondsText(self.pendingSeekTime))", type: "VLCPlayback")
             self.isVLCPlaybackStartupInProgress = false
             self.canMutateVLCSubtitleTracks = true
             self.markPlaybackStarted(reason: "ready")
@@ -8174,6 +8291,15 @@ extension PlayerViewController: PiPControllerDelegate {
     }
     func pipControllerDuration(_ controller: PiPController) -> Double { return cachedDuration }
     func pipControllerCurrentTime(_ controller: PiPController) -> Double { return cachedPosition }
+
+    @objc private func appDidReceiveMemoryWarning() {
+        guard isVLCPlayer else { return }
+        let now = CACurrentMediaTime()
+        guard now - lastVLCUIMemoryWarningLogTime >= 2 else { return }
+        lastVLCUIMemoryWarningLogTime = now
+        logVLCUI("memory warning \(vlcSteadyEnvironmentSnapshot(safePosition: cachedPosition, effectiveDuration: cachedDuration, durationIsReliable: cachedDuration > 5))", type: "VLCCrashProbe")
+        logVLCUIViewSnapshot("memoryWarning")
+    }
 
     @objc private func appWillResignActive() {
         logPictureInPicture("lifecycle notification received source=will-resign-active")

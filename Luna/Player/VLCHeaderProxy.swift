@@ -38,6 +38,10 @@ final class VLCHeaderProxy {
     private let token = UUID().uuidString
     private var sessions: [String: Session] = [:]
     private let sessionLock = NSLock()
+    private let requestStatsLock = NSLock()
+    private var activeRequestCount = 0
+    private var completedRequestCount = 0
+    private var lastRequestSummary = "none"
 
     private let maxSessions = 200
     private let sessionTTL: TimeInterval = 6 * 60 * 60
@@ -66,6 +70,40 @@ final class VLCHeaderProxy {
 
     private func sessionCount() -> Int {
         withSessionsLock { sessions.count }
+    }
+
+    private func beginRequest(id: String, kind: String, targetURL: URL) -> Int {
+        requestStatsLock.lock()
+        defer { requestStatsLock.unlock() }
+        activeRequestCount += 1
+        lastRequestSummary = "start id=\(id) kind=\(kind) target=\(logURLSummary(targetURL))"
+        return activeRequestCount
+    }
+
+    private func finishRequest(id: String, kind: String, targetURL: URL) -> Int {
+        requestStatsLock.lock()
+        defer { requestStatsLock.unlock() }
+        activeRequestCount = max(0, activeRequestCount - 1)
+        completedRequestCount += 1
+        lastRequestSummary = "finish id=\(id) kind=\(kind) target=\(logURLSummary(targetURL))"
+        return activeRequestCount
+    }
+
+    private func activeRequestCountSnapshot() -> Int {
+        requestStatsLock.lock()
+        defer { requestStatsLock.unlock() }
+        return activeRequestCount
+    }
+
+    func diagnosticsSnapshot() -> String {
+        requestStatsLock.lock()
+        let active = activeRequestCount
+        let completed = completedRequestCount
+        let last = lastRequestSummary
+        requestStatsLock.unlock()
+
+        let portText = port.map { String($0) } ?? "nil"
+        return "listener=\(listener != nil) port=\(portText) sessions=\(sessionCount()) activeRequests=\(active) completedRequests=\(completed) lastRequest={\(last)}"
     }
 
     private func logURLSummary(_ url: URL) -> String {
@@ -361,7 +399,9 @@ final class VLCHeaderProxy {
         let requestId = String(UUID().uuidString.prefix(8))
         let incomingRange = headers.first { $0.key.caseInsensitiveCompare("Range") == .orderedSame }?.value ?? "nil"
         let kind = requestKind(for: targetURL)
-        Logger.shared.log("VLCHeaderProxy[\(requestId)]: request method=\(method) kind=\(kind) target=\(logURLSummary(targetURL)) incomingRange=\(incomingRange) incomingHeaderKeys=[\(headers.keys.sorted().joined(separator: ","))] sessionHeaderKeys=[\(session.headers.keys.sorted().joined(separator: ","))]", type: "VLCProxy")
+        let activeRequests = beginRequest(id: requestId, kind: kind, targetURL: targetURL)
+        defer { _ = finishRequest(id: requestId, kind: kind, targetURL: targetURL) }
+        Logger.shared.log("VLCHeaderProxy[\(requestId)]: request method=\(method) kind=\(kind) activeRequests=\(activeRequests) target=\(logURLSummary(targetURL)) incomingRange=\(incomingRange) incomingHeaderKeys=[\(headers.keys.sorted().joined(separator: ","))] sessionHeaderKeys=[\(session.headers.keys.sorted().joined(separator: ","))]", type: "VLCProxy")
 
         var request = URLRequest(url: targetURL)
         request.httpMethod = method
@@ -379,7 +419,7 @@ final class VLCHeaderProxy {
         }
 
         let upstreamRange = request.value(forHTTPHeaderField: "Range") ?? "nil"
-        Logger.shared.log("VLCHeaderProxy[\(requestId)]: upstream start kind=\(kind) range=\(upstreamRange) target=\(logURLSummary(targetURL))", type: "VLCProxy")
+        Logger.shared.log("VLCHeaderProxy[\(requestId)]: upstream start kind=\(kind) activeRequests=\(activeRequestCountSnapshot()) range=\(upstreamRange) target=\(logURLSummary(targetURL))", type: "VLCProxy")
         let bridge = UpstreamBridge(
             proxy: self,
             request: request,
@@ -837,7 +877,7 @@ final class VLCHeaderProxy {
             responseAt = CFAbsoluteTimeGetCurrent()
             mode = proxy.upstreamBodyMode(for: http, targetURL: targetURL)
             let kind = proxy.requestKind(for: targetURL, contentType: contentType)
-            Logger.shared.log("VLCHeaderProxy[\(requestId)]: upstream response status=\(http.statusCode) kind=\(kind) mode=\(mode.logName) headerMs=\(proxy.elapsedMilliseconds(since: startedAt)) target=\(proxy.logURLSummary(targetURL)) contentLength=\(contentLength) contentRange=\(contentRange) contentType=\(contentType)", type: "VLCProxy")
+            Logger.shared.log("VLCHeaderProxy[\(requestId)]: upstream response status=\(http.statusCode) kind=\(kind) mode=\(mode.logName) activeRequests=\(proxy.activeRequestCountSnapshot()) headerMs=\(proxy.elapsedMilliseconds(since: startedAt)) target=\(proxy.logURLSummary(targetURL)) contentLength=\(contentLength) contentRange=\(contentRange) contentType=\(contentType)", type: "VLCProxy")
 
             let responseHeaders = proxy.filteredResponseHeaders(from: http)
             if method == "HEAD" {
@@ -947,10 +987,10 @@ final class VLCHeaderProxy {
                     sessionId: sessionId
                 )
                 downstreamBytes += body.count
-                Logger.shared.log("VLCHeaderProxy[\(requestId)]: upstream done status=\(http.statusCode) kind=\(proxy.requestKind(for: targetURL)) mode=\(mode.logName) recvBytes=\(bufferedData.count) sentBytes=\(downstreamBytes) responseBytes=\(body.count) rewritten=\(rewritten) firstByteMs=\(firstDataAt.map { String(format: "%.0f", max(0, ($0 - startedAt) * 1000.0)) } ?? "nil") totalMs=\(proxy.elapsedMilliseconds(since: startedAt)) target=\(proxy.logURLSummary(targetURL))", type: "VLCProxy")
+                Logger.shared.log("VLCHeaderProxy[\(requestId)]: upstream done status=\(http.statusCode) kind=\(proxy.requestKind(for: targetURL)) mode=\(mode.logName) activeRequests=\(proxy.activeRequestCountSnapshot()) recvBytes=\(bufferedData.count) sentBytes=\(downstreamBytes) responseBytes=\(body.count) rewritten=\(rewritten) firstByteMs=\(firstDataAt.map { String(format: "%.0f", max(0, ($0 - startedAt) * 1000.0)) } ?? "nil") totalMs=\(proxy.elapsedMilliseconds(since: startedAt)) target=\(proxy.logURLSummary(targetURL))", type: "VLCProxy")
                 proxy.sendResponse(connection, statusCode: http.statusCode, headers: headers, body: body)
             case .stream:
-                Logger.shared.log("VLCHeaderProxy[\(requestId)]: upstream stream complete status=\(http.statusCode) kind=\(proxy.requestKind(for: targetURL)) recvBytes=\(upstreamBytes) sentBytes=\(downstreamBytes) firstByteMs=\(firstDataAt.map { String(format: "%.0f", max(0, ($0 - startedAt) * 1000.0)) } ?? "nil") totalMs=\(proxy.elapsedMilliseconds(since: startedAt)) target=\(proxy.logURLSummary(targetURL))", type: "VLCProxy")
+                Logger.shared.log("VLCHeaderProxy[\(requestId)]: upstream stream complete status=\(http.statusCode) kind=\(proxy.requestKind(for: targetURL)) activeRequests=\(proxy.activeRequestCountSnapshot()) recvBytes=\(upstreamBytes) sentBytes=\(downstreamBytes) firstByteMs=\(firstDataAt.map { String(format: "%.0f", max(0, ($0 - startedAt) * 1000.0)) } ?? "nil") totalMs=\(proxy.elapsedMilliseconds(since: startedAt)) target=\(proxy.logURLSummary(targetURL))", type: "VLCProxy")
                 connection.cancel()
             }
 
