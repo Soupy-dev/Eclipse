@@ -1029,6 +1029,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var attemptedAnimeAudioAutoSelectSignature: String?
     private var lastAudioTracksMenuLogSignature: String?
     private var lastSubtitleTracksMenuLogSignature: String?
+    private var lastDefaultSubtitleChoiceLogSignature: String?
     private var lastVLCPauseLogSignature: String?
     private var lastVLCPauseLogTime: CFTimeInterval = 0
     private var pendingInitialResumeTarget: Double?
@@ -1136,6 +1137,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
     
     private func rendererTogglePause() {
+        if vlcRenderer != nil {
+            logVLCUI("rendererTogglePause requested paused=\(rendererIsPausedState()) loading=\(isRendererLoading) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))", type: "VLCPlayback")
+        } else {
+            logMPV("rendererTogglePause requested paused=\(rendererIsPausedState()) loading=\(isRendererLoading) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))")
+        }
         renderer.togglePause()
     }
 
@@ -2049,6 +2055,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         attemptedAnimeAudioAutoSelectSignature = nil
         lastAudioTracksMenuLogSignature = nil
         lastSubtitleTracksMenuLogSignature = nil
+        lastDefaultSubtitleChoiceLogSignature = nil
         lastVLCPauseLogSignature = nil
         lastVLCPauseLogTime = 0
         lastRequestedEmbeddedSubtitleTrackId = nil
@@ -2112,6 +2119,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         guard !playbackDidStart else { return }
         playbackDidStart = true
         playbackStartupWorkItem?.cancel()
+        Logger.shared.log("[PlayerVC.PlaybackStart] renderer=\(isVLCPlayer ? "VLC" : "MPV") started reason=\(reason) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) loading=\(isRendererLoading) context=\(playbackLaunchContext?.sourceName ?? "nil")", type: isVLCPlayer ? "VLCPlayback" : "MPV")
         if let context = playbackLaunchContext {
             SourceHealthStore.shared.recordPlaybackSuccess(sourceId: context.sourceId, sourceName: context.sourceName)
             Logger.shared.log("[PlayerVC.PlaybackStart] \(context.sourceName) started via \(reason)", type: "Stream")
@@ -3171,6 +3179,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
     
     @objc private func centerPlayPauseTapped() {
+        logSharedPlayerControl("center play/pause tapped paused=\(rendererIsPausedState()) loading=\(isRendererLoading) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))")
         playPauseTapped()
     }
     
@@ -5381,7 +5390,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         let bestScore = sorted.first?.1 ?? -999
         let best = bestScore > 0 ? sorted.first?.0 : nil
-        Logger.shared.log("PlayerViewController: default subtitles preferredLang=\(preferredLang) best=\(best?.1 ?? "nil") score=\(bestScore)", type: "Player")
+        let choiceLogSignature = "\(preferredLang)|\(tracks.map { "\($0.0):\($0.1)" }.joined(separator: "|"))|\(best?.0 ?? -1)|\(bestScore)"
+        if choiceLogSignature != lastDefaultSubtitleChoiceLogSignature {
+            lastDefaultSubtitleChoiceLogSignature = choiceLogSignature
+            Logger.shared.log("PlayerViewController: default subtitles preferredLang=\(preferredLang) best=\(best?.1 ?? "nil") score=\(bestScore)", type: "Player")
+        }
         return best
     }
 
@@ -6804,6 +6817,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 }
 #endif
                 if self.isRendererLoading && playbackAdvanced {
+                    if self.isVLCPlayer {
+                        self.logVLCUI("loading cleared by position advance safe=\(self.secondsText(safePosition)) effectiveDuration=\(self.secondsText(effectiveDuration)) waitingResume=\(waitingForInitialResume)", type: "VLCPlayback")
+                    }
                     self.isRendererLoading = false
                     self.loadingIndicator.stopAnimating()
                     self.loadingIndicator.alpha = 0.0
@@ -6841,6 +6857,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
             // If playback is progressing, force-hide any lingering loading spinner.
             if self.isRendererLoading && playbackAdvanced {
+                if self.isVLCPlayer {
+                    self.logVLCUI("loading cleared by position advance safe=\(self.secondsText(safePosition)) effectiveDuration=\(self.secondsText(effectiveDuration)) waitingResume=\(waitingForInitialResume)", type: "VLCPlayback")
+                }
                 self.isRendererLoading = false
                 self.loadingIndicator.stopAnimating()
                 self.loadingIndicator.alpha = 0.0
@@ -7935,6 +7954,7 @@ extension PlayerViewController: VLCRendererDelegate {
     
     func renderer(_ renderer: VLCRenderer, didBecomeReadyToSeek: Bool) {
         if isClosing { return }
+        logVLCUI("delegate didBecomeReadyToSeek cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) loading=\(isRendererLoading) pendingSeek=\(secondsText(pendingSeekTime))", type: "VLCPlayback")
 
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }

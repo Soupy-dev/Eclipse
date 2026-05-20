@@ -76,6 +76,12 @@ final class VLCRenderer: NSObject, PlayerRenderer {
     private var lastProgressLogBucket = -1
     private var lastProgressAnomalyKey: String?
     private var lastProgressAnomalyLogTime: CFTimeInterval = 0
+    private var lastAudioTracksDetailedLogSignature: String?
+    private var lastPlaybackClockSampleHostTime: CFTimeInterval?
+    private var lastPlaybackClockSamplePosition: Double?
+    private var lastSlowPlaybackClockLogTime: CFTimeInterval = 0
+    private var lastBufferingWhileAdvancingLogTime: CFTimeInterval = 0
+    private var lastPositionRegressionLogTime: CFTimeInterval = 0
     
     weak var delegate: VLCRendererDelegate?
     
@@ -412,6 +418,11 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         lastLoggedStateCode = nil
         lastProgressLogBucket = -1
         lastProgressAnomalyKey = nil
+        lastPlaybackClockSampleHostTime = nil
+        lastPlaybackClockSamplePosition = nil
+        lastSlowPlaybackClockLogTime = 0
+        lastBufferingWhileAdvancingLogTime = 0
+        lastPositionRegressionLogTime = 0
 
         // Use provided headers as-is; they're already built correctly by the caller
         // (StreamURL domain should NOT be used for headers—service baseUrl should be)
@@ -748,7 +759,13 @@ final class VLCRenderer: NSObject, PlayerRenderer {
                 result.append((index, name, code))
             }
         }
-        logVLC("getAudioTracksDetailed count=\(result.count) current=\(getCurrentAudioTrackId()) names=\(result.map { "\($0.0):\($0.1)" }.joined(separator: " | "))")
+        let currentTrackId = getCurrentAudioTrackId()
+        let trackSignature = result.map { "\($0.0):\($0.1):\($0.2)" }.joined(separator: "|")
+        let logSignature = "\(currentTrackId)|\(trackSignature)"
+        if logSignature != lastAudioTracksDetailedLogSignature {
+            lastAudioTracksDetailedLogSignature = logSignature
+            logVLC("getAudioTracksDetailed count=\(result.count) current=\(currentTrackId) names=\(result.map { "\($0.0):\($0.1)" }.joined(separator: " | "))")
+        }
         
         return result
     }
@@ -932,6 +949,7 @@ final class VLCRenderer: NSObject, PlayerRenderer {
             cachedDuration = max(cachedDuration, duration)
         }
         logProgressSnapshotIfNeeded(player: player, position: position, duration: duration)
+        logPlaybackClockDiagnosticsIfNeeded(player: player, position: position)
         let hasStartupSignal = hasUsablePlaybackSignal(player, position: position, duration: duration)
 
         if isPlaybackActive(player), hasStartupSignal, isPaused {
@@ -989,6 +1007,48 @@ final class VLCRenderer: NSObject, PlayerRenderer {
             lastProgressAnomalyLogTime = now
             logVLC("progress anomaly \(anomaly) position=\(secondsText(position)) duration=\(secondsText(duration)) snapshot={\(playerSnapshot(player))}", type: "Error")
         }
+    }
+
+    private func logPlaybackClockDiagnosticsIfNeeded(player: VLCMediaPlayer, position: Double) {
+        guard isPlaybackActive(player) else {
+            lastPlaybackClockSampleHostTime = nil
+            lastPlaybackClockSamplePosition = nil
+            return
+        }
+
+        let now = CACurrentMediaTime()
+        guard let previousHostTime = lastPlaybackClockSampleHostTime,
+              let previousPosition = lastPlaybackClockSamplePosition else {
+            lastPlaybackClockSampleHostTime = now
+            lastPlaybackClockSamplePosition = position
+            return
+        }
+
+        let wallDelta = max(0, now - previousHostTime)
+        guard wallDelta >= 1.0 else { return }
+
+        let mediaDelta = position - previousPosition
+        if mediaDelta < -1.0, now - lastPositionRegressionLogTime > 4.0 {
+            lastPositionRegressionLogTime = now
+            logVLC("playback clock regression previous=\(secondsText(previousPosition)) current=\(secondsText(position)) wallDelta=\(String(format: "%.2f", wallDelta)) snapshot={\(playerSnapshot(player))}", type: "VLCPlayback")
+        }
+
+        let expectedDelta = wallDelta * max(currentPlaybackSpeed, 0.1)
+        if expectedDelta > 0.5 {
+            let ratio = mediaDelta / expectedDelta
+            if ratio < 0.55, now - lastSlowPlaybackClockLogTime > 4.0 {
+                lastSlowPlaybackClockLogTime = now
+                logVLC("playback clock slow mediaDelta=\(secondsText(mediaDelta)) expected=\(secondsText(expectedDelta)) ratio=\(String(format: "%.2f", ratio)) wallDelta=\(String(format: "%.2f", wallDelta)) snapshot={\(playerSnapshot(player))}", type: "VLCPlayback")
+            }
+        }
+
+        if stateCode(player.state) == 2, mediaDelta > 0.1, now - lastBufferingWhileAdvancingLogTime > 8.0 {
+            lastBufferingWhileAdvancingLogTime = now
+            logVLC("state buffering while clock advances mediaDelta=\(secondsText(mediaDelta)) wallDelta=\(String(format: "%.2f", wallDelta)) snapshot={\(playerSnapshot(player))}", type: "VLCPlayback")
+        }
+
+        lastPlaybackClockSampleHostTime = now
+        lastPlaybackClockSamplePosition = position
     }
     
     @objc private func mediaPlayerStateChanged() {

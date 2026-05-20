@@ -63,15 +63,19 @@ extension JSController {
                     if let streamSources = json["streams"] as? [[String:Any]] {
                         streamUrlsAndHeaders = streamSources
                         Logger.shared.log("Found \(streamSources.count) streams and headers", type: "Stream")
+                        logStreamSourceDiagnostics(streamSources, serviceName: module.metadata.sourceName)
                     } else if let streamSource = json["stream"] as? [String:Any] {
                         streamUrlsAndHeaders = [streamSource]
                         Logger.shared.log("Found single stream with headers", type: "Stream")
+                        logStreamSourceDiagnostics([streamSource], serviceName: module.metadata.sourceName)
                     } else if let streamsArray = json["streams"] as? [String] {
                         streamUrls = streamsArray
                         Logger.shared.log("Found \(streamsArray.count) streams", type: "Stream")
+                        logPlainStreamDiagnostics(streamsArray, serviceName: module.metadata.sourceName)
                     } else if let streamUrl = json["stream"] as? String {
                         streamUrls = [streamUrl]
                         Logger.shared.log("Found single stream", type: "Stream")
+                        logPlainStreamDiagnostics([streamUrl], serviceName: module.metadata.sourceName)
                     }
                     
                     if let subsArray = json["subtitles"] as? [String] {
@@ -123,5 +127,48 @@ extension JSController {
         
         promise.invokeMethod("then", withArguments: [thenFunction])
         promise.invokeMethod("catch", withArguments: [catchFunction])
+    }
+
+    private func logStreamSourceDiagnostics(_ sources: [[String: Any]], serviceName: String) {
+        let summaries = sources.enumerated().prefix(8).map { index, source in
+            streamSourceDiagnosticSummary(source, index: index)
+        }.joined(separator: " || ")
+        Logger.shared.log("Service stream diagnostics service=\(serviceName) sourceCount=\(sources.count) \(summaries)", type: "StreamDiagnostics")
+    }
+
+    private func logPlainStreamDiagnostics(_ urls: [String], serviceName: String) {
+        let summaries = urls.enumerated().prefix(8).map { index, urlString in
+            plainStreamDiagnosticSummary(urlString, index: index)
+        }.joined(separator: " || ")
+        Logger.shared.log("Service stream diagnostics service=\(serviceName) sourceCount=\(urls.count) \(summaries)", type: "StreamDiagnostics")
+    }
+
+    private func streamSourceDiagnosticSummary(_ source: [String: Any], index: Int) -> String {
+        let urlString = firstStringValue(in: source, keys: ["url", "file", "src", "link", "stream"])
+        let name = firstStringValue(in: source, keys: ["name", "title", "label", "quality"]) ?? "nil"
+        let headerKeys = ((source["headers"] as? [String: Any]) ?? (source["headers"] as? [String: String])?.mapValues { $0 as Any } ?? [:])
+            .keys
+            .sorted()
+            .joined(separator: ",")
+        let summary = urlString.map { plainStreamDiagnosticSummary($0, index: index) } ?? "#\(index) url=nil"
+        return "\(summary) name=\(name) headerKeys=[\(headerKeys)]"
+    }
+
+    private func plainStreamDiagnosticSummary(_ urlString: String, index: Int) -> String {
+        guard let url = URL(string: urlString) else {
+            return "#\(index) url=invalid"
+        }
+        let ext = url.pathExtension.isEmpty ? "none" : url.pathExtension
+        let tail = url.lastPathComponent.isEmpty ? "/" : url.lastPathComponent
+        return "#\(index) host=\(url.host ?? "nil") ext=\(ext) tail=\(tail)"
+    }
+
+    private func firstStringValue(in source: [String: Any], keys: [String]) -> String? {
+        for key in keys {
+            if let value = source[key] as? String, !value.isEmpty {
+                return value
+            }
+        }
+        return nil
     }
 }
