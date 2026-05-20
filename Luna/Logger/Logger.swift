@@ -61,6 +61,8 @@ class Logger: @unchecked Sendable {
             return "Matching"
         case "mpvcrashprobe":
             return "MPV"
+        case "vlccrashprobe":
+            return "VLC"
         default:
             return trimmed
         }
@@ -71,7 +73,7 @@ class Logger: @unchecked Sendable {
         let entry = LogEntry(message: normalizedMessage, type: type, timestamp: Date())
 
         // Crash diagnostics must survive hard crashes immediately.
-        if Self.isCrashDiagnosticType(type) {
+        if Self.isCrashDiagnosticType(type) || Self.isCrashDiagnosticMessage(normalizedMessage) {
             appendToDisk(entry)
 
             queue.async(flags: .barrier) {
@@ -372,7 +374,7 @@ class Logger: @unchecked Sendable {
     }
 
     private func shouldBypassNoisySuppression(_ entry: LogEntry) -> Bool {
-        if Self.isCrashDiagnosticType(entry.type) {
+        if Self.isCrashDiagnosticType(entry.type) || Self.isCrashDiagnosticMessage(entry.message) {
             return true
         }
 
@@ -383,7 +385,7 @@ class Logger: @unchecked Sendable {
             return true
         }
 
-        if message.contains("playerheaderproxy") || message.contains("mpvheaderproxy") {
+        if message.contains("playerheaderproxy") || message.contains("mpvheaderproxy") || message.contains("vlcheaderproxy") {
             return true
         }
 
@@ -412,11 +414,18 @@ class Logger: @unchecked Sendable {
 
     private static func isCrashDiagnosticType(_ type: String) -> Bool {
         switch type.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
-        case "crashprobe", "mpvcrashprobe":
+        case "crashprobe", "mpvcrashprobe", "vlccrashprobe", "vlcplayback", "vlcproxy":
             return true
         default:
             return false
         }
+    }
+
+    private static func isCrashDiagnosticMessage(_ message: String) -> Bool {
+        let lowercasedMessage = message.lowercased()
+        return lowercasedMessage.contains("[vlcrenderer]")
+            || lowercasedMessage.contains("[playervc.vlc")
+            || lowercasedMessage.contains("vlcheaderproxy")
     }
 
     private func appendToDisk(_ entry: LogEntry) {

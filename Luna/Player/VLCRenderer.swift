@@ -1296,9 +1296,15 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         }
         let isPlaying = isPlaybackActive(player)
 
+        let waitingForPendingSeekClock = pendingSeekRequiresPlaybackClock
+            && pendingAbsoluteSeek != nil
+            && rawPosition <= 0.05
+
         let position: Double
         if rawPosition > 0 {
             position = rawPosition
+        } else if waitingForPendingSeekClock, let pending = pendingAbsoluteSeek {
+            position = duration > 0 ? min(max(0, pending), duration) : max(0, pending)
         } else if normalized > 0, duration > 0 {
             position = normalized * duration
         } else if isPlaying, let lastProgressHostTime {

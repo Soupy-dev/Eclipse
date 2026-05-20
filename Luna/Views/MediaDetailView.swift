@@ -125,8 +125,8 @@ struct MediaDetailView: View {
     @StateObject private var stremioManager = StremioAddonManager.shared
     @ObservedObject private var downloadManager = DownloadManager.shared
     @ObservedObject private var libraryManager = LibraryManager.shared
-    @ObservedObject private var progressManager = ProgressManager.shared
     @ObservedObject private var theme = LunaTheme.shared
+    private let progressManager = ProgressManager.shared
     
     @Environment(\.presentationMode) var presentationMode
     @Environment(\.verticalSizeClass) private var verticalSizeClass
@@ -1203,8 +1203,7 @@ struct MediaDetailView: View {
     }
 
     private func episodeProgressByKey() -> [MainPlayEpisodeKey: EpisodeProgressEntry] {
-        let publishedEntries = progressManager.episodeProgressList
-        let entries = publishedEntries.isEmpty ? progressManager.getProgressData().episodeProgress : publishedEntries
+        let entries = progressManager.getProgressData().episodeProgress
         var result: [MainPlayEpisodeKey: EpisodeProgressEntry] = [:]
 
         for entry in entries where entry.showId == searchResult.id {
