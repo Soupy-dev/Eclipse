@@ -171,7 +171,10 @@ struct ContentView: View {
     }
 
     private func presentUpdateAlertIfNeeded() {
-        guard githubReleaseShowAlertPending else { return }
+        guard GitHubReleaseChecker.shouldShowPendingUpdatePrompt else {
+            githubReleaseShowAlertPending = false
+            return
+        }
         showingReleaseAlert = true
     }
 

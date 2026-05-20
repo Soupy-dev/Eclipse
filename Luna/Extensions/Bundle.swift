@@ -40,6 +40,7 @@ enum GitHubReleaseChecker {
             pendingPromptKey: false,
             lastPromptedVersionKey: ""
         ])
+        refreshCachedUpdateStateForCurrentVersion()
     }
 
     private static var isAutoCheckEnabled: Bool {
@@ -99,6 +100,20 @@ enum GitHubReleaseChecker {
         } catch {
             Logger.shared.log("GitHub release check failed: \(error.localizedDescription)", type: "Update")
         }
+    }
+
+    static var shouldShowPendingUpdatePrompt: Bool {
+        registerDefaults()
+
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: pendingPromptKey),
+              defaults.bool(forKey: updateAvailableKey) else {
+            return false
+        }
+
+        let latestVersion = defaults.string(forKey: latestVersionKey) ?? ""
+        let currentVersion = normalizedVersionString(from: Bundle.main.appVersion)
+        return isVersion(normalizedVersionString(from: latestVersion), newerThan: currentVersion)
     }
 
     private static func fetchLatestRelease() async throws -> GitHubRelease {
@@ -161,6 +176,28 @@ enum GitHubReleaseChecker {
         }
 
         return false
+    }
+
+    private static func refreshCachedUpdateStateForCurrentVersion() {
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: updateAvailableKey) || defaults.bool(forKey: pendingPromptKey) else {
+            return
+        }
+
+        let latestVersion = normalizedVersionString(from: defaults.string(forKey: latestVersionKey) ?? "")
+        let currentVersion = normalizedVersionString(from: Bundle.main.appVersion)
+        guard !latestVersion.isEmpty else {
+            defaults.set(false, forKey: updateAvailableKey)
+            defaults.set(false, forKey: pendingPromptKey)
+            return
+        }
+
+        guard !isVersion(latestVersion, newerThan: currentVersion) else {
+            return
+        }
+
+        defaults.set(false, forKey: updateAvailableKey)
+        defaults.set(false, forKey: pendingPromptKey)
     }
 
     static func consumePendingUpdatePrompt() {
