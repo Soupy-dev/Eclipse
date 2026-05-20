@@ -800,6 +800,7 @@ final class VLCHeaderProxy {
         private var bufferedData = Data()
         private var responseHeadersSent = false
         private var finished = false
+        private let finishLock = NSLock()
         private let startedAt = CFAbsoluteTimeGetCurrent()
         private var responseAt: CFTimeInterval?
         private var firstDataAt: CFTimeInterval?
@@ -907,7 +908,7 @@ final class VLCHeaderProxy {
         }
 
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-            guard let proxy, !finished else { return }
+            guard let proxy, !isFinished else { return }
             guard method != "HEAD" else { return }
             upstreamBytes += data.count
             if firstDataAt == nil {
@@ -959,7 +960,7 @@ final class VLCHeaderProxy {
         }
 
         func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-            guard let proxy, !finished else { return }
+            guard let proxy, !isFinished else { return }
 
             if let error {
                 Logger.shared.log("VLCHeaderProxy[\(requestId)]: upstream error kind=\(proxy.requestKind(for: targetURL)) recvBytes=\(upstreamBytes) sentBytes=\(downstreamBytes) elapsedMs=\(proxy.elapsedMilliseconds(since: startedAt)) target=\(proxy.logURLSummary(targetURL)) error=\(error)", type: "Error")
@@ -1031,8 +1032,12 @@ final class VLCHeaderProxy {
                 return
             }
 
+            guard !isFinished else { return }
+
             guard !data.isEmpty else {
-                dataTask.resume()
+                if !isFinished {
+                    dataTask.resume()
+                }
                 return
             }
 
@@ -1055,16 +1060,33 @@ final class VLCHeaderProxy {
                     self.lastSlowSendLogAt = now
                     Logger.shared.log("VLCHeaderProxy[\(self.requestId)]: downstream slow send kind=\(proxy.requestKind(for: self.targetURL)) chunkBytes=\(data.count) sendMs=\(String(format: "%.0f", sendMs)) recvBytes=\(self.upstreamBytes) sentBytes=\(self.downstreamBytes) target=\(proxy.logURLSummary(self.targetURL))", type: "VLCProxy")
                 }
-                dataTask.resume()
+                if !self.isFinished {
+                    dataTask.resume()
+                }
             }
         }
 
+        private var isFinished: Bool {
+            finishLock.lock()
+            defer { finishLock.unlock() }
+            return finished
+        }
+
         private func finish() {
-            guard !finished else { return }
+            finishLock.lock()
+            guard !finished else {
+                finishLock.unlock()
+                return
+            }
             finished = true
-            urlSession?.invalidateAndCancel()
-            continuation?.resume()
+            let sessionToInvalidate = urlSession
+            let continuationToResume = continuation
+            urlSession = nil
             continuation = nil
+            finishLock.unlock()
+
+            sessionToInvalidate?.invalidateAndCancel()
+            continuationToResume?.resume()
         }
     }
 }

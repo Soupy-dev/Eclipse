@@ -425,8 +425,24 @@ final class VLCRenderer: NSObject, PlayerRenderer {
     }
     
     func load(url: URL, with preset: PlayerPreset, headers: [String: String]? = nil) {
+        load(
+            url: url,
+            with: preset,
+            headers: headers,
+            stopCurrentMediaBeforeLoad: false,
+            refreshProxyReason: nil
+        )
+    }
+
+    private func load(
+        url: URL,
+        with preset: PlayerPreset,
+        headers: [String: String]? = nil,
+        stopCurrentMediaBeforeLoad: Bool,
+        refreshProxyReason: String?
+    ) {
         let headerKeys = (headers ?? [:]).keys.sorted().joined(separator: ",")
-        logVLC("load begin url=\(url.absoluteString) preset=\(preset.id.rawValue) headers=\(headers?.count ?? 0)[\(headerKeys)] isLocal=\(url.isFileURL) preparedInitialSeek=\(secondsText(preparedInitialSeek))", type: "Stream")
+        logVLC("load begin url=\(url.absoluteString) preset=\(preset.id.rawValue) headers=\(headers?.count ?? 0)[\(headerKeys)] isLocal=\(url.isFileURL) preparedInitialSeek=\(secondsText(preparedInitialSeek)) stopCurrentMediaBeforeLoad=\(stopCurrentMediaBeforeLoad) refreshProxyReason=\(refreshProxyReason ?? "nil")", type: "Stream")
         
         currentURL = url
         currentPreset = preset
@@ -467,7 +483,24 @@ final class VLCRenderer: NSObject, PlayerRenderer {
                 return 
             }
             
-            let media = VLCMedia(url: url)
+            var mediaURL = url
+            if stopCurrentMediaBeforeLoad {
+                self.logVLC("load stopping current VLC media before replacement reason=\(refreshProxyReason ?? "reload") snapshot={\(self.playerSnapshot(player))}", type: "VLCCrashProbe")
+                player.stop()
+                self.currentMedia = nil
+                self.lastLoggedStateCode = nil
+                self.isLoading = true
+                self.isReadyToSeek = false
+            }
+
+            if let refreshProxyReason {
+                mediaURL = self.refreshedProxyURLForReloadIfNeeded(url, reason: refreshProxyReason)
+                self.currentURL = mediaURL
+                self.pendingSeekRequiresPlaybackClock = self.shouldDelayPreparedSeekUntilPlaybackClock(for: mediaURL)
+                self.logVLC("load refreshed proxy after media stop reason=\(refreshProxyReason) finalURL=\(mediaURL.absoluteString) snapshot={\(self.playerSnapshot(player))}", type: "VLCCrashProbe")
+            }
+
+            let media = VLCMedia(url: mediaURL)
             if let headers = self.currentHeaders, !headers.isEmpty {
                 if let ua = headers["User-Agent"], !ua.isEmpty {
                     media.addOption(":http-user-agent=\(ua)")
@@ -503,10 +536,10 @@ final class VLCRenderer: NSObject, PlayerRenderer {
             }
 
             // Tune caching and demuxer for local vs. remote playback
-            if url.isFileURL {
+            if mediaURL.isFileURL {
                 media.addOption(":file-caching=300")
                 // Force MPEG-TS demuxer for .ts files (concatenated HLS segments)
-                let ext = url.pathExtension.lowercased()
+                let ext = mediaURL.pathExtension.lowercased()
                 if ext == "ts" || ext == "mts" || ext == "m2ts" {
                     media.addOption(":demux=ts")
                 }
@@ -531,20 +564,30 @@ final class VLCRenderer: NSObject, PlayerRenderer {
     
     func reloadCurrentItem() {
         guard let url = currentURL, let preset = currentPreset else { return }
-        let reloadURL = refreshedProxyURLForReloadIfNeeded(url, reason: "reload-current-item")
         logVLC("reloadCurrentItem snapshot={\(playerSnapshot())}", type: "Stream")
-        load(url: reloadURL, with: preset, headers: currentHeaders)
+        load(
+            url: url,
+            with: preset,
+            headers: currentHeaders,
+            stopCurrentMediaBeforeLoad: true,
+            refreshProxyReason: isVLCHeaderProxyURL(url) ? "reload-current-item" : nil
+        )
     }
 
     private func reloadCurrentItemPreservingPosition(_ position: Double) {
         guard let url = currentURL, let preset = currentPreset else { return }
         let resumePosition = max(0, position)
         let preservedDuration = cachedDuration
-        let reloadURL = refreshedProxyURLForReloadIfNeeded(url, reason: "reload-preserve-position")
         logVLC("reloadCurrentItemPreservingPosition requested=\(secondsText(position)) resume=\(secondsText(resumePosition)) preservedDuration=\(secondsText(preservedDuration)) snapshot={\(playerSnapshot())}", type: "Stream")
         preparedInitialSeek = resumePosition
         pendingAbsoluteSeek = resumePosition
-        load(url: reloadURL, with: preset, headers: currentHeaders)
+        load(
+            url: url,
+            with: preset,
+            headers: currentHeaders,
+            stopCurrentMediaBeforeLoad: true,
+            refreshProxyReason: isVLCHeaderProxyURL(url) ? "reload-preserve-position" : nil
+        )
         cachedPosition = resumePosition
         if preservedDuration >= minimumReliableDuration {
             cachedDuration = preservedDuration

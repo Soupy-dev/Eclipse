@@ -1631,7 +1631,18 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             if subview === loadingIndicator { return "\(index):loading" }
             return "\(index):\(type(of: subview))"
         }.joined(separator: "|")
-        logVLCUI("\(event) ui app=\(appState) window=\(view.window != nil) presenting=\(presentingViewController != nil) closing=\(isClosing) running=\(isRunning) loading=\(isRendererLoading) controls=\(controlsVisible) paused=\(rendererIsPausedState()) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pipEnabled=\(Settings.shared.vlcPiPEnabled) pipAvailable=\(pipAvailable) pipActive=\(pipActive) view=\(String(format: "%.0fx%.0f", viewBounds.width, viewBounds.height)) video=\(String(format: "%.0fx%.0f", videoBounds.width, videoBounds.height)) windowBounds=\(String(format: "%.0fx%.0f", windowBounds.width, windowBounds.height)) vlcIndex=\(vlcIndex) vlcHidden=\(vlcView?.isHidden ?? true) vlcAlpha=\(String(format: "%.2f", vlcView?.alpha ?? 0)) displayAttached=\(displayLayer.superlayer != nil) displayHidden=\(displayLayer.isHidden) displayOpacity=\(String(format: "%.2f", displayLayer.opacity)) displayFrame=\(String(format: "%.0fx%.0f", displayFrame.width, displayFrame.height)) displayBg=\(displayBackground) stack=\(subviewStack)", type: "Player")
+        logVLCUI("\(event) ui app=\(appState) window=\(view.window != nil) presenting=\(presentingViewController != nil) closing=\(isClosing) running=\(isRunning) loading=\(isRendererLoading) controls=\(controlsVisible) paused=\(rendererIsPausedState()) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pipEnabled=\(Settings.shared.vlcPiPEnabled) pipAvailable=\(pipAvailable) pipActive=\(pipActive) view=\(String(format: "%.0fx%.0f", viewBounds.width, viewBounds.height)) video=\(String(format: "%.0fx%.0f", videoBounds.width, videoBounds.height)) windowBounds=\(String(format: "%.0fx%.0f", windowBounds.width, windowBounds.height)) vlcIndex=\(vlcIndex) vlcHidden=\(vlcView?.isHidden ?? true) vlcAlpha=\(String(format: "%.2f", vlcView?.alpha ?? 0)) displayAttached=\(displayLayer.superlayer != nil) displayHidden=\(displayLayer.isHidden) displayOpacity=\(String(format: "%.2f", displayLayer.opacity)) displayFrame=\(String(format: "%.0fx%.0f", displayFrame.width, displayFrame.height)) displayBg=\(displayBackground) browser={\(episodeBrowserStateSummary())} stack=\(subviewStack)", type: "Player")
+    }
+
+    private func episodeBrowserStateSummary(host explicitHost: UIHostingController<AnyView>? = nil) -> String {
+        let host = explicitHost ?? episodeBrowserHostingController
+        let hostView = host?.view
+        let browserIndex = hostView.flatMap { view in videoContainer.subviews.firstIndex { $0 === view } } ?? -1
+        let attached = hostView?.superview === videoContainer
+        let parentAttached = host?.parent === self
+        let frame = hostView?.frame ?? .zero
+        let viewCount = videoContainer.subviews.count
+        return "visible=\(isEpisodeBrowserVisible) host=\(host != nil) attached=\(attached) parent=\(parentAttached) index=\(browserIndex) alpha=\(String(format: "%.2f", hostView?.alpha ?? 0)) hidden=\(hostView?.isHidden ?? true) frame=\(String(format: "%.0fx%.0f", frame.width, frame.height)) subviews=\(viewCount)"
     }
 
     private func vlcMediaInfoLogLabel() -> String {
@@ -1680,7 +1691,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let vlcView = vlcRenderingView
         let route = vlcAudioRouteSummary()
         let proxy = vlcProxyDiagnosticsSummary()
-        return "app=\(appState) media={\(vlcMediaInfoLogLabel())} position=\(secondsText(safePosition))/\(secondsText(effectiveDuration)) reliable=\(durationIsReliable) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) running=\(isRunning) closing=\(isClosing) loading=\(isRendererLoading) playbackStarted=\(playbackDidStart) controls=\(controlsVisible) paused=\(rendererIsPausedState()) speed=\(String(format: "%.2f", rendererGetSpeed())) thermal=\(thermal) lowPower=\(processInfo.isLowPowerModeEnabled) route={\(route)} view=\(String(format: "%.0fx%.0f", viewBounds.width, viewBounds.height)) video=\(String(format: "%.0fx%.0f", videoBounds.width, videoBounds.height)) window=\(view.window != nil) vlcHidden=\(vlcView?.isHidden ?? true) vlcAlpha=\(String(format: "%.2f", vlcView?.alpha ?? 0)) spinnerAnimating=\(loadingIndicator.isAnimating) spinnerAlpha=\(String(format: "%.2f", loadingIndicator.alpha)) proxy={\(proxy)}"
+        return "app=\(appState) media={\(vlcMediaInfoLogLabel())} position=\(secondsText(safePosition))/\(secondsText(effectiveDuration)) reliable=\(durationIsReliable) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) running=\(isRunning) closing=\(isClosing) loading=\(isRendererLoading) playbackStarted=\(playbackDidStart) controls=\(controlsVisible) paused=\(rendererIsPausedState()) speed=\(String(format: "%.2f", rendererGetSpeed())) thermal=\(thermal) lowPower=\(processInfo.isLowPowerModeEnabled) route={\(route)} view=\(String(format: "%.0fx%.0f", viewBounds.width, viewBounds.height)) video=\(String(format: "%.0fx%.0f", videoBounds.width, videoBounds.height)) window=\(view.window != nil) vlcHidden=\(vlcView?.isHidden ?? true) vlcAlpha=\(String(format: "%.2f", vlcView?.alpha ?? 0)) spinnerAnimating=\(loadingIndicator.isAnimating) spinnerAlpha=\(String(format: "%.2f", loadingIndicator.alpha)) browser={\(episodeBrowserStateSummary())} proxy={\(proxy)}"
     }
 
     private func logVLCUISteadyHeartbeatIfNeeded(safePosition: Double, effectiveDuration: Double, durationIsReliable: Bool) {
@@ -2047,7 +2058,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         openSubtitlesFetchTask?.cancel()
         nextEpisodePreviewTask?.cancel()
         nextEpisodeArtworkTask?.cancel()
-        dismissEpisodeBrowser(animated: false)
+        dismissEpisodeBrowser(animated: false, reason: "deinit")
         pipController?.invalidate()
         rendererStop()
         
@@ -3482,7 +3493,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if !shouldShow {
             episodeBrowserButton.alpha = 0.0
             if isEpisodeBrowserVisible {
-                dismissEpisodeBrowser(animated: true)
+                logVLCUI("episode browser visibility update hiding active browser enabled=\(isVLCEpisodeBrowserButtonSettingEnabled) mediaInfo=\(mediaInfo != nil) supportsControls=\(supportsSharedPlayerControls)", type: "VLCCrashProbe")
+                dismissEpisodeBrowser(animated: true, reason: "button-visibility-hidden")
             }
         } else if controlsVisible {
             episodeBrowserButton.alpha = 1.0
@@ -3498,12 +3510,17 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     @objc private func episodeBrowserButtonTapped() {
-        guard let seed = makeEpisodeBrowserSeed() else { return }
-        if isEpisodeBrowserVisible {
-            dismissEpisodeBrowser(animated: true)
+        guard let seed = makeEpisodeBrowserSeed() else {
+            logVLCUI("episode browser button tapped but seed unavailable media={\(vlcMediaInfoLogLabel())} \(episodeBrowserStateSummary())", type: "VLCCrashProbe")
+            logVLCUIViewSnapshot("episodeBrowser tap seed unavailable")
             return
         }
-        showEpisodeBrowser(seed: seed)
+        logVLCUI("episode browser button tapped seed={showId=\(seed.showId) current=S\(seed.currentSeasonNumber)E\(seed.currentEpisodeNumber) anime=\(seed.isAnime) title=\(seed.showTitle)} \(episodeBrowserStateSummary())", type: "VLCCrashProbe")
+        if isEpisodeBrowserVisible {
+            dismissEpisodeBrowser(animated: true, reason: "button-toggle")
+            return
+        }
+        showEpisodeBrowser(seed: seed, reason: "button-tap")
     }
 
     private func makeEpisodeBrowserSeed() -> PlayerEpisodeBrowserSeed? {
@@ -3529,15 +3546,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         )
     }
 
-    private func showEpisodeBrowser(seed: PlayerEpisodeBrowserSeed) {
+    private func showEpisodeBrowser(seed: PlayerEpisodeBrowserSeed, reason: String = "unspecified") {
+        logVLCUI("episode browser show requested reason=\(reason) seed={showId=\(seed.showId) current=S\(seed.currentSeasonNumber)E\(seed.currentEpisodeNumber) anime=\(seed.isAnime) title=\(seed.showTitle)} \(episodeBrowserStateSummary())", type: "VLCCrashProbe")
+        logVLCUIViewSnapshot("episodeBrowser show requested")
         controlsHideWorkItem?.cancel()
         isEpisodeBrowserVisible = true
         let drawer = PlayerEpisodeBrowserDrawer(
             seed: seed,
             onClose: { [weak self] in
-                self?.dismissEpisodeBrowser(animated: true)
+                guard let self else { return }
+                self.logVLCUI("episode browser drawer close tapped \(self.episodeBrowserStateSummary())", type: "VLCCrashProbe")
+                self.dismissEpisodeBrowser(animated: true, reason: "drawer-close")
             },
             onEpisodeSelected: { [weak self] item in
+                self?.logVLCUI("episode browser drawer selected target=S\(item.episode.seasonNumber)E\(item.episode.episodeNumber) anime=\(item.isAnime) downloaded=\(item.isDownloaded) current=\(item.isCurrent) \(self?.episodeBrowserStateSummary() ?? "browser=nil")", type: "VLCCrashProbe")
                 self?.handleEpisodeBrowserSelection(item)
             }
         )
@@ -3555,18 +3577,29 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         host.didMove(toParent: self)
         episodeBrowserHostingController = host
         videoContainer.bringSubviewToFront(host.view)
+        logVLCUI("episode browser shown reason=\(reason) \(episodeBrowserStateSummary(host: host))", type: "VLCCrashProbe")
+        logVLCUIViewSnapshot("episodeBrowser shown")
+        scheduleVLCUIViewSnapshots("episodeBrowser shown followup", delays: [0.10, 0.50, 1.00])
     }
 
-    private func dismissEpisodeBrowser(animated: Bool) {
+    private func dismissEpisodeBrowser(animated: Bool, reason: String = "unspecified") {
         guard let host = episodeBrowserHostingController else {
+            logVLCUI("episode browser dismiss requested without host reason=\(reason) animated=\(animated) \(episodeBrowserStateSummary())", type: "VLCCrashProbe")
             isEpisodeBrowserVisible = false
+            logVLCUIViewSnapshot("episodeBrowser dismiss no host")
             return
         }
+        logVLCUI("episode browser dismiss requested reason=\(reason) animated=\(animated) \(episodeBrowserStateSummary(host: host))", type: "VLCCrashProbe")
+        logVLCUIViewSnapshot("episodeBrowser dismiss requested")
         isEpisodeBrowserVisible = false
         let removeHost = {
+            self.logVLCUI("episode browser dismiss removing reason=\(reason) \(self.episodeBrowserStateSummary(host: host))", type: "VLCCrashProbe")
             host.willMove(toParent: nil)
             host.view.removeFromSuperview()
             host.removeFromParent()
+            self.logVLCUI("episode browser dismiss removed reason=\(reason) \(self.episodeBrowserStateSummary(host: host))", type: "VLCCrashProbe")
+            self.logVLCUIViewSnapshot("episodeBrowser dismiss removed")
+            self.scheduleVLCUIViewSnapshots("episodeBrowser dismiss followup", delays: [0.10, 0.50])
         }
         if animated {
             UIView.animate(withDuration: 0.2) {
@@ -3581,12 +3614,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func handleEpisodeBrowserSelection(_ item: PlayerEpisodeBrowserItem, reason: String = "episode-browser") {
-        guard !item.isCurrent else { return }
+        guard !item.isCurrent else {
+            logVLCUI("episode selection ignored current item reason=\(reason) target=S\(item.episode.seasonNumber)E\(item.episode.episodeNumber) \(episodeBrowserStateSummary())", type: "VLCCrashProbe")
+            return
+        }
         logVLCUI("episode selection reason=\(reason) target=S\(item.episode.seasonNumber)E\(item.episode.episodeNumber) anime=\(item.isAnime) downloaded=\(item.isDownloaded) current=\(item.isCurrent)", type: "VLCCrashProbe")
 
         if UserDefaults.standard.bool(forKey: "preferDownloadedMedia"),
            let request = downloadedPlaybackRequest(for: item) {
-            dismissEpisodeBrowser(animated: true)
+            dismissEpisodeBrowser(animated: true, reason: "\(reason)-downloaded-selection")
             replacePlayback(with: request, reason: "\(reason)-downloaded")
             return
         }
@@ -3656,7 +3692,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             if wasVLC {
                 self.logVLCUI("replacePlayback begin transition=\(transitionId) generation=\(replacementGeneration) reason=\(reason) from={\(previousMedia)} to={\(nextMedia)} cached=\(self.secondsText(self.cachedPosition))/\(self.secondsText(self.cachedDuration)) running=\(self.isRunning) loading=\(self.isRendererLoading)", type: "VLCCrashProbe")
             }
-            self.dismissEpisodeBrowser(animated: true)
+            self.dismissEpisodeBrowser(animated: true, reason: "\(reason)-replace-playback")
             self.controlsHideWorkItem?.cancel()
             self.playbackStartupWorkItem?.cancel()
             self.playbackDidStart = false
@@ -6646,7 +6682,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         isClosing = true
         let isAnyPiPActive = rendererIsPictureInPictureActive()
         logSharedPlayerControl("closeTapped; pipActive=\(isAnyPiPActive); mediaInfo=\(String(describing: mediaInfo))")
-        dismissEpisodeBrowser(animated: false)
+        dismissEpisodeBrowser(animated: false, reason: "player-close")
         closeButton.isEnabled = false
         view.isUserInteractionEnabled = false
 
