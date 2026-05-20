@@ -80,6 +80,77 @@ class TMDBService: ObservableObject {
         guard !cleaned.isEmpty else { return nil }
         return String(cleaned.prefix(180))
     }
+
+    private func decodeTMDBListResponse<Response: Decodable>(
+        _ type: Response.Type,
+        from data: Data,
+        endpoint: String
+    ) throws -> Response {
+        do {
+            let response = try JSONDecoder().decode(type, from: data)
+            logSkippedListResults(response, endpoint: endpoint)
+            return response
+        } catch {
+            Logger.shared.log(
+                "TMDBService: decode failed endpoint=\(endpoint) error=\(Self.decodeErrorDescription(error)) bytes=\(data.count)",
+                type: "Error"
+            )
+            throw error
+        }
+    }
+
+    private func logSkippedListResults(_ response: Any, endpoint: String) {
+        let skipped: Int
+        let decoded: Int
+        let total: Int
+
+        switch response {
+        case let response as TMDBSearchResponse:
+            skipped = response.skippedResultCount
+            decoded = response.results.count
+            total = response.totalResults
+        case let response as TMDBMovieSearchResponse:
+            skipped = response.skippedResultCount
+            decoded = response.results.count
+            total = response.totalResults
+        case let response as TMDBTVSearchResponse:
+            skipped = response.skippedResultCount
+            decoded = response.results.count
+            total = response.totalResults
+        default:
+            return
+        }
+
+        guard skipped > 0 else { return }
+        Logger.shared.log(
+            "TMDBService: skipped malformed list results endpoint=\(endpoint) skipped=\(skipped) decoded=\(decoded) total=\(total)",
+            type: "TMDB"
+        )
+    }
+
+    private static func decodeErrorDescription(_ error: Error) -> String {
+        guard let decodingError = error as? DecodingError else {
+            return error.localizedDescription
+        }
+
+        switch decodingError {
+        case .typeMismatch(let type, let context):
+            return "type mismatch \(type) at \(codingPathDescription(context.codingPath)): \(context.debugDescription)"
+        case .valueNotFound(let type, let context):
+            return "value not found \(type) at \(codingPathDescription(context.codingPath)): \(context.debugDescription)"
+        case .keyNotFound(let key, let context):
+            return "key not found \(key.stringValue) at \(codingPathDescription(context.codingPath)): \(context.debugDescription)"
+        case .dataCorrupted(let context):
+            return "data corrupted at \(codingPathDescription(context.codingPath)): \(context.debugDescription)"
+        @unknown default:
+            return error.localizedDescription
+        }
+    }
+
+    private static func codingPathDescription(_ path: [CodingKey]) -> String {
+        let pathDescription = path.map(\.stringValue).joined(separator: ".")
+        return pathDescription.isEmpty ? "<root>" : pathDescription
+    }
     
     // MARK: - Multi Search (Movies and TV Shows)
     func searchMulti(query: String, maxPages: Int = 2) async throws -> [TMDBSearchResult] {
@@ -98,7 +169,7 @@ class TMDBService: ObservableObject {
             
             do {
                 let (data, _) = try await throttledData(from: url)
-                let response = try JSONDecoder().decode(TMDBSearchResponse.self, from: data)
+                let response = try decodeTMDBListResponse(TMDBSearchResponse.self, from: data, endpoint: url.path)
                 let filtered = response.results.filter { $0.mediaType == "movie" || $0.mediaType == "tv" }
                 allResults.append(contentsOf: filtered)
                 
@@ -127,7 +198,7 @@ class TMDBService: ObservableObject {
         
         do {
             let (data, _) = try await throttledData(from: url)
-            let response = try JSONDecoder().decode(TMDBMovieSearchResponse.self, from: data)
+            let response = try decodeTMDBListResponse(TMDBMovieSearchResponse.self, from: data, endpoint: url.path)
             return response.results
         } catch {
             throw TMDBError.networkError(error)
@@ -147,7 +218,7 @@ class TMDBService: ObservableObject {
         
         do {
             let (data, _) = try await throttledData(from: url)
-            let response = try JSONDecoder().decode(TMDBTVSearchResponse.self, from: data)
+            let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
             return response.results
         } catch {
             throw TMDBError.networkError(error)
@@ -311,7 +382,7 @@ class TMDBService: ObservableObject {
         
         do {
             let (data, _) = try await throttledData(from: url)
-            let response = try JSONDecoder().decode(TMDBSearchResponse.self, from: data)
+            let response = try decodeTMDBListResponse(TMDBSearchResponse.self, from: data, endpoint: url.path)
             return response.results
         } catch {
             throw TMDBError.networkError(error)
@@ -328,7 +399,7 @@ class TMDBService: ObservableObject {
         
         do {
             let (data, _) = try await throttledData(from: url)
-            let response = try JSONDecoder().decode(TMDBMovieSearchResponse.self, from: data)
+            let response = try decodeTMDBListResponse(TMDBMovieSearchResponse.self, from: data, endpoint: url.path)
             return response.results
         } catch {
             throw TMDBError.networkError(error)
@@ -345,7 +416,7 @@ class TMDBService: ObservableObject {
         
         do {
             let (data, _) = try await throttledData(from: url)
-            let response = try JSONDecoder().decode(TMDBMovieSearchResponse.self, from: data)
+            let response = try decodeTMDBListResponse(TMDBMovieSearchResponse.self, from: data, endpoint: url.path)
             return response.results
         } catch {
             throw TMDBError.networkError(error)
@@ -362,7 +433,7 @@ class TMDBService: ObservableObject {
         
         do {
             let (data, _) = try await throttledData(from: url)
-            let response = try JSONDecoder().decode(TMDBMovieSearchResponse.self, from: data)
+            let response = try decodeTMDBListResponse(TMDBMovieSearchResponse.self, from: data, endpoint: url.path)
             return response.results
         } catch {
             throw TMDBError.networkError(error)
@@ -379,7 +450,7 @@ class TMDBService: ObservableObject {
         
         do {
             let (data, _) = try await throttledData(from: url)
-            let response = try JSONDecoder().decode(TMDBTVSearchResponse.self, from: data)
+            let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
             return response.results
         } catch {
             throw TMDBError.networkError(error)
@@ -396,7 +467,7 @@ class TMDBService: ObservableObject {
         
         do {
             let (data, _) = try await throttledData(from: url)
-            let response = try JSONDecoder().decode(TMDBTVSearchResponse.self, from: data)
+            let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
             return response.results
         } catch {
             throw TMDBError.networkError(error)
@@ -413,7 +484,7 @@ class TMDBService: ObservableObject {
         
         do {
             let (data, _) = try await throttledData(from: url)
-            let response = try JSONDecoder().decode(TMDBTVSearchResponse.self, from: data)
+            let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
             return response.results
         } catch {
             throw TMDBError.networkError(error)
@@ -430,7 +501,7 @@ class TMDBService: ObservableObject {
         
         do {
             let (data, _) = try await throttledData(from: url)
-            let response = try JSONDecoder().decode(TMDBMovieSearchResponse.self, from: data)
+            let response = try decodeTMDBListResponse(TMDBMovieSearchResponse.self, from: data, endpoint: url.path)
             return response.results
         } catch {
             throw TMDBError.networkError(error)
@@ -447,7 +518,7 @@ class TMDBService: ObservableObject {
         
         do {
             let (data, _) = try await throttledData(from: url)
-            let response = try JSONDecoder().decode(TMDBTVSearchResponse.self, from: data)
+            let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
             return response.results
         } catch {
             throw TMDBError.networkError(error)
@@ -464,7 +535,7 @@ class TMDBService: ObservableObject {
         
         do {
             let (data, _) = try await throttledData(from: url)
-            let response = try JSONDecoder().decode(TMDBTVSearchResponse.self, from: data)
+            let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
             return response.results
         } catch {
             throw TMDBError.networkError(error)
@@ -481,7 +552,7 @@ class TMDBService: ObservableObject {
         
         do {
             let (data, _) = try await throttledData(from: url)
-            let response = try JSONDecoder().decode(TMDBTVSearchResponse.self, from: data)
+            let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
             return response.results
         } catch {
             throw TMDBError.networkError(error)
@@ -513,12 +584,12 @@ class TMDBService: ObservableObject {
         guard let url = URL(string: urlString) else { throw TMDBError.invalidURL }
         let (data, _) = try await throttledData(from: url)
         if mediaType == "movie" {
-            let response = try JSONDecoder().decode(TMDBMovieSearchResponse.self, from: data)
+            let response = try decodeTMDBListResponse(TMDBMovieSearchResponse.self, from: data, endpoint: url.path)
             return response.results.map {
                 TMDBSearchResult(id: $0.id, mediaType: "movie", title: $0.title, name: nil, overview: $0.overview, posterPath: $0.posterPath, backdropPath: $0.backdropPath, releaseDate: $0.releaseDate, firstAirDate: nil, voteAverage: $0.voteAverage, popularity: $0.popularity, adult: $0.adult, genreIds: $0.genreIds)
             }
         } else {
-            let response = try JSONDecoder().decode(TMDBTVSearchResponse.self, from: data)
+            let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
             return response.results.map {
                 TMDBSearchResult(id: $0.id, mediaType: "tv", title: nil, name: $0.name, overview: $0.overview, posterPath: $0.posterPath, backdropPath: $0.backdropPath, releaseDate: nil, firstAirDate: $0.firstAirDate, voteAverage: $0.voteAverage, popularity: $0.popularity, adult: nil, genreIds: $0.genreIds)
             }
@@ -530,7 +601,7 @@ class TMDBService: ObservableObject {
         let urlString = "\(baseURL)/discover/tv?api_key=\(apiKey)&language=\(currentLanguage)&page=\(page)&with_networks=\(networkId)&sort_by=popularity.desc&include_adult=false"
         guard let url = URL(string: urlString) else { throw TMDBError.invalidURL }
         let (data, _) = try await throttledData(from: url)
-        let response = try JSONDecoder().decode(TMDBTVSearchResponse.self, from: data)
+        let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
         return response.results.map {
             TMDBSearchResult(id: $0.id, mediaType: "tv", title: nil, name: $0.name, overview: $0.overview, posterPath: $0.posterPath, backdropPath: $0.backdropPath, releaseDate: nil, firstAirDate: $0.firstAirDate, voteAverage: $0.voteAverage, popularity: $0.popularity, adult: nil, genreIds: $0.genreIds)
         }
@@ -542,12 +613,12 @@ class TMDBService: ObservableObject {
         guard let url = URL(string: urlString) else { throw TMDBError.invalidURL }
         let (data, _) = try await throttledData(from: url)
         if mediaType == "movie" {
-            let response = try JSONDecoder().decode(TMDBMovieSearchResponse.self, from: data)
+            let response = try decodeTMDBListResponse(TMDBMovieSearchResponse.self, from: data, endpoint: url.path)
             return response.results.map {
                 TMDBSearchResult(id: $0.id, mediaType: "movie", title: $0.title, name: nil, overview: $0.overview, posterPath: $0.posterPath, backdropPath: $0.backdropPath, releaseDate: $0.releaseDate, firstAirDate: nil, voteAverage: $0.voteAverage, popularity: $0.popularity, adult: $0.adult, genreIds: $0.genreIds)
             }
         } else {
-            let response = try JSONDecoder().decode(TMDBTVSearchResponse.self, from: data)
+            let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
             return response.results.map {
                 TMDBSearchResult(id: $0.id, mediaType: "tv", title: nil, name: $0.name, overview: $0.overview, posterPath: $0.posterPath, backdropPath: $0.backdropPath, releaseDate: nil, firstAirDate: $0.firstAirDate, voteAverage: $0.voteAverage, popularity: $0.popularity, adult: nil, genreIds: $0.genreIds)
             }
@@ -682,7 +753,7 @@ class TMDBService: ObservableObject {
         let status = (httpResponse as? HTTPURLResponse)?.statusCode ?? -1
         probe("getMovieRecommendations response id=\(id) status=\(status) bytes=\(data.count)")
         probe("getMovieRecommendations decode start id=\(id)")
-        let decodedResponse = try JSONDecoder().decode(TMDBMovieSearchResponse.self, from: data)
+        let decodedResponse = try decodeTMDBListResponse(TMDBMovieSearchResponse.self, from: data, endpoint: url.path)
         probe("getMovieRecommendations decode done id=\(id) count=\(decodedResponse.results.count)")
         detailCache.set(key: cacheKey, value: decodedResponse.results)
         probe("getMovieRecommendations cache store id=\(id)")
@@ -698,7 +769,7 @@ class TMDBService: ObservableObject {
         let urlString = "\(baseURL)/tv/\(id)/recommendations?api_key=\(apiKey)&language=\(currentLanguage)&page=1"
         guard let url = URL(string: urlString) else { throw TMDBError.invalidURL }
         let (data, _) = try await throttledData(from: url)
-        let response = try JSONDecoder().decode(TMDBTVSearchResponse.self, from: data)
+        let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
         detailCache.set(key: cacheKey, value: response.results)
         return response.results
     }

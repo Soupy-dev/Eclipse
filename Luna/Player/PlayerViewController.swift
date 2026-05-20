@@ -7972,8 +7972,7 @@ extension PlayerViewController: VLCRendererDelegate {
             if let seekTime = self.pendingSeekTime {
                 self.pendingInitialResumeTarget = seekTime
                 self.pendingInitialResumeDeadline = Date().addingTimeInterval(20)
-                self.rendererSeek(to: seekTime)
-                Logger.shared.log("Resumed VLC playback from \(Int(seekTime))s", type: "Progress")
+                Logger.shared.log("Queued VLC resume seek at \(Int(seekTime))s; renderer will apply when playback clock is stable", type: "Progress")
                 self.pendingSeekTime = nil
             }
             self.applyDefaultPlaybackSpeed()

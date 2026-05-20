@@ -82,6 +82,8 @@ final class VLCRenderer: NSObject, PlayerRenderer {
     private var lastSlowPlaybackClockLogTime: CFTimeInterval = 0
     private var lastBufferingWhileAdvancingLogTime: CFTimeInterval = 0
     private var lastPositionRegressionLogTime: CFTimeInterval = 0
+    private var pendingSeekRequiresPlaybackClock = false
+    private var pendingSeekDelayLogged = false
     
     weak var delegate: VLCRendererDelegate?
     
@@ -414,6 +416,8 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         cachedPosition = 0
         cachedDuration = 0
         pendingAbsoluteSeek = initialSeek
+        pendingSeekRequiresPlaybackClock = initialSeek != nil && shouldDelayPreparedSeekUntilPlaybackClock(for: url)
+        pendingSeekDelayLogged = false
         lastProgressHostTime = nil
         lastLoggedStateCode = nil
         lastProgressLogBucket = -1
@@ -471,6 +475,9 @@ final class VLCRenderer: NSObject, PlayerRenderer {
 
             if let initialSeek, initialSeek > 0 {
                 Logger.shared.log("[VLCRenderer.load] queued initial seek \(Int(initialSeek))s", type: "Progress")
+                if self.pendingSeekRequiresPlaybackClock {
+                    Logger.shared.log("[VLCRenderer.load] delaying initial seek until playback clock advances for proxied stream", type: "Progress")
+                }
             }
 
             // Tune caching and demuxer for local vs. remote playback
@@ -518,6 +525,15 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         if preservedDuration >= minimumReliableDuration {
             cachedDuration = preservedDuration
         }
+    }
+
+    private func shouldDelayPreparedSeekUntilPlaybackClock(for url: URL) -> Bool {
+        guard let host = url.host?.lowercased(),
+              host == "127.0.0.1" || host == "localhost" else {
+            return false
+        }
+
+        return url.path.localizedCaseInsensitiveContains("/proxy/")
     }
     
     func applyPreset(_ preset: PlayerPreset) {
@@ -646,11 +662,15 @@ final class VLCRenderer: NSObject, PlayerRenderer {
             setNormalizedPosition(normalized, on: player)
             cachedDuration = duration
             pendingAbsoluteSeek = nil
+            pendingSeekRequiresPlaybackClock = false
+            pendingSeekDelayLogged = false
             logVLC("applySeek used live duration normalized=\(String(format: "%.5f", normalized))", type: "Progress")
         } else if cachedDuration >= minimumReliableDuration {
             let normalized = min(max(clamped / cachedDuration, 0), 1)
             setNormalizedPosition(normalized, on: player)
             pendingAbsoluteSeek = clamped
+            pendingSeekRequiresPlaybackClock = false
+            pendingSeekDelayLogged = false
             logVLC("applySeek used cached duration normalized=\(String(format: "%.5f", normalized)) pending=\(secondsText(clamped))", type: "Progress")
         } else {
             pendingAbsoluteSeek = clamped
@@ -944,6 +964,7 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         let progress = resolvedPlaybackProgress(from: player)
         let position = progress.position
         let duration = progress.duration
+        let rawPosition = max(0, (player.time.value?.doubleValue ?? 0) / 1000.0)
         cachedPosition = position
         if duration.isFinite, duration > 0 {
             cachedDuration = max(cachedDuration, duration)
@@ -963,10 +984,24 @@ final class VLCRenderer: NSObject, PlayerRenderer {
 
         // If we were waiting for duration to apply a pending seek, do it once duration is known.
         if duration > 0, let pending = pendingAbsoluteSeek {
+            if pendingSeekRequiresPlaybackClock && rawPosition <= 0.05 {
+                if !pendingSeekDelayLogged {
+                    pendingSeekDelayLogged = true
+                    logVLC("delaying pending seek until raw playback clock advances pending=\(secondsText(pending)) duration=\(secondsText(duration)) snapshot={\(playerSnapshot(player))}", type: "Progress")
+                }
+                clearLoadingState()
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.delegate?.renderer(self, didUpdatePosition: position, duration: duration)
+                }
+                return
+            }
             let normalized = min(max(pending / duration, 0), 1)
             logVLC("applying pending seek from progress pending=\(secondsText(pending)) duration=\(secondsText(duration)) normalized=\(String(format: "%.5f", normalized))", type: "Progress")
             setNormalizedPosition(normalized, on: player)
             pendingAbsoluteSeek = nil
+            pendingSeekRequiresPlaybackClock = false
+            pendingSeekDelayLogged = false
         }
 
         // If we were marked loading but playback is progressing, clear loading state.

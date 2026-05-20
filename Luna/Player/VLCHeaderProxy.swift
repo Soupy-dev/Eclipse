@@ -348,12 +348,33 @@ final class VLCHeaderProxy {
             return .playlist
         }
 
+        if isDefinitelyMediaResponse(http: http, targetURL: targetURL) {
+            return .stream
+        }
+
         let expected = http.expectedContentLength
         if expected >= 0 && expected <= Int64(maxPlaylistBytes) {
             return .probe
         }
 
         return .stream
+    }
+
+    private func isDefinitelyMediaResponse(http: HTTPURLResponse, targetURL: URL) -> Bool {
+        let ext = targetURL.pathExtension.lowercased()
+        if ["ts", "m4s", "mp4", "m4v", "aac", "mp3", "webm", "mkv", "jpg", "jpeg", "png", "webp"].contains(ext) {
+            return true
+        }
+
+        let contentType = (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
+        if contentType.hasPrefix("video/")
+            || contentType.hasPrefix("audio/")
+            || contentType.hasPrefix("image/")
+            || contentType.contains("octet-stream") {
+            return true
+        }
+
+        return false
     }
 
     private func isPlaylistMetadata(http: HTTPURLResponse, targetURL: URL) -> Bool {

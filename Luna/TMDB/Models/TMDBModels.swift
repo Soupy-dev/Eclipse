@@ -7,17 +7,68 @@
 
 import Foundation
 
+private struct LossyDecodableArray<Element: Decodable>: Decodable {
+    let elements: [Element]
+    let skippedCount: Int
+
+    init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        var elements: [Element] = []
+        var skippedCount = 0
+
+        while !container.isAtEnd {
+            let value = try container.decode(LossyDecodableValue<Element>.self)
+            if let element = value.element {
+                elements.append(element)
+            } else {
+                skippedCount += 1
+            }
+        }
+
+        self.elements = elements
+        self.skippedCount = skippedCount
+    }
+}
+
+private struct LossyDecodableValue<Element: Decodable>: Decodable {
+    let element: Element?
+
+    init(from decoder: Decoder) throws {
+        element = try? Element(from: decoder)
+    }
+}
+
 // MARK: - Search Response
-struct TMDBSearchResponse: Codable {
+struct TMDBSearchResponse: Decodable {
     let page: Int
     let results: [TMDBSearchResult]
     let totalPages: Int
     let totalResults: Int
+    let skippedResultCount: Int
     
     enum CodingKeys: String, CodingKey {
         case page, results
         case totalPages = "total_pages"
         case totalResults = "total_results"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let lossyResults = try container.decodeIfPresent(LossyDecodableArray<TMDBSearchResult>.self, forKey: .results)
+
+        page = try container.decodeIfPresent(Int.self, forKey: .page) ?? 1
+        results = lossyResults?.elements ?? []
+        totalPages = try container.decodeIfPresent(Int.self, forKey: .totalPages) ?? 1
+        totalResults = try container.decodeIfPresent(Int.self, forKey: .totalResults) ?? results.count
+        skippedResultCount = lossyResults?.skippedCount ?? 0
+    }
+
+    init(page: Int, results: [TMDBSearchResult], totalPages: Int, totalResults: Int, skippedResultCount: Int = 0) {
+        self.page = page
+        self.results = results
+        self.totalPages = totalPages
+        self.totalResults = totalResults
+        self.skippedResultCount = skippedResultCount
     }
 }
 
@@ -81,30 +132,70 @@ struct TMDBSearchResult: Codable, Identifiable {
 }
 
 // MARK: - Movie Search Response
-struct TMDBMovieSearchResponse: Codable {
+struct TMDBMovieSearchResponse: Decodable {
     let page: Int
     let results: [TMDBMovie]
     let totalPages: Int
     let totalResults: Int
+    let skippedResultCount: Int
     
     enum CodingKeys: String, CodingKey {
         case page, results
         case totalPages = "total_pages"
         case totalResults = "total_results"
     }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let lossyResults = try container.decodeIfPresent(LossyDecodableArray<TMDBMovie>.self, forKey: .results)
+
+        page = try container.decodeIfPresent(Int.self, forKey: .page) ?? 1
+        results = lossyResults?.elements ?? []
+        totalPages = try container.decodeIfPresent(Int.self, forKey: .totalPages) ?? 1
+        totalResults = try container.decodeIfPresent(Int.self, forKey: .totalResults) ?? results.count
+        skippedResultCount = lossyResults?.skippedCount ?? 0
+    }
+
+    init(page: Int, results: [TMDBMovie], totalPages: Int, totalResults: Int, skippedResultCount: Int = 0) {
+        self.page = page
+        self.results = results
+        self.totalPages = totalPages
+        self.totalResults = totalResults
+        self.skippedResultCount = skippedResultCount
+    }
 }
 
 // MARK: - TV Show Search Response
-struct TMDBTVSearchResponse: Codable {
+struct TMDBTVSearchResponse: Decodable {
     let page: Int
     let results: [TMDBTVShow]
     let totalPages: Int
     let totalResults: Int
+    let skippedResultCount: Int
     
     enum CodingKeys: String, CodingKey {
         case page, results
         case totalPages = "total_pages"
         case totalResults = "total_results"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let lossyResults = try container.decodeIfPresent(LossyDecodableArray<TMDBTVShow>.self, forKey: .results)
+
+        page = try container.decodeIfPresent(Int.self, forKey: .page) ?? 1
+        results = lossyResults?.elements ?? []
+        totalPages = try container.decodeIfPresent(Int.self, forKey: .totalPages) ?? 1
+        totalResults = try container.decodeIfPresent(Int.self, forKey: .totalResults) ?? results.count
+        skippedResultCount = lossyResults?.skippedCount ?? 0
+    }
+
+    init(page: Int, results: [TMDBTVShow], totalPages: Int, totalResults: Int, skippedResultCount: Int = 0) {
+        self.page = page
+        self.results = results
+        self.totalPages = totalPages
+        self.totalResults = totalResults
+        self.skippedResultCount = skippedResultCount
     }
 }
 
