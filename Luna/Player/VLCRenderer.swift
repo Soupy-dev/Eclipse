@@ -219,6 +219,13 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         return "state=\(describeState(player.state))(\(stateCode(player.state))) playing=\(isPlayerActivelyPlaying(player)) pausedFlag=\(isPaused) loading=\(isLoading) ready=\(isReadyToSeek) raw=\(secondsText(rawPosition))/\(secondsText(rawDuration)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pending=\(secondsText(pendingAbsoluteSeek)) speed=\(String(format: "%.2f", currentPlaybackSpeed)) pipAvailable=false pipActive=false app=\(appStateText())"
     }
 
+    private func foregroundSafeSnapshot() -> String {
+        let urlHost = currentURL?.host ?? "nil"
+        let urlPort = currentURL?.port.map(String.init) ?? "nil"
+        let urlExt = currentURL?.pathExtension ?? "nil"
+        return "running=\(isRunning) stopping=\(isStopping) playerPresent=\(mediaPlayer != nil) mediaPresent=\(currentMedia != nil) pausedFlag=\(isPaused) loading=\(isLoading) ready=\(isReadyToSeek) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pending=\(secondsText(pendingAbsoluteSeek)) speed=\(String(format: "%.2f", currentPlaybackSpeed)) gen=\(loadGeneration) resumeAttempt=\(proxyResumeAttemptID) needsProxyReloadAfterBackground=\(needsProxyReloadAfterBackground) currentIsProxy=\(isVLCHeaderProxyURL(currentURL)) urlHost=\(urlHost) urlPort=\(urlPort) urlExt=\(urlExt) app=\(appStateText())"
+    }
+
     func performanceOverlaySnapshot() -> String {
         "VLC \(isPaused ? "paused" : "playing")\(isLoading ? " loading" : "") ready=\(isReadyToSeek)\npos=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) speed=\(String(format: "%.2f", currentPlaybackSpeed)) pending=\(secondsText(pendingAbsoluteSeek)) app=\(appStateText())"
     }
@@ -237,10 +244,30 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         }
     }
 
+    private func logForegroundSafeDrawableSnapshot(_ event: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let drawableView = self.activeVLCView
+            let bounds = drawableView.bounds
+            let containerBounds = self.renderingContainerView.bounds
+            let superBounds = self.renderingContainerView.superview?.bounds ?? .zero
+            let attachedToContainer = drawableView.superview === self.renderingContainerView
+            self.logVLC("\(event) foregroundSafe drawableMode=\(self.renderingModeDescription()) drawableHidden=\(drawableView.isHidden) drawableAlpha=\(String(format: "%.2f", drawableView.alpha)) drawableBounds=\(String(format: "%.0fx%.0f", bounds.width, bounds.height)) containerBounds=\(String(format: "%.0fx%.0f", containerBounds.width, containerBounds.height)) super=\(String(format: "%.0fx%.0f", superBounds.width, superBounds.height)) window=\(self.renderingContainerView.window != nil) attachedToContainer=\(attachedToContainer) subviews=\(self.renderingContainerView.subviews.count) safe={\(self.foregroundSafeSnapshot())}", type: "VLCCrashProbe")
+        }
+    }
+
     private func scheduleDrawableSnapshots(_ event: String, delays: [TimeInterval] = [0.25, 1.0]) {
         for delay in delays {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 self?.logDrawableSnapshot("\(event) +\(String(format: "%.2f", delay))s")
+            }
+        }
+    }
+
+    private func scheduleForegroundSafeDrawableSnapshots(_ event: String, delays: [TimeInterval] = [0.10, 0.50, 1.50]) {
+        for delay in delays {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                self?.logForegroundSafeDrawableSnapshot("\(event) +\(String(format: "%.2f", delay))s")
             }
         }
     }
@@ -254,15 +281,15 @@ final class VLCRenderer: NSObject, PlayerRenderer {
     }
 
     private func reattachRenderingView() {
-        logVLC("reattach drawable requested snapshot={\(playerSnapshot())}")
+        logVLC("foreground reattach drawable requested safe={\(foregroundSafeSnapshot())}", type: "VLCCrashProbe")
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.syncRenderingViewWithPictureInPictureSetting(reason: "reattach", reassignPlayerDrawable: false)
             self.mediaPlayer?.drawable = self.activeVLCView
             self.activeVLCView.setNeedsLayout()
             self.activeVLCView.layoutIfNeeded()
-            self.logDrawableSnapshot("reattach drawable applied")
-            self.scheduleDrawableSnapshots("reattach drawable followup")
+            self.logForegroundSafeDrawableSnapshot("foreground reattach drawable applied")
+            self.scheduleForegroundSafeDrawableSnapshots("foreground reattach drawable followup")
         }
     }
 
@@ -444,12 +471,14 @@ final class VLCRenderer: NSObject, PlayerRenderer {
         headers: [String: String]? = nil
     ) {
         let headerKeys = (headers ?? [:]).keys.sorted().joined(separator: ",")
-        logVLC("load begin url=\(url.absoluteString) preset=\(preset.id.rawValue) headers=\(headers?.count ?? 0)[\(headerKeys)] isLocal=\(url.isFileURL) preparedInitialSeek=\(secondsText(preparedInitialSeek))", type: "Stream")
+        let replacingActiveMedia = currentMedia != nil && isRunning && !isStopping
+        logVLC("load begin url=\(url.absoluteString) preset=\(preset.id.rawValue) headers=\(headers?.count ?? 0)[\(headerKeys)] isLocal=\(url.isFileURL) preparedInitialSeek=\(secondsText(preparedInitialSeek)) replacingActiveMedia=\(replacingActiveMedia)", type: "Stream")
         
         currentURL = url
         currentPreset = preset
         loadGeneration += 1
         proxyResumeAttemptID += 1
+        needsProxyReloadAfterBackground = false
         let initialSeek = preparedInitialSeek
         preparedInitialSeek = nil
         cachedPosition = 0
@@ -1645,15 +1674,18 @@ final class VLCRenderer: NSObject, PlayerRenderer {
     }
     
     @objc private func handleAppWillEnterForeground() {
-        logVLC("appWillEnterForeground snapshot={\(playerSnapshot())}", type: "Player")
-        logDrawableSnapshot("appWillEnterForeground")
-        scheduleDrawableSnapshots("appWillEnterForeground followup")
+        logVLC("foreground will-enter begin safe={\(foregroundSafeSnapshot())}", type: "VLCCrashProbe")
+        logForegroundSafeDrawableSnapshot("foreground will-enter begin")
+        scheduleForegroundSafeDrawableSnapshots("foreground will-enter followup", delays: [0.10, 0.50, 1.50, 3.00])
         ensureAudioSessionActive()
         reattachRenderingView()
+        logVLC("foreground will-enter submitted audio-session+reattach safe={\(foregroundSafeSnapshot())}", type: "VLCCrashProbe")
     }
 
     @objc private func handleAppDidBecomeActive() {
-        logVLC("appDidBecomeActive snapshot={\(playerSnapshot())}", type: "Player")
+        logVLC("foreground did-become-active safe={\(foregroundSafeSnapshot())}", type: "VLCCrashProbe")
+        logForegroundSafeDrawableSnapshot("foreground did-become-active")
+        scheduleForegroundSafeDrawableSnapshots("foreground did-become-active followup", delays: [0.10, 0.75, 2.00])
     }
 
     // MARK: - Picture in Picture
