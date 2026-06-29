@@ -653,7 +653,9 @@ private final class SupportPurchaseStore: ObservableObject {
         }
     }
 
-    private func verifiedTransaction(from result: VerificationResult<Transaction>) throws -> Transaction {
+    private func verifiedTransaction(
+        from result: VerificationResult<StoreKit.Transaction>
+    ) throws -> StoreKit.Transaction {
         switch result {
         case .verified(let transaction):
             return transaction
