@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(StoreKit)
+import StoreKit
+#endif
 
 struct SettingsView: View {
     @AppStorage("tmdbLanguage") private var selectedLanguage = "en-US"
@@ -112,7 +115,7 @@ struct SettingsView: View {
         ScrollView {
             VStack(spacing: ExperimentalFeatureState.isEnabledAtLaunch ? 22 : 28) {
                 // MARK: - Support
-                GlassSection(header: Bundle.main.allowsExternalDonationLinks ? "Support" : "Community") {
+                GlassSection(header: "Support") {
                     VStack(spacing: 0) {
                         if Bundle.main.allowsExternalDonationLinks {
                             Text("Help support the app. Any amount helps keep the app free for everyone. Thanks for using the app and supporting development!")
@@ -145,6 +148,24 @@ struct SettingsView: View {
                             .buttonStyle(.plain)
 
                             GlassDivider()
+                        } else {
+                            #if canImport(StoreKit)
+                            NavigationLink(destination: StoreKitSupportView()) {
+                                GlassSettingsRow(icon: "heart.fill", iconColor: .pink, title: "Support Eclipse") {
+                                    HStack(spacing: 4) {
+                                        Text("Tips & subscription")
+                                            .font(.subheadline)
+                                            .foregroundColor(.white.opacity(0.5))
+                                        Image(systemName: "chevron.right")
+                                            .font(.system(size: 13, weight: .semibold))
+                                            .foregroundColor(.white.opacity(0.3))
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+
+                            GlassDivider()
+                            #endif
                         }
 
                         Link(destination: discordURL) {
@@ -394,9 +415,14 @@ struct SettingsView: View {
                 Link("Support on Patreon", destination: patreonURL)
                 Link("Support on Ko-fi", destination: koFiURL)
             }
+            #if canImport(StoreKit)
+            if !Bundle.main.allowsExternalDonationLinks {
+                NavigationLink("Support Eclipse", destination: StoreKitSupportView())
+            }
+            #endif
             Link("Join Discord", destination: discordURL)
         } header: {
-            Text(Bundle.main.allowsExternalDonationLinks ? "Support" : "Community")
+            Text("Support")
         }
 
         Section {
@@ -489,6 +515,305 @@ struct SettingsView: View {
         }
     }
 }
+
+#if canImport(StoreKit)
+private enum SupportProductKind {
+    case tip
+    case subscription
+}
+
+private struct SupportProductDefinition {
+    let id: String
+    let fallbackName: String
+    let fallbackDescription: String
+    let icon: String
+    let color: Color
+    let kind: SupportProductKind
+
+    var isConfigured: Bool {
+        !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+}
+
+private enum SupportPurchaseCatalog {
+    static let definitions: [SupportProductDefinition] = [
+        SupportProductDefinition(
+            id: "idkbruh",
+            fallbackName: "Tip",
+            fallbackDescription: "One-time tip. Unlocks nothing.",
+            icon: "heart.fill",
+            color: .pink,
+            kind: .tip
+        ),
+        SupportProductDefinition(
+            id: "idkbruh2",
+            fallbackName: "Bigger Tip",
+            fallbackDescription: "One-time tip. Unlocks nothing.",
+            icon: "heart.circle.fill",
+            color: .purple,
+            kind: .tip
+        ),
+        SupportProductDefinition(
+            id: "idkbruh3",
+            fallbackName: "Huge Tip",
+            fallbackDescription: "One-time tip. Unlocks nothing.",
+            icon: "sparkles",
+            color: .orange,
+            kind: .tip
+        ),
+        SupportProductDefinition(
+            id: "idkbruh4",
+            fallbackName: "Monthly Support",
+            fallbackDescription: "Optional recurring support. Unlocks nothing.",
+            icon: "arrow.triangle.2.circlepath.circle.fill",
+            color: .cyan,
+            kind: .subscription
+        )
+    ]
+
+    static var productIDs: [String] {
+        definitions
+            .map(\.id)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    static var configuredProductCount: Int {
+        productIDs.count
+    }
+
+    static func definition(for productID: String) -> SupportProductDefinition? {
+        definitions.first { $0.id == productID }
+    }
+
+    static func order(for productID: String) -> Int {
+        definitions.firstIndex { $0.id == productID } ?? Int.max
+    }
+}
+
+@MainActor
+private final class SupportPurchaseStore: ObservableObject {
+    @Published private(set) var products: [Product] = []
+    @Published private(set) var isLoading = false
+    @Published private(set) var purchasingProductID: String?
+    @Published private(set) var message: String?
+
+    var hasConfiguredProducts: Bool {
+        SupportPurchaseCatalog.configuredProductCount > 0
+    }
+
+    func loadProducts() async {
+        guard !isLoading, hasConfiguredProducts else { return }
+        isLoading = true
+        defer { isLoading = false }
+
+        do {
+            let loadedProducts = try await Product.products(for: SupportPurchaseCatalog.productIDs)
+            products = loadedProducts.sorted {
+                SupportPurchaseCatalog.order(for: $0.id) < SupportPurchaseCatalog.order(for: $1.id)
+            }
+            if products.isEmpty {
+                message = "Support purchases are not available yet."
+            }
+        } catch {
+            message = "Unable to load support purchases."
+        }
+    }
+
+    func purchase(_ product: Product) async {
+        purchasingProductID = product.id
+        message = nil
+        defer { purchasingProductID = nil }
+
+        do {
+            let result = try await product.purchase()
+            switch result {
+            case .success(let verification):
+                let transaction = try verifiedTransaction(from: verification)
+                await transaction.finish()
+                message = "Thanks for supporting Eclipse."
+            case .pending:
+                message = "Purchase pending approval."
+            case .userCancelled:
+                message = nil
+            @unknown default:
+                message = "Purchase could not be completed."
+            }
+        } catch {
+            message = "Purchase could not be completed."
+        }
+    }
+
+    func restorePurchases() async {
+        message = nil
+        do {
+            try await AppStore.sync()
+            message = "Purchases restored."
+        } catch {
+            message = "Restore could not be completed."
+        }
+    }
+
+    private func verifiedTransaction(from result: VerificationResult<Transaction>) throws -> Transaction {
+        switch result {
+        case .verified(let transaction):
+            return transaction
+        case .unverified(_, _):
+            throw SupportPurchaseError.unverifiedTransaction
+        }
+    }
+}
+
+private enum SupportPurchaseError: Error {
+    case unverifiedTransaction
+}
+
+private struct StoreKitSupportView: View {
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 22) {
+                GlassSection(header: "Support") {
+                    StoreKitSupportSection()
+                }
+
+                GlassSectionFooter("Tips and subscriptions are optional App Store purchases. They help support development and do not unlock features.")
+            }
+            .padding(.top, 16)
+            .padding(.bottom, 32)
+        }
+        .navigationTitle("Support Eclipse")
+        .background(SettingsGradientBackground().ignoresSafeArea())
+        .eclipseDarkToolbar()
+    }
+}
+
+private struct StoreKitSupportSection: View {
+    @StateObject private var store = SupportPurchaseStore()
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text("Tips are optional App Store purchases. They help support development and do not unlock features.")
+                .font(.subheadline)
+                .foregroundColor(.white.opacity(0.62))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+
+            GlassDivider(leadingInset: 14)
+
+            if !store.hasConfiguredProducts {
+                SupportPurchaseStatusRow(
+                    icon: "exclamationmark.triangle.fill",
+                    color: .orange,
+                    title: "Tips Unavailable",
+                    subtitle: "Product IDs need to be configured."
+                )
+            } else if store.isLoading && store.products.isEmpty {
+                SupportPurchaseStatusRow(
+                    icon: "hourglass",
+                    color: .blue,
+                    title: "Loading Tips",
+                    subtitle: "Checking App Store availability."
+                )
+            } else if store.products.isEmpty {
+                SupportPurchaseStatusRow(
+                    icon: "cart.badge.questionmark",
+                    color: .orange,
+                    title: "Tips Unavailable",
+                    subtitle: "Please try again later."
+                )
+            } else {
+                ForEach(Array(store.products.enumerated()), id: \.element.id) { index, product in
+                    StoreKitSupportButton(product: product, store: store)
+
+                    if index < store.products.count - 1 {
+                        GlassDivider()
+                    }
+                }
+
+                GlassDivider()
+
+                Button {
+                    Task { await store.restorePurchases() }
+                } label: {
+                    GlassSettingsRow(icon: "arrow.clockwise.circle.fill", iconColor: .green, title: "Restore Purchases") {
+                        Text("Optional")
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.5))
+                    }
+                }
+                .buttonStyle(.plain)
+            }
+
+            if let message = store.message, !message.isEmpty {
+                GlassDivider(leadingInset: 14)
+                Text(message)
+                    .font(.footnote)
+                    .foregroundColor(.white.opacity(0.56))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+            }
+        }
+        .task {
+            await store.loadProducts()
+        }
+    }
+}
+
+private struct StoreKitSupportButton: View {
+    let product: Product
+    @ObservedObject var store: SupportPurchaseStore
+
+    private var definition: SupportProductDefinition? {
+        SupportPurchaseCatalog.definition(for: product.id)
+    }
+
+    private var isPurchasing: Bool {
+        store.purchasingProductID == product.id
+    }
+
+    var body: some View {
+        Button {
+            Task { await store.purchase(product) }
+        } label: {
+            GlassSettingsRow(
+                icon: definition?.icon ?? "heart.fill",
+                iconColor: definition?.color ?? .pink,
+                title: product.displayName.isEmpty ? (definition?.fallbackName ?? "Tip") : product.displayName
+            ) {
+                HStack(spacing: 6) {
+                    if isPurchasing {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+
+                    Text(isPurchasing ? "Purchasing" : product.displayPrice)
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.5))
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(isPurchasing || store.purchasingProductID != nil)
+    }
+}
+
+private struct SupportPurchaseStatusRow: View {
+    let icon: String
+    let color: Color
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        GlassSettingsRow(icon: icon, iconColor: color, title: title) {
+            Text(subtitle)
+                .font(.subheadline)
+                .foregroundColor(.white.opacity(0.5))
+        }
+    }
+}
+
+#endif
 
 struct ScheduleSettingsView: View {
     @AppStorage("defaultScheduleMode") private var defaultScheduleModeRaw = ScheduleMode.anime.rawValue
