@@ -514,6 +514,15 @@ enum HomeAnimatedBackgroundSettings {
     }
 }
 
+enum ModeSwitchAnimationSettings {
+    static let enabledKey = "modeSwitchAnimationEnabled"
+    static let defaultEnabled = true
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: enabledKey) == nil ? defaultEnabled : defaults.bool(forKey: enabledKey)
+    }
+}
+
 struct EclipseAmbientMotionBackground: View {
     let topClearance: CGFloat
     let ambientColor: Color?

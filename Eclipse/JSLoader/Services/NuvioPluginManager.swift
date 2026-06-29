@@ -16,9 +16,13 @@ final class NuvioPluginManager: ObservableObject {
     }()
     private var initialized = false
 
+    nonisolated static var isFeatureAvailable: Bool {
+        Bundle.main.allowsNuvioPlugins
+    }
+
     var repositories: [NuvioPluginRepositoryItem] { state.repositories }
     var scrapers: [NuvioPluginScraper] { state.scrapers }
-    var pluginsEnabled: Bool { state.pluginsEnabled }
+    var pluginsEnabled: Bool { Self.isFeatureAvailable && state.pluginsEnabled }
     var groupStreamsByRepository: Bool { state.groupStreamsByRepository }
 
     var activeSources: [NuvioPluginSource] {
@@ -34,6 +38,7 @@ final class NuvioPluginManager: ObservableObject {
     }
 
     nonisolated static func persistedBackupState() -> NuvioStoredPluginsState {
+        guard isFeatureAvailable else { return NuvioStoredPluginsState() }
         NuvioPluginStore().load()
     }
 
@@ -41,6 +46,7 @@ final class NuvioPluginManager: ObservableObject {
         _ restored: NuvioStoredPluginsState,
         refreshRepositories: Bool = false
     ) {
+        guard isFeatureAvailable else { return }
         let sanitized = sanitizedStoredState(restored)
         NuvioPluginStore().save(sanitized)
         Task { @MainActor in
@@ -51,11 +57,18 @@ final class NuvioPluginManager: ObservableObject {
     }
 
     func load() {
+        guard Self.isFeatureAvailable else {
+            state = NuvioStoredPluginsState(pluginsEnabled: false)
+            initialized = true
+            syncAutoModeSources()
+            return
+        }
         state = store.load()
         initialized = true
     }
 
     func backupState() -> NuvioStoredPluginsState {
+        guard Self.isFeatureAvailable else { return NuvioStoredPluginsState() }
         var copy = state
         copy.repositories = copy.repositories.map {
             var repo = $0
@@ -67,12 +80,14 @@ final class NuvioPluginManager: ObservableObject {
     }
 
     func restoreBackupState(_ restored: NuvioStoredPluginsState) {
+        guard Self.isFeatureAvailable else { return }
         state = Self.sanitizedStoredState(restored)
         persist()
         syncAutoModeSources()
     }
 
     func setPluginsEnabled(_ enabled: Bool) {
+        guard Self.isFeatureAvailable else { return }
         ensureLoaded()
         state.pluginsEnabled = enabled
         persist()
@@ -80,6 +95,7 @@ final class NuvioPluginManager: ObservableObject {
     }
 
     func setGroupStreamsByRepository(_ enabled: Bool) {
+        guard Self.isFeatureAvailable else { return }
         ensureLoaded()
         state.groupStreamsByRepository = enabled
         persist()
@@ -87,6 +103,9 @@ final class NuvioPluginManager: ObservableObject {
     }
 
     func addRepository(rawURL: String) async throws {
+        guard Self.isFeatureAvailable else {
+            throw NuvioPluginError.repositoryInstallFailed("Plugins are unavailable in this distribution.")
+        }
         ensureLoaded()
         let manifestURL = try Self.normalizeManifestURL(rawURL)
         guard !state.repositories.contains(where: { $0.manifestUrl.caseInsensitiveCompare(manifestURL) == .orderedSame }) else {
@@ -109,6 +128,7 @@ final class NuvioPluginManager: ObservableObject {
     }
 
     func removeRepository(_ manifestURL: String) {
+        guard Self.isFeatureAvailable else { return }
         ensureLoaded()
         let removedSourceIds = NuvioPluginSupport.sourceGroups(
             scrapers: state.scrapers.filter { $0.repositoryUrl == manifestURL },
@@ -124,6 +144,7 @@ final class NuvioPluginManager: ObservableObject {
     }
 
     func refreshAll() async {
+        guard Self.isFeatureAvailable else { return }
         ensureLoaded()
         for repository in state.repositories {
             await refreshRepository(repository.manifestUrl)
@@ -131,6 +152,7 @@ final class NuvioPluginManager: ObservableObject {
     }
 
     func refreshRepository(_ manifestURL: String) async {
+        guard Self.isFeatureAvailable else { return }
         ensureLoaded()
         guard state.repositories.contains(where: { $0.manifestUrl == manifestURL }) else { return }
         markRefreshing(manifestURL, isRefreshing: true, error: nil)
@@ -151,6 +173,7 @@ final class NuvioPluginManager: ObservableObject {
     }
 
     func toggleScraper(_ scraperId: String, enabled: Bool) {
+        guard Self.isFeatureAvailable else { return }
         ensureLoaded()
         state.scrapers = state.scrapers.map { scraper in
             guard scraper.id == scraperId else { return scraper }
@@ -163,17 +186,20 @@ final class NuvioPluginManager: ObservableObject {
     }
 
     func activeSources(for type: String?) -> [NuvioPluginSource] {
+        guard Self.isFeatureAvailable else { return [] }
         ensureLoaded()
         guard state.pluginsEnabled else { return [] }
         return sources(for: type, includeDisabled: false)
     }
 
     func installedSources(for type: String?) -> [NuvioPluginSource] {
+        guard Self.isFeatureAvailable else { return [] }
         ensureLoaded()
         return sources(for: type, includeDisabled: true)
     }
 
     func isSourceEnabled(_ source: NuvioPluginSource) -> Bool {
+        guard Self.isFeatureAvailable else { return false }
         ensureLoaded()
         guard state.pluginsEnabled else { return false }
         let scraperIds = Set(source.scrapers.map(\.id))
@@ -186,6 +212,7 @@ final class NuvioPluginManager: ObservableObject {
     }
 
     func canEnableSource(_ source: NuvioPluginSource) -> Bool {
+        guard Self.isFeatureAvailable else { return false }
         source.scrapers.contains {
             $0.manifestEnabled &&
             !$0.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -193,6 +220,7 @@ final class NuvioPluginManager: ObservableObject {
     }
 
     func setSourceEnabled(_ source: NuvioPluginSource, enabled: Bool) {
+        guard Self.isFeatureAvailable else { return }
         ensureLoaded()
         let scraperIds = Set(source.scrapers.map(\.id))
         if enabled {
@@ -209,6 +237,9 @@ final class NuvioPluginManager: ObservableObject {
     }
 
     func testScraper(_ scraperId: String) async throws -> [NuvioPluginStream] {
+        guard Self.isFeatureAvailable else {
+            throw NuvioPluginError.providerNotFound
+        }
         ensureLoaded()
         guard let scraper = state.scrapers.first(where: { $0.id == scraperId }) else {
             throw NuvioPluginError.providerNotFound
@@ -241,6 +272,7 @@ final class NuvioPluginManager: ObservableObject {
         season: Int?,
         episode: Int?
     ) async -> [NuvioPluginStream] {
+        guard Self.isFeatureAvailable else { return [] }
         var streams: [NuvioPluginStream] = []
         for scraper in source.scrapers where scraper.supportsType(mediaType) {
             do {
@@ -434,6 +466,7 @@ final class NuvioPluginManager: ObservableObject {
     }
 
     private func persist() {
+        guard Self.isFeatureAvailable else { return }
         store.save(state)
     }
 

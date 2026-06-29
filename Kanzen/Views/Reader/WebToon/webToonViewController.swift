@@ -2564,8 +2564,7 @@ final class KanzenZoomableTextureView: UIView, UIScrollViewDelegate, UIGestureRe
         let changes = {
             self.layout.zoomScale = nextScale
             self.layout.invalidateLayout()
-            self.collectionNode.view.layoutIfNeeded()
-            self.adjustContentSize()
+            self.relayoutVisibleNodesForZoom()
             let targetOffset = CGPoint(
                 x: anchorContent.x * nextScale - anchor.x,
                 y: anchorContent.y * nextScale - anchor.y
@@ -2578,6 +2577,16 @@ final class KanzenZoomableTextureView: UIView, UIScrollViewDelegate, UIGestureRe
         } else {
             changes()
         }
+    }
+
+    private func relayoutVisibleNodesForZoom() {
+        collectionNode.visibleNodes.forEach { node in
+            node.invalidateCalculatedLayout()
+            node.setNeedsLayout()
+        }
+        collectionNode.view.setNeedsLayout()
+        collectionNode.view.layoutIfNeeded()
+        adjustContentSize()
     }
 
     private func boundedOffset(_ point: CGPoint) -> CGPoint {

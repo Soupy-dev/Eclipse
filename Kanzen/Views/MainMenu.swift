@@ -11,33 +11,70 @@ enum KanzenRootTab: Hashable {
 
 struct KanzenModeSwitchButton: View {
     @AppStorage("showKanzen") private var showKanzen: Bool = false
+    @AppStorage(ModeSwitchAnimationSettings.enabledKey) private var modeSwitchAnimationEnabled = ModeSwitchAnimationSettings.defaultEnabled
+    @State private var isLaunching = false
 
     var body: some View {
         Button {
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
-                showKanzen = false
-            }
+            switchToMediaMode()
         } label: {
             if ExperimentalFeatureState.isEnabledAtLaunch {
-                Image(systemName: "play.rectangle.fill")
-                    .font(.headline.weight(.semibold))
-                    .foregroundColor(.white)
-                    .frame(width: 42, height: 42)
-                    .applyLiquidGlassBackground(
-                        cornerRadius: 21,
-                        glassTint: Color.white.opacity(0.04)
-                    )
+                ZStack {
+                    ModeSwitchButtonPulse(isActive: isLaunching, tint: .cyan)
+
+                    Image(systemName: "play.rectangle.fill")
+                        .font(.headline.weight(.semibold))
+                        .foregroundColor(.white)
+                        .rotationEffect(.degrees(isLaunching ? 10 : 0))
+                        .scaleEffect(isLaunching ? 1.14 : 1)
+                }
+                .frame(width: 42, height: 42)
+                .applyLiquidGlassBackground(
+                    cornerRadius: 21,
+                    glassTint: Color.white.opacity(0.04)
+                )
+                .scaleEffect(isLaunching ? 0.94 : 1)
             } else {
-                Image(systemName: "play.rectangle.fill")
-                    .font(.headline.weight(.semibold))
-                    .foregroundColor(.white)
-                    .frame(width: 42, height: 42)
-                    .background(Color.accentColor.opacity(0.82))
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                ZStack {
+                    ModeSwitchButtonPulse(isActive: isLaunching, tint: .cyan)
+
+                    Image(systemName: "play.rectangle.fill")
+                        .font(.headline.weight(.semibold))
+                        .foregroundColor(.white)
+                        .rotationEffect(.degrees(isLaunching ? 10 : 0))
+                        .scaleEffect(isLaunching ? 1.14 : 1)
+                }
+                .frame(width: 42, height: 42)
+                .background(Color.accentColor.opacity(0.82))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .scaleEffect(isLaunching ? 0.94 : 1)
             }
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Switch to Media Mode")
+    }
+
+    private func switchToMediaMode() {
+        guard showKanzen, !isLaunching else { return }
+
+        guard modeSwitchAnimationEnabled else {
+            showKanzen = false
+            return
+        }
+
+#if os(iOS)
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+#endif
+
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.58)) {
+            isLaunching = true
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            withAnimation(.spring(response: 0.72, dampingFraction: 0.82, blendDuration: 0.08)) {
+                showKanzen = false
+            }
+        }
     }
 }
 

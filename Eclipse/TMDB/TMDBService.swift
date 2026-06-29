@@ -750,6 +750,7 @@ class TMDBService: ObservableObject {
         for country in Self.fastAnimeOriginCountries {
             let shows = try await discoverFastAnimeShows(
                 originCountry: country,
+                originalLanguage: Self.fastAnimeOriginalLanguageByCountry[country],
                 sortBy: sortBy,
                 page: 1,
                 adultKeywordIDs: adultKeywordIDs,
@@ -762,6 +763,7 @@ class TMDBService: ObservableObject {
 
     private func discoverFastAnimeShows(
         originCountry: String,
+        originalLanguage: String?,
         sortBy: String,
         page: Int,
         adultKeywordIDs: [Int],
@@ -780,6 +782,9 @@ class TMDBService: ObservableObject {
                 value: adultKeywordIDs.map { String($0) }.joined(separator: "|")
             ))
         }
+        if let originalLanguage {
+            queryItems.append(URLQueryItem(name: "with_original_language", value: originalLanguage))
+        }
         queryItems.append(contentsOf: extraQueryItems)
         let url = try tmdbURL(path: "/discover/tv", queryItems: queryItems)
         let (data, _) = try await throttledData(from: url)
@@ -788,19 +793,48 @@ class TMDBService: ObservableObject {
     }
 
     private static let fastAnimeOriginCountries = ["JP", "CN", "KR", "TW"]
+    private static let fastAnimeOriginalLanguageByCountry = [
+        "JP": "ja",
+        "CN": "zh",
+        "KR": "ko",
+        "TW": "zh"
+    ]
     private static let fastAnimeOriginalLanguages: Set<String> = ["ja", "zh", "ko"]
     private static let fastAnimeAdultKeywordNames = [
         "adult animation",
         "adult anime",
+        "adult cartoon",
+        "adult film",
+        "adult video",
         "ecchi",
+        "ero anime",
+        "eroge",
         "erotica",
+        "erotic",
+        "erotic animation",
+        "erotic anime",
+        "explicit sex",
+        "explicit sexual",
+        "female nudity",
         "hentai",
+        "mature anime",
+        "mild nudity",
+        "nudity",
+        "ova hentai",
+        "pornographic",
         "pornography",
-        "softcore"
+        "r 18",
+        "r18",
+        "sex comedy",
+        "sexual content",
+        "sexually explicit",
+        "softcore",
+        "uncensored"
     ]
 
     private func isFastAnimeTVShow(_ show: TMDBTVShow) -> Bool {
         guard show.genreIds?.contains(16) == true else { return false }
+        guard Self.allowsFastAnimeOriginalLanguage(show.originalLanguage) else { return false }
         if let originCountry = show.originCountry, !originCountry.isEmpty {
             return originCountry.contains { Self.fastAnimeOriginCountries.contains($0) }
         }
@@ -815,6 +849,7 @@ class TMDBService: ObservableObject {
               result.genreIds?.contains(16) == true else {
             return false
         }
+        guard Self.allowsFastAnimeOriginalLanguage(result.originalLanguage) else { return false }
         if let originCountry = result.originCountry, !originCountry.isEmpty {
             return originCountry.contains { Self.fastAnimeOriginCountries.contains($0) }
         }
@@ -822,6 +857,13 @@ class TMDBService: ObservableObject {
             return Self.fastAnimeOriginalLanguages.contains(originalLanguage)
         }
         return false
+    }
+
+    private static func allowsFastAnimeOriginalLanguage(_ language: String?) -> Bool {
+        guard let language = language?.lowercased(), !language.isEmpty else {
+            return true
+        }
+        return fastAnimeOriginalLanguages.contains(language)
     }
 
     private func deduplicatedFastAnimeResults(_ results: [TMDBSearchResult]) -> [TMDBSearchResult] {

@@ -21,6 +21,20 @@ struct ServicesView: View {
     @State private var selectedAutoModeSourceIds: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "servicesAutoModeSourceIds") ?? [])
     @State private var autoModeSourceOrderIds: [String] = UserDefaults.standard.stringArray(forKey: "servicesAutoModeSourceOrderIds") ?? []
 
+    private var pluginsAllowed: Bool {
+        Bundle.main.allowsNuvioPlugins
+    }
+
+    private var hasAnyInstalledSources: Bool {
+        !serviceManager.services.isEmpty ||
+        !stremioManager.addons.isEmpty ||
+        (pluginsAllowed && !pluginManager.installedSources.isEmpty)
+    }
+
+    private var sourceSectionTitle: String {
+        pluginsAllowed ? "Services, Addons & Plugins" : "Services & Addons"
+    }
+
     private struct ServiceDownloadAlert: Identifiable {
         let id = UUID()
         let title: String
@@ -30,7 +44,7 @@ struct ServicesView: View {
     var body: some View {
         ZStack {
             VStack {
-                if serviceManager.services.isEmpty && stremioManager.addons.isEmpty && pluginManager.installedSources.isEmpty {
+                if !hasAnyInstalledSources {
                     emptyStateView
                 } else {
                     servicesList
@@ -98,7 +112,9 @@ struct ServicesView: View {
             }
             .onAppear {
                 _ = healthStore.version
-                pluginManager.load()
+                if pluginsAllowed {
+                    pluginManager.load()
+                }
                 reloadAutoModeSelectionFromDefaults()
             }
             .onChangeComp(of: pluginManager.state) { _, _ in
@@ -331,7 +347,7 @@ struct ServicesView: View {
                         .foregroundColor(.secondary)
 
                     if orderedAutoModeListItems.isEmpty {
-                        Text("Activate at least one stream-capable service, addon, or plugin to use Auto Mode.")
+                        Text("Activate at least one stream-capable source to use Auto Mode.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     } else {
@@ -372,8 +388,8 @@ struct ServicesView: View {
             .eclipseExperimentalSettingsRows()
 
             Section(header: unifiedSectionHeader) {
-                if serviceManager.services.isEmpty && stremioManager.addons.isEmpty && pluginManager.installedSources.isEmpty {
-                    Text("No services, addons, or plugins installed")
+                if !hasAnyInstalledSources {
+                    Text(pluginsAllowed ? "No services, addons, or plugins installed" : "No services or addons installed")
                         .foregroundColor(.secondary)
                         .font(.subheadline)
                 } else {
@@ -397,7 +413,7 @@ struct ServicesView: View {
 
     @ViewBuilder
     private var unifiedSectionHeader: some View {
-        Text("Services, Addons & Plugins")
+        Text(sourceSectionTitle)
     }
 
     private func deleteUnifiedItems(offsets: IndexSet) {

@@ -138,6 +138,7 @@ struct BackupData: Codable {
     // UI Preferences
     var showKanzen: Bool = false
     var hideSplashScreen: Bool?
+    var modeSwitchAnimationEnabled: Bool = ModeSwitchAnimationSettings.defaultEnabled
     var kanzenAutoUpdateModules: Bool = true
     var seasonMenu: Bool = false
     var horizontalEpisodeList: Bool = false
@@ -447,7 +448,7 @@ struct BackupData: Codable {
         case defaultPlaybackSpeed, holdSpeedPlayer, externalPlayer, preferDownloadedMedia, alwaysLandscape, aniSkipEnabled, introDBEnabled, introDBAppEnabled, aniSkipAutoSkip, skip85sEnabled, skip85sAlwaysVisible, showNextEpisodeButton, showEpisodeBrowserButton, showVLCEpisodeBrowserButton, showNextEpisodePosterButton, nextEpisodeThreshold, vlcHeaderProxyEnabled
         case playerBrightnessGestureEnabled, playerVolumeGestureEnabled, vlcBrightnessGestureEnabled, vlcVolumeGestureEnabled, playerTwoFingerTapPlayPauseEnabled, playerCenterTapPlayPauseEnabled, playerDoubleTapSeekEnabled, vlcDoubleTapSeekEnabled, playerDoubleTapSeekSeconds, vlcDoubleTapSeekSeconds, playerOpenSubtitlesEnabled, vlcOpenSubtitlesEnabled, playerOpenSubtitlesAutoFallbackEnabled, vlcOpenSubtitlesAutoFallbackEnabled, playerPerformanceOverlayEnabled, mpvForegroundFPS, mpvRenderBackend, mpvMetalQualityProfile, mpvAppExitPictureInPictureEnabled, mpvHDRMode, mpvSurroundSoundEnabled, smartInAppPlayerChoosingEnabled, experimentalFeaturesEnabled, experimentalFeaturesLastChangedAt, experimentalMPVPreloadEnabled, experimentalMPVSmoothTransitionEnabled, experimentalMPVPreloadCellularEnabled, experimentalMPVPreloadWifiLimitMB, experimentalMPVPreloadCellularLimitMB, experimentalMPVShowRemainingTime, experimentalMPVPreciseProgress, experimentalMPVIgnoreSpecialSubtitleStyles, experimentalMPVPreloadAutoClear, experimentalICloudSyncEnabled
         case subtitleForegroundColor, subtitleStrokeColor, subtitleStrokeWidth, subtitleFontSize, subtitleVerticalOffset, subtitlesVisible
-        case showKanzen, hideSplashScreen, kanzenAutoUpdateModules, seasonMenu, horizontalEpisodeList, useClassicScheduleUI, heroBannerCatalogId, heroBannerBehavior, homeCatalogLayoutOverrides, homeAnimatedBackgroundEnabled, experimentalMediaDesignPreset, experimentalHeroBleedLevel, experimentalHomeCardShape, experimentalMultiGradientPalette, experimentalHeroHeightScale, experimentalHeroBleedStrength, experimentalHeroFadeDistanceScale, experimentalSectionSpacingScale, experimentalCardRadiusScale, experimentalMediaCardScale, experimentalGlassStrength, experimentalGradientBaseDarkness, experimentalGradientAccentIntensity, experimentalGradientScrollMotion, experimentalGradientUseCustomColors, experimentalGradientColorA, experimentalGradientColorB, experimentalGradientColorC, atmosphereStyle, atmosphereSolidColorSource, atmosphereSolidColor, readerAtmosphereStyle, readerAtmosphereSolidColorSource, readerAtmosphereSolidColor, mediaDetailElementOrder, mediaDetailHiddenElements, readerDetailElementOrder, readerDetailHiddenElements, mediaColumnsPortrait, mediaColumnsLandscape
+        case showKanzen, hideSplashScreen, modeSwitchAnimationEnabled, kanzenAutoUpdateModules, seasonMenu, horizontalEpisodeList, useClassicScheduleUI, heroBannerCatalogId, heroBannerBehavior, homeCatalogLayoutOverrides, homeAnimatedBackgroundEnabled, experimentalMediaDesignPreset, experimentalHeroBleedLevel, experimentalHomeCardShape, experimentalMultiGradientPalette, experimentalHeroHeightScale, experimentalHeroBleedStrength, experimentalHeroFadeDistanceScale, experimentalSectionSpacingScale, experimentalCardRadiusScale, experimentalMediaCardScale, experimentalGlassStrength, experimentalGradientBaseDarkness, experimentalGradientAccentIntensity, experimentalGradientScrollMotion, experimentalGradientUseCustomColors, experimentalGradientColorA, experimentalGradientColorB, experimentalGradientColorC, atmosphereStyle, atmosphereSolidColorSource, atmosphereSolidColor, readerAtmosphereStyle, readerAtmosphereSolidColorSource, readerAtmosphereSolidColor, mediaDetailElementOrder, mediaDetailHiddenElements, readerDetailElementOrder, readerDetailHiddenElements, mediaColumnsPortrait, mediaColumnsLandscape
         case readingMode, kanzenReaderMode, kanzenReaderModeOverrides, readerDownsampleImages, readerCropBorders, readerDisableQuickActions, readerDisableDoubleTap, readerLiveText, readerHideBarsOnSwipe, readerBackgroundColor, readerOrientation, readerTapZones, readerInvertTapZones, readerAnimatePageTransitions, readerUpscaleImages, readerUpscaleMaxHeight, readerUpscaleModelName, readerPagesToPreload, readerPagedPageLayout, readerPagedPageOffset, readerPagedPageOffsetOverrides, readerSplitWideImages, readerReverseSplitOrder, readerVerticalInfiniteScroll, readerPillarbox, readerPillarboxAmount, readerPillarboxOrientation, readerOrientationLockEnabled, readerOrientationLockMask, readerReadThresholdPercent
         case readerFontSize, readerFontFamily, readerFontWeight, readerColorPreset, readerTextAlignment, readerLineSpacing, readerMargin
         case autoClearCacheEnabled, autoClearCacheThresholdMB, highQualityThreshold, backgroundHLSPipelineEnabled, readerDownloadsBackgroundEnabled, readerDownloadsWifiOnly, readerDownloadsParallelLimit, autoUpdateServicesEnabled, servicesAutoModeEnabled, servicesAutoSelectEpisodesEnabled, servicesAutoModeSourceIds, servicesAutoModeSourceOrderIds, servicesAutoModeQualityPreference, githubReleaseAutoCheckEnabled, githubReleaseUpdateAvailable, githubReleaseLatestVersion, githubReleaseURL, githubReleaseShowAlertPending, githubReleaseLastPromptedVersion, filterHorrorContent = "filterHorror", selectedSimilarityAlgorithm, performanceModeEnabled, performanceModeSkipAniListTraversalForAnimeDetails, performanceModeFastAnimeCatalogOverrides
@@ -560,6 +561,7 @@ struct BackupData: Codable {
         // UI preferences
         showKanzen = try container.decodeIfPresent(Bool.self, forKey: .showKanzen) ?? false
         hideSplashScreen = try container.decodeIfPresent(Bool.self, forKey: .hideSplashScreen)
+        modeSwitchAnimationEnabled = try container.decodeIfPresent(Bool.self, forKey: .modeSwitchAnimationEnabled) ?? ModeSwitchAnimationSettings.defaultEnabled
         kanzenAutoUpdateModules = try container.decodeIfPresent(Bool.self, forKey: .kanzenAutoUpdateModules) ?? true
         seasonMenu = try container.decodeIfPresent(Bool.self, forKey: .seasonMenu) ?? false
         horizontalEpisodeList = try container.decodeIfPresent(Bool.self, forKey: .horizontalEpisodeList) ?? false
@@ -830,6 +832,7 @@ struct BackupData: Codable {
         // UI preferences
         try container.encode(showKanzen, forKey: .showKanzen)
         try container.encodeIfPresent(hideSplashScreen, forKey: .hideSplashScreen)
+        try container.encode(modeSwitchAnimationEnabled, forKey: .modeSwitchAnimationEnabled)
         try container.encode(kanzenAutoUpdateModules, forKey: .kanzenAutoUpdateModules)
         try container.encode(seasonMenu, forKey: .seasonMenu)
         try container.encode(horizontalEpisodeList, forKey: .horizontalEpisodeList)
@@ -1033,6 +1036,7 @@ struct BackupData: Codable {
         // UI preferences
         showKanzen: Bool = false,
         hideSplashScreen: Bool? = nil,
+        modeSwitchAnimationEnabled: Bool = ModeSwitchAnimationSettings.defaultEnabled,
         kanzenAutoUpdateModules: Bool = true,
         seasonMenu: Bool = false,
         horizontalEpisodeList: Bool = false,
@@ -1231,6 +1235,7 @@ struct BackupData: Codable {
 
         self.showKanzen = showKanzen
         self.hideSplashScreen = hideSplashScreen
+        self.modeSwitchAnimationEnabled = modeSwitchAnimationEnabled
         self.kanzenAutoUpdateModules = kanzenAutoUpdateModules
         self.seasonMenu = seasonMenu
         self.horizontalEpisodeList = horizontalEpisodeList
@@ -1988,6 +1993,7 @@ class BackupManager {
         // UI preferences
         let showKanzen = userDefaults.bool(forKey: "showKanzen")
         let hideSplashScreen = userDefaults.bool(forKey: "hideSplashScreen")
+        let modeSwitchAnimationEnabled = ModeSwitchAnimationSettings.isEnabled(defaults: userDefaults)
         let kanzenAutoUpdateModules = ModuleManager.isAutoUpdateEnabled
         let seasonMenu = userDefaults.bool(forKey: "seasonMenu")
         let horizontalEpisodeList = userDefaults.bool(forKey: "horizontalEpisodeList")
@@ -2283,6 +2289,7 @@ class BackupManager {
 
             showKanzen: showKanzen,
             hideSplashScreen: hideSplashScreen,
+            modeSwitchAnimationEnabled: modeSwitchAnimationEnabled,
             kanzenAutoUpdateModules: kanzenAutoUpdateModules,
             seasonMenu: seasonMenu,
             horizontalEpisodeList: horizontalEpisodeList,
@@ -2538,6 +2545,7 @@ class BackupManager {
         // UI preferences
         let showKanzen = json["showKanzen"] as? Bool ?? false
         let hideSplashScreen = json["hideSplashScreen"] as? Bool
+        let modeSwitchAnimationEnabled = json["modeSwitchAnimationEnabled"] as? Bool ?? ModeSwitchAnimationSettings.defaultEnabled
         let kanzenAutoUpdateModules = json["kanzenAutoUpdateModules"] as? Bool ?? true
         let seasonMenu = json["seasonMenu"] as? Bool ?? false
         let horizontalEpisodeList = json["horizontalEpisodeList"] as? Bool ?? false
@@ -2866,6 +2874,7 @@ class BackupManager {
             subtitlesVisible: subtitlesVisible,
             showKanzen: showKanzen,
             hideSplashScreen: hideSplashScreen,
+            modeSwitchAnimationEnabled: modeSwitchAnimationEnabled,
             kanzenAutoUpdateModules: kanzenAutoUpdateModules,
             seasonMenu: seasonMenu,
             horizontalEpisodeList: horizontalEpisodeList,
@@ -3085,6 +3094,7 @@ class BackupManager {
         if let hideSplashScreen = backup.hideSplashScreen {
             userDefaults.set(hideSplashScreen, forKey: "hideSplashScreen")
         }
+        userDefaults.set(backup.modeSwitchAnimationEnabled, forKey: ModeSwitchAnimationSettings.enabledKey)
         userDefaults.set(backup.kanzenAutoUpdateModules, forKey: "kanzenAutoUpdateModules")
         userDefaults.set(backup.seasonMenu, forKey: "seasonMenu")
         userDefaults.set(backup.horizontalEpisodeList, forKey: "horizontalEpisodeList")

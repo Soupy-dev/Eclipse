@@ -11,12 +11,8 @@ struct SettingsView: View {
 
     @StateObject private var catalogManager = CatalogManager.shared
     @AppStorage("showKanzen") private var showKanzen: Bool = false
-    @AppStorage("hideSplashScreen") private var hideSplashScreen = false
-    @AppStorage(HomeAnimatedBackgroundSettings.enabledKey) private var homeAnimatedBackgroundEnabled = HomeAnimatedBackgroundSettings.defaultEnabled
     @State private var isCheckingGitHubRelease = false
 
-    private let patreonURL = URL(string: "https://www.patreon.com/c/soupy698")!
-    private let koFiURL = URL(string: "https://ko-fi.com/soupydev")!
     private let discordURL = URL(string: "https://discord.gg/UjHgGaEbn")!
     private let sourceCodeURL = URL(string: "https://github.com/Soupy-dev/Eclipse")!
     private let originalProjectURL = URL(string: "https://github.com/cranci1/Luna")!
@@ -113,40 +109,9 @@ struct SettingsView: View {
         #else
         ScrollView {
             VStack(spacing: ExperimentalFeatureState.isEnabledAtLaunch ? 22 : 28) {
-                // MARK: - Support
-                GlassSection(header: "Support") {
+                // MARK: - Community
+                GlassSection(header: "Community") {
                     VStack(spacing: 0) {
-                        Text("Help support the app. Any amount helps keep the app free for everyone. Thanks for using the app and supporting development!")
-                            .font(.subheadline)
-                            .foregroundColor(.white.opacity(0.62))
-                            .fixedSize(horizontal: false, vertical: true)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 12)
-
-                        GlassDivider(leadingInset: 14)
-
-                        Link(destination: patreonURL) {
-                            GlassSettingsRow(icon: "heart.fill", iconColor: .pink, title: "Support on Patreon") {
-                                Text("Optional")
-                                    .font(.subheadline)
-                                    .foregroundColor(.white.opacity(0.5))
-                            }
-                        }
-                        .buttonStyle(.plain)
-
-                        GlassDivider()
-
-                        Link(destination: koFiURL) {
-                            GlassSettingsRow(icon: "cup.and.saucer.fill", iconColor: .cyan, title: "Support on Ko-fi") {
-                                Text("Optional")
-                                    .font(.subheadline)
-                                    .foregroundColor(.white.opacity(0.5))
-                            }
-                        }
-                        .buttonStyle(.plain)
-
-                        GlassDivider()
-
                         Link(destination: discordURL) {
                             GlassSettingsRow(icon: "bubble.left.and.bubble.right.fill", iconColor: .indigo, title: "Join Discord") {
                                 Text("Community")
@@ -193,22 +158,6 @@ struct SettingsView: View {
 
                         GlassDivider()
 
-                        GlassSettingsRow(icon: "moon.fill", iconColor: .indigo, title: "Hide Splash Screen") {
-                            Toggle("", isOn: $hideSplashScreen)
-                                .labelsHidden()
-                                .tint(.indigo)
-                        }
-
-                        GlassDivider()
-
-                        GlassSettingsRow(icon: "sparkles", iconColor: .cyan, title: "Animated Background") {
-                            Toggle("", isOn: $homeAnimatedBackgroundEnabled)
-                                .labelsHidden()
-                                .tint(.cyan)
-                        }
-
-                        GlassDivider()
-
                         NavigationLink(destination: PlayerSettingsView()) {
                             GlassSettingsRow(icon: "play.fill", iconColor: .white, title: "Media Player")
                         }
@@ -251,12 +200,14 @@ struct SettingsView: View {
                         }
                         .buttonStyle(.plain)
 
-                        GlassDivider()
+                        if Bundle.main.allowsNuvioPlugins {
+                            GlassDivider()
 
-                        NavigationLink(destination: NuvioPluginsView()) {
-                            GlassSettingsRow(icon: "puzzlepiece.extension", iconColor: .mint, title: "Plugins")
+                            NavigationLink(destination: NuvioPluginsView()) {
+                                GlassSettingsRow(icon: "puzzlepiece.extension", iconColor: .mint, title: "Plugins")
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
 
                         GlassDivider()
 
@@ -403,12 +354,9 @@ struct SettingsView: View {
     @ViewBuilder
     private var settingsListContent: some View {
         Section {
-            Text("Help support the app. Any amount helps keep the app free for everyone")
-            Link("Support on Patreon", destination: patreonURL)
-            Link("Support on Ko-fi", destination: koFiURL)
             Link("Join Discord", destination: discordURL)
         } header: {
-            Text("Support")
+            Text("Community")
         }
 
         Section {
@@ -423,8 +371,6 @@ struct SettingsView: View {
             NavigationLink(destination: PerformanceModeSettingsView()) {
                 Text("Performance Mode")
             }
-            Toggle("Hide Splash Screen", isOn: $hideSplashScreen)
-            Toggle("Animated Background", isOn: $homeAnimatedBackgroundEnabled)
         } header: {
             Text("TMDB Settings")
         }
@@ -435,7 +381,9 @@ struct SettingsView: View {
             NavigationLink(destination: ScheduleSettingsView()) { Text("Schedule") }
             NavigationLink(destination: CatalogsSettingsView()) { Text("Catalogs") }
             NavigationLink(destination: ServicesView()) { Text("Services") }
-            NavigationLink(destination: NuvioPluginsView()) { Text("Plugins") }
+            if Bundle.main.allowsNuvioPlugins {
+                NavigationLink(destination: NuvioPluginsView()) { Text("Plugins") }
+            }
             NavigationLink(destination: TrackersSettingsView()) { Text("Trackers") }
         }
 
@@ -702,7 +650,7 @@ struct ExperimentalCloudSyncView: View {
             ("Settings", "gearshape"),
             ("Libraries and collections", "books.vertical"),
             ("Watch and read progress", "play.rectangle"),
-            ("Catalogs, services, addons, and plugins", "server.rack"),
+            (Bundle.main.allowsNuvioPlugins ? "Catalogs, services, addons, and plugins" : "Catalogs, services, and addons", "server.rack"),
             ("Tracker connections and preferences", "chart.bar")
         ]
     }

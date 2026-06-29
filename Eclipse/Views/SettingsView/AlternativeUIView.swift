@@ -16,6 +16,8 @@ struct AlternativeUIView: View {
     @AppStorage(ExperimentalVisualTuning.glassStrengthKey) private var experimentalGlassStrength = ExperimentalVisualTuning.defaultGlassStrength
     @AppStorage(ExperimentalVisualTuning.heroHeightScaleKey) private var experimentalHeroHeightScale = ExperimentalVisualTuning.defaultHeroHeightScale
     @AppStorage(HomeAnimatedBackgroundSettings.enabledKey) private var homeAnimatedBackgroundEnabled = HomeAnimatedBackgroundSettings.defaultEnabled
+    @AppStorage(ModeSwitchAnimationSettings.enabledKey) private var modeSwitchAnimationEnabled = ModeSwitchAnimationSettings.defaultEnabled
+    @AppStorage("hideSplashScreen") private var hideSplashScreen = false
 
     // Interface (modern vs classic) - restart applied gate
     @AppStorage(ExperimentalFeatureState.enabledKey) private var modernInterfaceEnabled = true
@@ -34,6 +36,8 @@ struct AlternativeUIView: View {
             themeSection
                 .eclipseExperimentalSettingsRows()
             interfaceSection
+                .eclipseExperimentalSettingsRows()
+            appExperienceSection
                 .eclipseExperimentalSettingsRows()
             homeLayoutSection
                 .eclipseExperimentalSettingsRows()
@@ -203,6 +207,32 @@ struct AlternativeUIView: View {
         }
     }
 
+    // MARK: - App experience
+
+    private var appExperienceSection: some View {
+        Section {
+            toggleRow(
+                title: "Switch Mode Animation",
+                description: "Animate the top-right Media and Reader mode switch.",
+                isOn: $modeSwitchAnimationEnabled
+            )
+
+            toggleRow(
+                title: "Animated Background",
+                description: "Show ambient motion behind the home screen.",
+                isOn: $homeAnimatedBackgroundEnabled
+            )
+
+            toggleRow(
+                title: "Hide Splash Screen",
+                description: "Skip the launch splash once Eclipse opens.",
+                isOn: $hideSplashScreen
+            )
+        } header: {
+            Text("App Experience")
+        }
+    }
+
     // MARK: - Home layout
 
     private var homeLayoutSection: some View {
@@ -254,7 +284,7 @@ struct AlternativeUIView: View {
                         Text("Reset Appearance")
                             .font(.subheadline)
                             .fontWeight(.medium)
-                        Text("Restore the default theme and layout values.")
+                        Text("Restore the default theme, layout, animation, and startup display values.")
                             .font(.caption)
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.leading)
@@ -265,7 +295,7 @@ struct AlternativeUIView: View {
                 }
             }
         } footer: {
-            Text("Resets theme, layout and per-catalog overrides to their defaults.")
+            Text("Resets theme, layout, app experience, and per-catalog overrides to their defaults.")
         }
     }
 
@@ -517,6 +547,8 @@ struct AlternativeUIView: View {
         experimentalMediaCardScale = ExperimentalVisualTuning.defaultMediaCardScale
         experimentalGlassStrength = ExperimentalVisualTuning.defaultGlassStrength
         homeAnimatedBackgroundEnabled = HomeAnimatedBackgroundSettings.defaultEnabled
+        modeSwitchAnimationEnabled = ModeSwitchAnimationSettings.defaultEnabled
+        hideSplashScreen = false
         HomeCatalogLayoutStore.shared.resetAll()
     }
 }

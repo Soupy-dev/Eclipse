@@ -25,8 +25,18 @@ extension Bundle {
         }
         return "GitHub"
     }
+    var isAppleReviewedDistribution: Bool {
+        let normalized = distributionChannel
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: " ", with: "")
+            .lowercased()
+        return normalized == "testflight" || normalized == "appstore"
+    }
     var usesGitHubReleaseUpdates: Bool {
-        distributionChannel.caseInsensitiveCompare("TestFlight") != .orderedSame
+        !isAppleReviewedDistribution
+    }
+    var allowsNuvioPlugins: Bool {
+        !isAppleReviewedDistribution
     }
 }
 

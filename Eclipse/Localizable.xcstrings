@@ -111,6 +111,28 @@
         }
       }
     },
+    "Animate the top-right Media and Reader mode switch.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Animate the top-right Media and Reader mode switch."
+          }
+        }
+      }
+    },
+    "App Experience": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "App Experience"
+          }
+        }
+      }
+    },
     "App Updates": {
       "extractionState": "manual",
       "localizations": {
@@ -2157,6 +2179,17 @@
         }
       }
     },
+    "Resets theme, layout, app experience, and per-catalog overrides to their defaults.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Resets theme, layout, app experience, and per-catalog overrides to their defaults."
+          }
+        }
+      }
+    },
     "Restart Required": {
       "extractionState": "manual",
       "localizations": {
@@ -2219,6 +2252,17 @@
           "stringUnit": {
             "state": "translated",
             "value": "Restore the default theme and layout values."
+          }
+        }
+      }
+    },
+    "Restore the default theme, layout, animation, and startup display values.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restore the default theme, layout, animation, and startup display values."
           }
         }
       }
@@ -2465,6 +2509,17 @@
         }
       }
     },
+    "Show ambient motion behind the home screen.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show ambient motion behind the home screen."
+          }
+        }
+      }
+    },
     "Size": {
       "extractionState": "manual",
       "localizations": {
@@ -2505,6 +2560,17 @@
           "stringUnit": {
             "state": "translated",
             "value": "Skip Episode"
+          }
+        }
+      }
+    },
+    "Skip the launch splash once Eclipse opens.": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Skip the launch splash once Eclipse opens."
           }
         }
       }
@@ -2604,6 +2670,17 @@
           "stringUnit": {
             "state": "translated",
             "value": "Switch to Reader Mode"
+          }
+        }
+      }
+    },
+    "Switch Mode Animation": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switch Mode Animation"
           }
         }
       }

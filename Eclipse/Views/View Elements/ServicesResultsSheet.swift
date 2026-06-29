@@ -326,7 +326,20 @@ struct ModulesSearchResultsSheet: View {
         isMovie ? "movie" : "tv"
     }
 
+    private var pluginsAllowed: Bool {
+        Bundle.main.allowsNuvioPlugins
+    }
+
+    private var sourceKindList: String {
+        pluginsAllowed ? "services, addons, or plugins" : "services or addons"
+    }
+
+    private var sourceKindSelectionList: String {
+        pluginsAllowed ? "service, addon, or plugin" : "service or addon"
+    }
+
     private var activePluginSourcesForCurrentRequest: [NuvioPluginSource] {
+        guard pluginsAllowed else { return [] }
         pluginManager.activeSources(for: pluginMediaType)
     }
 
@@ -460,7 +473,7 @@ struct ModulesSearchResultsSheet: View {
                     .font(.headline)
                     .fontWeight(.semibold)
                 
-                Text("You don't have any active services, Stremio addons, or plugins. Add or enable a source in Settings.")
+                Text("You don't have any active \(sourceKindList). Add or enable a source in Settings.")
                     .font(.body)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -932,7 +945,7 @@ struct ModulesSearchResultsSheet: View {
     private func autoModeUnavailableMessage() -> String {
         let selectedActive = sortedResultItems.filter { selectedAutoModeSourceIds.contains($0.sourceId) }
         guard !selectedActive.isEmpty else {
-            return "Auto Mode is enabled, but no active service, addon, or plugin is selected. Please select at least one source in Services settings."
+            return "Auto Mode is enabled, but no active \(sourceKindSelectionList) is selected. Please select at least one source in Services settings."
         }
 
         return "Auto Mode could not find a playable result from the selected sources. Try again or choose a source manually."
@@ -1370,7 +1383,7 @@ struct ModulesSearchResultsSheet: View {
             }
         }
 
-        viewModel.streamError = "Auto Mode could not find a playable match in the selected sources. Try selecting more services, addons, or plugins."
+        viewModel.streamError = "Auto Mode could not find a playable match in the selected sources. Try selecting more \(sourceKindList)."
         viewModel.showingStreamError = true
     }
 
@@ -2298,6 +2311,7 @@ struct ModulesSearchResultsSheet: View {
     // MARK: - Nuvio Plugin Search
 
     private func startPluginSearch() {
+        guard pluginsAllowed else { return }
         let active = activePluginSourcesForCurrentRequest
         guard !active.isEmpty else { return }
 
