@@ -39,7 +39,7 @@ final class NuvioPluginManager: ObservableObject {
 
     nonisolated static func persistedBackupState() -> NuvioStoredPluginsState {
         guard isFeatureAvailable else { return NuvioStoredPluginsState() }
-        NuvioPluginStore().load()
+        return NuvioPluginStore().load()
     }
 
     nonisolated static func restorePersistedBackupState(
@@ -213,7 +213,7 @@ final class NuvioPluginManager: ObservableObject {
 
     func canEnableSource(_ source: NuvioPluginSource) -> Bool {
         guard Self.isFeatureAvailable else { return false }
-        source.scrapers.contains {
+        return source.scrapers.contains {
             $0.manifestEnabled &&
             !$0.code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }

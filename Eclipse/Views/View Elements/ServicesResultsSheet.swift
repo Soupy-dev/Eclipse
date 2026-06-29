@@ -340,7 +340,7 @@ struct ModulesSearchResultsSheet: View {
 
     private var activePluginSourcesForCurrentRequest: [NuvioPluginSource] {
         guard pluginsAllowed else { return [] }
-        pluginManager.activeSources(for: pluginMediaType)
+        return pluginManager.activeSources(for: pluginMediaType)
     }
 
     private var stremioCatalogTitleCandidates: [String] {
