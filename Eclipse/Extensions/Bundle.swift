@@ -38,6 +38,9 @@ extension Bundle {
     var allowsNuvioPlugins: Bool {
         !isAppleReviewedDistribution
     }
+    var allowsExternalDonationLinks: Bool {
+        !isAppleReviewedDistribution
+    }
 }
 
 enum GitHubReleaseChecker {

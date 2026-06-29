@@ -13,6 +13,8 @@ struct SettingsView: View {
     @AppStorage("showKanzen") private var showKanzen: Bool = false
     @State private var isCheckingGitHubRelease = false
 
+    private let patreonURL = URL(string: "https://www.patreon.com/c/soupy698")!
+    private let koFiURL = URL(string: "https://ko-fi.com/soupydev")!
     private let discordURL = URL(string: "https://discord.gg/UjHgGaEbn")!
     private let sourceCodeURL = URL(string: "https://github.com/Soupy-dev/Eclipse")!
     private let originalProjectURL = URL(string: "https://github.com/cranci1/Luna")!
@@ -109,9 +111,42 @@ struct SettingsView: View {
         #else
         ScrollView {
             VStack(spacing: ExperimentalFeatureState.isEnabledAtLaunch ? 22 : 28) {
-                // MARK: - Community
-                GlassSection(header: "Community") {
+                // MARK: - Support
+                GlassSection(header: Bundle.main.allowsExternalDonationLinks ? "Support" : "Community") {
                     VStack(spacing: 0) {
+                        if Bundle.main.allowsExternalDonationLinks {
+                            Text("Help support the app. Any amount helps keep the app free for everyone. Thanks for using the app and supporting development!")
+                                .font(.subheadline)
+                                .foregroundColor(.white.opacity(0.62))
+                                .fixedSize(horizontal: false, vertical: true)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 12)
+
+                            GlassDivider(leadingInset: 14)
+
+                            Link(destination: patreonURL) {
+                                GlassSettingsRow(icon: "heart.fill", iconColor: .pink, title: "Support on Patreon") {
+                                    Text("Optional")
+                                        .font(.subheadline)
+                                        .foregroundColor(.white.opacity(0.5))
+                                }
+                            }
+                            .buttonStyle(.plain)
+
+                            GlassDivider()
+
+                            Link(destination: koFiURL) {
+                                GlassSettingsRow(icon: "cup.and.saucer.fill", iconColor: .cyan, title: "Support on Ko-fi") {
+                                    Text("Optional")
+                                        .font(.subheadline)
+                                        .foregroundColor(.white.opacity(0.5))
+                                }
+                            }
+                            .buttonStyle(.plain)
+
+                            GlassDivider()
+                        }
+
                         Link(destination: discordURL) {
                             GlassSettingsRow(icon: "bubble.left.and.bubble.right.fill", iconColor: .indigo, title: "Join Discord") {
                                 Text("Community")
@@ -354,9 +389,14 @@ struct SettingsView: View {
     @ViewBuilder
     private var settingsListContent: some View {
         Section {
+            if Bundle.main.allowsExternalDonationLinks {
+                Text("Help support the app. Any amount helps keep the app free for everyone")
+                Link("Support on Patreon", destination: patreonURL)
+                Link("Support on Ko-fi", destination: koFiURL)
+            }
             Link("Join Discord", destination: discordURL)
         } header: {
-            Text("Community")
+            Text(Bundle.main.allowsExternalDonationLinks ? "Support" : "Community")
         }
 
         Section {
