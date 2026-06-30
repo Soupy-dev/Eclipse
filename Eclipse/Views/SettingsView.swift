@@ -525,7 +525,7 @@ private enum SupportProductKind {
 private struct SupportProductDefinition {
     let id: String
     let fallbackName: String
-    let fallbackDescription: String
+    let fallbackPrice: String
     let icon: String
     let color: Color
     let kind: SupportProductKind
@@ -540,15 +540,15 @@ private enum SupportPurchaseCatalog {
         SupportProductDefinition(
             id: "idkbruh",
             fallbackName: "Tip",
-            fallbackDescription: "One-time tip. Unlocks nothing.",
+            fallbackPrice: "$1",
             icon: "heart.fill",
             color: .pink,
             kind: .tip
         ),
         SupportProductDefinition(
             id: "idkbruh2",
-            fallbackName: "Bigger Tip",
-            fallbackDescription: "One-time tip. Unlocks nothing.",
+            fallbackName: "Big Tip",
+            fallbackPrice: "$5",
             icon: "heart.circle.fill",
             color: .purple,
             kind: .tip
@@ -556,7 +556,7 @@ private enum SupportPurchaseCatalog {
         SupportProductDefinition(
             id: "idkbruh3",
             fallbackName: "Huge Tip",
-            fallbackDescription: "One-time tip. Unlocks nothing.",
+            fallbackPrice: "$10",
             icon: "sparkles",
             color: .orange,
             kind: .tip
@@ -564,7 +564,7 @@ private enum SupportPurchaseCatalog {
         SupportProductDefinition(
             id: "idkbruh4",
             fallbackName: "Monthly Support",
-            fallbackDescription: "Optional recurring support. Unlocks nothing.",
+            fallbackPrice: "$3/month",
             icon: "arrow.triangle.2.circlepath.circle.fill",
             color: .cyan,
             kind: .subscription
@@ -679,7 +679,7 @@ private struct StoreKitSupportView: View {
                     StoreKitSupportSection()
                 }
 
-                GlassSectionFooter("Tips and subscriptions are optional App Store purchases. They help support development and do not unlock features.")
+                GlassSectionFooter("Support purchases are optional and do not unlock features.")
             }
             .padding(.top, 16)
             .padding(.bottom, 32)
@@ -695,7 +695,7 @@ private struct StoreKitSupportSection: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Text("Tips are optional App Store purchases. They help support development and do not unlock features.")
+            Text("Choose an optional way to support Eclipse.")
                 .font(.subheadline)
                 .foregroundColor(.white.opacity(0.62))
                 .fixedSize(horizontal: false, vertical: true)
@@ -729,7 +729,7 @@ private struct StoreKitSupportSection: View {
 
                 GlassDivider(leadingInset: 14)
 
-                Text("Prices load from the App Store when these purchases become available. They are optional and do not unlock features.")
+                Text("Prices load from the App Store when these purchases become available.")
                     .font(.footnote)
                     .foregroundColor(.white.opacity(0.56))
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -779,7 +779,7 @@ private struct StoreKitSupportPreviewRow: View {
 
     var body: some View {
         GlassSettingsRow(icon: definition.icon, iconColor: definition.color, title: definition.fallbackName) {
-            Text("App Store Price")
+            Text(definition.fallbackPrice)
                 .font(.subheadline)
                 .foregroundColor(.white.opacity(0.5))
                 .lineLimit(1)
