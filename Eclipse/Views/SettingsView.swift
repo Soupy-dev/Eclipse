@@ -572,13 +572,15 @@ private enum SupportPurchaseCatalog {
     ]
 
     static var productIDs: [String] {
-        definitions
-            .map(\.id)
-            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        configuredDefinitions.map(\.id)
     }
 
     static var configuredProductCount: Int {
-        productIDs.count
+        configuredDefinitions.count
+    }
+
+    static var configuredDefinitions: [SupportProductDefinition] {
+        definitions.filter(\.isConfigured)
     }
 
     static func definition(for productID: String) -> SupportProductDefinition? {
@@ -612,7 +614,7 @@ private final class SupportPurchaseStore: ObservableObject {
                 SupportPurchaseCatalog.order(for: $0.id) < SupportPurchaseCatalog.order(for: $1.id)
             }
             if products.isEmpty {
-                message = "Support purchases are not available yet."
+                message = nil
             }
         } catch {
             message = "Unable to load support purchases."
@@ -717,12 +719,22 @@ private struct StoreKitSupportSection: View {
                     subtitle: "Checking App Store availability."
                 )
             } else if store.products.isEmpty {
-                SupportPurchaseStatusRow(
-                    icon: "cart.badge.questionmark",
-                    color: .orange,
-                    title: "Tips Unavailable",
-                    subtitle: "Please try again later."
-                )
+                ForEach(Array(SupportPurchaseCatalog.configuredDefinitions.enumerated()), id: \.element.id) { index, definition in
+                    StoreKitSupportPreviewRow(definition: definition)
+
+                    if index < SupportPurchaseCatalog.configuredProductCount - 1 {
+                        GlassDivider()
+                    }
+                }
+
+                GlassDivider(leadingInset: 14)
+
+                Text("Prices load from the App Store when these purchases become available. They are optional and do not unlock features.")
+                    .font(.footnote)
+                    .foregroundColor(.white.opacity(0.56))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
             } else {
                 ForEach(Array(store.products.enumerated()), id: \.element.id) { index, product in
                     StoreKitSupportButton(product: product, store: store)
@@ -758,6 +770,20 @@ private struct StoreKitSupportSection: View {
         }
         .task {
             await store.loadProducts()
+        }
+    }
+}
+
+private struct StoreKitSupportPreviewRow: View {
+    let definition: SupportProductDefinition
+
+    var body: some View {
+        GlassSettingsRow(icon: definition.icon, iconColor: definition.color, title: definition.fallbackName) {
+            Text("App Store Price")
+                .font(.subheadline)
+                .foregroundColor(.white.opacity(0.5))
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
         }
     }
 }
