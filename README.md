@@ -31,7 +31,7 @@
 
 ## Why Eclipse
 
-Eclipse was designed to bridge Luna services (more well known as Sora modules) with Stremio addons in one polished app. The goal is simple: search faster, pick the right result with better metadata, watch with stronger controls, keep progress synced, and continue across anime, movies, shows, manga, and novels. Now powered by Aidoku and Nuvio Plugins as well. Star the repo, join the Discord, or support on Patreon or Ko-fi if you like my work!
+Eclipse was designed to bridge Luna services (more well known as Sora modules) with Stremio addons in one polished app. The goal is simple: search faster, pick the right result with better metadata, watch with stronger controls, keep progress synced, and continue across anime, movies, shows, manga, and novels. Now powered by Aidoku as well. Star the repo, join the Discord, or support on Patreon or Ko-fi if you like my work!
 
 ## Screenshots
 
@@ -71,7 +71,7 @@ Eclipse was designed to bridge Luna services (more well known as Sora modules) w
 - MPV playback with subtitle defaults, language defaults, next episode actions, AniSkip, IntroDB, and TheIntroDB support
 - A redesigned interface built around browsing, watching, reading, and managing progress
 - Customizable UI
-- Nuvio Plugins
+- Aidoku support
 - And more!
 
 ## Install
