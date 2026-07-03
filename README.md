@@ -99,6 +99,14 @@ https://raw.githubusercontent.com/Soupy-dev/Eclipse/main/altsource.json
 - Development started in December 2025
 
 
+## Bring Your Own Sources
+
+Eclipse ships as an app shell and media manager. It does not provide hosted media, built-in piracy sources, or bundled addons.
+
+Users are responsible for the services and addons they choose to add. The app and developer do not support piracy.
+
+To add a service/addon, click the top right settings icon in the homescreen and then click services. Then click the top right plus icon and choose whichever type of link you copied.
+
 
 ## License
 
@@ -110,14 +118,16 @@ Source code for builds distributed from this repository is available at `https:/
 
 Credits to https://github.com/Aidoku/Aidoku for powering Reader Mode.
 
-Credit to https://github.com/NuvioMedia/NuvioMobile for Nuvio Plugins.
+Credit to https://github.com/NuvioMedia/NuvioMobile for Nuvio Plugins. (Soon to be removed due to Apple's policies)
+
+Acknowledgments inherited from parent repo:
+
+https://github.com/undeaDD/FakeWebKit
+
+https://github.com/onevcat/Kingfisher
+
+https://github.com/mpvkit/MPVKit
+
+https://github.com/cranci1/SoraCore
 
 This program comes with no warranty, to the extent permitted by law.
-
-## Bring Your Own Sources
-
-Eclipse ships as an app shell and media manager. It does not provide hosted media, built-in piracy sources, or bundled addons.
-
-Users are responsible for the services and addons they choose to add. The app and developer do not support piracy.
-
-To add a service/addon, click the top right settings icon in the homescreen and then click services. Then click the top right plus icon and choose whichever type of link you copied.
