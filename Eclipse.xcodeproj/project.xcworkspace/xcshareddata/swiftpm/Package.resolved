@@ -1,5 +1,5 @@
 {
-  "originHash" : "4561a9088cc02d530cf0726a874107be63f44ab1ddffae049809036cedc44807",
+  "originHash" : "e8fcbbf86d3234f4ca2fd9cf317996117498f9c359e2e49dd7e0fea1744d604c",
   "pins" : [
     {
       "identity" : "aidokurunner",
@@ -29,6 +29,15 @@
       }
     },
     {
+      "identity" : "lrucache",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/nicklockwood/LRUCache.git",
+      "state" : {
+        "revision" : "cb5b2bd0da83ad29c0bec762d39f41c8ad0eaf3e",
+        "version" : "1.2.1"
+      }
+    },
+    {
       "identity" : "mpvkit",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/Soupy-dev/MPVKit",
@@ -44,6 +53,15 @@
       "state" : {
         "revision" : "0ead44350d2737db384908569c012fe67c421e4d",
         "version" : "12.8.0"
+      }
+    },
+    {
+      "identity" : "plcrashreporter",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/microsoft/plcrashreporter.git",
+      "state" : {
+        "revision" : "0254f941c646b1ed17b243654723d0f071e990d0",
+        "version" : "1.12.2"
       }
     },
     {
@@ -65,15 +83,6 @@
       }
     },
     {
-      "identity" : "texture",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Skittyblock/Texture.git",
-      "state" : {
-        "revision" : "6a6475db9bf9f7e04731ab60053c3ca4934c1ac6",
-        "version" : "3.1.1"
-      }
-    },
-    {
       "identity" : "swiftlintplugins",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/SimplyDanny/SwiftLintPlugins",
@@ -89,6 +98,15 @@
       "state" : {
         "revision" : "4206bc7b8bd9a4ff8e9511211e1b4bff979ef9c4",
         "version" : "2.11.1"
+      }
+    },
+    {
+      "identity" : "texture",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Skittyblock/Texture.git",
+      "state" : {
+        "revision" : "6a6475db9bf9f7e04731ab60053c3ca4934c1ac6",
+        "version" : "3.1.1"
       }
     },
     {
