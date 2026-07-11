@@ -431,10 +431,6 @@ final class IntroDBAppService {
             return []
         }
 
-        if let body = String(data: data, encoding: .utf8) {
-            Logger.shared.log("IntroDBAppService: Raw response preview \(body.prefix(700))", type: "IntroDB")
-        }
-
         let decoded = try JSONDecoder().decode(IntroDBAppResponse.self, from: data)
         let maxDuration = episodeDuration.isFinite && episodeDuration > 0 ? episodeDuration : nil
 

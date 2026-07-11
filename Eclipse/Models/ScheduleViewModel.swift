@@ -60,7 +60,7 @@ struct ScheduleEntry: Identifiable {
     let airingAt: Date
     let episode: Int
     let season: Int?
-    let coverImage: String?
+    var coverImage: String?
     let englishTitle: String?
     let romajiTitle: String?
     let nativeTitle: String?
@@ -129,34 +129,75 @@ struct ScheduleEntry: Identifiable {
 }
 
 final class ScheduleViewModel: ObservableObject {
+    static let shared = ScheduleViewModel()
+
     @Published var isLoading = true
     @Published var errorMessage: String?
     @Published var scheduleEntries: [ScheduleEntry] = []
     @Published var dayBuckets: [DayBucket] = []
     @Published var currentDayAnchor = Date()
+    private(set) var loadedScheduleMode: ScheduleMode?
 
     private let scheduleDayCount = 7
     private var animeScheduleEntries: [ScheduleEntry]?
     private var westernScheduleEntries: [ScheduleEntry]?
+    private var activeLoadID: UUID?
+    private var activeLoadMode: ScheduleMode?
+    private var activePosterHydrationID: UUID?
+    private var posterHydrationTask: Task<Void, Never>?
+    private var posterHydrationAttemptedTMDBIDs = Set<Int>()
+    private var currentLocalTimeZone = true
 
     init() {}
 
     func loadSchedule(mode: ScheduleMode, localTimeZone: Bool, forceRefresh: Bool = false) async {
-        await MainActor.run {
+        let loadID = UUID()
+        let shouldStart = await MainActor.run { () -> Bool in
+            if !forceRefresh, activeLoadID != nil, activeLoadMode == mode {
+                return false
+            }
+            posterHydrationTask?.cancel()
+            posterHydrationTask = nil
+            activePosterHydrationID = nil
+            activeLoadID = loadID
+            activeLoadMode = mode
+            currentLocalTimeZone = localTimeZone
+            if forceRefresh {
+                posterHydrationAttemptedTMDBIDs.removeAll(keepingCapacity: true)
+            }
             isLoading = true
             errorMessage = nil
+            return true
         }
+        guard shouldStart else { return }
 
         do {
             let entries = try await entries(for: mode, forceRefresh: forceRefresh)
             await MainActor.run {
+                guard activeLoadID == loadID else { return }
+                activeLoadID = nil
+                activeLoadMode = nil
                 isLoading = false
                 scheduleEntries = entries
+                loadedScheduleMode = mode
                 currentDayAnchor = Date()
                 updateBuckets(with: entries, localTimeZone: localTimeZone)
+                startPosterHydrationIfNeeded(for: entries, loadID: loadID)
             }
         } catch {
+            if Self.isIntentionalCancellation(error) {
+                await MainActor.run {
+                    guard activeLoadID == loadID else { return }
+                    activeLoadID = nil
+                    activeLoadMode = nil
+                    isLoading = false
+                }
+                return
+            }
             await MainActor.run {
+                guard activeLoadID == loadID else { return }
+                activeLoadID = nil
+                activeLoadMode = nil
                 isLoading = false
                 errorMessage = error.localizedDescription
             }
@@ -170,21 +211,37 @@ final class ScheduleViewModel: ObservableObject {
         case .western:
             return try await westernEntries(forceRefresh: forceRefresh)
         case .combined:
+            async let animeResult = scheduleSourceResult {
+                try await self.animeEntries(forceRefresh: forceRefresh)
+            }
+            async let westernResult = scheduleSourceResult {
+                try await self.westernEntries(forceRefresh: forceRefresh)
+            }
+
+            let sourceResults = await (animeResult, westernResult)
             var combinedEntries: [ScheduleEntry] = []
             var firstError: Error?
             var loadedSource = false
 
-            do {
-                combinedEntries += try await animeEntries(forceRefresh: forceRefresh)
+            switch sourceResults.0 {
+            case .success(let entries):
+                combinedEntries += entries
                 loadedSource = true
-            } catch {
+            case .failure(let error):
+                if Self.isIntentionalCancellation(error) {
+                    throw CancellationError()
+                }
                 firstError = error
             }
 
-            do {
-                combinedEntries += try await westernEntries(forceRefresh: forceRefresh)
+            switch sourceResults.1 {
+            case .success(let entries):
+                combinedEntries += entries
                 loadedSource = true
-            } catch {
+            case .failure(let error):
+                if Self.isIntentionalCancellation(error) {
+                    throw CancellationError()
+                }
                 firstError = firstError ?? error
             }
 
@@ -195,12 +252,25 @@ final class ScheduleViewModel: ObservableObject {
         }
     }
 
+    private func scheduleSourceResult(
+        operation: () async throws -> [ScheduleEntry]
+    ) async -> Result<[ScheduleEntry], Error> {
+        do {
+            return .success(try await operation())
+        } catch {
+            return .failure(error)
+        }
+    }
+
     private func animeEntries(forceRefresh: Bool) async throws -> [ScheduleEntry] {
         if !forceRefresh, let animeScheduleEntries {
             return animeScheduleEntries
         }
-        let entries = try await AniListService.shared.fetchAiringSchedule(daysAhead: scheduleDayCount)
-            .map(ScheduleEntry.init(animeEntry:))
+        let schedule = try await retryOnceAfterTransientCancellation(operationName: "AniList schedule") {
+            try await AniListService.shared.fetchAiringSchedule(daysAhead: scheduleDayCount)
+        }
+        let entries = schedule.map(ScheduleEntry.init(animeEntry:))
+        try Task.checkCancellation()
         animeScheduleEntries = entries
         return entries
     }
@@ -211,13 +281,60 @@ final class ScheduleViewModel: ObservableObject {
         }
         let entries: [ScheduleEntry]
         do {
-            entries = try await TraktScheduleService.shared.fetchSchedule(dayCount: scheduleDayCount)
+            entries = try await retryOnceAfterTransientCancellation(operationName: "Trakt schedule") {
+                try await TraktScheduleService.shared.fetchSchedule(dayCount: scheduleDayCount)
+            }
         } catch {
+            if Self.isIntentionalCancellation(error) {
+                throw CancellationError()
+            }
             Logger.shared.log("TraktScheduleService: falling back to TVMaze: \(error.localizedDescription)", type: "TMDB")
             entries = try await TVMazeService.shared.fetchSchedule(dayCount: scheduleDayCount)
         }
+        try Task.checkCancellation()
         westernScheduleEntries = entries
         return entries
+    }
+
+    private func retryOnceAfterTransientCancellation<T>(
+        operationName: String,
+        operation: () async throws -> T
+    ) async throws -> T {
+        try Task.checkCancellation()
+        do {
+            let result = try await operation()
+            try Task.checkCancellation()
+            return result
+        } catch {
+            if Self.isIntentionalCancellation(error) {
+                throw CancellationError()
+            }
+            guard Self.isTransportCancellation(error) else {
+                throw error
+            }
+
+            Logger.shared.log(
+                "ScheduleViewModel: transient \(operationName) cancellation; retrying once after 1 second",
+                type: "TMDB"
+            )
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+            try Task.checkCancellation()
+            let result = try await operation()
+            try Task.checkCancellation()
+            return result
+        }
+    }
+
+    private static func isIntentionalCancellation(_ error: Error) -> Bool {
+        Task.isCancelled || error is CancellationError
+    }
+
+    private static func isTransportCancellation(_ error: Error) -> Bool {
+        if let urlError = error as? URLError {
+            return urlError.code == .cancelled
+        }
+        let nsError = error as NSError
+        return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
     }
 
     func updateBuckets(with entries: [ScheduleEntry], localTimeZone: Bool) {
@@ -244,6 +361,7 @@ final class ScheduleViewModel: ObservableObject {
     }
 
     func regroupBuckets(localTimeZone: Bool) {
+        currentLocalTimeZone = localTimeZone
         updateBuckets(with: scheduleEntries, localTimeZone: localTimeZone)
     }
 
@@ -256,9 +374,51 @@ final class ScheduleViewModel: ObservableObject {
             await loadSchedule(mode: mode, localTimeZone: localTimeZone, forceRefresh: true)
         } else {
             await MainActor.run {
+                currentLocalTimeZone = localTimeZone
                 currentDayAnchor = Date()
                 updateBuckets(with: scheduleEntries, localTimeZone: localTimeZone)
             }
+        }
+    }
+
+    @MainActor
+    private func startPosterHydrationIfNeeded(for entries: [ScheduleEntry], loadID: UUID) {
+        let westernEntries = entries.filter {
+            guard $0.source == .western,
+                  let tmdbId = $0.tmdbId,
+                  $0.coverImage == nil else {
+                return false
+            }
+            return !posterHydrationAttemptedTMDBIDs.contains(tmdbId)
+        }
+        guard !westernEntries.isEmpty else { return }
+
+        activePosterHydrationID = loadID
+        posterHydrationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let details = await TraktScheduleService.shared.fetchTMDBDetails(for: westernEntries)
+            guard !Task.isCancelled, self.activePosterHydrationID == loadID else { return }
+            posterHydrationAttemptedTMDBIDs.formUnion(westernEntries.compactMap(\.tmdbId))
+
+            if !details.isEmpty {
+                var hydratedEntries = self.scheduleEntries
+                for index in hydratedEntries.indices {
+                    guard let tmdbId = hydratedEntries[index].tmdbId,
+                          let detail = details[tmdbId] else {
+                        continue
+                    }
+                    hydratedEntries[index].coverImage = detail.fullPosterURL
+                }
+
+                scheduleEntries = hydratedEntries
+                westernScheduleEntries = hydratedEntries.filter { $0.source == .western }
+                updateBuckets(
+                    with: hydratedEntries,
+                    localTimeZone: currentLocalTimeZone
+                )
+            }
+            activePosterHydrationID = nil
+            posterHydrationTask = nil
         }
     }
 
@@ -479,13 +639,12 @@ private final class TraktScheduleService {
         let candidates = scheduleCandidates(from: items)
         let filtered = removeDailyShows(from: candidates)
             .sorted { $0.airingAt < $1.airingAt }
-        let tmdbDetails = await fetchTMDBDetails(for: filtered)
 
         return filtered.map { candidate in
             ScheduleEntry(
                 traktItem: candidate.item,
                 airingAt: candidate.airingAt,
-                tmdbDetail: candidate.item.show.ids.tmdb.flatMap { tmdbDetails[$0] }
+                tmdbDetail: nil
             )
         }
     }
@@ -564,10 +723,10 @@ private final class TraktScheduleService {
         return candidates.filter { !dailyShowIds.contains($0.showKey) }
     }
 
-    private func fetchTMDBDetails(for candidates: [TraktScheduleCandidate]) async -> [Int: TMDBTVShowDetail] {
+    func fetchTMDBDetails(for entries: [ScheduleEntry]) async -> [Int: TMDBTVShowDetail] {
         var seen = Set<Int>()
-        let ids = candidates
-            .compactMap { $0.item.show.ids.tmdb }
+        let ids = entries
+            .compactMap(\.tmdbId)
             .filter { seen.insert($0).inserted }
 
         return await withTaskGroup(of: (Int, TMDBTVShowDetail?).self) { group in

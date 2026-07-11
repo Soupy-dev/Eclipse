@@ -10,6 +10,9 @@ class NormalPlayer: AVPlayerViewController, AVPlayerViewControllerDelegate {
     private var playbackDidStart = false
     private var playbackFailureHandled = false
     private var slowProbeCount = 0
+    private var hasBegunMediaStatePlaybackLease = false
+    private var hasEndedMediaStatePlaybackLease = false
+    private var hasFinalizedPlaybackSession = false
     var mediaInfo: MediaInfo?
     var episodePlaybackContext: EpisodePlaybackContext?
     var playbackLaunchContext: PlaybackLaunchContext?
@@ -17,10 +20,21 @@ class NormalPlayer: AVPlayerViewController, AVPlayerViewControllerDelegate {
     
 #if os(iOS)
     private var holdGesture: UILongPressGestureRecognizer?
+    private var preferredAudioSelectionTask: Task<Void, Never>?
+    private var isPictureInPictureActiveOrStarting = false
+    private var hasViewDisappeared = false
+    private var isRestoringFromPictureInPicture = false
 #endif
     
     override func viewDidLoad() {
         super.viewDidLoad()
+        beginMediaStatePlaybackLeaseIfNeeded()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleMediaStateAccountBoundary),
+            name: .mediaStateWillChangeCurrentUser,
+            object: nil
+        )
         
 #if os(iOS)
         setupHoldGesture()
@@ -31,14 +45,31 @@ class NormalPlayer: AVPlayerViewController, AVPlayerViewControllerDelegate {
         }
         setupPlaybackStartupMonitoring()
         setupAudioSession()
+#if os(iOS)
+        schedulePreferredAudioSelection()
+#endif
     }
     
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
-        player?.pause()
-        ProgressManager.shared.flushPendingSave()
-        postPlayerDidCloseNotification()
-        
+#if os(iOS)
+        hasViewDisappeared = true
+        if isPictureInPictureActiveOrStarting {
+            // AVPlayerViewController dismisses its full-screen UI while PiP
+            // keeps playing. The playback lease and progress observer must
+            // remain active until PiP actually stops.
+            return
+        }
+#endif
+        finalizePlaybackSessionIfNeeded()
+        tearDownPlaybackObservers()
+    }
+
+    private func tearDownPlaybackObservers() {
+#if os(iOS)
+        preferredAudioSelectionTask?.cancel()
+        preferredAudioSelectionTask = nil
+#endif
         if let token = timeObserverToken {
             player?.removeTimeObserver(token)
             timeObserverToken = nil
@@ -69,6 +100,79 @@ class NormalPlayer: AVPlayerViewController, AVPlayerViewControllerDelegate {
         }
         NotificationCenter.default.post(name: .playerDidClose, object: self, userInfo: userInfo)
     }
+
+    private func beginMediaStatePlaybackLeaseIfNeeded() {
+        guard mediaInfo != nil, !hasBegunMediaStatePlaybackLease else { return }
+        hasBegunMediaStatePlaybackLease = true
+        MediaStatePlaybackLease.begin()
+    }
+
+    private func finishMediaStatePlaybackLeaseIfNeeded() {
+        guard hasBegunMediaStatePlaybackLease, !hasEndedMediaStatePlaybackLease else { return }
+        hasEndedMediaStatePlaybackLease = true
+        MediaStatePlaybackLease.end()
+    }
+
+    private func persistCurrentProgressForAccountBoundary() {
+        guard let mediaInfo,
+              let item = player?.currentItem else { return }
+        let currentTime = player?.currentTime().seconds ?? .nan
+        let duration = item.duration.seconds
+        guard currentTime.isFinite,
+              duration.isFinite,
+              currentTime >= 0,
+              duration >= 5,
+              currentTime <= duration else { return }
+
+        switch mediaInfo {
+        case .movie(let id, let title, let posterURL, _):
+            ProgressManager.shared.updateMovieProgress(
+                movieId: id,
+                title: title,
+                currentTime: currentTime,
+                totalDuration: duration,
+                posterURL: posterURL
+            )
+        case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, let showPosterURL, let isAnime):
+            ProgressManager.shared.updateEpisodeProgress(
+                showId: showId,
+                seasonNumber: seasonNumber,
+                episodeNumber: episodeNumber,
+                currentTime: currentTime,
+                totalDuration: duration,
+                showTitle: showTitle,
+                showPosterURL: showPosterURL,
+                playbackContext: episodePlaybackContext?.forEpisodeNumber(episodeNumber),
+                isAnime: isAnime || episodePlaybackContext?.hasAnimeMediaId == true
+            )
+        }
+    }
+
+    private func finalizePlaybackSessionIfNeeded(persistLatestPosition: Bool = false) {
+        guard !hasFinalizedPlaybackSession else { return }
+        hasFinalizedPlaybackSession = true
+        player?.pause()
+        if persistLatestPosition {
+            persistCurrentProgressForAccountBoundary()
+        }
+        ProgressManager.shared.flushPendingSave()
+        postPlayerDidCloseNotification()
+        finishMediaStatePlaybackLeaseIfNeeded()
+    }
+
+    @objc private func handleMediaStateAccountBoundary() {
+        // Notification delivery is synchronous. Finish every outgoing-account
+        // write before the sync manager neutralizes or installs another user.
+        guard hasBegunMediaStatePlaybackLease, !hasEndedMediaStatePlaybackLease else { return }
+        finalizePlaybackSessionIfNeeded(persistLatestPosition: true)
+        tearDownPlaybackObservers()
+#if os(iOS)
+        isPictureInPictureActiveOrStarting = false
+        isRestoringFromPictureInPicture = false
+#endif
+        player = nil
+        dismiss(animated: false)
+    }
     
     deinit {
         if let token = timeObserverToken {
@@ -77,10 +181,26 @@ class NormalPlayer: AVPlayerViewController, AVPlayerViewControllerDelegate {
         if let token = startupTimeObserverToken {
             player?.removeTimeObserver(token)
         }
+#if os(iOS)
+        preferredAudioSelectionTask?.cancel()
+#endif
         startupWorkItem?.cancel()
+        NotificationCenter.default.removeObserver(self)
+        finishMediaStatePlaybackLeaseIfNeeded()
     }
     
 #if os(iOS)
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        hasViewDisappeared = false
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        hasViewDisappeared = false
+        isRestoringFromPictureInPicture = false
+    }
+
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
         if UserDefaults.standard.bool(forKey: "alwaysLandscape") {
             return .landscape
@@ -104,8 +224,41 @@ class NormalPlayer: AVPlayerViewController, AVPlayerViewControllerDelegate {
             self.allowsPictureInPicturePlayback = true
         }
     }
+
+    func playerViewControllerWillStartPictureInPicture(_ playerViewController: AVPlayerViewController) {
+        isPictureInPictureActiveOrStarting = true
+    }
+
+    func playerViewControllerDidStartPictureInPicture(_ playerViewController: AVPlayerViewController) {
+        isPictureInPictureActiveOrStarting = true
+    }
+
+    func playerViewController(
+        _ playerViewController: AVPlayerViewController,
+        failedToStartPictureInPictureWithError error: Error
+    ) {
+        isPictureInPictureActiveOrStarting = false
+        if hasViewDisappeared {
+            finalizePlaybackSessionIfNeeded()
+            tearDownPlaybackObservers()
+        }
+    }
+
+    func playerViewControllerWillStopPictureInPicture(_ playerViewController: AVPlayerViewController) {
+        // Keep the lease until AVKit has fully stopped producing playback
+        // callbacks; `didStop` is the account-safe release point.
+    }
+
+    func playerViewControllerDidStopPictureInPicture(_ playerViewController: AVPlayerViewController) {
+        isPictureInPictureActiveOrStarting = false
+        if hasViewDisappeared, !isRestoringFromPictureInPicture {
+            finalizePlaybackSessionIfNeeded()
+            tearDownPlaybackObservers()
+        }
+    }
     
     func playerViewController(_ playerViewController: AVPlayerViewController, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void) {
+        isRestoringFromPictureInPicture = true
         let windowScene = UIApplication.shared.connectedScenes
             .filter { $0.activationState == .foregroundActive }
             .compactMap { $0 as? UIWindowScene }
@@ -122,6 +275,7 @@ class NormalPlayer: AVPlayerViewController, AVPlayerViewControllerDelegate {
                 completionHandler(true)
             }
         } else {
+            isRestoringFromPictureInPicture = false
             completionHandler(false)
         }
     }
@@ -345,6 +499,9 @@ class NormalPlayer: AVPlayerViewController, AVPlayerViewControllerDelegate {
         } else {
             player?.replaceCurrentItem(with: item)
         }
+#if os(iOS)
+        schedulePreferredAudioSelection()
+#endif
         setupPlaybackStartupMonitoring()
         playAtDefaultSpeed()
     }
@@ -415,6 +572,72 @@ class NormalPlayer: AVPlayerViewController, AVPlayerViewControllerDelegate {
         }
     }
 }
+
+#if os(iOS)
+private extension NormalPlayer {
+    func schedulePreferredAudioSelection() {
+        preferredAudioSelectionTask?.cancel()
+        preferredAudioSelectionTask = nil
+
+        guard let item = player?.currentItem else { return }
+        let isAnime: Bool
+        switch mediaInfo {
+        case .movie(_, _, _, let value), .episode(_, _, _, _, _, let value):
+            isAnime = value
+        case nil:
+            isAnime = false
+        }
+        guard let preferredLanguage = PlaybackMediaSelectionIntent
+            .currentDefaults(isAnime: isAnime)
+            .preferredAudioLanguage else {
+            return
+        }
+
+        preferredAudioSelectionTask = Task { @MainActor [weak self, weak item] in
+            guard let self, let item else { return }
+            do {
+                guard let group = try await item.asset.loadMediaSelectionGroup(for: .audible),
+                      !Task.isCancelled,
+                      self.player?.currentItem === item else {
+                    return
+                }
+                let options = group.options.map {
+                    PlaybackLanguageSelectionPolicy.Option(
+                        languageTag: $0.extendedLanguageTag ?? $0.locale?.identifier,
+                        displayName: $0.displayName
+                    )
+                }
+                guard let index = PlaybackLanguageSelectionPolicy.preferredIndex(
+                    in: options,
+                    preferredLanguage: preferredLanguage
+                ), group.options.indices.contains(index) else {
+                    Logger.shared.log(
+                        "NormalPlayer: no embedded audio match for preferred language=\(preferredLanguage) anime=\(isAnime)",
+                        type: "Player"
+                    )
+                    return
+                }
+                let option = group.options[index]
+                item.select(option, in: group)
+                Logger.shared.log(
+                    "NormalPlayer: auto-selected audio=\(option.displayName) preferredLanguage=\(preferredLanguage) anime=\(isAnime)",
+                    type: "Player"
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                guard !Task.isCancelled else { return }
+                Logger.shared.log(
+                    "NormalPlayer: preferred audio selection failed: \(error.localizedDescription)",
+                    type: "Player"
+                )
+            }
+        }
+    }
+
+}
+
+#endif
 
 extension UIViewController {
     func topmostViewController() -> UIViewController {

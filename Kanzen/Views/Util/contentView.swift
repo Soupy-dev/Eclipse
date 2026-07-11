@@ -221,7 +221,11 @@ struct contentView: View {
                             var tempChapters: [Chapter] = []
                             if let chapters = value as? [Any?] {
                                 for (idx, chapter) in chapters.enumerated() {
-                                    if let chapter = chapter as? [Any?], let chapterName = chapter[0] as? String, let rawData = chapter[1] as? [[String: Any?]], let chapterData = rawData.compactMap({ChapterData(dict: $0 as [String : Any])}) as? [ChapterData] {
+                                    if let chapter = chapter as? [Any?],
+                                       chapter.count >= 2,
+                                       let chapterName = chapter[0] as? String,
+                                       let rawData = chapter[1] as? [[String: Any?]],
+                                       let chapterData = rawData.compactMap({ ChapterData(dict: $0 as [String: Any]) }) as? [ChapterData] {
                                         tempChapters.append(Chapter(chapterNumber: chapterName, idx: idx, chapterData: chapterData))
                                     }
                                 }
@@ -546,7 +550,7 @@ struct contentView: View {
     private func chaptersElementView() -> some View {
         if loadingState {
             HStack(spacing: 10) {
-                ProgressView()
+                EclipseLoadingIndicator()
                 Text("Loading chapters...")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
@@ -973,7 +977,7 @@ struct MangaModuleContentLoaderView: View {
                     message: loadError
                 )
             } else {
-                ProgressView("Loading source...")
+                EclipseLoadingIndicator("Loading source...")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .task(id: "\(module.id.uuidString):\(contentParams)") {
                         loadModule()

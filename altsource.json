@@ -22,12 +22,12 @@
                      "category":  "entertainment",
                      "versions":  [
                                       {
-                                          "version":  "2.0.5",
+                                          "version":  "2.1.0",
                                           "buildVersion":  "12",
-                                          "marketingVersion":  "2.0.5",
+                                          "marketingVersion":  "2.1.0",
                                           "date":  "2026-06-26",
-                                          "localizedDescription":  "Eclipse 2.0.5 includes the latest GitHub and sideload release updates.",
-                                          "downloadURL":  "https://github.com/Soupy-dev/Eclipse/releases/download/v2.0.5/Eclipse.ipa",
+                                          "localizedDescription":  "Eclipse 2.1.0 includes the latest GitHub and sideload release updates.",
+                                          "downloadURL":  "https://github.com/Soupy-dev/Eclipse/releases/download/v2.1.0/Eclipse.ipa",
                                           "size":  21433540,
                                           "minOSVersion":  "15.0"
                                       }

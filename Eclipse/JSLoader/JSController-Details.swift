@@ -18,7 +18,7 @@ struct EpisodeLink: Identifiable {
 extension JSController {
     func fetchDetailsJS(url: String, module: Service? = nil, completion: @escaping ([MediaItem], [EpisodeLink]) -> Void) {
         guard let url = URL(string: url) else {
-            Logger.shared.log("Invalid URL in fetchDetailsJS: \(url)", type: "Error")
+            Logger.shared.log("Service detail rejected an invalid URL; value suppressed", type: "Error")
             completion([], [])
             return
         }
@@ -33,8 +33,8 @@ extension JSController {
             }
         }
         
-        if let exception = context.exception {
-            Logger.shared.log("Service detail JavaScript exception service=\(module?.metadata.sourceName ?? "unknown"): \(exception)", type: "Error")
+        if context.exception != nil {
+            Logger.shared.log("Service detail JavaScript exception; untrusted body suppressed", type: "Error")
             endOperation(reason: "exception")
             completion([], [])
             return
@@ -108,7 +108,7 @@ extension JSController {
             }
         }
         
-        let catchBlockDetails: @convention(block) (JSValue) -> Void = { error in
+        let catchBlockDetails: @convention(block) (JSValue) -> Void = { _ in
             detailsGroupQueue.sync {
                 guard !hasLeftDetailsGroup else {
                     Logger.shared.log("extractDetails: catchBlock called but group already left", type: "Debug")
@@ -116,7 +116,7 @@ extension JSController {
                 }
                 hasLeftDetailsGroup = true
                 
-                Logger.shared.log("Promise rejected of extractDetails service=\(module?.metadata.sourceName ?? "unknown"): \(String(describing: error.toString()))", type: "Error")
+                Logger.shared.log("Service detail promise rejected; untrusted body suppressed", type: "Error")
                 dispatchGroup.leave()
             }
         }
@@ -193,7 +193,7 @@ extension JSController {
             }
         }
         
-        let catchBlockEpisodes: @convention(block) (JSValue) -> Void = { error in
+        let catchBlockEpisodes: @convention(block) (JSValue) -> Void = { _ in
             timeoutWorkItem.cancel()
             episodesGroupQueue.sync {
                 guard !hasLeftEpisodesGroup else {
@@ -202,7 +202,7 @@ extension JSController {
                 }
                 hasLeftEpisodesGroup = true
                 
-                Logger.shared.log("Promise rejected of extractEpisodes service=\(module?.metadata.sourceName ?? "unknown"): \(String(describing: error.toString()))", type: "Error")
+                Logger.shared.log("Service episodes promise rejected; untrusted body suppressed", type: "Error")
                 dispatchGroup.leave()
             }
         }
@@ -222,15 +222,15 @@ extension JSController {
     
     func fetchEpisodesJS(url: String, module: Service, completion: @escaping ([EpisodeLink]) -> Void) {
         guard let url = URL(string: url) else {
-            Logger.shared.log("Invalid URL in fetchEpisodesJS service=\(module.metadata.sourceName): \(url)", type: "Error")
+            Logger.shared.log("Service episodes rejected an invalid URL; value suppressed", type: "Error")
             completion([])
             return
         }
 
         let operation = beginServiceOperation(service: module, operation: "extractEpisodes", primaryURL: url.absoluteString)
         
-        if let exception = context.exception {
-            Logger.shared.log("Service episodes JavaScript exception service=\(module.metadata.sourceName): \(exception)", type: "Error")
+        if context.exception != nil {
+            Logger.shared.log("Service episodes JavaScript exception; untrusted body suppressed", type: "Error")
             endServiceOperation(operation, reason: "exception")
             completion([])
             return
@@ -307,14 +307,15 @@ extension JSController {
 
                 Logger.shared.log("Service episodes completed service=\(module.metadata.sourceName) episodeCount=\(episodeLinks.count) target=\(ServiceSandboxState.redactedURL(url.absoluteString))", type: "Service")
                 self.endServiceOperation(operation, reason: "resolved")
-                
+
+                let resolvedEpisodeLinks = episodeLinks
                 DispatchQueue.main.async {
-                    completion(episodeLinks)
+                    completion(resolvedEpisodeLinks)
                 }
             }
         }
         
-        let catchBlockEpisodes: @convention(block) (JSValue) -> Void = { error in
+        let catchBlockEpisodes: @convention(block) (JSValue) -> Void = { _ in
             timeoutWorkItem.cancel()
             completionQueue.sync {
                 guard !hasCompleted else {
@@ -323,7 +324,7 @@ extension JSController {
                 }
                 hasCompleted = true
                 
-                Logger.shared.log("Promise rejected of extractEpisodes service=\(module.metadata.sourceName): \(String(describing: error.toString()))", type: "Error")
+                Logger.shared.log("Service episodes promise rejected; untrusted body suppressed", type: "Error")
                 self.endServiceOperation(operation, reason: "rejected")
                 DispatchQueue.main.async {
                     completion([])

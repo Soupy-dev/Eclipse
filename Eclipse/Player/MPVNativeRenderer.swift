@@ -1,5 +1,4 @@
-// GPU-first libmpv renderers for iOS. OpenGL remains the stable fallback;
-// the MPVKit fork can drive inline playback through MoltenVK/CAMetalLayer
+// GPU-first libmpv renderers for iOS. Inline playback uses MoltenVK/CAMetalLayer,
 // while AVSampleBufferDisplayLayer is reserved for PiP handoff.
 
 import UIKit
@@ -194,6 +193,7 @@ protocol MPVNativeRendererDelegate: AnyObject {
 }
 
 #if os(iOS)
+#if ECLIPSE_ENABLE_OPENGL_RENDERER
 import GLKit
 import OpenGLES
 import Darwin
@@ -2661,6 +2661,57 @@ private func performOnMainSync(_ block: () -> Void) {
         DispatchQueue.main.sync(execute: block)
     }
 }
+#else
+/// Compatibility placeholder for code shared with platforms where the iOS MPV
+/// renderer is unavailable. OpenGL is intentionally not compiled into iOS.
+final class MPVNativeRenderer: PlayerRenderer {
+    enum RendererError: Error { case unavailable }
+
+    weak var delegate: MPVNativeRendererDelegate?
+
+    init(displayLayer: AVSampleBufferDisplayLayer) { }
+    var prefersPictureInPictureLayerActivationBeforeStart: Bool { false }
+    func getRenderingView() -> UIView { UIView() }
+    func renderingLayoutDidChange(containerSize: CGSize) { }
+    func start() throws { throw RendererError.unavailable }
+    func stop() { }
+    func load(url: URL, with preset: PlayerPreset, headers: [String: String]?) { }
+    func reloadCurrentItem() { }
+    func applyPreset(_ preset: PlayerPreset) { }
+    func prepareInitialSeek(to seconds: Double?) { }
+    func beginForegroundUIStallRecovery(reason: String) { }
+    func canStartSampleBufferPictureInPicture() -> Bool { false }
+    func prepareForPictureInPictureStart() { }
+    func finishPictureInPicture() { }
+    func primePictureInPictureFrames(reason: String) { }
+    func activatePictureInPictureLayer() { }
+    func isPictureInPicturePrimed() -> Bool { false }
+    func resumeForegroundRendering(reason: String) { }
+    func pictureInPictureDebugSnapshot() -> String { "mpv unavailable" }
+    func performanceOverlaySnapshot() -> String { "MPV unavailable" }
+    func play() { }
+    func pausePlayback() { }
+    func togglePause() { }
+    func seek(to seconds: Double) { }
+    func seek(by seconds: Double) { }
+    func setSpeed(_ speed: Double) { }
+    func getSpeed() -> Double { 1.0 }
+    func getAudioTracksDetailed() -> [(Int, String, String)] { [] }
+    func getAudioTracks() -> [(Int, String)] { [] }
+    func getCurrentAudioTrackId() -> Int { -1 }
+    func setAudioTrack(id: Int) { }
+    func getSubtitleTracks() -> [(Int, String)] { [] }
+    func getSubtitleTracksDetailed() -> [(Int, String, String, Bool)] { [] }
+    func getCurrentSubtitleTrackId() -> Int { -1 }
+    func setSubtitleTrack(id: Int) { }
+    func disableSubtitles() { }
+    func refreshSubtitleOverlay() { }
+    func loadExternalSubtitles(urls: [String], names: [String]? = nil, enforce: Bool = false) { }
+    func applySubtitleStyle(_ style: SubtitleStyle) { }
+    var isPausedState: Bool { true }
+    var supportsBitmapSubtitleTracks: Bool { false }
+}
+#endif
 
 /// Lightweight per-stream facts surfaced by the performance overlay so heat can be *correlated* with what is
 /// actually being.
@@ -2739,10 +2790,9 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     /// Last logged decode signature (hwdec-current|pixfmt) so the per-load decode-engagement log
     /// fires only when it changes. Reset on each new load.
     private var lastLoggedDecode = ""
-    /// Decoded source video height (from the kit diagnostics), used by the "Upscale by one level" upscaling mode to
-    /// decide whether a.
+    /// Decoded source video height (from the kit diagnostics), used by upscaling modes to choose scaler/cap behavior.
     private var lastKnownSourceHeight: Int = 0
-    /// Decoded source video width, paired with `lastKnownSourceHeight` so the "Upscale by one level"
+    /// Decoded source video width, paired with `lastKnownSourceHeight` so capped upscaling modes
     /// render cap can aspect-fit the source into the view (letterboxed video occupies less than the
     /// full view). 0 until resolved; reset on each new load.
     private var lastKnownSourceWidth: Int = 0
@@ -2755,7 +2805,6 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     private var lastHDRConfigurationSignature = ""
     private var lastTrackListSignature = ""
     private var lastNotifiedSubtitleTrackId: Int?
-
     var isPausedState: Bool { isPaused }
     var currentTime: Double { gpuRenderer.currentTime }
     var duration: Double { gpuRenderer.duration }
@@ -2807,8 +2856,16 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     /// Render-scale multiplier actually used for the drawable.
     private func effectiveRenderScaleMultiplier() -> CGFloat {
         let base = renderScaleMultiplier
-        guard Settings.shared.mpvUpscalingMode == .oneLevelAlways,
-              lastKnownSourceWidth > 0, lastKnownSourceHeight > 0 else {
+        let targetHeight: CGFloat
+        switch Settings.shared.mpvUpscalingMode {
+        case .oneLevelAlways:
+            targetHeight = CGFloat(oneTierAboveHeight(lastKnownSourceHeight))
+        case .upscaleTo4K:
+            targetHeight = 2160
+        case .off, .upscaleTo1080, .auto:
+            return base
+        }
+        guard lastKnownSourceWidth > 0, lastKnownSourceHeight > 0 else {
             return base
         }
         let viewW = hostView.bounds.width
@@ -2820,9 +2877,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         let videoDisplayHeightPoints = (viewW / viewH > srcAspect) ? viewH : viewW / srcAspect
         let nativeVideoDrawableHeight = videoDisplayHeightPoints * currentBaseContentsScale()
         guard nativeVideoDrawableHeight > 1 else { return base }
-        let targetHeight = CGFloat(oneTierAboveHeight(lastKnownSourceHeight))
-        // Cap so the video renders ~one tier above source; min() keeps the heat profile's downscale and never supersamples
-        // above what.
+        // Cap the render target; min() keeps the heat profile's downscale and never supersamples beyond the display.
         return min(base, targetHeight / nativeVideoDrawableHeight)
     }
 
@@ -2841,8 +2896,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         )
     }
 
-    /// Parity init options the kit's gpu-next renderer doesn't set itself, mirroring the OpenGL and sample-buffer
-    /// renderers so the.
+    /// Parity init options the kit's gpu-next renderer doesn't set itself, mirroring the sample-buffer renderer.
     private static func makeAdditionalMPVOptions() -> [String: String] {
         [
             "audio-channels": Settings.shared.mpvSurroundSoundEnabled ? "auto" : "stereo",
@@ -2852,7 +2906,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             "cache-pause-wait": "5",
             "demuxer-max-bytes": "80M",
             "demuxer-readahead-secs": "10",
-            // MoltenVK queue-emulation CPU reduction (mirrors the NuvioMobile reference path).
+            // MoltenVK queue-emulation CPU reduction.
             "vulkan-async-compute": "no",
             "vulkan-async-transfer": "no",
             "vulkan-queue-count": "1",
@@ -2891,7 +2945,14 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     /// profile (which.
     private func resolvedUpscalingScalers() -> (scale: String, cscale: String, dscale: String, deband: String) {
         let cheap = (scale: "bilinear", cscale: "bilinear", dscale: "mitchell", deband: "no")
-        let quality = (scale: "ewa_lanczossharp", cscale: "ewa_lanczossoft", dscale: "mitchell", deband: "yes")
+        // mpv has a known corrupted-frame path when an EWA filter is used for cscale. It is most
+        // visible under sustained gpu-next/MoltenVK upscaling as vertical smearing/stale bands.
+        // Keep EWA for luma detail, but use the non-EWA Lanczos chroma workaround on iPad.
+        let qualityChromaScaler = UIDevice.current.userInterfaceIdiom == .pad ? "lanczos" : "ewa_lanczossoft"
+        let quality = (scale: "ewa_lanczossharp", cscale: qualityChromaScaler, dscale: "mitchell", deband: "yes")
+        // A 4K cap applies to nearly every common source on iPad. Keep the lighter non-EWA Lanczos
+        // scaler for this tier, but enable debanding so the mode matches its advertised behavior.
+        let fourK = (scale: "lanczos", cscale: "bilinear", dscale: "mitchell", deband: "yes")
         // Thermal safety: when the heat profile has dropped to its lowest tier (Low Heat = serious/critical thermal, or
         // the user.
         if qualityProfile.name == "Low Heat" { return cheap }
@@ -2901,6 +2962,9 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         case .upscaleTo1080:
             // Only sub-1080p sources benefit; leave already-HD on the cheap path.
             return (lastKnownSourceHeight > 0 && lastKnownSourceHeight < 1080) ? quality : cheap
+        case .upscaleTo4K:
+            // Only sub-4K sources benefit; leave native 4K+ on the cheap path.
+            return (lastKnownSourceHeight > 0 && lastKnownSourceHeight < 2160) ? fourK : cheap
         case .oneLevelAlways, .auto:
             // Both apply the quality scaler to every source; they differ only in render target
             // (effectiveRenderScaleMultiplier caps oneLevelAlways one tier above source), not here.
@@ -2984,8 +3048,8 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             self.logDecodeEngagement()
             self.notifyTrackChangesIfNeeded(reason: "video-reconfigure")
         }
-        // Activate the playback audio session (category/mode + preferred multichannel output) like
-        // the OpenGL/sample-buffer renderers do - the kit renderer doesn't own this.
+        // Activate the playback audio session (category/mode + preferred multichannel output);
+        // the kit renderer doesn't own this.
         ensureAudioSessionActive()
         try gpuRenderer.start()
         // mpv handle now exists - apply the profile's scalers/deband and drawable scale (the
@@ -3380,7 +3444,9 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
 
     func pictureInPictureDebugSnapshot() -> String {
         let d = gpuRenderer.diagnosticsSnapshot()
-        return "mode=gpu-next-inline presentation=\(d.presentationMode.rawValue) vo=\(d.inlineVideoOutput) api=\(d.inlineGPUAPI) ctx=\(d.inlineGPUContext) running=\(isRunning) paused=\(isPaused) loading=\(isLoading) ready=\(isReadyToSeek) pip=\(isPictureInPictureActive) pos=\(String(format: "%.2f", d.currentTime))/\(String(format: "%.2f", d.duration))"
+        let layer = gpuRenderer.pictureInPictureDisplayLayer
+        let frameCount = d.pictureInPictureDiagnostics?.frameCount ?? 0
+        return "mode=gpu-next-inline presentation=\(d.presentationMode.rawValue) vo=\(d.inlineVideoOutput) api=\(d.inlineGPUAPI) ctx=\(d.inlineGPUContext) running=\(isRunning) paused=\(isPaused) loading=\(isLoading) ready=\(isReadyToSeek) pip=\(isPictureInPictureActive) pos=\(String(format: "%.2f", d.currentTime))/\(String(format: "%.2f", d.duration)) pipFrames=\(frameCount) sourceLayer={hidden=\(layer.isHidden) opacity=\(String(format: "%.2f", layer.opacity)) status=\(layer.status.rawValue) ready=\(layer.isReadyForMoreMediaData) timebase=\(layer.controlTimebase != nil)}"
     }
 
     // MARK: Position / state
@@ -4170,6 +4236,7 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
     }
 }
 
+#if ECLIPSE_ENABLE_OPENGL_RENDERER
 final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
     enum RendererError: Error {
         case mpvCreationFailed
@@ -5834,6 +5901,7 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
         logMPV("PiP hybrid bridge warmup event suppressed event=\(event) detail={\(detail)}")
     }
 }
+#endif
 #endif
 
 #else

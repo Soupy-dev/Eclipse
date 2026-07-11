@@ -129,3 +129,9 @@ iOSInjectionProject/
 **/xcshareddata/WorkspaceSettings.xcsettings
 
 # End of https://www.toptal.com/developers/gitignore/api/macos,swift,xcode
+
+# Local-only build/audit tooling and tvOS test targets. CI workflows inline
+# their own validation logic and do not depend on scripts/ being checked out.
+/scripts/
+/EclipseTVTests/
+/EclipseTVUITests/

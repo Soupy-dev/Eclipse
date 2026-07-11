@@ -76,6 +76,7 @@ struct BackupData: Codable {
     var defaultSubtitleLanguage: String
     var playerSubtitleAppearanceEnabled: Bool
 
+    var preferredAutoAudioLanguage: String
     var preferredAnimeAudioLanguage: String
     var inAppPlayer: String
     var showScheduleTab: Bool
@@ -98,6 +99,7 @@ struct BackupData: Codable {
     var showEpisodeBrowserButton: Bool = true
     var showNextEpisodePosterButton: Bool = false
     var nextEpisodeThreshold: Double = 0.90
+    var nextEpisodeSkipFillerEnabled: Bool = NextEpisodeFillerSettings.defaultEnabled
     var playerBrightnessGestureEnabled: Bool = false
     var playerVolumeGestureEnabled: Bool = false
     var playerTwoFingerTapPlayPauseEnabled: Bool = true
@@ -110,9 +112,15 @@ struct BackupData: Codable {
     var mpvForegroundFPS: Int = 30
     var mpvRenderBackend: String = MPVRenderBackend.defaultBackend.rawValue
     var mpvMetalQualityProfile: String = MPVMetalQualityProfile.defaultProfile.rawValue
+    var mpvUpscalingMode: String = MPVUpscalingMode.defaultMode.rawValue
+    var mpvPlayerSkin: String = MPVPlayerSkin.defaultSkin.rawValue
+    var mpvPlayerSkinCustomPrimaryColor: Data?
+    var mpvPlayerSkinCustomSecondaryColor: Data?
+    var mpvPlayerSkinAnimationsEnabled: Bool = MPVPlayerSkinSettings.defaultAnimationsEnabled
     var mpvAppExitPictureInPictureEnabled: Bool = false
     var mpvHDRMode: String = MPVHDRMode.defaultMode.rawValue
     var mpvSurroundSoundEnabled: Bool = true
+    var watchTogetherEnabled: Bool = WatchTogetherSettings.defaultEnabled
     var smartInAppPlayerChoosingEnabled: Bool = false
     var experimentalFeaturesEnabled: Bool = false
     var experimentalFeaturesLastChangedAt: Double = 0
@@ -142,12 +150,15 @@ struct BackupData: Codable {
     var kanzenAutoUpdateModules: Bool = true
     var seasonMenu: Bool = false
     var horizontalEpisodeList: Bool = false
+    var mediaDetailTitleArtworkEnabled: Bool = MediaDetailTitleArtworkSettings.defaultEnabled
+    var mediaDetailSimilarTitlesEnabled: Bool = MediaDetailSimilarTitlesSettings.defaultEnabled
     var useClassicScheduleUI: Bool = false
     var heroBannerCatalogId: String = "trending"
     var heroBannerBehavior: String = HeroBannerBehavior.defaultValue.rawValue
     /// JSON blob of per-catalog home layout overrides (keyed by catalog id). "" when none.
     var homeCatalogLayoutOverrides: String = ""
     var homeAnimatedBackgroundEnabled: Bool?
+    var homeAnimatedBackgroundQuality: String = HomeAnimatedBackgroundQuality.defaultValue.rawValue
     var experimentalMediaDesignPreset: String = ExperimentalMediaDesignPreset.defaultValue.rawValue
     var experimentalHeroBleedLevel: String = ExperimentalHeroBleedLevel.defaultValue.rawValue
     var experimentalHomeCardShape: String = ExperimentalHomeCardShape.defaultValue.rawValue
@@ -234,6 +245,14 @@ struct BackupData: Codable {
     var servicesAutoModeSourceIds: [String] = []
     var servicesAutoModeSourceOrderIds: [String] = []
     var servicesAutoModeQualityPreference: String = AutoModeQualityPreference.defaultPreference.rawValue
+    var servicesStremioStyleSheetEnabled: Bool = ServicesSheetPresentationSettings.defaultStremioStyleEnabled
+    var servicesIncludedStreamLanguages: [String] = []
+    var servicesHiddenStreamLanguages: [String] = []
+    var servicesHideStreamsWithoutLanguageData: Bool = false
+    var servicesHiddenStreamQualities: [Int] = []
+    var servicesHideStreamsWithoutDetectedQuality: Bool = false
+    /// nil preserves the default of applying rules to every Service/Stremio addon; [] means none.
+    var servicesExtraRulesSourceIds: [String]? = nil
     var githubReleaseAutoCheckEnabled: Bool = true
     var githubReleaseUpdateAvailable: Bool = false
     var githubReleaseLatestVersion: String = ""
@@ -268,9 +287,6 @@ struct BackupData: Codable {
     // Stremio addons. Nil means the backup predates this field and restore should leave existing addons alone.
     var stremioAddons: [BackupStremioAddon]? = nil
 
-    // Nuvio plugins. Nil means the backup predates this field and restore should leave existing plugins alone.
-    var nuvioPlugins: NuvioStoredPluginsState? = nil
-
     // Manga / Kanzen data
     var mangaCollections: [BackupMangaCollection] = []
     var mangaReadingProgress: [String: MangaProgress] = [:]
@@ -286,86 +302,33 @@ struct BackupData: Codable {
     var userRatings: [String: Double] = [:]
     var userRatingNotes: [String: String] = [:]
 
+    /// Safe media-state settings that are also eligible for CloudKit sync.
+    /// Values are property-list encoded so newer settings do not have to wait
+    /// for this backup model to grow another hand-written field.
+    var mediaStateSettings: [String: Data]? = nil
+
+    // These presence flags are intentionally not encoded. They let restores of
+    // newer backups clear an explicitly empty domain while older backups that
+    // predate that domain continue to preserve the device's existing data.
+    private(set) var hasMangaCollections = true
+    private(set) var hasMangaReadingProgress = true
+    private(set) var hasMangaCatalogs = true
+    private(set) var hasKanzenModules = true
+    private(set) var hasUserRatings = true
+
     func redactedForExperimentalCloudSync() -> BackupData {
         var snapshot = self
 
-        snapshot.services = services.compactMap { service in
-            guard let safeURL = Self.cloudSafeURLString(service.url),
-                  !Self.containsCloudUnsafeSecret(service.jsonMetadata),
-                  !Self.containsCloudUnsafeSecret(service.jsScript) else {
-                return nil
-            }
-            return BackupService(
-                id: service.id,
-                url: safeURL,
-                jsonMetadata: service.jsonMetadata,
-                jsScript: service.jsScript,
-                isActive: service.isActive,
-                sortIndex: service.sortIndex
-            )
+        snapshot.trackerState.accounts = trackerState.accounts.map { account in
+            var metadataOnly = account
+            metadataOnly.accessToken = ""
+            metadataOnly.refreshToken = nil
+            metadataOnly.expiresAt = nil
+            return metadataOnly
         }
 
-        snapshot.stremioAddons = stremioAddons?.compactMap { addon in
-            guard let safeURL = Self.cloudSafeURLString(addon.configuredURL),
-                  !Self.containsCloudUnsafeSecret(addon.manifestJSON) else {
-                return nil
-            }
-            return BackupStremioAddon(
-                id: addon.id,
-                configuredURL: safeURL,
-                manifestJSON: addon.manifestJSON,
-                isActive: addon.isActive,
-                sortIndex: addon.sortIndex
-            )
-        }
-
-        if var plugins = nuvioPlugins {
-            plugins.repositories = plugins.repositories.compactMap { repository in
-                guard let safeURL = Self.cloudSafeURLString(repository.manifestUrl) else { return nil }
-                return NuvioPluginRepositoryItem(
-                    manifestUrl: safeURL,
-                    name: repository.name,
-                    description: repository.description,
-                    version: repository.version,
-                    scraperCount: repository.scraperCount,
-                    lastUpdated: repository.lastUpdated,
-                    isRefreshing: false,
-                    errorMessage: nil
-                )
-            }
-            let repositoryURLs = Set(plugins.repositories.map(\.manifestUrl))
-            plugins.scrapers = plugins.scrapers.compactMap { scraper in
-                guard repositoryURLs.contains(scraper.repositoryUrl),
-                      !scraper.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                      !scraper.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                    return nil
-                }
-
-                return NuvioPluginScraper(
-                    id: scraper.id,
-                    repositoryUrl: scraper.repositoryUrl,
-                    name: scraper.name,
-                    description: scraper.description,
-                    version: scraper.version,
-                    filename: scraper.filename,
-                    supportedTypes: scraper.supportedTypes,
-                    enabled: scraper.enabled,
-                    manifestEnabled: scraper.manifestEnabled,
-                    logo: scraper.logo.flatMap(Self.cloudSafeURLString),
-                    contentLanguage: scraper.contentLanguage,
-                    formats: scraper.formats,
-                    code: ""
-                )
-            }
-            let scraperIDs = Set(plugins.scrapers.map(\.id))
-            plugins.scraperSettingsJSON = plugins.scraperSettingsJSON?.filter { scraperID, rawJSON in
-                scraperIDs.contains(scraperID) && !Self.containsCloudUnsafeSecret(rawJSON)
-            }
-            if plugins.scraperSettingsJSON?.isEmpty == true {
-                plugins.scraperSettingsJSON = nil
-            }
-            snapshot.nuvioPlugins = plugins
-        }
+        snapshot.services = services.compactMap(Self.serviceForExperimentalCloudSync)
+        snapshot.stremioAddons = stremioAddons?.compactMap(Self.stremioAddonForExperimentalCloudSync)
 
         snapshot.kanzenModules = kanzenModules.filter {
             Self.cloudSafeURLString($0.moduleurl) != nil &&
@@ -442,21 +405,105 @@ struct BackupData: Codable {
         return secretMarkers.contains { lowercased.contains($0) }
     }
 
+    /// Returns the cloud-safe representation of a service, or nil when its
+    /// install URL/script may contain device-local credentials. The same
+    /// classification is reused during restore so omitted private sources are
+    /// preserved locally rather than mistaken for remote deletions.
+    static func serviceForExperimentalCloudSync(_ service: BackupService) -> BackupService? {
+        guard let safeURL = cloudSafeURLString(service.url),
+              !containsCloudUnsafeSecret(service.jsonMetadata),
+              !containsCloudUnsafeSecret(service.jsScript) else {
+            return nil
+        }
+        return BackupService(
+            id: service.id,
+            url: safeURL,
+            jsonMetadata: service.jsonMetadata,
+            jsScript: service.jsScript,
+            isActive: service.isActive,
+            sortIndex: service.sortIndex
+        )
+    }
+
+    /// Configured Stremio paths and query strings commonly contain opaque
+    /// provider/debrid tokens without a helpful `token=` marker. Only a bare
+    /// HTTP(S) origin is safe to copy through the redacted cloud snapshot.
+    static func stremioAddonForExperimentalCloudSync(
+        _ addon: BackupStremioAddon
+    ) -> BackupStremioAddon? {
+        guard let safeURL = cloudSafeURLString(addon.configuredURL),
+              let components = URLComponents(string: safeURL),
+              components.user == nil,
+              components.password == nil,
+              components.queryItems?.isEmpty != false,
+              components.percentEncodedPath.isEmpty || components.percentEncodedPath == "/",
+              !containsCloudUnsafeSecret(addon.manifestJSON) else {
+            return nil
+        }
+        return BackupStremioAddon(
+            id: addon.id,
+            configuredURL: safeURL,
+            manifestJSON: addon.manifestJSON,
+            isActive: addon.isActive,
+            sortIndex: addon.sortIndex
+        )
+    }
+
+    static func captureMediaStateSettings(from defaults: UserDefaults = .standard) -> [String: Data] {
+        var result: [String: Data] = [:]
+        for key in MediaStateSettingRegistry.allKeys {
+            guard MediaStateSettingRegistry.scope(for: key)?.appliesToCurrentPlatform == true,
+                  let value = defaults.object(forKey: key),
+                  PropertyListSerialization.propertyList(value, isValidFor: .binary),
+                  let data = try? PropertyListSerialization.data(
+                    fromPropertyList: value,
+                    format: .binary,
+                    options: 0
+                  ) else {
+                continue
+            }
+            result[key] = data
+        }
+        return result
+    }
+
+    static func restoreMediaStateSettings(_ settings: [String: Data]?, to defaults: UserDefaults = .standard) {
+        guard let settings else { return }
+        for (key, data) in settings {
+            guard MediaStateSettingRegistry.scope(for: key)?.appliesToCurrentPlatform == true,
+                  let value = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) else {
+                continue
+            }
+            defaults.set(value, forKey: key)
+        }
+    }
+
+    static func mediaStateSettings(fromJSONValue value: Any?) -> [String: Data]? {
+        guard let values = value as? [String: Any] else { return nil }
+        let decoded = values.reduce(into: [String: Data]()) { result, item in
+            guard let base64 = item.value as? String,
+                  let data = Data(base64Encoded: base64) else { return }
+            result[item.key] = data
+        }
+        return decoded
+    }
+
     enum CodingKeys: String, CodingKey {
         case version, createdDate
-        case accentColor, settingsGradientColor, readerAccentColor, tmdbLanguage, selectedAppearance, readerSelectedAppearance, readerGlobalAppearanceEnabled, readerSettingsGradientColor, enableSubtitlesByDefault, defaultSubtitleLanguage, playerSubtitleAppearanceEnabled, enableVLCSubtitleEditMenu, preferredAnimeAudioLanguage, inAppPlayer, playerChoice, showScheduleTab, showLocalScheduleTime, defaultScheduleMode
-        case defaultPlaybackSpeed, holdSpeedPlayer, externalPlayer, preferDownloadedMedia, alwaysLandscape, aniSkipEnabled, introDBEnabled, introDBAppEnabled, aniSkipAutoSkip, skip85sEnabled, skip85sAlwaysVisible, showNextEpisodeButton, showEpisodeBrowserButton, showVLCEpisodeBrowserButton, showNextEpisodePosterButton, nextEpisodeThreshold, vlcHeaderProxyEnabled
-        case playerBrightnessGestureEnabled, playerVolumeGestureEnabled, vlcBrightnessGestureEnabled, vlcVolumeGestureEnabled, playerTwoFingerTapPlayPauseEnabled, playerCenterTapPlayPauseEnabled, playerDoubleTapSeekEnabled, vlcDoubleTapSeekEnabled, playerDoubleTapSeekSeconds, vlcDoubleTapSeekSeconds, playerOpenSubtitlesEnabled, vlcOpenSubtitlesEnabled, playerOpenSubtitlesAutoFallbackEnabled, vlcOpenSubtitlesAutoFallbackEnabled, playerPerformanceOverlayEnabled, mpvForegroundFPS, mpvRenderBackend, mpvMetalQualityProfile, mpvAppExitPictureInPictureEnabled, mpvHDRMode, mpvSurroundSoundEnabled, smartInAppPlayerChoosingEnabled, experimentalFeaturesEnabled, experimentalFeaturesLastChangedAt, experimentalMPVPreloadEnabled, experimentalMPVSmoothTransitionEnabled, experimentalMPVPreloadCellularEnabled, experimentalMPVPreloadWifiLimitMB, experimentalMPVPreloadCellularLimitMB, experimentalMPVShowRemainingTime, experimentalMPVPreciseProgress, experimentalMPVIgnoreSpecialSubtitleStyles, experimentalMPVPreloadAutoClear, experimentalICloudSyncEnabled
+        case accentColor, settingsGradientColor, readerAccentColor, tmdbLanguage, selectedAppearance, readerSelectedAppearance, readerGlobalAppearanceEnabled, readerSettingsGradientColor, enableSubtitlesByDefault, defaultSubtitleLanguage, playerSubtitleAppearanceEnabled, enableVLCSubtitleEditMenu, preferredAutoAudioLanguage, preferredAnimeAudioLanguage, inAppPlayer, playerChoice, showScheduleTab, showLocalScheduleTime, defaultScheduleMode
+        case defaultPlaybackSpeed, holdSpeedPlayer, externalPlayer, preferDownloadedMedia, alwaysLandscape, aniSkipEnabled, introDBEnabled, introDBAppEnabled, aniSkipAutoSkip, skip85sEnabled, skip85sAlwaysVisible, showNextEpisodeButton, showEpisodeBrowserButton, showVLCEpisodeBrowserButton, showNextEpisodePosterButton, nextEpisodeThreshold, nextEpisodeSkipFillerEnabled, vlcHeaderProxyEnabled
+        case playerBrightnessGestureEnabled, playerVolumeGestureEnabled, vlcBrightnessGestureEnabled, vlcVolumeGestureEnabled, playerTwoFingerTapPlayPauseEnabled, playerCenterTapPlayPauseEnabled, playerDoubleTapSeekEnabled, vlcDoubleTapSeekEnabled, playerDoubleTapSeekSeconds, vlcDoubleTapSeekSeconds, playerOpenSubtitlesEnabled, vlcOpenSubtitlesEnabled, playerOpenSubtitlesAutoFallbackEnabled, vlcOpenSubtitlesAutoFallbackEnabled, playerPerformanceOverlayEnabled, mpvForegroundFPS, mpvRenderBackend, mpvMetalQualityProfile, mpvUpscalingMode, mpvPlayerSkin, mpvPlayerSkinCustomPrimaryColor, mpvPlayerSkinCustomSecondaryColor, mpvPlayerSkinAnimationsEnabled, mpvAppExitPictureInPictureEnabled, mpvHDRMode, mpvSurroundSoundEnabled, watchTogetherEnabled, smartInAppPlayerChoosingEnabled, experimentalFeaturesEnabled, experimentalFeaturesLastChangedAt, experimentalMPVPreloadEnabled, experimentalMPVSmoothTransitionEnabled, experimentalMPVPreloadCellularEnabled, experimentalMPVPreloadWifiLimitMB, experimentalMPVPreloadCellularLimitMB, experimentalMPVShowRemainingTime, experimentalMPVPreciseProgress, experimentalMPVIgnoreSpecialSubtitleStyles, experimentalMPVPreloadAutoClear, experimentalICloudSyncEnabled
         case subtitleForegroundColor, subtitleStrokeColor, subtitleStrokeWidth, subtitleFontSize, subtitleVerticalOffset, subtitlesVisible
-        case showKanzen, hideSplashScreen, modeSwitchAnimationEnabled, kanzenAutoUpdateModules, seasonMenu, horizontalEpisodeList, useClassicScheduleUI, heroBannerCatalogId, heroBannerBehavior, homeCatalogLayoutOverrides, homeAnimatedBackgroundEnabled, experimentalMediaDesignPreset, experimentalHeroBleedLevel, experimentalHomeCardShape, experimentalMultiGradientPalette, experimentalHeroHeightScale, experimentalHeroBleedStrength, experimentalHeroFadeDistanceScale, experimentalSectionSpacingScale, experimentalCardRadiusScale, experimentalMediaCardScale, experimentalGlassStrength, experimentalGradientBaseDarkness, experimentalGradientAccentIntensity, experimentalGradientScrollMotion, experimentalGradientUseCustomColors, experimentalGradientColorA, experimentalGradientColorB, experimentalGradientColorC, atmosphereStyle, atmosphereSolidColorSource, atmosphereSolidColor, readerAtmosphereStyle, readerAtmosphereSolidColorSource, readerAtmosphereSolidColor, mediaDetailElementOrder, mediaDetailHiddenElements, readerDetailElementOrder, readerDetailHiddenElements, mediaColumnsPortrait, mediaColumnsLandscape
+        case showKanzen, hideSplashScreen, modeSwitchAnimationEnabled, kanzenAutoUpdateModules, seasonMenu, horizontalEpisodeList, mediaDetailTitleArtworkEnabled, mediaDetailSimilarTitlesEnabled, useClassicScheduleUI, heroBannerCatalogId, heroBannerBehavior, homeCatalogLayoutOverrides, homeAnimatedBackgroundEnabled, homeAnimatedBackgroundQuality, experimentalMediaDesignPreset, experimentalHeroBleedLevel, experimentalHomeCardShape, experimentalMultiGradientPalette, experimentalHeroHeightScale, experimentalHeroBleedStrength, experimentalHeroFadeDistanceScale, experimentalSectionSpacingScale, experimentalCardRadiusScale, experimentalMediaCardScale, experimentalGlassStrength, experimentalGradientBaseDarkness, experimentalGradientAccentIntensity, experimentalGradientScrollMotion, experimentalGradientUseCustomColors, experimentalGradientColorA, experimentalGradientColorB, experimentalGradientColorC, atmosphereStyle, atmosphereSolidColorSource, atmosphereSolidColor, readerAtmosphereStyle, readerAtmosphereSolidColorSource, readerAtmosphereSolidColor, mediaDetailElementOrder, mediaDetailHiddenElements, readerDetailElementOrder, readerDetailHiddenElements, mediaColumnsPortrait, mediaColumnsLandscape
         case readingMode, kanzenReaderMode, kanzenReaderModeOverrides, readerDownsampleImages, readerCropBorders, readerDisableQuickActions, readerDisableDoubleTap, readerLiveText, readerHideBarsOnSwipe, readerBackgroundColor, readerOrientation, readerTapZones, readerInvertTapZones, readerAnimatePageTransitions, readerUpscaleImages, readerUpscaleMaxHeight, readerUpscaleModelName, readerPagesToPreload, readerPagedPageLayout, readerPagedPageOffset, readerPagedPageOffsetOverrides, readerSplitWideImages, readerReverseSplitOrder, readerVerticalInfiniteScroll, readerPillarbox, readerPillarboxAmount, readerPillarboxOrientation, readerOrientationLockEnabled, readerOrientationLockMask, readerReadThresholdPercent
         case readerFontSize, readerFontFamily, readerFontWeight, readerColorPreset, readerTextAlignment, readerLineSpacing, readerMargin
-        case autoClearCacheEnabled, autoClearCacheThresholdMB, highQualityThreshold, backgroundHLSPipelineEnabled, readerDownloadsBackgroundEnabled, readerDownloadsWifiOnly, readerDownloadsParallelLimit, autoUpdateServicesEnabled, servicesAutoModeEnabled, servicesAutoSelectEpisodesEnabled, servicesAutoModeSourceIds, servicesAutoModeSourceOrderIds, servicesAutoModeQualityPreference, githubReleaseAutoCheckEnabled, githubReleaseUpdateAvailable, githubReleaseLatestVersion, githubReleaseURL, githubReleaseShowAlertPending, githubReleaseLastPromptedVersion, filterHorrorContent = "filterHorror", selectedSimilarityAlgorithm, performanceModeEnabled, performanceModeSkipAniListTraversalForAnimeDetails, performanceModeFastAnimeCatalogOverrides
+        case autoClearCacheEnabled, autoClearCacheThresholdMB, highQualityThreshold, backgroundHLSPipelineEnabled, readerDownloadsBackgroundEnabled, readerDownloadsWifiOnly, readerDownloadsParallelLimit, autoUpdateServicesEnabled, servicesAutoModeEnabled, servicesAutoSelectEpisodesEnabled, servicesAutoModeSourceIds, servicesAutoModeSourceOrderIds, servicesAutoModeQualityPreference, servicesStremioStyleSheetEnabled, servicesIncludedStreamLanguages, servicesHiddenStreamLanguages, servicesHideStreamsWithoutLanguageData, servicesHiddenStreamQualities, servicesHideStreamsWithoutDetectedQuality, servicesExtraRulesSourceIds, githubReleaseAutoCheckEnabled, githubReleaseUpdateAvailable, githubReleaseLatestVersion, githubReleaseURL, githubReleaseShowAlertPending, githubReleaseLastPromptedVersion, filterHorrorContent = "filterHorror", selectedSimilarityAlgorithm, performanceModeEnabled, performanceModeSkipAniListTraversalForAnimeDetails, performanceModeFastAnimeCatalogOverrides
         case kanzenHomeSelectedSourceID, kanzenRecentSourceSearches
-        case collections, progressData, trackerState, catalogs, services, stremioAddons, nuvioPlugins
+        case collections, progressData, trackerState, catalogs, services, stremioAddons
         case mangaCollections, mangaReadingProgress, mangaCatalogs, kanzenModules, aidokuState
         case searchHistory, recommendationCache
         case userRatings, userRatingNotes
+        case mediaStateSettings
     }
 
     init(from decoder: Decoder) throws {
@@ -481,6 +528,7 @@ struct BackupData: Codable {
             ?? container.decodeIfPresent(Bool.self, forKey: .enableVLCSubtitleEditMenu)
             ?? true
 
+        preferredAutoAudioLanguage = try container.decodeIfPresent(String.self, forKey: .preferredAutoAudioLanguage) ?? "eng"
         preferredAnimeAudioLanguage = try container.decodeIfPresent(String.self, forKey: .preferredAnimeAudioLanguage) ?? "jpn"
         // Support both new "inAppPlayer" key and legacy "playerChoice" key
         inAppPlayer = Settings.normalizedInAppPlayer(
@@ -509,6 +557,7 @@ struct BackupData: Codable {
             ?? true
         showNextEpisodePosterButton = try container.decodeIfPresent(Bool.self, forKey: .showNextEpisodePosterButton) ?? false
         nextEpisodeThreshold = try container.decodeIfPresent(Double.self, forKey: .nextEpisodeThreshold) ?? 0.90
+        nextEpisodeSkipFillerEnabled = try container.decodeIfPresent(Bool.self, forKey: .nextEpisodeSkipFillerEnabled) ?? NextEpisodeFillerSettings.defaultEnabled
         playerBrightnessGestureEnabled = try container.decodeIfPresent(Bool.self, forKey: .playerBrightnessGestureEnabled)
             ?? container.decodeIfPresent(Bool.self, forKey: .vlcBrightnessGestureEnabled)
             ?? false
@@ -533,9 +582,15 @@ struct BackupData: Codable {
         mpvForegroundFPS = Self.sanitizedMPVForegroundFPS(try container.decodeIfPresent(Int.self, forKey: .mpvForegroundFPS) ?? 30)
         mpvRenderBackend = Self.sanitizedMPVRenderBackend(try container.decodeIfPresent(String.self, forKey: .mpvRenderBackend))
         mpvMetalQualityProfile = Self.sanitizedMPVMetalQualityProfile(try container.decodeIfPresent(String.self, forKey: .mpvMetalQualityProfile))
+        mpvUpscalingMode = Self.sanitizedMPVUpscalingMode(try container.decodeIfPresent(String.self, forKey: .mpvUpscalingMode))
+        mpvPlayerSkin = Self.sanitizedMPVPlayerSkin(try container.decodeIfPresent(String.self, forKey: .mpvPlayerSkin))
+        mpvPlayerSkinCustomPrimaryColor = try Self.decodeColorData(from: container, forKey: .mpvPlayerSkinCustomPrimaryColor)
+        mpvPlayerSkinCustomSecondaryColor = try Self.decodeColorData(from: container, forKey: .mpvPlayerSkinCustomSecondaryColor)
+        mpvPlayerSkinAnimationsEnabled = try container.decodeIfPresent(Bool.self, forKey: .mpvPlayerSkinAnimationsEnabled) ?? MPVPlayerSkinSettings.defaultAnimationsEnabled
         mpvAppExitPictureInPictureEnabled = try container.decodeIfPresent(Bool.self, forKey: .mpvAppExitPictureInPictureEnabled) ?? false
         mpvHDRMode = MPVHDRMode(rawValue: try container.decodeIfPresent(String.self, forKey: .mpvHDRMode) ?? MPVHDRMode.defaultMode.rawValue)?.rawValue ?? MPVHDRMode.defaultMode.rawValue
         mpvSurroundSoundEnabled = try container.decodeIfPresent(Bool.self, forKey: .mpvSurroundSoundEnabled) ?? true
+        watchTogetherEnabled = try container.decodeIfPresent(Bool.self, forKey: .watchTogetherEnabled) ?? WatchTogetherSettings.defaultEnabled
         smartInAppPlayerChoosingEnabled = try container.decodeIfPresent(Bool.self, forKey: .smartInAppPlayerChoosingEnabled) ?? false
         experimentalFeaturesEnabled = try container.decodeIfPresent(Bool.self, forKey: .experimentalFeaturesEnabled) ?? false
         experimentalFeaturesLastChangedAt = try container.decodeIfPresent(Double.self, forKey: .experimentalFeaturesLastChangedAt) ?? 0
@@ -565,10 +620,13 @@ struct BackupData: Codable {
         kanzenAutoUpdateModules = try container.decodeIfPresent(Bool.self, forKey: .kanzenAutoUpdateModules) ?? true
         seasonMenu = try container.decodeIfPresent(Bool.self, forKey: .seasonMenu) ?? false
         horizontalEpisodeList = try container.decodeIfPresent(Bool.self, forKey: .horizontalEpisodeList) ?? false
+        mediaDetailTitleArtworkEnabled = try container.decodeIfPresent(Bool.self, forKey: .mediaDetailTitleArtworkEnabled) ?? MediaDetailTitleArtworkSettings.defaultEnabled
+        mediaDetailSimilarTitlesEnabled = try container.decodeIfPresent(Bool.self, forKey: .mediaDetailSimilarTitlesEnabled) ?? MediaDetailSimilarTitlesSettings.defaultEnabled
         useClassicScheduleUI = try container.decodeIfPresent(Bool.self, forKey: .useClassicScheduleUI) ?? false
         heroBannerCatalogId = Self.sanitizedNonEmptyString(try container.decodeIfPresent(String.self, forKey: .heroBannerCatalogId), defaultValue: "trending")
         homeCatalogLayoutOverrides = try container.decodeIfPresent(String.self, forKey: .homeCatalogLayoutOverrides) ?? ""
         homeAnimatedBackgroundEnabled = try container.decodeIfPresent(Bool.self, forKey: .homeAnimatedBackgroundEnabled)
+        homeAnimatedBackgroundQuality = Self.sanitizedHomeAnimatedBackgroundQuality(try container.decodeIfPresent(String.self, forKey: .homeAnimatedBackgroundQuality))
         heroBannerBehavior = Self.sanitizedHeroBannerBehavior(try container.decodeIfPresent(String.self, forKey: .heroBannerBehavior))
         experimentalMediaDesignPreset = Self.sanitizedExperimentalMediaDesignPreset(try container.decodeIfPresent(String.self, forKey: .experimentalMediaDesignPreset))
         experimentalHeroBleedLevel = Self.sanitizedExperimentalHeroBleedLevel(try container.decodeIfPresent(String.self, forKey: .experimentalHeroBleedLevel))
@@ -666,6 +724,17 @@ struct BackupData: Codable {
         servicesAutoModeSourceIds = Self.sanitizedStringList(try container.decodeIfPresent([String].self, forKey: .servicesAutoModeSourceIds))
         servicesAutoModeSourceOrderIds = Self.sanitizedStringList(try container.decodeIfPresent([String].self, forKey: .servicesAutoModeSourceOrderIds))
         servicesAutoModeQualityPreference = AutoModeQualityPreference.sanitizedRawValue(try container.decodeIfPresent(String.self, forKey: .servicesAutoModeQualityPreference))
+        servicesStremioStyleSheetEnabled = try container.decodeIfPresent(Bool.self, forKey: .servicesStremioStyleSheetEnabled) ?? ServicesSheetPresentationSettings.defaultStremioStyleEnabled
+        servicesIncludedStreamLanguages = StreamLanguageFilter.sanitizedLanguageList(try container.decodeIfPresent([String].self, forKey: .servicesIncludedStreamLanguages) ?? [])
+        servicesHiddenStreamLanguages = StreamLanguageFilter.sanitizedLanguageList(try container.decodeIfPresent([String].self, forKey: .servicesHiddenStreamLanguages) ?? [])
+        servicesHideStreamsWithoutLanguageData = try container.decodeIfPresent(Bool.self, forKey: .servicesHideStreamsWithoutLanguageData) ?? false
+        servicesHiddenStreamQualities = StreamLanguageFilter.sanitizedQualityHeights(try container.decodeIfPresent([Int].self, forKey: .servicesHiddenStreamQualities) ?? [])
+        servicesHideStreamsWithoutDetectedQuality = try container.decodeIfPresent(Bool.self, forKey: .servicesHideStreamsWithoutDetectedQuality) ?? false
+        if let decodedSourceIds = try container.decodeIfPresent([String].self, forKey: .servicesExtraRulesSourceIds) {
+            servicesExtraRulesSourceIds = StreamLanguageFilter.sanitizedExtraRulesSourceIds(decodedSourceIds)
+        } else {
+            servicesExtraRulesSourceIds = nil
+        }
         githubReleaseAutoCheckEnabled = try container.decodeIfPresent(Bool.self, forKey: .githubReleaseAutoCheckEnabled) ?? true
         githubReleaseUpdateAvailable = try container.decodeIfPresent(Bool.self, forKey: .githubReleaseUpdateAvailable) ?? false
         githubReleaseLatestVersion = try container.decodeIfPresent(String.self, forKey: .githubReleaseLatestVersion) ?? ""
@@ -687,7 +756,6 @@ struct BackupData: Codable {
         catalogs = try container.decodeIfPresent([Catalog].self, forKey: .catalogs) ?? []
         services = try container.decodeIfPresent([BackupService].self, forKey: .services) ?? []
         stremioAddons = try container.decodeIfPresent([BackupStremioAddon].self, forKey: .stremioAddons)
-        nuvioPlugins = try container.decodeIfPresent(NuvioStoredPluginsState.self, forKey: .nuvioPlugins)
         mangaCollections = try container.decodeIfPresent([BackupMangaCollection].self, forKey: .mangaCollections) ?? []
         mangaReadingProgress = try container.decodeIfPresent([String: MangaProgress].self, forKey: .mangaReadingProgress) ?? [:]
         mangaCatalogs = try container.decodeIfPresent([MangaCatalog].self, forKey: .mangaCatalogs) ?? []
@@ -697,6 +765,12 @@ struct BackupData: Codable {
         recommendationCache = try container.decodeIfPresent([TMDBSearchResult].self, forKey: .recommendationCache) ?? []
         userRatings = Self.decodeUserRatings(from: container)
         userRatingNotes = try container.decodeIfPresent([String: String].self, forKey: .userRatingNotes) ?? [:]
+        mediaStateSettings = try container.decodeIfPresent([String: Data].self, forKey: .mediaStateSettings)
+        hasMangaCollections = container.contains(.mangaCollections)
+        hasMangaReadingProgress = container.contains(.mangaReadingProgress)
+        hasMangaCatalogs = container.contains(.mangaCatalogs)
+        hasKanzenModules = container.contains(.kanzenModules)
+        hasUserRatings = container.contains(.userRatings) || container.contains(.userRatingNotes)
     }
 
     static func decodeColorData(from container: KeyedDecodingContainer<CodingKeys>, forKey key: CodingKeys) throws -> Data? {
@@ -770,6 +844,7 @@ struct BackupData: Codable {
         try container.encode(defaultSubtitleLanguage, forKey: .defaultSubtitleLanguage)
         try container.encode(playerSubtitleAppearanceEnabled, forKey: .playerSubtitleAppearanceEnabled)
 
+        try container.encode(preferredAutoAudioLanguage, forKey: .preferredAutoAudioLanguage)
         try container.encode(preferredAnimeAudioLanguage, forKey: .preferredAnimeAudioLanguage)
         try container.encode(inAppPlayer, forKey: .inAppPlayer)
         try container.encode(showScheduleTab, forKey: .showScheduleTab)
@@ -792,6 +867,7 @@ struct BackupData: Codable {
         try container.encode(showEpisodeBrowserButton, forKey: .showEpisodeBrowserButton)
         try container.encode(showNextEpisodePosterButton, forKey: .showNextEpisodePosterButton)
         try container.encode(nextEpisodeThreshold, forKey: .nextEpisodeThreshold)
+        try container.encode(nextEpisodeSkipFillerEnabled, forKey: .nextEpisodeSkipFillerEnabled)
         try container.encode(playerBrightnessGestureEnabled, forKey: .playerBrightnessGestureEnabled)
         try container.encode(playerVolumeGestureEnabled, forKey: .playerVolumeGestureEnabled)
         try container.encode(playerTwoFingerTapPlayPauseEnabled, forKey: .playerTwoFingerTapPlayPauseEnabled)
@@ -804,9 +880,15 @@ struct BackupData: Codable {
         try container.encode(mpvForegroundFPS, forKey: .mpvForegroundFPS)
         try container.encode(mpvRenderBackend, forKey: .mpvRenderBackend)
         try container.encode(mpvMetalQualityProfile, forKey: .mpvMetalQualityProfile)
+        try container.encode(mpvUpscalingMode, forKey: .mpvUpscalingMode)
+        try container.encode(Self.sanitizedMPVPlayerSkin(mpvPlayerSkin), forKey: .mpvPlayerSkin)
+        try container.encodeIfPresent(mpvPlayerSkinCustomPrimaryColor, forKey: .mpvPlayerSkinCustomPrimaryColor)
+        try container.encodeIfPresent(mpvPlayerSkinCustomSecondaryColor, forKey: .mpvPlayerSkinCustomSecondaryColor)
+        try container.encode(mpvPlayerSkinAnimationsEnabled, forKey: .mpvPlayerSkinAnimationsEnabled)
         try container.encode(mpvAppExitPictureInPictureEnabled, forKey: .mpvAppExitPictureInPictureEnabled)
         try container.encode(mpvHDRMode, forKey: .mpvHDRMode)
         try container.encode(mpvSurroundSoundEnabled, forKey: .mpvSurroundSoundEnabled)
+        try container.encode(watchTogetherEnabled, forKey: .watchTogetherEnabled)
         try container.encode(smartInAppPlayerChoosingEnabled, forKey: .smartInAppPlayerChoosingEnabled)
         try container.encode(experimentalFeaturesEnabled, forKey: .experimentalFeaturesEnabled)
         try container.encode(experimentalFeaturesLastChangedAt, forKey: .experimentalFeaturesLastChangedAt)
@@ -836,10 +918,13 @@ struct BackupData: Codable {
         try container.encode(kanzenAutoUpdateModules, forKey: .kanzenAutoUpdateModules)
         try container.encode(seasonMenu, forKey: .seasonMenu)
         try container.encode(horizontalEpisodeList, forKey: .horizontalEpisodeList)
+        try container.encode(mediaDetailTitleArtworkEnabled, forKey: .mediaDetailTitleArtworkEnabled)
+        try container.encode(mediaDetailSimilarTitlesEnabled, forKey: .mediaDetailSimilarTitlesEnabled)
         try container.encode(useClassicScheduleUI, forKey: .useClassicScheduleUI)
         try container.encode(heroBannerCatalogId, forKey: .heroBannerCatalogId)
         try container.encode(homeCatalogLayoutOverrides, forKey: .homeCatalogLayoutOverrides)
         try container.encodeIfPresent(homeAnimatedBackgroundEnabled, forKey: .homeAnimatedBackgroundEnabled)
+        try container.encode(Self.sanitizedHomeAnimatedBackgroundQuality(homeAnimatedBackgroundQuality), forKey: .homeAnimatedBackgroundQuality)
         try container.encode(Self.sanitizedHeroBannerBehavior(heroBannerBehavior), forKey: .heroBannerBehavior)
         try container.encode(Self.sanitizedExperimentalMediaDesignPreset(experimentalMediaDesignPreset), forKey: .experimentalMediaDesignPreset)
         try container.encode(Self.sanitizedExperimentalHeroBleedLevel(experimentalHeroBleedLevel), forKey: .experimentalHeroBleedLevel)
@@ -927,6 +1012,18 @@ struct BackupData: Codable {
         try container.encode(Self.sanitizedStringList(servicesAutoModeSourceIds), forKey: .servicesAutoModeSourceIds)
         try container.encode(Self.sanitizedStringList(servicesAutoModeSourceOrderIds), forKey: .servicesAutoModeSourceOrderIds)
         try container.encode(AutoModeQualityPreference.sanitizedRawValue(servicesAutoModeQualityPreference), forKey: .servicesAutoModeQualityPreference)
+        try container.encode(servicesStremioStyleSheetEnabled, forKey: .servicesStremioStyleSheetEnabled)
+        try container.encode(StreamLanguageFilter.sanitizedLanguageList(servicesIncludedStreamLanguages), forKey: .servicesIncludedStreamLanguages)
+        try container.encode(StreamLanguageFilter.sanitizedLanguageList(servicesHiddenStreamLanguages), forKey: .servicesHiddenStreamLanguages)
+        try container.encode(servicesHideStreamsWithoutLanguageData, forKey: .servicesHideStreamsWithoutLanguageData)
+        try container.encode(StreamLanguageFilter.sanitizedQualityHeights(servicesHiddenStreamQualities), forKey: .servicesHiddenStreamQualities)
+        try container.encode(servicesHideStreamsWithoutDetectedQuality, forKey: .servicesHideStreamsWithoutDetectedQuality)
+        if let servicesExtraRulesSourceIds {
+            try container.encode(
+                StreamLanguageFilter.sanitizedExtraRulesSourceIds(servicesExtraRulesSourceIds),
+                forKey: .servicesExtraRulesSourceIds
+            )
+        }
         try container.encode(githubReleaseAutoCheckEnabled, forKey: .githubReleaseAutoCheckEnabled)
         try container.encode(githubReleaseUpdateAvailable, forKey: .githubReleaseUpdateAvailable)
         try container.encode(githubReleaseLatestVersion, forKey: .githubReleaseLatestVersion)
@@ -947,7 +1044,6 @@ struct BackupData: Codable {
         try container.encode(catalogs, forKey: .catalogs)
         try container.encode(services, forKey: .services)
         try container.encodeIfPresent(stremioAddons, forKey: .stremioAddons)
-        try container.encodeIfPresent(nuvioPlugins, forKey: .nuvioPlugins)
         try container.encode(mangaCollections, forKey: .mangaCollections)
         try container.encode(mangaReadingProgress, forKey: .mangaReadingProgress)
         try container.encode(mangaCatalogs, forKey: .mangaCatalogs)
@@ -957,6 +1053,7 @@ struct BackupData: Codable {
         try container.encode(recommendationCache, forKey: .recommendationCache)
         try container.encode(userRatings, forKey: .userRatings)
         try container.encode(userRatingNotes, forKey: .userRatingNotes)
+        try container.encodeIfPresent(mediaStateSettings, forKey: .mediaStateSettings)
     }
     
     init(
@@ -974,6 +1071,7 @@ struct BackupData: Codable {
         defaultSubtitleLanguage: String,
         playerSubtitleAppearanceEnabled: Bool,
 
+        preferredAutoAudioLanguage: String,
         preferredAnimeAudioLanguage: String,
         inAppPlayer: String,
         showScheduleTab: Bool,
@@ -996,6 +1094,7 @@ struct BackupData: Codable {
         showEpisodeBrowserButton: Bool = true,
         showNextEpisodePosterButton: Bool = false,
         nextEpisodeThreshold: Double = 0.90,
+        nextEpisodeSkipFillerEnabled: Bool = NextEpisodeFillerSettings.defaultEnabled,
         playerBrightnessGestureEnabled: Bool = false,
         playerVolumeGestureEnabled: Bool = false,
         playerTwoFingerTapPlayPauseEnabled: Bool = true,
@@ -1008,9 +1107,15 @@ struct BackupData: Codable {
         mpvForegroundFPS: Int = 30,
         mpvRenderBackend: String = MPVRenderBackend.defaultBackend.rawValue,
         mpvMetalQualityProfile: String = MPVMetalQualityProfile.defaultProfile.rawValue,
+        mpvUpscalingMode: String = MPVUpscalingMode.defaultMode.rawValue,
+        mpvPlayerSkin: String = MPVPlayerSkin.defaultSkin.rawValue,
+        mpvPlayerSkinCustomPrimaryColor: Data? = nil,
+        mpvPlayerSkinCustomSecondaryColor: Data? = nil,
+        mpvPlayerSkinAnimationsEnabled: Bool = MPVPlayerSkinSettings.defaultAnimationsEnabled,
         mpvAppExitPictureInPictureEnabled: Bool = false,
         mpvHDRMode: String = MPVHDRMode.defaultMode.rawValue,
         mpvSurroundSoundEnabled: Bool = true,
+        watchTogetherEnabled: Bool = WatchTogetherSettings.defaultEnabled,
         smartInAppPlayerChoosingEnabled: Bool = false,
         experimentalFeaturesEnabled: Bool = false,
         experimentalFeaturesLastChangedAt: Double = 0,
@@ -1040,11 +1145,14 @@ struct BackupData: Codable {
         kanzenAutoUpdateModules: Bool = true,
         seasonMenu: Bool = false,
         horizontalEpisodeList: Bool = false,
+        mediaDetailTitleArtworkEnabled: Bool = MediaDetailTitleArtworkSettings.defaultEnabled,
+        mediaDetailSimilarTitlesEnabled: Bool = MediaDetailSimilarTitlesSettings.defaultEnabled,
         useClassicScheduleUI: Bool = false,
         heroBannerCatalogId: String = "trending",
         heroBannerBehavior: String = HeroBannerBehavior.defaultValue.rawValue,
         homeCatalogLayoutOverrides: String = "",
         homeAnimatedBackgroundEnabled: Bool? = nil,
+        homeAnimatedBackgroundQuality: String = HomeAnimatedBackgroundQuality.defaultValue.rawValue,
         experimentalMediaDesignPreset: String = ExperimentalMediaDesignPreset.defaultValue.rawValue,
         experimentalHeroBleedLevel: String = ExperimentalHeroBleedLevel.defaultValue.rawValue,
         experimentalHomeCardShape: String = ExperimentalHomeCardShape.defaultValue.rawValue,
@@ -1131,6 +1239,13 @@ struct BackupData: Codable {
         servicesAutoModeSourceIds: [String] = [],
         servicesAutoModeSourceOrderIds: [String] = [],
         servicesAutoModeQualityPreference: String = AutoModeQualityPreference.defaultPreference.rawValue,
+        servicesStremioStyleSheetEnabled: Bool = ServicesSheetPresentationSettings.defaultStremioStyleEnabled,
+        servicesIncludedStreamLanguages: [String] = [],
+        servicesHiddenStreamLanguages: [String] = [],
+        servicesHideStreamsWithoutLanguageData: Bool = false,
+        servicesHiddenStreamQualities: [Int] = [],
+        servicesHideStreamsWithoutDetectedQuality: Bool = false,
+        servicesExtraRulesSourceIds: [String]? = nil,
         githubReleaseAutoCheckEnabled: Bool = true,
         githubReleaseUpdateAvailable: Bool = false,
         githubReleaseLatestVersion: String = "",
@@ -1151,7 +1266,6 @@ struct BackupData: Codable {
         catalogs: [Catalog] = [],
         services: [BackupService] = [],
         stremioAddons: [BackupStremioAddon]? = nil,
-        nuvioPlugins: NuvioStoredPluginsState? = nil,
         mangaCollections: [BackupMangaCollection] = [],
         mangaReadingProgress: [String: MangaProgress] = [:],
         mangaCatalogs: [MangaCatalog] = [],
@@ -1160,7 +1274,13 @@ struct BackupData: Codable {
         searchHistory: BackupSearchHistory = BackupSearchHistory(),
         recommendationCache: [TMDBSearchResult] = [],
         userRatings: [String: Double] = [:],
-        userRatingNotes: [String: String] = [:]
+        userRatingNotes: [String: String] = [:],
+        mediaStateSettings: [String: Data]? = nil,
+        mangaCollectionsPresent: Bool = true,
+        mangaReadingProgressPresent: Bool = true,
+        mangaCatalogsPresent: Bool = true,
+        kanzenModulesPresent: Bool = true,
+        userRatingsPresent: Bool = true
     ) {
         self.version = version
         self.createdDate = createdDate
@@ -1176,6 +1296,7 @@ struct BackupData: Codable {
         self.defaultSubtitleLanguage = defaultSubtitleLanguage
         self.playerSubtitleAppearanceEnabled = playerSubtitleAppearanceEnabled
 
+        self.preferredAutoAudioLanguage = preferredAutoAudioLanguage
         self.preferredAnimeAudioLanguage = preferredAnimeAudioLanguage
         self.inAppPlayer = Settings.normalizedInAppPlayer(inAppPlayer)
         self.showScheduleTab = showScheduleTab
@@ -1197,6 +1318,7 @@ struct BackupData: Codable {
         self.showEpisodeBrowserButton = showEpisodeBrowserButton
         self.showNextEpisodePosterButton = showNextEpisodePosterButton
         self.nextEpisodeThreshold = nextEpisodeThreshold
+        self.nextEpisodeSkipFillerEnabled = nextEpisodeSkipFillerEnabled
         self.playerBrightnessGestureEnabled = playerBrightnessGestureEnabled
         self.playerVolumeGestureEnabled = playerVolumeGestureEnabled
         self.playerTwoFingerTapPlayPauseEnabled = playerTwoFingerTapPlayPauseEnabled
@@ -1209,9 +1331,15 @@ struct BackupData: Codable {
         self.mpvForegroundFPS = Self.sanitizedMPVForegroundFPS(mpvForegroundFPS)
         self.mpvRenderBackend = Self.sanitizedMPVRenderBackend(mpvRenderBackend)
         self.mpvMetalQualityProfile = Self.sanitizedMPVMetalQualityProfile(mpvMetalQualityProfile)
+        self.mpvUpscalingMode = Self.sanitizedMPVUpscalingMode(mpvUpscalingMode)
+        self.mpvPlayerSkin = Self.sanitizedMPVPlayerSkin(mpvPlayerSkin)
+        self.mpvPlayerSkinCustomPrimaryColor = mpvPlayerSkinCustomPrimaryColor
+        self.mpvPlayerSkinCustomSecondaryColor = mpvPlayerSkinCustomSecondaryColor
+        self.mpvPlayerSkinAnimationsEnabled = mpvPlayerSkinAnimationsEnabled
         self.mpvAppExitPictureInPictureEnabled = mpvAppExitPictureInPictureEnabled
         self.mpvHDRMode = MPVHDRMode(rawValue: mpvHDRMode)?.rawValue ?? MPVHDRMode.defaultMode.rawValue
         self.mpvSurroundSoundEnabled = mpvSurroundSoundEnabled
+        self.watchTogetherEnabled = watchTogetherEnabled
         self.smartInAppPlayerChoosingEnabled = smartInAppPlayerChoosingEnabled
         self.experimentalFeaturesEnabled = experimentalFeaturesEnabled
         self.experimentalFeaturesLastChangedAt = experimentalFeaturesLastChangedAt
@@ -1239,11 +1367,14 @@ struct BackupData: Codable {
         self.kanzenAutoUpdateModules = kanzenAutoUpdateModules
         self.seasonMenu = seasonMenu
         self.horizontalEpisodeList = horizontalEpisodeList
+        self.mediaDetailTitleArtworkEnabled = mediaDetailTitleArtworkEnabled
+        self.mediaDetailSimilarTitlesEnabled = mediaDetailSimilarTitlesEnabled
         self.useClassicScheduleUI = useClassicScheduleUI
         self.heroBannerCatalogId = Self.sanitizedNonEmptyString(heroBannerCatalogId, defaultValue: "trending")
         self.heroBannerBehavior = Self.sanitizedHeroBannerBehavior(heroBannerBehavior)
         self.homeCatalogLayoutOverrides = homeCatalogLayoutOverrides
         self.homeAnimatedBackgroundEnabled = homeAnimatedBackgroundEnabled
+        self.homeAnimatedBackgroundQuality = Self.sanitizedHomeAnimatedBackgroundQuality(homeAnimatedBackgroundQuality)
         self.experimentalMediaDesignPreset = Self.sanitizedExperimentalMediaDesignPreset(experimentalMediaDesignPreset)
         self.experimentalHeroBleedLevel = Self.sanitizedExperimentalHeroBleedLevel(experimentalHeroBleedLevel)
         self.experimentalHomeCardShape = Self.sanitizedExperimentalHomeCardShape(experimentalHomeCardShape)
@@ -1327,6 +1458,13 @@ struct BackupData: Codable {
         self.servicesAutoModeSourceIds = Self.sanitizedStringList(servicesAutoModeSourceIds)
         self.servicesAutoModeSourceOrderIds = Self.sanitizedStringList(servicesAutoModeSourceOrderIds)
         self.servicesAutoModeQualityPreference = AutoModeQualityPreference.sanitizedRawValue(servicesAutoModeQualityPreference)
+        self.servicesStremioStyleSheetEnabled = servicesStremioStyleSheetEnabled
+        self.servicesIncludedStreamLanguages = StreamLanguageFilter.sanitizedLanguageList(servicesIncludedStreamLanguages)
+        self.servicesHiddenStreamLanguages = StreamLanguageFilter.sanitizedLanguageList(servicesHiddenStreamLanguages)
+        self.servicesHideStreamsWithoutLanguageData = servicesHideStreamsWithoutLanguageData
+        self.servicesHiddenStreamQualities = StreamLanguageFilter.sanitizedQualityHeights(servicesHiddenStreamQualities)
+        self.servicesHideStreamsWithoutDetectedQuality = servicesHideStreamsWithoutDetectedQuality
+        self.servicesExtraRulesSourceIds = servicesExtraRulesSourceIds.map(StreamLanguageFilter.sanitizedExtraRulesSourceIds)
         self.githubReleaseAutoCheckEnabled = githubReleaseAutoCheckEnabled
         self.githubReleaseUpdateAvailable = githubReleaseUpdateAvailable
         self.githubReleaseLatestVersion = githubReleaseLatestVersion
@@ -1347,7 +1485,6 @@ struct BackupData: Codable {
         self.catalogs = catalogs
         self.services = services
         self.stremioAddons = stremioAddons
-        self.nuvioPlugins = nuvioPlugins
         self.mangaCollections = mangaCollections
         self.mangaReadingProgress = mangaReadingProgress
         self.mangaCatalogs = mangaCatalogs
@@ -1357,6 +1494,12 @@ struct BackupData: Codable {
         self.recommendationCache = recommendationCache
         self.userRatings = userRatings
         self.userRatingNotes = userRatingNotes
+        self.mediaStateSettings = mediaStateSettings
+        self.hasMangaCollections = mangaCollectionsPresent
+        self.hasMangaReadingProgress = mangaReadingProgressPresent
+        self.hasMangaCatalogs = mangaCatalogsPresent
+        self.hasKanzenModules = kanzenModulesPresent
+        self.hasUserRatings = userRatingsPresent
     }
 
     private static func decodeUserRatings(from container: KeyedDecodingContainer<CodingKeys>) -> [String: Double] {
@@ -1383,12 +1526,8 @@ struct BackupData: Codable {
         value == 60 ? 60 : 30
     }
 
-    static func sanitizedMPVRenderBackend(_ value: String?) -> String {
-        guard let value,
-              let backend = MPVRenderBackend(rawValue: value) else {
-            return MPVRenderBackend.defaultBackend.rawValue
-        }
-        return MPVRenderBackendSupport.effectiveBackend(requested: backend, hasMetalDevice: true).rawValue
+    static func sanitizedMPVRenderBackend(_: String?) -> String {
+        MPVRenderBackend.defaultBackend.rawValue
     }
 
     static func sanitizedMPVMetalQualityProfile(_ value: String?) -> String {
@@ -1397,6 +1536,19 @@ struct BackupData: Codable {
             return MPVMetalQualityProfile.defaultProfile.rawValue
         }
         return profile.rawValue
+    }
+
+    static func sanitizedMPVUpscalingMode(_ value: String?) -> String {
+        guard let value,
+              let mode = MPVUpscalingMode(rawValue: value) else {
+            return MPVUpscalingMode.defaultMode.rawValue
+        }
+        return mode.rawValue
+    }
+
+    static func sanitizedMPVPlayerSkin(_ value: String?) -> String {
+        if value == "cypberpunk" { return MPVPlayerSkin.cyberpunk.rawValue }
+        return MPVPlayerSkin(rawValue: value ?? "")?.rawValue ?? MPVPlayerSkin.defaultSkin.rawValue
     }
 
     static func sanitizedMediaDetailElementOrder(_ value: String?) -> String {
@@ -1440,6 +1592,10 @@ struct BackupData: Codable {
             return HeroBannerBehavior.defaultValue.rawValue
         }
         return behavior.rawValue
+    }
+
+    static func sanitizedHomeAnimatedBackgroundQuality(_ value: String?) -> String {
+        HomeAnimatedBackgroundQuality.resolved(value).rawValue
     }
 
     static func sanitizedExperimentalMediaDesignPreset(_ value: String?) -> String {
@@ -1678,6 +1834,16 @@ struct BackupData: Codable {
         value as? [String] ?? []
     }
 
+    static func intList(from value: Any?) -> [Int] {
+        guard let values = value as? [Any] else { return [] }
+        return values.compactMap { value in
+            if let intValue = value as? Int { return intValue }
+            if let number = value as? NSNumber { return number.intValue }
+            if let string = value as? String { return Int(string) }
+            return nil
+        }
+    }
+
 }
 
 // Codable wrapper for Service
@@ -1712,6 +1878,44 @@ struct BackupStremioAddon: Codable {
         manifestJSON = try container.decodeIfPresent(String.self, forKey: .manifestJSON) ?? ""
         isActive = try container.decodeIfPresent(Bool.self, forKey: .isActive) ?? true
         sortIndex = try container.decodeIfPresent(Int64.self, forKey: .sortIndex) ?? 0
+    }
+}
+
+/// A redacted cloud snapshot intentionally omits sources whose configuration
+/// may contain credentials. Those omissions are not deletion signals. Safe
+/// sources still use replacement semantics so a deletion made on another
+/// device propagates normally.
+enum ExperimentalCloudSourceRestorePolicy {
+    static func services(
+        current: [BackupService],
+        incoming: [BackupService]
+    ) -> [BackupService] {
+        let deviceLocal = current.filter {
+            BackupData.serviceForExperimentalCloudSync($0) == nil
+        }
+        let deviceLocalIDs = Set(deviceLocal.map(\.id))
+        return (incoming.filter { !deviceLocalIDs.contains($0.id) } + deviceLocal).sorted {
+            if $0.sortIndex == $1.sortIndex {
+                return $0.id.uuidString < $1.id.uuidString
+            }
+            return $0.sortIndex < $1.sortIndex
+        }
+    }
+
+    static func stremioAddons(
+        current: [BackupStremioAddon],
+        incoming: [BackupStremioAddon]
+    ) -> [BackupStremioAddon] {
+        let deviceLocal = current.filter {
+            BackupData.stremioAddonForExperimentalCloudSync($0) == nil
+        }
+        let deviceLocalIDs = Set(deviceLocal.map(\.id))
+        return (incoming.filter { !deviceLocalIDs.contains($0.id) } + deviceLocal).sorted {
+            if $0.sortIndex == $1.sortIndex {
+                return $0.id.uuidString < $1.id.uuidString
+            }
+            return $0.sortIndex < $1.sortIndex
+        }
     }
 }
 
@@ -1792,6 +1996,14 @@ class BackupManager {
     private let fileManager = FileManager.default
     private let dateFormatter = ISO8601DateFormatter()
 
+    private func performOnMainThread(_ work: () -> Void) {
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.sync(execute: work)
+        }
+    }
+
     private static func parseUserRatings(_ ratings: [String: Any]) -> [String: Double] {
         Dictionary(uniqueKeysWithValues: ratings.compactMap { key, value -> (String, Double)? in
             let numericValue: Double?
@@ -1810,6 +2022,92 @@ class BackupManager {
             let halfStepValue = (finiteValue * 2).rounded() / 2
             return (key, max(0.5, min(10, halfStepValue)))
         })
+    }
+
+    private static func trackerStateWithoutCredentials(_ state: TrackerState) -> TrackerState {
+        var sanitized = state
+        sanitized.accounts = state.accounts.map { account in
+            var metadataOnly = account
+            metadataOnly.accessToken = ""
+            metadataOnly.refreshToken = nil
+            metadataOnly.expiresAt = nil
+            return metadataOnly
+        }
+        return sanitized
+    }
+
+    /// State already owned by CKSyncEngine when the legacy iCloud Documents
+    /// snapshot restores. Capturing the live managers, rather than the local
+    /// media archive, also protects first launch while the initial CloudKit
+    /// fetch is still in flight or the archive is empty.
+    private struct LegacyCloudMediaStateAuthority {
+        let settings: MediaStateLegacyRestoreSettingSnapshot
+        let collections: [LibraryCollection]
+        let progress: ProgressData
+        let ratings: [String: Double]
+        let ratingNotes: [String: String]
+        let catalogs: [Catalog]
+    }
+
+    private func captureLegacyCloudMediaStateAuthority() -> LegacyCloudMediaStateAuthority {
+        let defaults = UserDefaults.standard
+        let persistentDomain: [String: Any]
+        if let bundleIdentifier = Bundle.main.bundleIdentifier {
+            persistentDomain = defaults.persistentDomain(forName: bundleIdentifier) ?? [:]
+        } else {
+            // Test/extension processes may not expose a bundle identifier. Use
+            // the visible domain as a conservative fallback so a legacy restore
+            // still cannot replace the values currently driving the app.
+            persistentDomain = defaults.dictionaryRepresentation()
+        }
+
+        var collections: [LibraryCollection] = []
+        var progress = ProgressData()
+        var ratings: [String: Double] = [:]
+        var ratingNotes: [String: String] = [:]
+        var catalogs: [Catalog] = []
+        performOnMainThread {
+            collections = LibraryManager.shared.collections
+            progress = ProgressManager.shared.getProgressData()
+            ratings = UserRatingManager.shared.getRatingsForBackup()
+            ratingNotes = UserRatingManager.shared.getNotesForBackup()
+            catalogs = CatalogManager.shared.catalogs
+        }
+
+        return LegacyCloudMediaStateAuthority(
+            settings: MediaStateLegacyRestoreSettingSnapshot(persistentDomain: persistentDomain),
+            collections: collections,
+            progress: progress,
+            ratings: ratings,
+            ratingNotes: ratingNotes,
+            catalogs: catalogs
+        )
+    }
+
+    private func restoreLegacyCloudMediaStateAuthority(_ authority: LegacyCloudMediaStateAuthority) {
+        performOnMainThread {
+            let defaults = UserDefaults.standard
+            authority.settings.restore(to: defaults)
+
+            LibraryManager.shared.replaceCollectionsForMediaState(authority.collections)
+            ProgressManager.shared.replaceProgressDataForRestore(authority.progress)
+            UserRatingManager.shared.restoreRatingsAndNotes(
+                ratings: authority.ratings,
+                notes: authority.ratingNotes
+            )
+
+            let catalogManager = CatalogManager.shared
+            catalogManager.setPerformanceModeEnabled(
+                defaults.bool(forKey: PerformanceModeSettings.enabledKey)
+            )
+            catalogManager.catalogs = authority.catalogs
+            catalogManager.saveCatalogs()
+
+            HomeCatalogLayoutStore.shared.reloadFromStorage()
+            Task { @MainActor in
+                EclipseTheme.shared.reloadMediaAppearanceFromDefaults()
+            }
+        }
     }
     
     // MARK: - Export Backup
@@ -1859,12 +2157,22 @@ class BackupManager {
         }
     }
 
-    func restoreExperimentalCloudSnapshot(from data: Data) -> Bool {
+    func restoreExperimentalCloudSnapshot(
+        from data: Data,
+        preserveMediaStateForCloudKit: Bool = true
+    ) -> Bool {
         do {
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             let snapshot = try decoder.decode(BackupData.self, from: data).redactedForExperimentalCloudSync()
-            return applyBackupData(snapshot, refreshCloudSources: true)
+            let mediaStateAuthority = preserveMediaStateForCloudKit
+                ? captureLegacyCloudMediaStateAuthority()
+                : nil
+            let restored = applyBackupData(snapshot, refreshCloudSources: true)
+            if let mediaStateAuthority {
+                restoreLegacyCloudMediaStateAuthority(mediaStateAuthority)
+            }
+            return restored
         } catch {
             Logger.shared.log("Failed to restore experimental iCloud snapshot: \(error.localizedDescription)", type: "iCloud")
             return false
@@ -1897,6 +2205,7 @@ class BackupManager {
             playerSubtitleAppearanceEnabled = userDefaults.bool(forKey: "playerSubtitleAppearanceEnabled")
         }
 
+        let preferredAutoAudioLanguage = userDefaults.string(forKey: "preferredAutoAudioLanguage") ?? "eng"
         let preferredAnimeAudioLanguage = userDefaults.string(forKey: "preferredAnimeAudioLanguage") ?? "jpn"
         let inAppPlayer = Settings.normalizedInAppPlayer(userDefaults.string(forKey: "inAppPlayer"))
         let tmdbLanguage = userDefaults.string(forKey: "tmdbLanguage") ?? "en-US"
@@ -1925,6 +2234,7 @@ class BackupManager {
         let showNextEpisodePosterButton = userDefaults.bool(forKey: "showNextEpisodePosterButton")
         let savedNextThreshold = userDefaults.double(forKey: "nextEpisodeThreshold")
         let nextEpisodeThreshold = savedNextThreshold > 0 ? savedNextThreshold : 0.90
+        let nextEpisodeSkipFillerEnabled = NextEpisodeFillerSettings.isEnabled(defaults: userDefaults)
         let playerBrightnessGestureEnabled = userDefaults.object(forKey: "playerBrightnessGestureEnabled") == nil
             ? (userDefaults.object(forKey: "vlcBrightnessGestureEnabled") as? Bool ?? false)
             : userDefaults.bool(forKey: "playerBrightnessGestureEnabled")
@@ -1955,9 +2265,15 @@ class BackupManager {
         let mpvForegroundFPS = userDefaults.integer(forKey: "mpvForegroundFPS") == 60 ? 60 : 30
         let mpvRenderBackend = BackupData.sanitizedMPVRenderBackend(userDefaults.string(forKey: "mpvRenderBackend"))
         let mpvMetalQualityProfile = BackupData.sanitizedMPVMetalQualityProfile(userDefaults.string(forKey: "mpvMetalQualityProfile"))
+        let mpvUpscalingMode = BackupData.sanitizedMPVUpscalingMode(userDefaults.string(forKey: "mpvUpscalingMode"))
+        let mpvPlayerSkin = BackupData.sanitizedMPVPlayerSkin(userDefaults.string(forKey: MPVPlayerSkinSettings.skinKey))
+        let mpvPlayerSkinCustomPrimaryColor = userDefaults.data(forKey: MPVPlayerSkinSettings.customPrimaryColorKey)
+        let mpvPlayerSkinCustomSecondaryColor = userDefaults.data(forKey: MPVPlayerSkinSettings.customSecondaryColorKey)
+        let mpvPlayerSkinAnimationsEnabled = MPVPlayerSkinSettings.animationsEnabled(defaults: userDefaults)
         let mpvAppExitPictureInPictureEnabled = userDefaults.bool(forKey: "mpvAppExitPictureInPictureEnabled")
         let mpvHDRMode = MPVHDRMode(rawValue: userDefaults.string(forKey: "mpvHDRMode") ?? MPVHDRMode.defaultMode.rawValue)?.rawValue ?? MPVHDRMode.defaultMode.rawValue
         let mpvSurroundSoundEnabled = userDefaults.object(forKey: "mpvSurroundSoundEnabled") == nil ? true : userDefaults.bool(forKey: "mpvSurroundSoundEnabled")
+        let watchTogetherEnabled = WatchTogetherSettings.isEnabled(defaults: userDefaults)
         let smartInAppPlayerChoosingEnabled = false
         ExperimentalFeatureState.registerDefaults(defaults: userDefaults)
         let experimentalFeaturesEnabled = userDefaults.bool(forKey: ExperimentalFeatureState.enabledKey)
@@ -1997,11 +2313,14 @@ class BackupManager {
         let kanzenAutoUpdateModules = ModuleManager.isAutoUpdateEnabled
         let seasonMenu = userDefaults.bool(forKey: "seasonMenu")
         let horizontalEpisodeList = userDefaults.bool(forKey: "horizontalEpisodeList")
+        let mediaDetailTitleArtworkEnabled = MediaDetailTitleArtworkSettings.isEnabled(defaults: userDefaults)
+        let mediaDetailSimilarTitlesEnabled = MediaDetailSimilarTitlesSettings.isEnabled(defaults: userDefaults)
         let useClassicScheduleUI = userDefaults.bool(forKey: "useClassicScheduleUI")
         let heroBannerCatalogId = BackupData.sanitizedNonEmptyString(userDefaults.string(forKey: "heroBannerCatalogId"), defaultValue: "trending")
         let heroBannerBehavior = BackupData.sanitizedHeroBannerBehavior(userDefaults.string(forKey: "heroBannerBehavior"))
         let homeCatalogLayoutOverrides = userDefaults.data(forKey: HomeCatalogLayoutStore.storageKey).flatMap { String(data: $0, encoding: .utf8) } ?? ""
         let homeAnimatedBackgroundEnabled = HomeAnimatedBackgroundSettings.isEnabled(defaults: userDefaults)
+        let homeAnimatedBackgroundQuality = BackupData.sanitizedHomeAnimatedBackgroundQuality(userDefaults.string(forKey: HomeAnimatedBackgroundQuality.storageKey))
         let experimentalMediaDesignPreset = BackupData.sanitizedExperimentalMediaDesignPreset(userDefaults.string(forKey: ExperimentalMediaDesignPreset.storageKey))
         let experimentalHeroBleedLevel = BackupData.sanitizedExperimentalHeroBleedLevel(userDefaults.string(forKey: ExperimentalHeroBleedLevel.storageKey))
         let experimentalHomeCardShape = BackupData.sanitizedExperimentalHomeCardShape(userDefaults.string(forKey: ExperimentalHomeCardShape.storageKey))
@@ -2106,6 +2425,13 @@ class BackupManager {
         let servicesAutoModeSourceIds = BackupData.sanitizedStringList(userDefaults.stringArray(forKey: "servicesAutoModeSourceIds"))
         let servicesAutoModeSourceOrderIds = BackupData.sanitizedStringList(userDefaults.stringArray(forKey: "servicesAutoModeSourceOrderIds"))
         let servicesAutoModeQualityPreference = AutoModeQualityPreference.sanitizedRawValue(userDefaults.string(forKey: AutoModeQualityPreference.storageKey))
+        let servicesStremioStyleSheetEnabled = ServicesSheetPresentationSettings.usesStremioStyle(defaults: userDefaults)
+        let servicesIncludedStreamLanguages = StreamLanguageFilter.includedLanguages(defaults: userDefaults)
+        let servicesHiddenStreamLanguages = StreamLanguageFilter.hiddenLanguages(defaults: userDefaults)
+        let servicesHideStreamsWithoutLanguageData = StreamLanguageFilter.hidesStreamsWithoutLanguageData(defaults: userDefaults)
+        let servicesHiddenStreamQualities = StreamLanguageFilter.hiddenQualityHeights(defaults: userDefaults)
+        let servicesHideStreamsWithoutDetectedQuality = StreamLanguageFilter.hidesStreamsWithoutDetectedQuality(defaults: userDefaults)
+        let servicesExtraRulesSourceIds = StreamLanguageFilter.extraRulesSourceIds(defaults: userDefaults)
         let githubReleaseAutoCheckEnabled = userDefaults.object(forKey: "githubReleaseAutoCheckEnabled") == nil ? true : userDefaults.bool(forKey: "githubReleaseAutoCheckEnabled")
         let githubReleaseUpdateAvailable = userDefaults.bool(forKey: "githubReleaseUpdateAvailable")
         let githubReleaseLatestVersion = userDefaults.string(forKey: "githubReleaseLatestVersion") ?? ""
@@ -2139,10 +2465,10 @@ class BackupManager {
         let trackerManager = TrackerManager.shared
         let trackerState: TrackerState
         if Thread.isMainThread {
-            trackerState = trackerManager.trackerState
+            trackerState = Self.trackerStateWithoutCredentials(trackerManager.trackerState)
         } else {
             trackerState = DispatchQueue.main.sync {
-                trackerManager.trackerState
+                Self.trackerStateWithoutCredentials(trackerManager.trackerState)
             }
         }
         
@@ -2175,8 +2501,6 @@ class BackupManager {
                 sortIndex: entity.sortIndex
             )
         }
-
-        let nuvioPlugins = NuvioPluginManager.persistedBackupState()
 
         // Get manga library collections
         let mangaLibraryManager = MangaLibraryManager.shared
@@ -2230,6 +2554,7 @@ class BackupManager {
             defaultSubtitleLanguage: defaultSubtitleLanguage,
             playerSubtitleAppearanceEnabled: playerSubtitleAppearanceEnabled,
 
+            preferredAutoAudioLanguage: preferredAutoAudioLanguage,
             preferredAnimeAudioLanguage: preferredAnimeAudioLanguage,
             inAppPlayer: inAppPlayer,
             showScheduleTab: showScheduleTab,
@@ -2251,6 +2576,7 @@ class BackupManager {
             showEpisodeBrowserButton: showEpisodeBrowserButton,
             showNextEpisodePosterButton: showNextEpisodePosterButton,
             nextEpisodeThreshold: nextEpisodeThreshold,
+            nextEpisodeSkipFillerEnabled: nextEpisodeSkipFillerEnabled,
             playerBrightnessGestureEnabled: playerBrightnessGestureEnabled,
             playerVolumeGestureEnabled: playerVolumeGestureEnabled,
             playerTwoFingerTapPlayPauseEnabled: playerTwoFingerTapPlayPauseEnabled,
@@ -2263,9 +2589,15 @@ class BackupManager {
             mpvForegroundFPS: mpvForegroundFPS,
             mpvRenderBackend: mpvRenderBackend,
             mpvMetalQualityProfile: mpvMetalQualityProfile,
+            mpvUpscalingMode: mpvUpscalingMode,
+            mpvPlayerSkin: mpvPlayerSkin,
+            mpvPlayerSkinCustomPrimaryColor: mpvPlayerSkinCustomPrimaryColor,
+            mpvPlayerSkinCustomSecondaryColor: mpvPlayerSkinCustomSecondaryColor,
+            mpvPlayerSkinAnimationsEnabled: mpvPlayerSkinAnimationsEnabled,
             mpvAppExitPictureInPictureEnabled: mpvAppExitPictureInPictureEnabled,
             mpvHDRMode: mpvHDRMode,
             mpvSurroundSoundEnabled: mpvSurroundSoundEnabled,
+            watchTogetherEnabled: watchTogetherEnabled,
             smartInAppPlayerChoosingEnabled: smartInAppPlayerChoosingEnabled,
             experimentalFeaturesEnabled: experimentalFeaturesEnabled,
             experimentalFeaturesLastChangedAt: experimentalFeaturesLastChangedAt,
@@ -2293,11 +2625,14 @@ class BackupManager {
             kanzenAutoUpdateModules: kanzenAutoUpdateModules,
             seasonMenu: seasonMenu,
             horizontalEpisodeList: horizontalEpisodeList,
+            mediaDetailTitleArtworkEnabled: mediaDetailTitleArtworkEnabled,
+            mediaDetailSimilarTitlesEnabled: mediaDetailSimilarTitlesEnabled,
             useClassicScheduleUI: useClassicScheduleUI,
             heroBannerCatalogId: heroBannerCatalogId,
             heroBannerBehavior: heroBannerBehavior,
             homeCatalogLayoutOverrides: homeCatalogLayoutOverrides,
             homeAnimatedBackgroundEnabled: homeAnimatedBackgroundEnabled,
+            homeAnimatedBackgroundQuality: homeAnimatedBackgroundQuality,
             experimentalMediaDesignPreset: experimentalMediaDesignPreset,
             experimentalHeroBleedLevel: experimentalHeroBleedLevel,
             experimentalHomeCardShape: experimentalHomeCardShape,
@@ -2381,6 +2716,13 @@ class BackupManager {
             servicesAutoModeSourceIds: servicesAutoModeSourceIds,
             servicesAutoModeSourceOrderIds: servicesAutoModeSourceOrderIds,
             servicesAutoModeQualityPreference: servicesAutoModeQualityPreference,
+            servicesStremioStyleSheetEnabled: servicesStremioStyleSheetEnabled,
+            servicesIncludedStreamLanguages: servicesIncludedStreamLanguages,
+            servicesHiddenStreamLanguages: servicesHiddenStreamLanguages,
+            servicesHideStreamsWithoutLanguageData: servicesHideStreamsWithoutLanguageData,
+            servicesHiddenStreamQualities: servicesHiddenStreamQualities,
+            servicesHideStreamsWithoutDetectedQuality: servicesHideStreamsWithoutDetectedQuality,
+            servicesExtraRulesSourceIds: servicesExtraRulesSourceIds,
             githubReleaseAutoCheckEnabled: githubReleaseAutoCheckEnabled,
             githubReleaseUpdateAvailable: githubReleaseUpdateAvailable,
             githubReleaseLatestVersion: githubReleaseLatestVersion,
@@ -2401,7 +2743,6 @@ class BackupManager {
             catalogs: catalogs,
             services: services,
             stremioAddons: stremioAddons,
-            nuvioPlugins: nuvioPlugins,
             mangaCollections: mangaCollections,
             mangaReadingProgress: mangaReadingProgress,
             mangaCatalogs: mangaCatalogs,
@@ -2410,7 +2751,8 @@ class BackupManager {
             searchHistory: searchHistory,
             recommendationCache: RecommendationEngine.shared.getRecommendationCache(),
             userRatings: UserRatingManager.shared.getRatingsForBackup(),
-            userRatingNotes: UserRatingManager.shared.getNotesForBackup()
+            userRatingNotes: UserRatingManager.shared.getNotesForBackup(),
+            mediaStateSettings: BackupData.captureMediaStateSettings(from: userDefaults)
         )
         
         return backup
@@ -2482,6 +2824,7 @@ class BackupManager {
         let playerSubtitleAppearanceEnabled = json["playerSubtitleAppearanceEnabled"] as? Bool
             ?? json["enableVLCSubtitleEditMenu"] as? Bool
             ?? true
+        let preferredAutoAudioLanguage = json["preferredAutoAudioLanguage"] as? String ?? "eng"
         let preferredAnimeAudioLanguage = json["preferredAnimeAudioLanguage"] as? String ?? "jpn"
         let inAppPlayer = Settings.normalizedInAppPlayer(json["inAppPlayer"] as? String ?? json["playerChoice"] as? String)
         let showScheduleTab = json["showScheduleTab"] as? Bool ?? true
@@ -2504,6 +2847,7 @@ class BackupManager {
         let showEpisodeBrowserButton = json["showEpisodeBrowserButton"] as? Bool ?? json["showVLCEpisodeBrowserButton"] as? Bool ?? true
         let showNextEpisodePosterButton = json["showNextEpisodePosterButton"] as? Bool ?? false
         let nextEpisodeThreshold = json["nextEpisodeThreshold"] as? Double ?? 0.90
+        let nextEpisodeSkipFillerEnabled = json["nextEpisodeSkipFillerEnabled"] as? Bool ?? NextEpisodeFillerSettings.defaultEnabled
         let playerBrightnessGestureEnabled = json["playerBrightnessGestureEnabled"] as? Bool ?? json["vlcBrightnessGestureEnabled"] as? Bool ?? false
         let playerVolumeGestureEnabled = json["playerVolumeGestureEnabled"] as? Bool ?? json["vlcVolumeGestureEnabled"] as? Bool ?? false
         let playerTwoFingerTapPlayPauseEnabled = json["playerTwoFingerTapPlayPauseEnabled"] as? Bool ?? true
@@ -2517,9 +2861,15 @@ class BackupManager {
         let mpvForegroundFPS = mpvForegroundFPSRaw == 60 ? 60 : 30
         let mpvRenderBackend = BackupData.sanitizedMPVRenderBackend(json["mpvRenderBackend"] as? String)
         let mpvMetalQualityProfile = BackupData.sanitizedMPVMetalQualityProfile(json["mpvMetalQualityProfile"] as? String)
+        let mpvUpscalingMode = BackupData.sanitizedMPVUpscalingMode(json["mpvUpscalingMode"] as? String)
+        let mpvPlayerSkin = BackupData.sanitizedMPVPlayerSkin(json["mpvPlayerSkin"] as? String)
+        let mpvPlayerSkinCustomPrimaryColor = BackupData.backupColorData(from: json["mpvPlayerSkinCustomPrimaryColor"])
+        let mpvPlayerSkinCustomSecondaryColor = BackupData.backupColorData(from: json["mpvPlayerSkinCustomSecondaryColor"])
+        let mpvPlayerSkinAnimationsEnabled = json["mpvPlayerSkinAnimationsEnabled"] as? Bool ?? MPVPlayerSkinSettings.defaultAnimationsEnabled
         let mpvAppExitPictureInPictureEnabled = json["mpvAppExitPictureInPictureEnabled"] as? Bool ?? false
         let mpvHDRMode = MPVHDRMode(rawValue: json["mpvHDRMode"] as? String ?? MPVHDRMode.defaultMode.rawValue)?.rawValue ?? MPVHDRMode.defaultMode.rawValue
         let mpvSurroundSoundEnabled = json["mpvSurroundSoundEnabled"] as? Bool ?? true
+        let watchTogetherEnabled = json["watchTogetherEnabled"] as? Bool ?? WatchTogetherSettings.defaultEnabled
         let smartInAppPlayerChoosingEnabled = false
         let experimentalFeaturesEnabled = json["experimentalFeaturesEnabled"] as? Bool ?? false
         let experimentalFeaturesLastChangedAt = json["experimentalFeaturesLastChangedAt"] as? Double ?? 0
@@ -2549,11 +2899,14 @@ class BackupManager {
         let kanzenAutoUpdateModules = json["kanzenAutoUpdateModules"] as? Bool ?? true
         let seasonMenu = json["seasonMenu"] as? Bool ?? false
         let horizontalEpisodeList = json["horizontalEpisodeList"] as? Bool ?? false
+        let mediaDetailTitleArtworkEnabled = json["mediaDetailTitleArtworkEnabled"] as? Bool ?? MediaDetailTitleArtworkSettings.defaultEnabled
+        let mediaDetailSimilarTitlesEnabled = json["mediaDetailSimilarTitlesEnabled"] as? Bool ?? MediaDetailSimilarTitlesSettings.defaultEnabled
         let useClassicScheduleUI = json["useClassicScheduleUI"] as? Bool ?? false
         let heroBannerCatalogId = BackupData.sanitizedNonEmptyString(json["heroBannerCatalogId"] as? String, defaultValue: "trending")
         let heroBannerBehavior = BackupData.sanitizedHeroBannerBehavior(json["heroBannerBehavior"] as? String)
         let homeCatalogLayoutOverrides = json["homeCatalogLayoutOverrides"] as? String ?? ""
         let homeAnimatedBackgroundEnabled = json["homeAnimatedBackgroundEnabled"] as? Bool
+        let homeAnimatedBackgroundQuality = BackupData.sanitizedHomeAnimatedBackgroundQuality(json["homeAnimatedBackgroundQuality"] as? String)
         let experimentalMediaDesignPreset = BackupData.sanitizedExperimentalMediaDesignPreset(json["experimentalMediaDesignPreset"] as? String)
         let experimentalHeroBleedLevel = BackupData.sanitizedExperimentalHeroBleedLevel(json["experimentalHeroBleedLevel"] as? String)
         let experimentalHomeCardShape = BackupData.sanitizedExperimentalHomeCardShape(json["experimentalHomeCardShape"] as? String)
@@ -2641,6 +2994,18 @@ class BackupManager {
         let servicesAutoModeSourceIds = BackupData.sanitizedStringList(BackupData.stringList(from: json["servicesAutoModeSourceIds"]))
         let servicesAutoModeSourceOrderIds = BackupData.sanitizedStringList(BackupData.stringList(from: json["servicesAutoModeSourceOrderIds"]))
         let servicesAutoModeQualityPreference = AutoModeQualityPreference.sanitizedRawValue(json["servicesAutoModeQualityPreference"] as? String)
+        let servicesStremioStyleSheetEnabled = json["servicesStremioStyleSheetEnabled"] as? Bool ?? ServicesSheetPresentationSettings.defaultStremioStyleEnabled
+        let servicesIncludedStreamLanguages = StreamLanguageFilter.sanitizedLanguageList(BackupData.stringList(from: json["servicesIncludedStreamLanguages"]))
+        let servicesHiddenStreamLanguages = StreamLanguageFilter.sanitizedLanguageList(BackupData.stringList(from: json["servicesHiddenStreamLanguages"]))
+        let servicesHideStreamsWithoutLanguageData = json["servicesHideStreamsWithoutLanguageData"] as? Bool ?? false
+        let servicesHiddenStreamQualities = StreamLanguageFilter.sanitizedQualityHeights(BackupData.intList(from: json["servicesHiddenStreamQualities"]))
+        let servicesHideStreamsWithoutDetectedQuality = json["servicesHideStreamsWithoutDetectedQuality"] as? Bool ?? false
+        let servicesExtraRulesSourceIds: [String]?
+        if let rawSourceIds = json["servicesExtraRulesSourceIds"] as? [String] {
+            servicesExtraRulesSourceIds = StreamLanguageFilter.sanitizedExtraRulesSourceIds(rawSourceIds)
+        } else {
+            servicesExtraRulesSourceIds = nil
+        }
         let githubReleaseAutoCheckEnabled = json["githubReleaseAutoCheckEnabled"] as? Bool ?? true
         let githubReleaseUpdateAvailable = json["githubReleaseUpdateAvailable"] as? Bool ?? false
         let githubReleaseLatestVersion = json["githubReleaseLatestVersion"] as? String ?? ""
@@ -2727,13 +3092,6 @@ class BackupManager {
             stremioAddons = decodedAddons
         }
 
-        var nuvioPlugins: NuvioStoredPluginsState? = nil
-        if let pluginData = json["nuvioPlugins"] as? [String: Any],
-           let pluginJSON = try? JSONSerialization.data(withJSONObject: pluginData),
-           let decodedPlugins = try? JSONDecoder().decode(NuvioStoredPluginsState.self, from: pluginJSON) {
-            nuvioPlugins = decodedPlugins
-        }
-
         // Manga data
         var mangaCollections: [BackupMangaCollection] = []
         if let mangaColData = json["mangaCollections"] as? [[String: Any]] {
@@ -2803,6 +3161,13 @@ class BackupManager {
         if let notesDict = json["userRatingNotes"] as? [String: String] {
             userRatingNotes = notesDict
         }
+
+        let mediaStateSettings = BackupData.mediaStateSettings(fromJSONValue: json["mediaStateSettings"])
+        let mangaCollectionsPresent = json["mangaCollections"] != nil
+        let mangaReadingProgressPresent = json["mangaReadingProgress"] != nil
+        let mangaCatalogsPresent = json["mangaCatalogs"] != nil
+        let kanzenModulesPresent = json["kanzenModules"] != nil
+        let userRatingsPresent = json["userRatings"] != nil || json["userRatingNotes"] != nil
         
         return BackupData(
             version: version,
@@ -2818,6 +3183,7 @@ class BackupManager {
             enableSubtitlesByDefault: enableSubtitlesByDefault,
             defaultSubtitleLanguage: defaultSubtitleLanguage,
             playerSubtitleAppearanceEnabled: playerSubtitleAppearanceEnabled,
+            preferredAutoAudioLanguage: preferredAutoAudioLanguage,
             preferredAnimeAudioLanguage: preferredAnimeAudioLanguage,
             inAppPlayer: inAppPlayer,
             showScheduleTab: showScheduleTab,
@@ -2838,6 +3204,7 @@ class BackupManager {
             showEpisodeBrowserButton: showEpisodeBrowserButton,
             showNextEpisodePosterButton: showNextEpisodePosterButton,
             nextEpisodeThreshold: nextEpisodeThreshold,
+            nextEpisodeSkipFillerEnabled: nextEpisodeSkipFillerEnabled,
             playerBrightnessGestureEnabled: playerBrightnessGestureEnabled,
             playerVolumeGestureEnabled: playerVolumeGestureEnabled,
             playerTwoFingerTapPlayPauseEnabled: playerTwoFingerTapPlayPauseEnabled,
@@ -2850,9 +3217,15 @@ class BackupManager {
             mpvForegroundFPS: mpvForegroundFPS,
             mpvRenderBackend: mpvRenderBackend,
             mpvMetalQualityProfile: mpvMetalQualityProfile,
+            mpvUpscalingMode: mpvUpscalingMode,
+            mpvPlayerSkin: mpvPlayerSkin,
+            mpvPlayerSkinCustomPrimaryColor: mpvPlayerSkinCustomPrimaryColor,
+            mpvPlayerSkinCustomSecondaryColor: mpvPlayerSkinCustomSecondaryColor,
+            mpvPlayerSkinAnimationsEnabled: mpvPlayerSkinAnimationsEnabled,
             mpvAppExitPictureInPictureEnabled: mpvAppExitPictureInPictureEnabled,
             mpvHDRMode: mpvHDRMode,
             mpvSurroundSoundEnabled: mpvSurroundSoundEnabled,
+            watchTogetherEnabled: watchTogetherEnabled,
             smartInAppPlayerChoosingEnabled: smartInAppPlayerChoosingEnabled,
             experimentalFeaturesEnabled: experimentalFeaturesEnabled,
             experimentalFeaturesLastChangedAt: experimentalFeaturesLastChangedAt,
@@ -2878,11 +3251,14 @@ class BackupManager {
             kanzenAutoUpdateModules: kanzenAutoUpdateModules,
             seasonMenu: seasonMenu,
             horizontalEpisodeList: horizontalEpisodeList,
+            mediaDetailTitleArtworkEnabled: mediaDetailTitleArtworkEnabled,
+            mediaDetailSimilarTitlesEnabled: mediaDetailSimilarTitlesEnabled,
             useClassicScheduleUI: useClassicScheduleUI,
             heroBannerCatalogId: heroBannerCatalogId,
             heroBannerBehavior: heroBannerBehavior,
             homeCatalogLayoutOverrides: homeCatalogLayoutOverrides,
             homeAnimatedBackgroundEnabled: homeAnimatedBackgroundEnabled,
+            homeAnimatedBackgroundQuality: homeAnimatedBackgroundQuality,
             experimentalMediaDesignPreset: experimentalMediaDesignPreset,
             experimentalHeroBleedLevel: experimentalHeroBleedLevel,
             experimentalHomeCardShape: experimentalHomeCardShape,
@@ -2963,6 +3339,13 @@ class BackupManager {
             servicesAutoModeSourceIds: servicesAutoModeSourceIds,
             servicesAutoModeSourceOrderIds: servicesAutoModeSourceOrderIds,
             servicesAutoModeQualityPreference: servicesAutoModeQualityPreference,
+            servicesStremioStyleSheetEnabled: servicesStremioStyleSheetEnabled,
+            servicesIncludedStreamLanguages: servicesIncludedStreamLanguages,
+            servicesHiddenStreamLanguages: servicesHiddenStreamLanguages,
+            servicesHideStreamsWithoutLanguageData: servicesHideStreamsWithoutLanguageData,
+            servicesHiddenStreamQualities: servicesHiddenStreamQualities,
+            servicesHideStreamsWithoutDetectedQuality: servicesHideStreamsWithoutDetectedQuality,
+            servicesExtraRulesSourceIds: servicesExtraRulesSourceIds,
             githubReleaseAutoCheckEnabled: githubReleaseAutoCheckEnabled,
             githubReleaseUpdateAvailable: githubReleaseUpdateAvailable,
             githubReleaseLatestVersion: githubReleaseLatestVersion,
@@ -2982,7 +3365,6 @@ class BackupManager {
             catalogs: catalogs,
             services: services,
             stremioAddons: stremioAddons,
-            nuvioPlugins: nuvioPlugins,
             mangaCollections: mangaCollections,
             mangaReadingProgress: mangaReadingProgress,
             mangaCatalogs: mangaCatalogs,
@@ -2991,19 +3373,32 @@ class BackupManager {
             searchHistory: searchHistory,
             recommendationCache: recommendationCache,
             userRatings: userRatings,
-            userRatingNotes: userRatingNotes
+            userRatingNotes: userRatingNotes,
+            mediaStateSettings: mediaStateSettings,
+            mangaCollectionsPresent: mangaCollectionsPresent,
+            mangaReadingProgressPresent: mangaReadingProgressPresent,
+            mangaCatalogsPresent: mangaCatalogsPresent,
+            kanzenModulesPresent: kanzenModulesPresent,
+            userRatingsPresent: userRatingsPresent
         )
     }
     
     /// Applies backup data to all managers and UserDefaults
     private func applyBackupData(_ backup: BackupData, refreshCloudSources: Bool = false) -> Bool {
-        let trackerManager = TrackerManager.shared
+        var trackerManager: TrackerManager!
+        performOnMainThread {
+            trackerManager = TrackerManager.shared
+        }
         trackerManager.setBackupRestoreSyncSuppressed(true)
         defer {
             trackerManager.setBackupRestoreSyncSuppressed(false)
         }
 
         let userDefaults = UserDefaults.standard
+
+        // Restore the shared safe-settings envelope first. Hand-written fields
+        // below remain authoritative for older/newer schema migrations.
+        BackupData.restoreMediaStateSettings(backup.mediaStateSettings, to: userDefaults)
         
         // Restore settings
         if let accentColorData = backup.accentColor {
@@ -3026,6 +3421,7 @@ class BackupManager {
         userDefaults.set(backup.defaultSubtitleLanguage, forKey: "defaultSubtitleLanguage")
         userDefaults.set(backup.playerSubtitleAppearanceEnabled, forKey: "playerSubtitleAppearanceEnabled")
 
+        userDefaults.set(backup.preferredAutoAudioLanguage, forKey: "preferredAutoAudioLanguage")
         userDefaults.set(backup.preferredAnimeAudioLanguage, forKey: "preferredAnimeAudioLanguage")
         userDefaults.set(Settings.normalizedInAppPlayer(backup.inAppPlayer), forKey: "inAppPlayer")
         userDefaults.set(backup.showScheduleTab, forKey: "showScheduleTab")
@@ -3048,6 +3444,7 @@ class BackupManager {
         userDefaults.set(backup.showEpisodeBrowserButton, forKey: "showEpisodeBrowserButton")
         userDefaults.set(backup.showNextEpisodePosterButton, forKey: "showNextEpisodePosterButton")
         userDefaults.set(backup.nextEpisodeThreshold, forKey: "nextEpisodeThreshold")
+        userDefaults.set(backup.nextEpisodeSkipFillerEnabled, forKey: NextEpisodeFillerSettings.enabledKey)
         userDefaults.set(backup.playerBrightnessGestureEnabled, forKey: "playerBrightnessGestureEnabled")
         userDefaults.set(backup.playerVolumeGestureEnabled, forKey: "playerVolumeGestureEnabled")
         userDefaults.set(backup.playerTwoFingerTapPlayPauseEnabled, forKey: "playerTwoFingerTapPlayPauseEnabled")
@@ -3060,9 +3457,23 @@ class BackupManager {
         userDefaults.set(backup.mpvForegroundFPS == 60 ? 60 : 30, forKey: "mpvForegroundFPS")
         userDefaults.set(BackupData.sanitizedMPVRenderBackend(backup.mpvRenderBackend), forKey: "mpvRenderBackend")
         userDefaults.set(BackupData.sanitizedMPVMetalQualityProfile(backup.mpvMetalQualityProfile), forKey: "mpvMetalQualityProfile")
+        userDefaults.set(BackupData.sanitizedMPVUpscalingMode(backup.mpvUpscalingMode), forKey: "mpvUpscalingMode")
+        userDefaults.set(BackupData.sanitizedMPVPlayerSkin(backup.mpvPlayerSkin), forKey: MPVPlayerSkinSettings.skinKey)
+        if let primaryColor = backup.mpvPlayerSkinCustomPrimaryColor {
+            userDefaults.set(primaryColor, forKey: MPVPlayerSkinSettings.customPrimaryColorKey)
+        } else {
+            userDefaults.removeObject(forKey: MPVPlayerSkinSettings.customPrimaryColorKey)
+        }
+        if let secondaryColor = backup.mpvPlayerSkinCustomSecondaryColor {
+            userDefaults.set(secondaryColor, forKey: MPVPlayerSkinSettings.customSecondaryColorKey)
+        } else {
+            userDefaults.removeObject(forKey: MPVPlayerSkinSettings.customSecondaryColorKey)
+        }
+        userDefaults.set(backup.mpvPlayerSkinAnimationsEnabled, forKey: MPVPlayerSkinSettings.animationsEnabledKey)
         userDefaults.set(backup.mpvAppExitPictureInPictureEnabled, forKey: "mpvAppExitPictureInPictureEnabled")
         userDefaults.set(MPVHDRMode(rawValue: backup.mpvHDRMode)?.rawValue ?? MPVHDRMode.defaultMode.rawValue, forKey: "mpvHDRMode")
         userDefaults.set(backup.mpvSurroundSoundEnabled, forKey: "mpvSurroundSoundEnabled")
+        userDefaults.set(backup.watchTogetherEnabled, forKey: WatchTogetherSettings.enabledKey)
         userDefaults.set(backup.smartInAppPlayerChoosingEnabled, forKey: "smartInAppPlayerChoosingEnabled")
         userDefaults.set(backup.experimentalFeaturesEnabled, forKey: ExperimentalFeatureState.enabledKey)
         userDefaults.set(backup.experimentalFeaturesLastChangedAt, forKey: ExperimentalFeatureState.lastChangedAtKey)
@@ -3098,6 +3509,8 @@ class BackupManager {
         userDefaults.set(backup.kanzenAutoUpdateModules, forKey: "kanzenAutoUpdateModules")
         userDefaults.set(backup.seasonMenu, forKey: "seasonMenu")
         userDefaults.set(backup.horizontalEpisodeList, forKey: "horizontalEpisodeList")
+        userDefaults.set(backup.mediaDetailTitleArtworkEnabled, forKey: MediaDetailTitleArtworkSettings.enabledKey)
+        userDefaults.set(backup.mediaDetailSimilarTitlesEnabled, forKey: MediaDetailSimilarTitlesSettings.enabledKey)
         userDefaults.set(backup.useClassicScheduleUI, forKey: "useClassicScheduleUI")
         userDefaults.set(BackupData.sanitizedNonEmptyString(backup.heroBannerCatalogId, defaultValue: "trending"), forKey: "heroBannerCatalogId")
         userDefaults.set(BackupData.sanitizedHeroBannerBehavior(backup.heroBannerBehavior), forKey: "heroBannerBehavior")
@@ -3110,6 +3523,7 @@ class BackupManager {
         if let homeAnimatedBackgroundEnabled = backup.homeAnimatedBackgroundEnabled {
             userDefaults.set(homeAnimatedBackgroundEnabled, forKey: HomeAnimatedBackgroundSettings.enabledKey)
         }
+        userDefaults.set(BackupData.sanitizedHomeAnimatedBackgroundQuality(backup.homeAnimatedBackgroundQuality), forKey: HomeAnimatedBackgroundQuality.storageKey)
         userDefaults.set(BackupData.sanitizedExperimentalMediaDesignPreset(backup.experimentalMediaDesignPreset), forKey: ExperimentalMediaDesignPreset.storageKey)
         userDefaults.set(BackupData.sanitizedExperimentalHeroBleedLevel(backup.experimentalHeroBleedLevel), forKey: ExperimentalHeroBleedLevel.storageKey)
         userDefaults.set(BackupData.sanitizedExperimentalHomeCardShape(backup.experimentalHomeCardShape), forKey: ExperimentalHomeCardShape.storageKey)
@@ -3218,6 +3632,13 @@ class BackupManager {
         userDefaults.set(restoredAutoModeSourceIds, forKey: "servicesAutoModeSourceIds")
         userDefaults.set(restoredAutoModeSourceOrderIds, forKey: "servicesAutoModeSourceOrderIds")
         userDefaults.set(AutoModeQualityPreference.sanitizedRawValue(backup.servicesAutoModeQualityPreference), forKey: AutoModeQualityPreference.storageKey)
+        userDefaults.set(backup.servicesStremioStyleSheetEnabled, forKey: ServicesSheetPresentationSettings.stremioStyleEnabledKey)
+        StreamLanguageFilter.setIncludedLanguages(backup.servicesIncludedStreamLanguages, defaults: userDefaults)
+        StreamLanguageFilter.setHiddenLanguages(backup.servicesHiddenStreamLanguages, defaults: userDefaults)
+        StreamLanguageFilter.setHidesStreamsWithoutLanguageData(backup.servicesHideStreamsWithoutLanguageData, defaults: userDefaults)
+        StreamLanguageFilter.setHiddenQualityHeights(backup.servicesHiddenStreamQualities, defaults: userDefaults)
+        StreamLanguageFilter.setHidesStreamsWithoutDetectedQuality(backup.servicesHideStreamsWithoutDetectedQuality, defaults: userDefaults)
+        StreamLanguageFilter.setExtraRulesSourceIds(backup.servicesExtraRulesSourceIds, defaults: userDefaults)
         userDefaults.set(backup.githubReleaseAutoCheckEnabled, forKey: "githubReleaseAutoCheckEnabled")
         userDefaults.set(backup.githubReleaseUpdateAvailable, forKey: "githubReleaseUpdateAvailable")
         userDefaults.set(backup.githubReleaseLatestVersion, forKey: "githubReleaseLatestVersion")
@@ -3234,76 +3655,176 @@ class BackupManager {
         if let searchHistoryData = try? JSONEncoder().encode(backup.searchHistory.queries) {
             userDefaults.set(searchHistoryData, forKey: "searchHistory")
         }
-        TMDBContentFilter.shared.filterHorror = backup.filterHorrorContent
-        AlgorithmManager.shared.selectedAlgorithm = SimilarityAlgorithm(rawValue: BackupData.sanitizedSimilarityAlgorithm(backup.selectedSimilarityAlgorithm)) ?? .hybrid
-        
-        // Reload Settings singleton to pick up changes
-        let settings = Settings.shared
-        let theme = EclipseTheme.shared
-        DispatchQueue.main.async {
+        performOnMainThread {
+            TMDBContentFilter.shared.filterHorror = backup.filterHorrorContent
+            AlgorithmManager.shared.selectedAlgorithm = SimilarityAlgorithm(rawValue: BackupData.sanitizedSimilarityAlgorithm(backup.selectedSimilarityAlgorithm)) ?? .hybrid
+
+            // Reload Settings singleton to pick up changes
+            let settings = Settings.shared
+            let theme = EclipseTheme.shared
             settings.objectWillChange.send()
             theme.objectWillChange.send()
         }
         
         // Restore collections
-        let libraryManager = LibraryManager.shared
-        libraryManager.collections = backup.collections.map { $0.toLibraryCollection() }
+        let restoredCollections = backup.collections.map { $0.toLibraryCollection() }
+        performOnMainThread {
+            LibraryManager.shared.collections = restoredCollections
+        }
         // Collections are auto-saved in LibraryManager
         
         // Restore progress data in bulk to avoid per-entry tracker sync bursts (prevents AniList 429)
         let progressManager = ProgressManager.shared
         progressManager.replaceProgressDataForRestore(backup.progressData)
         
-        // Restore tracker state, including connected AniList/MAL/Trakt accounts and sync settings.
+        // Tracker credentials are never written to backups. Merge metadata and
+        // preferences while retaining credentials already held by this device.
         let restoreTrackerState = {
-            trackerManager.trackerState = backup.trackerState
+            var restoredState = backup.trackerState
+            restoredState.accounts = backup.trackerState.accounts.compactMap { incoming in
+                if !incoming.accessToken.isEmpty {
+                    // Backward compatibility for older user-created backups.
+                    return incoming
+                }
+                return trackerManager.trackerState.accounts.first(where: { $0.service == incoming.service })
+            }
+            trackerManager.trackerState = restoredState
             trackerManager.saveTrackerState()
         }
-        if Thread.isMainThread {
-            restoreTrackerState()
-        } else {
-            DispatchQueue.main.sync(execute: restoreTrackerState)
-        }
+        performOnMainThread(restoreTrackerState)
         
         // Restore catalogs (merge to preserve new defaults like widget catalogs)
-        let catalogManager = CatalogManager.shared
-        catalogManager.setPerformanceModeEnabled(backup.performanceModeEnabled)
         if !backup.catalogs.isEmpty {
             var merged = backup.catalogs
             let existingIds = Set(merged.map { $0.id })
-            let currentDefaults = catalogManager.catalogs.filter { !existingIds.contains($0.id) }
+            var currentDefaults: [Catalog] = []
+            performOnMainThread {
+                currentDefaults = CatalogManager.shared.catalogs.filter { !existingIds.contains($0.id) }
+            }
             merged.append(contentsOf: currentDefaults)
             merged = merged.enumerated().map { index, catalog in
                 var updated = catalog
                 updated.order = index
                 return updated
             }
-            catalogManager.catalogs = merged
+            performOnMainThread {
+                let catalogManager = CatalogManager.shared
+                catalogManager.setPerformanceModeEnabled(backup.performanceModeEnabled)
+                catalogManager.catalogs = merged
+                catalogManager.saveCatalogs()
+            }
+        } else {
+            performOnMainThread {
+                let catalogManager = CatalogManager.shared
+                catalogManager.setPerformanceModeEnabled(backup.performanceModeEnabled)
+                catalogManager.saveCatalogs()
+            }
         }
-        catalogManager.saveCatalogs()
 
-        // Restore services (clear existing, then insert)
+        // Normal file backups are authoritative replacements. Redacted cloud
+        // snapshots replace only cloud-eligible sources and retain device-local
+        // providers that were omitted because they may contain credentials.
         let serviceStore = ServiceStore.shared
         let existingServices = serviceStore.getServices()
-        existingServices.forEach { serviceStore.remove($0) }
-        for svc in backup.services {
-            serviceStore.storeService(id: svc.id, url: svc.url, jsonMetadata: svc.jsonMetadata, jsScript: svc.jsScript, isActive: svc.isActive)
+        let incomingServices = backup.services.sorted(by: {
+            if $0.sortIndex == $1.sortIndex {
+                return $0.id.uuidString < $1.id.uuidString
+            }
+            return $0.sortIndex < $1.sortIndex
+        })
+        let servicesToRestore: [BackupService]
+        var deviceLocalServiceIDs = Set<UUID>()
+        if refreshCloudSources {
+            let currentServices = existingServices.map { service in
+                let metadata = (try? JSONEncoder().encode(service.metadata))
+                    .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                return BackupService(
+                    id: service.id,
+                    url: service.url,
+                    jsonMetadata: metadata,
+                    jsScript: service.jsScript,
+                    isActive: service.isActive,
+                    sortIndex: service.sortIndex
+                )
+            }
+            deviceLocalServiceIDs = Set(currentServices.compactMap { service in
+                BackupData.serviceForExperimentalCloudSync(service) == nil ? service.id : nil
+            })
+            servicesToRestore = ExperimentalCloudSourceRestorePolicy.services(
+                current: currentServices,
+                incoming: incomingServices
+            )
+        } else {
+            servicesToRestore = incomingServices
+        }
+        let servicesToRemove = refreshCloudSources
+            ? existingServices.filter { !deviceLocalServiceIDs.contains($0.id) }
+            : existingServices
+        servicesToRemove.forEach { serviceStore.remove($0) }
+        for svc in servicesToRestore where !deviceLocalServiceIDs.contains(svc.id) {
+            serviceStore.storeService(
+                id: svc.id,
+                url: svc.url,
+                jsonMetadata: svc.jsonMetadata,
+                jsScript: svc.jsScript,
+                isActive: svc.isActive,
+                sortIndex: svc.sortIndex
+            )
+        }
+        if refreshCloudSources {
+            let entities = serviceStore.getEntities()
+            for (index, service) in servicesToRestore.enumerated() {
+                entities.first(where: { $0.id == service.id })?.sortIndex = Int64(index)
+            }
+            serviceStore.save()
+        }
+        Task { @MainActor in
+            ServiceManager.shared.loadServicesFromCloud()
         }
 
         // Restore Stremio addons only when the backup explicitly contains this field.
         // Older backups did not know about Stremio addons, so they must not wipe the current device's addons.
         if let stremioAddons = backup.stremioAddons {
             let stremioStore = StremioAddonStore.shared
-            stremioStore.removeAll()
-
-            let sortedAddons = stremioAddons.sorted {
+            let incomingAddons = stremioAddons.sorted {
                 if $0.sortIndex == $1.sortIndex {
                     return $0.id.uuidString < $1.id.uuidString
                 }
                 return $0.sortIndex < $1.sortIndex
             }
+            let addonsToRestore: [BackupStremioAddon]
+            var deviceLocalAddonIDs = Set<UUID>()
+            if refreshCloudSources {
+                let currentAddons = stremioStore.getAddons().map { addon in
+                    let manifestJSON = (try? JSONEncoder().encode(addon.manifest))
+                        .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                    return BackupStremioAddon(
+                        id: addon.id,
+                        configuredURL: addon.configuredURL,
+                        manifestJSON: manifestJSON,
+                        isActive: addon.isActive,
+                        sortIndex: addon.sortIndex
+                    )
+                }
+                deviceLocalAddonIDs = Set(currentAddons.compactMap { addon in
+                    BackupData.stremioAddonForExperimentalCloudSync(addon) == nil ? addon.id : nil
+                })
+                addonsToRestore = ExperimentalCloudSourceRestorePolicy.stremioAddons(
+                    current: currentAddons,
+                    incoming: incomingAddons
+                )
+            } else {
+                addonsToRestore = incomingAddons
+            }
+            if refreshCloudSources {
+                for addon in stremioStore.getAddons() where !deviceLocalAddonIDs.contains(addon.id) {
+                    stremioStore.remove(addon)
+                }
+            } else {
+                stremioStore.removeAll()
+            }
 
-            for addon in sortedAddons {
+            for addon in addonsToRestore where !deviceLocalAddonIDs.contains(addon.id) {
                 let configuredURL = addon.configuredURL.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !configuredURL.isEmpty,
                       let manifestData = addon.manifestJSON.data(using: .utf8),
@@ -3321,60 +3842,70 @@ class BackupManager {
                     sortIndex: addon.sortIndex
                 )
             }
+            if refreshCloudSources {
+                let entities = stremioStore.getEntities()
+                for (index, addon) in addonsToRestore.enumerated() {
+                    entities.first(where: { $0.id == addon.id })?.sortIndex = Int64(index)
+                }
+                stremioStore.save()
+            }
 
             Task { @MainActor in
                 StremioAddonManager.shared.loadAddons()
             }
         }
 
-        // Restore Nuvio plugins only when the backup explicitly contains this field.
-        // Older backups did not know about plugins, so they must not wipe current plugin repositories.
-        if let nuvioPlugins = backup.nuvioPlugins {
-            NuvioPluginManager.restorePersistedBackupState(nuvioPlugins, refreshRepositories: refreshCloudSources)
-        }
-
-        // Restore manga library collections
-        let mangaLibraryManager = MangaLibraryManager.shared
-        if !backup.mangaCollections.isEmpty {
-            mangaLibraryManager.collections = backup.mangaCollections.map { bc in
+        // Restore manga library collections. An explicitly empty array is a
+        // real cleared state; only older backups that omit the field preserve
+        // the destination's existing data.
+        if backup.hasMangaCollections {
+            let restoredMangaCollections = backup.mangaCollections.map { bc in
                 MangaLibraryCollection(id: bc.id, name: bc.name, items: bc.items, description: bc.description)
+            }
+            performOnMainThread {
+                MangaLibraryManager.shared.collections = restoredMangaCollections
             }
         }
 
-        // Restore manga reading progress
-        if !backup.mangaReadingProgress.isEmpty {
-            let mangaProgressMap = Dictionary(uniqueKeysWithValues:
+        // Restore manga reading progress, including an explicit empty map.
+        if backup.hasMangaReadingProgress {
+            let mangaProgressMap = Dictionary(
                 backup.mangaReadingProgress.compactMap { key, value -> (Int, MangaProgress)? in
                     guard let id = Int(key) else { return nil }
                     return (id, value)
-                }
+                },
+                uniquingKeysWith: { _, incoming in incoming }
             )
-            MangaReadingProgressManager.shared.replaceProgressMapForRestore(mangaProgressMap)
+            performOnMainThread {
+                MangaReadingProgressManager.shared.replaceProgressMapForRestore(mangaProgressMap)
+            }
         }
 
-        // Restore manga catalogs
-        if !backup.mangaCatalogs.isEmpty {
+        // Restore manga catalogs, including an explicit empty list.
+        if backup.hasMangaCatalogs {
             let mangaCatalogManager = MangaCatalogManager.shared
             mangaCatalogManager.catalogs = backup.mangaCatalogs
             mangaCatalogManager.saveCatalogs()
         }
 
-        // Restore Kanzen modules
-        if !backup.kanzenModules.isEmpty {
-            let kanzenModuleManager = ModuleManager.shared
-            for mod in backup.kanzenModules {
-                if !kanzenModuleManager.modules.contains(where: { $0.id == mod.id }) {
-                    let container = ModuleDataContainer(
-                        id: mod.id,
-                        moduleData: mod.moduleData,
-                        localPath: mod.localPath,
-                        moduleurl: mod.moduleurl,
-                        isActive: mod.isActive
-                    )
-                    kanzenModuleManager.modules.append(container)
-                }
+        // Restore Kanzen modules as a replacement so removed modules do not
+        // survive on the destination. ModuleManager will re-download missing
+        // local script files from each module's script URL when needed.
+        if backup.hasKanzenModules {
+            let restoredModules = backup.kanzenModules.map { mod in
+                ModuleDataContainer(
+                    id: mod.id,
+                    moduleData: mod.moduleData,
+                    localPath: mod.localPath,
+                    moduleurl: mod.moduleurl,
+                    isActive: mod.isActive
+                )
             }
-            kanzenModuleManager.saveModules()
+            performOnMainThread {
+                let kanzenModuleManager = ModuleManager.shared
+                kanzenModuleManager.modules = restoredModules
+                kanzenModuleManager.saveModules()
+            }
         }
 
 #if !os(tvOS)
@@ -3391,8 +3922,9 @@ class BackupManager {
             RecommendationEngine.shared.restoreRecommendationCache(backup.recommendationCache)
         }
 
-        // Restore user ratings and private notes without triggering tracker writes.
-        if !backup.userRatings.isEmpty || !backup.userRatingNotes.isEmpty {
+        // Restore user ratings and private notes without triggering tracker
+        // writes. Empty maps are authoritative when present in the backup.
+        if backup.hasUserRatings {
             UserRatingManager.shared.restoreRatingsAndNotes(
                 ratings: backup.userRatings,
                 notes: backup.userRatingNotes

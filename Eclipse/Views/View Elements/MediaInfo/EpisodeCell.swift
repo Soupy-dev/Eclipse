@@ -14,6 +14,7 @@ struct EpisodeCell: View {
     var onDownload: (() -> Void)? = nil
     var playbackContext: EpisodePlaybackContext? = nil
     var isAnimeContent: Bool = false
+    var isFiller: Bool = false
     
     @State private var isWatched: Bool = false
     @State private var progressValue: Double = 0
@@ -25,6 +26,17 @@ struct EpisodeCell: View {
     private var horizontalOverviewHeight: CGFloat { 42 }
     private var horizontalDetailsHeight: CGFloat { 86 }
     private var horizontalCellHeight: CGFloat { horizontalImageHeight + 8 + horizontalDetailsHeight }
+
+    private struct EpisodePlayButtonModifier: ViewModifier {
+        @ViewBuilder
+        func body(content: Content) -> some View {
+#if os(tvOS)
+            content.buttonStyle(.card)
+#else
+            content.buttonStyle(PlainButtonStyle())
+#endif
+        }
+    }
     
     var body: some View {
         if horizontalEpisodeList {
@@ -35,6 +47,8 @@ struct EpisodeCell: View {
     }
     
     @MainActor private var horizontalLayout: some View {
+        Group {
+            VStack(alignment: .leading, spacing: isTvOS ? 10 : 0) {
         Button(action: onTap) {
             VStack(alignment: .leading, spacing: 8) {
                 ZStack {
@@ -85,6 +99,10 @@ struct EpisodeCell: View {
                         Text("Episode \(episode.episodeNumber)")
                             .font(.caption)
                             .foregroundColor(.secondary)
+
+                        if isFiller {
+                            fillerBadge
+                        }
                         
                         Spacer()
                         
@@ -152,10 +170,17 @@ struct EpisodeCell: View {
             .frame(width: horizontalCellWidth, height: horizontalCellHeight, alignment: .topLeading)
             .contentShape(Rectangle())
         }
-        .buttonStyle(PlainButtonStyle())
+        .modifier(EpisodePlayButtonModifier())
+#if os(tvOS)
+                tvEpisodeActions(maxWidth: horizontalCellWidth)
+#endif
+            }
+        }
+#if !os(tvOS)
         .contextMenu {
             episodeContextMenu
         }
+#endif
         .onAppear {
             progressValue = progress
             loadEpisodeProgress()
@@ -167,6 +192,8 @@ struct EpisodeCell: View {
     }
     
     @MainActor private var verticalLayout: some View {
+        Group {
+            VStack(alignment: .leading, spacing: isTvOS ? 10 : 0) {
         Button(action: onTap) {
             HStack(spacing: 12) {
                 ZStack {
@@ -218,6 +245,10 @@ struct EpisodeCell: View {
                             .font(.caption)
                             .foregroundColor(.secondary)
                             .fontWeight(.medium)
+
+                        if isFiller {
+                            fillerBadge
+                        }
                         
                         Spacer()
                         
@@ -278,10 +309,17 @@ struct EpisodeCell: View {
                     .stroke(Color.white.opacity(0.1), lineWidth: 0.5)
             )
         }
-        .buttonStyle(PlainButtonStyle())
+        .modifier(EpisodePlayButtonModifier())
+#if os(tvOS)
+                tvEpisodeActions(maxWidth: .infinity)
+#endif
+            }
+        }
+#if !os(tvOS)
         .contextMenu {
             episodeContextMenu
         }
+#endif
         .onAppear {
             progressValue = progress
             loadEpisodeProgress()
@@ -291,6 +329,116 @@ struct EpisodeCell: View {
         }
         .preferredColorScheme(.dark)
     }
+
+    private var fillerBadge: some View {
+        Text("Filler")
+            .font(.caption2)
+            .fontWeight(.semibold)
+            .foregroundColor(.orange)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(Color.orange.opacity(0.16), in: Capsule())
+            .accessibilityLabel("Filler episode")
+    }
+
+#if os(tvOS)
+    private func tvEpisodeActions(maxWidth: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Button {
+                    if isWatched {
+                        markEpisodeAsNotWatched()
+                    } else {
+                        markEpisodeAsWatched()
+                    }
+                } label: {
+                    Label(
+                        isWatched ? "Not Watched" : "Watched",
+                        systemImage: isWatched ? "eye.slash" : "checkmark.circle"
+                    )
+                }
+
+                if progressValue > 0 {
+                    Button {
+                        resetCurrentEpisodeProgress()
+                    } label: {
+                        Label("Reset", systemImage: "arrow.counterclockwise")
+                    }
+                }
+            }
+
+            if episode.episodeNumber > 1 {
+                Menu {
+                    Button {
+                        markPreviousEpisodesAsWatched()
+                    } label: {
+                        Label("Mark Previous as Watched", systemImage: "checkmark.circle")
+                    }
+
+                    Button {
+                        markPreviousEpisodesAsNotWatched()
+                    } label: {
+                        Label("Mark Previous as Not Watched", systemImage: "arrow.uturn.backward")
+                    }
+                } label: {
+                    Label("Previous Episodes", systemImage: "list.bullet")
+                }
+            }
+        }
+        .font(.callout)
+        .controlSize(.small)
+        .buttonStyle(.bordered)
+        .frame(maxWidth: maxWidth, alignment: .leading)
+    }
+
+    private func markPreviousEpisodesAsWatched() {
+        ProgressManager.shared.markPreviousEpisodesAsWatched(
+            showId: showId,
+            seasonNumber: episode.seasonNumber,
+            episodeNumber: episode.episodeNumber,
+            playbackContext: playbackContext,
+            isAnime: isAnimeContent
+        )
+        refreshProgressState()
+    }
+
+    private func markPreviousEpisodesAsNotWatched() {
+        ProgressManager.shared.markPreviousEpisodesAsUnwatched(
+            showId: showId,
+            seasonNumber: episode.seasonNumber,
+            episodeNumber: episode.episodeNumber
+        )
+        refreshProgressState()
+    }
+
+    private func markEpisodeAsNotWatched() {
+        ProgressManager.shared.markEpisodeAsUnwatched(
+            showId: showId,
+            seasonNumber: episode.seasonNumber,
+            episodeNumber: episode.episodeNumber
+        )
+        onResetProgress()
+        isWatched = false
+        refreshProgressState()
+    }
+
+    private func markEpisodeAsWatched() {
+        onMarkWatched()
+        isWatched = true
+        progressValue = 1
+    }
+
+    private func resetCurrentEpisodeProgress() {
+        ProgressManager.shared.resetEpisodeProgress(
+            showId: showId,
+            seasonNumber: episode.seasonNumber,
+            episodeNumber: episode.episodeNumber
+        )
+        onResetProgress()
+        isWatched = false
+        progressValue = 0
+    }
+#endif
     
     private var episodeContextMenu: some View {
         Group {
@@ -298,6 +446,7 @@ struct EpisodeCell: View {
                 Label("Play", systemImage: "play.fill")
             }
             
+#if !os(tvOS)
             if let onDownload = onDownload {
                 let isDownloaded = DownloadManager.shared.isDownloaded(
                     tmdbId: showId, isMovie: false,
@@ -323,6 +472,7 @@ struct EpisodeCell: View {
                     }
                 }
             }
+#endif
             
             if episode.episodeNumber > 1 {
                 Button(action: {

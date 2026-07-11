@@ -6,6 +6,8 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 	<key>EclipseDistributionChannel</key>
 	<string>$(ECLIPSE_DISTRIBUTION_CHANNEL)</string>
 	<key>EclipseReleaseVersion</key>
@@ -18,6 +20,8 @@
 			<key>CFBundleURLSchemes</key>
 			<array>
 				<string>luna</string>
+				<string>com.googleusercontent.apps.871649357486-168i49j7ouc70r4t879112h65kmdilit</string>
+				<string>msauth.app.Eclipse.Soupy</string>
 			</array>
 		</dict>
 	</array>
@@ -37,7 +41,7 @@
 		<true/>
 	</dict>
 	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>Eclipse can save reader images you choose from the reader quick actions.</string>
+	<string>Eclipse can save images you choose, including reader images and media stills, to your photo library.</string>
 	<key>TMDBAPIKey</key>
 	<string>$(TMDB_API_KEY)</string>
 	<key>AniListClientID</key>
@@ -62,5 +66,7 @@
 	<array>
 		<string>audio</string>
 	</array>
+	<key>UIFileSharingEnabled</key>
+	<true/>
 </dict>
 </plist>

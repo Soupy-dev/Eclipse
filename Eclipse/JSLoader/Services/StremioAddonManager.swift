@@ -9,9 +9,10 @@ class StremioAddonManager: ObservableObject {
     @Published var isDownloading = false
     private var catalogResolutionCache: [String: TMDBSearchResult] = [:]
     private var catalogResolutionMisses: Set<String> = []
+    private var imdbResolutionCache: [String: String] = [:]
 
     var activeAddons: [StremioAddon] {
-        addons.filter { $0.isActive }
+        addons.filter(isAddonEnabled)
     }
 
     var activeStreamAddons: [StremioAddon] {
@@ -39,7 +40,8 @@ class StremioAddonManager: ObservableObject {
 
     // MARK: - Add Addon
 
-    func addAddon(from url: String) async throws {
+    @discardableResult
+    func addAddon(from url: String) async throws -> StremioAddon {
         isDownloading = true
         defer { isDownloading = false }
 
@@ -66,24 +68,37 @@ class StremioAddonManager: ObservableObject {
             manifestJSON: manifestJSON,
             isActive: true
         )
+        PlatformSourceActivation.removeOverride(sourceID: "stremio:\(id.uuidString)")
         if manifest.supportsStreams {
             AutoModeSourceSelection.appendSourceIfNeeded("stremio:\(id.uuidString)")
         }
 
         loadAddons()
         Logger.shared.log("Stremio: Added addon '\(manifest.name)' (\(manifest.id))", type: "Stremio")
+        return addons.first(where: { $0.id == id }) ?? StremioAddon(
+            id: id,
+            configuredURL: configuredURL,
+            manifest: manifest,
+            isActive: true,
+            sortIndex: Int64(addons.count)
+        )
     }
 
     // MARK: - Remove Addon
 
     func removeAddon(_ addon: StremioAddon) {
         StremioAddonStore.shared.remove(addon)
+        PlatformSourceActivation.removeOverride(sourceID: SourceHealth.stremioId(addon))
         loadAddons()
     }
 
     // MARK: - Toggle Active
 
     func setAddonState(_ addon: StremioAddon, isActive: Bool) {
+#if os(tvOS)
+        PlatformSourceActivation.setEnabled(isActive, sourceID: SourceHealth.stremioId(addon))
+        loadAddons()
+#else
         let manifestData = (try? JSONEncoder().encode(addon.manifest)).flatMap { String(data: $0, encoding: .utf8) } ?? ""
         StremioAddonStore.shared.storeAddon(
             id: addon.id,
@@ -92,6 +107,14 @@ class StremioAddonManager: ObservableObject {
             isActive: isActive
         )
         loadAddons()
+#endif
+    }
+
+    func isAddonEnabled(_ addon: StremioAddon) -> Bool {
+        PlatformSourceActivation.isEnabled(
+            sourceID: SourceHealth.stremioId(addon),
+            sharedValue: addon.isActive
+        )
     }
 
     // MARK: - Reconfigure
@@ -213,12 +236,21 @@ class StremioAddonManager: ObservableObject {
         }
 
         let client = StremioClient.shared
-        let effectivePlaybackContext = await Self.enrichedPlaybackContextForKitsuIfNeeded(
+        async let resolvedIMDbIDTask = resolveIMDbID(
+            tmdbId: tmdbId,
+            providedIMDbID: imdbId,
+            type: type
+        )
+        async let effectivePlaybackContextTask = Self.enrichedPlaybackContextForKitsuIfNeeded(
             playbackContext,
             addons: active,
             type: type,
             titleCandidates: titleCandidates,
             expectedYear: expectedYear
+        )
+        let (resolvedIMDbID, effectivePlaybackContext) = await (
+            resolvedIMDbIDTask,
+            effectivePlaybackContextTask
         )
         let maxConcurrent = 2
 
@@ -233,7 +265,7 @@ class StremioAddonManager: ObservableObject {
                         addon,
                         client: client,
                         tmdbId: tmdbId,
-                        imdbId: imdbId,
+                        imdbId: resolvedIMDbID,
                         type: type,
                         season: season,
                         episode: episode,
@@ -261,7 +293,7 @@ class StremioAddonManager: ObservableObject {
                             addon,
                             client: client,
                             tmdbId: tmdbId,
-                            imdbId: imdbId,
+                            imdbId: resolvedIMDbID,
                             type: type,
                             season: season,
                             episode: episode,
@@ -296,19 +328,28 @@ class StremioAddonManager: ObservableObject {
             return []
         }
 
-        let effectivePlaybackContext = await Self.enrichedPlaybackContextForKitsuIfNeeded(
+        async let resolvedIMDbIDTask = resolveIMDbID(
+            tmdbId: tmdbId,
+            providedIMDbID: imdbId,
+            type: type
+        )
+        async let effectivePlaybackContextTask = Self.enrichedPlaybackContextForKitsuIfNeeded(
             playbackContext,
             addons: [addon],
             type: type,
             titleCandidates: titleCandidates,
             expectedYear: expectedYear
         )
+        let (resolvedIMDbID, effectivePlaybackContext) = await (
+            resolvedIMDbIDTask,
+            effectivePlaybackContextTask
+        )
 
         return await Self.resolveStreamsForAddon(
             addon,
             client: StremioClient.shared,
             tmdbId: tmdbId,
-            imdbId: imdbId,
+            imdbId: resolvedIMDbID,
             type: type,
             season: season,
             episode: episode,
@@ -339,13 +380,22 @@ class StremioAddonManager: ObservableObject {
         guard !active.isEmpty else { return [] }
 
         let client = StremioClient.shared
-        let effectivePlaybackContext = await Self.enrichedPlaybackContextForKitsuIfNeeded(
+        async let resolvedIMDbIDTask = resolveIMDbID(
+            tmdbId: tmdbId,
+            providedIMDbID: imdbId,
+            type: type
+        )
+        async let effectivePlaybackContextTask = Self.enrichedPlaybackContextForKitsuIfNeeded(
             playbackContext,
             addons: active,
             type: type,
             titleCandidates: titleCandidates,
             expectedYear: expectedYear,
             resourceName: "subtitles"
+        )
+        let (resolvedIMDbID, effectivePlaybackContext) = await (
+            resolvedIMDbIDTask,
+            effectivePlaybackContextTask
         )
         let maxConcurrent = 2
 
@@ -360,7 +410,7 @@ class StremioAddonManager: ObservableObject {
                         addon,
                         client: client,
                         tmdbId: tmdbId,
-                        imdbId: imdbId,
+                        imdbId: resolvedIMDbID,
                         type: type,
                         season: season,
                         episode: episode,
@@ -384,7 +434,7 @@ class StremioAddonManager: ObservableObject {
                             addon,
                             client: client,
                             tmdbId: tmdbId,
-                            imdbId: imdbId,
+                            imdbId: resolvedIMDbID,
                             type: type,
                             season: season,
                             episode: episode,
@@ -488,13 +538,13 @@ class StremioAddonManager: ObservableObject {
             return nil
         }
 
-        if let tmdbId = Self.tmdbId(from: meta.id) {
+        if let tmdbId = meta.tmdbId ?? Self.tmdbId(from: meta.id) {
             let result = Self.searchResult(from: meta, tmdbId: tmdbId, mediaType: mediaType)
             catalogResolutionCache[cacheKey] = result
             return result
         }
 
-        if let imdbId = Self.imdbId(from: meta.id) {
+        if let imdbId = StremioClient.normalizedIMDbID(meta.imdbId ?? Self.imdbId(from: meta.id)) {
             do {
                 if let result = try await tmdbService.findByIMDbId(imdbId, preferredMediaType: mediaType) {
                     catalogResolutionCache[cacheKey] = result
@@ -568,6 +618,52 @@ class StremioAddonManager: ObservableObject {
         return value
     }
 
+    private func resolveIMDbID(
+        tmdbId: Int,
+        providedIMDbID: String?,
+        type: String
+    ) async -> String? {
+        let normalizedType = type.lowercased()
+        let cacheType = normalizedType == "movie" ? "movie" : "series"
+        let cacheKey = "\(cacheType)|\(tmdbId)"
+
+        if let provided = StremioClient.normalizedIMDbID(providedIMDbID) {
+            imdbResolutionCache[cacheKey] = provided
+            return provided
+        }
+        if let cached = imdbResolutionCache[cacheKey] {
+            return cached
+        }
+        guard tmdbId > 0 else { return nil }
+
+        do {
+            let resolved: String?
+            switch normalizedType {
+            case "movie":
+                resolved = try await TMDBService.shared.getMovieDetails(id: tmdbId).imdbId
+            case "series", "tv":
+                resolved = try await TMDBService.shared.getTVShowDetails(id: tmdbId).externalIds?.imdbId
+            default:
+                resolved = nil
+            }
+
+            guard let normalized = StremioClient.normalizedIMDbID(resolved) else {
+                Logger.shared.log("Stremio: TMDB-to-IMDb fallback found no IMDb ID for \(cacheType) tmdbId=\(tmdbId)", type: "Stremio")
+                return nil
+            }
+
+            imdbResolutionCache[cacheKey] = normalized
+            Logger.shared.log("Stremio: TMDB-to-IMDb fallback resolved \(cacheType) tmdbId=\(tmdbId) to \(normalized)", type: "Stremio")
+            return normalized
+        } catch {
+            Logger.shared.log(
+                "Stremio: TMDB-to-IMDb fallback failed for \(cacheType) tmdbId=\(tmdbId) error=\(String(describing: Swift.type(of: error)))",
+                type: "Stremio"
+            )
+            return nil
+        }
+    }
+
     private static func fetchStreamsForAddon(
         _ addon: StremioAddon,
         client: StremioClient,
@@ -636,10 +732,17 @@ class StremioAddonManager: ObservableObject {
         let prefixes = resourceName == "subtitles"
             ? (addon.manifest.subtitleIdPrefixes ?? [])
             : (addon.manifest.streamIdPrefixes ?? [])
-        guard !prefixes.isEmpty else { return true }
+        return explicitlySupportsKitsuContentIds(prefixes)
+    }
+
+    /// Kitsu title resolution is an extra rate-limited network preflight. A
+    /// non-empty prefix list can rule it out explicitly, while Stremio's
+    /// missing/empty prefix convention is an unrestricted wildcard.
+    static func explicitlySupportsKitsuContentIds(_ prefixes: [String]?) -> Bool {
+        guard let prefixes, !prefixes.isEmpty else { return true }
         return prefixes.contains { prefix in
-            let lowercased = prefix.lowercased()
-            return lowercased == "kitsu" || lowercased == "kitsu:"
+            let normalized = prefix.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return normalized == "kitsu" || normalized == "kitsu:"
         }
     }
 
@@ -660,7 +763,10 @@ class StremioAddonManager: ObservableObject {
             return []
         }
 
-        Logger.shared.log("Stremio: Starting fetch for addon '\(addon.manifest.name)' baseURL=\(addon.configuredURL)", type: "Stremio")
+        Logger.shared.log(
+            "Stremio: Starting fetch for addon '\(addon.manifest.name)' endpoint=\(StremioClient.redactedEndpointDescription(from: addon.configuredURL))",
+            type: "Stremio"
+        )
 
         let contentIds = client.buildContentIds(
             tmdbId: tmdbId,
@@ -681,14 +787,19 @@ class StremioAddonManager: ObservableObject {
         var lastError: Error?
         var directStreams: [StremioStream] = []
         var directHitCount = 0
-        for contentId in contentIds {
+        for (candidateIndex, contentId) in contentIds.enumerated() {
+            if Task.isCancelled {
+                Logger.shared.log("Stremio: Cancelled lookup for \(addon.manifest.name) before candidate \(candidateIndex + 1)/\(contentIds.count)", type: "Stremio")
+                return dedupeStreams(directStreams)
+            }
             Logger.shared.log("Stremio: \(addon.manifest.name) requesting streams with contentId='\(contentId)'", type: "Stremio")
 
             do {
                 let streams = try await client.fetchStreams(
                     baseURL: addon.configuredURL,
                     type: type,
-                    id: contentId
+                    id: contentId,
+                    retryEmptyResponse: candidateIndex == 0
                 )
                 Logger.shared.log("Stremio: \(addon.manifest.name) returned \(streams.count) stream(s) for '\(contentId)'", type: "Stremio")
                 if !streams.isEmpty {
@@ -696,8 +807,15 @@ class StremioAddonManager: ObservableObject {
                     directStreams.append(contentsOf: streams)
                 }
             } catch {
+                if Task.isCancelled || error is CancellationError || (error as? URLError)?.code == .cancelled {
+                    Logger.shared.log("Stremio: Cancelled lookup for \(addon.manifest.name) while requesting candidate \(candidateIndex + 1)/\(contentIds.count)", type: "Stremio")
+                    return dedupeStreams(directStreams)
+                }
                 lastError = error
-                Logger.shared.log("Stremio: \(addon.manifest.name) FAILED with id '\(contentId)': \(error.localizedDescription)", type: "Stremio")
+                Logger.shared.log(
+                    "Stremio: \(addon.manifest.name) FAILED with id '\(contentId)' error=\(String(describing: Swift.type(of: error)))",
+                    type: "Stremio"
+                )
             }
         }
 
@@ -1244,13 +1362,55 @@ class StremioAddonManager: ObservableObject {
     }
 }
 
+struct KitsuLookupQueryCache {
+    enum Entry: Equatable {
+        case match(Int)
+        case noMatch
+    }
+
+    private let capacity: Int
+    private var entries: [String: Entry] = [:]
+    private var insertionOrder: [String] = []
+
+    init(capacity: Int = 512) {
+        precondition(capacity > 0)
+        self.capacity = capacity
+    }
+
+    func entry(for key: String) -> Entry? {
+        entries[key]
+    }
+
+    mutating func store(_ entry: Entry, for key: String) {
+        if entries.updateValue(entry, forKey: key) == nil {
+            insertionOrder.append(key)
+        }
+
+        let overflow = entries.count - capacity
+        guard overflow > 0 else { return }
+        let evictedKeys = insertionOrder.prefix(overflow)
+        for evictedKey in evictedKeys {
+            entries.removeValue(forKey: evictedKey)
+        }
+        insertionOrder.removeFirst(overflow)
+    }
+}
+
 private actor KitsuAnimeIDLookup {
+    private enum FetchResult {
+        case response(KitsuSearchResponse)
+        case unavailable
+        case rateLimited
+        case cancelled
+    }
+
     static let shared = KitsuAnimeIDLookup()
 
     private let endpoint = URL(string: "https://kitsu.io/api/edge/anime")!
     private var positiveCacheByHint: [Int: Int] = [:]
-    private var queryCache: [String: Int?] = [:]
+    private var queryCache = KitsuLookupQueryCache()
     private var nextAvailableAt = Date.distantPast
+    private var rateLimitedUntil = Date.distantPast
     private let minimumSpacing: TimeInterval = 0.4
 
     func resolveAnimeId(
@@ -1262,21 +1422,42 @@ private actor KitsuAnimeIDLookup {
         if let cacheHint, let cached = positiveCacheByHint[cacheHint] {
             return cached
         }
+        guard rateLimitedUntil <= Date() else {
+            return nil
+        }
 
         let queries = searchQueries(from: titleCandidates).prefix(5)
         guard !queries.isEmpty else { return nil }
 
         for query in queries {
             let cacheKey = "\(normalizedTitle(query))|\(expectedEpisodeCount?.description ?? "-")|\(expectedYear?.description ?? "-")"
-            if let cached = queryCache[cacheKey] {
-                if let cacheHint, let cached {
-                    positiveCacheByHint[cacheHint] = cached
+            if let cached = queryCache.entry(for: cacheKey) {
+                switch cached {
+                case .match(let id):
+                    if let cacheHint {
+                        positiveCacheByHint[cacheHint] = id
+                    }
+                    return id
+                case .noMatch:
+                    // Keep walking: another title variant may have matched, or
+                    // may have previously failed at the network layer and must
+                    // remain retryable.
+                    continue
                 }
-                return cached
             }
 
-            guard let response = await fetchKitsuSearch(query: query) else {
+            let response: KitsuSearchResponse
+            switch await fetchKitsuSearch(query: query) {
+            case .response(let value):
+                response = value
+            case .unavailable:
                 continue
+            case .rateLimited:
+                // Kitsu is an optional enrichment. Respect Retry-After without
+                // delaying the primary addon requests behind that cooldown.
+                return nil
+            case .cancelled:
+                return nil
             }
 
             if let match = bestMatch(
@@ -1285,7 +1466,7 @@ private actor KitsuAnimeIDLookup {
                 expectedEpisodeCount: expectedEpisodeCount,
                 expectedYear: expectedYear
             ) {
-                queryCache[cacheKey] = match.id
+                queryCache.store(.match(match.id), for: cacheKey)
                 if let cacheHint {
                     positiveCacheByHint[cacheHint] = match.id
                 }
@@ -1293,17 +1474,23 @@ private actor KitsuAnimeIDLookup {
                 return match.id
             }
 
-            queryCache[cacheKey] = nil
+            queryCache.store(.noMatch, for: cacheKey)
         }
 
         return nil
     }
 
-    private func fetchKitsuSearch(query: String) async -> KitsuSearchResponse? {
-        await waitForSlot()
+    private func fetchKitsuSearch(query: String) async -> FetchResult {
+        do {
+            try await waitForSlot()
+        } catch {
+            return .cancelled
+        }
+        guard !Task.isCancelled else { return .cancelled }
+        guard rateLimitedUntil <= Date() else { return .rateLimited }
 
         guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else {
-            return nil
+            return .unavailable
         }
         components.queryItems = [
             URLQueryItem(name: "filter[text]", value: query),
@@ -1311,45 +1498,56 @@ private actor KitsuAnimeIDLookup {
             URLQueryItem(name: "fields[anime]", value: "slug,canonicalTitle,titles,startDate,episodeCount")
         ]
 
-        guard let url = components.url else { return nil }
+        guard let url = components.url else { return .unavailable }
 
         do {
             var request = URLRequest(url: url, timeoutInterval: 5.0)
             request.setValue("application/vnd.api+json", forHTTPHeaderField: "Accept")
             let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse else { return nil }
+            guard let httpResponse = response as? HTTPURLResponse else { return .unavailable }
 
             if httpResponse.statusCode == 429 {
                 pauseUntilRetryAfter(httpResponse)
                 Logger.shared.log("Stremio: Kitsu title lookup rate limited", type: "Stremio")
-                return nil
+                return .rateLimited
             }
 
             guard httpResponse.statusCode == 200 else {
                 Logger.shared.log("Stremio: Kitsu title lookup failed status=\(httpResponse.statusCode) query='\(query)'", type: "Stremio")
-                return nil
+                return .unavailable
             }
 
-            return try JSONDecoder().decode(KitsuSearchResponse.self, from: data)
+            return .response(try JSONDecoder().decode(KitsuSearchResponse.self, from: data))
         } catch {
+            if Task.isCancelled
+                || error is CancellationError
+                || (error as? URLError)?.code == .cancelled {
+                return .cancelled
+            }
             Logger.shared.log("Stremio: Kitsu title lookup failed query='\(query)' error=\(error.localizedDescription)", type: "Stremio")
-            return nil
+            return .unavailable
         }
     }
 
-    private func waitForSlot() async {
+    private func waitForSlot() async throws {
+        try Task.checkCancellation()
         let now = Date()
-        if nextAvailableAt > now {
-            let delay = nextAvailableAt.timeIntervalSince(now)
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        let reservedSlot = max(now, nextAvailableAt)
+        nextAvailableAt = reservedSlot.addingTimeInterval(minimumSpacing)
+
+        let delay = reservedSlot.timeIntervalSince(now)
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
         }
-        nextAvailableAt = Date().addingTimeInterval(minimumSpacing)
+        try Task.checkCancellation()
     }
 
     private func pauseUntilRetryAfter(_ response: HTTPURLResponse) {
         let retryAfter = response.value(forHTTPHeaderField: "Retry-After")
             .flatMap(TimeInterval.init) ?? 5
-        nextAvailableAt = max(nextAvailableAt, Date().addingTimeInterval(min(max(retryAfter, 1), 120)))
+        let cooldown = Date().addingTimeInterval(min(max(retryAfter, 1), 120))
+        rateLimitedUntil = max(rateLimitedUntil, cooldown)
+        nextAvailableAt = max(nextAvailableAt, cooldown)
     }
 
     private func bestMatch(

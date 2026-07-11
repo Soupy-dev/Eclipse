@@ -12,7 +12,9 @@ enum KanzenRootTab: Hashable {
 struct KanzenModeSwitchButton: View {
     @AppStorage("showKanzen") private var showKanzen: Bool = false
     @AppStorage(ModeSwitchAnimationSettings.enabledKey) private var modeSwitchAnimationEnabled = ModeSwitchAnimationSettings.defaultEnabled
+    @EnvironmentObject private var modeSwitchTransitionCoordinator: ModeSwitchTransitionCoordinator
     @State private var isLaunching = false
+    @State private var buttonFrame: CGRect = .zero
 
     var body: some View {
         Button {
@@ -51,6 +53,17 @@ struct KanzenModeSwitchButton: View {
             }
         }
         .buttonStyle(.plain)
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: ModeSwitchButtonOriginPreferenceKey.self,
+                    value: proxy.frame(in: .named(ModeSwitchTransitionCoordinator.coordinateSpaceName))
+                )
+            }
+        }
+        .onPreferenceChange(ModeSwitchButtonOriginPreferenceKey.self) { frame in
+            buttonFrame = frame
+        }
         .accessibilityLabel("Switch to Media Mode")
     }
 
@@ -62,6 +75,9 @@ struct KanzenModeSwitchButton: View {
             return
         }
 
+        recordSwitchOrigin()
+        modeSwitchTransitionCoordinator.beginBurst(toReaderMode: false)
+
 #if os(iOS)
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
 #endif
@@ -70,11 +86,18 @@ struct KanzenModeSwitchButton: View {
             isLaunching = true
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            withAnimation(.spring(response: 0.72, dampingFraction: 0.82, blendDuration: 0.08)) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) {
+            withAnimation(.easeInOut(duration: 0.84)) {
                 showKanzen = false
             }
         }
+    }
+
+    private func recordSwitchOrigin() {
+        guard buttonFrame != .zero else { return }
+        modeSwitchTransitionCoordinator.record(
+            origin: CGPoint(x: buttonFrame.midX, y: buttonFrame.midY)
+        )
     }
 }
 

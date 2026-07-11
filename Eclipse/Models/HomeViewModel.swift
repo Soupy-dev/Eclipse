@@ -14,6 +14,7 @@ final class HomeViewModel: ObservableObject {
     private var heroCarouselItems: [TMDBSearchResult] = []
     private var heroCarouselIndex = 0
     private var heroLaunchSelectionCatalogId: String?
+    private static let maxHeroCarouselItems = 12
 
     /// Number of items in the hero carousel (for pager dots).
     var heroCarouselCount: Int { heroCarouselItems.count }
@@ -570,22 +571,26 @@ final class HomeViewModel: ObservableObject {
 
         guard !candidates.isEmpty else { return }
 
-        heroCarouselItems = candidates
         switch behavior {
         case .static:
+            heroCarouselItems = candidates
             heroLaunchSelectionCatalogId = nil
             heroCarouselIndex = 0
             heroContent = candidates.first
         case .carousel:
+            // Keep the carousel and its pager dots on the same set of items so
+            // swiping past the last visible dot wraps to the first item.
+            heroCarouselItems = Array(candidates.prefix(Self.maxHeroCarouselItems))
             heroLaunchSelectionCatalogId = nil
             if let current = heroContent,
-               let currentIndex = candidates.firstIndex(where: { $0.stableIdentity == current.stableIdentity }) {
+               let currentIndex = heroCarouselItems.firstIndex(where: { $0.stableIdentity == current.stableIdentity }) {
                 heroCarouselIndex = currentIndex
             } else {
                 heroCarouselIndex = 0
-                heroContent = candidates.first
+                heroContent = heroCarouselItems.first
             }
         case .launch:
+            heroCarouselItems = candidates
             if heroLaunchSelectionCatalogId == catalogId,
                let current = heroContent,
                let currentIndex = candidates.firstIndex(where: { $0.stableIdentity == current.stableIdentity }) {

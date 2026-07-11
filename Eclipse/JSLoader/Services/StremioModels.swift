@@ -323,6 +323,8 @@ struct StremioMetaPreview: Codable, Identifiable, Hashable {
     let id: String
     let type: String?
     let name: String
+    let imdbId: String?
+    let tmdbId: Int?
     let poster: String?
     let background: String?
     let description: String?
@@ -334,6 +336,85 @@ struct StremioMetaPreview: Codable, Identifiable, Hashable {
 
     enum CodingKeys: String, CodingKey {
         case id, type, name, poster, background, description, releaseInfo, released, imdbRating, videos, behaviorHints
+        case imdbId = "imdb_id"
+        case imdbIdCamel = "imdbId"
+        case tmdbId = "tmdb_id"
+        case tmdbIdCamel = "tmdbId"
+        case moviedbId = "moviedb_id"
+        case moviedbIdCamel = "moviedbId"
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        type = try container.decodeIfPresent(String.self, forKey: .type)
+        name = try container.decode(String.self, forKey: .name)
+        imdbId = container.decodeIfPresentLossyString(forKey: .imdbId)
+            ?? container.decodeIfPresentLossyString(forKey: .imdbIdCamel)
+        tmdbId = Self.decodeFlexibleInt(from: container, forKey: .tmdbId)
+            ?? Self.decodeFlexibleInt(from: container, forKey: .tmdbIdCamel)
+            ?? Self.decodeFlexibleInt(from: container, forKey: .moviedbId)
+            ?? Self.decodeFlexibleInt(from: container, forKey: .moviedbIdCamel)
+        poster = try container.decodeIfPresent(String.self, forKey: .poster)
+        background = try container.decodeIfPresent(String.self, forKey: .background)
+        description = try container.decodeIfPresent(String.self, forKey: .description)
+        releaseInfo = try container.decodeIfPresent(String.self, forKey: .releaseInfo)
+        released = try container.decodeIfPresent(String.self, forKey: .released)
+        imdbRating = try container.decodeIfPresent(String.self, forKey: .imdbRating)
+        videos = try container.decodeIfPresent([StremioVideo].self, forKey: .videos)
+        behaviorHints = try container.decodeIfPresent(StremioMetaBehaviorHints.self, forKey: .behaviorHints)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encodeIfPresent(type, forKey: .type)
+        try container.encode(name, forKey: .name)
+        try container.encodeIfPresent(imdbId, forKey: .imdbId)
+        try container.encodeIfPresent(tmdbId, forKey: .tmdbId)
+        try container.encodeIfPresent(poster, forKey: .poster)
+        try container.encodeIfPresent(background, forKey: .background)
+        try container.encodeIfPresent(description, forKey: .description)
+        try container.encodeIfPresent(releaseInfo, forKey: .releaseInfo)
+        try container.encodeIfPresent(released, forKey: .released)
+        try container.encodeIfPresent(imdbRating, forKey: .imdbRating)
+        try container.encodeIfPresent(videos, forKey: .videos)
+        try container.encodeIfPresent(behaviorHints, forKey: .behaviorHints)
+    }
+
+    private static func decodeFlexibleInt(
+        from container: KeyedDecodingContainer<CodingKeys>,
+        forKey key: CodingKeys
+    ) -> Int? {
+        if let value = try? container.decodeIfPresent(Int.self, forKey: key) {
+            return value
+        }
+        if let value = try? container.decodeIfPresent(Double.self, forKey: key) {
+            return Int(value)
+        }
+        if let value = try? container.decodeIfPresent(String.self, forKey: key) {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let intValue = Int(trimmed) {
+                return intValue
+            }
+            let numericRuns = trimmed.components(separatedBy: CharacterSet.decimalDigits.inverted).filter { !$0.isEmpty }
+            if numericRuns.count == 1 {
+                return Int(numericRuns[0])
+            }
+        }
+        return nil
+    }
+}
+
+private extension KeyedDecodingContainer where Key == StremioMetaPreview.CodingKeys {
+    func decodeIfPresentLossyString(forKey key: Key) -> String? {
+        if let value = try? decodeIfPresent(String.self, forKey: key) {
+            return value
+        }
+        if let value = try? decodeIfPresent(Int.self, forKey: key) {
+            return String(value)
+        }
+        return nil
     }
 }
 
@@ -413,9 +494,45 @@ struct StremioSubtitleResponse: Codable, Sendable {
 /// Throwaway type used only to advance the unkeyed container past a bad element.
 private struct AnyCodable: Codable {
     init(from decoder: Decoder) throws {
-        _ = try? decoder.singleValueContainer().decode(String.self)
+        if var array = try? decoder.unkeyedContainer() {
+            while !array.isAtEnd {
+                if (try? array.decodeNil()) == true { continue }
+                _ = try array.decode(AnyCodable.self)
+            }
+            return
+        }
+
+        if let object = try? decoder.container(keyedBy: AnyCodingKey.self) {
+            for key in object.allKeys {
+                if (try? object.decodeNil(forKey: key)) == true { continue }
+                _ = try object.decode(AnyCodable.self, forKey: key)
+            }
+            return
+        }
+
+        let value = try decoder.singleValueContainer()
+        if value.decodeNil() { return }
+        if (try? value.decode(Bool.self)) != nil { return }
+        if (try? value.decode(Double.self)) != nil { return }
+        if (try? value.decode(String.self)) != nil { return }
+        throw DecodingError.dataCorruptedError(in: value, debugDescription: "Unsupported JSON value")
     }
     func encode(to encoder: Encoder) throws {}
+}
+
+private struct AnyCodingKey: CodingKey {
+    let stringValue: String
+    let intValue: Int?
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+        intValue = nil
+    }
+
+    init?(intValue: Int) {
+        stringValue = String(intValue)
+        self.intValue = intValue
+    }
 }
 
 struct StremioStream: Codable, Identifiable, Hashable {
@@ -626,7 +743,7 @@ extension StremioAddonEntity {
             let manifest = try JSONDecoder().decode(StremioManifest.self, from: data)
             return StremioAddon(
                 id: id,
-                configuredURL: configuredURL,
+                configuredURL: StremioConfiguredURLVault.resolve(addonID: id, persistedURL: configuredURL),
                 manifest: manifest,
                 isActive: isActive,
                 sortIndex: sortIndex

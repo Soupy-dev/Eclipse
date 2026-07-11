@@ -12,9 +12,13 @@ private enum MPVHeaderProxyPlaylistMode {
 private final class MPVHeaderProxyCore {
     private struct Session {
         let headers: [String: String]
+        let credentialOriginURL: URL
         let createdAt: Date
         let lastAccessed: Date
         let logType: String
+        let traceID: String
+        let requestCount: Int
+        let upstreamTransport: UpstreamTransport
     }
 
     private enum UpstreamBodyMode {
@@ -91,8 +95,103 @@ private final class MPVHeaderProxyCore {
         return components?.string ?? "\(url.scheme ?? "unknown")://\(url.host ?? "unknown")\(url.path)"
     }
 
+    private static func sanitizedCredentialHeaders(_ headers: [String: String]) -> [String: String] {
+        let managedOrHopByHopHeaders: Set<String> = [
+            "accept-encoding", "connection", "content-length", "host", "keep-alive",
+            "proxy-authenticate", "proxy-authorization", "proxy-connection", "range", "te",
+            "trailer", "transfer-encoding", "upgrade"
+        ]
+        let validNameCharacters = CharacterSet(
+            charactersIn: "!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        )
+
+        return headers.reduce(into: [:]) { result, pair in
+            let name = pair.key.trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = pair.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            let hasValidName = !name.isEmpty && name.unicodeScalars.allSatisfy {
+                $0.value < 128 && validNameCharacters.contains($0)
+            }
+            let hasValidValue = value.unicodeScalars.allSatisfy {
+                $0.value == 9 || $0.value >= 32 && $0.value != 127
+            }
+            guard hasValidName,
+                  !value.isEmpty,
+                  name.utf8.count <= 128,
+                  value.utf8.count <= 16 * 1_024,
+                  hasValidValue,
+                  !managedOrHopByHopHeaders.contains(name.lowercased()) else { return }
+            result[name] = value
+        }
+    }
+
+    private static func credentialHeaders(
+        _ headers: [String: String],
+        for destinationURL: URL,
+        originURL: URL
+    ) -> [String: String] {
+        let sanitized = sanitizedCredentialHeaders(headers)
+        guard !sameOrigin(destinationURL, originURL) else { return sanitized }
+        let safeCrossOriginHeaders: Set<String> = [
+            "accept", "accept-language", "cache-control", "pragma", "user-agent"
+        ]
+        return sanitized.reduce(into: [:]) { result, pair in
+            switch pair.key.lowercased() {
+            case let name where safeCrossOriginHeaders.contains(name):
+                result[pair.key] = pair.value
+            case "referer":
+                if let value = redactedCrossOriginReferer(pair.value) {
+                    result[pair.key] = value
+                }
+            case "origin":
+                if let value = sanitizedOrigin(pair.value) {
+                    result[pair.key] = value
+                }
+            default:
+                break
+            }
+        }
+    }
+
+    private static func sameOrigin(_ lhs: URL, _ rhs: URL) -> Bool {
+        func origin(_ url: URL) -> (scheme: String, host: String, port: Int)? {
+            guard let scheme = url.scheme?.lowercased(),
+                  let host = url.host?.lowercased(),
+                  scheme == "http" || scheme == "https" else { return nil }
+            return (scheme, host, url.port ?? (scheme == "https" ? 443 : 80))
+        }
+        guard let lhsOrigin = origin(lhs), let rhsOrigin = origin(rhs) else { return false }
+        return lhsOrigin == rhsOrigin
+    }
+
+    private static func redactedCrossOriginReferer(_ value: String) -> String? {
+        guard var components = URLComponents(string: value),
+              ["http", "https"].contains(components.scheme?.lowercased() ?? ""),
+              components.host != nil,
+              components.user == nil,
+              components.password == nil else { return nil }
+        components.query = nil
+        components.fragment = nil
+        return components.url?.absoluteString
+    }
+
+    private static func sanitizedOrigin(_ value: String) -> String? {
+        guard let url = URL(string: value),
+              let scheme = url.scheme?.lowercased(),
+              let host = url.host?.lowercased(),
+              ["http", "https"].contains(scheme),
+              url.user == nil,
+              url.password == nil else { return nil }
+        let port = url.port.map { ":\($0)" } ?? ""
+        return "\(scheme)://\(host)\(port)"
+    }
+
+    private func isExpectedPlayerDisconnect(_ error: NWError) -> Bool {
+        guard case .posix(let code) = error else { return false }
+        return code == .ECONNRESET || code == .EPIPE || code == .ENOTCONN || code == .ECANCELED
+    }
+
     private func setSession(_ session: Session, for id: String) {
-        _ = withSessionsLock {
+        withSessionsLock {
             sessions[id] = session
         }
     }
@@ -100,13 +199,22 @@ private final class MPVHeaderProxyCore {
     private func touchSession(for id: String) -> Session? {
         withSessionsLock {
             guard let session = sessions[id] else { return nil }
-            let updated = Session(headers: session.headers, createdAt: session.createdAt, lastAccessed: Date(), logType: session.logType)
+            let updated = Session(
+                headers: session.headers,
+                credentialOriginURL: session.credentialOriginURL,
+                createdAt: session.createdAt,
+                lastAccessed: Date(),
+                logType: session.logType,
+                traceID: session.traceID,
+                requestCount: session.requestCount + 1,
+                upstreamTransport: session.upstreamTransport
+            )
             sessions[id] = updated
             return updated
         }
     }
 
-    func makeProxyURL(for targetURL: URL, headers: [String: String], logType: String = "Stream") -> URL? {
+    func makeProxyURL(for targetURL: URL, headers: [String: String], logType: String = "Stream", traceID: String? = nil) -> URL? {
         guard ensureStarted() else { return nil }
 
         var activePort = port
@@ -129,8 +237,21 @@ private final class MPVHeaderProxyCore {
 
         let sessionId = UUID().uuidString
         let now = Date()
-        setSession(Session(headers: headers, createdAt: now, lastAccessed: now, logType: logType), for: sessionId)
-        Logger.shared.log("\(logPrefix): created session=\(String(sessionId.prefix(8))) target=\(logURLSummary(targetURL)) headerKeys=[\(headers.keys.sorted().joined(separator: ","))] activeSessions=\(sessionCount())", type: logType)
+        let resolvedTraceID = traceID ?? String(sessionId.prefix(8))
+        setSession(
+            Session(
+                headers: headers,
+                credentialOriginURL: targetURL,
+                createdAt: now,
+                lastAccessed: now,
+                logType: logType,
+                traceID: resolvedTraceID,
+                requestCount: 0,
+                upstreamTransport: UpstreamTransport()
+            ),
+            for: sessionId
+        )
+        Logger.shared.log("[MPVProxyTrace \(resolvedTraceID)] stage=session-created session=\(String(sessionId.prefix(8))) target=\(logURLSummary(targetURL)) headerKeys=[\(headers.keys.sorted().joined(separator: ","))] activeSessions=\(sessionCount())", type: "PlaybackTrace")
 
         return buildProxyURL(port: activePort, sessionId: sessionId, targetURL: targetURL)
     }
@@ -186,7 +307,9 @@ private final class MPVHeaderProxyCore {
     private func handleConnection(_ connection: NWConnection) {
         connection.stateUpdateHandler = { state in
             if case .failed(let error) = state {
-                Logger.shared.log("\(self.logPrefix): connection failed: \(error)", type: "Error")
+                if !self.isExpectedPlayerDisconnect(error) {
+                    Logger.shared.log("\(self.logPrefix): connection failed: \(error)", type: "Error")
+                }
             }
         }
         connection.start(queue: queue)
@@ -197,7 +320,9 @@ private final class MPVHeaderProxyCore {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) { [weak self] data, _, isComplete, error in
             guard let self else { return }
             if let error {
-                Logger.shared.log("\(self.logPrefix): receive error: \(error)", type: "Error")
+                if !self.isExpectedPlayerDisconnect(error) {
+                    Logger.shared.log("\(self.logPrefix): receive error: \(error)", type: "Error")
+                }
                 connection.cancel()
                 return
             }
@@ -305,21 +430,41 @@ private final class MPVHeaderProxyCore {
 
         let requestId = String(UUID().uuidString.prefix(8))
         let logType = session.logType
+        let requestSequence = session.requestCount
+        let shouldLogLifecycle = requestSequence == 1 || requestSequence.isMultiple(of: 25)
         let incomingRange = headers.first { $0.key.caseInsensitiveCompare("Range") == .orderedSame }?.value ?? "nil"
-        Logger.shared.log("\(logPrefix)[\(requestId)]: request method=\(method) target=\(logURLSummary(targetURL)) incomingRange=\(incomingRange) incomingHeaderKeys=[\(headers.keys.sorted().joined(separator: ","))] sessionHeaderKeys=[\(session.headers.keys.sorted().joined(separator: ","))]", type: logType)
+        if shouldLogLifecycle {
+            Logger.shared.log("[MPVProxyTrace \(session.traceID)] stage=request session=\(String(sessionId.prefix(8))) req=\(requestSequence) id=\(requestId) method=\(method) target=\(logURLSummary(targetURL)) range=\(incomingRange)", type: "PlaybackTrace")
+        }
 
         var request = URLRequest(url: targetURL)
         request.httpMethod = method
 
+        let credentialHeaderNames = Set(
+            Self.sanitizedCredentialHeaders(session.headers).keys.map { $0.lowercased() }
+        ).union(["authorization", "cookie", "cookie2", "proxy-authorization"])
+        let safeIncomingHeaderNames: Set<String> = [
+            "accept", "accept-language", "cache-control", "dnt", "icy-metadata",
+            "if-match", "if-modified-since", "if-none-match", "if-range",
+            "if-unmodified-since", "pragma", "range", "user-agent"
+        ]
         for (key, value) in headers {
             let lower = key.lowercased()
-            if lower == "host" || hopByHopRequestHeaders.contains(lower) {
+            if lower == "host"
+                || hopByHopRequestHeaders.contains(lower)
+                || credentialHeaderNames.contains(lower)
+                || !safeIncomingHeaderNames.contains(lower) {
                 continue
             }
             request.setValue(value, forHTTPHeaderField: key)
         }
 
-        for (key, value) in session.headers {
+        let scopedSessionHeaders = Self.credentialHeaders(
+            session.headers,
+            for: targetURL,
+            originURL: session.credentialOriginURL
+        )
+        for (key, value) in scopedSessionHeaders {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
@@ -334,7 +479,7 @@ private final class MPVHeaderProxyCore {
 
         let cachedPrefixPlan = await cachedPrefixPlanIfAvailable(
             targetURL: targetURL,
-            headers: session.headers,
+            headers: scopedSessionHeaders,
             method: method,
             rangeHeader: request.value(forHTTPHeaderField: "Range"),
             requestId: requestId,
@@ -353,7 +498,9 @@ private final class MPVHeaderProxyCore {
         }
 
         let upstreamRange = request.value(forHTTPHeaderField: "Range") ?? "nil"
-        Logger.shared.log("\(logPrefix)[\(requestId)]: upstream start range=\(upstreamRange) target=\(logURLSummary(targetURL))", type: logType)
+        if shouldLogLifecycle {
+            Logger.shared.log("[MPVProxyTrace \(session.traceID)] stage=upstream-start session=\(String(sessionId.prefix(8))) req=\(requestSequence) range=\(upstreamRange)", type: "PlaybackTrace")
+        }
         let bridge = UpstreamBridge(
             proxy: self,
             request: request,
@@ -361,7 +508,13 @@ private final class MPVHeaderProxyCore {
             method: method,
             targetURL: targetURL,
             sessionId: sessionId,
+            traceID: session.traceID,
+            requestSequence: requestSequence,
+            shouldLogLifecycle: shouldLogLifecycle,
             logType: logType,
+            credentialHeaders: session.headers,
+            credentialOriginURL: session.credentialOriginURL,
+            upstreamTransport: session.upstreamTransport,
             connection: connection,
             cachedPrefix: cachedPrefix
         )
@@ -395,7 +548,29 @@ private final class MPVHeaderProxyCore {
             return nil
         }
 
-        guard let starter = await ExperimentalMPVPreloadManager.shared.cachedStarter(for: targetURL, headers: headers, waitUpTo: 0.35) else {
+        let parsedRange: (start: Int64, end: Int64?)?
+        if let rangeHeader {
+            guard let supportedRange = parseByteRange(rangeHeader) else {
+                Logger.shared.log("\(logPrefix)[\(requestId)]: MPV warmup cache skipped reason=unsupported-request-range range=\(rangeHeader) target=\(logURLSummary(targetURL))", type: logType)
+                return nil
+            }
+            parsedRange = supportedRange
+        } else {
+            parsedRange = nil
+        }
+        let requestedStart = parsedRange?.start ?? 0
+        guard requestedStart == 0 else {
+            // The cached starter only contains the beginning of the resource. Reject nonzero
+            // ranges before touching disk or waiting for an exact-key warmup to finish.
+            Logger.shared.log("\(logPrefix)[\(requestId)]: MPV warmup cache skipped reason=nonzero-request-range range=\(rangeHeader ?? "nil") target=\(logURLSummary(targetURL))", type: logType)
+            return nil
+        }
+
+        guard let starter = await ExperimentalMPVPreloadManager.shared.cachedStarter(
+            for: targetURL,
+            headers: headers,
+            waitForActiveWarmupUpTo: 0.35
+        ) else {
             Logger.shared.log("\(logPrefix)[\(requestId)]: MPV warmup cache miss target=\(logURLSummary(targetURL)) range=\(rangeHeader ?? "nil")", type: logType)
             return nil
         }
@@ -417,13 +592,6 @@ private final class MPVHeaderProxyCore {
 
         let cachedByteCount = Int64(starter.data.count)
         guard cachedByteCount > 0 else { return nil }
-
-        let parsedRange = parseByteRange(rangeHeader)
-        let requestedStart = parsedRange?.start ?? 0
-        guard requestedStart == 0 else {
-            Logger.shared.log("\(logPrefix)[\(requestId)]: MPV warmup cache skipped reason=nonzero-request-range range=\(rangeHeader ?? "nil") target=\(logURLSummary(targetURL))", type: logType)
-            return nil
-        }
 
         let requestedEnd = min(parsedRange?.end ?? (totalLength - 1), totalLength - 1)
         guard requestedEnd >= 0 else { return nil }
@@ -480,10 +648,22 @@ private final class MPVHeaderProxyCore {
         let parts = body.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false).map(String.init)
         guard parts.count == 2,
               !parts[0].isEmpty,
-              let start = Int64(parts[0]) else {
+              parts[0].utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }),
+              let start = Int64(parts[0]),
+              start >= 0 else {
             return nil
         }
-        let end = parts[1].isEmpty ? nil : Int64(parts[1])
+        let end: Int64?
+        if parts[1].isEmpty {
+            end = nil
+        } else {
+            guard parts[1].utf8.allSatisfy({ $0 >= 48 && $0 <= 57 }),
+                  let parsedEnd = Int64(parts[1]),
+                  parsedEnd >= start else {
+                return nil
+            }
+            end = parsedEnd
+        }
         return (start, end)
     }
 
@@ -737,6 +917,14 @@ private final class MPVHeaderProxyCore {
         sendResponse(connection, statusCode: statusCode, headers: headers, body: data)
     }
 
+    private func emptyResponseHeaders(from http: HTTPURLResponse) -> [String: String] {
+        var headers = filteredResponseHeaders(from: http)
+        removeHeader("Content-Length", from: &headers)
+        removeHeader("Content-Encoding", from: &headers)
+        headers["Content-Length"] = "0"
+        return headers
+    }
+
     private func sendResponse(_ connection: NWConnection, statusCode: Int, headers: [String: String], body: Data) {
         let headerData = responseHeaderData(statusCode: statusCode, headers: headers)
         let responseData = headerData + body
@@ -800,6 +988,7 @@ private final class MPVHeaderProxyCore {
         case 404: return "Not Found"
         case 405: return "Method Not Allowed"
         case 416: return "Range Not Satisfiable"
+        case 429: return "Too Many Requests"
         case 431: return "Request Header Fields Too Large"
         case 500: return "Internal Server Error"
         case 502: return "Bad Gateway"
@@ -859,41 +1048,215 @@ private final class MPVHeaderProxyCore {
         return nil
     }
 
+    func invalidateSession(for proxyURL: URL) {
+        guard let sessionID = managedSessionID(from: proxyURL) else { return }
+        let removed = withSessionsLock {
+            sessions.removeValue(forKey: sessionID)
+        }
+        removed?.upstreamTransport.invalidateAndCancel()
+    }
+
+    private func managedSessionID(from proxyURL: URL) -> String? {
+        guard let components = URLComponents(url: proxyURL, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == "http",
+              components.host == "127.0.0.1" else {
+            return nil
+        }
+
+        let pathParts = components.path.split(separator: "/")
+        guard pathParts.count >= 2,
+              pathParts[0] == "proxy",
+              components.queryItems?.first(where: { $0.name == "token" })?.value == token else {
+            return nil
+        }
+        return String(pathParts[1])
+    }
+
     private func cleanupExpiredSessions() {
         let now = Date()
-        _ = withSessionsLock {
-            sessions = sessions.filter { now.timeIntervalSince($0.value.lastAccessed) < sessionTTL }
+        let expired = withSessionsLock {
+            let expiredIDs = sessions.compactMap { id, session in
+                now.timeIntervalSince(session.lastAccessed) >= sessionTTL ? id : nil
+            }
+            return expiredIDs.compactMap { sessions.removeValue(forKey: $0) }
+        }
+        for session in expired {
+            session.upstreamTransport.invalidateAndCancel()
         }
     }
 
     private func cleanupOldestSessions() {
-        _ = withSessionsLock {
+        let removed = withSessionsLock {
             let sorted = sessions.sorted { $0.value.lastAccessed < $1.value.lastAccessed }
             let removeCount = max(0, sessions.count - maxSessions + 1)
             if removeCount == 0 {
-                return
+                return [Session]()
             }
 
-            for idx in 0..<removeCount {
+            return (0..<removeCount).compactMap { idx in
                 sessions.removeValue(forKey: sorted[idx].key)
+            }
+        }
+        for session in removed {
+            session.upstreamTransport.invalidateAndCancel()
+        }
+    }
+
+    // Each proxy playback session owns one ephemeral URLSession. Rewritten HLS playlists keep
+    // the same proxy session ID, so their manifests, keys, and segments share the connection
+    // pool without sharing cookies, credentials, cache, or connections with another playback.
+    private final class UpstreamTransport: NSObject, URLSessionDataDelegate {
+        private let lock = NSLock()
+        private let delegateQueue: OperationQueue
+        private var urlSession: URLSession!
+        private var bridges: [Int: UpstreamBridge] = [:]
+        private var isInvalidated = false
+
+        override init() {
+            let delegateQueue = OperationQueue()
+            delegateQueue.maxConcurrentOperationCount = 1
+            delegateQueue.qualityOfService = .userInitiated
+            self.delegateQueue = delegateQueue
+            super.init()
+
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.httpShouldSetCookies = false
+            configuration.httpCookieAcceptPolicy = .never
+            configuration.httpCookieStorage = nil
+            configuration.urlCredentialStorage = nil
+            configuration.urlCache = nil
+            configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+            configuration.timeoutIntervalForRequest = 120
+            configuration.timeoutIntervalForResource = 6 * 60 * 60
+            urlSession = URLSession(configuration: configuration, delegate: self, delegateQueue: delegateQueue)
+        }
+
+        func start(_ bridge: UpstreamBridge, request: URLRequest) -> Bool {
+            lock.lock()
+            guard !isInvalidated else {
+                lock.unlock()
+                return false
+            }
+            let task = urlSession.dataTask(with: request)
+            bridges[task.taskIdentifier] = bridge
+            lock.unlock()
+            task.resume()
+            return true
+        }
+
+        func invalidateAndCancel() {
+            lock.lock()
+            guard !isInvalidated else {
+                lock.unlock()
+                return
+            }
+            isInvalidated = true
+            lock.unlock()
+            urlSession.invalidateAndCancel()
+        }
+
+        private func bridge(for task: URLSessionTask) -> UpstreamBridge? {
+            lock.lock()
+            defer { lock.unlock() }
+            return bridges[task.taskIdentifier]
+        }
+
+        private func removeBridge(for task: URLSessionTask) {
+            lock.lock()
+            bridges.removeValue(forKey: task.taskIdentifier)
+            lock.unlock()
+        }
+
+        private var transportIsInvalidated: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return isInvalidated
+        }
+
+        func urlSession(
+            _ session: URLSession,
+            dataTask: URLSessionDataTask,
+            didReceive response: URLResponse,
+            completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+        ) {
+            guard let bridge = bridge(for: dataTask) else {
+                completionHandler(.cancel)
+                return
+            }
+            bridge.enqueue {
+                bridge.handleResponse(
+                    dataTask: dataTask,
+                    response: response,
+                    completionHandler: completionHandler
+                )
+            }
+        }
+
+        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+            guard let bridge = bridge(for: dataTask) else { return }
+            bridge.enqueue {
+                bridge.handleData(dataTask: dataTask, data: data)
+            }
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+            guard let bridge = bridge(for: task) else { return }
+            bridge.enqueue {
+                bridge.handleMetrics(metrics)
+            }
+        }
+
+        func urlSession(
+            _ session: URLSession,
+            task: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest,
+            completionHandler: @escaping (URLRequest?) -> Void
+        ) {
+            guard let bridge = bridge(for: task) else {
+                completionHandler(nil)
+                return
+            }
+            bridge.enqueue {
+                bridge.handleRedirection(
+                    response: response,
+                    request: request,
+                    completionHandler: completionHandler
+                )
+            }
+        }
+
+        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+            guard let bridge = bridge(for: task) else { return }
+            let transportWasInvalidated = transportIsInvalidated
+            removeBridge(for: task)
+            bridge.enqueue {
+                bridge.handleCompletion(
+                    error: error,
+                    transportWasInvalidated: transportWasInvalidated
+                )
             }
         }
     }
 
-    private final class UpstreamBridge: NSObject, URLSessionDataDelegate {
+    private final class UpstreamBridge {
         private weak var proxy: MPVHeaderProxyCore?
         private let request: URLRequest
         private let requestId: String
         private let method: String
         private let targetURL: URL
         private let sessionId: String
+        private let traceID: String
+        private let requestSequence: Int
+        private let shouldLogLifecycle: Bool
         private let logType: String
+        private let credentialHeaders: [String: String]
+        private let credentialOriginURL: URL
+        private let upstreamTransport: UpstreamTransport
         private let connection: NWConnection
         private let cachedPrefix: CachedPrefixContinuation?
         private let callbackQueue: OperationQueue
 
-        private var urlSession: URLSession?
-        private var task: URLSessionDataTask?
         private var continuation: CheckedContinuation<Void, Never>?
         private var httpResponse: HTTPURLResponse?
         private var mode: UpstreamBodyMode = .stream
@@ -913,7 +1276,13 @@ private final class MPVHeaderProxyCore {
             method: String,
             targetURL: URL,
             sessionId: String,
+            traceID: String,
+            requestSequence: Int,
+            shouldLogLifecycle: Bool,
             logType: String,
+            credentialHeaders: [String: String],
+            credentialOriginURL: URL,
+            upstreamTransport: UpstreamTransport,
             connection: NWConnection,
             cachedPrefix: CachedPrefixContinuation? = nil
         ) {
@@ -923,14 +1292,19 @@ private final class MPVHeaderProxyCore {
             self.method = method
             self.targetURL = targetURL
             self.sessionId = sessionId
+            self.traceID = traceID
+            self.requestSequence = requestSequence
+            self.shouldLogLifecycle = shouldLogLifecycle
             self.logType = logType
+            self.credentialHeaders = credentialHeaders
+            self.credentialOriginURL = credentialOriginURL
+            self.upstreamTransport = upstreamTransport
             self.connection = connection
             self.cachedPrefix = cachedPrefix
             let callbackQueue = OperationQueue()
             callbackQueue.maxConcurrentOperationCount = 1
             callbackQueue.qualityOfService = .userInitiated
             self.callbackQueue = callbackQueue
-            super.init()
         }
 
         private var errorLogType: String {
@@ -940,27 +1314,21 @@ private final class MPVHeaderProxyCore {
         func start() async {
             await withCheckedContinuation { continuation in
                 self.continuation = continuation
-
-                let configuration = URLSessionConfiguration.ephemeral
-                configuration.httpShouldSetCookies = false
-                configuration.httpCookieAcceptPolicy = .never
-                configuration.httpCookieStorage = nil
-                configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-                configuration.timeoutIntervalForRequest = 120
-                configuration.timeoutIntervalForResource = 6 * 60 * 60
-
-                let urlSession = URLSession(configuration: configuration, delegate: self, delegateQueue: callbackQueue)
-                self.urlSession = urlSession
-                let task = urlSession.dataTask(with: request)
-                self.task = task
-                task.resume()
+                guard upstreamTransport.start(self, request: request) else {
+                    proxy?.sendSimpleResponse(connection, statusCode: 502, body: "Upstream session unavailable")
+                    finish()
+                    return
+                }
             }
         }
 
-        func urlSession(
-            _ session: URLSession,
+        func enqueue(_ operation: @escaping () -> Void) {
+            callbackQueue.addOperation(operation)
+        }
+
+        func handleResponse(
             dataTask: URLSessionDataTask,
-            didReceive response: URLResponse,
+            response: URLResponse,
             completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
         ) {
             guard let proxy else {
@@ -981,7 +1349,20 @@ private final class MPVHeaderProxyCore {
             let contentType = http.value(forHTTPHeaderField: "Content-Type") ?? "nil"
             let contentLength = http.value(forHTTPHeaderField: "Content-Length") ?? "nil"
             let contentRange = http.value(forHTTPHeaderField: "Content-Range") ?? "nil"
-            Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: upstream response status=\(http.statusCode) target=\(proxy.logURLSummary(targetURL)) contentLength=\(contentLength) contentRange=\(contentRange) contentType=\(contentType)", type: logType)
+            if shouldLogLifecycle || !(200...299).contains(http.statusCode) {
+                Logger.shared.log("[MPVProxyTrace \(traceID)] stage=upstream-response req=\(requestSequence) status=\(http.statusCode) contentLength=\(contentLength) contentRange=\(contentRange) contentType=\(contentType) target=\(proxy.logURLSummary(targetURL))", type: shouldLogLifecycle ? "PlaybackTrace" : errorLogType)
+            }
+
+            guard (200...299).contains(http.statusCode) else {
+                // Never pass an HTML error document to MPV as a media segment. A 429 response for
+                // an image-named HLS segment used to become a bogus JPEG frame and caused both
+                // visual artifacts and long playback hitches.
+                Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: refusing upstream error body status=\(http.statusCode) target=\(proxy.logURLSummary(targetURL))", type: errorLogType)
+                proxy.sendResponse(connection, statusCode: http.statusCode, headers: proxy.emptyResponseHeaders(from: http), body: Data())
+                completionHandler(.cancel)
+                finish()
+                return
+            }
 
             let responseHeaders = proxy.filteredResponseHeaders(from: http)
             if method == "HEAD" {
@@ -1030,7 +1411,7 @@ private final class MPVHeaderProxyCore {
             }
         }
 
-        func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        func handleData(dataTask: URLSessionDataTask, data: Data) {
             guard let proxy, !finished else { return }
             guard method != "HEAD" else { return }
 
@@ -1057,16 +1438,31 @@ private final class MPVHeaderProxyCore {
             }
         }
 
-        func urlSession(
-            _ session: URLSession,
-            task: URLSessionTask,
-            willPerformHTTPRedirection response: HTTPURLResponse,
-            newRequest request: URLRequest,
+        func handleRedirection(
+            response: HTTPURLResponse,
+            request: URLRequest,
             completionHandler: @escaping (URLRequest?) -> Void
         ) {
             var redirected = request
             redirected.httpMethod = self.request.httpMethod
-            for (key, value) in self.request.allHTTPHeaderFields ?? [:] {
+
+            // URLSession strips standard credentials on cross-origin redirects, but provider
+            // headers can use arbitrary names. Remove every caller-supplied credential header
+            // and then reapply only the subset allowed for the redirect destination.
+            let credentialHeaderNames = Set(
+                MPVHeaderProxyCore.sanitizedCredentialHeaders(credentialHeaders)
+                    .keys
+                    .map { $0.lowercased() }
+            ).union(["authorization", "cookie", "cookie2", "proxy-authorization"])
+            for key in (redirected.allHTTPHeaderFields ?? [:]).keys
+            where credentialHeaderNames.contains(key.lowercased()) {
+                redirected.setValue(nil, forHTTPHeaderField: key)
+            }
+            for (key, value) in MPVHeaderProxyCore.credentialHeaders(
+                credentialHeaders,
+                for: request.url ?? targetURL,
+                originURL: credentialOriginURL
+            ) {
                 redirected.setValue(value, forHTTPHeaderField: key)
             }
             let redirectTarget = redirected.url.flatMap { proxy?.logURLSummary($0) } ?? "nil"
@@ -1074,8 +1470,29 @@ private final class MPVHeaderProxyCore {
             completionHandler(redirected)
         }
 
-        func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-            guard let proxy, !finished else { return }
+        func handleMetrics(_ metrics: URLSessionTaskMetrics) {
+            guard shouldLogLifecycle else { return }
+            let transactions = metrics.transactionMetrics
+            let reusedTransactions = transactions.filter(\.isReusedConnection).count
+            let protocols = Set(transactions.compactMap(\.networkProtocolName)).sorted().joined(separator: ",")
+            let taskMs = metrics.taskInterval.duration * 1_000
+            Logger.shared.log(
+                "[MPVProxyTrace \(traceID)] stage=transport-metrics req=\(requestSequence) reused=\(reusedTransactions)/\(transactions.count) protocols=\(protocols.isEmpty ? "unknown" : protocols) taskMs=\(String(format: "%.0f", taskMs))",
+                type: "PlaybackTrace"
+            )
+        }
+
+        func handleCompletion(error: Error?, transportWasInvalidated: Bool) {
+            guard !finished else { return }
+            if transportWasInvalidated {
+                connection.cancel()
+                finish()
+                return
+            }
+            guard let proxy else {
+                finish()
+                return
+            }
 
             if let error {
                 Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: upstream error target=\(proxy.logURLSummary(targetURL)) error=\(error)", type: errorLogType)
@@ -1103,13 +1520,15 @@ private final class MPVHeaderProxyCore {
                     sessionId: sessionId,
                     logType: logType
                 )
-                Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: upstream done status=\(http.statusCode) responseStatus=\(responseStatus) bytes=\(bufferedData.count) responseBytes=\(body.count) rewritten=\(rewritten) target=\(proxy.logURLSummary(targetURL))", type: logType)
+                if shouldLogLifecycle {
+                    Logger.shared.log("[MPVProxyTrace \(traceID)] stage=playlist-complete req=\(requestSequence) status=\(http.statusCode) responseStatus=\(responseStatus) bytes=\(bufferedData.count) responseBytes=\(body.count) rewritten=\(rewritten)", type: "PlaybackTrace")
+                }
                 proxy.sendResponse(connection, statusCode: responseStatus, headers: headers, body: body)
             case .stream:
                 let expected = http.expectedContentLength >= 0 ? String(http.expectedContentLength) : "unknown"
                 pendingStreamCompletionStatusCode = http.statusCode
-                if pendingDownstreamSends > 0 {
-                    Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: upstream stream complete waiting for downstream sends pending=\(pendingDownstreamSends) pendingBytes=\(pendingDownstreamBytes) bytes=\(streamedByteCount) expected=\(expected) target=\(proxy.logURLSummary(targetURL))", type: logType)
+                if shouldLogLifecycle, pendingDownstreamSends > 0 {
+                    Logger.shared.log("[MPVProxyTrace \(traceID)] stage=upstream-complete-waiting req=\(requestSequence) pending=\(pendingDownstreamSends) pendingBytes=\(pendingDownstreamBytes) bytes=\(streamedByteCount) expected=\(expected)", type: "PlaybackTrace")
                 }
                 finishStreamIfReady(expected: expected)
             }
@@ -1238,11 +1657,12 @@ private final class MPVHeaderProxyCore {
                 finish()
                 return
             }
+            guard !finished else { return }
 
             pendingDownstreamSends = max(0, pendingDownstreamSends - 1)
             pendingDownstreamBytes = max(0, pendingDownstreamBytes - data.count)
             if let error {
-                Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: downstream send failed afterBytes=\(streamedByteCount) chunkBytes=\(data.count) pending=\(pendingDownstreamSends) pendingBytes=\(pendingDownstreamBytes) error=\(error)", type: errorLogType)
+                Logger.shared.log("[MPVProxyTrace \(traceID)] stage=downstream-closed req=\(requestSequence) afterBytes=\(streamedByteCount) pending=\(pendingDownstreamSends) pendingBytes=\(pendingDownstreamBytes) error=\(error)", type: logType)
                 dataTask.cancel()
                 connection.cancel()
                 finish()
@@ -1254,7 +1674,7 @@ private final class MPVHeaderProxyCore {
             let now = CFAbsoluteTimeGetCurrent()
             if sendMs > 250, now - lastSlowSendLogAt > 2.0 {
                 lastSlowSendLogAt = now
-                Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: downstream slow send chunkBytes=\(data.count) sendMs=\(String(format: "%.0f", sendMs)) streamedBytes=\(streamedByteCount) pending=\(pendingDownstreamSends) pendingBytes=\(pendingDownstreamBytes) target=\(proxy.logURLSummary(targetURL))", type: logType)
+                Logger.shared.log("[MPVProxyTrace \(traceID)] stage=slow-downstream req=\(requestSequence) chunkBytes=\(data.count) sendMs=\(String(format: "%.0f", sendMs)) streamedBytes=\(streamedByteCount) pending=\(pendingDownstreamSends) pendingBytes=\(pendingDownstreamBytes) target=\(proxy.logURLSummary(targetURL))", type: "PlaybackTrace")
             }
 
             if pendingStreamCompletionStatusCode == nil, resumeDataTask, !finished {
@@ -1276,7 +1696,9 @@ private final class MPVHeaderProxyCore {
             }
 
             pendingStreamCompletionStatusCode = nil
-            Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: upstream stream complete bytes=\(streamedByteCount) expected=\(expected) target=\(proxy.logURLSummary(targetURL))", type: logType)
+            if shouldLogLifecycle {
+                Logger.shared.log("[MPVProxyTrace \(traceID)] stage=request-complete req=\(requestSequence) bytes=\(streamedByteCount) expected=\(expected)", type: "PlaybackTrace")
+            }
             proxy.finishResponse(on: connection)
             finish()
         }
@@ -1284,7 +1706,6 @@ private final class MPVHeaderProxyCore {
         private func finish() {
             guard !finished else { return }
             finished = true
-            urlSession?.invalidateAndCancel()
             continuation?.resume()
             continuation = nil
         }
@@ -1302,8 +1723,12 @@ final class MPVHeaderProxy {
 
     private init() {}
 
-    func makeProxyURL(for targetURL: URL, headers: [String: String], logType: String = "MPV") -> URL? {
-        proxy.makeProxyURL(for: targetURL, headers: headers, logType: logType)
+    func makeProxyURL(for targetURL: URL, headers: [String: String], logType: String = "MPV", traceID: String? = nil) -> URL? {
+        proxy.makeProxyURL(for: targetURL, headers: headers, logType: logType, traceID: traceID)
+    }
+
+    func invalidateSession(for proxyURL: URL) {
+        proxy.invalidateSession(for: proxyURL)
     }
 }
 #endif

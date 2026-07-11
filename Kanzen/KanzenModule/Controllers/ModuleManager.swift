@@ -65,8 +65,11 @@ class ModuleManager: ObservableObject {
     }
     func deleteModule(_ module: ModuleDataContainer)
     {
-        let fileUrl = getDocumentsDirectory().appendingPathComponent(modulesFileName)
-        try? fileManager.removeItem(at: fileUrl)
+        if let fileUrl = validatedModuleScriptURL(for: module.localPath) {
+            try? fileManager.removeItem(at: fileUrl)
+        } else {
+            ReaderLogger.shared.log("Skipped unsafe module file path: \(module.localPath)", type: "Error")
+        }
         ModuleManager.shared.modules.removeAll(where: {$0.id == module.id})
         ModuleManager.shared.saveModules()
         
@@ -76,8 +79,19 @@ class ModuleManager: ObservableObject {
         getDocumentsDirectory().appendingPathComponent(modulesFileName)
     }
     func getModuleScript(module: ModuleDataContainer) throws -> String{
-        let localUrl = getDocumentsDirectory().appendingPathComponent(module.localPath)
+        guard let localUrl = validatedModuleScriptURL(for: module.localPath) else {
+            throw ModuleLoadingError.missingScriptPath("Unsafe module script path")
+        }
         return try String(contentsOf: localUrl, encoding: .utf8)
+    }
+    private func validatedModuleScriptURL(for localPath: String) -> URL? {
+        let fileName = (localPath as NSString).lastPathComponent
+        guard !fileName.isEmpty,
+              fileName == localPath,
+              (fileName as NSString).pathExtension.lowercased() == "js" else {
+            return nil
+        }
+        return getDocumentsDirectory().appendingPathComponent(fileName, isDirectory: false)
     }
     func createModuleFile()
     {
@@ -154,8 +168,9 @@ class ModuleManager: ObservableObject {
     { Task
         {
             do  {
-               
-                let fileUrl = getDocumentsDirectory().appendingPathComponent(module.localPath)
+                guard let fileUrl = validatedModuleScriptURL(for: module.localPath) else {
+                    throw ModuleLoadingError.missingScriptPath("Unsafe module script path")
+                }
                 
                 let validFilePath =  fileManager.fileExists(atPath: fileUrl.path)
               
@@ -197,7 +212,9 @@ class ModuleManager: ObservableObject {
                 }
 
                 let jsContent = try await validateJSfile(metaData.scriptURL)
-                let localUrl = getDocumentsDirectory().appendingPathComponent(module.localPath)
+                guard let localUrl = validatedModuleScriptURL(for: module.localPath) else {
+                    throw ModuleLoadingError.missingScriptPath("Unsafe module script path")
+                }
                 try jsContent.write(to: localUrl, atomically: true, encoding: .utf8)
 
                 if let index = modules.firstIndex(where: { $0.id == module.id }) {

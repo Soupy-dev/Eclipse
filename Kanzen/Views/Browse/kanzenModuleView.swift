@@ -173,7 +173,7 @@ struct KanzenModuleView: View {
             if let url = URL(string: urlString) {
                 KFImage(url)
                     .placeholder {
-                        ProgressView()
+                        EclipseLoadingIndicator()
                     }
                     .cancelOnDisappear(true)
                     .resizable()

@@ -14,6 +14,32 @@ struct ProgressData: Codable {
     var movieProgress: [MovieProgressEntry] = []
     var episodeProgress: [EpisodeProgressEntry] = []
     var showMetadata: [Int: ShowMetadata] = [:]  // showId -> metadata
+    var hiddenUpNextShowIds: Set<Int> = []
+
+    private enum CodingKeys: String, CodingKey {
+        case movieProgress
+        case episodeProgress
+        case showMetadata
+        case hiddenUpNextShowIds
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        movieProgress = try container.decodeIfPresent([MovieProgressEntry].self, forKey: .movieProgress) ?? []
+        episodeProgress = try container.decodeIfPresent([EpisodeProgressEntry].self, forKey: .episodeProgress) ?? []
+        showMetadata = try container.decodeIfPresent([Int: ShowMetadata].self, forKey: .showMetadata) ?? [:]
+        hiddenUpNextShowIds = try container.decodeIfPresent(Set<Int>.self, forKey: .hiddenUpNextShowIds) ?? []
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(movieProgress, forKey: .movieProgress)
+        try container.encode(episodeProgress, forKey: .episodeProgress)
+        try container.encode(showMetadata, forKey: .showMetadata)
+        try container.encode(hiddenUpNextShowIds.sorted(), forKey: .hiddenUpNextShowIds)
+    }
 
     mutating func updateMovie(_ entry: MovieProgressEntry) {
         if let index = movieProgress.firstIndex(where: { $0.id == entry.id }) {
@@ -92,6 +118,23 @@ struct EpisodeProgressEntry: Codable, Identifiable {
     }
 }
 
+enum ContinueWatchingRemovalTarget {
+    case localProgress
+    case localUpNextShow
+    case traktPlayback(Int)
+    case traktUpNextShow
+    case none
+
+    var isRemovable: Bool {
+        switch self {
+        case .none:
+            return false
+        case .localProgress, .localUpNextShow, .traktPlayback, .traktUpNextShow:
+            return true
+        }
+    }
+}
+
 // Continue watching item
 struct ContinueWatchingItem: Identifiable {
     let id: String
@@ -110,6 +153,7 @@ struct ContinueWatchingItem: Identifiable {
     let statusText: String?
     let isWatchNext: Bool
     let traktPlaybackId: Int?
+    var removalTarget: ContinueWatchingRemovalTarget = .localProgress
     
     var remainingTime: String {
         let remaining = max(0, totalDuration - currentTime)
@@ -163,13 +207,12 @@ final class ProgressManager: ObservableObject {
 
     /// Replaces all progress data during backup restore without triggering per-entry tracker sync.
     func replaceProgressDataForRestore(_ newData: ProgressData) {
-        accessQueue.async(flags: .barrier) { [weak self] in
-            guard let self = self else { return }
+        accessQueue.sync(flags: .barrier) {
             self.progressData = newData
-            self.publishCurrentData()
-            Logger.shared.log("Progress data restored in bulk (\(newData.movieProgress.count) movies, \(newData.episodeProgress.count) episodes)", type: "Progress")
         }
-        saveProgressData()
+        publishProgressData(newData)
+        writeProgressData(newData)
+        Logger.shared.log("Progress data restored in bulk (\(newData.movieProgress.count) movies, \(newData.episodeProgress.count) episodes)", type: "Progress")
     }
 
     /// Marks episodes up to throughEpisode without tracker sync.
@@ -198,13 +241,17 @@ final class ProgressManager: ObservableObject {
     private func publishCurrentData() {
         accessQueue.async { [weak self] in
             guard let self = self else { return }
-            let movies = self.progressData.movieProgress
-            let episodes = self.progressData.episodeProgress
-            DispatchQueue.main.async {
-                self.movieProgressList = movies
-                self.episodeProgressList = episodes
-                NotificationCenter.default.post(name: .progressDataDidChange, object: self)
-            }
+            self.publishProgressData(self.progressData)
+        }
+    }
+
+    private func publishProgressData(_ snapshot: ProgressData) {
+        let movies = snapshot.movieProgress
+        let episodes = snapshot.episodeProgress
+        DispatchQueue.main.async {
+            self.movieProgressList = movies
+            self.episodeProgressList = episodes
+            NotificationCenter.default.post(name: .progressDataDidChange, object: self)
         }
     }
 
@@ -218,17 +265,7 @@ final class ProgressManager: ObservableObject {
 
         do {
             let data = try Data(contentsOf: progressFileURL)
-            Logger.shared.log("Raw JSON file size: \(data.count) bytes", type: "Progress")
-
-            // Log just the episode section to see structure
-            if let jsonString = String(data: data, encoding: .utf8), jsonString.contains("\"episodeProgress\"") {
-                if let start = jsonString.range(of: "\"episodeProgress\""),
-                   let end = jsonString.range(of: "]", range: start.upperBound..<jsonString.endIndex) {
-                    let section = String(jsonString[start.lowerBound..<end.upperBound])
-                    let preview = section.count > 500 ? String(section.prefix(500)) + "..." : section
-                    Logger.shared.log("Episode section: \(preview)", type: "Progress")
-                }
-            }
+            Logger.shared.log("Progress file size: \(data.count) bytes", type: "Progress")
 
             let decoded = try JSONDecoder().decode(ProgressData.self, from: data)
             Logger.shared.log("Loaded \(decoded.episodeProgress.count) episodes from JSON", type: "Progress")
@@ -370,6 +407,52 @@ final class ProgressManager: ObservableObject {
         return result
     }
 
+    func isMovieWatched(movieId: Int) -> Bool {
+        var result: Bool = false
+        accessQueue.sync {
+            if let entry = self.progressData.findMovie(id: movieId) {
+                result = Self.isCompletedMovie(entry)
+            }
+        }
+        return result
+    }
+
+    func markMovieAsWatched(movieId: Int, title: String, posterURL: String? = nil) {
+        accessQueue.async(flags: .barrier) { [weak self] in
+            guard let self = self else { return }
+            var entry = self.progressData.findMovie(id: movieId) ?? MovieProgressEntry(id: movieId, title: title)
+            let safeDuration = entry.totalDuration > 0 ? entry.totalDuration : max(entry.currentTime, 1)
+            entry.posterURL = posterURL ?? entry.posterURL
+            entry.totalDuration = safeDuration
+            entry.currentTime = safeDuration
+            entry.isWatched = true
+            entry.lastUpdated = Date()
+            self.progressData.updateMovie(entry)
+            self.publishCurrentData()
+            self.saveProgressData()
+            Logger.shared.log("Marked movie as watched: \(entry.title)", type: "Progress")
+
+            DispatchQueue.main.async {
+                TrackerManager.shared.syncTraktMoviePlaybackProgress(movieId: movieId, progress: 1.0, force: true)
+            }
+        }
+    }
+
+    func markMovieAsUnwatched(movieId: Int, title: String, posterURL: String? = nil) {
+        accessQueue.async(flags: .barrier) { [weak self] in
+            guard let self = self else { return }
+            var entry = self.progressData.findMovie(id: movieId) ?? MovieProgressEntry(id: movieId, title: title)
+            entry.posterURL = posterURL ?? entry.posterURL
+            entry.currentTime = 0
+            entry.isWatched = false
+            entry.lastUpdated = Date()
+            self.progressData.updateMovie(entry)
+            self.publishCurrentData()
+            self.saveProgressData()
+            Logger.shared.log("Marked movie as unwatched: \(entry.title)", type: "Progress")
+        }
+    }
+
     // MARK: - Record last service/href used for playback
 
     func recordMovieServiceInfo(movieId: Int, serviceId: UUID?, href: String?) {
@@ -444,6 +527,7 @@ final class ProgressManager: ObservableObject {
                 entry.isWatched = true
             }
 
+            self.unhideUpNextShowIfNeeded(showId: showId)
             self.progressData.updateEpisode(entry)
             
             // Update show metadata if provided
@@ -551,6 +635,7 @@ final class ProgressManager: ObservableObject {
             entry.lastUpdated = Date()
             entry.playbackContext = playbackContext ?? entry.playbackContext
             entry.isAnime = entry.isAnime == true || isAnime || playbackContext?.hasAnimeMediaId == true
+            self.unhideUpNextShowIfNeeded(showId: showId)
             self.progressData.updateEpisode(entry)
             self.publishCurrentData()
             Logger.shared.log("Marked episode as watched: S\(seasonNumber)E\(episodeNumber)", type: "Progress")
@@ -775,8 +860,13 @@ final class ProgressManager: ObservableObject {
         var candidates: [WatchNextCandidate] = []
 
         accessQueue.sync {
+            let hiddenShowIds = self.progressData.hiddenUpNextShowIds
             candidates = Dictionary(grouping: self.progressData.episodeProgress, by: \.showId)
                 .compactMap { showId, episodes in
+                    guard !hiddenShowIds.contains(showId) else {
+                        return nil
+                    }
+
                     let regularEpisodes = episodes.filter(Self.isRegularEpisode)
                     guard !regularEpisodes.contains(where: Self.isActiveContinueWatchingEpisode) else {
                         return nil
@@ -814,6 +904,10 @@ final class ProgressManager: ObservableObject {
 
     private static func isCompletedEpisode(_ episode: EpisodeProgressEntry) -> Bool {
         episode.isWatched || episode.progress >= watchedProgressThreshold
+    }
+
+    private static func isCompletedMovie(_ movie: MovieProgressEntry) -> Bool {
+        movie.isWatched || movie.progress >= watchedProgressThreshold
     }
 
     private static func isActiveContinueWatchingEpisode(_ episode: EpisodeProgressEntry) -> Bool {
@@ -856,6 +950,7 @@ final class ProgressManager: ObservableObject {
                 entry.currentTime = safeDuration
                 entry.isWatched = true
                 entry.lastUpdated = Date()
+                self.unhideUpNextShowIfNeeded(showId: item.tmdbId)
                 self.progressData.updateEpisode(entry)
                 self.progressData.updateShowMetadata(showId: item.tmdbId, title: item.title, posterURL: item.posterURL)
                 Logger.shared.log("Marked continue-watching episode as watched: showId=\(item.tmdbId) S\(seasonNumber)E\(episodeNumber)", type: "Progress")
@@ -874,6 +969,22 @@ final class ProgressManager: ObservableObject {
 
             self.publishCurrentData()
             self.saveProgressData()
+        }
+    }
+
+    func removeUpNextShow(_ item: ContinueWatchingItem) {
+        accessQueue.async(flags: .barrier) { [weak self] in
+            guard let self = self else { return }
+            self.progressData.hiddenUpNextShowIds.insert(item.tmdbId)
+            Logger.shared.log("Removed show from Up Next: showId=\(item.tmdbId)", type: "Progress")
+            self.publishCurrentData()
+            self.saveProgressData()
+        }
+    }
+
+    private func unhideUpNextShowIfNeeded(showId: Int) {
+        if progressData.hiddenUpNextShowIds.remove(showId) != nil {
+            Logger.shared.log("Restored show to Up Next after new progress: showId=\(showId)", type: "Progress")
         }
     }
 

@@ -123,6 +123,30 @@ struct TrackersSettingsView: View {
                         onDisconnect: { trackerManager.disconnectTracker(.trakt) }
                     )
 
+#if os(tvOS)
+                    if trackerManager.isAuthenticating,
+                       let userCode = trackerManager.traktDeviceUserCode,
+                       let verificationURL = trackerManager.traktDeviceVerificationURL {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Connect Trakt")
+                                .font(.headline)
+                                .foregroundColor(.white)
+                            Text("Open \(verificationURL.absoluteString) on any browser and enter:")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Text(userCode)
+                                .font(.system(size: 34, weight: .bold, design: .monospaced))
+                            Text("Eclipse will finish connecting automatically. You can close the web sheet and use the code on a phone or computer instead.")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        .padding()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.blue.opacity(0.15))
+                        .cornerRadius(12)
+                    }
+#endif
+
                     if trackerManager.trackerState.getAccount(for: .trakt) != nil {
                         Toggle("Live Trakt Scrobbling", isOn: Binding(
                             get: { trackerManager.trackerState.liveTraktScrobbling },
@@ -177,7 +201,7 @@ struct TrackersSettingsView: View {
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("This will import your AniList lists as Eclipse collections and fill local watch/read progress without deleting or downgrading anything.")
+            Text(aniListImportConfirmationMessage)
         }
         .alert("Import MAL Library", isPresented: $showMALImportConfirmation) {
             Button("Import", role: .none) {
@@ -185,7 +209,7 @@ struct TrackersSettingsView: View {
             }
             Button("Cancel", role: .cancel) { }
         } message: {
-            Text("This will import your MAL lists as Eclipse collections and fill local watch/read progress without deleting or downgrading anything.")
+            Text(malImportConfirmationMessage)
         }
         .alert("Import Trakt Library", isPresented: $showTraktImportConfirmation) {
             Button("Import", role: .none) {
@@ -219,8 +243,7 @@ struct TrackersSettingsView: View {
                 Spacer()
 
                 if trackerManager.isImportingAniList {
-                    ProgressView()
-                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                    EclipseLoadingIndicator(tint: .white)
                 } else {
                     Button(action: { showImportConfirmation = true }) {
                         Text("Import")
@@ -261,7 +284,7 @@ struct TrackersSettingsView: View {
                         .font(.headline)
                         .foregroundColor(.white)
 
-                    Text("Import MAL lists as Eclipse collections and reader progress")
+                    Text(malImportDescription)
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -269,8 +292,7 @@ struct TrackersSettingsView: View {
                 Spacer()
 
                 if trackerManager.isImportingMAL {
-                    ProgressView()
-                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                    EclipseLoadingIndicator(tint: .white)
                 } else {
                     Button(action: { showMALImportConfirmation = true }) {
                         Text("Import")
@@ -319,8 +341,7 @@ struct TrackersSettingsView: View {
                 Spacer()
 
                 if trackerManager.isImportingTrakt {
-                    ProgressView()
-                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                    EclipseLoadingIndicator(tint: .white)
                 } else {
                     Button(action: { showTraktImportConfirmation = true }) {
                         Text("Import")
@@ -455,10 +476,24 @@ struct TrackersSettingsView: View {
 
             VStack(spacing: 10) {
                 TextField("Trakt list URL or ID", text: $traktListInput)
+#if os(tvOS)
+                    .textFieldStyle(.plain)
+                    .padding(12)
+                    .background(Color.white.opacity(0.08))
+                    .cornerRadius(8)
+#else
                     .textFieldStyle(.roundedBorder)
+#endif
 
                 TextField("Catalog name (optional)", text: $traktListName)
+#if os(tvOS)
+                    .textFieldStyle(.plain)
+                    .padding(12)
+                    .background(Color.white.opacity(0.08))
+                    .cornerRadius(8)
+#else
                     .textFieldStyle(.roundedBorder)
+#endif
 
                 HStack {
                     Picker(LocalizedStringKey("Trakt List Type"), selection: $traktListMediaType) {
@@ -653,6 +688,30 @@ struct TrackersSettingsView: View {
         .background(Color.gray.opacity(0.1))
         .cornerRadius(12)
     }
+
+    private var aniListImportConfirmationMessage: String {
+#if os(tvOS)
+        "This will import your AniList anime lists as Eclipse collections and fill local watched progress without deleting or downgrading anything."
+#else
+        "This will import your AniList lists as Eclipse collections and fill local watch/read progress without deleting or downgrading anything."
+#endif
+    }
+
+    private var malImportConfirmationMessage: String {
+#if os(tvOS)
+        "This will import your MAL anime lists as Eclipse collections and fill local watched progress without deleting or downgrading anything."
+#else
+        "This will import your MAL lists as Eclipse collections and fill local watch/read progress without deleting or downgrading anything."
+#endif
+    }
+
+    private var malImportDescription: String {
+#if os(tvOS)
+        "Import MAL anime lists as Eclipse collections and watched progress"
+#else
+        "Import MAL lists as Eclipse collections and reader progress"
+#endif
+    }
 }
 
 private struct TrackerSyncToolsSheet: View {
@@ -710,8 +769,7 @@ private struct TrackerSyncToolsSheet: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 if trackerManager.isRunningSyncTool {
-                    ProgressView()
-                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                    EclipseLoadingIndicator(tint: .white)
                 }
 
                 Text(status)

@@ -37,7 +37,7 @@ struct AidokuMangaRouteLoaderView: View {
                     actionTitle: "Aidoku Sources"
                 )
             } else if isLoading {
-                ProgressView("Loading source...")
+                EclipseLoadingIndicator("Loading source...")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .task {
                         await load()
@@ -548,7 +548,7 @@ struct AidokuMangaDetailView: View {
     private func chaptersElementView() -> some View {
         if isLoading && (manga.chapters?.isEmpty ?? true) {
             HStack(spacing: 10) {
-                ProgressView()
+                EclipseLoadingIndicator()
                 Text("Loading chapters...")
                     .font(.subheadline)
                     .foregroundColor(.secondary)

@@ -10,6 +10,9 @@ struct KanzenLibraryView: View {
     @State private var scrollOffset: CGFloat = 0
     @State private var isRefreshingSources = false
     @State private var refreshStatus: String?
+    @State private var showingRenameCollection = false
+    @State private var renameText = ""
+    @State private var collectionToRename: MangaLibraryCollection?
     private var designMetrics: ExperimentalMediaDesignMetrics { .current }
 
     private var bookmarksCollection: MangaLibraryCollection? {
@@ -30,7 +33,7 @@ struct KanzenLibraryView: View {
                             refreshLibrarySources()
                         } label: {
                             if isRefreshingSources {
-                                ProgressView()
+                                EclipseLoadingIndicator()
                             } else {
                                 Image(systemName: "arrow.clockwise")
                             }
@@ -107,6 +110,14 @@ struct KanzenLibraryView: View {
                                             collectionCard(collection)
                                         }
                                         .contextMenu {
+                                            Button {
+                                                renameText = collection.name
+                                                collectionToRename = collection
+                                                showingRenameCollection = true
+                                            } label: {
+                                                Label("Rename", systemImage: "pencil")
+                                            }
+
                                             Button(role: .destructive) {
                                                 libraryManager.deleteCollection(collection)
                                             } label: {
@@ -147,6 +158,17 @@ struct KanzenLibraryView: View {
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
+        .alert("Rename Collection", isPresented: $showingRenameCollection) {
+            TextField("Collection Name", text: $renameText)
+            Button("Cancel", role: .cancel) { }
+            Button("Save") {
+                if let collection = collectionToRename {
+                    libraryManager.renameCollection(collection, name: renameText)
+                }
+            }
+        } message: {
+            Text("Enter a new name for this collection.")
+        }
     }
 
     // MARK: - Card Views

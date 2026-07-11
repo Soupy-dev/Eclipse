@@ -6,35 +6,54 @@ final class StremioClient {
     static let shared = StremioClient()
     static let openSubtitlesV3BaseURL = "https://opensubtitles-v3.strem.io"
 
+    private static let maximumStreamFetchAttempts = 2
+    private static let maximumPlayableStreamsPerResponse = 300
+    private static let maximumManifestResponseBytes = 1_000_000
+    private static let maximumStreamResponseBytes = 10_000_000
+    private static let maximumCatalogResponseBytes = 10_000_000
+    private static let maximumMetaResponseBytes = 5_000_000
+    private static let maximumSubtitleResponseBytes = 5_000_000
+    private static let retryDelayNanoseconds: UInt64 = 400_000_000
     private let session: URLSession
-    private let decoder = JSONDecoder()
 
     private init() {
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 30
-        session = URLSession(configuration: config)
+        session = URLSession(
+            configuration: config,
+            delegate: FetchDelegate(allowRedirects: true),
+            delegateQueue: nil
+        )
     }
 
     // MARK: - Fetch Manifest
 
     func fetchManifest(from url: String) async throws -> StremioManifest {
-        let manifestURL = normalizeManifestURL(url)
-        Logger.shared.log("Stremio: Fetching manifest from \(manifestURL)", type: "Stremio")
-        guard let requestURL = URL(string: manifestURL), requestURL.scheme != nil else {
-            Logger.shared.log("Stremio: Invalid manifest URL: \(manifestURL)", type: "Stremio")
+        guard let requestURL = Self.endpointURL(
+            baseURL: url,
+            appendingPercentEncodedPath: "/manifest.json"
+        ),
+              let scheme = requestURL.scheme?.lowercased(),
+              scheme == "https" || scheme == "http" else {
+            Logger.shared.log("Stremio: Invalid manifest URL", type: "Stremio")
             throw StremioError.invalidURL
         }
+        let endpoint = Self.redactedEndpointDescription(for: requestURL)
+        Logger.shared.log("Stremio: Fetching manifest from \(endpoint)", type: "Stremio")
 
-        let (data, response) = try await session.data(from: requestURL)
+        let (data, response) = try await boundedData(
+            from: requestURL,
+            maximumResponseBytes: Self.maximumManifestResponseBytes
+        )
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
             let code = (response as? HTTPURLResponse)?.statusCode ?? 0
-            Logger.shared.log("Stremio: Manifest fetch failed HTTP \(code) from \(manifestURL)", type: "Stremio")
+            Logger.shared.log("Stremio: Manifest fetch failed HTTP \(code) from \(endpoint)", type: "Stremio")
             throw StremioError.httpError(code)
         }
 
-        let manifest = try decoder.decode(StremioManifest.self, from: data)
+        let manifest = try JSONDecoder().decode(StremioManifest.self, from: data)
         Logger.shared.log("Stremio: Manifest OK - id=\(manifest.id) name=\(manifest.name) resources=\(manifest.resources?.count ?? 0) idPrefixes=\(manifest.idPrefixes ?? [])", type: "Stremio")
         return manifest
     }
@@ -43,56 +62,126 @@ final class StremioClient {
 
     /// Fetches streams for a given addon and content ID.
     /// Only direct HTTP(S) streams are returned.
-    func fetchStreams(baseURL: String, type: String, id: String) async throws -> [StremioStream] {
-        let cleanBase = normalizedBaseURL(baseURL)
+    func fetchStreams(
+        baseURL: String,
+        type: String,
+        id: String,
+        retryEmptyResponse: Bool = false
+    ) async throws -> [StremioStream] {
         let encodedId = encodePathSegment(id, preservingColon: true)
-        let urlString = "\(cleanBase)/stream/\(type)/\(encodedId).json"
-        guard let url = URL(string: urlString) else {
+        guard let url = Self.endpointURL(
+            baseURL: baseURL,
+            appendingPercentEncodedPath: "/stream/\(type)/\(encodedId).json"
+        ) else {
             throw StremioError.invalidURL
         }
 
-        Logger.shared.log("Stremio: Fetching streams - type=\(type) id=\(id) url=\(urlString)", type: "Stremio")
+        let endpoint = Self.redactedEndpointDescription(for: url)
+        let lookupID = String(UUID().uuidString.prefix(8))
+        var lastError: Error?
 
-        let (data, response) = try await session.data(from: url)
-        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
-        Logger.shared.log("Stremio: Stream response HTTP \(statusCode) from \(cleanBase)", type: "Stremio")
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
-            Logger.shared.log("Stremio: Stream fetch FAILED HTTP \(statusCode) - base=\(cleanBase) type=\(type) id=\(id)", type: "Stremio")
-            throw StremioError.httpError(statusCode)
+        for attempt in 1...Self.maximumStreamFetchAttempts {
+            try Task.checkCancellation()
+            let startedAt = Date()
+            var request = URLRequest(
+                url: url,
+                cachePolicy: .reloadIgnoringLocalCacheData,
+                timeoutInterval: 15
+            )
+            request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+
+            Logger.shared.log(
+                "Stremio: Stream lookup[\(lookupID)] attempt \(attempt)/\(Self.maximumStreamFetchAttempts) endpoint=\(endpoint) type=\(type) id=\(id)",
+                type: "Stremio"
+            )
+
+            do {
+                let (data, response) = try await boundedData(
+                    for: request,
+                    maximumResponseBytes: Self.maximumStreamResponseBytes
+                )
+                try Task.checkCancellation()
+
+                let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+                let elapsed = Date().timeIntervalSince(startedAt)
+                guard let httpResponse = response as? HTTPURLResponse,
+                      (200...299).contains(httpResponse.statusCode) else {
+                    throw StremioError.httpError(statusCode)
+                }
+                let streamResponse = try JSONDecoder().decode(StremioStreamResponse.self, from: data)
+                let allStreams = streamResponse.streams ?? []
+
+                // Keep torrent-only streams out of playback.
+                var safeStreams: [StremioStream] = []
+                safeStreams.reserveCapacity(min(allStreams.count, Self.maximumPlayableStreamsPerResponse))
+                var directHTTPCount = 0
+                for stream in allStreams where stream.isDirectHTTP {
+                    directHTTPCount += 1
+                    if safeStreams.count < Self.maximumPlayableStreamsPerResponse {
+                        safeStreams.append(stream)
+                    }
+                }
+                let dropped = allStreams.count - directHTTPCount
+                let truncated = max(directHTTPCount - safeStreams.count, 0)
+                Logger.shared.log(
+                    "Stremio: Stream lookup[\(lookupID)] HTTP \(statusCode) attempt=\(attempt) bytes=\(data.count) decoded=\(allStreams.count) playable=\(safeStreams.count) dropped=\(dropped) truncated=\(truncated) elapsed=\(String(format: "%.2f", elapsed))s",
+                    type: "Stremio"
+                )
+
+#if os(tvOS)
+                if safeStreams.isEmpty,
+                   allStreams.contains(where: { stream in
+                       let candidate = stream.url?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+                       return stream.infoHash?.isEmpty == false
+                           || candidate.hasPrefix("magnet:")
+                           || (!candidate.isEmpty && !candidate.hasPrefix("http://") && !candidate.hasPrefix("https://"))
+                   }) {
+                    throw ServiceCompatibilityError.unsupportedTransport
+                }
+#endif
+
+                if retryEmptyResponse,
+                   Self.shouldRetryNoPlayableResponse(allStreams: allStreams, safeStreams: safeStreams),
+                   attempt < Self.maximumStreamFetchAttempts {
+                    Logger.shared.log(
+                        "Stremio: Stream lookup[\(lookupID)] retrying one empty or diagnostic-only HTTP 200 response",
+                        type: "Stremio"
+                    )
+                    try await Self.waitBeforeStreamRetry()
+                    continue
+                }
+
+                return safeStreams
+            } catch {
+                if Task.isCancelled || Self.isCancellation(error) {
+                    throw CancellationError()
+                }
+
+                lastError = error
+                if attempt < Self.maximumStreamFetchAttempts,
+                   let retryReason = Self.retryReason(for: error) {
+                    Logger.shared.log(
+                        "Stremio: Stream lookup[\(lookupID)] retrying after \(retryReason) from \(endpoint)",
+                        type: "Stremio"
+                    )
+                    try await Self.waitBeforeStreamRetry()
+                    continue
+                }
+
+                Logger.shared.log(
+                    "Stremio: Stream lookup[\(lookupID)] failed endpoint=\(endpoint) attempt=\(attempt) error=\(Self.safeErrorDescription(error))",
+                    type: "Stremio"
+                )
+                throw error
+            }
         }
 
-        let streamResponse: StremioStreamResponse
-        do {
-            streamResponse = try decoder.decode(StremioStreamResponse.self, from: data)
-        } catch {
-            // Log partial body so we can diagnose format mismatches
-            let preview = String(data: data.prefix(512), encoding: .utf8) ?? "<binary>"
-            Logger.shared.log("Stremio: Decode FAILED for \(cleanBase) - \(error.localizedDescription) body=\(preview)", type: "Stremio")
-            throw error
-        }
-        let allStreams = streamResponse.streams ?? []
-
-        if allStreams.isEmpty, let preview = String(data: data.prefix(512), encoding: .utf8) {
-            Logger.shared.log("Stremio: 0 streams decoded from \(cleanBase) - body=\(preview)", type: "Stremio")
-        }
-
-        // Keep torrent-only streams out of playback.
-        let safeStreams = allStreams.filter { $0.isDirectHTTP }
-
-        let dropped = allStreams.count - safeStreams.count
-        if dropped > 0 {
-            Logger.shared.log("Stremio: Dropped \(dropped) non-HTTP stream(s) (torrent/infoHash only)", type: "Stremio")
-        }
-
-        Logger.shared.log("Stremio: Got \(safeStreams.count) safe HTTP stream(s) from \(cleanBase)", type: "Stremio")
-        return safeStreams
+        throw lastError ?? StremioError.noStreams
     }
 
     // MARK: - Fetch Catalogs and Meta
 
     func fetchCatalogMetas(baseURL: String, catalog: StremioCatalog, searchQuery: String? = nil, skip: Int? = nil) async throws -> [StremioMetaPreview] {
-        let cleanBase = normalizedBaseURL(baseURL)
         let encodedType = encodePathSegment(catalog.type, preservingColon: false)
         let encodedCatalogId = encodePathSegment(catalog.id, preservingColon: true)
         var extras: [String] = []
@@ -103,46 +192,54 @@ final class StremioClient {
             extras.append("search=\(encodeExtraValue(searchQuery))")
         }
         let extraPath = extras.isEmpty ? "" : "/\(extras.joined(separator: "&"))"
-        let urlString = "\(cleanBase)/catalog/\(encodedType)/\(encodedCatalogId)\(extraPath).json"
-
-        guard let url = URL(string: urlString) else {
+        guard let url = Self.endpointURL(
+            baseURL: baseURL,
+            appendingPercentEncodedPath: "/catalog/\(encodedType)/\(encodedCatalogId)\(extraPath).json"
+        ) else {
             throw StremioError.invalidURL
         }
+        let endpoint = Self.redactedEndpointDescription(for: url)
 
-        Logger.shared.log("Stremio: Fetching catalog \(catalog.id) query='\(searchQuery ?? "nil")' skip=\(skip?.description ?? "nil") url=\(urlString)", type: "Stremio")
+        Logger.shared.log("Stremio: Fetching catalog \(catalog.id) query='\(searchQuery ?? "nil")' skip=\(skip?.description ?? "nil") endpoint=\(endpoint)", type: "Stremio")
 
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await boundedData(
+            from: url,
+            maximumResponseBytes: Self.maximumCatalogResponseBytes
+        )
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
-            Logger.shared.log("Stremio: Catalog fetch failed HTTP \(statusCode) catalog=\(catalog.id) query='\(searchQuery ?? "nil")' skip=\(skip?.description ?? "nil")", type: "Stremio")
+            Logger.shared.log("Stremio: Catalog fetch failed HTTP \(statusCode) catalog=\(catalog.id) query='\(searchQuery ?? "nil")' skip=\(skip?.description ?? "nil") endpoint=\(endpoint)", type: "Stremio")
             throw StremioError.httpError(statusCode)
         }
 
         do {
-            let response = try decoder.decode(StremioCatalogResponse.self, from: data)
+            let response = try JSONDecoder().decode(StremioCatalogResponse.self, from: data)
             Logger.shared.log("Stremio: Catalog \(catalog.id) returned \(response.metas.count) meta candidate(s)", type: "Stremio")
             return response.metas
         } catch {
-            let preview = String(data: data.prefix(512), encoding: .utf8) ?? "<binary>"
-            Logger.shared.log("Stremio: Catalog decode FAILED for \(catalog.id) - \(error.localizedDescription) body=\(preview)", type: "Stremio")
+            Logger.shared.log("Stremio: Catalog decode FAILED for \(catalog.id) endpoint=\(endpoint) bytes=\(data.count) error=\(Self.safeErrorDescription(error))", type: "Stremio")
             throw error
         }
     }
 
     func fetchMeta(baseURL: String, type: String, id: String) async throws -> StremioMetaPreview? {
-        let cleanBase = normalizedBaseURL(baseURL)
         let encodedType = encodePathSegment(type, preservingColon: false)
         let encodedId = encodePathSegment(id, preservingColon: true)
-        let urlString = "\(cleanBase)/meta/\(encodedType)/\(encodedId).json"
-
-        guard let url = URL(string: urlString) else {
+        guard let url = Self.endpointURL(
+            baseURL: baseURL,
+            appendingPercentEncodedPath: "/meta/\(encodedType)/\(encodedId).json"
+        ) else {
             throw StremioError.invalidURL
         }
+        let endpoint = Self.redactedEndpointDescription(for: url)
 
-        Logger.shared.log("Stremio: Fetching meta type=\(type) id=\(id) url=\(urlString)", type: "Stremio")
+        Logger.shared.log("Stremio: Fetching meta type=\(type) id=\(id) endpoint=\(endpoint)", type: "Stremio")
 
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await boundedData(
+            from: url,
+            maximumResponseBytes: Self.maximumMetaResponseBytes
+        )
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
@@ -151,11 +248,10 @@ final class StremioClient {
         }
 
         do {
-            let response = try decoder.decode(StremioMetaResponse.self, from: data)
+            let response = try JSONDecoder().decode(StremioMetaResponse.self, from: data)
             return response.meta
         } catch {
-            let preview = String(data: data.prefix(512), encoding: .utf8) ?? "<binary>"
-            Logger.shared.log("Stremio: Meta decode FAILED for id=\(id) - \(error.localizedDescription) body=\(preview)", type: "Stremio")
+            Logger.shared.log("Stremio: Meta decode FAILED for id=\(id) endpoint=\(endpoint) bytes=\(data.count) error=\(Self.safeErrorDescription(error))", type: "Stremio")
             throw error
         }
     }
@@ -163,31 +259,34 @@ final class StremioClient {
     // MARK: - Fetch Subtitles
 
     func fetchSubtitles(baseURL: String, type: String, id: String) async throws -> [StremioSubtitle] {
-        let cleanBase = normalizedBaseURL(baseURL)
         let encodedType = encodePathSegment(type, preservingColon: false)
         let encodedId = encodePathSegment(id, preservingColon: true)
-        let urlString = "\(cleanBase)/subtitles/\(encodedType)/\(encodedId).json"
-
-        guard let url = URL(string: urlString) else {
+        guard let url = Self.endpointURL(
+            baseURL: baseURL,
+            appendingPercentEncodedPath: "/subtitles/\(encodedType)/\(encodedId).json"
+        ) else {
             throw StremioError.invalidURL
         }
+        let endpoint = Self.redactedEndpointDescription(for: url)
 
-        Logger.shared.log("Stremio: Fetching subtitles - type=\(type) id=\(id) url=\(urlString)", type: "Stremio")
+        Logger.shared.log("Stremio: Fetching subtitles - type=\(type) id=\(id) endpoint=\(endpoint)", type: "Stremio")
 
-        let (data, response) = try await session.data(from: url)
+        let (data, response) = try await boundedData(
+            from: url,
+            maximumResponseBytes: Self.maximumSubtitleResponseBytes
+        )
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
-            Logger.shared.log("Stremio: Subtitle fetch FAILED HTTP \(statusCode) - base=\(cleanBase) type=\(type) id=\(id)", type: "Stremio")
+            Logger.shared.log("Stremio: Subtitle fetch FAILED HTTP \(statusCode) endpoint=\(endpoint) type=\(type) id=\(id)", type: "Stremio")
             throw StremioError.httpError(statusCode)
         }
 
         let subtitleResponse: StremioSubtitleResponse
         do {
-            subtitleResponse = try decoder.decode(StremioSubtitleResponse.self, from: data)
+            subtitleResponse = try JSONDecoder().decode(StremioSubtitleResponse.self, from: data)
         } catch {
-            let preview = String(data: data.prefix(512), encoding: .utf8) ?? "<binary>"
-            Logger.shared.log("Stremio: Subtitle decode FAILED for \(cleanBase) - \(error.localizedDescription) body=\(preview)", type: "Stremio")
+            Logger.shared.log("Stremio: Subtitle decode FAILED endpoint=\(endpoint) bytes=\(data.count) error=\(Self.safeErrorDescription(error))", type: "Stremio")
             throw error
         }
 
@@ -196,7 +295,7 @@ final class StremioClient {
             return url.hasPrefix("http://") || url.hasPrefix("https://")
         }
 
-        Logger.shared.log("Stremio: Got \(subtitles.count) HTTP subtitle(s) from \(cleanBase)", type: "Stremio")
+        Logger.shared.log("Stremio: Got \(subtitles.count) HTTP subtitle(s) from \(endpoint)", type: "Stremio")
         return subtitles
     }
 
@@ -290,7 +389,8 @@ final class StremioClient {
         let supportsAniList = normalizedPrefixes.isEmpty || normalizedPrefixes.contains { $0 == "anilist" || $0 == "anilist:" }
         let supportsKitsu = normalizedPrefixes.isEmpty || normalizedPrefixes.contains { $0 == "kitsu" || $0 == "kitsu:" }
 
-        Logger.shared.log("Stremio: buildContentId addon=\(addonName) prefixes=\(prefixes) imdbId=\(imdbId ?? "nil") tmdbId=\(tmdbId) anilistId=\(anilistId?.description ?? "nil") kitsuId=\(kitsuId?.description ?? "nil") type=\(type) s=\(season?.description ?? "nil") e=\(episode?.description ?? "nil") anilistS=\(anilistSeason?.description ?? "nil") anilistE=\(anilistEpisode?.description ?? "nil") kitsuE=\(kitsuEpisode?.description ?? "nil") altS=\(alternateSeason?.description ?? "nil") altE=\(alternateEpisode?.description ?? "nil")", type: "Stremio")
+        let normalizedIMDbID = Self.normalizedIMDbID(imdbId)
+        Logger.shared.log("Stremio: buildContentId addon=\(addonName) prefixes=\(prefixes) imdbId=\(normalizedIMDbID ?? "nil") tmdbId=\(tmdbId) anilistId=\(anilistId?.description ?? "nil") kitsuId=\(kitsuId?.description ?? "nil") type=\(type) s=\(season?.description ?? "nil") e=\(episode?.description ?? "nil") anilistS=\(anilistSeason?.description ?? "nil") anilistE=\(anilistEpisode?.description ?? "nil") kitsuE=\(kitsuEpisode?.description ?? "nil") altS=\(alternateSeason?.description ?? "nil") altE=\(alternateEpisode?.description ?? "nil")", type: "Stremio")
         var candidates: [String] = []
         let seriesTuples = contentIdSeriesTuples(
             type: type,
@@ -301,8 +401,7 @@ final class StremioClient {
         )
 
         // Prefer IMDB because it is the universal Stremio standard, then try TMDB too.
-        if supportsIMDB, let imdb = imdbId, !imdb.isEmpty {
-            let ttId = imdb.hasPrefix("tt") ? imdb : "tt\(imdb)"
+        if supportsIMDB, let ttId = normalizedIMDbID {
             if type == "series", !seriesTuples.isEmpty {
                 for tuple in seriesTuples {
                     candidates.append("\(ttId):\(tuple.season):\(tuple.episode)")
@@ -387,6 +486,147 @@ final class StremioClient {
 
     // MARK: - Helpers
 
+    static func normalizedIMDbID(_ rawValue: String?) -> String? {
+        guard var value = rawValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+              !value.isEmpty else {
+            return nil
+        }
+
+        if value.hasPrefix("imdb:") {
+            value.removeFirst("imdb:".count)
+        }
+
+        if value.hasPrefix("tt") {
+            value.removeFirst(2)
+        }
+
+        guard !value.isEmpty,
+              value.allSatisfy(\.isNumber) else {
+            return nil
+        }
+        // IMDb's older numeric IDs are seven digits and often have a leading zero.
+        // Preserve their canonical form when an addon encoded imdb_id as a JSON number.
+        if value.count < 7 {
+            value = String(repeating: "0", count: 7 - value.count) + value
+        }
+        return "tt\(value)"
+    }
+
+    static func redactedEndpointDescription(from configuredURL: String) -> String {
+        let normalized = normalizedConfiguredURL(from: configuredURL)
+        guard let url = URL(string: normalized) else {
+            return "<invalid endpoint>"
+        }
+        return redactedEndpointDescription(for: url)
+    }
+
+    private static func redactedEndpointDescription(for url: URL) -> String {
+        guard let host = url.host, !host.isEmpty else {
+            return "<invalid endpoint>"
+        }
+        let scheme = url.scheme?.lowercased() ?? "https"
+        let portSuffix = url.port.map { ":\($0)" } ?? ""
+        return "\(scheme)://\(host.lowercased())\(portSuffix)"
+    }
+
+    private static func shouldRetryNoPlayableResponse(
+        allStreams: [StremioStream],
+        safeStreams: [StremioStream]
+    ) -> Bool {
+        guard safeStreams.isEmpty else { return false }
+        if allStreams.isEmpty { return true }
+
+        // Some addons report temporary upstream failures as a 200 response with
+        // a display-only stream item (no URL or info hash). Retry that once, but
+        // do not retry a legitimate torrent-only response that Eclipse filters.
+        return allStreams.allSatisfy { stream in
+            let url = stream.url?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let infoHash = stream.infoHash?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return url.isEmpty && infoHash.isEmpty
+        }
+    }
+
+    private func boundedData(
+        for request: URLRequest,
+        maximumResponseBytes: Int
+    ) async throws -> (Data, URLResponse) {
+        do {
+            return try await session.boundedData(
+                for: request,
+                maximumResponseBytes: maximumResponseBytes
+            )
+        } catch is BoundedURLSessionError {
+            throw ServiceCompatibilityError.responseTooLarge
+        }
+    }
+
+    private func boundedData(
+        from url: URL,
+        maximumResponseBytes: Int
+    ) async throws -> (Data, URLResponse) {
+        try await boundedData(
+            for: URLRequest(url: url),
+            maximumResponseBytes: maximumResponseBytes
+        )
+    }
+
+    private static func retryReason(for error: Error) -> String? {
+        if let stremioError = error as? StremioError,
+           case .httpError(let statusCode) = stremioError,
+           [408, 425, 429, 500, 502, 503, 504].contains(statusCode) {
+            return "transient HTTP \(statusCode)"
+        }
+
+        if error is DecodingError {
+            return "an invalid temporary response"
+        }
+
+        guard let urlError = error as? URLError else { return nil }
+        switch urlError.code {
+        case .timedOut,
+             .cannotFindHost,
+             .cannotConnectToHost,
+             .dnsLookupFailed,
+             .networkConnectionLost,
+             .resourceUnavailable,
+             .secureConnectionFailed,
+             .cannotLoadFromNetwork:
+            return "network error \(urlError.code.rawValue)"
+        default:
+            return nil
+        }
+    }
+
+    private static func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        return (error as? URLError)?.code == .cancelled
+    }
+
+    private static func safeErrorDescription(_ error: Error) -> String {
+        if let compatibilityError = error as? ServiceCompatibilityError {
+            return compatibilityError.localizedDescription
+        }
+        if let stremioError = error as? StremioError {
+            return stremioError.localizedDescription
+        }
+        if let urlError = error as? URLError {
+            return "network error \(urlError.code.rawValue)"
+        }
+        if error is DecodingError {
+            return "invalid response format"
+        }
+        if error is CancellationError {
+            return "cancelled"
+        }
+        return String(describing: type(of: error))
+    }
+
+    private static func waitBeforeStreamRetry() async throws {
+        try await Task<Never, Never>.sleep(nanoseconds: retryDelayNanoseconds)
+    }
+
     static func normalizedConfiguredURL(from url: String) -> String {
         var cleaned = url.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -394,24 +634,75 @@ final class StremioClient {
             cleaned = "https://" + String(cleaned.dropFirst("stremio://".count))
         }
 
-        if cleaned.hasSuffix("/") {
-            cleaned = String(cleaned.dropLast())
+        guard var components = URLComponents(string: cleaned) else {
+            return cleaned
         }
 
-        if cleaned.hasSuffix("/manifest.json") {
-            cleaned = String(cleaned.dropLast("/manifest.json".count))
+        var path = components.percentEncodedPath
+        while path.count > 1 && path.hasSuffix("/") {
+            path.removeLast()
+        }
+        if path == "/" {
+            path = ""
+        }
+        if path.lowercased().hasSuffix("/manifest.json") {
+            path.removeLast("/manifest.json".count)
+        }
+        components.percentEncodedPath = path
+        return components.string ?? cleaned
+    }
+
+    /// Builds the provider's configuration page without ever exposing the
+    /// configured URL to logs or visible diagnostics. URLComponents is used so
+    /// a token-bearing query remains a query instead of becoming part of the
+    /// appended path.
+    static func configurationPageURL(from configuredURL: String) -> URL? {
+        let normalized = normalizedConfiguredURL(from: configuredURL)
+        guard var components = URLComponents(string: normalized),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "https" || scheme == "http",
+              components.host?.isEmpty == false else {
+            return nil
         }
 
-        return cleaned
+        var path = components.percentEncodedPath
+        while path.count > 1 && path.hasSuffix("/") {
+            path.removeLast()
+        }
+        if path == "/" {
+            path = ""
+        }
+        if !path.lowercased().hasSuffix("/configure") {
+            path += "/configure"
+        }
+        components.percentEncodedPath = path
+        components.fragment = nil
+        return components.url
     }
 
-    /// Normalizes a user-provided URL to point to manifest.json
-    private func normalizeManifestURL(_ url: String) -> String {
-        "\(Self.normalizedConfiguredURL(from: url))/manifest.json"
-    }
+    private static func endpointURL(
+        baseURL: String,
+        appendingPercentEncodedPath suffix: String
+    ) -> URL? {
+        let normalized = normalizedConfiguredURL(from: baseURL)
+        guard var components = URLComponents(string: normalized),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "https" || scheme == "http",
+              components.host?.isEmpty == false else {
+            return nil
+        }
 
-    private func normalizedBaseURL(_ url: String) -> String {
-        Self.normalizedConfiguredURL(from: url)
+        var path = components.percentEncodedPath
+        while path.count > 1 && path.hasSuffix("/") {
+            path.removeLast()
+        }
+        if path == "/" {
+            path = ""
+        }
+        path += suffix.hasPrefix("/") ? suffix : "/\(suffix)"
+        components.percentEncodedPath = path
+        components.fragment = nil
+        return components.url
     }
 
     private func encodePathSegment(_ value: String, preservingColon: Bool) -> String {

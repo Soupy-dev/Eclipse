@@ -28,7 +28,7 @@ final class PiPController: NSObject {
     weak var delegate: PiPControllerDelegate?
     
     var isPictureInPictureSupported: Bool {
-        return AVPictureInPictureController.isPictureInPictureSupported()
+        AVPictureInPictureController.isPictureInPictureSupported()
     }
     
     var isPictureInPictureActive: Bool {
@@ -44,7 +44,7 @@ final class PiPController: NSObject {
     }
 
     static var isPictureInPictureSupported: Bool {
-        return AVPictureInPictureController.isPictureInPictureSupported()
+        AVPictureInPictureController.isPictureInPictureSupported()
     }
     
     init(sampleBufferDisplayLayer: AVSampleBufferDisplayLayer) {
@@ -56,7 +56,10 @@ final class PiPController: NSObject {
     private func setupSampleBufferPictureInPicture() {
         guard isPictureInPictureSupported,
               let displayLayer = sampleBufferDisplayLayer else {
-                        Logger.shared.log("[PiPController] setup skipped: supported=\(isPictureInPictureSupported) hasDisplayLayer=\(sampleBufferDisplayLayer != nil)", type: "MPV")
+            Logger.shared.log(
+                "[PiPController] setup skipped: supported=\(isPictureInPictureSupported) hasDisplayLayer=\(sampleBufferDisplayLayer != nil)",
+                type: "MPV"
+            )
             return
         }
         
@@ -71,7 +74,10 @@ final class PiPController: NSObject {
         #if !os(tvOS)
         pipController?.canStartPictureInPictureAutomaticallyFromInline = false
         #endif
-        Logger.shared.log("[PiPController] initialized supported=\(isPictureInPictureSupported) possible=\(pipController?.isPictureInPicturePossible ?? false) autoInline=false layer={\(layerSnapshot())}", type: "MPV")
+        Logger.shared.log(
+            "[PiPController] initialized supported=\(isPictureInPictureSupported) possible=\(pipController?.isPictureInPicturePossible ?? false) autoInline=false layer={\(layerSnapshot())}",
+            type: "MPV"
+        )
     }
 
     func setCanStartPictureInPictureAutomaticallyFromInline(_ enabled: Bool) {
@@ -133,7 +139,20 @@ final class PiPController: NSObject {
         guard let layer = sampleBufferDisplayLayer else { return "nil" }
         let nsError = layer.error.map { $0 as NSError }
         let errorText = nsError.map { "\($0.domain)#\($0.code)" } ?? "nil"
-        return "ready=\(layer.isReadyForMoreMediaData) status=\(layerStatusName(layer.status)) error=\(errorText) hidden=\(layer.isHidden) opacity=\(String(format: "%.2f", layer.opacity)) frame=\(String(format: "%.0fx%.0f", layer.bounds.width, layer.bounds.height)) timebase=\(layer.controlTimebase != nil)"
+        let readyForDisplay: String
+        if #available(iOS 17.4, tvOS 17.4, *) {
+            readyForDisplay = String(layer.isReadyForDisplay)
+        } else {
+            readyForDisplay = "unavailable"
+        }
+        let timebase: String
+        if let controlTimebase = layer.controlTimebase {
+            let time = CMTimeGetSeconds(CMTimebaseGetTime(controlTimebase))
+            timebase = "\(String(format: "%.2f", time))@\(String(format: "%.2f", CMTimebaseGetRate(controlTimebase)))"
+        } else {
+            timebase = "nil"
+        }
+        return "readyForDisplay=\(readyForDisplay) readyForMore=\(layer.isReadyForMoreMediaData) status=\(layerStatusName(layer.status)) error=\(errorText) hidden=\(layer.isHidden) opacity=\(String(format: "%.2f", layer.opacity)) frame=\(String(format: "%.0fx%.0f", layer.bounds.width, layer.bounds.height)) timebase=\(timebase)"
     }
 
     private func layerStatusName(_ status: AVQueuedSampleBufferRenderingStatus) -> String {
@@ -159,20 +178,24 @@ final class PiPController: NSObject {
 
 extension PiPController: AVPictureInPictureControllerDelegate {
     func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-        Logger.shared.log("[PiPController] delegate willStart active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) layer={\(layerSnapshot())}", type: "MPV")
+        Logger.shared.log("[PiPController] stage=will-start active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) layer={\(layerSnapshot())}", type: "PiPTrace")
         delegate?.pipController(self, willStartPictureInPicture: true)
     }
     
     func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         isStartRequestPending = false
-        Logger.shared.log("[PiPController] delegate didStart active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) layer={\(layerSnapshot())}", type: "MPV")
+        Logger.shared.log("[PiPController] stage=did-start active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) layer={\(layerSnapshot())}", type: "PiPTrace")
         delegate?.pipController(self, didStartPictureInPicture: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self, weak pictureInPictureController] in
+            guard let self, let pictureInPictureController else { return }
+            Logger.shared.log("[PiPController] stage=post-start-health active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) layer={\(self.layerSnapshot())}", type: "PiPTrace")
+        }
     }
     
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
         isStartRequestPending = false
         let nsError = error as NSError
-        Logger.shared.log("[PiPController] failedToStart error=\(nsError.domain)#\(nsError.code) desc=\(nsError.localizedDescription) active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) hasDelegate=\(delegate != nil) layer={\(layerSnapshot())}", type: "MPV")
+        Logger.shared.log("[PiPController] stage=failed-to-start error=\(nsError.domain)#\(nsError.code) desc=\(nsError.localizedDescription) active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) hasDelegate=\(delegate != nil) layer={\(layerSnapshot())}", type: "PiPTrace")
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.delegate?.pipController(self, didStartPictureInPicture: false)
@@ -181,12 +204,12 @@ extension PiPController: AVPictureInPictureControllerDelegate {
     
     func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         isStartRequestPending = false
-        Logger.shared.log("[PiPController] delegate willStop active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) layer={\(layerSnapshot())}", type: "MPV")
+        Logger.shared.log("[PiPController] stage=will-stop active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) layer={\(layerSnapshot())}", type: "PiPTrace")
         delegate?.pipController(self, willStopPictureInPicture: true)
     }
     
     func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-        Logger.shared.log("[PiPController] delegate didStop active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) layer={\(layerSnapshot())}", type: "MPV")
+        Logger.shared.log("[PiPController] stage=did-stop active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) layer={\(layerSnapshot())}", type: "PiPTrace")
         delegate?.pipController(self, didStopPictureInPicture: true)
     }
     
@@ -211,7 +234,7 @@ extension PiPController: AVPictureInPictureSampleBufferPlaybackDelegate {
     }
     
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, didTransitionToRenderSize newRenderSize: CMVideoDimensions) {
-        Logger.shared.log("[PiPController] render size transition \(newRenderSize.width)x\(newRenderSize.height) layer={\(layerSnapshot())}", type: "MPV")
+        Logger.shared.log("[PiPController] stage=render-size size=\(newRenderSize.width)x\(newRenderSize.height) layer={\(layerSnapshot())}", type: "PiPTrace")
     }
     
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, skipByInterval skipInterval: CMTime, completion completionHandler: @escaping () -> Void) {

@@ -4,7 +4,7 @@ import Combine
 final class MangaLibraryCollection: ObservableObject, Codable, Identifiable, Equatable {
     @Published var items: [MangaLibraryItem] = []
     var id: UUID
-    var name: String
+    @Published var name: String
     var description: String?
 
     init(id: UUID = UUID(), name: String, items: [MangaLibraryItem] = [], description: String? = nil) {

@@ -59,7 +59,9 @@ struct TrackerState: Codable {
     var accounts: [TrackerAccount] = []
     var syncEnabled: Bool = true
     var autoSyncRatings: Bool = false
+#if !os(tvOS)
     var autoSyncReaderRatings: Bool = false
+#endif
     var mergeTraktContinueWatching: Bool = false
     var liveTraktScrobbling: Bool = true
     var traktPublicCatalogsEnabled: Bool = false
@@ -78,7 +80,9 @@ struct TrackerState: Codable {
         case accounts
         case syncEnabled
         case autoSyncRatings
+#if !os(tvOS)
         case autoSyncReaderRatings
+#endif
         case mergeTraktContinueWatching
         case liveTraktScrobbling
         case traktPublicCatalogsEnabled
@@ -96,7 +100,9 @@ struct TrackerState: Codable {
         accounts = try container.decodeIfPresent([TrackerAccount].self, forKey: .accounts) ?? []
         syncEnabled = try container.decodeIfPresent(Bool.self, forKey: .syncEnabled) ?? true
         autoSyncRatings = try container.decodeIfPresent(Bool.self, forKey: .autoSyncRatings) ?? false
+#if !os(tvOS)
         autoSyncReaderRatings = try container.decodeIfPresent(Bool.self, forKey: .autoSyncReaderRatings) ?? false
+#endif
         mergeTraktContinueWatching = try container.decodeIfPresent(Bool.self, forKey: .mergeTraktContinueWatching) ?? false
         liveTraktScrobbling = try container.decodeIfPresent(Bool.self, forKey: .liveTraktScrobbling) ?? true
         traktPublicCatalogsEnabled = try container.decodeIfPresent(Bool.self, forKey: .traktPublicCatalogsEnabled) ?? false
@@ -321,6 +327,22 @@ enum TrackerSyncToolAction: String, CaseIterable, Identifiable {
     }
 
     var subtitle: String {
+#if os(tvOS)
+        switch self {
+        case .fillEclipseFromAniList:
+            return "Add missing anime and advance local watched progress."
+        case .fillEclipseFromMAL:
+            return "Use MAL anime-list progress to fill local Eclipse progress."
+        case .pushEclipseToAniList:
+            return "Send completed local anime episodes to AniList."
+        case .pushEclipseToMAL:
+            return "Send completed local anime episodes to MAL."
+        case .portAniListToMAL:
+            return "Copy AniList anime watch progress into MAL after preview."
+        case .portMALToAniList:
+            return "Copy MAL anime watch progress into AniList after preview."
+        }
+#else
         switch self {
         case .fillEclipseFromAniList:
             return "Add missing shows and advance local watched progress."
@@ -335,6 +357,7 @@ enum TrackerSyncToolAction: String, CaseIterable, Identifiable {
         case .portMALToAniList:
             return "Copy MAL watch/read progress into AniList after preview."
         }
+#endif
     }
 
     var isProviderPort: Bool {

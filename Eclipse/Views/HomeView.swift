@@ -51,6 +51,14 @@ private enum HeroCarouselDirection {
     case backward
 }
 
+#if os(tvOS)
+private enum TVHeroFocusTarget: Hashable {
+    case hero
+    case watchNow
+    case watchlist
+}
+#endif
+
 struct HomeView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -72,6 +80,10 @@ struct HomeView: View {
     @State private var showingHeroDetail = false
     @State private var heroLogoURL: String?
     @State private var heroLogoIdentity: String?
+#if os(tvOS)
+    @FocusState private var tvHeroFocus: TVHeroFocusTarget?
+    @State private var focusedHeroSnapshot: TMDBSearchResult?
+#endif
     @ObservedObject private var libraryManager = LibraryManager.shared
     @ObservedObject private var trackerManager = TrackerManager.shared
     @State private var scrollOffset: CGFloat = 0
@@ -139,7 +151,9 @@ struct HomeView: View {
         // Reading experimentalMediaCardScale here (not just relying on .current) keeps the
         // home reactive to global size changes made elsewhere.
         var tuning = ExperimentalVisualTuning.current
+#if !os(tvOS)
         tuning.mediaCardScale = ExperimentalVisualTuning.sanitizedMediaCardScale(experimentalMediaCardScale)
+#endif
         return ExperimentalMediaDesignMetrics(
             preset: ExperimentalMediaDesignPreset(rawValue: experimentalDesignPreset) ?? ExperimentalMediaDesignPreset.defaultValue,
             heroBleedLevel: ExperimentalHeroBleedLevel(rawValue: experimentalHeroBleedLevel) ?? ExperimentalHeroBleedLevel.defaultValue,
@@ -190,6 +204,9 @@ struct HomeView: View {
     }
     
     var body: some View {
+#if os(tvOS)
+        homeContent
+#else
         if #available(iOS 16.0, *) {
             NavigationStack {
                 homeContent
@@ -200,6 +217,7 @@ struct HomeView: View {
             }
             .navigationViewStyle(StackNavigationViewStyle())
         }
+#endif
     }
     
     private var homeContent: some View {
@@ -247,7 +265,14 @@ struct HomeView: View {
         .navigationBarHidden(true)
         .onAppear {
             refreshContinueWatchingItems()
-            observedHomeCatalogSignature = currentHomeCatalogSignature()
+            let catalogSignature = currentHomeCatalogSignature()
+            if observedHomeCatalogSignature.isEmpty ||
+                (!homeViewModel.hasLoadedContent &&
+                 !homeViewModel.hasCompletedInitialLoad) {
+                observedHomeCatalogSignature = catalogSignature
+            } else if observedHomeCatalogSignature != catalogSignature {
+                scheduleHomeCatalogReloadIfNeeded()
+            }
             if homeViewModel.hasCompletedInitialLoad {
                 reportStartupReadyIfNeeded()
             }
@@ -314,6 +339,9 @@ struct HomeView: View {
         }
         .onReceive(heroCarouselTimer) { _ in
             guard !showingHeroDetail else { return }
+#if os(tvOS)
+            guard tvHeroFocus == nil else { return }
+#endif
             advanceHeroCarousel(.forward)
         }
         .background(heroDetailNavigationHost)
@@ -325,7 +353,7 @@ struct HomeView: View {
     @ViewBuilder
     private var loadingView: some View {
         VStack(spacing: 16) {
-            ProgressView()
+            EclipseLoadingIndicator()
                 .scaleEffect(1.5)
             Text("Loading amazing content...")
                 .font(.caption)
@@ -410,7 +438,8 @@ struct HomeView: View {
             ContinueWatchingSection(
                 items: continueWatchingItems,
                 tmdbService: tmdbService,
-                onDataChanged: refreshContinueWatchingItems
+                onDataChanged: refreshContinueWatchingItems,
+                onSectionBecameEmpty: requestTVHomeFallbackFocus
             )
         }
     }
@@ -419,6 +448,23 @@ struct HomeView: View {
     @ViewBuilder
     private var heroSection: some View {
         if ExperimentalFeatureState.isEnabledAtLaunch, homeViewModel.heroContent != nil {
+#if os(tvOS)
+            Button {
+                guard let hero = focusedHeroSnapshot ?? homeViewModel.heroContent else { return }
+                openHeroDetail(hero)
+            } label: {
+                heroSectionBody
+            }
+            .buttonStyle(.plain)
+            .focused($tvHeroFocus, equals: .hero)
+            .onChangeComp(of: tvHeroFocus) { _, focus in
+                if focus == .hero {
+                    focusedHeroSnapshot = homeViewModel.heroContent
+                }
+            }
+            .accessibilityLabel(homeViewModel.heroContent?.displayTitle ?? "Featured title")
+            .accessibilityHint("Open details")
+#else
             heroSectionBody
                 .onTapGesture {
                     openCurrentHeroDetail()
@@ -427,6 +473,7 @@ struct HomeView: View {
                 .accessibilityAction {
                     openCurrentHeroDetail()
                 }
+#endif
         } else {
             heroSectionBody
         }
@@ -490,7 +537,9 @@ struct HomeView: View {
                 .transition(heroBannerTransition)
         }
         .contentShape(Rectangle())
+#if !os(tvOS)
         .simultaneousGesture(heroCarouselSwipeGesture)
+#endif
         .animation(heroCarouselAnimation, value: heroIdentity)
     }
 
@@ -515,6 +564,7 @@ struct HomeView: View {
         }
     }
 
+#if !os(tvOS)
     private var heroCarouselSwipeGesture: some Gesture {
         DragGesture(minimumDistance: 28, coordinateSpace: .local)
             .onEnded { value in
@@ -532,6 +582,7 @@ struct HomeView: View {
                 advanceHeroCarousel(horizontal < 0 ? .forward : .backward)
             }
     }
+#endif
 
     private func advanceHeroCarousel(_ direction: HeroCarouselDirection) {
         heroCarouselDirection = direction
@@ -623,9 +674,9 @@ struct HomeView: View {
 
     @ViewBuilder
     private var heroPagerDots: some View {
-        let count = min(homeViewModel.heroCarouselCount, 12)
+        let count = homeViewModel.heroCarouselCount
         if heroBannerBehavior == HeroBannerBehavior.carousel.rawValue && count > 1 {
-            let current = min(homeViewModel.heroCarouselCurrentIndex, count - 1)
+            let current = homeViewModel.heroCarouselCurrentIndex
             HStack(spacing: isIPad ? 15 : 12) {
                 ForEach(Array(0..<count), id: \.self) { index in
                     Circle()
@@ -710,12 +761,18 @@ struct HomeView: View {
                     })
                 }
                 .buttonStyle(.plain)
+#if os(tvOS)
+                .focused($tvHeroFocus, equals: .watchNow)
+                .onChangeComp(of: tvHeroFocus) { _, focus in
+                    if focus == .watchNow {
+                        focusedHeroSnapshot = hero
+                    }
+                }
+#endif
 
                 Button(action: {
-                    if let hero = homeViewModel.heroContent {
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            libraryManager.toggleBookmark(for: hero)
-                        }
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        libraryManager.toggleBookmark(for: hero)
                     }
                 }) {
                     HStack(spacing: 8) {
@@ -751,6 +808,15 @@ struct HomeView: View {
                     })
                     .shadow(color: .black.opacity(0.1), radius: 4, x: 0, y: 2)
                 }
+                .buttonStyle(.plain)
+#if os(tvOS)
+                .focused($tvHeroFocus, equals: .watchlist)
+                .onChangeComp(of: tvHeroFocus) { _, focus in
+                    if focus == .watchlist {
+                        focusedHeroSnapshot = hero
+                    }
+                }
+#endif
             }
         }
         .frame(maxWidth: .infinity)
@@ -955,10 +1021,10 @@ struct HomeView: View {
                 switch catalog.displayStyle {
                 case .standard:
                     if let items = homeViewModel.catalogResults[catalog.id], !items.isEmpty {
-                        let limitedItems = Array(items.prefix(15))
-                        let displayItems = catalog.id == "trending"
-                            ? limitedItems.filter { $0.stableIdentity != homeViewModel.heroContent?.stableIdentity }
-                            : limitedItems
+                        let detailItems = catalog.id == "trending"
+                            ? items.filter { $0.stableIdentity != homeViewModel.heroContent?.stableIdentity }
+                            : items
+                        let displayItems = Array(detailItems.prefix(15))
 
                         let displayTitle: String = {
                             if catalog.id == "becauseYouWatched" && !homeViewModel.becauseYouWatchedTitle.isEmpty {
@@ -970,6 +1036,11 @@ struct HomeView: View {
                         MediaSection(
                             title: displayTitle,
                             items: displayItems,
+                            destination: sectionDetailView(
+                                for: catalog,
+                                title: displayTitle,
+                                initialItems: detailItems
+                            ),
                             metrics: catalogMetrics
                         )
                     }
@@ -1022,7 +1093,8 @@ struct HomeView: View {
                             title: catalog.name,
                             items: items,
                             tmdbService: tmdbService,
-                            onDataChanged: refreshContinueWatchingItems
+                            onDataChanged: refreshContinueWatchingItems,
+                            onSectionBecameEmpty: requestTVHomeFallbackFocus
                         )
                     }
                 }
@@ -1049,6 +1121,16 @@ struct HomeView: View {
                 }
             }
         )
+    }
+
+    private func requestTVHomeFallbackFocus() {
+#if os(tvOS)
+        DispatchQueue.main.async {
+            if homeViewModel.heroContent != nil {
+                tvHeroFocus = .hero
+            }
+        }
+#endif
     }
     
     private func loadContent(showLoading: Bool = true) {
@@ -1103,7 +1185,8 @@ struct HomeView: View {
     }
 
     private func scheduleHomeCatalogReloadIfNeeded() {
-        guard homeViewModel.hasLoadedContent || homeViewModel.hasCompletedInitialLoad else {
+        guard homeViewModel.hasLoadedContent ||
+                homeViewModel.hasCompletedInitialLoad else {
             observedHomeCatalogSignature = currentHomeCatalogSignature()
             return
         }
@@ -1138,6 +1221,189 @@ struct HomeView: View {
             .map { "\($0.key)=\($0.value)" }
             .joined(separator: ",")
         return "\(catalogPart)#\(modePart)#\(overrides)"
+    }
+
+    private func sectionDetailView(
+        for catalog: Catalog,
+        title: String,
+        initialItems: [TMDBSearchResult]
+    ) -> DiscoverDetailView {
+        DiscoverDetailView(
+            title: title,
+            initialItems: initialItems,
+            loadMore: sectionLoadMoreHandler(for: catalog)
+        )
+    }
+
+    private func sectionLoadMoreHandler(for catalog: Catalog) -> ((Int) async -> [TMDBSearchResult])? {
+        switch catalog.id {
+        case "trending":
+            return { page in
+                await loadFilteredSectionPage(catalogId: catalog.id, page: page) {
+                    try await tmdbService.getTrending(page: page)
+                }
+            }
+        case "popularMovies":
+            return { page in
+                await loadFilteredSectionPage(catalogId: catalog.id, page: page) {
+                    try await tmdbService.getPopularMovies(page: page).map(\.asSearchResult)
+                }
+            }
+        case "nowPlayingMovies":
+            return { page in
+                await loadFilteredSectionPage(catalogId: catalog.id, page: page) {
+                    try await tmdbService.getNowPlayingMovies(page: page).map(\.asSearchResult)
+                }
+            }
+        case "upcomingMovies":
+            return { page in
+                await loadFilteredSectionPage(catalogId: catalog.id, page: page) {
+                    try await tmdbService.getUpcomingMovies(page: page).map(\.asSearchResult)
+                }
+            }
+        case "popularTVShows":
+            return { page in
+                await loadFilteredSectionPage(catalogId: catalog.id, page: page) {
+                    try await tmdbService.getPopularTVShows(page: page).map(\.asSearchResult)
+                }
+            }
+        case "onTheAirTV":
+            return { page in
+                await loadFilteredSectionPage(catalogId: catalog.id, page: page) {
+                    try await tmdbService.getOnTheAirTVShows(page: page).map(\.asSearchResult)
+                }
+            }
+        case "airingTodayTV":
+            return { page in
+                await loadFilteredSectionPage(catalogId: catalog.id, page: page) {
+                    try await tmdbService.getAiringTodayTVShows(page: page).map(\.asSearchResult)
+                }
+            }
+        case "topRatedTVShows":
+            return { page in
+                await loadFilteredSectionPage(catalogId: catalog.id, page: page) {
+                    try await tmdbService.getTopRatedTVShows(page: page).map(\.asSearchResult)
+                }
+            }
+        case "topRatedMovies":
+            return { page in
+                await loadFilteredSectionPage(catalogId: catalog.id, page: page) {
+                    try await tmdbService.getTopRatedMovies(page: page).map(\.asSearchResult)
+                }
+            }
+        case "trendingAnime":
+            return animeSectionLoadMoreHandler(for: .trending, catalogId: catalog.id)
+        case "popularAnime":
+            return animeSectionLoadMoreHandler(for: .popular, catalogId: catalog.id)
+        case "topRatedAnime":
+            return animeSectionLoadMoreHandler(for: .topRated, catalogId: catalog.id)
+        case "airingAnime":
+            return animeSectionLoadMoreHandler(for: .airing, catalogId: catalog.id)
+        case "upcomingAnime":
+            return animeSectionLoadMoreHandler(for: .upcoming, catalogId: catalog.id)
+        default:
+            return expandingSourceLoadMoreHandler(for: catalog)
+        }
+    }
+
+    private func loadFilteredSectionPage(
+        catalogId: String,
+        page: Int,
+        fetch: () async throws -> [TMDBSearchResult]
+    ) async -> [TMDBSearchResult] {
+        do {
+            return contentFilter.filterSearchResults(try await fetch())
+        } catch {
+            Logger.shared.log("HomeView: section \(catalogId) page \(page) failed: \(error.localizedDescription)", type: "TMDB")
+            return []
+        }
+    }
+
+    private func animeSectionLoadMoreHandler(
+        for kind: AniListService.AniListCatalogKind,
+        catalogId: String
+    ) -> ((Int) async -> [TMDBSearchResult]) {
+        { page in
+            await loadAnimeSectionPage(kind: kind, catalogId: catalogId, page: page)
+        }
+    }
+
+    private func loadAnimeSectionPage(
+        kind: AniListService.AniListCatalogKind,
+        catalogId: String,
+        page: Int
+    ) async -> [TMDBSearchResult] {
+        let pageSize = 20
+        let boundedPage = max(page, 1)
+
+        do {
+            if catalogManager.performanceModeEnabled, let fastKind = fastAnimeCatalogKind(for: kind) {
+                let limit = boundedPage * pageSize
+                let offset = (boundedPage - 1) * pageSize
+                let results = contentFilter.filterFastAnimeSearchResults(
+                    try await tmdbService.getFastAnimeCatalog(kind: fastKind, limit: limit)
+                )
+                return Array(results.dropFirst(offset))
+            }
+
+            return contentFilter.filterSearchResults(
+                try await AniListService.shared.fetchAnimeCatalog(
+                    kind,
+                    page: boundedPage,
+                    limit: pageSize,
+                    tmdbService: tmdbService
+                )
+            )
+        } catch {
+            Logger.shared.log("HomeView: anime section \(catalogId) page \(page) failed: \(error.localizedDescription)", type: "AniList")
+            return []
+        }
+    }
+
+    private func fastAnimeCatalogKind(for kind: AniListService.AniListCatalogKind) -> TMDBService.FastAnimeCatalogKind? {
+        switch kind {
+        case .trending:
+            return .trending
+        case .popular:
+            return .popular
+        case .topRated:
+            return .topRated
+        case .airing:
+            return .airing
+        case .upcoming:
+            return .upcoming
+        }
+    }
+
+    private func expandingSourceLoadMoreHandler(for catalog: Catalog) -> ((Int) async -> [TMDBSearchResult])? {
+        switch catalog.source {
+        case .stremio:
+            return { page in
+                let pageSize = 15
+                let limit = max(page, 1) * pageSize
+                let offset = max(page - 1, 0) * pageSize
+                let items = await StremioAddonManager.shared.fetchCatalogItems(
+                    for: catalog,
+                    tmdbService: tmdbService,
+                    limit: limit
+                )
+                return Array(contentFilter.filterSearchResults(items).dropFirst(offset))
+            }
+        case .trakt:
+            return { page in
+                let pageSize = 15
+                let limit = max(page, 1) * pageSize
+                let offset = max(page - 1, 0) * pageSize
+                let items = await trackerManager.fetchTraktPublicListCatalogItems(
+                    for: catalog,
+                    tmdbService: tmdbService,
+                    limit: limit
+                )
+                return Array(contentFilter.filterSearchResults(items).dropFirst(offset))
+            }
+        case .tmdb, .anilist, .local:
+            return nil
+        }
     }
 
     private func refreshContinueWatchingItems() {
@@ -1324,7 +1590,8 @@ struct HomeView: View {
             isAnime: candidate.isAnime,
             statusText: "Watch next",
             isWatchNext: true,
-            traktPlaybackId: nil
+            traktPlaybackId: nil,
+            removalTarget: .localUpNextShow
         )
     }
 
@@ -1397,6 +1664,7 @@ private struct HeroScoreChipView: View {
 struct MediaSection: View {
     let title: String
     let items: [TMDBSearchResult]
+    var destination: DiscoverDetailView?
     var metrics: ExperimentalMediaDesignMetrics = .current
     
     var gap: Double { isTvOS ? 50.0 : (isIPad ? 28.0 : 20.0) }
@@ -1406,6 +1674,7 @@ struct MediaSection: View {
             ExperimentalMediaShelf(
                 title: title,
                 items: items,
+                destination: destination,
                 preferredStyle: title.localizedCaseInsensitiveContains("anime") ? .poster : .automatic,
                 metrics: metrics
             )
@@ -1421,6 +1690,17 @@ struct MediaSection: View {
                     .font(sectionTitleFont)
                     .foregroundColor(.white)
                 Spacer()
+
+                if let destination = destination {
+                    NavigationLink(destination: destination) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: isTvOS ? 26 : 20, weight: .semibold))
+                            .foregroundColor(.white.opacity(0.55))
+                            .frame(width: isTvOS ? 54 : 44, height: isTvOS ? 54 : 44, alignment: .trailing)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .accessibilityLabel("See all \(title)")
+                }
             }
             .padding(.horizontal, isTvOS ? 40 : 16)
             
@@ -1461,6 +1741,7 @@ enum ExperimentalMediaShelfStyle {
 struct ExperimentalMediaShelf: View {
     let title: String
     let items: [TMDBSearchResult]
+    var destination: DiscoverDetailView?
     let preferredStyle: ExperimentalMediaShelfStyle
     let metrics: ExperimentalMediaDesignMetrics
 
@@ -1518,9 +1799,16 @@ struct ExperimentalMediaShelf: View {
 
                 Spacer(minLength: 8)
 
-                Image(systemName: "chevron.right")
-                    .font(.system(size: isIPad ? 26 : 22, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.46))
+                if let destination = destination {
+                    NavigationLink(destination: destination) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: isIPad ? 26 : 22, weight: .semibold))
+                            .foregroundColor(.white.opacity(0.46))
+                            .frame(width: isIPad ? 52 : 44, height: isIPad ? 52 : 44, alignment: .trailing)
+                    }
+                    .buttonStyle(PlainButtonStyle())
+                    .accessibilityLabel("See all \(title)")
+                }
             }
             .padding(.horizontal, isIPad ? 24 : 16)
 
@@ -1701,11 +1989,11 @@ struct MediaCard: View {
                 posterCard
             }
         }
-        .tvos({ view in
-            view.buttonStyle(BorderlessButtonStyle())
-        }, else: { view in
-            view.buttonStyle(PlainButtonStyle())
-        })
+#if os(tvOS)
+        .buttonStyle(.card)
+#else
+        .buttonStyle(PlainButtonStyle())
+#endif
     }
 
     private var posterCard: some View {
@@ -1827,6 +2115,9 @@ struct ContinueWatchingSection: View {
     let items: [ContinueWatchingItem]
     let tmdbService: TMDBService
     let onDataChanged: () -> Void
+    var onSectionBecameEmpty: () -> Void = {}
+
+    @State private var requestedTVFocusItemID: String?
 
     private var gap: Double { isTvOS ? 50.0 : (isIPad ? 24.0 : 16.0) }
 
@@ -1845,7 +2136,15 @@ struct ContinueWatchingSection: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: gap) {
                     ForEach(items) { item in
-                        ContinueWatchingCard(item: item, tmdbService: tmdbService, onDataChanged: onDataChanged)
+                        ContinueWatchingCard(
+                            item: item,
+                            tmdbService: tmdbService,
+                            onDataChanged: onDataChanged,
+                            requestedTVFocusItemID: $requestedTVFocusItemID,
+                            onItemDisappeared: {
+                                requestFocusAfterRemoving(itemID: item.id)
+                            }
+                        )
                     }
                 }
                 .padding(.horizontal, isTvOS ? 40 : 16)
@@ -1855,12 +2154,29 @@ struct ContinueWatchingSection: View {
         }
         .padding(.top, isTvOS ? 40 : 24)
     }
+
+    private func requestFocusAfterRemoving(itemID: String) {
+        guard let removedIndex = items.firstIndex(where: { $0.id == itemID }) else { return }
+        let survivingItems = items.filter { $0.id != itemID }
+        guard !survivingItems.isEmpty else {
+            onSectionBecameEmpty()
+            return
+        }
+
+        let nearestIndex = min(removedIndex, survivingItems.count - 1)
+        let nearestItemID = survivingItems[nearestIndex].id
+        DispatchQueue.main.async {
+            requestedTVFocusItemID = nearestItemID
+        }
+    }
 }
 
 struct ContinueWatchingCard: View {
     let item: ContinueWatchingItem
     let tmdbService: TMDBService
     let onDataChanged: () -> Void
+    @Binding var requestedTVFocusItemID: String?
+    let onItemDisappeared: () -> Void
 
     @AppStorage("tmdbLanguage") private var selectedLanguage = "en-US"
 
@@ -1882,6 +2198,30 @@ struct ContinueWatchingCard: View {
     @State private var imdbId: String? = nil
     @State private var enrichedPlaybackContext: EpisodePlaybackContext? = nil
     @State private var detailGenres: [TMDBGenre] = []
+
+    private enum TVActionFocus: Hashable {
+        case play
+        case details
+        case watched
+        case remove
+    }
+
+    @FocusState private var tvActionFocus: TVActionFocus?
+
+    private struct PlayButtonModifier: ViewModifier {
+        let focus: FocusState<TVActionFocus?>.Binding
+
+        @ViewBuilder
+        func body(content: Content) -> some View {
+#if os(tvOS)
+            content
+                .buttonStyle(.card)
+                .focused(focus, equals: .play)
+#else
+            content.buttonStyle(PlainButtonStyle())
+#endif
+        }
+    }
 
     // Continue Watching follows the global card-size control (Modern UI, non-tvOS only).
     private var globalCardSizeScale: CGFloat {
@@ -1941,7 +2281,7 @@ struct ContinueWatchingCard: View {
     private var selectedEpisodePlaybackContext: EpisodePlaybackContext? {
         let baseContext = enrichedPlaybackContext ?? item.playbackContext
         guard let episode = selectedEpisodeForSearch else { return baseContext }
-        if (PerformanceModeSettings.isEnabled || PerformanceModeSettings.skipsAniListTraversalForAnimeDetails), searchSheetIsAnime {
+        if PerformanceModeSettings.skipsAniListTraversalForAnimeDetails, searchSheetIsAnime {
             return EpisodePlaybackContext(
                 localSeasonNumber: episode.seasonNumber,
                 localEpisodeNumber: episode.episodeNumber,
@@ -1978,7 +2318,14 @@ struct ContinueWatchingCard: View {
     }
 
     var body: some View {
+        Group {
+            VStack(spacing: isTvOS ? 12 : 0) {
         Button {
+#if os(iOS)
+            if playPreferredDownloadedMediaIfAvailable() {
+                return
+            }
+#endif
             if isMetadataReady {
                 showingSearchResults = true
             } else {
@@ -2069,11 +2416,12 @@ struct ContinueWatchingCard: View {
             .animation(.easeInOut(duration: 0.2), value: isHovering)
             .modifier(ContinuousHoverModifier(isHovering: $isHovering))
         }
-        .tvos({ view in
-            view.buttonStyle(BorderlessButtonStyle())
-        }, else: { view in
-            view.buttonStyle(PlainButtonStyle())
-        })
+        .modifier(PlayButtonModifier(focus: $tvActionFocus))
+#if os(tvOS)
+                tvActionBar
+#endif
+            }
+        }
         .task {
             await loadMediaDetails()
         }
@@ -2101,6 +2449,7 @@ struct ContinueWatchingCard: View {
                 isAnimationGenre16: detailGenres.contains { $0.id == 16 }
             )
         }
+#if !os(tvOS)
         .contextMenu {
             Button {
                 showingDetails = true
@@ -2114,21 +2463,63 @@ struct ContinueWatchingCard: View {
                 Label("Mark as Watched", systemImage: "checkmark.circle")
             }
 
-            if !item.isWatchNext {
+            if item.removalTarget.isRemovable {
                 Button(role: .destructive) {
                     removeFromContinueWatching()
                 } label: {
-                    Label("Remove", systemImage: "trash")
+                    Label(item.isWatchNext ? "Remove from Up Next" : "Remove", systemImage: "trash")
                 }
             }
         }
+#endif
         .background(
             NavigationLink(destination: MediaDetailView(searchResult: detailSearchResult), isActive: $showingDetails) {
                 EmptyView()
             }
             .hidden()
         )
+#if os(tvOS)
+        .onChange(of: requestedTVFocusItemID) { requestedItemID in
+            guard requestedItemID == item.id else { return }
+            tvActionFocus = .play
+            requestedTVFocusItemID = nil
+        }
+#endif
     }
+
+#if os(tvOS)
+    private var tvActionBar: some View {
+        HStack(spacing: 10) {
+            Button {
+                showingDetails = true
+            } label: {
+                Label("Details", systemImage: "info.circle")
+            }
+            .focused($tvActionFocus, equals: .details)
+
+            Button {
+                markAsWatched()
+            } label: {
+                Label("Watched", systemImage: "checkmark.circle")
+            }
+            .focused($tvActionFocus, equals: .watched)
+
+            if item.removalTarget.isRemovable {
+                Button(role: .destructive) {
+                    removeFromContinueWatching()
+                } label: {
+                    Label("Remove", systemImage: "trash")
+                }
+                .accessibilityLabel(item.isWatchNext ? "Remove from Up Next" : "Remove")
+                .focused($tvActionFocus, equals: .remove)
+            }
+        }
+        .font(.callout)
+        .controlSize(.small)
+        .buttonStyle(.bordered)
+        .frame(width: cardWidth)
+    }
+#endif
 
     @ViewBuilder
     private var titleText: some View {
@@ -2189,7 +2580,10 @@ struct ContinueWatchingCard: View {
                 }
             } else {
                 // Fetch TMDB details, images, and romaji title in parallel
-                async let detailsTask = tmdbService.getTVShowDetails(id: item.tmdbId)
+                // Use the same cached representation as anime traversal so a
+                // legacy card that needs the full fallback does not request the
+                // identical TMDB show endpoint twice under two cache keys.
+                async let detailsTask = tmdbService.getTVShowWithSeasons(id: item.tmdbId)
                 async let imagesTask = tmdbService.getTVShowImages(id: item.tmdbId, preferredLanguage: selectedLanguage)
                 async let romajiTask = tmdbService.getRomajiTitle(for: "tv", id: item.tmdbId)
                 async let episodeArtworkTask = resolveEpisodeArtworkURL()
@@ -2219,8 +2613,32 @@ struct ContinueWatchingCard: View {
                 }
 
                 if detectedAsAnime && !PerformanceModeSettings.skipsAniListTraversalForAnimeDetails {
-                    // Fetch AniList data for correct season title mapping
-                    do {
+                    // Progress written by the detail/player flows already carries
+                    // the exact AniList season most of the time. Resolve that one
+                    // compact node first instead of traversing the whole franchise
+                    // and hydrating every TMDB season for each visible Home card.
+                    let exactAniListId = knownAniListSeasonId()
+                    if let exactAniListId,
+                       let identity = await AniListService.shared.fetchAnimeSeasonIdentity(
+                           anilistId: exactAniListId,
+                           tmdbShowId: details.id,
+                           title: details.name
+                       ) {
+                        let context = playbackContext(enrichedWith: identity)
+                        applyResolvedAnimeCardMetadata(
+                            seasonTitle: identity.title,
+                            seasonRomajiTitle: identity.romajiTitle,
+                            playbackContext: context,
+                            artworkURL: episodeArtworkURL ?? identity.posterURL ?? showArtworkURL
+                        )
+                        Logger.shared.log(
+                            "ContinueWatchingCard: exact AniList season enrichment id=\(exactAniListId) title=\(identity.title)",
+                            type: "AniList"
+                        )
+                    } else {
+                        // Legacy progress may not have season identity. Preserve
+                        // the existing full traversal as the correctness fallback.
+                        do {
                         let animeData = try await AniListService.shared.fetchAnimeDetailsWithEpisodes(
                             title: details.name,
                             tmdbShowId: details.id,
@@ -2273,17 +2691,18 @@ struct ContinueWatchingCard: View {
                         }
 
                         Logger.shared.log("ContinueWatchingCard: Resolved anime metadata for \(details.name), seasonTitle=\(matchedSeasonTitle ?? "nil")", type: "AniList")
-                    } catch {
-                        // AniList fetch failed - still mark as anime but without season title
-                        Logger.shared.log("ContinueWatchingCard: AniList fetch failed for \(details.name): \(error.localizedDescription)", type: "AniList")
-                        await MainActor.run {
-                            self.isAnimeContent = true
-                            self.animeSeasonRomajiTitle = nil
-                            self.enrichedPlaybackContext = item.playbackContext
-                            self.isMetadataReady = true
-                            if self.pendingOpenSheet {
-                                self.pendingOpenSheet = false
-                                self.showingSearchResults = true
+                        } catch {
+                            // AniList fetch failed - still mark as anime but without season title
+                            Logger.shared.log("ContinueWatchingCard: AniList fetch failed for \(details.name): \(error.localizedDescription)", type: "AniList")
+                            await MainActor.run {
+                                self.isAnimeContent = true
+                                self.animeSeasonRomajiTitle = nil
+                                self.enrichedPlaybackContext = item.playbackContext
+                                self.isMetadataReady = true
+                                if self.pendingOpenSheet {
+                                    self.pendingOpenSheet = false
+                                    self.showingSearchResults = true
+                                }
                             }
                         }
                     }
@@ -2328,6 +2747,59 @@ struct ContinueWatchingCard: View {
                     self.showingSearchResults = true
                 }
             }
+        }
+    }
+
+    private func knownAniListSeasonId() -> Int? {
+        guard let context = item.playbackContext,
+              let id = context.anilistMediaId,
+              id > 0,
+              context.resolvedTMDBSeasonNumber != nil,
+              context.resolvedTMDBEpisodeNumber != nil else {
+            return nil
+        }
+        return id
+    }
+
+    private func playbackContext(enrichedWith identity: AniListSeasonIdentity) -> EpisodePlaybackContext? {
+        if let existing = item.playbackContext {
+            return existing.withKitsuMediaId(identity.kitsuId)
+        }
+        guard let seasonNumber = item.seasonNumber,
+              let episodeNumber = item.episodeNumber else {
+            return nil
+        }
+        return EpisodePlaybackContext(
+            localSeasonNumber: seasonNumber,
+            localEpisodeNumber: episodeNumber,
+            anilistMediaId: identity.anilistId,
+            kitsuMediaId: identity.kitsuId,
+            tmdbSeasonNumber: nil,
+            tmdbEpisodeNumber: nil,
+            tmdbEpisodeOffset: nil,
+            animeAbsoluteEpisodeNumber: nil,
+            animeSeasonEpisodeCount: identity.episodeCount,
+            isSpecial: false,
+            titleOnlySearch: false
+        )
+    }
+
+    @MainActor
+    private func applyResolvedAnimeCardMetadata(
+        seasonTitle: String?,
+        seasonRomajiTitle: String?,
+        playbackContext: EpisodePlaybackContext?,
+        artworkURL: String?
+    ) {
+        isAnimeContent = true
+        animeSeasonTitle = seasonTitle
+        animeSeasonRomajiTitle = seasonRomajiTitle
+        enrichedPlaybackContext = playbackContext
+        backdropURL = artworkURL
+        isMetadataReady = true
+        if pendingOpenSheet {
+            pendingOpenSheet = false
+            showingSearchResults = true
         }
     }
 
@@ -2377,6 +2849,84 @@ struct ContinueWatchingCard: View {
         return "\(TMDBService.tmdbImageBaseURL)\(path)"
     }
 
+#if os(iOS)
+    @MainActor
+    private func playPreferredDownloadedMediaIfAvailable() -> Bool {
+        guard UserDefaults.standard.bool(forKey: "preferDownloadedMedia") else {
+            return false
+        }
+
+        let downloadManager = DownloadManager.shared
+        let downloadedItem: DownloadItem?
+        if item.isMovie {
+            downloadedItem = downloadManager.completedDownloadItem(
+                tmdbId: item.tmdbId,
+                isMovie: true
+            )
+        } else if let seasonNumber = item.seasonNumber,
+                  let episodeNumber = item.episodeNumber {
+            downloadedItem = downloadManager.completedEpisodeDownloadItem(
+                tmdbId: item.tmdbId,
+                seasonNumber: seasonNumber,
+                episodeNumber: episodeNumber,
+                playbackContext: enrichedPlaybackContext ?? item.playbackContext
+            )
+        } else {
+            downloadedItem = nil
+        }
+
+        guard let downloadedItem,
+              let fileURL = downloadManager.localFileURL(for: downloadedItem),
+              let presenter = rootPresentationController() else {
+            return false
+        }
+
+        let subtitles = downloadManager.localSubtitleURL(for: downloadedItem).map { [$0.absoluteString] } ?? []
+        let resumePosition: Double? = {
+            guard case .localProgress = item.removalTarget,
+                  item.currentTime.isFinite,
+                  item.currentTime > 0 else {
+                return nil
+            }
+            return item.currentTime
+        }()
+        let nextEpisodeRequest: ((_ seasonNumber: Int, _ episodeNumber: Int) -> Void)? = item.isMovie ? nil : { seasonNumber, episodeNumber in
+            NotificationCenter.default.post(
+                name: .requestNextEpisode,
+                object: nil,
+                userInfo: [
+                    "tmdbId": item.tmdbId,
+                    "seasonNumber": seasonNumber,
+                    "episodeNumber": episodeNumber
+                ]
+            )
+        }
+        let playbackRequest = PlaybackRequest(
+            url: fileURL,
+            headers: [:],
+            subtitles: subtitles,
+            mediaInfo: downloadedItem.mediaInfo,
+            episodePlaybackContext: downloadedItem.episodePlaybackContext,
+            resumePosition: resumePosition,
+            title: downloadedItem.playerTitleBase,
+            subtitle: downloadedItem.isMovie ? nil : downloadedItem.displayTitle,
+            artworkURL: downloadedItem.posterURL.flatMap(URL.init(string:)),
+            isAnime: downloadedItem.isAnime || downloadedItem.episodePlaybackContext?.hasAnimeMediaId == true,
+            isAnimation: detailGenres.contains { $0.id == 16 },
+            originalTMDBSeasonNumber: downloadedItem.episodePlaybackContext?.resolvedTMDBSeasonNumber,
+            originalTMDBEpisodeNumber: downloadedItem.episodePlaybackContext?.resolvedTMDBEpisodeNumber,
+            onRequestNextEpisode: nextEpisodeRequest
+        )
+
+        Logger.shared.log(
+            "ContinueWatchingCard: using preferred download id=\(downloadedItem.id) source=\(item.id)",
+            type: "Download"
+        )
+        PlaybackCoordinator.shared.present(playbackRequest, from: presenter)
+        return true
+    }
+#endif
+
     @MainActor
     private func presentResolvedPlayback(_ request: PlayerResolvedPlaybackRequest) {
         showingSearchResults = false
@@ -2408,6 +2958,47 @@ struct ContinueWatchingCard: View {
 
     @MainActor
     private func presentResolvedPlaybackAfterSheetDismissal(_ request: PlayerResolvedPlaybackRequest, presenter: UIViewController) {
+#if os(tvOS)
+        let episodeSubtitle: String? = {
+            guard !item.isMovie,
+                  let season = item.seasonNumber,
+                  let episode = item.episodeNumber else { return nil }
+            return "Season \(season), Episode \(episode)"
+        }()
+        let nextEpisodeRequest: ((_ seasonNumber: Int, _ episodeNumber: Int) -> Void)? = item.isMovie ? nil : { seasonNumber, nextEpisodeNumber in
+            NotificationCenter.default.post(
+                name: .requestNextEpisode,
+                object: nil,
+                userInfo: [
+                    "tmdbId": item.tmdbId,
+                    "seasonNumber": seasonNumber,
+                    "episodeNumber": nextEpisodeNumber
+                ]
+            )
+        }
+        let playbackRequest = PlaybackRequest(
+            url: request.url,
+            preset: request.preset,
+            headers: request.headers ?? [:],
+            subtitles: request.subtitles ?? [],
+            subtitleNames: request.subtitleNames,
+            subtitleHeadersByURL: request.subtitleHeadersByURL,
+            mediaInfo: request.mediaInfo,
+            imdbID: request.imdbId,
+            episodePlaybackContext: request.episodePlaybackContext,
+            launchContext: request.launchContext,
+            title: displayTitle,
+            subtitle: episodeSubtitle,
+            artworkURL: backdropURL.flatMap(URL.init(string:)),
+            isAnime: request.isAnimeHint,
+            isAnimation: request.isAnimationContentHint ?? false,
+            originalTMDBSeasonNumber: request.originalTMDBSeasonNumber,
+            originalTMDBEpisodeNumber: request.originalTMDBEpisodeNumber,
+            onRequestNextEpisode: nextEpisodeRequest
+        )
+        Logger.shared.log("ContinueWatchingCard: presenting resolved playback through tvOS coordinator", type: "Player")
+        PlaybackCoordinator.shared.present(playbackRequest, from: presenter)
+#else
         let externalRaw = UserDefaults.standard.string(forKey: "externalPlayer") ?? ExternalPlayer.none.rawValue
         let external = ExternalPlayer(rawValue: externalRaw) ?? .none
         if let scheme = external.schemeURL(for: request.url.absoluteString),
@@ -2471,6 +3062,7 @@ struct ContinueWatchingCard: View {
         presenter.present(playerVC, animated: true) {
             playerVC.playAtDefaultSpeed()
         }
+#endif
     }
 
     @MainActor
@@ -2487,20 +3079,35 @@ struct ContinueWatchingCard: View {
         ProgressManager.shared.markContinueWatchingItemAsWatched(item)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             onDataChanged()
+            onItemDisappeared()
         }
     }
 
     private func removeFromContinueWatching() {
-        if let traktPlaybackId = item.traktPlaybackId {
-            TrackerManager.shared.removeTraktContinueWatchingItem(traktPlaybackId) {
+        switch item.removalTarget {
+        case .traktPlayback(let playbackId):
+            TrackerManager.shared.removeTraktContinueWatchingItem(playbackId) {
                 onDataChanged()
+                onItemDisappeared()
             }
             return
-        } else {
+        case .traktUpNextShow:
+            TrackerManager.shared.removeTraktUpNextShow(tmdbId: item.tmdbId) {
+                onDataChanged()
+                onItemDisappeared()
+            }
+            return
+        case .localUpNextShow:
+            ProgressManager.shared.removeUpNextShow(item)
+        case .localProgress:
             ProgressManager.shared.removeContinueWatchingItem(item)
+        case .none:
+            return
         }
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             onDataChanged()
+            onItemDisappeared()
         }
     }
 }

@@ -25,17 +25,23 @@ extension Bundle {
         }
         return "GitHub"
     }
+    /// TestFlight apps use Apple's sandbox receipt even when the build's
+    /// distribution-channel plist value was lost during export.
+    var isTestFlight: Bool {
+        #if os(iOS) || os(tvOS) || os(macOS)
+        appStoreReceiptURL?.lastPathComponent == "sandboxReceipt"
+        #else
+        false
+        #endif
+    }
     var isAppleReviewedDistribution: Bool {
         let normalized = distributionChannel
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .replacingOccurrences(of: " ", with: "")
             .lowercased()
-        return normalized == "testflight" || normalized == "appstore"
+        return normalized == "testflight" || normalized == "appstore" || isTestFlight
     }
     var usesGitHubReleaseUpdates: Bool {
-        !isAppleReviewedDistribution
-    }
-    var allowsNuvioPlugins: Bool {
         !isAppleReviewedDistribution
     }
     var allowsExternalDonationLinks: Bool {
@@ -275,4 +281,3 @@ private struct GitHubRelease: Decodable {
         case htmlUrl = "html_url"
     }
 }
-

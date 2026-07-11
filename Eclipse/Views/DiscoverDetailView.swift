@@ -45,7 +45,7 @@ struct DiscoverDetailView: View {
                 .padding(.top, heroItem != nil ? 16 : 8)
                 
                 if isLoadingMore {
-                    ProgressView()
+                    EclipseLoadingIndicator()
                         .padding(.vertical, 20)
                 }
                 

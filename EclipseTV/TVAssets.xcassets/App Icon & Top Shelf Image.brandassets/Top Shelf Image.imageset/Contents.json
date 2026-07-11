@@ -1,0 +1,18 @@
+{
+  "images" : [
+    {
+      "filename" : "Eclipse-Top-Shelf-1920x720.png",
+      "idiom" : "tv",
+      "scale" : "1x"
+    },
+    {
+      "filename" : "Eclipse-Top-Shelf-3840x1440.png",
+      "idiom" : "tv",
+      "scale" : "2x"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}

@@ -24,6 +24,23 @@ class TMDBService: ObservableObject {
     private var fastAnimeAdultKeywordIDsCache: [Int]?
     private var fastAnimeAdultKeywordIDsTask: Task<[Int], Never>?
 
+    private struct FastAnimeAdultKeywordCacheRecord: Codable {
+        let version: Int
+        let language: String
+        let keywordNames: [String]
+        let ids: [Int]
+        let storedAt: TimeInterval
+    }
+
+    private struct FastAnimeAdultKeywordLookup: Sendable {
+        let id: Int?
+        let completed: Bool
+    }
+
+    private static let fastAnimeAdultKeywordCacheVersion = 1
+    private static let fastAnimeAdultKeywordCacheKey = "tmdbFastAnimeAdultKeywordIDs.v1"
+    private static let fastAnimeAdultKeywordCacheTTL: TimeInterval = 30 * 24 * 60 * 60
+
     private init() {}
     
     private var currentLanguage: String {
@@ -36,9 +53,10 @@ class TMDBService: ObservableObject {
             throw TMDBError.missingAPIKey
         }
 
-        var request = URLRequest(url: url)
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        var configuredRequest = URLRequest(url: url)
+        configuredRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+        configuredRequest.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        let request = configuredRequest
 
         let result = try await rateLimiter.execute {
             try await URLSession.shared.data(for: request)
@@ -350,7 +368,7 @@ class TMDBService: ObservableObject {
         }
         
         do {
-            let (data, response) = try await throttledData(from: url)
+            let (data, _) = try await throttledData(from: url)
             let movieDetail = try JSONDecoder().decode(TMDBMovieDetail.self, from: data)
             detailCache.set(key: "movie_\(id)", value: movieDetail)
             return movieDetail
@@ -474,8 +492,8 @@ class TMDBService: ObservableObject {
     }
     
     // MARK: - Get Trending Movies and TV Shows
-    func getTrending(mediaType: String = "all", timeWindow: String = "week") async throws -> [TMDBSearchResult] {
-        let urlString = "\(baseURL)/trending/\(mediaType)/\(timeWindow)?api_key=\(apiKey)&language=\(currentLanguage)&include_adult=false"
+    func getTrending(mediaType: String = "all", timeWindow: String = "week", page: Int = 1) async throws -> [TMDBSearchResult] {
+        let urlString = "\(baseURL)/trending/\(mediaType)/\(timeWindow)?api_key=\(apiKey)&language=\(currentLanguage)&page=\(page)&include_adult=false"
         
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
@@ -746,18 +764,42 @@ class TMDBService: ObservableObject {
         adultKeywordIDs: [Int],
         extraQueryItems: [URLQueryItem] = []
     ) async throws -> [TMDBSearchResult] {
-        var combined: [TMDBSearchResult] = []
-        for country in Self.fastAnimeOriginCountries {
-            let shows = try await discoverFastAnimeShows(
-                originCountry: country,
-                originalLanguage: Self.fastAnimeOriginalLanguageByCountry[country],
-                sortBy: sortBy,
-                page: 1,
-                adultKeywordIDs: adultKeywordIDs,
-                extraQueryItems: extraQueryItems
-            )
-            combined.append(contentsOf: shows.filter { self.isFastAnimeTVShow($0) }.map(\.asSearchResult))
+        let countryResults = try await withThrowingTaskGroup(
+            of: (Int, [TMDBTVShow]).self,
+            returning: [(Int, [TMDBTVShow])].self
+        ) { group in
+            for (index, country) in Self.fastAnimeOriginCountries.enumerated() {
+                group.addTask {
+                    let shows = try await self.discoverFastAnimeShows(
+                        originCountry: country,
+                        originalLanguage: Self.fastAnimeOriginalLanguageByCountry[country],
+                        sortBy: sortBy,
+                        page: 1,
+                        adultKeywordIDs: adultKeywordIDs,
+                        extraQueryItems: extraQueryItems
+                    )
+                    return (index, shows)
+                }
+            }
+
+            var loaded: [(Int, [TMDBTVShow])] = []
+            loaded.reserveCapacity(Self.fastAnimeOriginCountries.count)
+            do {
+                for try await result in group {
+                    loaded.append(result)
+                }
+                return loaded
+            } catch {
+                group.cancelAll()
+                throw error
+            }
         }
+
+        let combined = countryResults
+            .sorted { $0.0 < $1.0 }
+            .flatMap { _, shows in
+                shows.filter { self.isFastAnimeTVShow($0) }.map(\.asSearchResult)
+            }
         return Array(deduplicatedFastAnimeResults(combined).prefix(limit))
     }
 
@@ -878,13 +920,22 @@ class TMDBService: ObservableObject {
         if let fastAnimeAdultKeywordIDsCache {
             return fastAnimeAdultKeywordIDsCache
         }
+        if let persisted = persistedFastAnimeAdultKeywordIDs() {
+            fastAnimeAdultKeywordIDsCache = persisted
+            return persisted
+        }
         if let fastAnimeAdultKeywordIDsTask {
             return await fastAnimeAdultKeywordIDsTask.value
         }
 
+        let cacheLanguage = currentLanguage
         let task = Task { [weak self] () -> [Int] in
             guard let self else { return [] }
-            return await self.fetchFastAnimeAdultKeywordIDs()
+            let result = await self.fetchFastAnimeAdultKeywordIDs()
+            if result.completed, self.currentLanguage == cacheLanguage {
+                self.persistFastAnimeAdultKeywordIDs(result.ids, language: cacheLanguage)
+            }
+            return result.ids
         }
         fastAnimeAdultKeywordIDsTask = task
         let ids = await task.value
@@ -893,25 +944,32 @@ class TMDBService: ObservableObject {
         return ids
     }
 
-    private func fetchFastAnimeAdultKeywordIDs() async -> [Int] {
-        await withTaskGroup(of: Int?.self) { group in
+    private func fetchFastAnimeAdultKeywordIDs() async -> (ids: [Int], completed: Bool) {
+        await withTaskGroup(of: FastAnimeAdultKeywordLookup.self) { group in
             for keyword in Self.fastAnimeAdultKeywordNames {
                 group.addTask { [weak self] in
-                    await self?.fetchExactKeywordID(named: keyword)
+                    guard let self else {
+                        return FastAnimeAdultKeywordLookup(id: nil, completed: false)
+                    }
+                    return await self.fetchExactKeywordID(named: keyword)
                 }
             }
 
             var ids = Set<Int>()
-            for await id in group {
-                if let id {
+            var completedCount = 0
+            for await lookup in group {
+                if lookup.completed {
+                    completedCount += 1
+                }
+                if let id = lookup.id {
                     ids.insert(id)
                 }
             }
-            return ids.sorted()
+            return (ids.sorted(), completedCount == Self.fastAnimeAdultKeywordNames.count)
         }
     }
 
-    private func fetchExactKeywordID(named keyword: String) async -> Int? {
+    private func fetchExactKeywordID(named keyword: String) async -> FastAnimeAdultKeywordLookup {
         do {
             let url = try tmdbURL(path: "/search/keyword", queryItems: [
                 URLQueryItem(name: "query", value: keyword),
@@ -920,19 +978,48 @@ class TMDBService: ObservableObject {
             let (data, _) = try await throttledData(from: url)
             let response = try JSONDecoder().decode(TMDBKeywordSearchResponse.self, from: data)
             let normalizedKeyword = Self.normalizedKeyword(keyword)
-            return response.results.first { result in
+            let id = response.results.first { result in
                 Self.normalizedKeyword(result.name) == normalizedKeyword
             }?.id
+            return FastAnimeAdultKeywordLookup(id: id, completed: true)
         } catch {
             if case TMDBError.missingAPIKey = error {
-                return nil
+                return FastAnimeAdultKeywordLookup(id: nil, completed: false)
             }
             Logger.shared.log(
                 "TMDBService: fast anime keyword lookup failed for \(keyword): \(error.localizedDescription)",
                 type: "TMDB"
             )
+            return FastAnimeAdultKeywordLookup(id: nil, completed: false)
+        }
+    }
+
+    private func persistedFastAnimeAdultKeywordIDs() -> [Int]? {
+        guard let data = UserDefaults.standard.data(forKey: Self.fastAnimeAdultKeywordCacheKey),
+              let record = try? JSONDecoder().decode(FastAnimeAdultKeywordCacheRecord.self, from: data),
+              record.version == Self.fastAnimeAdultKeywordCacheVersion,
+              record.language == currentLanguage,
+              record.keywordNames == Self.fastAnimeAdultKeywordNames else {
             return nil
         }
+
+        let age = Date().timeIntervalSince1970 - record.storedAt
+        guard age >= 0, age <= Self.fastAnimeAdultKeywordCacheTTL else {
+            return nil
+        }
+        return Array(Set(record.ids.filter { $0 > 0 })).sorted()
+    }
+
+    private func persistFastAnimeAdultKeywordIDs(_ ids: [Int], language: String) {
+        let record = FastAnimeAdultKeywordCacheRecord(
+            version: Self.fastAnimeAdultKeywordCacheVersion,
+            language: language,
+            keywordNames: Self.fastAnimeAdultKeywordNames,
+            ids: Array(Set(ids.filter { $0 > 0 })).sorted(),
+            storedAt: Date().timeIntervalSince1970
+        )
+        guard let data = try? JSONEncoder().encode(record) else { return }
+        UserDefaults.standard.set(data, forKey: Self.fastAnimeAdultKeywordCacheKey)
     }
 
     private static func normalizedKeyword(_ keyword: String) -> String {
@@ -992,6 +1079,47 @@ class TMDBService: ObservableObject {
             }
         } catch {
             return nil
+        }
+    }
+
+    // MARK: - Discover Media
+    func discoverMedia(
+        mediaType: String,
+        genreIds: [Int] = [],
+        year: Int? = nil,
+        originCountry: String? = nil,
+        page: Int = 1
+    ) async throws -> [TMDBSearchResult] {
+        let normalizedMediaType = mediaType == "tv" ? "tv" : "movie"
+        var queryItems = [
+            URLQueryItem(name: "page", value: "\(page)"),
+            URLQueryItem(name: "sort_by", value: "popularity.desc"),
+            URLQueryItem(name: "include_adult", value: "false")
+        ]
+
+        if !genreIds.isEmpty {
+            let genreValue = genreIds.map(String.init).joined(separator: ",")
+            queryItems.append(URLQueryItem(name: "with_genres", value: genreValue))
+        }
+
+        if let year {
+            let yearKey = normalizedMediaType == "tv" ? "first_air_date_year" : "primary_release_year"
+            queryItems.append(URLQueryItem(name: yearKey, value: "\(year)"))
+        }
+
+        if let originCountry, !originCountry.isEmpty {
+            queryItems.append(URLQueryItem(name: "with_origin_country", value: originCountry))
+        }
+
+        let url = try tmdbURL(path: "/discover/\(normalizedMediaType)", queryItems: queryItems)
+        let (data, _) = try await throttledData(from: url)
+
+        if normalizedMediaType == "tv" {
+            let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
+            return response.results.map(\.asSearchResult)
+        } else {
+            let response = try decodeTMDBListResponse(TMDBMovieSearchResponse.self, from: data, endpoint: url.path)
+            return response.results.map(\.asSearchResult)
         }
     }
 
@@ -1057,7 +1185,7 @@ class TMDBService: ObservableObject {
         }
         
         do {
-            let (data, httpResponse) = try await throttledData(from: url)
+            let (data, _) = try await throttledData(from: url)
             let decodedResponse = try JSONDecoder().decode(TMDBImagesResponse.self, from: data)
             detailCache.set(key: cacheKey, value: decodedResponse)
             return decodedResponse
@@ -1168,7 +1296,7 @@ class TMDBService: ObservableObject {
         }
         let urlString = "\(baseURL)/movie/\(id)/credits?api_key=\(apiKey)&language=\(currentLanguage)"
         guard let url = URL(string: urlString) else { throw TMDBError.invalidURL }
-        let (data, response) = try await throttledData(from: url)
+        let (data, _) = try await throttledData(from: url)
         let result = try JSONDecoder().decode(TMDBCreditsResponse.self, from: data)
         detailCache.set(key: cacheKey, value: result)
         return result
@@ -1196,7 +1324,7 @@ class TMDBService: ObservableObject {
         }
         let urlString = "\(baseURL)/movie/\(id)/recommendations?api_key=\(apiKey)&language=\(currentLanguage)&page=1"
         guard let url = URL(string: urlString) else { throw TMDBError.invalidURL }
-        let (data, httpResponse) = try await throttledData(from: url)
+        let (data, _) = try await throttledData(from: url)
         let decodedResponse = try decodeTMDBListResponse(TMDBMovieSearchResponse.self, from: data, endpoint: url.path)
         detailCache.set(key: cacheKey, value: decodedResponse.results)
         return decodedResponse.results
@@ -1258,46 +1386,90 @@ enum TMDBError: Error, LocalizedError {
 /// Actor-based concurrency limiter for TMDB API calls.
 /// Limits concurrent in-flight requests and enforces a minimum interval between requests.
 actor TMDBRateLimiter {
+    private struct Waiter {
+        let id: UUID
+        let continuation: CheckedContinuation<Void, Error>
+    }
+
     private let maxConcurrent: Int
-    private let minInterval: TimeInterval
+    private let minIntervalNanoseconds: UInt64
     private var inFlight: Int = 0
-    private var waiters: [CheckedContinuation<Void, Never>] = []
-    private var lastRequestTime: Date = .distantPast
+    private var waiters: [Waiter] = []
+    private var nextAllowedStart: UInt64 = 0
 
     init(maxConcurrent: Int, minInterval: TimeInterval) {
-        self.maxConcurrent = maxConcurrent
-        self.minInterval = minInterval
+        self.maxConcurrent = max(1, maxConcurrent)
+        self.minIntervalNanoseconds = UInt64(max(0, minInterval) * 1_000_000_000)
     }
 
     func execute<T>(_ operation: @Sendable () async throws -> T) async throws -> T {
-        await acquireSlot()
-        defer { Task { await releaseSlot() } }
+        let waiterID = UUID()
+        try await acquireSlot(waiterID: waiterID)
+        do {
+            try Task.checkCancellation()
+            try await waitForStartPermission()
+            try Task.checkCancellation()
+        } catch {
+            releaseSlot()
+            throw error
+        }
+
+        defer { releaseSlot() }
         return try await operation()
     }
 
-    private func acquireSlot() async {
-        while inFlight >= maxConcurrent {
-            await withCheckedContinuation { continuation in
-                waiters.append(continuation)
-            }
+    private func acquireSlot(waiterID: UUID) async throws {
+        try Task.checkCancellation()
+        if inFlight < maxConcurrent {
+            inFlight += 1
+            return
         }
-        inFlight += 1
 
-        // Enforce minimum interval
-        let elapsed = Date().timeIntervalSince(lastRequestTime)
-        if elapsed < minInterval {
-            let delay = UInt64((minInterval - elapsed) * 1_000_000_000)
-            try? await Task.sleep(nanoseconds: delay)
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                if Task.isCancelled {
+                    continuation.resume(throwing: CancellationError())
+                } else {
+                    waiters.append(Waiter(id: waiterID, continuation: continuation))
+                }
+            }
+        } onCancel: {
+            Task { await self.cancelWaiter(id: waiterID) }
         }
-        lastRequestTime = Date()
+    }
+
+    private func waitForStartPermission() async throws {
+        while true {
+            try Task.checkCancellation()
+            let now = DispatchTime.now().uptimeNanoseconds
+            if now >= nextAllowedStart {
+                let next = now.addingReportingOverflow(minIntervalNanoseconds)
+                nextAllowedStart = next.overflow ? UInt64.max : next.partialValue
+                return
+            }
+
+            try await Task.sleep(nanoseconds: nextAllowedStart - now)
+        }
+    }
+
+    private func cancelWaiter(id: UUID) {
+        guard let index = waiters.firstIndex(where: { $0.id == id }) else { return }
+        let waiter = waiters.remove(at: index)
+        waiter.continuation.resume(throwing: CancellationError())
+    }
+
+    private func resumeNextWaiterIfPossible() {
+        guard inFlight < maxConcurrent, !waiters.isEmpty else { return }
+        let waiter = waiters.removeFirst()
+        inFlight += 1
+        waiter.continuation.resume()
     }
 
     private func releaseSlot() {
-        inFlight -= 1
-        if !waiters.isEmpty {
-            let next = waiters.removeFirst()
-            next.resume()
+        if inFlight > 0 {
+            inFlight -= 1
         }
+        resumeNextWaiterIfPossible()
     }
 }
 

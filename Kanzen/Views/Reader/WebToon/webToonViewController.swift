@@ -77,7 +77,6 @@ struct WebtoonView: UIViewControllerRepresentable {
         collectionView.scrollsToTop = false
         collectionView.showsVerticalScrollIndicator = false
         collectionView.showsHorizontalScrollIndicator = false
-        collectionView.contentInset = .zero
         collectionView.scrollIndicatorInsets = .zero
         collectionView.delaysContentTouches = false
         if #available(iOS 11.0, *) {
@@ -287,10 +286,9 @@ struct WebtoonView: UIViewControllerRepresentable {
             guard now.timeIntervalSince(lastHitchLogTime) >= 1.5 else { return }
             lastHitchLogTime = now
 
-            let collectionView = collectionNode?.view
-            let offset = Int(collectionView?.contentOffset.y ?? 0)
-            let contentHeight = Int(collectionView?.contentSize.height ?? 0)
-            let visible = collectionView?.indexPathsForVisibleItems.map(\.item).sorted() ?? []
+            let offset = Int(collectionNode?.contentOffset.y ?? 0)
+            let contentHeight = Int(collectionNode?.view.contentSize.height ?? 0)
+            let visible = collectionNode?.indexPathsForVisibleItems.map(\.item).sorted() ?? []
             ReaderLogger.shared.log(
                 "Webtoon frame hitch deltaMs=\(Int(deltaMs)) page=\(lastReportedPage + 1)/\(pages.count) offset=\(offset)/\(contentHeight) visible=\(visible)",
                 type: "ReaderPerf"
@@ -470,8 +468,8 @@ struct WebtoonView: UIViewControllerRepresentable {
                 pendingLayoutWorkItem = nil
                 return
             }
-            let workItem = DispatchWorkItem { [weak self, weak collectionView] in
-                guard let self, let collectionView else { return }
+            let workItem = DispatchWorkItem { [weak collectionView] in
+                guard let collectionView else { return }
                 UIView.performWithoutAnimation {
                     collectionView.collectionViewLayout.invalidateLayout()
                 }
@@ -588,8 +586,8 @@ struct WebtoonView: UIViewControllerRepresentable {
         private func loadAdjacentChaptersIfNeeded(_ collectionNode: ASCollectionNode) {
             let collectionView = collectionNode.view
             let threshold = max(collectionView.bounds.height * 1.25, 420)
-            let topDistance = collectionView.contentOffset.y
-            let bottomDistance = collectionView.contentSize.height - (collectionView.contentOffset.y + collectionView.bounds.height)
+            let topDistance = collectionNode.contentOffset.y
+            let bottomDistance = collectionView.contentSize.height - (collectionNode.contentOffset.y + collectionView.bounds.height)
 
             if topDistance < threshold {
                 prependPreviousChapterIfNeeded()
@@ -1258,11 +1256,13 @@ final class WebtoonPageView: UIView, UIGestureRecognizerDelegate {
         addSubview(activityIndicator)
 
         retryButton.translatesAutoresizingMaskIntoConstraints = false
-        retryButton.setTitle("Retry", for: .normal)
-        retryButton.tintColor = .white
+        var retryConfiguration = UIButton.Configuration.plain()
+        retryConfiguration.title = "Retry"
+        retryConfiguration.baseForegroundColor = .white
+        retryConfiguration.contentInsets = NSDirectionalEdgeInsets(top: 10, leading: 18, bottom: 10, trailing: 18)
+        retryButton.configuration = retryConfiguration
         retryButton.backgroundColor = UIColor.white.withAlphaComponent(0.14)
         retryButton.layer.cornerRadius = 12
-        retryButton.contentEdgeInsets = UIEdgeInsets(top: 10, left: 18, bottom: 10, right: 18)
         retryButton.addTarget(self, action: #selector(retryTapped), for: .touchUpInside)
         addSubview(retryButton)
 
@@ -1707,7 +1707,7 @@ enum ReaderWebtoonImagePipeline {
         }
 
         let localURL = try await localZipURL(for: url, sourceId: sourceId)
-        guard let archive = Archive(url: localURL, accessMode: .read),
+        guard let archive = try? Archive(url: localURL, accessMode: .read, pathEncoding: nil),
               let entry = archive[filePath] else {
             throw ReaderWebtoonImageError.decodeFailed
         }
@@ -2507,7 +2507,7 @@ final class KanzenZoomableTextureView: UIView, UIScrollViewDelegate, UIGestureRe
     func setContentOffset(_ point: CGPoint, animated: Bool) {
         let bounded = boundedOffset(point)
         scrollView.setContentOffset(bounded, animated: animated)
-        collectionNode.view.setContentOffset(bounded, animated: false)
+        collectionNode.setContentOffset(bounded, animated: false)
     }
 
     func resetZoom() {
@@ -2515,7 +2515,7 @@ final class KanzenZoomableTextureView: UIView, UIScrollViewDelegate, UIGestureRe
     }
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
-        collectionNode.view.contentOffset = scrollView.contentOffset
+        collectionNode.contentOffset = scrollView.contentOffset
         onScroll?()
     }
 
@@ -3252,14 +3252,16 @@ final class KanzenPagedReaderViewController: UIViewController, KanzenReaderChild
 
 extension KanzenPagedReaderViewController: UIPageViewControllerDataSource, UIPageViewControllerDelegate {
     func pageViewController(_ pageViewController: UIPageViewController, viewControllerBefore viewController: UIViewController) -> UIViewController? {
-        guard let current = controllers.firstIndex(of: viewController as! KanzenReaderPageUnitViewController) else { return nil }
+        guard let page = viewController as? KanzenReaderPageUnitViewController,
+              let current = controllers.firstIndex(of: page) else { return nil }
         let next = mode == .rtl ? current + 1 : current - 1
         guard next >= 0, next < controllers.count else { return nil }
         return controllers[next]
     }
 
     func pageViewController(_ pageViewController: UIPageViewController, viewControllerAfter viewController: UIViewController) -> UIViewController? {
-        guard let current = controllers.firstIndex(of: viewController as! KanzenReaderPageUnitViewController) else { return nil }
+        guard let page = viewController as? KanzenReaderPageUnitViewController,
+              let current = controllers.firstIndex(of: page) else { return nil }
         let next = mode == .rtl ? current - 1 : current + 1
         guard next >= 0, next < controllers.count else { return nil }
         return controllers[next]

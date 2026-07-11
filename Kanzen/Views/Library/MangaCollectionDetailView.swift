@@ -60,7 +60,7 @@ struct MangaCollectionDetailView: View {
                     refreshCollectionSources()
                 } label: {
                     if isRefreshingSources {
-                        ProgressView()
+                        EclipseLoadingIndicator()
                     } else {
                         Image(systemName: "arrow.clockwise")
                     }

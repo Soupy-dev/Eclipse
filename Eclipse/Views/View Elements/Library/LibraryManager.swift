@@ -37,6 +37,16 @@ final class LibraryManager: ObservableObject {
         if let data = try? JSONEncoder().encode(collections) {
             UserDefaults.standard.set(data, forKey: collectionsKey)
         }
+        NotificationCenter.default.post(name: .libraryDataDidChange, object: self)
+    }
+
+    /// Applies the media-only state produced by CloudKit. Reader collections are
+    /// intentionally owned by a different manager and never enter this path.
+    func replaceCollectionsForMediaState(_ newCollections: [LibraryCollection]) {
+        collectionCancellables.removeAll()
+        collections = newCollections
+        createDefaultBookmarksCollection()
+        collections.forEach { observeCollection($0) }
     }
     
     private func createDefaultBookmarksCollection() {
@@ -50,7 +60,16 @@ final class LibraryManager: ObservableObject {
         let new = LibraryCollection(name: name, description: description)
         collections.append(new)
     }
-    
+
+    func renameCollection(_ collection: LibraryCollection, name: String) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty,
+              trimmedName.caseInsensitiveCompare("Bookmarks") != .orderedSame,
+              let index = collections.firstIndex(where: { $0.id == collection.id }) else { return }
+
+        collections[index].name = trimmedName
+    }
+
     func deleteCollection(_ collection: LibraryCollection) {
         guard collection.name != "Bookmarks" else { return }
         collectionCancellables[collection.id] = nil

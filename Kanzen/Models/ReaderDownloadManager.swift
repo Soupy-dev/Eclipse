@@ -546,12 +546,13 @@ final class ReaderDownloadManager: ObservableObject {
             let isLastPage = index == pages.count - 1
             if isFirstPage || isLastPage || now.timeIntervalSince(lastProgressPublish) >= progressPublishInterval {
                 lastProgressPublish = now
+                let publishedDownloadedBytes = downloadedBytes
                 await MainActor.run {
                     self.updateItem(itemId) {
                         $0.completedPages = index + 1
                         $0.totalPages = pages.count
                         $0.progress = Double(index + 1) / Double(max(pages.count, 1))
-                        $0.downloadedBytes = downloadedBytes
+                        $0.downloadedBytes = publishedDownloadedBytes
                     }
                 }
             }
@@ -570,6 +571,7 @@ final class ReaderDownloadManager: ObservableObject {
         try manifestData.write(to: directory.appendingPathComponent("chapter.json"), options: .atomic)
 
         item.downloadedBytes = downloadedBytes
+        let completedDownloadedBytes = downloadedBytes
         await MainActor.run {
             self.queuedContexts.removeValue(forKey: itemId)
             self.updateItem(itemId) {
@@ -577,7 +579,7 @@ final class ReaderDownloadManager: ObservableObject {
                 $0.progress = 1
                 $0.completedPages = pages.count
                 $0.totalPages = pages.count
-                $0.downloadedBytes = downloadedBytes
+                $0.downloadedBytes = completedDownloadedBytes
                 $0.dateCompleted = Date()
                 $0.error = nil
             }

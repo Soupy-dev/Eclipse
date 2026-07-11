@@ -82,7 +82,7 @@ struct StarRatingView: View {
             currentRating = UserRatingManager.shared.rating(for: mediaId) ?? 0
             noteText = UserRatingManager.shared.note(for: mediaId)
         }
-        .onChange(of: noteText) { value in
+        .onChangeComp(of: noteText) { _, value in
             UserRatingManager.shared.setNote(value, for: mediaId)
         }
     }
@@ -91,6 +91,17 @@ struct StarRatingView: View {
     private var ratingStars: some View {
         HStack(spacing: 4) {
             ForEach(1...10, id: \.self) { star in
+#if os(tvOS)
+                Button {
+                    updateRating(Double(star))
+                } label: {
+                    Image(systemName: starSymbol(for: star))
+                        .font(.body)
+                        .foregroundColor(starTint(for: star))
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("\(star) out of 10")
+#else
                 let starImage = Image(systemName: starSymbol(for: star))
                     .font(.body)
                     .foregroundColor(starTint(for: star))
@@ -109,6 +120,7 @@ struct StarRatingView: View {
                 }
                 .frame(width: 20, height: 22)
                 .animation(.easeInOut(duration: 0.15), value: currentRating)
+#endif
             }
 
             Spacer(minLength: 8)
@@ -122,6 +134,14 @@ struct StarRatingView: View {
 
     @ViewBuilder
     private var notesEditor: some View {
+#if os(tvOS)
+        TextField("Private notes", text: $noteText)
+            .textFieldStyle(.plain)
+            .padding(12)
+            .foregroundColor(.white)
+            .background(Color.black.opacity(0.2))
+            .cornerRadius(8)
+#else
         TextEditor(text: $noteText)
             .frame(minHeight: 82)
             .padding(8)
@@ -129,6 +149,7 @@ struct StarRatingView: View {
             .background(Color.black.opacity(0.2))
             .cornerRadius(8)
             .eclipseHideScrollBackground()
+#endif
     }
 
     @ViewBuilder
@@ -227,6 +248,7 @@ struct StarRatingView: View {
     }
 }
 
+#if !os(tvOS)
 struct ReaderRatingNotesView: View {
     let itemId: Int
     let title: String
@@ -509,3 +531,4 @@ struct ReaderRatingNotesView: View {
         return String(format: "%.1f", normalized)
     }
 }
+#endif

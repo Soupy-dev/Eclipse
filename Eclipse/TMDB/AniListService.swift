@@ -358,10 +358,15 @@ actor AnimeIdentityCache {
     private struct CachedDetails: Codable {
         let value: AniListAnimeWithSeasons
         let storedAt: TimeInterval
+        let languageCode: String?
     }
 
     private let detailsKey = "anime.metadata.details.cache.v1"
     private let maxAge: TimeInterval = 60 * 60 * 24 * 45
+    // Full episode graphs can gain newly aired metadata. Keep the fast path
+    // short while retaining the separate 45-day stale-on-error fallback.
+    private let freshMaxAge: TimeInterval = 60 * 60
+    private let maxEntries = 40
     private var details: [String: CachedDetails]
 
     private init() {
@@ -373,36 +378,96 @@ actor AnimeIdentityCache {
         }
     }
 
-    func cachedDetails(tmdbShowId: Int, title: String) -> AniListAnimeWithSeasons? {
+    func cachedDetails(
+        tmdbShowId: Int,
+        title: String,
+        languageCode: String
+    ) -> AniListAnimeWithSeasons? {
         let keys = detailKeys(tmdbShowId: tmdbShowId, title: title)
         let now = Date().timeIntervalSince1970
         for key in keys {
-            guard let cached = details[key], now - cached.storedAt <= maxAge else { continue }
+            guard let cached = details[key],
+                  now - cached.storedAt <= maxAge,
+                  cached.languageCode == nil || cached.languageCode == languageCode else {
+                continue
+            }
             Logger.shared.log("AnimeMetadataCache: details cache hit key=\(key)", type: "AniList")
             return cached.value
         }
         return nil
     }
 
-    func storeAniListDetails(_ value: AniListAnimeWithSeasons, tmdbShowId: Int, title: String) {
-        let cached = CachedDetails(value: value, storedAt: Date().timeIntervalSince1970)
+    func cachedFreshDetails(
+        tmdbShowId: Int,
+        title: String,
+        languageCode: String
+    ) -> AniListAnimeWithSeasons? {
+        let now = Date().timeIntervalSince1970
         for key in detailKeys(tmdbShowId: tmdbShowId, title: title) {
-            details[key] = cached
+            guard let cached = details[key],
+                  cached.languageCode == languageCode,
+                  now - cached.storedAt <= freshMaxAge else {
+                continue
+            }
+            Logger.shared.log("AnimeMetadataCache: fresh details cache hit key=\(key)", type: "AniList")
+            return cached.value
         }
+        return nil
+    }
+
+    func storeAniListDetails(
+        _ value: AniListAnimeWithSeasons,
+        tmdbShowId: Int,
+        title: String,
+        languageCode: String
+    ) {
+        let cached = CachedDetails(
+            value: value,
+            storedAt: Date().timeIntervalSince1970,
+            languageCode: languageCode
+        )
+        // Store the full episode graph once. Older versions duplicated the
+        // complete value under both TMDB and title keys, doubling encode/write
+        // work for long-running shows.
+        details[tmdbKey(tmdbShowId)] = cached
+        let titleKey = legacyTitleKey(title)
+        if !titleKey.isEmpty {
+            details[titleKey] = nil
+        }
+        prune()
         persist()
     }
 
     private func detailKeys(tmdbShowId: Int, title: String) -> [String] {
-        var keys = ["tmdb:\(tmdbShowId)"]
-        let titleKey = normalize(title)
+        var keys = [tmdbKey(tmdbShowId)]
+        let titleKey = legacyTitleKey(title)
         if !titleKey.isEmpty {
-            keys.append("title:\(titleKey)")
+            keys.append(titleKey)
         }
         return keys
     }
 
+    private func tmdbKey(_ tmdbShowId: Int) -> String {
+        "tmdb:\(tmdbShowId)"
+    }
+
+    private func legacyTitleKey(_ title: String) -> String {
+        let normalizedTitle = normalize(title)
+        return normalizedTitle.isEmpty ? "" : "title:\(normalizedTitle)"
+    }
+
     private func normalize(_ value: String) -> String {
         value.lowercased().components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
+    }
+
+    private func prune() {
+        let cutoff = Date().timeIntervalSince1970 - maxAge
+        details = details.filter { $0.value.storedAt >= cutoff }
+        guard details.count > maxEntries else { return }
+        let kept = details
+            .sorted { $0.value.storedAt > $1.value.storedAt }
+            .prefix(maxEntries)
+        details = Dictionary(uniqueKeysWithValues: kept.map { ($0.key, $0.value) })
     }
 
     private func persist() {
@@ -470,23 +535,39 @@ final class AnimeMetadataService {
 /// Ensures AniList API calls are spaced out and adapts to AniList response headers.
 /// Uses a slot-reservation pattern: each caller claims a future time slot BEFORE sleeping,
 /// so concurrent callers queue up instead of bunching together.
-private actor AniListRateLimiter {
+actor AniListRateLimiter {
     static let shared = AniListRateLimiter()
-    
-    private var minInterval: TimeInterval = 0.8
+
+    private var minInterval: TimeInterval
     private var nextAvailableTime: Date = .distantPast
-    
-    func waitForSlot() async {
-        let now = Date()
-        // Claim the next available slot
-        let slotTime = max(now, nextAvailableTime)
-        // Reserve it immediately so the next caller queues AFTER this one
-        nextAvailableTime = slotTime.addingTimeInterval(minInterval)
-        
-        // Sleep until our reserved slot arrives
-        let delay = slotTime.timeIntervalSince(now)
-        if delay > 0.001 {
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+    private var globalPauseUntil: Date = .distantPast
+
+    init(minInterval: TimeInterval = 0.8) {
+        self.minInterval = max(0, minInterval)
+    }
+
+    func waitForSlot() async throws {
+        while true {
+            try Task.checkCancellation()
+            let now = Date()
+            // Claim the next available slot, including any server-directed
+            // pause already known when this caller enters the queue.
+            let slotTime = max(max(now, nextAvailableTime), globalPauseUntil)
+            nextAvailableTime = slotTime.addingTimeInterval(minInterval)
+
+            let delay = slotTime.timeIntervalSince(now)
+            if delay > 0.001 {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+            try Task.checkCancellation()
+
+            // Actors are reentrant while sleeping. A 429 from another request
+            // may therefore extend the pause after this slot was reserved.
+            // Requeue instead of allowing that stale reservation through.
+            if globalPauseUntil > Date() {
+                continue
+            }
+            return
         }
     }
 
@@ -512,14 +593,24 @@ private actor AniListRateLimiter {
 
         let resetDate = Date(timeIntervalSince1970: reset)
         if resetDate > Date() {
-            nextAvailableTime = max(nextAvailableTime, resetDate)
+            pause(until: resetDate)
         }
     }
 
     func pauseUntilRetryAfter(_ response: HTTPURLResponse) {
         let retryAfter = response.value(forHTTPHeaderField: "Retry-After")
             .flatMap(TimeInterval.init) ?? 5
-        nextAvailableTime = max(nextAvailableTime, Date().addingTimeInterval(min(max(retryAfter, 1), 120)))
+        pause(for: retryAfter.isFinite ? max(retryAfter, 1) : 5)
+    }
+
+    func pause(for interval: TimeInterval) {
+        guard interval.isFinite, interval > 0 else { return }
+        pause(until: Date().addingTimeInterval(interval))
+    }
+
+    private func pause(until date: Date) {
+        globalPauseUntil = max(globalPauseUntil, date)
+        nextAvailableTime = max(nextAvailableTime, date)
     }
 }
 
@@ -550,100 +641,154 @@ struct AniMapTMDBImportMatch {
     let tmdbSeason: Int?
 }
 
+private struct AniMapLookupResult {
+    let mappings: [AniMapMapping]
+    let isComplete: Bool
+}
+
 private actor AniMapMappingService {
     static let shared = AniMapMappingService()
 
-    private let baseURL = URL(string: "https://animap.s0n1c.ca")!
-    private var cacheByTMDBShowId: [Int: [AniMapMapping]] = [:]
-    private var cacheByAniListId: [Int: [AniMapMapping]] = [:]
+    private struct CacheEntry {
+        let result: AniMapLookupResult
+        let expiresAt: Date
+    }
+
+    private static let baseURL = URL(string: "https://animap.s0n1c.ca")!
+    private var cacheByTMDBShowId: [Int: CacheEntry] = [:]
+    private var cacheByAniListId: [Int: CacheEntry] = [:]
+    private var inFlightByTMDBShowId: [Int: Task<AniMapLookupResult, Never>] = [:]
+    private var inFlightByAniListId: [Int: Task<AniMapLookupResult, Never>] = [:]
+
+    private let populatedTTL: TimeInterval = 24 * 60 * 60
+    private let emptyTTL: TimeInterval = 15 * 60
+    private let failureTTL: TimeInterval = 30
 
     func mappings(forTMDBShowId tmdbShowId: Int) async -> [AniMapMapping] {
+        await mappingsResult(forTMDBShowId: tmdbShowId).mappings
+    }
+
+    func mappingsResult(forTMDBShowId tmdbShowId: Int) async -> AniMapLookupResult {
+        guard tmdbShowId > 0, !Task.isCancelled else {
+            return AniMapLookupResult(mappings: [], isComplete: false)
+        }
+
         if let cached = cacheByTMDBShowId[tmdbShowId] {
-            return cached
-        }
-
-        let mappingsURL = baseURL
-            .appendingPathComponent("mappings")
-            .appendingPathComponent(String(tmdbShowId))
-        guard var components = URLComponents(url: mappingsURL, resolvingAgainstBaseURL: false) else {
-            cacheByTMDBShowId[tmdbShowId] = []
-            return []
-        }
-        components.queryItems = [URLQueryItem(name: "mapping_key", value: "tmdb_show")]
-
-        guard let url = components.url else {
-            cacheByTMDBShowId[tmdbShowId] = []
-            return []
-        }
-
-        do {
-            let request = URLRequest(url: url, timeoutInterval: 4.0)
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                cacheByTMDBShowId[tmdbShowId] = []
-                return []
+            if cached.expiresAt > Date() {
+                return cached.result
             }
+            cacheByTMDBShowId[tmdbShowId] = nil
+        }
 
-            let decoded = try JSONDecoder().decode(AniMapMappingList.self, from: data)
-            let mappings = decoded.mappings.filter { mapping in
+        if let inFlight = inFlightByTMDBShowId[tmdbShowId] {
+            return await inFlight.value
+        }
+
+        let task = Task {
+            await Self.fetchMappings(value: tmdbShowId, mappingKey: "tmdb_show") { mapping in
                 mapping.tmdbShowId == tmdbShowId
             }
-            cacheByTMDBShowId[tmdbShowId] = mappings
-            return mappings
-        } catch {
-            Logger.shared.log("AniMapMappingService: lookup failed for TMDB show \(tmdbShowId): \(error.localizedDescription)", type: "AniList")
-            cacheByTMDBShowId[tmdbShowId] = []
-            return []
         }
+        inFlightByTMDBShowId[tmdbShowId] = task
+        let result = await task.value
+        inFlightByTMDBShowId[tmdbShowId] = nil
+        cacheByTMDBShowId[tmdbShowId] = cacheEntry(for: result)
+        return result
     }
 
     func specialMappings(forTMDBShowId tmdbShowId: Int) async -> [AniMapMapping] {
-        let mappings = await mappings(forTMDBShowId: tmdbShowId)
-        return mappings.filter { mapping in
+        await specialMappingsResult(forTMDBShowId: tmdbShowId).mappings
+    }
+
+    func specialMappingsResult(forTMDBShowId tmdbShowId: Int) async -> AniMapLookupResult {
+        let result = await mappingsResult(forTMDBShowId: tmdbShowId)
+        let mappings = result.mappings.filter { mapping in
             guard let type = mapping.mediaType?.uppercased() else {
                 return false
             }
             return type == "SPECIAL" || type == "OVA"
         }
+        return AniMapLookupResult(mappings: mappings, isComplete: result.isComplete)
     }
 
     func mappings(forAniListId anilistId: Int) async -> [AniMapMapping] {
-        if let cached = cacheByAniListId[anilistId] {
-            return cached
+        await mappingsResult(forAniListId: anilistId).mappings
+    }
+
+    func mappingsResult(forAniListId anilistId: Int) async -> AniMapLookupResult {
+        guard anilistId > 0, !Task.isCancelled else {
+            return AniMapLookupResult(mappings: [], isComplete: false)
         }
 
+        if let cached = cacheByAniListId[anilistId] {
+            if cached.expiresAt > Date() {
+                return cached.result
+            }
+            cacheByAniListId[anilistId] = nil
+        }
+
+        if let inFlight = inFlightByAniListId[anilistId] {
+            return await inFlight.value
+        }
+
+        let task = Task {
+            await Self.fetchMappings(value: anilistId, mappingKey: "anilist") { mapping in
+                mapping.anilistId == nil || mapping.anilistId == anilistId
+            }
+        }
+        inFlightByAniListId[anilistId] = task
+        let result = await task.value
+        inFlightByAniListId[anilistId] = nil
+        cacheByAniListId[anilistId] = cacheEntry(for: result)
+        return result
+    }
+
+    private func cacheEntry(for result: AniMapLookupResult) -> CacheEntry {
+        let ttl: TimeInterval
+        if !result.isComplete {
+            ttl = failureTTL
+        } else if result.mappings.isEmpty {
+            ttl = emptyTTL
+        } else {
+            ttl = populatedTTL
+        }
+        return CacheEntry(result: result, expiresAt: Date().addingTimeInterval(ttl))
+    }
+
+    private static func fetchMappings(
+        value: Int,
+        mappingKey: String,
+        filter: @escaping (AniMapMapping) -> Bool
+    ) async -> AniMapLookupResult {
         let mappingsURL = baseURL
             .appendingPathComponent("mappings")
-            .appendingPathComponent(String(anilistId))
+            .appendingPathComponent(String(value))
         guard var components = URLComponents(url: mappingsURL, resolvingAgainstBaseURL: false) else {
-            cacheByAniListId[anilistId] = []
-            return []
+            return AniMapLookupResult(mappings: [], isComplete: false)
         }
-        components.queryItems = [URLQueryItem(name: "mapping_key", value: "anilist")]
-
+        components.queryItems = [URLQueryItem(name: "mapping_key", value: mappingKey)]
         guard let url = components.url else {
-            cacheByAniListId[anilistId] = []
-            return []
+            return AniMapLookupResult(mappings: [], isComplete: false)
         }
 
         do {
-            let request = URLRequest(url: url, timeoutInterval: 4.0)
+            var request = URLRequest(url: url, timeoutInterval: 4.0)
+            request.cachePolicy = .returnCacheDataElseLoad
             let (data, response) = try await URLSession.shared.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else {
-                cacheByAniListId[anilistId] = []
-                return []
+                return AniMapLookupResult(mappings: [], isComplete: false)
             }
 
             let decoded = try JSONDecoder().decode(AniMapMappingList.self, from: data)
-            let mappings = decoded.mappings.filter { mapping in
-                mapping.anilistId == nil || mapping.anilistId == anilistId
-            }
-            cacheByAniListId[anilistId] = mappings
-            return mappings
+            return AniMapLookupResult(mappings: decoded.mappings.filter(filter), isComplete: true)
+        } catch is CancellationError {
+            return AniMapLookupResult(mappings: [], isComplete: false)
         } catch {
-            Logger.shared.log("AniMapMappingService: AniList lookup failed for \(anilistId): \(error.localizedDescription)", type: "AniList")
-            cacheByAniListId[anilistId] = []
-            return []
+            Logger.shared.log(
+                "AniMapMappingService: lookup failed key=\(mappingKey) value=\(value): \(error.localizedDescription)",
+                type: "AniList"
+            )
+            return AniMapLookupResult(mappings: [], isComplete: false)
         }
     }
 
@@ -663,6 +808,142 @@ private actor AniMapMappingService {
     }
 }
 
+private struct AnimeDetailRequestKey: Hashable {
+    let tmdbShowId: Int
+    let languageCode: String
+}
+
+/// Shares one complete metadata traversal among concurrent consumers such as
+/// Media Detail, Continue Watching, skip-data resolution and the player episode
+/// browser. The underlying task is intentionally independent of any one
+/// waiter: cancelling one screen cannot cancel or poison the result used by
+/// another waiter. Cancelled waiters still reject the value before returning.
+private actor AnimeDetailRequestCoordinator {
+    static let shared = AnimeDetailRequestCoordinator()
+
+    private var inFlight: [AnimeDetailRequestKey: Task<AniListAnimeWithSeasons, Error>] = [:]
+
+    func value(
+        for key: AnimeDetailRequestKey,
+        operation: @escaping () async throws -> AniListAnimeWithSeasons
+    ) async throws -> AniListAnimeWithSeasons {
+        try Task.checkCancellation()
+
+        if let existing = inFlight[key] {
+            let value = try await existing.value
+            try Task.checkCancellation()
+            return value
+        }
+
+        let task = Task {
+            try await operation()
+        }
+        inFlight[key] = task
+
+        do {
+            let value = try await task.value
+            inFlight[key] = nil
+            try Task.checkCancellation()
+            return value
+        } catch {
+            inFlight[key] = nil
+            if Task.isCancelled || error is CancellationError {
+                throw CancellationError()
+            }
+            throw error
+        }
+    }
+}
+
+struct AniListSeasonIdentity: Equatable {
+    let anilistId: Int
+    let malId: Int?
+    let kitsuId: Int?
+    let title: String
+    let englishTitle: String?
+    let romajiTitle: String?
+    let nativeTitle: String?
+    let episodeCount: Int?
+    let posterURL: String?
+}
+
+struct AnimeSeasonIdentityRequestKey: Hashable {
+    let anilistId: Int
+    let languageCode: String
+}
+
+actor AnimeSeasonIdentityRequestCoordinator {
+    static let shared = AnimeSeasonIdentityRequestCoordinator()
+
+    private struct CachedValue {
+        let value: AniListSeasonIdentity
+        let expiresAt: Date
+    }
+
+    private var cached: [AnimeSeasonIdentityRequestKey: CachedValue] = [:]
+    private var pending: [AnimeSeasonIdentityRequestKey: [CheckedContinuation<AniListSeasonIdentity?, Never>]] = [:]
+    private var flushTask: Task<Void, Never>?
+    private let ttl: TimeInterval = 30 * 60
+
+    func value(
+        for key: AnimeSeasonIdentityRequestKey,
+        operation: @escaping ([AnimeSeasonIdentityRequestKey]) async -> [AnimeSeasonIdentityRequestKey: AniListSeasonIdentity]
+    ) async -> AniListSeasonIdentity? {
+        guard !Task.isCancelled else { return nil }
+        if let cachedValue = cached[key] {
+            if cachedValue.expiresAt > Date() {
+                return cachedValue.value
+            }
+            cached[key] = nil
+        }
+
+        return await withCheckedContinuation { continuation in
+            pending[key, default: []].append(continuation)
+            guard flushTask == nil else { return }
+            flushTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 25_000_000)
+                guard !Task.isCancelled else { return }
+                await self?.flush(operation: operation)
+            }
+        }
+    }
+
+    private func flush(
+        operation: @escaping ([AnimeSeasonIdentityRequestKey]) async -> [AnimeSeasonIdentityRequestKey: AniListSeasonIdentity]
+    ) async {
+        let waiters = pending
+        pending = [:]
+        flushTask = nil
+        guard !waiters.isEmpty else { return }
+
+        let values = await operation(Array(waiters.keys))
+        let expiresAt = Date().addingTimeInterval(ttl)
+        for (key, continuations) in waiters {
+            let value = values[key]
+            if let value {
+                cached[key] = CachedValue(value: value, expiresAt: expiresAt)
+            }
+            continuations.forEach { $0.resume(returning: value) }
+        }
+    }
+}
+
+struct AniListCatalogPageRequest: Equatable {
+    static let maximumPageSize = 50
+
+    let page: Int
+    let perPage: Int
+
+    init(page: Int, requestedPageSize: Int) {
+        self.page = max(page, 1)
+        self.perPage = min(max(requestedPageSize, 1), Self.maximumPageSize)
+    }
+
+    var graphQLArguments: String {
+        "page: \(page), perPage: \(perPage)"
+    }
+}
+
 final class AniListService {
     static let shared = AniListService()
 
@@ -676,7 +957,7 @@ final class AniListService {
     }
 
     // MARK: - In-Memory Cache for anime details (avoids re-fetching on back-navigation)
-    private let animeDetailsCache = NSCache<NSNumber, AniListAnimeWithSeasonsWrapper>()
+    private let animeDetailsCache = NSCache<NSString, AniListAnimeWithSeasonsWrapper>()
     private let animeCacheTTL: TimeInterval = 300 // 5 minutes
 
     /// NSCache requires reference-type values, so wrap the struct
@@ -689,12 +970,88 @@ final class AniListService {
         }
     }
 
-    enum AniListCatalogKind {
+    private final class SpecialEntriesCacheWrapper {
+        let entries: [AniListSpecialSearchEntry]
+        let timestamp = Date()
+
+        init(entries: [AniListSpecialSearchEntry]) {
+            self.entries = entries
+        }
+    }
+
+    private struct SpecialEntriesFetchResult {
+        let entries: [AniListSpecialSearchEntry]
+        let isComplete: Bool
+    }
+
+    private let specialEntriesCache = NSCache<NSString, SpecialEntriesCacheWrapper>()
+    private let specialEntriesCacheTTL: TimeInterval = 15 * 60
+
+    enum AniListCatalogKind: CaseIterable, Hashable {
         case trending
         case popular
         case topRated
         case airing
         case upcoming
+
+        fileprivate var queryAlias: String {
+            switch self {
+            case .trending: return "trending"
+            case .popular: return "popular"
+            case .topRated: return "topRated"
+            case .airing: return "airing"
+            case .upcoming: return "upcoming"
+            }
+        }
+
+        fileprivate var querySort: String {
+            switch self {
+            case .trending: return "TRENDING_DESC"
+            case .popular, .airing, .upcoming: return "POPULARITY_DESC"
+            case .topRated: return "SCORE_DESC"
+            }
+        }
+
+        fileprivate var queryStatus: String? {
+            switch self {
+            case .airing: return "RELEASING"
+            case .upcoming: return "NOT_YET_RELEASED"
+            case .trending, .popular, .topRated: return nil
+            }
+        }
+    }
+
+    struct CatalogQueryPlan {
+        let orderedKinds: [AniListCatalogKind]
+        let limit: Int
+
+        init(kinds: Set<AniListCatalogKind>, requestedLimit: Int) {
+            orderedKinds = AniListCatalogKind.allCases.filter(kinds.contains)
+            limit = min(max(requestedLimit, 1), AniListCatalogPageRequest.maximumPageSize)
+        }
+
+        var query: String {
+            let selections = orderedKinds.map { kind in
+                let statusClause = kind.queryStatus.map { ", status: \($0)" } ?? ""
+                return """
+                    \(kind.queryAlias): Page(perPage: \(limit)) {
+                        media(type: ANIME, sort: [\(kind.querySort)]\(statusClause)) {
+                            id
+                            title { romaji english native }
+                            episodes status seasonYear season
+                            coverImage { large medium }
+                            format
+                        }
+                    }
+                """
+            }.joined(separator: "\n")
+
+            return """
+            query {
+            \(selections)
+            }
+            """
+        }
     }
 
     // MARK: - Catalog Fetching
@@ -705,16 +1062,42 @@ final class AniListService {
         limit: Int = 20,
         tmdbService: TMDBService
     ) async throws -> [AniListCatalogKind: [TMDBSearchResult]] {
+        try await fetchAnimeCatalogs(
+            kinds: Set(AniListCatalogKind.allCases),
+            limit: limit,
+            tmdbService: tmdbService
+        )
+    }
+
+    /// Fetches only the requested Home anime rows while retaining a single aliased GraphQL call.
+    func fetchAnimeCatalogs(
+        kinds: Set<AniListCatalogKind>,
+        limit: Int = 20,
+        tmdbService: TMDBService
+    ) async throws -> [AniListCatalogKind: [TMDBSearchResult]] {
+        guard !kinds.isEmpty else { return [:] }
+
         do {
-            let result = try await fetchAllAnimeCatalogsFromAniList(limit: limit, tmdbService: tmdbService)
+            let result = try await fetchAnimeCatalogsFromAniList(
+                kinds: kinds,
+                limit: limit,
+                tmdbService: tmdbService
+            )
             AnimeProviderHealthCenter.shared.recordAniListSuccess()
             return result
         } catch {
+            if Task.isCancelled || error is CancellationError {
+                throw CancellationError()
+            }
             let reason = AnimeProviderHealthCenter.shared.recordAniListFailure(error)
             guard AnimeProviderHealthCenter.shared.shouldUseMALFallback(for: reason) else { throw error }
             AnimeProviderHealthCenter.shared.notifyMALFallbackIfNeeded(reason: "catalogs-\(reason.rawValue)")
             do {
-                return try await MALMetadataService.shared.fetchAllAnimeCatalogs(limit: limit, tmdbService: tmdbService)
+                let fallback = try await MALMetadataService.shared.fetchAllAnimeCatalogs(
+                    limit: limit,
+                    tmdbService: tmdbService
+                )
+                return fallback.filter { kinds.contains($0.key) }
             } catch {
                 AnimeProviderHealthCenter.shared.recordMALFailure(error)
                 throw error
@@ -722,85 +1105,32 @@ final class AniListService {
         }
     }
 
-    private func fetchAllAnimeCatalogsFromAniList(
+    private func fetchAnimeCatalogsFromAniList(
+        kinds: Set<AniListCatalogKind>,
         limit: Int = 20,
         tmdbService: TMDBService
     ) async throws -> [AniListCatalogKind: [TMDBSearchResult]] {
-        // Single aliased query fetches all 5 catalogs at once (1 API call instead of 5)
-        let query = """
-        query {
-            trending: Page(perPage: \(limit)) {
-                media(type: ANIME, sort: [TRENDING_DESC]) {
-                    id
-                    title { romaji english native }
-                    episodes status seasonYear season
-                    coverImage { large medium }
-                    format
-                }
-            }
-            popular: Page(perPage: \(limit)) {
-                media(type: ANIME, sort: [POPULARITY_DESC]) {
-                    id
-                    title { romaji english native }
-                    episodes status seasonYear season
-                    coverImage { large medium }
-                    format
-                }
-            }
-            topRated: Page(perPage: \(limit)) {
-                media(type: ANIME, sort: [SCORE_DESC]) {
-                    id
-                    title { romaji english native }
-                    episodes status seasonYear season
-                    coverImage { large medium }
-                    format
-                }
-            }
-            airing: Page(perPage: \(limit)) {
-                media(type: ANIME, sort: [POPULARITY_DESC], status: RELEASING) {
-                    id
-                    title { romaji english native }
-                    episodes status seasonYear season
-                    coverImage { large medium }
-                    format
-                }
-            }
-            upcoming: Page(perPage: \(limit)) {
-                media(type: ANIME, sort: [POPULARITY_DESC], status: NOT_YET_RELEASED) {
-                    id
-                    title { romaji english native }
-                    episodes status seasonYear season
-                    coverImage { large medium }
-                    format
-                }
-            }
-        }
-        """
+        let plan = CatalogQueryPlan(kinds: kinds, requestedLimit: limit)
 
         struct PageData: Codable { let media: [AniListAnime] }
-        struct AllCatalogsResponse: Codable {
-            let data: DataWrapper
-            struct DataWrapper: Codable {
-                let trending: PageData
-                let popular: PageData
-                let topRated: PageData
-                let airing: PageData
-                let upcoming: PageData
-            }
+        struct CatalogsResponse: Codable {
+            let data: [String: PageData]
         }
 
-        let data = try await executeGraphQLQuery(query, token: nil)
-        let decoded = try JSONDecoder().decode(AllCatalogsResponse.self, from: data)
+        let data = try await executeGraphQLQuery(plan.query, token: nil)
+        let decoded = try JSONDecoder().decode(CatalogsResponse.self, from: data)
 
-        // Hydrate all unique anime with TMDB matches in parallel (deduped)
         var allAnime: [AniListAnime] = []
-        let lists: [(AniListCatalogKind, [AniListAnime])] = [
-            (.trending, decoded.data.trending.media),
-            (.popular, decoded.data.popular.media),
-            (.topRated, decoded.data.topRated.media),
-            (.airing, decoded.data.airing.media),
-            (.upcoming, decoded.data.upcoming.media),
-        ]
+        let lists: [(AniListCatalogKind, [AniListAnime])] = try plan.orderedKinds.map { kind in
+            guard let page = decoded.data[kind.queryAlias] else {
+                throw NSError(
+                    domain: "AniList",
+                    code: -2,
+                    userInfo: [NSLocalizedDescriptionKey: "Missing catalog response for \(kind.queryAlias)"]
+                )
+            }
+            return (kind, page.media)
+        }
         var seenIds = Set<Int>()
         for (_, animeList) in lists {
             for anime in animeList {
@@ -810,25 +1140,28 @@ final class AniListService {
             }
         }
 
-        // Batch TMDB hydration for all unique anime
         let tmdbMap = await batchMapAniListToTMDB(allAnime, tmdbService: tmdbService)
 
-        // Reassemble per-catalog results preserving order
         var result: [AniListCatalogKind: [TMDBSearchResult]] = [:]
         for (kind, animeList) in lists {
             result[kind] = animeList.compactMap { tmdbMap[$0.id] }
         }
 
-        Logger.shared.log("AniListService: Fetched all 5 anime catalogs in 1 query (\(allAnime.count) unique anime)", type: "AniList")
+        Logger.shared.log(
+            "AniListService: Fetched \(lists.count) requested anime catalogs in 1 query (\(allAnime.count) unique anime)",
+            type: "AniList"
+        )
         return result
     }
 
     /// Fetch a single anime catalog (kept for backward compatibility).
     func fetchAnimeCatalog(
         _ kind: AniListCatalogKind,
+        page: Int = 1,
         limit: Int = 20,
         tmdbService: TMDBService
     ) async throws -> [TMDBSearchResult] {
+        let pageRequest = AniListCatalogPageRequest(page: page, requestedPageSize: limit)
         let sort: String
         let status: String?
 
@@ -854,7 +1187,7 @@ final class AniListService {
 
         let query = """
         query {
-            Page(perPage: \(limit)) {
+            Page(\(pageRequest.graphQLArguments)) {
                 media(type: ANIME, sort: [\(sort)]\(statusClause)) {
                     id
                     title { romaji english native }
@@ -891,6 +1224,9 @@ final class AniListService {
             AnimeProviderHealthCenter.shared.recordAniListSuccess()
             return result
         } catch {
+            if Task.isCancelled || error is CancellationError {
+                throw CancellationError()
+            }
             let reason = AnimeProviderHealthCenter.shared.recordAniListFailure(error)
             guard AnimeProviderHealthCenter.shared.shouldUseMALFallback(for: reason) else { throw error }
             AnimeProviderHealthCenter.shared.notifyMALFallbackIfNeeded(reason: "schedule-\(reason.rawValue)")
@@ -997,7 +1333,139 @@ final class AniListService {
                 entry.airingAt >= start && entry.airingAt < end
             }
     }
-    
+
+    /// Resolves one already-known AniList season without traversing its relation
+    /// graph or fetching every TMDB season. Continue Watching uses this compact
+    /// path to enrich card-local search identity without competing with Home's
+    /// catalog assembly.
+    func fetchAnimeSeasonIdentity(
+        anilistId: Int,
+        tmdbShowId: Int? = nil,
+        title: String? = nil
+    ) async -> AniListSeasonIdentity? {
+        guard anilistId > 0 else { return nil }
+        let languageCode = preferredLanguageCode
+
+        if let tmdbShowId,
+           let cached = animeDetailsCache.object(forKey: animeDetailsCacheKey(tmdbShowId: tmdbShowId))?.value,
+           let identity = seasonIdentity(anilistId: anilistId, from: cached) {
+            return identity
+        }
+
+        if let tmdbShowId, let title,
+           let cached = await AnimeIdentityCache.shared.cachedFreshDetails(
+               tmdbShowId: tmdbShowId,
+               title: title,
+               languageCode: languageCode
+           ),
+           let identity = seasonIdentity(anilistId: anilistId, from: cached) {
+            animeDetailsCache.setObject(
+                AniListAnimeWithSeasonsWrapper(cached),
+                forKey: animeDetailsCacheKey(tmdbShowId: tmdbShowId)
+            )
+            return identity
+        }
+
+        let key = AnimeSeasonIdentityRequestKey(
+            anilistId: anilistId,
+            languageCode: languageCode
+        )
+
+        return await AnimeSeasonIdentityRequestCoordinator.shared.value(for: key) { [self] keys in
+            await fetchAnimeSeasonIdentities(keys: keys)
+        }
+    }
+
+    private func seasonIdentity(
+        anilistId: Int,
+        from anime: AniListAnimeWithSeasons
+    ) -> AniListSeasonIdentity? {
+        guard let season = anime.seasons.first(where: { $0.anilistId == anilistId }) else {
+            return nil
+        }
+        return AniListSeasonIdentity(
+            anilistId: season.anilistId,
+            malId: season.anilistId == anime.id ? anime.malId : nil,
+            kitsuId: season.kitsuId,
+            title: season.title,
+            englishTitle: season.englishTitle,
+            romajiTitle: season.romajiTitle,
+            nativeTitle: season.nativeTitle,
+            episodeCount: season.episodes.count,
+            posterURL: season.posterUrl
+        )
+    }
+
+    private func fetchAnimeSeasonIdentities(
+        keys: [AnimeSeasonIdentityRequestKey]
+    ) async -> [AnimeSeasonIdentityRequestKey: AniListSeasonIdentity] {
+        guard !keys.isEmpty, !Task.isCancelled else { return [:] }
+        let uniqueIDs = Array(Set(keys.map(\.anilistId))).sorted()
+        let aliases = uniqueIDs.enumerated().map { index, id in
+            """
+            m\(index): Media(id: \(id), type: ANIME) {
+                id
+                idMal
+                externalLinks { site siteId url }
+                title { romaji english native }
+                episodes
+                coverImage { large medium }
+            }
+            """
+        }.joined(separator: "\n")
+        let query = "query { \(aliases) }"
+
+        do {
+            let data = try await executeGraphQLQuery(query, token: nil)
+            guard !Task.isCancelled,
+                  let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let dataDictionary = json["data"] as? [String: Any] else {
+                return [:]
+            }
+
+            var animeByID: [Int: AniListAnime] = [:]
+            for (index, id) in uniqueIDs.enumerated() {
+                let alias = "m\(index)"
+                guard let mediaJSON = dataDictionary[alias],
+                      !(mediaJSON is NSNull),
+                      let mediaData = try? JSONSerialization.data(withJSONObject: mediaJSON),
+                      let anime = try? JSONDecoder().decode(AniListAnime.self, from: mediaData) else {
+                    continue
+                }
+                animeByID[id] = anime
+            }
+
+            AnimeProviderHealthCenter.shared.recordAniListSuccess()
+            return keys.reduce(into: [:]) { result, key in
+                guard let anime = animeByID[key.anilistId] else { return }
+                result[key] = AniListSeasonIdentity(
+                    anilistId: anime.id,
+                    malId: anime.idMal,
+                    kitsuId: anime.kitsuId,
+                    title: AniListTitlePicker.title(
+                        from: anime.title,
+                        preferredLanguageCode: key.languageCode
+                    ),
+                    englishTitle: anime.title.english.map(AniListTitlePicker.cleanedTitle),
+                    romajiTitle: anime.title.romaji.map(AniListTitlePicker.cleanedTitle),
+                    nativeTitle: anime.title.native.map(AniListTitlePicker.cleanedTitle),
+                    episodeCount: anime.episodes,
+                    posterURL: anime.coverImage?.large ?? anime.coverImage?.medium
+                )
+            }
+        } catch {
+            if Task.isCancelled || error is CancellationError {
+                return [:]
+            }
+            AnimeProviderHealthCenter.shared.recordAniListFailure(error)
+            Logger.shared.log(
+                "AniListService: exact season identity batch failed count=\(keys.count): \(error.localizedDescription)",
+                type: "AniList"
+            )
+            return [:]
+        }
+    }
+
     /// Fetch full anime details with seasons and episodes from AniList + TMDB
     /// Uses AniList for season structure and sequels, TMDB for episode details
     func fetchAnimeDetailsWithEpisodes(
@@ -1007,6 +1475,45 @@ final class AniListService {
         tmdbShowPoster: String?,
         token: String?
     ) async throws -> AniListAnimeWithSeasons {
+        let memoryCacheKey = animeDetailsCacheKey(tmdbShowId: tmdbShowId)
+        if let cached = animeDetailsCache.object(forKey: memoryCacheKey),
+           Date().timeIntervalSince(cached.timestamp) < animeCacheTTL {
+            return cached.value
+        }
+        let key = AnimeDetailRequestKey(
+            tmdbShowId: tmdbShowId,
+            languageCode: preferredLanguageCode
+        )
+        return try await AnimeDetailRequestCoordinator.shared.value(for: key) { [self] in
+            try await fetchAnimeDetailsWithEpisodesUncoalesced(
+                title: title,
+                tmdbShowId: tmdbShowId,
+                tmdbService: tmdbService,
+                tmdbShowPoster: tmdbShowPoster,
+                token: token
+            )
+        }
+    }
+
+    private func fetchAnimeDetailsWithEpisodesUncoalesced(
+        title: String,
+        tmdbShowId: Int,
+        tmdbService: TMDBService,
+        tmdbShowPoster: String?,
+        token: String?
+    ) async throws -> AniListAnimeWithSeasons {
+        if let cached = await AnimeIdentityCache.shared.cachedFreshDetails(
+            tmdbShowId: tmdbShowId,
+            title: title,
+            languageCode: preferredLanguageCode
+        ) {
+            animeDetailsCache.setObject(
+                AniListAnimeWithSeasonsWrapper(cached),
+                forKey: animeDetailsCacheKey(tmdbShowId: tmdbShowId)
+            )
+            return cached
+        }
+
         do {
             let result = try await fetchAnimeDetailsWithEpisodesFromAniList(
                 title: title,
@@ -1016,11 +1523,23 @@ final class AniListService {
                 token: token
             )
             AnimeProviderHealthCenter.shared.recordAniListSuccess()
-            await AnimeIdentityCache.shared.storeAniListDetails(result, tmdbShowId: tmdbShowId, title: title)
+            await AnimeIdentityCache.shared.storeAniListDetails(
+                result,
+                tmdbShowId: tmdbShowId,
+                title: title,
+                languageCode: preferredLanguageCode
+            )
             return result
         } catch {
+            if Task.isCancelled || error is CancellationError {
+                throw CancellationError()
+            }
             let reason = AnimeProviderHealthCenter.shared.recordAniListFailure(error)
-            if let cached = await AnimeIdentityCache.shared.cachedDetails(tmdbShowId: tmdbShowId, title: title) {
+            if let cached = await AnimeIdentityCache.shared.cachedDetails(
+                tmdbShowId: tmdbShowId,
+                title: title,
+                languageCode: preferredLanguageCode
+            ) {
                 if AnimeProviderHealthCenter.shared.shouldUseMALFallback(for: reason) {
                     AnimeProviderHealthCenter.shared.notifyMALFallbackIfNeeded(reason: "details-cache-\(reason.rawValue)")
                 }
@@ -1104,15 +1623,141 @@ final class AniListService {
         return AnimeMetadataRating(value: value, source: .aniList)
     }
 
-    private func aniMapCandidateAniListIds(forTMDBShowId tmdbShowId: Int, limit: Int = 12) async -> [Int] {
-        let mappings = await AniMapMappingService.shared.mappings(forTMDBShowId: tmdbShowId)
-        guard !mappings.isEmpty else {
-            return []
+    private func fetchTMDBShowForAnimeTraversal(
+        tmdbShowId: Int,
+        tmdbService: TMDBService
+    ) async -> TMDBTVShowWithSeasons? {
+        do {
+            return try await tmdbService.getTVShowWithSeasons(id: tmdbShowId)
+        } catch {
+            if !Task.isCancelled {
+                Logger.shared.log(
+                    "AniListService: Failed to prefetch TMDB show details: \(error.localizedDescription)",
+                    type: "TMDB"
+                )
+            }
+            return nil
+        }
+    }
+
+    private func fetchTMDBEpisodesByAbsolute(
+        tmdbShowId: Int,
+        tvShowDetail: TMDBTVShowWithSeasons?,
+        tmdbService: TMDBService
+    ) async -> [Int: TMDBEpisode] {
+        var episodesByAbsolute: [Int: TMDBEpisode] = [:]
+
+        if let tvShowDetail {
+            let realSeasons = tvShowDetail.seasons
+                .filter { $0.seasonNumber > 0 }
+                .sorted { $0.seasonNumber < $1.seasonNumber }
+            var seasonResults: [(seasonNumber: Int, episodes: [TMDBEpisode])] = []
+
+            await withTaskGroup(of: (Int, [TMDBEpisode]?).self) { group in
+                for season in realSeasons {
+                    group.addTask {
+                        guard !Task.isCancelled else { return (season.seasonNumber, nil) }
+                        do {
+                            let detail = try await tmdbService.getSeasonDetails(
+                                tvShowId: tmdbShowId,
+                                seasonNumber: season.seasonNumber
+                            )
+                            return (season.seasonNumber, detail.episodes)
+                        } catch {
+                            Logger.shared.log(
+                                "AniListService: Failed to fetch TMDB season \(season.seasonNumber): \(error.localizedDescription)",
+                                type: "AniList"
+                            )
+                            return (season.seasonNumber, nil)
+                        }
+                    }
+                }
+
+                for await (seasonNumber, episodes) in group {
+                    if Task.isCancelled {
+                        group.cancelAll()
+                        break
+                    }
+                    if let episodes {
+                        seasonResults.append((seasonNumber, episodes))
+                    }
+                }
+            }
+
+            var absoluteIndex = 1
+            for (seasonNumber, episodes) in seasonResults.sorted(by: { $0.seasonNumber < $1.seasonNumber }) {
+                let sortedEpisodes = episodes.sorted { $0.episodeNumber < $1.episodeNumber }
+                Logger.shared.log(
+                    "AniListService: TMDB season \(seasonNumber) returned \(sortedEpisodes.count) episodes",
+                    type: "AniList"
+                )
+                for episode in sortedEpisodes {
+                    episodesByAbsolute[absoluteIndex] = episode
+                    absoluteIndex += 1
+                }
+            }
+        }
+
+        guard episodesByAbsolute.isEmpty, !Task.isCancelled else {
+            return episodesByAbsolute
+        }
+
+        Logger.shared.log(
+            "AniListService: No TMDB episodes loaded; attempting direct season fetch",
+            type: "AniList"
+        )
+        var absoluteIndex = 1
+        var seasonNumber = 1
+        while !Task.isCancelled {
+            do {
+                let seasonDetail = try await tmdbService.getSeasonDetails(
+                    tvShowId: tmdbShowId,
+                    seasonNumber: seasonNumber
+                )
+                guard !seasonDetail.episodes.isEmpty else {
+                    Logger.shared.log(
+                        "AniListService: Fallback found empty season \(seasonNumber), stopping",
+                        type: "AniList"
+                    )
+                    break
+                }
+                for episode in seasonDetail.episodes.sorted(by: { $0.episodeNumber < $1.episodeNumber }) {
+                    episodesByAbsolute[absoluteIndex] = episode
+                    absoluteIndex += 1
+                }
+                Logger.shared.log(
+                    "AniListService: Fallback fetched season \(seasonNumber): \(seasonDetail.episodes.count) episodes",
+                    type: "AniList"
+                )
+                seasonNumber += 1
+            } catch {
+                Logger.shared.log(
+                    "AniListService: Fallback stopped at season \(seasonNumber) (no more seasons found)",
+                    type: "AniList"
+                )
+                break
+            }
+        }
+        return episodesByAbsolute
+    }
+
+    private struct AniMapSeasonSeedPlan {
+        let ids: [Int]
+    }
+
+    private func aniMapSeasonSeedPlan(forTMDBShowId tmdbShowId: Int, limit: Int = 12) async -> AniMapSeasonSeedPlan {
+        let lookup = await AniMapMappingService.shared.mappingsResult(forTMDBShowId: tmdbShowId)
+        guard !lookup.mappings.isEmpty else {
+            return AniMapSeasonSeedPlan(ids: [])
         }
 
         var seen = Set<Int>()
-        let ids = mappings
-            .filter { $0.tmdbShowId == tmdbShowId }
+        let ids = lookup.mappings
+            .filter { mapping in
+                guard mapping.tmdbShowId == tmdbShowId else { return false }
+                guard let mediaType = mapping.mediaType?.uppercased() else { return true }
+                return mediaType == "TV" || mediaType == "TV_SHORT" || mediaType == "ONA"
+            }
             .sorted { lhs, rhs in
                 let lhsScore = aniMapCandidateScore(lhs)
                 let rhsScore = aniMapCandidateScore(rhs)
@@ -1128,7 +1773,7 @@ final class AniListService {
                 return id
             }
 
-        return Array(ids.prefix(limit))
+        return AniMapSeasonSeedPlan(ids: Array(ids.prefix(limit)))
     }
 
     private func aniMapCandidateScore(_ mapping: AniMapMapping) -> Int {
@@ -1161,6 +1806,16 @@ final class AniListService {
         return !["recap", "summary", "music", "trailer", "pv", "cm"].contains { title.contains($0) }
     }
 
+    private func aniListSeasonOrdinal(_ season: String?) -> Int {
+        switch season?.uppercased() {
+        case "WINTER": return 0
+        case "SPRING": return 1
+        case "SUMMER": return 2
+        case "FALL": return 3
+        default: return 4
+        }
+    }
+
     private func fetchAnimeDetailsWithEpisodesFromAniList(
         title: String,
         tmdbShowId: Int,
@@ -1168,8 +1823,9 @@ final class AniListService {
         tmdbShowPoster: String?,
         token: String?
     ) async throws -> AniListAnimeWithSeasons {
+        try Task.checkCancellation()
         // Check in-memory cache first
-        let cacheKey = NSNumber(value: tmdbShowId)
+        let cacheKey = animeDetailsCacheKey(tmdbShowId: tmdbShowId)
         if let cached = animeDetailsCache.object(forKey: cacheKey),
            Date().timeIntervalSince(cached.timestamp) < animeCacheTTL {
             Logger.shared.log("AniListService: Cache HIT for tmdbId=\(tmdbShowId)", type: "AniList")
@@ -1177,15 +1833,25 @@ final class AniListService {
         }
 
         Logger.shared.log("AniListService: fetchAnimeDetailsWithEpisodes START for '\(title)' tmdbId=\(tmdbShowId)", type: "AniList")
+        async let tvShowDetailTask = fetchTMDBShowForAnimeTraversal(
+            tmdbShowId: tmdbShowId,
+            tmdbService: tmdbService
+        )
         var candidates: [AniListAnime] = []
-        let aniMapCandidateIds = await aniMapCandidateAniListIds(forTMDBShowId: tmdbShowId)
+        let aniMapSeedPlan = await aniMapSeasonSeedPlan(forTMDBShowId: tmdbShowId)
+        let aniMapCandidateIds = aniMapSeedPlan.ids
+        try Task.checkCancellation()
         if !aniMapCandidateIds.isEmpty {
-            let nodesById = await batchFetchAniListNodes(ids: aniMapCandidateIds)
-            candidates = aniMapCandidateIds.compactMap { nodesById[$0] }
+            let nodeResult = await batchFetchAniListNodesResult(ids: aniMapCandidateIds)
+            try Task.checkCancellation()
+            candidates = aniMapCandidateIds.compactMap { nodeResult.nodes[$0] }
             let hydratedCandidateCount = candidates.count
-            if !candidates.isEmpty, !candidates.contains(where: isNormalAniListSeasonCandidate) {
+            let normalSeasonCandidates = candidates.filter { isNormalAniListSeasonCandidate($0) }
+            if !candidates.isEmpty, normalSeasonCandidates.isEmpty {
                 Logger.shared.log("AniListService: AniMap hydrated \(candidates.count) nodes for tmdbId=\(tmdbShowId), but none looked like normal anime seasons; falling back to title search", type: "AniList")
                 candidates = []
+            } else if !normalSeasonCandidates.isEmpty {
+                candidates = normalSeasonCandidates
             }
             if candidates.isEmpty, hydratedCandidateCount == 0 {
                 Logger.shared.log("AniListService: AniMap returned \(aniMapCandidateIds.count) mapped AniList IDs for tmdbId=\(tmdbShowId), but none hydrated from AniList", type: "AniList")
@@ -1292,15 +1958,13 @@ final class AniListService {
             throw NSError(domain: "AniListService", code: -1, userInfo: [NSLocalizedDescriptionKey: "AniList did not return any matches for \(title)"])
         }
 
-        // Fetch TMDB show info early for hinting (episode count, first air year) and reuse later.
-        let tvShowDetail: TMDBTVShowWithSeasons? = await {
-            do {
-                return try await tmdbService.getTVShowWithSeasons(id: tmdbShowId)
-            } catch {
-                Logger.shared.log("AniListService: Failed to prefetch TMDB show details: \(error.localizedDescription)", type: "TMDB")
-                return nil
-            }
-        }()
+        // TMDB show lookup started alongside AniMap/AniList discovery above.
+        let tvShowDetail = await tvShowDetailTask
+        async let tmdbEpisodesTask = fetchTMDBEpisodesByAbsolute(
+            tmdbShowId: tmdbShowId,
+            tvShowDetail: tvShowDetail,
+            tmdbService: tmdbService
+        )
 
         var anime = pickBestAniListMatch(from: candidates, tmdbShow: tvShowDetail)
 
@@ -1344,30 +2008,21 @@ final class AniListService {
         }
 
         appendAnime(anime)
-        let aniMapSeedIds = Set(aniMapCandidateIds)
-        let aniMapSeedCandidates = candidates.filter { candidate in
-            aniMapSeedIds.contains(candidate.id)
-                && candidate.id != anime.id
-                && isNormalAniListSeasonCandidate(candidate)
-        }
-        if !aniMapSeedCandidates.isEmpty {
-            Logger.shared.log("AniListService: Seeding sequel detection with \(aniMapSeedCandidates.count) AniMap-mapped AniList nodes for tmdbId=\(tmdbShowId)", type: "AniList")
-        }
-        
+
         Logger.shared.log("AniListService: Starting sequel detection for \(AniListTitlePicker.title(from: anime.title, preferredLanguageCode: preferredLanguageCode)) (ID: \(anime.id), episodes: \(anime.episodes ?? 0), relations: \(anime.relations?.edges.count ?? 0))", type: "AniList")
 
         // Allowed relation types we treat as season/continuation
         let allowedRelationTypes: Set<String> = ["SEQUEL", "PREQUEL", "SEASON"]
 
         // BFS over sequels/prequels/seasons, batch-fetching nodes that need deeper relations per level
+        // AniMap is a high-confidence identity source, not proof of the complete
+        // cour/season graph. It may select the root above, but only the normal AniList
+        // relation traversal (and guarded orphan recovery below) may add seasons.
         var queue: [AniListAnime] = [anime]
         var seenIds = Set<Int>([anime.id])
-        for seed in aniMapSeedCandidates where seenIds.insert(seed.id).inserted {
-            appendAnime(seed)
-            queue.append(seed)
-        }
 
         while !queue.isEmpty {
+            try Task.checkCancellation()
             let currentLevel = queue
             queue.removeAll()
 
@@ -1410,6 +2065,7 @@ final class AniListService {
             if !idsToFetch.isEmpty {
                 Logger.shared.log("AniListService: Batch-fetching \(idsToFetch.count) sequel nodes in 1 query", type: "AniList")
                 let fetchedNodes = await batchFetchAniListNodes(ids: idsToFetch)
+                try Task.checkCancellation()
                 for id in idsToFetch {
                     let fullNode: AniListAnime
                     if let fetched = fetchedNodes[id] {
@@ -1430,6 +2086,7 @@ final class AniListService {
         if let tvShowDetail, !allAnimeToProcess.isEmpty, let tmdbTotalEps = tvShowDetail.numberOfEpisodes, tmdbTotalEps > 0 {
             let anilistTotalEps = allAnimeToProcess.reduce(0) { $0 + ($1.anime.episodes ?? 0) }
             if anilistTotalEps < Int(Double(tmdbTotalEps) * 0.75) {
+                try Task.checkCancellation()
                 Logger.shared.log("AniListService: BFS found \(anilistTotalEps) episodes but TMDB has \(tmdbTotalEps) \u{2014} searching for orphaned entries", type: "AniList")
                 let searchTitle = tvShowDetail.name
                 let orphanQuery = """
@@ -1510,6 +2167,7 @@ final class AniListService {
                         // BFS from orphan to discover its sequels (e.g. SAO Alicization to War of Underworld)
                         var orphanQueue: [AniListAnime] = [orphanWithRelations]
                         while !orphanQueue.isEmpty {
+                            try Task.checkCancellation()
                             let currentOrphanLevel = orphanQueue
                             orphanQueue.removeAll()
 
@@ -1543,6 +2201,7 @@ final class AniListService {
                             if !orphanIdsToFetch.isEmpty {
                                 Logger.shared.log("AniListService: Batch-fetching \(orphanIdsToFetch.count) orphan sequel nodes", type: "AniList")
                                 let fetchedOrphans = await batchFetchAniListNodes(ids: orphanIdsToFetch)
+                                try Task.checkCancellation()
                                 for id in orphanIdsToFetch {
                                     let fullNode: AniListAnime
                                     if let fetched = fetchedOrphans[id] {
@@ -1568,6 +2227,9 @@ final class AniListService {
             let lhsYear = lhs.anime.seasonYear ?? Int.max
             let rhsYear = rhs.anime.seasonYear ?? Int.max
             if lhsYear != rhsYear { return lhsYear < rhsYear }
+            let lhsSeason = aniListSeasonOrdinal(lhs.anime.season)
+            let rhsSeason = aniListSeasonOrdinal(rhs.anime.season)
+            if lhsSeason != rhsSeason { return lhsSeason < rhsSeason }
             return lhs.anime.id < rhs.anime.id
         }
 
@@ -1604,78 +2266,10 @@ final class AniListService {
             }
         }
 
-        // Fetch all TMDB season data in parallel (excluding Season 0 specials)
-        // Build an absolute episode index so we can map stills/runtime even when seasons reset numbering
-        var tmdbEpisodesByAbsolute: [Int: TMDBEpisode] = [:]
-        if let tvShowDetail {
-            // Sort seasons by seasonNumber to keep ordering consistent
-            let realSeasons = tvShowDetail.seasons.filter { $0.seasonNumber > 0 }.sorted { $0.seasonNumber < $1.seasonNumber }
-            
-            // Fetch all seasons in parallel for speed
-            var seasonResults: [(seasonNumber: Int, episodes: [TMDBEpisode])] = []
-            await withTaskGroup(of: (Int, [TMDBEpisode]?).self) { group in
-                for season in realSeasons {
-                    group.addTask {
-                        do {
-                            let detail = try await tmdbService.getSeasonDetails(tvShowId: tmdbShowId, seasonNumber: season.seasonNumber)
-                            return (season.seasonNumber, detail.episodes)
-                        } catch {
-                            Logger.shared.log("AniListService: Failed to fetch TMDB season \(season.seasonNumber): \(error.localizedDescription)", type: "AniList")
-                            return (season.seasonNumber, nil)
-                        }
-                    }
-                }
-                for await (seasonNum, episodes) in group {
-                    if let episodes {
-                        seasonResults.append((seasonNum, episodes))
-                    }
-                }
-            }
-            
-            // Process results in season order
-            seasonResults.sort { $0.seasonNumber < $1.seasonNumber }
-            var absoluteIndex = 1
-            for (seasonNum, episodes) in seasonResults {
-                let sorted = episodes.sorted(by: { $0.episodeNumber < $1.episodeNumber })
-                Logger.shared.log("AniListService: TMDB season \(seasonNum) returned \(sorted.count) episodes", type: "AniList")
-                for episode in sorted {
-                    tmdbEpisodesByAbsolute[absoluteIndex] = episode
-                    if absoluteIndex <= 3 {
-                        Logger.shared.log("  Episode \(episode.episodeNumber): '\(episode.name)', overview: \(episode.overview?.isEmpty == false ? "YES" : "NO"), stillPath: \(episode.stillPath != nil ? "YES" : "NO")", type: "AniList")
-                    }
-                    absoluteIndex += 1
-                }
-            }
-        }
-        
-        // ALWAYS attempt fallback season fetch if we don't have enough episodes yet
-        // This ensures we get episode metadata even when show detail fetch fails
-        if tmdbEpisodesByAbsolute.isEmpty {
-            Logger.shared.log("AniListService: No TMDB episodes loaded; attempting direct season fetch", type: "AniList")
-            var absoluteIndex = 1
-            var seasonNumber = 1
-            // Keep fetching seasons until we hit an error or empty season
-            // This handles any length anime (One Piece 20+ seasons, etc.)
-            while true {
-                do {
-                    let seasonDetail = try await tmdbService.getSeasonDetails(tvShowId: tmdbShowId, seasonNumber: seasonNumber)
-                    if seasonDetail.episodes.isEmpty {
-                        Logger.shared.log("AniListService: Fallback found empty season \(seasonNumber), stopping", type: "AniList")
-                        break
-                    }
-                    for episode in seasonDetail.episodes.sorted(by: { $0.episodeNumber < $1.episodeNumber }) {
-                        tmdbEpisodesByAbsolute[absoluteIndex] = episode
-                        absoluteIndex += 1
-                    }
-                    Logger.shared.log("AniListService: Fallback fetched season \(seasonNumber): \(seasonDetail.episodes.count) episodes", type: "AniList")
-                    seasonNumber += 1
-                } catch {
-                    // Stop when we hit an error (likely season does not exist)
-                    Logger.shared.log("AniListService: Fallback stopped at season \(seasonNumber) (no more seasons found)", type: "AniList")
-                    break
-                }
-            }
-        }
+        // This hydration began as soon as TMDB show metadata was available and ran
+        // concurrently with AniList relation/orphan discovery.
+        let tmdbEpisodesByAbsolute = await tmdbEpisodesTask
+        try Task.checkCancellation()
         
         // Build all seasons from AniList structure + TMDB episode details
         var seasons: [AniListSeasonWithPoster] = []
@@ -1765,11 +2359,19 @@ final class AniListService {
             status: anime.status ?? "UNKNOWN",
             rating: aniListRating(from: anime.averageScore)
         )
-        
+
+        try Task.checkCancellation()
         // Cache the result for fast back-navigation
-        animeDetailsCache.setObject(AniListAnimeWithSeasonsWrapper(animeWithSeasons), forKey: NSNumber(value: tmdbShowId))
+        animeDetailsCache.setObject(
+            AniListAnimeWithSeasonsWrapper(animeWithSeasons),
+            forKey: animeDetailsCacheKey(tmdbShowId: tmdbShowId)
+        )
         
         return animeWithSeasons
+    }
+
+    private func animeDetailsCacheKey(tmdbShowId: Int) -> NSString {
+        "\(tmdbShowId)|\(preferredLanguageCode)" as NSString
     }
 
     func fetchSpecialSearchEntries(
@@ -1778,14 +2380,44 @@ final class AniListService {
         baseAniListIds: [Int] = [],
         tmdbService: TMDBService
     ) async -> [AniListSpecialSearchEntry] {
-        let entries = await fetchSpecialSearchEntriesFromAniList(
+        let cacheKey = specialEntriesCacheKey(
+            tmdbShowId: tmdbShowId,
+            baseAniListIds: baseAniListIds,
+            fallbackPosterURL: fallbackPosterURL
+        )
+        if let cached = specialEntriesCache.object(forKey: cacheKey as NSString),
+           Date().timeIntervalSince(cached.timestamp) < specialEntriesCacheTTL {
+            return cached.entries
+        }
+
+        let aniListResult = await fetchSpecialSearchEntriesFromAniList(
             tmdbShowId: tmdbShowId,
             fallbackPosterURL: fallbackPosterURL,
             baseAniListIds: baseAniListIds,
             tmdbService: tmdbService
         )
+        let entries = aniListResult.entries
+
+        // A successful, authoritative empty result means this title simply has
+        // no mapped specials. Do not turn that into MAL's much larger title and
+        // per-candidate detail traversal.
+        if entries.isEmpty,
+           aniListResult.isComplete,
+           !AnimeProviderHealthCenter.shared.isAniListTemporarilyUnavailable {
+            specialEntriesCache.setObject(
+                SpecialEntriesCacheWrapper(entries: []),
+                forKey: cacheKey as NSString
+            )
+            return []
+        }
 
         guard entries.isEmpty || AnimeProviderHealthCenter.shared.isAniListTemporarilyUnavailable else {
+            if aniListResult.isComplete {
+                specialEntriesCache.setObject(
+                    SpecialEntriesCacheWrapper(entries: entries),
+                    forKey: cacheKey as NSString
+                )
+            }
             return entries
         }
 
@@ -1803,19 +2435,30 @@ final class AniListService {
             .sorted { $0.isOrderedBeforeSpecialEntry($1) }
     }
 
+    private func specialEntriesCacheKey(
+        tmdbShowId: Int,
+        baseAniListIds: [Int],
+        fallbackPosterURL: String?
+    ) -> String {
+        let ids = Set(baseAniListIds.filter { $0 > 0 }).sorted().map(String.init).joined(separator: ",")
+        return "\(tmdbShowId)|\(preferredLanguageCode)|\(ids)|\(fallbackPosterURL ?? "-")"
+    }
+
     private func fetchSpecialSearchEntriesFromAniList(
         tmdbShowId: Int,
         fallbackPosterURL: String?,
         baseAniListIds: [Int] = [],
         tmdbService: TMDBService
-    ) async -> [AniListSpecialSearchEntry] {
-        let mappings = await AniMapMappingService.shared.specialMappings(forTMDBShowId: tmdbShowId)
+    ) async -> SpecialEntriesFetchResult {
+        let mappingResult = await AniMapMappingService.shared.specialMappingsResult(forTMDBShowId: tmdbShowId)
+        let mappings = mappingResult.mappings
         let uniqueMappings = mappings.reduce(into: [Int: AniMapMapping]()) { result, mapping in
             guard let anilistId = mapping.anilistId, result[anilistId] == nil else { return }
             result[anilistId] = mapping
         }
 
-        let nodesById = await batchFetchAniListNodes(ids: Array(uniqueMappings.keys))
+        let nodeResult = await batchFetchAniListNodesResult(ids: Array(uniqueMappings.keys))
+        let nodesById = nodeResult.nodes
         // Some AniMap specials only expose a fallback season number for metadata.
         // Keep playback/search tied to tmdbSeason so specials stay isolated from the main anime flow.
         let metadataSeasonNumbers = Set(uniqueMappings.values.compactMap { $0.tmdbSeason ?? $0.tvdbSeason })
@@ -1859,22 +2502,33 @@ final class AniListService {
             )
         }
 
-        let relationEntries = await relationSpecialSearchEntries(
+        let relationResult = await relationSpecialSearchEntries(
             baseAniListIds: baseAniListIds,
             tmdbShowId: tmdbShowId,
             fallbackPosterURL: fallbackPosterURL,
             tmdbService: tmdbService,
             excluding: Set(entries.map { $0.id })
         )
+        let relationEntries = relationResult.entries
         if !relationEntries.isEmpty {
             let existingIds = Set(entries.map { $0.id })
             entries.append(contentsOf: relationEntries.filter { !existingIds.contains($0.id) })
             Logger.shared.log("AniListService: relation fallback added \(relationEntries.count) special/OVA entries for TMDB \(tmdbShowId)", type: "AniList")
         }
 
-        return entries.sorted { lhs, rhs in
-            lhs.isOrderedBeforeSpecialEntry(rhs)
-        }
+        let hasRelationSeeds = baseAniListIds.contains { $0 > 0 }
+        return SpecialEntriesFetchResult(
+            entries: entries.sorted { lhs, rhs in
+                lhs.isOrderedBeforeSpecialEntry(rhs)
+            },
+            // Empty AniMap output alone is not proof that a show has no
+            // specials. Only suppress MAL fallback after the known base season
+            // relations were also inspected successfully.
+            isComplete: hasRelationSeeds
+                && mappingResult.isComplete
+                && nodeResult.isComplete
+                && relationResult.isComplete
+        )
     }
 
     private func buildSpecialSearchEntry(
@@ -1960,11 +2614,14 @@ final class AniListService {
         fallbackPosterURL: String?,
         tmdbService: TMDBService,
         excluding existingIds: Set<Int>
-    ) async -> [AniListSpecialSearchEntry] {
-        let baseIds = Array(Set(baseAniListIds)).filter { !existingIds.contains($0) }
-        guard !baseIds.isEmpty else { return [] }
+    ) async -> SpecialEntriesFetchResult {
+        let baseIds = Array(Set(baseAniListIds)).filter { $0 > 0 && !existingIds.contains($0) }
+        guard !baseIds.isEmpty else {
+            return SpecialEntriesFetchResult(entries: [], isComplete: true)
+        }
 
-        let baseNodes = await batchFetchAniListNodes(ids: baseIds)
+        let baseNodeResult = await batchFetchAniListNodesResult(ids: baseIds)
+        let baseNodes = baseNodeResult.nodes
         var candidates: [Int: AniListAnime] = [:]
 
         for base in baseNodes.values {
@@ -1980,28 +2637,33 @@ final class AniListService {
             }
         }
 
-        guard !candidates.isEmpty else { return [] }
-        let hydratedCandidates = await batchFetchAniListNodes(ids: Array(candidates.keys))
+        guard !candidates.isEmpty else {
+            return SpecialEntriesFetchResult(entries: [], isComplete: baseNodeResult.isComplete)
+        }
+        let hydratedResult = await batchFetchAniListNodesResult(ids: Array(candidates.keys))
+        let hydratedCandidates = hydratedResult.nodes
         let candidateNodes = candidates.mapValues { relationNode in
             hydratedCandidates[relationNode.id] ?? relationNode
         }
 
         var mappingsById: [Int: AniMapMapping] = [:]
-        await withTaskGroup(of: (Int, AniMapMapping?).self) { group in
+        var mappingsAreComplete = true
+        await withTaskGroup(of: (Int, AniMapMapping?, Bool).self) { group in
             for id in candidates.keys {
                 group.addTask {
-                    let mappings = await AniMapMappingService.shared.mappings(forAniListId: id)
-                    let specialMapping = mappings.first { mapping in
+                    let result = await AniMapMappingService.shared.mappingsResult(forAniListId: id)
+                    let specialMapping = result.mappings.first { mapping in
                         let type = mapping.mediaType?.uppercased()
                         let isSpecial = type == nil || type == "SPECIAL" || type == "OVA" || type == "ONA"
                         let matchesShow = mapping.tmdbShowId == nil || mapping.tmdbShowId == tmdbShowId
                         return isSpecial && matchesShow
                     }
-                    return (id, specialMapping)
+                    return (id, specialMapping, result.isComplete)
                 }
             }
 
-            for await (id, mapping) in group {
+            for await (id, mapping, isComplete) in group {
+                mappingsAreComplete = mappingsAreComplete && isComplete
                 if let mapping {
                     mappingsById[id] = mapping
                 }
@@ -2038,15 +2700,18 @@ final class AniListService {
             }
         }
 
-        return candidateNodes.compactMap { id, node in
-            buildSpecialSearchEntry(
-                anilistId: id,
-                node: node,
-                mapping: mappingsById[id],
-                fallbackPosterURL: fallbackPosterURL,
-                seasonDetailsByNumber: seasonDetailsByNumber
-            )
-        }
+        return SpecialEntriesFetchResult(
+            entries: candidateNodes.compactMap { id, node in
+                buildSpecialSearchEntry(
+                    anilistId: id,
+                    node: node,
+                    mapping: mappingsById[id],
+                    fallbackPosterURL: fallbackPosterURL,
+                    seasonDetailsByNumber: seasonDetailsByNumber
+                )
+            },
+            isComplete: baseNodeResult.isComplete && hydratedResult.isComplete && mappingsAreComplete
+        )
     }
 
     private func isSpecialRelationCandidate(_ edge: AniListAnime.AniListRelationEdge) -> Bool {
@@ -2809,9 +3474,6 @@ final class AniListService {
     // MARK: - Private Helpers
     
     private func executeGraphQLQuery(_ query: String, token: String?, maxRetries: Int = 3) async throws -> Data {
-        // Throttle all AniList requests to stay under rate limit
-        await AniListRateLimiter.shared.waitForSlot()
-        
         var request = URLRequest(url: graphQLEndpoint)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -2826,6 +3488,10 @@ final class AniListService {
         
         var lastError: Error?
         for attempt in 0..<maxRetries {
+            // Every network attempt, including transport and 429 retries, must
+            // claim a fresh slot and honor pauses learned by other requests.
+            try await AniListRateLimiter.shared.waitForSlot()
+
             let data: Data
             let response: URLResponse
             do {
@@ -2857,12 +3523,13 @@ final class AniListService {
                 
                 // Rate limited - wait and retry
                 if httpResponse.statusCode == 429 {
-                    let retryAfter = httpResponse.value(forHTTPHeaderField: "Retry-After")
-                        .flatMap(Double.init) ?? Double(2 * (attempt + 1))
-                    let delay = min(retryAfter, 10)
-                    Logger.shared.log("AniList rate limited (429), retry \(attempt + 1)/\(maxRetries) after \(delay)s", type: "AniList")
-                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                     lastError = NSError(domain: "AniList", code: 429, userInfo: [NSLocalizedDescriptionKey: "AniList rate limited (HTTP 429)"])
+                    if attempt < maxRetries - 1 {
+                        Logger.shared.log(
+                            "AniList rate limited (429); attempt \(attempt + 2)/\(maxRetries) will honor the global server retry window",
+                            type: "AniList"
+                        )
+                    }
                     continue
                 }
                 
@@ -2968,9 +3635,20 @@ final class AniListService {
         return result
     }
 
-    /// Batch-fetch multiple anime nodes with relations in a single aliased GraphQL query
+    private struct AniListNodeBatchResult {
+        let nodes: [Int: AniListAnime]
+        let isComplete: Bool
+    }
+
+    /// Batch-fetch multiple anime nodes with relations in a single aliased GraphQL query.
     private func batchFetchAniListNodes(ids: [Int]) async -> [Int: AniListAnime] {
-        guard !ids.isEmpty else { return [:] }
+        await batchFetchAniListNodesResult(ids: ids).nodes
+    }
+
+    private func batchFetchAniListNodesResult(ids: [Int]) async -> AniListNodeBatchResult {
+        guard !ids.isEmpty else {
+            return AniListNodeBatchResult(nodes: [:], isComplete: true)
+        }
 
         let fragment = """
             id
@@ -3035,7 +3713,9 @@ final class AniListService {
         do {
             let data = try await executeGraphQLQuery(query, token: nil)
             let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            guard let dataDict = json?["data"] as? [String: Any] else { return [:] }
+            guard let dataDict = json?["data"] as? [String: Any] else {
+                return AniListNodeBatchResult(nodes: [:], isComplete: false)
+            }
 
             var result: [Int: AniListAnime] = [:]
             for (i, id) in ids.enumerated() {
@@ -3046,11 +3726,18 @@ final class AniListService {
                     result[id] = anime
                 }
             }
-            return result
+            let requestedIDs = Set(ids)
+            return AniListNodeBatchResult(
+                nodes: result,
+                isComplete: requestedIDs.isSubset(of: Set(result.keys))
+            )
         } catch {
+            if Task.isCancelled || error is CancellationError {
+                return AniListNodeBatchResult(nodes: [:], isComplete: false)
+            }
             AnimeProviderHealthCenter.shared.recordAniListFailure(error)
             Logger.shared.log("AniListService: Batch fetch failed for \(ids.count) nodes: \(error.localizedDescription)", type: "AniList")
-            return [:]
+            return AniListNodeBatchResult(nodes: [:], isComplete: false)
         }
     }
 
@@ -3107,6 +3794,114 @@ final class AniListService {
 }
 
 // MARK: - Helper Models
+
+actor AnimeFillerService {
+    static let shared = AnimeFillerService()
+
+    private struct EpisodesResponse: Decodable {
+        struct Pagination: Decodable {
+            let hasNextPage: Bool
+
+            enum CodingKeys: String, CodingKey {
+                case hasNextPage = "has_next_page"
+            }
+        }
+
+        struct Episode: Decodable {
+            let number: Int
+            let filler: Bool
+
+            enum CodingKeys: String, CodingKey {
+                case number = "mal_id"
+                case filler
+            }
+        }
+
+        let pagination: Pagination
+        let data: [Episode]
+    }
+
+    private enum ServiceError: LocalizedError {
+        case invalidURL
+        case invalidResponse
+        case httpStatus(Int)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidURL:
+                return "The filler metadata URL is invalid."
+            case .invalidResponse:
+                return "The filler metadata response was invalid."
+            case .httpStatus(let status):
+                return "The filler metadata request returned HTTP \(status)."
+            }
+        }
+    }
+
+    private var cachedEpisodeNumbers: [Int: Set<Int>] = [:]
+    private var inFlightRequests: [Int: Task<Set<Int>, Error>] = [:]
+
+    func fillerEpisodeNumbers(malId: Int) async throws -> Set<Int> {
+        let normalizedId = abs(malId)
+        guard normalizedId > 0 else { return [] }
+
+        if let cached = cachedEpisodeNumbers[normalizedId] {
+            return cached
+        }
+        if let inFlight = inFlightRequests[normalizedId] {
+            return try await inFlight.value
+        }
+
+        let task = Task {
+            try await Self.fetchFillerEpisodeNumbers(malId: normalizedId)
+        }
+        inFlightRequests[normalizedId] = task
+
+        do {
+            let episodeNumbers = try await task.value
+            cachedEpisodeNumbers[normalizedId] = episodeNumbers
+            inFlightRequests[normalizedId] = nil
+            return episodeNumbers
+        } catch {
+            inFlightRequests[normalizedId] = nil
+            throw error
+        }
+    }
+
+    private static func fetchFillerEpisodeNumbers(malId: Int) async throws -> Set<Int> {
+        var page = 1
+        var fillerEpisodeNumbers = Set<Int>()
+
+        while true {
+            guard var components = URLComponents(string: "https://api.jikan.moe/v4/anime/\(malId)/episodes") else {
+                throw ServiceError.invalidURL
+            }
+            components.queryItems = [URLQueryItem(name: "page", value: String(page))]
+            guard let url = components.url else { throw ServiceError.invalidURL }
+
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let httpResponse = response as? HTTPURLResponse else {
+                throw ServiceError.invalidResponse
+            }
+            guard (200..<300).contains(httpResponse.statusCode) else {
+                throw ServiceError.httpStatus(httpResponse.statusCode)
+            }
+
+            let decoded = try JSONDecoder().decode(EpisodesResponse.self, from: data)
+            fillerEpisodeNumbers.formUnion(
+                decoded.data.lazy.filter(\.filler).map(\.number)
+            )
+
+            guard decoded.pagination.hasNextPage else { break }
+            page += 1
+
+            // Jikan allows three requests per second. Stay below that limit for long shows.
+            try await Task.sleep(nanoseconds: 400_000_000)
+        }
+
+        return fillerEpisodeNumbers
+    }
+}
 
 protocol AniListEpisodeProtocol {
     var number: Int { get }
@@ -4147,9 +4942,11 @@ private final class MALMetadataService {
     }
 
     private func displayTitle(for detail: MALAnimeDetails) -> String {
-        detail.alternativeTitles?.en?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-            ? detail.alternativeTitles!.en!
-            : detail.title
+        guard let englishTitle = detail.alternativeTitles?.en,
+              !englishTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return detail.title
+        }
+        return englishTitle
     }
 
     private func rating(from detail: MALAnimeDetails) -> AnimeMetadataRating? {

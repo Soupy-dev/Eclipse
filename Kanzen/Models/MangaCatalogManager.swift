@@ -118,7 +118,6 @@ final class MangaCatalogManager {
     func saveCatalogs() {
         if let data = try? JSONEncoder().encode(catalogs) {
             userDefaults.set(data, forKey: catalogsKey)
-            userDefaults.synchronize()
         }
     }
 
@@ -218,7 +217,7 @@ final class MangaHomeSourceManager: ObservableObject {
 
     @MainActor
     func allSources(
-        aidokuManager: AidokuSourceManager = .shared,
+        aidokuManager: AidokuSourceManager,
         modules: [ModuleDataContainer],
         includeDisabledAidoku: Bool = true
     ) -> [MangaHomeSource] {
@@ -243,7 +242,7 @@ final class MangaHomeSourceManager: ObservableObject {
 
     @MainActor
     func enabledSources(
-        aidokuManager: AidokuSourceManager = .shared,
+        aidokuManager: AidokuSourceManager,
         modules: [ModuleDataContainer]
     ) -> [MangaHomeSource] {
         allSources(aidokuManager: aidokuManager, modules: modules, includeDisabledAidoku: false)

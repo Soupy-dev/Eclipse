@@ -63,9 +63,11 @@ extension JSContext
                 return JSValue(newErrorFromMessage: "Invalid URL", in: self)
             }
             
-            guard let _ = self.objectForKeyedSubscript("Promise") else
-            {
-                fatalError("Promise constructor not found in JSContext")
+            guard let promiseConstructor = self.objectForKeyedSubscript("Promise"),
+                  !promiseConstructor.isUndefined,
+                  !promiseConstructor.isNull else {
+                ReaderLogger.shared.log("Promise constructor not found in JSContext", type: "Error")
+                return JSValue(newErrorFromMessage: "Promise is not supported", in: self)
             }
             
             let executor: @convention(block) (@escaping (JSValue) -> Void, @escaping (JSValue) -> Void) -> Void = { resolve, reject in
@@ -323,7 +325,7 @@ extension JSContext
                 if let httpResponse = response as? HTTPURLResponse {
                     for (key, value) in httpResponse.allHeaderFields {
                         if let keyString = key as? String {
-                            safeHeaders[keyString] = value is String ? (value as! String) : String(describing: value)
+                            safeHeaders[keyString] = (value as? String) ?? String(describing: value)
                         }
                     }
                 }

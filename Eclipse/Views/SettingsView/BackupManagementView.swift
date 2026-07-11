@@ -49,8 +49,7 @@ struct BackupManagementView: View {
                     Button(action: createBackup) {
                         GlassDetailRow(icon: "arrow.up.doc.fill", iconColor: .teal, title: "Create Backup") {
                             if isProcessing {
-                                ProgressView()
-                                    .progressViewStyle(.circular)
+                                EclipseLoadingIndicator()
                                     .tint(.white.opacity(0.6))
                             } else {
                                 EmptyView()
@@ -58,8 +57,10 @@ struct BackupManagementView: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    .backupActionHitArea()
                     .disabled(isProcessing)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 GlassSectionFooter("Create a backup file containing all your collections, settings, watch progress, tracker logins including MAL, and service configurations.")
 
                 GlassSection(header: "Import") {
@@ -71,8 +72,7 @@ struct BackupManagementView: View {
                         }) {
                             GlassDetailRow(icon: "arrow.down.doc.fill", iconColor: .blue, title: "Import Backup") {
                                 if isProcessing {
-                                    ProgressView()
-                                        .progressViewStyle(.circular)
+                                    EclipseLoadingIndicator()
                                         .tint(.white.opacity(0.6))
                                 } else {
                                     EmptyView()
@@ -80,6 +80,7 @@ struct BackupManagementView: View {
                             }
                         }
                         .buttonStyle(.plain)
+                        .backupActionHitArea()
                         .disabled(isProcessing)
 
                         GlassDivider()
@@ -91,8 +92,7 @@ struct BackupManagementView: View {
                         }) {
                             GlassDetailRow(icon: "arrow.down.doc", iconColor: .indigo, title: "Alternative Import Backup") {
                                 if isProcessing {
-                                    ProgressView()
-                                        .progressViewStyle(.circular)
+                                    EclipseLoadingIndicator()
                                         .tint(.white.opacity(0.6))
                                 } else {
                                     EmptyView()
@@ -100,9 +100,12 @@ struct BackupManagementView: View {
                             }
                         }
                         .buttonStyle(.plain)
+                        .backupActionHitArea()
                         .disabled(isProcessing)
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 GlassSectionFooter("Restore all data from a previously saved backup file. This will overwrite your current settings and progress.")
 
                 if !backupMessage.isEmpty {
@@ -122,6 +125,7 @@ struct BackupManagementView: View {
             }
             .padding(.top, 16)
             .padding(.bottom, 32)
+            .frame(maxWidth: .infinity, alignment: .leading)
             .background(EclipseScrollTracker())
         }
         .navigationTitle("Backup & Import")
@@ -355,6 +359,14 @@ struct BackupManagementView: View {
         return data
     }
     #endif
+}
+
+private extension View {
+    func backupActionHitArea() -> some View {
+        frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.white.opacity(0.001))
+            .contentShape(Rectangle())
+    }
 }
 
 #Preview {

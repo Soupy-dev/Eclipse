@@ -10,7 +10,7 @@ DEVELOPMENT_TEAM = ANMK3Y568U
 BUNDLE_IDENTIFIER = app.Eclipse.Soupy
 ECLIPSE_DISTRIBUTION_CHANNEL = GitHub
 // GitHub updater version. Override this for sideload/GitHub releases instead of MARKETING_VERSION.
-ECLIPSE_RELEASE_VERSION = 2.0.5
+ECLIPSE_RELEASE_VERSION = 2.1.0
 ICLOUD_CONTAINER_ID = iCloud.Eclipse.Soupy
 // Development for local/dev signing; the TestFlight workflow overrides this to Production.
 ICLOUD_CONTAINER_ENVIRONMENT = Development

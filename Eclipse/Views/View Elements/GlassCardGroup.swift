@@ -330,8 +330,21 @@ struct GlassSliderRow: View {
                     .monospacedDigit()
             }
 #if os(tvOS)
-            Stepper("", value: $value, in: range, step: step)
-                .labelsHidden()
+            HStack(spacing: 18) {
+                Button {
+                    value = max(range.lowerBound, value - step)
+                } label: {
+                    Label("Decrease \(title)", systemImage: "minus")
+                }
+                .disabled(value <= range.lowerBound)
+
+                Button {
+                    value = min(range.upperBound, value + step)
+                } label: {
+                    Label("Increase \(title)", systemImage: "plus")
+                }
+                .disabled(value >= range.upperBound)
+            }
 #else
             Slider(value: $value, in: range, step: step)
                 .tint(tint)

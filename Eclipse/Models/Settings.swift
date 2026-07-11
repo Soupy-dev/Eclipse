@@ -1,14 +1,159 @@
 import SwiftUI
+#if os(iOS)
+import AuthenticationServices
+import Security
+import UIKit
+#endif
 #if canImport(CryptoKit)
 import CryptoKit
 #endif
 #if canImport(Network)
 import Network
 #endif
-// helper Class & Enums
+
+/// Platform-neutral preference shared by Settings and the iOS SharePlay
+/// coordinator. Keeping the key/default here lets tvOS compile the shared
+/// settings model without adding GroupActivities code to the tvOS target.
+enum WatchTogetherSettings {
+    static let enabledKey = "watchTogetherEnabled"
+    static let defaultEnabled = true
+
+    /// Unsigned GitHub releases cannot carry SharePlay's group-session
+    /// entitlement, so expose Watch Together only in Apple distribution lanes.
+    static var isAvailableInCurrentBuild: Bool {
+#if os(iOS)
+        Bundle.main.isAppleReviewedDistribution
+#else
+        false
+#endif
+    }
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        guard isAvailableInCurrentBuild else { return false }
+        guard defaults.object(forKey: enabledKey) != nil else { return defaultEnabled }
+        return defaults.bool(forKey: enabledKey)
+    }
+}
+
+/// Visual presets for Eclipse's MPV control overlay. The default deliberately
+/// preserves the player UI that shipped before skins were introduced.
+enum MPVPlayerSkin: String, CaseIterable, Identifiable {
+    case defaultSkin = "default"
+    case blackAndGold = "blackAndGold"
+    case prismatic = "prismatic"
+    case cyberpunk = "cyberpunk"
+    case custom = "custom"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .defaultSkin: return "Default"
+        case .blackAndGold: return "Black and Gold"
+        case .prismatic: return "Prismatic"
+        case .cyberpunk: return "Cyberpunk"
+        case .custom: return "Custom"
+        }
+    }
+
+    var settingsDescription: String {
+        switch self {
+        case .defaultSkin:
+            return "The original Eclipse MPV controls."
+        case .blackAndGold:
+            return "Warm gold controls over a deep black overlay."
+        case .prismatic:
+            return "A soft animated spectrum with bright controls."
+        case .cyberpunk:
+            return "Electric cyan and magenta with a subtle neon sweep."
+        case .custom:
+            return "Choose your own primary and secondary control colors."
+        }
+    }
+
+    var defaultAnimationStyle: MPVPlayerSkinAnimationStyle {
+        switch self {
+        case .defaultSkin, .blackAndGold, .custom: return .glow
+        case .prismatic: return .spectrum
+        case .cyberpunk: return .sweep
+        }
+    }
+}
+
+enum MPVPlayerSkinAnimationStyle: String, CaseIterable, Identifiable {
+    case glow
+    case spectrum
+    case sweep
+    case aurora
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .glow: return "Glow"
+        case .spectrum: return "Spectrum"
+        case .sweep: return "Scan"
+        case .aurora: return "Aurora"
+        }
+    }
+
+    var settingsDescription: String {
+        switch self {
+        case .glow: return "A soft pulse that breathes with the accent color."
+        case .spectrum: return "Slowly cycles through the skin's colors."
+        case .sweep: return "A light beam that scans across the controls."
+        case .aurora: return "Gently drifting ribbons of color."
+        }
+    }
+}
+
+enum MPVPlayerSkinSettings {
+    static let skinKey = "mpvPlayerSkin"
+    static let customPrimaryColorKey = "mpvPlayerSkinCustomPrimaryColor"
+    static let customSecondaryColorKey = "mpvPlayerSkinCustomSecondaryColor"
+    static let animationsEnabledKey = "mpvPlayerSkinAnimationsEnabled"
+    static let defaultAnimationsEnabled = true
+    static let tintControlsOnlyKey = "mpvPlayerSkinTintControlsOnly"
+    static let defaultTintControlsOnly = false
+    static let animationStyleKeyPrefix = "mpvPlayerSkinAnimationStyle."
+
+    static func selected(defaults: UserDefaults = .standard) -> MPVPlayerSkin {
+        let rawValue = defaults.string(forKey: skinKey) ?? ""
+        if rawValue == "cypberpunk" { return .cyberpunk }
+        return MPVPlayerSkin(rawValue: rawValue) ?? .defaultSkin
+    }
+
+    static func animationsEnabled(defaults: UserDefaults = .standard) -> Bool {
+        guard defaults.object(forKey: animationsEnabledKey) != nil else {
+            return defaultAnimationsEnabled
+        }
+        return defaults.bool(forKey: animationsEnabledKey)
+    }
+
+    static func tintControlsOnly(defaults: UserDefaults = .standard) -> Bool {
+        guard defaults.object(forKey: tintControlsOnlyKey) != nil else {
+            return defaultTintControlsOnly
+        }
+        return defaults.bool(forKey: tintControlsOnlyKey)
+    }
+
+    static func animationStyle(for skin: MPVPlayerSkin, defaults: UserDefaults = .standard) -> MPVPlayerSkinAnimationStyle {
+        if let raw = defaults.string(forKey: animationStyleKeyPrefix + skin.rawValue),
+           let style = MPVPlayerSkinAnimationStyle(rawValue: raw) {
+            return style
+        }
+        return skin.defaultAnimationStyle
+    }
+
+    static func setAnimationStyle(_ style: MPVPlayerSkinAnimationStyle, for skin: MPVPlayerSkin, defaults: UserDefaults = .standard) {
+        defaults.set(style.rawValue, forKey: animationStyleKeyPrefix + skin.rawValue)
+    }
+}
+
+// Shared media settings and player configuration.
 enum Appearance: String, CaseIterable, Identifiable {
     case system, light, dark
-    
+
     var id: String { self.rawValue }
 }
 
@@ -17,6 +162,7 @@ enum MediaDetailElement: String, CaseIterable, Identifiable {
     case overview
     case details
     case cast
+    case similarTitles
     case ratingNotes
     case traktComments
     case episodes
@@ -38,7 +184,8 @@ enum MediaDetailElement: String, CaseIterable, Identifiable {
         .traktComments,
         .episodes,
         .stills,
-        .trailers
+        .trailers,
+        .similarTitles
     ]
 
     var displayName: String {
@@ -51,6 +198,8 @@ enum MediaDetailElement: String, CaseIterable, Identifiable {
             return "Details"
         case .cast:
             return "Cast"
+        case .similarTitles:
+            return "Similar Titles"
         case .ratingNotes:
             return "Rating & Notes"
         case .traktComments:
@@ -74,6 +223,8 @@ enum MediaDetailElement: String, CaseIterable, Identifiable {
             return "Runtime, genres, dates, status, and ratings."
         case .cast:
             return "Principal cast list."
+        case .similarTitles:
+            return "TMDB recommendations related to the current title."
         case .ratingNotes:
             return "Your star rating, notes, and tracker sync shortcuts."
         case .traktComments:
@@ -172,6 +323,36 @@ enum MediaDetailElement: String, CaseIterable, Identifiable {
     }
 }
 
+enum MediaDetailSimilarTitlesSettings {
+    static let enabledKey = "mediaDetailSimilarTitlesEnabled"
+    static let defaultEnabled = false
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: enabledKey) == nil ? defaultEnabled : defaults.bool(forKey: enabledKey)
+    }
+}
+
+enum ServicesSheetPresentationSettings {
+    static let stremioStyleEnabledKey = "servicesStremioStyleSheetEnabled"
+    static let defaultStremioStyleEnabled = false
+
+    static func usesStremioStyle(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: stremioStyleEnabledKey) == nil
+            ? defaultStremioStyleEnabled
+            : defaults.bool(forKey: stremioStyleEnabledKey)
+    }
+}
+
+enum NextEpisodeFillerSettings {
+    static let enabledKey = "nextEpisodeSkipFillerEnabled"
+    static let defaultEnabled = false
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: enabledKey) == nil ? defaultEnabled : defaults.bool(forKey: enabledKey)
+    }
+}
+
+#if !os(tvOS)
 enum ReaderDetailElement: String, CaseIterable, Identifiable {
     case overview
     case tags
@@ -278,21 +459,10 @@ enum ReaderDetailElement: String, CaseIterable, Identifiable {
         defaults.set(rawValue(for: hiddenElements), forKey: hiddenStorageKey)
     }
 }
+#endif
 
-enum MPVRenderBackend: String, CaseIterable, Identifiable {
-    case openGL = "opengl"
+enum MPVRenderBackend: String {
     case metal = "metal"
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .openGL:
-            return "OpenGL"
-        case .metal:
-            return "MoltenVK"
-        }
-    }
 
     static let defaultBackend: MPVRenderBackend = .metal
 }
@@ -341,6 +511,8 @@ enum MPVUpscalingMode: String, CaseIterable, Identifiable {
     /// EWA Lanczos + deband only for sub-1080p sources (e.g. a 480p/720p stream sharpened toward
     /// 1080p); already-HD video stays on the cheap path. The lightest upscaling mode.
     case upscaleTo1080 = "upscaleTo1080"
+    /// EWA Lanczos + deband only for sub-4K sources, with the render target capped around 2160p.
+    case upscaleTo4K = "upscaleTo4K"
     /// EWA Lanczos + deband on every source, with the render target capped at roughly one resolution tier above the
     /// source (e.g.
     case oneLevelAlways = "oneLevelAlways"
@@ -354,6 +526,7 @@ enum MPVUpscalingMode: String, CaseIterable, Identifiable {
         switch self {
         case .off: return "Off"
         case .upscaleTo1080: return "Upscale to 1080p"
+        case .upscaleTo4K: return "Upscale to 4K"
         case .oneLevelAlways: return "Upscale by one level"
         case .auto: return "Auto (Lanczos + deband)"
         }
@@ -365,6 +538,8 @@ enum MPVUpscalingMode: String, CaseIterable, Identifiable {
             return "No upscaling or debanding - video is scaled cheaply to fit the screen, exactly like the old renderer always did. Lowest heat and battery use."
         case .upscaleTo1080:
             return "Applies Lanczos upscaling and debanding only to below-HD video (under 1080p) that actually benefits - e.g. a 720p stream is sharpened toward 1080p - and leaves already-HD video on the cheap path to save power."
+        case .upscaleTo4K:
+            return "Applies Lanczos upscaling and debanding to video below 4K and caps the render target around 2160p. Sharper for HD and 1440p sources on high-resolution displays, with a higher power cost."
         case .oneLevelAlways:
             return "Applies Lanczos upscaling and debanding to every source and renders one resolution tier above it (e.g. 1080p toward 1440p), capped at the display. On phone screens HD video is already panel-limited, so this mainly helps below-HD sources and external/AirPlay displays."
         case .auto:
@@ -546,12 +721,9 @@ struct MPVRenderBackendSupport {
 
     static var settingsDescription: String {
         if metalIsFullySupported {
-            return "Applies to the next player session. MoltenVK is the default MPV renderer and uses gpu-next inline playback with a GPU sample-buffer handoff for PiP; OpenGL remains the fallback."
+            return "MPV uses the MoltenVK gpu-next renderer with a GPU sample-buffer handoff for PiP."
         }
-        if !metalRendererEnabled {
-            return "Applies to the next player session. OpenGL is active in this build."
-        }
-        return "Applies to the next player session. MoltenVK is remembered but falls back to OpenGL until the inline renderer is available."
+        return "MoltenVK playback is unavailable in this build."
     }
 
     static var settingsStatusLine: String {
@@ -564,14 +736,7 @@ struct MPVRenderBackendSupport {
         return "MoltenVK backend: waiting for inline renderer"
     }
 
-    static func effectiveBackend(requested: MPVRenderBackend, hasMetalDevice: Bool) -> MPVRenderBackend {
-        guard requested == .metal else { return .openGL }
-        guard hasMetalDevice, metalIsFullySupported else { return .openGL }
-        return .metal
-    }
-
-    static func fallbackReason(requested: MPVRenderBackend, hasMetalDevice: Bool) -> String? {
-        guard requested == .metal else { return nil }
+    static func fallbackReason(hasMetalDevice: Bool) -> String? {
         guard metalRendererEnabled else { return "MoltenVK renderer hidden in this build" }
         guard hasMetalDevice else { return "MoltenVK device unavailable" }
         guard moltenVKInlineRendererAvailable else {
@@ -619,11 +784,21 @@ enum ExperimentalFeatureState {
 
     // Modern interface is the default. Use object(forKey:) so a fresh install
     // (key unset, before registerDefaults runs) still resolves to `true`.
-    private(set) static var isEnabledAtLaunch: Bool = (UserDefaults.standard.object(forKey: enabledKey) as? Bool) ?? true
+    private(set) static var isEnabledAtLaunch: Bool = {
+#if os(tvOS)
+        true
+#else
+        (UserDefaults.standard.object(forKey: enabledKey) as? Bool) ?? true
+#endif
+    }()
 
     static func configureLaunchState(defaults: UserDefaults = .standard) {
         registerDefaults(defaults: defaults)
+#if os(tvOS)
+        isEnabledAtLaunch = true
+#else
         isEnabledAtLaunch = (defaults.object(forKey: enabledKey) as? Bool) ?? true
+#endif
     }
 
     static func registerDefaults(defaults: UserDefaults = .standard) {
@@ -643,12 +818,18 @@ enum ExperimentalFeatureState {
     }
 
     static var currentStoredValue: Bool {
+#if os(tvOS)
+        true
+#else
         UserDefaults.standard.bool(forKey: enabledKey)
+#endif
     }
 
     static func setStoredValue(_ enabled: Bool, defaults: UserDefaults = .standard) {
+#if !os(tvOS)
         defaults.set(enabled, forKey: enabledKey)
         defaults.set(Date().timeIntervalSince1970, forKey: lastChangedAtKey)
+#endif
     }
 
     static var isMPVPlaybackDefault: Bool {
@@ -659,10 +840,7 @@ enum ExperimentalFeatureState {
     }
 
     static var isMetalMPVPlaybackDefault: Bool {
-        guard isMPVPlaybackDefault else { return false }
-        let raw = UserDefaults.standard.string(forKey: "mpvRenderBackend") ?? MPVRenderBackend.defaultBackend.rawValue
-        let requested = MPVRenderBackend(rawValue: raw) ?? .defaultBackend
-        return MPVRenderBackendSupport.effectiveBackend(requested: requested, hasMetalDevice: true) == .metal
+        isMPVPlaybackDefault && MPVRenderBackendSupport.metalIsFullySupported
     }
 
     static var mpvAdvancedPlaybackUnavailableReason: String? {
@@ -673,12 +851,8 @@ enum ExperimentalFeatureState {
         let usesInternalPlayer = external.isEmpty || external == "none" || external == "Default"
         guard usesInternalPlayer else { return "external-player-enabled" }
 
-        let raw = UserDefaults.standard.string(forKey: "mpvRenderBackend") ?? MPVRenderBackend.defaultBackend.rawValue
-        let requested = MPVRenderBackend(rawValue: raw) ?? .defaultBackend
-        guard requested == .metal else { return "renderer-not-moltenvk" }
-
-        guard MPVRenderBackendSupport.effectiveBackend(requested: requested, hasMetalDevice: true) == .metal else {
-            return MPVRenderBackendSupport.fallbackReason(requested: requested, hasMetalDevice: true) ?? "moltenvk-renderer-unavailable"
+        guard MPVRenderBackendSupport.metalIsFullySupported else {
+            return MPVRenderBackendSupport.fallbackReason(hasMetalDevice: true) ?? "moltenvk-renderer-unavailable"
         }
 
         return nil
@@ -693,19 +867,66 @@ enum ExperimentalFeatureState {
     }
 }
 
+#if os(iOS)
+enum CloudSyncProvider: String, CaseIterable, Identifiable, Hashable {
+    case iCloud = "icloud"
+    case googleDrive = "googleDrive"
+    case oneDrive = "oneDrive"
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .iCloud: return "iCloud"
+        case .googleDrive: return "Google Drive"
+        case .oneDrive: return "OneDrive"
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .iCloud: return "icloud.fill"
+        case .googleDrive: return "externaldrive.fill"
+        case .oneDrive: return "cloud.fill"
+        }
+    }
+
+    var syncEnabledKey: String {
+        switch self {
+        case .iCloud: return ExperimentalFeatureState.iCloudSyncEnabledKey
+        case .googleDrive: return "experimentalGoogleDriveSyncEnabled"
+        case .oneDrive: return "experimentalOneDriveSyncEnabled"
+        }
+    }
+
+    var lastSeenRemoteModificationKey: String {
+        switch self {
+        case .iCloud:
+            return "experimentalICloudSyncLastSeenRemoteModificationAt"
+        case .googleDrive:
+            return "experimentalGoogleDriveSyncLastSeenRemoteModificationAt"
+        case .oneDrive:
+            return "experimentalOneDriveSyncLastSeenRemoteModificationAt"
+        }
+    }
+
+    var requiresAccountConnection: Bool {
+        self != .iCloud
+    }
+}
+
 struct ExperimentalCloudSyncAvailability {
     let isAvailable: Bool
     let statusTitle: String
     let statusMessage: String
 
     static var current: ExperimentalCloudSyncAvailability {
-#if os(iOS)
         let fileManager = FileManager.default
         if fileManager.url(forUbiquityContainerIdentifier: nil) != nil {
             return ExperimentalCloudSyncAvailability(
                 isAvailable: true,
                 statusTitle: "iCloud Available",
-                statusMessage: "This build has access to the signed-in iCloud account. Eclipse will sync only personal state and safe source definitions when enabled."
+                statusMessage: "This build has access to the signed-in iCloud account. Eclipse can sync selected app state with iCloud, Google Drive, or OneDrive."
             )
         }
 
@@ -713,7 +934,7 @@ struct ExperimentalCloudSyncAvailability {
             return ExperimentalCloudSyncAvailability(
                 isAvailable: false,
                 statusTitle: "iCloud Account Required",
-                statusMessage: "Sign in to iCloud and enable iCloud Drive on this device, then reopen Eclipse. TestFlight is required, but the device account still has to expose iCloud Drive."
+                statusMessage: "Sign in to iCloud and enable iCloud Drive on this device to use iCloud. Google Drive and OneDrive can still be connected below."
             )
         }
 
@@ -721,23 +942,21 @@ struct ExperimentalCloudSyncAvailability {
             return ExperimentalCloudSyncAvailability(
                 isAvailable: false,
                 statusTitle: "iCloud Container Unavailable",
-                statusMessage: "This TestFlight build is installed, but iOS has not exposed Eclipse's iCloud container. Rebuild with an iCloud Documents provisioning profile, or reinstall after the profile is updated."
+                statusMessage: "This TestFlight build is installed, but iOS has not exposed Eclipse's iCloud container. Google Drive and OneDrive can still be connected below."
             )
         }
-#endif
+
         return ExperimentalCloudSyncAvailability(
             isAvailable: false,
-            statusTitle: "Unavailable in This Build",
-            statusMessage: "iCloud requires the app entitlement. Sideloaded builds stay local-only; TestFlight builds can enable this once the entitlement is present."
+            statusTitle: "iCloud Unavailable",
+            statusMessage: "iCloud requires the app entitlement. Google Drive and OneDrive use their own account connections."
         )
     }
 
-#if os(iOS)
     private static var isTestFlightBuild: Bool {
         let channel = Bundle.main.infoDictionary?["EclipseDistributionChannel"] as? String
         return channel?.caseInsensitiveCompare("TestFlight") == .orderedSame
     }
-#endif
 }
 
 @MainActor
@@ -745,20 +964,53 @@ final class ExperimentalCloudSyncManager: ObservableObject {
     static let shared = ExperimentalCloudSyncManager()
 
     @Published private(set) var isSyncing = false
+    @Published private(set) var activeProvider: CloudSyncProvider?
     @Published private(set) var lastStatusMessage: String = ""
     @Published private(set) var lastSyncDate: Date?
+    @Published private var providerStatusMessages: [CloudSyncProvider: String] = [:]
+    @Published private var providerLastSyncDates: [CloudSyncProvider: Date] = [:]
+    @Published private(set) var connectionStateVersion = 0
 
     private static let snapshotFileName = "EclipseExperimentalSync.json"
-    private static let lastSeenRemoteModificationKey = "experimentalICloudSyncLastSeenRemoteModificationAt"
-    private var lastAutomaticSync: Date?
+    private static let googleClientID = "871649357486-168i49j7ouc70r4t879112h65kmdilit.apps.googleusercontent.com"
+    private static let googleURLScheme = "com.googleusercontent.apps.871649357486-168i49j7ouc70r4t879112h65kmdilit"
+    private static let microsoftClientID = "a4361dcd-07d3-46b7-9509-1f8ed0ee03ba"
+    private static let microsoftTenant = "common"
+    private static let microsoftRedirectURI = "msauth.app.Eclipse.Soupy://auth"
 
-    private init() {}
+    private let authPresentationContextProvider = CloudSyncAuthPresentationContextProvider()
+    private var authenticationSession: ASWebAuthenticationSession?
+    private var lastAutomaticSync: Date?
+    private var pendingAutomaticSyncTask: Task<Void, Never>?
+    private var observers: [NSObjectProtocol] = []
+
+    private init() {
+        let center = NotificationCenter.default
+        let names: [Notification.Name] = [
+            .libraryDataDidChange,
+            .progressDataDidChange,
+            .userRatingDataDidChange,
+            .catalogDataDidChange,
+            UserDefaults.didChangeNotification
+        ]
+        observers = names.map { name in
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    self?.scheduleAutomaticSync()
+                }
+            }
+        }
+    }
+
+    deinit {
+        observers.forEach(NotificationCenter.default.removeObserver)
+        pendingAutomaticSyncTask?.cancel()
+    }
 
     func syncOnActivationIfNeeded(reason: String) {
-        guard ExperimentalFeatureState.isEnabledAtLaunch,
-              UserDefaults.standard.bool(forKey: ExperimentalFeatureState.iCloudSyncEnabledKey) else {
-            return
-        }
+        guard ExperimentalFeatureState.isEnabledAtLaunch else { return }
+        let providers = enabledProvidersForAutomaticSync()
+        guard !providers.isEmpty else { return }
 
         if let lastAutomaticSync,
            Date().timeIntervalSince(lastAutomaticSync) < 300 {
@@ -766,103 +1018,383 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         }
 
         lastAutomaticSync = Date()
-        syncSnapshot(reason: reason)
+        syncProviders(providers, reason: reason)
     }
 
     func syncSnapshot(reason: String = "manual") {
-        runSyncTask(statusPrefix: "Synced") {
-            try Self.reconcileSnapshot(reason: reason)
+        syncProviders(enabledProvidersForManualSync(), reason: reason)
+    }
+
+    func syncSnapshot(provider: CloudSyncProvider, reason: String = "manual") {
+        runProviderTask(provider: provider, statusPrefix: "Synced") {
+            try await Self.reconcileSnapshot(provider: provider, reason: reason)
         }
     }
 
     func pushLocalSnapshot(reason: String = "manual") {
-        runSyncTask(statusPrefix: "Synced") {
-            try Self.writeLocalSnapshot(reason: reason)
-        }
+        syncSnapshot(provider: .iCloud, reason: reason)
     }
 
     func restoreRemoteSnapshot() {
-        runSyncTask(statusPrefix: "Restored") {
-            try Self.restoreRemoteSnapshot()
+        restoreRemoteSnapshot(provider: .iCloud)
+    }
+
+    func restoreRemoteSnapshot(provider: CloudSyncProvider) {
+        runProviderTask(provider: provider, statusPrefix: "Restored") {
+            try await Self.restoreRemoteSnapshot(provider: provider)
         }
     }
 
-    private func runSyncTask(statusPrefix: String, operation: @escaping () throws -> Date) {
+    func connectProvider(_ provider: CloudSyncProvider) {
+        guard provider.requiresAccountConnection else { return }
         guard !isSyncing else { return }
-        guard ExperimentalFeatureState.isEnabledAtLaunch,
-              UserDefaults.standard.bool(forKey: ExperimentalFeatureState.iCloudSyncEnabledKey) else {
-            lastStatusMessage = "Enable experimental iCloud sync first."
-            return
-        }
-        guard ExperimentalCloudSyncAvailability.current.isAvailable else {
-            lastStatusMessage = ExperimentalCloudSyncAvailability.current.statusMessage
-            return
-        }
 
         isSyncing = true
+        activeProvider = provider
+        setStatus("Connecting to \(provider.displayName)...", for: provider)
+
         Task {
             do {
-                let date = try operation()
-                self.lastSyncDate = date
-                self.lastStatusMessage = "\(statusPrefix) \(Self.relativeSyncTime(for: date))"
-                self.isSyncing = false
+                let token = try await authorize(provider: provider)
+                try CloudSyncTokenStore.save(token, for: provider)
+                UserDefaults.standard.set(true, forKey: provider.syncEnabledKey)
+                connectionStateVersion += 1
+
+                let date = try await Self.reconcileSnapshot(provider: provider, reason: "connected")
+                completeProviderTask(provider: provider, statusPrefix: "Connected and synced", date: date)
             } catch {
-                self.lastStatusMessage = error.localizedDescription
-                self.isSyncing = false
+                failProviderTask(provider: provider, error: error)
             }
         }
     }
 
-    private static func writeLocalSnapshot(reason: String) throws -> Date {
-#if os(iOS)
-        let url = try snapshotURL()
+    func disconnectProvider(_ provider: CloudSyncProvider) {
+        guard provider.requiresAccountConnection else { return }
+        CloudSyncTokenStore.deleteToken(for: provider)
+        UserDefaults.standard.set(false, forKey: provider.syncEnabledKey)
+        connectionStateVersion += 1
+        let message = "Disconnected from \(provider.displayName)."
+        setStatus(message, for: provider)
+        lastStatusMessage = message
+    }
+
+    func isProviderConnected(_ provider: CloudSyncProvider) -> Bool {
+        switch provider {
+        case .iCloud:
+            return ExperimentalCloudSyncAvailability.current.isAvailable
+        case .googleDrive, .oneDrive:
+            _ = connectionStateVersion
+            return CloudSyncTokenStore.token(for: provider) != nil
+        }
+    }
+
+    func statusMessage(for provider: CloudSyncProvider) -> String {
+        providerStatusMessages[provider] ?? ""
+    }
+
+    func lastSyncDate(for provider: CloudSyncProvider) -> Date? {
+        providerLastSyncDates[provider]
+    }
+
+    func isBusy(_ provider: CloudSyncProvider) -> Bool {
+        isSyncing && activeProvider == provider
+    }
+
+    func canUseProvider(_ provider: CloudSyncProvider) -> Bool {
+        switch provider {
+        case .iCloud:
+            return ExperimentalCloudSyncAvailability.current.isAvailable
+        case .googleDrive, .oneDrive:
+            return isProviderConnected(provider)
+        }
+    }
+
+    private func enabledProvidersForAutomaticSync() -> [CloudSyncProvider] {
+        CloudSyncProvider.allCases.filter { provider in
+            UserDefaults.standard.bool(forKey: provider.syncEnabledKey) && canUseProvider(provider)
+        }
+    }
+
+    private func scheduleAutomaticSync() {
+        guard ExperimentalFeatureState.isEnabledAtLaunch,
+              !isSyncing,
+              !enabledProvidersForAutomaticSync().isEmpty else {
+            return
+        }
+
+        pendingAutomaticSyncTask?.cancel()
+        pendingAutomaticSyncTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.syncOnActivationIfNeeded(reason: "local-change")
+        }
+    }
+
+    private func enabledProvidersForManualSync() -> [CloudSyncProvider] {
+        let providers = enabledProvidersForAutomaticSync()
+        if providers.isEmpty {
+            lastStatusMessage = "Enable at least one cloud sync provider first."
+        }
+        return providers
+    }
+
+    private func syncProviders(_ providers: [CloudSyncProvider], reason: String) {
+        guard !providers.isEmpty, !isSyncing else { return }
+        lastAutomaticSync = Date()
+        isSyncing = true
+        activeProvider = nil
+
+        Task {
+            var syncedCount = 0
+            var lastDate: Date?
+
+            for provider in providers {
+                activeProvider = provider
+                do {
+                    let date = try await Self.reconcileSnapshot(provider: provider, reason: reason)
+                    syncedCount += 1
+                    lastDate = date
+                    setStatus("Synced \(Self.relativeSyncTime(for: date))", for: provider)
+                    providerLastSyncDates[provider] = date
+                } catch {
+                    setStatus(error.localizedDescription, for: provider)
+                }
+            }
+
+            activeProvider = nil
+            isSyncing = false
+            if let lastDate, syncedCount > 0 {
+                lastSyncDate = lastDate
+                lastStatusMessage = syncedCount == 1
+                    ? "Synced 1 provider \(Self.relativeSyncTime(for: lastDate))"
+                    : "Synced \(syncedCount) providers \(Self.relativeSyncTime(for: lastDate))"
+            } else {
+                lastStatusMessage = "Cloud sync could not complete."
+            }
+        }
+    }
+
+    private func runProviderTask(
+        provider: CloudSyncProvider,
+        statusPrefix: String,
+        operation: @escaping () async throws -> Date
+    ) {
+        guard !isSyncing else { return }
+        guard UserDefaults.standard.bool(forKey: provider.syncEnabledKey) else {
+            setStatus("Enable \(provider.displayName) sync first.", for: provider)
+            return
+        }
+        guard canUseProvider(provider) else {
+            setStatus(unavailableMessage(for: provider), for: provider)
+            return
+        }
+
+        isSyncing = true
+        activeProvider = provider
+        lastAutomaticSync = Date()
+
+        Task {
+            do {
+                let date = try await operation()
+                completeProviderTask(provider: provider, statusPrefix: statusPrefix, date: date)
+            } catch {
+                failProviderTask(provider: provider, error: error)
+            }
+        }
+    }
+
+    private func completeProviderTask(provider: CloudSyncProvider, statusPrefix: String, date: Date) {
+        let message = "\(statusPrefix) \(Self.relativeSyncTime(for: date))"
+        providerLastSyncDates[provider] = date
+        setStatus(message, for: provider)
+        lastSyncDate = date
+        lastStatusMessage = "\(provider.displayName): \(message)"
+        activeProvider = nil
+        isSyncing = false
+    }
+
+    private func failProviderTask(provider: CloudSyncProvider, error: Error) {
+        setStatus(error.localizedDescription, for: provider)
+        lastStatusMessage = "\(provider.displayName): \(error.localizedDescription)"
+        activeProvider = nil
+        isSyncing = false
+    }
+
+    private func setStatus(_ message: String, for provider: CloudSyncProvider) {
+        providerStatusMessages[provider] = message
+    }
+
+    private func unavailableMessage(for provider: CloudSyncProvider) -> String {
+        switch provider {
+        case .iCloud:
+            return ExperimentalCloudSyncAvailability.current.statusMessage
+        case .googleDrive, .oneDrive:
+            return "Connect \(provider.displayName) first."
+        }
+    }
+
+    private func authorize(provider: CloudSyncProvider) async throws -> CloudSyncToken {
+        let configuration = try Self.oauthConfiguration(for: provider)
+        let verifier = try Self.randomPKCEString(length: 64)
+        let challenge = Self.codeChallenge(for: verifier)
+        let state = try Self.randomPKCEString(length: 40)
+        let callbackURL = try await openAuthorizationSession(
+            provider: provider,
+            configuration: configuration,
+            challenge: challenge,
+            state: state
+        )
+        let parameters = Self.callbackParameters(from: callbackURL)
+
+        guard parameters["state"] == state else {
+            throw SyncError.authorizationFailed("The \(provider.displayName) sign-in response could not be verified.")
+        }
+        if let errorDescription = parameters["error_description"] ?? parameters["error"] {
+            throw SyncError.authorizationFailed(errorDescription)
+        }
+        guard let code = parameters["code"], !code.isEmpty else {
+            throw SyncError.authorizationFailed("No authorization code was returned by \(provider.displayName).")
+        }
+
+        return try await Self.exchangeAuthorizationCode(
+            code,
+            verifier: verifier,
+            configuration: configuration,
+            provider: provider
+        )
+    }
+
+    private func openAuthorizationSession(
+        provider: CloudSyncProvider,
+        configuration: OAuthConfiguration,
+        challenge: String,
+        state: String
+    ) async throws -> URL {
+        let authURL = try Self.authorizationURL(
+            provider: provider,
+            configuration: configuration,
+            challenge: challenge,
+            state: state
+        )
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let session = ASWebAuthenticationSession(
+                url: authURL,
+                callbackURLScheme: configuration.callbackScheme
+            ) { [weak self] callbackURL, error in
+                Task { @MainActor in
+                    self?.authenticationSession = nil
+                }
+
+                if let callbackURL {
+                    continuation.resume(returning: callbackURL)
+                } else if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(throwing: SyncError.authorizationFailed("Sign-in was cancelled."))
+                }
+            }
+
+            session.presentationContextProvider = authPresentationContextProvider
+            session.prefersEphemeralWebBrowserSession = false
+            authenticationSession = session
+
+            if !session.start() {
+                authenticationSession = nil
+                continuation.resume(throwing: SyncError.authorizationFailed("Could not open \(provider.displayName) sign-in."))
+            }
+        }
+    }
+
+    private static func reconcileSnapshot(provider: CloudSyncProvider, reason: String) async throws -> Date {
+        guard let metadata = try await remoteMetadata(provider: provider) else {
+            return try await writeLocalSnapshot(provider: provider, reason: reason)
+        }
+
+        if hasUnseenRemoteSnapshot(metadata: metadata, provider: provider) {
+            Logger.shared.log("Experimental cloud snapshot restoring newer remote provider=\(provider.rawValue) reason=\(reason)", type: "CloudSync")
+            return try await restoreRemoteSnapshot(provider: provider)
+        }
+
+        return try await writeLocalSnapshot(provider: provider, reason: reason)
+    }
+
+    private static func writeLocalSnapshot(provider: CloudSyncProvider, reason: String) async throws -> Date {
         guard let data = BackupManager.shared.createExperimentalCloudSnapshotData() else {
             throw SyncError.snapshotEncodingFailed
         }
-        try data.write(to: url, options: .atomic)
-        markRemoteSnapshotSeen(at: url, fallbackDate: Date())
-        Logger.shared.log("Experimental iCloud snapshot pushed reason=\(reason) bytes=\(data.count)", type: "iCloud")
+
+        let metadata: RemoteSnapshotMetadata
+        switch provider {
+        case .iCloud:
+            metadata = try writeICloudSnapshot(data: data)
+        case .googleDrive:
+            metadata = try await writeGoogleDriveSnapshot(data: data)
+        case .oneDrive:
+            metadata = try await writeOneDriveSnapshot(data: data)
+        }
+
+        markRemoteSnapshotSeen(provider: provider, fallbackDate: metadata.modifiedAt ?? Date())
+        Logger.shared.log("Experimental cloud snapshot pushed provider=\(provider.rawValue) reason=\(reason) bytes=\(data.count)", type: "CloudSync")
         return Date()
-#else
-        throw SyncError.unavailable
-#endif
     }
 
-    private static func reconcileSnapshot(reason: String) throws -> Date {
-#if os(iOS)
-        let url = try snapshotURL()
-        if hasUnseenRemoteSnapshot(at: url) {
-            Logger.shared.log("Experimental iCloud snapshot restoring newer remote reason=\(reason)", type: "iCloud")
-            return try restoreRemoteSnapshot()
-        }
-        return try writeLocalSnapshot(reason: reason)
-#else
-        throw SyncError.unavailable
-#endif
-    }
+    private static func restoreRemoteSnapshot(provider: CloudSyncProvider) async throws -> Date {
+        let data: Data
+        let modifiedAt: Date?
 
-    private static func restoreRemoteSnapshot() throws -> Date {
-#if os(iOS)
-        let url = try snapshotURL()
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            throw SyncError.noSnapshot
+        switch provider {
+        case .iCloud:
+            let snapshot = try readICloudSnapshot()
+            data = snapshot.data
+            modifiedAt = snapshot.modifiedAt
+        case .googleDrive:
+            let snapshot = try await readGoogleDriveSnapshot()
+            data = snapshot.data
+            modifiedAt = snapshot.modifiedAt
+        case .oneDrive:
+            let snapshot = try await readOneDriveSnapshot()
+            data = snapshot.data
+            modifiedAt = snapshot.modifiedAt
         }
-        let data = try Data(contentsOf: url)
-        guard BackupManager.shared.restoreExperimentalCloudSnapshot(from: data) else {
+
+        let didRestore: Bool
+        if provider == .iCloud, #available(iOS 17.0, *) {
+            didRestore = MediaStateSyncManager.shared.performLegacySnapshotRestorePreservingMediaState {
+                BackupManager.shared.restoreExperimentalCloudSnapshot(
+                    from: data,
+                    preserveMediaStateForCloudKit: provider == .iCloud
+                )
+            }
+        } else {
+            didRestore = BackupManager.shared.restoreExperimentalCloudSnapshot(
+                from: data,
+                preserveMediaStateForCloudKit: provider == .iCloud
+            )
+        }
+        guard didRestore else {
             throw SyncError.snapshotRestoreFailed
         }
-        markRemoteSnapshotSeen(at: url, fallbackDate: Date())
-        Logger.shared.log("Experimental iCloud snapshot restored bytes=\(data.count)", type: "iCloud")
+
+        markRemoteSnapshotSeen(provider: provider, fallbackDate: modifiedAt ?? Date())
+        Logger.shared.log("Experimental cloud snapshot restored provider=\(provider.rawValue) bytes=\(data.count)", type: "CloudSync")
         return Date()
-#else
-        throw SyncError.unavailable
-#endif
     }
 
-#if os(iOS)
-    private static func snapshotURL() throws -> URL {
+    private static func remoteMetadata(provider: CloudSyncProvider) async throws -> RemoteSnapshotMetadata? {
+        switch provider {
+        case .iCloud:
+            return try iCloudMetadata()
+        case .googleDrive:
+            return try await googleDriveMetadata()
+        case .oneDrive:
+            return try await oneDriveMetadata()
+        }
+    }
+
+    private static func iCloudSnapshotURL() throws -> URL {
         guard let container = FileManager.default.url(forUbiquityContainerIdentifier: nil) else {
-            throw SyncError.unavailable
+            throw SyncError.unavailable(.iCloud)
         }
 
         let documents = container.appendingPathComponent("Documents", isDirectory: true)
@@ -870,26 +1402,427 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         return documents.appendingPathComponent(snapshotFileName)
     }
 
-    private static func hasUnseenRemoteSnapshot(at url: URL) -> Bool {
-        guard FileManager.default.fileExists(atPath: url.path),
-              let modificationDate = remoteModificationDate(at: url) else {
-            return false
+    private static func iCloudMetadata() throws -> RemoteSnapshotMetadata? {
+        let url = try iCloudSnapshotURL()
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            return nil
         }
-
-        let lastSeen = UserDefaults.standard.double(forKey: lastSeenRemoteModificationKey)
-        guard lastSeen > 0 else { return true }
-        return modificationDate.timeIntervalSince1970 > lastSeen + 1
+        return RemoteSnapshotMetadata(id: nil, modifiedAt: remoteModificationDate(at: url))
     }
 
-    private static func markRemoteSnapshotSeen(at url: URL, fallbackDate: Date) {
-        let modificationDate = remoteModificationDate(at: url) ?? fallbackDate
-        UserDefaults.standard.set(modificationDate.timeIntervalSince1970, forKey: lastSeenRemoteModificationKey)
+    private static func writeICloudSnapshot(data: Data) throws -> RemoteSnapshotMetadata {
+        let url = try iCloudSnapshotURL()
+        try data.write(to: url, options: .atomic)
+        return RemoteSnapshotMetadata(id: nil, modifiedAt: remoteModificationDate(at: url))
+    }
+
+    private static func readICloudSnapshot() throws -> RemoteSnapshot {
+        let url = try iCloudSnapshotURL()
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw SyncError.noSnapshot(.iCloud)
+        }
+        return RemoteSnapshot(data: try Data(contentsOf: url), modifiedAt: remoteModificationDate(at: url))
     }
 
     private static func remoteModificationDate(at url: URL) -> Date? {
         (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate]) as? Date
     }
+
+    private static func googleDriveMetadata() async throws -> RemoteSnapshotMetadata? {
+        let accessToken = try await accessToken(for: .googleDrive)
+        var components = URLComponents(string: "https://www.googleapis.com/drive/v3/files")!
+        components.queryItems = [
+            URLQueryItem(name: "spaces", value: "appDataFolder"),
+            URLQueryItem(name: "pageSize", value: "1"),
+            URLQueryItem(name: "fields", value: "files(id,modifiedTime)"),
+            URLQueryItem(name: "q", value: "name = '\(snapshotFileName)' and 'appDataFolder' in parents and trashed = false")
+        ]
+
+        var request = URLRequest(url: components.url!)
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+
+        let data = try await validatedData(for: request, provider: .googleDrive)
+        let response = try JSONDecoder().decode(GoogleDriveListResponse.self, from: data)
+        guard let file = response.files.first else { return nil }
+        return RemoteSnapshotMetadata(id: file.id, modifiedAt: parseRemoteDate(file.modifiedTime))
+    }
+
+    private static func writeGoogleDriveSnapshot(data: Data) async throws -> RemoteSnapshotMetadata {
+        let accessToken = try await accessToken(for: .googleDrive)
+        let existing = try await googleDriveMetadata()
+
+        if let fileID = existing?.id, !fileID.isEmpty {
+            var components = URLComponents(string: "https://www.googleapis.com/upload/drive/v3/files/\(fileID)")!
+            components.queryItems = [
+                URLQueryItem(name: "uploadType", value: "media"),
+                URLQueryItem(name: "fields", value: "id,modifiedTime")
+            ]
+
+            var request = URLRequest(url: components.url!)
+            request.httpMethod = "PATCH"
+            request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = data
+
+            let responseData = try await validatedData(for: request, provider: .googleDrive)
+            let file = try JSONDecoder().decode(GoogleDriveFile.self, from: responseData)
+            return RemoteSnapshotMetadata(id: file.id, modifiedAt: parseRemoteDate(file.modifiedTime))
+        }
+
+        let boundary = "EclipseCloudSync-\(UUID().uuidString)"
+        let metadata: [String: Any] = [
+            "name": snapshotFileName,
+            "parents": ["appDataFolder"]
+        ]
+        let metadataData = try JSONSerialization.data(withJSONObject: metadata)
+        let body = multipartBody(metadata: metadataData, fileData: data, boundary: boundary)
+
+        var components = URLComponents(string: "https://www.googleapis.com/upload/drive/v3/files")!
+        components.queryItems = [
+            URLQueryItem(name: "uploadType", value: "multipart"),
+            URLQueryItem(name: "fields", value: "id,modifiedTime")
+        ]
+
+        var request = URLRequest(url: components.url!)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("multipart/related; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.httpBody = body
+
+        let responseData = try await validatedData(for: request, provider: .googleDrive)
+        let file = try JSONDecoder().decode(GoogleDriveFile.self, from: responseData)
+        return RemoteSnapshotMetadata(id: file.id, modifiedAt: parseRemoteDate(file.modifiedTime))
+    }
+
+    private static func readGoogleDriveSnapshot() async throws -> RemoteSnapshot {
+        let accessToken = try await accessToken(for: .googleDrive)
+        guard let metadata = try await googleDriveMetadata(),
+              let fileID = metadata.id,
+              !fileID.isEmpty else {
+            throw SyncError.noSnapshot(.googleDrive)
+        }
+
+        var components = URLComponents(string: "https://www.googleapis.com/drive/v3/files/\(fileID)")!
+        components.queryItems = [URLQueryItem(name: "alt", value: "media")]
+
+        var request = URLRequest(url: components.url!)
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+
+        return RemoteSnapshot(
+            data: try await validatedData(for: request, provider: .googleDrive),
+            modifiedAt: metadata.modifiedAt
+        )
+    }
+
+    private static func oneDriveMetadata() async throws -> RemoteSnapshotMetadata? {
+        let accessToken = try await accessToken(for: .oneDrive)
+        var request = URLRequest(url: oneDriveSnapshotMetadataURL())
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+
+        guard let data = try await validatedData(for: request, provider: .oneDrive, allowNotFound: true) else {
+            return nil
+        }
+
+        let item = try JSONDecoder().decode(OneDriveItem.self, from: data)
+        return RemoteSnapshotMetadata(id: item.id, modifiedAt: parseRemoteDate(item.lastModifiedDateTime))
+    }
+
+    private static func writeOneDriveSnapshot(data: Data) async throws -> RemoteSnapshotMetadata {
+        let accessToken = try await accessToken(for: .oneDrive)
+        var request = URLRequest(url: oneDriveSnapshotContentURL())
+        request.httpMethod = "PUT"
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = data
+
+        let responseData = try await validatedData(for: request, provider: .oneDrive)
+        let item = try JSONDecoder().decode(OneDriveItem.self, from: responseData)
+        return RemoteSnapshotMetadata(id: item.id, modifiedAt: parseRemoteDate(item.lastModifiedDateTime))
+    }
+
+    private static func readOneDriveSnapshot() async throws -> RemoteSnapshot {
+        let accessToken = try await accessToken(for: .oneDrive)
+        let metadata = try await oneDriveMetadata()
+        guard metadata != nil else {
+            throw SyncError.noSnapshot(.oneDrive)
+        }
+
+        var request = URLRequest(url: oneDriveSnapshotContentURL())
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+
+        return RemoteSnapshot(
+            data: try await validatedData(for: request, provider: .oneDrive),
+            modifiedAt: metadata?.modifiedAt
+        )
+    }
+
+    private static func oneDriveSnapshotMetadataURL() -> URL {
+        URL(string: "https://graph.microsoft.com/v1.0/me/drive/special/approot:/\(snapshotFileName)")!
+    }
+
+    private static func oneDriveSnapshotContentURL() -> URL {
+        URL(string: "https://graph.microsoft.com/v1.0/me/drive/special/approot:/\(snapshotFileName):/content")!
+    }
+
+    private static func hasUnseenRemoteSnapshot(metadata: RemoteSnapshotMetadata, provider: CloudSyncProvider) -> Bool {
+        guard let modificationDate = metadata.modifiedAt else { return false }
+        let lastSeen = UserDefaults.standard.double(forKey: provider.lastSeenRemoteModificationKey)
+        guard lastSeen > 0 else { return true }
+        return modificationDate.timeIntervalSince1970 > lastSeen + 1
+    }
+
+    private static func markRemoteSnapshotSeen(provider: CloudSyncProvider, fallbackDate: Date) {
+        UserDefaults.standard.set(fallbackDate.timeIntervalSince1970, forKey: provider.lastSeenRemoteModificationKey)
+    }
+
+    private static func accessToken(for provider: CloudSyncProvider) async throws -> String {
+        guard provider.requiresAccountConnection else {
+            throw SyncError.unavailable(provider)
+        }
+        guard var token = CloudSyncTokenStore.token(for: provider) else {
+            throw SyncError.authenticationRequired(provider)
+        }
+
+        if token.expiresAt.timeIntervalSinceNow > 90 {
+            return token.accessToken
+        }
+
+        guard let refreshToken = token.refreshToken, !refreshToken.isEmpty else {
+            throw SyncError.authenticationRequired(provider)
+        }
+
+        let configuration = try oauthConfiguration(for: provider)
+        let refreshed = try await refreshAccessToken(refreshToken, currentToken: token, configuration: configuration, provider: provider)
+        token = refreshed
+        try CloudSyncTokenStore.save(token, for: provider)
+        return token.accessToken
+    }
+
+    private static func oauthConfiguration(for provider: CloudSyncProvider) throws -> OAuthConfiguration {
+        switch provider {
+        case .iCloud:
+            throw SyncError.unavailable(provider)
+        case .googleDrive:
+            return OAuthConfiguration(
+                authorizationURL: URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!,
+                tokenURL: URL(string: "https://oauth2.googleapis.com/token")!,
+                clientID: googleClientID,
+                redirectURI: "\(googleURLScheme):/oauth2redirect",
+                callbackScheme: googleURLScheme,
+                scopes: ["https://www.googleapis.com/auth/drive.appdata"],
+                additionalAuthorizationParameters: [
+                    "access_type": "offline",
+                    "prompt": "consent"
+                ]
+            )
+        case .oneDrive:
+            return OAuthConfiguration(
+                authorizationURL: URL(string: "https://login.microsoftonline.com/\(microsoftTenant)/oauth2/v2.0/authorize")!,
+                tokenURL: URL(string: "https://login.microsoftonline.com/\(microsoftTenant)/oauth2/v2.0/token")!,
+                clientID: microsoftClientID,
+                redirectURI: microsoftRedirectURI,
+                callbackScheme: "msauth.app.Eclipse.Soupy",
+                scopes: ["offline_access", "Files.ReadWrite.AppFolder"],
+                additionalAuthorizationParameters: [:]
+            )
+        }
+    }
+
+    private static func authorizationURL(
+        provider: CloudSyncProvider,
+        configuration: OAuthConfiguration,
+        challenge: String,
+        state: String
+    ) throws -> URL {
+        var components = URLComponents(url: configuration.authorizationURL, resolvingAgainstBaseURL: false)!
+        var queryItems = [
+            URLQueryItem(name: "client_id", value: configuration.clientID),
+            URLQueryItem(name: "redirect_uri", value: configuration.redirectURI),
+            URLQueryItem(name: "response_type", value: "code"),
+            URLQueryItem(name: "scope", value: configuration.scopes.joined(separator: " ")),
+            URLQueryItem(name: "state", value: state),
+            URLQueryItem(name: "code_challenge", value: challenge),
+            URLQueryItem(name: "code_challenge_method", value: "S256")
+        ]
+
+        if provider == .oneDrive {
+            queryItems.append(URLQueryItem(name: "response_mode", value: "query"))
+        }
+
+        queryItems.append(contentsOf: configuration.additionalAuthorizationParameters.map {
+            URLQueryItem(name: $0.key, value: $0.value)
+        })
+
+        components.queryItems = queryItems
+        guard let url = components.url else {
+            throw SyncError.authorizationFailed("Could not prepare \(provider.displayName) sign-in.")
+        }
+        return url
+    }
+
+    private static func exchangeAuthorizationCode(
+        _ code: String,
+        verifier: String,
+        configuration: OAuthConfiguration,
+        provider: CloudSyncProvider
+    ) async throws -> CloudSyncToken {
+        var request = URLRequest(url: configuration.tokenURL)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = formBody([
+            "client_id": configuration.clientID,
+            "code": code,
+            "code_verifier": verifier,
+            "grant_type": "authorization_code",
+            "redirect_uri": configuration.redirectURI,
+            "scope": configuration.scopes.joined(separator: " ")
+        ])
+
+        let data = try await validatedData(for: request, provider: provider)
+        let response = try JSONDecoder().decode(OAuthTokenResponse.self, from: data)
+        guard let refreshToken = response.refreshToken, !refreshToken.isEmpty else {
+            throw SyncError.authorizationFailed("\(provider.displayName) did not return a refresh token.")
+        }
+        return CloudSyncToken(
+            accessToken: response.accessToken,
+            refreshToken: refreshToken,
+            expiresAt: Date().addingTimeInterval(response.expiresIn ?? 3600)
+        )
+    }
+
+    private static func refreshAccessToken(
+        _ refreshToken: String,
+        currentToken: CloudSyncToken,
+        configuration: OAuthConfiguration,
+        provider: CloudSyncProvider
+    ) async throws -> CloudSyncToken {
+        var request = URLRequest(url: configuration.tokenURL)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        request.httpBody = formBody([
+            "client_id": configuration.clientID,
+            "refresh_token": refreshToken,
+            "grant_type": "refresh_token",
+            "scope": configuration.scopes.joined(separator: " ")
+        ])
+
+        let data = try await validatedData(for: request, provider: provider)
+        let response = try JSONDecoder().decode(OAuthTokenResponse.self, from: data)
+        return CloudSyncToken(
+            accessToken: response.accessToken,
+            refreshToken: response.refreshToken ?? currentToken.refreshToken,
+            expiresAt: Date().addingTimeInterval(response.expiresIn ?? 3600)
+        )
+    }
+
+    private static func validatedData(
+        for request: URLRequest,
+        provider: CloudSyncProvider,
+        allowNotFound: Bool = false
+    ) async throws -> Data? {
+        let (data, response) = try await URLSession.shared.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw SyncError.invalidResponse(provider)
+        }
+
+        if allowNotFound, httpResponse.statusCode == 404 {
+            return nil
+        }
+
+        guard (200..<300).contains(httpResponse.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
+            throw SyncError.remoteRequestFailed(provider, httpResponse.statusCode, body)
+        }
+
+        return data
+    }
+
+    private static func validatedData(for request: URLRequest, provider: CloudSyncProvider) async throws -> Data {
+        guard let data = try await validatedData(for: request, provider: provider, allowNotFound: false) else {
+            throw SyncError.invalidResponse(provider)
+        }
+        return data
+    }
+
+    private static func formBody(_ values: [String: String]) -> Data {
+        values
+            .map { "\(formEncode($0.key))=\(formEncode($0.value))" }
+            .joined(separator: "&")
+            .data(using: .utf8) ?? Data()
+    }
+
+    private static func formEncode(_ value: String) -> String {
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "-._~")
+        return value.addingPercentEncoding(withAllowedCharacters: allowed) ?? value
+    }
+
+    private static func callbackParameters(from url: URL) -> [String: String] {
+        var values: [String: String] = [:]
+        if let queryItems = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems {
+            queryItems.forEach { values[$0.name] = $0.value }
+        }
+        if let fragment = url.fragment,
+           let queryItems = URLComponents(string: "?\(fragment)")?.queryItems {
+            queryItems.forEach { values[$0.name] = $0.value }
+        }
+        return values
+    }
+
+    private static func randomPKCEString(length: Int) throws -> String {
+        let characters = Array("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
+        var bytes = [UInt8](repeating: 0, count: length)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        guard status == errSecSuccess else {
+            throw SyncError.authorizationFailed("Could not prepare sign-in security data.")
+        }
+        return String(bytes.map { characters[Int($0) % characters.count] })
+    }
+
+    private static func codeChallenge(for verifier: String) -> String {
+#if canImport(CryptoKit)
+        let digest = SHA256.hash(data: Data(verifier.utf8))
+        return base64URLEncoded(Data(digest))
+#else
+        return verifier
 #endif
+    }
+
+    private static func base64URLEncoded(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private static func multipartBody(metadata: Data, fileData: Data, boundary: String) -> Data {
+        var body = Data()
+        append("--\(boundary)\r\n", to: &body)
+        append("Content-Type: application/json; charset=UTF-8\r\n\r\n", to: &body)
+        body.append(metadata)
+        append("\r\n--\(boundary)\r\n", to: &body)
+        append("Content-Type: application/json\r\n\r\n", to: &body)
+        body.append(fileData)
+        append("\r\n--\(boundary)--\r\n", to: &body)
+        return body
+    }
+
+    private static func append(_ string: String, to data: inout Data) {
+        data.append(string.data(using: .utf8) ?? Data())
+    }
+
+    private static func parseRemoteDate(_ value: String?) -> Date? {
+        guard let value else { return nil }
+        let fractionalFormatter = ISO8601DateFormatter()
+        fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractionalFormatter.date(from: value) {
+            return date
+        }
+
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: value)
+    }
 
     private static func relativeSyncTime(for date: Date) -> String {
         let formatter = RelativeDateTimeFormatter()
@@ -897,27 +1830,154 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         return formatter.localizedString(for: date, relativeTo: Date())
     }
 
+    private struct OAuthConfiguration {
+        let authorizationURL: URL
+        let tokenURL: URL
+        let clientID: String
+        let redirectURI: String
+        let callbackScheme: String
+        let scopes: [String]
+        let additionalAuthorizationParameters: [String: String]
+    }
+
+    private struct OAuthTokenResponse: Decodable {
+        let accessToken: String
+        let refreshToken: String?
+        let expiresIn: TimeInterval?
+
+        enum CodingKeys: String, CodingKey {
+            case accessToken = "access_token"
+            case refreshToken = "refresh_token"
+            case expiresIn = "expires_in"
+        }
+    }
+
+    fileprivate struct CloudSyncToken: Codable {
+        let accessToken: String
+        let refreshToken: String?
+        let expiresAt: Date
+    }
+
+    private struct RemoteSnapshotMetadata {
+        let id: String?
+        let modifiedAt: Date?
+    }
+
+    private struct RemoteSnapshot {
+        let data: Data
+        let modifiedAt: Date?
+    }
+
+    private struct GoogleDriveListResponse: Decodable {
+        let files: [GoogleDriveFile]
+    }
+
+    private struct GoogleDriveFile: Decodable {
+        let id: String
+        let modifiedTime: String?
+    }
+
+    private struct OneDriveItem: Decodable {
+        let id: String?
+        let lastModifiedDateTime: String?
+    }
+
     private enum SyncError: LocalizedError {
-        case unavailable
-        case noSnapshot
+        case unavailable(CloudSyncProvider)
+        case authenticationRequired(CloudSyncProvider)
+        case noSnapshot(CloudSyncProvider)
         case snapshotEncodingFailed
         case snapshotRestoreFailed
+        case authorizationFailed(String)
+        case invalidResponse(CloudSyncProvider)
+        case remoteRequestFailed(CloudSyncProvider, Int, String)
 
         var errorDescription: String? {
             switch self {
-            case .unavailable:
-                return "iCloud is unavailable for this build or account."
-            case .noSnapshot:
-                return "No iCloud snapshot was found."
+            case .unavailable(let provider):
+                return "\(provider.displayName) is unavailable for this build or account."
+            case .authenticationRequired(let provider):
+                return "Connect \(provider.displayName) first."
+            case .noSnapshot(let provider):
+                return "No \(provider.displayName) snapshot was found."
             case .snapshotEncodingFailed:
-                return "Could not prepare a safe iCloud snapshot."
+                return "Could not prepare a safe cloud snapshot."
             case .snapshotRestoreFailed:
-                return "Could not restore the iCloud snapshot."
+                return "Could not restore the cloud snapshot."
+            case .authorizationFailed(let message):
+                return message
+            case .invalidResponse(let provider):
+                return "\(provider.displayName) returned an invalid response."
+            case .remoteRequestFailed(let provider, let statusCode, let message):
+                let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+                if trimmed.isEmpty {
+                    return "\(provider.displayName) request failed with HTTP \(statusCode)."
+                }
+                return "\(provider.displayName) request failed with HTTP \(statusCode): \(trimmed)"
             }
         }
     }
 }
 
+private final class CloudSyncAuthPresentationContextProvider: NSObject, ASWebAuthenticationPresentationContextProviding {
+    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap { $0.windows }
+            .first { $0.isKeyWindow } ?? ASPresentationAnchor()
+    }
+}
+
+private enum CloudSyncTokenStore {
+    private static let service = "app.Eclipse.Soupy.cloud-sync"
+
+    static func token(for provider: CloudSyncProvider) -> ExperimentalCloudSyncManager.CloudSyncToken? {
+        var query = baseQuery(for: provider)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess,
+              let data = result as? Data else {
+            return nil
+        }
+
+        return try? JSONDecoder().decode(ExperimentalCloudSyncManager.CloudSyncToken.self, from: data)
+    }
+
+    static func save(_ token: ExperimentalCloudSyncManager.CloudSyncToken, for provider: CloudSyncProvider) throws {
+        let data = try JSONEncoder().encode(token)
+        var query = baseQuery(for: provider)
+        query[kSecValueData as String] = data
+        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+
+        SecItemDelete(baseQuery(for: provider) as CFDictionary)
+        let status = SecItemAdd(query as CFDictionary, nil)
+        guard status == errSecSuccess else {
+            throw NSError(
+                domain: NSOSStatusErrorDomain,
+                code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: "Could not store \(provider.displayName) credentials in Keychain."]
+            )
+        }
+    }
+
+    static func deleteToken(for provider: CloudSyncProvider) {
+        SecItemDelete(baseQuery(for: provider) as CFDictionary)
+    }
+
+    private static func baseQuery(for provider: CloudSyncProvider) -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: provider.rawValue
+        ]
+    }
+}
+#endif
+
+#if !os(tvOS)
 struct ExperimentalMPVPreloadCachedStarter {
     let data: Data
     let contentType: String?
@@ -1033,24 +2093,19 @@ final class ExperimentalMPVPreloadManager {
         }
 
         let key = cacheKey(for: url, headers: headers)
-        lock.lock()
-        if activeKeys.contains(key) {
-            lock.unlock()
+        guard reserveActiveKey(key) else {
             Logger.shared.log("MPV warmup coalesced for \(safeLabel) target=\(logURLSummary(url)) headerKeys=[\(headerKeys)]", type: "MPV")
             return
         }
-        activeKeys.insert(key)
-        lock.unlock()
 
         Logger.shared.log("MPV warmup started for \(safeLabel) target=\(logURLSummary(url)) key=\(String(key.prefix(8))) headerKeys=[\(headerKeys)] limitBytes=\(currentCacheLimitBytes())", type: "MPV")
 
-        Task.detached(priority: .utility) { [weak self] in
+        Task.detached(priority: .utility) { [self] in
             defer {
-                self?.lock.lock()
-                self?.activeKeys.remove(key)
-                self?.lock.unlock()
+                releaseActiveKey(key)
             }
-            await self?.writeStarterCache(url: url, headers: headers, key: key, label: label)
+            guard !Task.isCancelled else { return }
+            await writeStarterCache(url: url, headers: headers, key: key, label: label)
         }
     }
 
@@ -1058,6 +2113,14 @@ final class ExperimentalMPVPreloadManager {
         let key = cacheKey(for: url, headers: headers)
         let dataURL = starterURL(forKey: key)
         let metadataURL = starterMetadataURL(forKey: key)
+
+        // Reserve only this cache key while validating its data/metadata pair.
+        // The global lock protects the reservation itself, never the JSON
+        // decode or the (up to 8 MiB) disk read. A writer for this same key is
+        // therefore excluded without serializing unrelated cache I/O or
+        // blocking player startup behind another key's disk access.
+        guard reserveActiveKey(key) else { return nil }
+        defer { releaseActiveKey(key) }
 
         guard let metadata = try? JSONDecoder().decode(StarterMetadata.self, from: Data(contentsOf: metadataURL)),
               Date().timeIntervalSince1970 - metadata.storedAt <= maxStarterAge,
@@ -1078,21 +2141,56 @@ final class ExperimentalMPVPreloadManager {
         )
     }
 
-    func cachedStarter(for url: URL, headers: [String: String]?, waitUpTo timeout: TimeInterval) async -> ExperimentalMPVPreloadCachedStarter? {
-        if let starter = cachedStarter(for: url, headers: headers) {
-            return starter
+    func cachedStarter(
+        for url: URL,
+        headers: [String: String]?,
+        waitForActiveWarmupUpTo timeout: TimeInterval
+    ) async -> ExperimentalMPVPreloadCachedStarter? {
+        let key = cacheKey(for: url, headers: headers)
+        guard isActiveKey(key), timeout > 0 else {
+            // Ordinary misses must not inherit the warmup grace period. Read the cache once and
+            // let playback continue immediately unless this exact URL/header key is being staged.
+            return cachedStarter(for: url, headers: headers)
         }
 
-        guard timeout > 0 else { return nil }
+        let waitStartedAt = Date()
         let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            try? await Task.sleep(nanoseconds: 50_000_000)
-            if let starter = cachedStarter(for: url, headers: headers) {
-                Logger.shared.log("MPV warmup cache became available target=\(logURLSummary(url)) waitMs=\(Int(timeout * 1000)) bytes=\(starter.data.count)", type: "MPV")
-                return starter
+        while isActiveKey(key), Date() < deadline {
+            do {
+                try await Task.sleep(nanoseconds: 25_000_000)
+            } catch {
+                return nil
             }
         }
-        return nil
+
+        // A timed-out warmup may be between its two atomic file writes. Do not inspect (and
+        // potentially invalidate) that partial pair; playback can fall through while staging
+        // finishes in the background.
+        guard !Task.isCancelled, !isActiveKey(key) else { return nil }
+        let starter = cachedStarter(for: url, headers: headers)
+        if let starter {
+            let waitMilliseconds = Int(Date().timeIntervalSince(waitStartedAt) * 1_000)
+            Logger.shared.log("MPV warmup cache became available target=\(logURLSummary(url)) waitMs=\(waitMilliseconds) bytes=\(starter.data.count)", type: "MPV")
+        }
+        return starter
+    }
+
+    private func reserveActiveKey(_ key: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return activeKeys.insert(key).inserted
+    }
+
+    private func releaseActiveKey(_ key: String) {
+        lock.lock()
+        activeKeys.remove(key)
+        lock.unlock()
+    }
+
+    private func isActiveKey(_ key: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return activeKeys.contains(key)
     }
 
     private func preloadSkipReason(for url: URL) -> String? {
@@ -1257,13 +2355,36 @@ final class ExperimentalMPVPreloadManager {
         }
 
         Logger.shared.log("MPV warmup HLS media targets count=\(targets.count) playlist=\(logURLSummary(playlistURL)) targets=[\(targets.map { logURLSummary($0) }.joined(separator: ","))]", type: "MPV")
+        var reservedTargets: [(url: URL, key: String)] = []
         for target in targets {
+            let key = cacheKey(for: target, headers: headers)
+            if reserveActiveKey(key) {
+                reservedTargets.append((url: target, key: key))
+            } else {
+                Logger.shared.log("MPV warmup coalesced for \(label) HLS media target=\(logURLSummary(target))", type: "MPV")
+            }
+        }
+
+        // Reserve the map and first segment together before either fetch begins. MPV commonly asks
+        // for both back-to-back, so the second key must already be visible to the proxy while the
+        // first target is still downloading.
+        var pendingKeys = Set(reservedTargets.map { $0.key })
+        defer {
+            for key in pendingKeys {
+                releaseActiveKey(key)
+            }
+        }
+
+        for target in reservedTargets {
+            guard !Task.isCancelled else { return }
             await writeStarterCache(
-                url: target,
+                url: target.url,
                 headers: headers,
-                key: cacheKey(for: target, headers: headers),
+                key: target.key,
                 label: "\(label) HLS media"
             )
+            pendingKeys.remove(target.key)
+            releaseActiveKey(target.key)
         }
     }
 
@@ -1495,45 +2616,63 @@ final class ExperimentalMPVPreloadManager {
 
     private func freeDiskBytes() -> Int64 {
         let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+#if os(tvOS)
+        let attributes = try? fileManager.attributesOfFileSystem(forPath: caches.path)
+        return (attributes?[.systemFreeSize] as? NSNumber)?.int64Value ?? 0
+#else
         let values = try? caches.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
         return values?.volumeAvailableCapacityForImportantUsage ?? 0
+#endif
     }
 }
+#endif
 
 class Settings: ObservableObject {
     static let shared = Settings()
-    
+
     @Published var accentColor: Color {
         didSet {
             saveAccentColor(accentColor)
         }
     }
+#if !os(tvOS)
     @Published var readerAccentColor: Color {
         didSet {
             saveReaderAccentColor(readerAccentColor)
         }
     }
+#endif
     @Published var selectedAppearance: Appearance {
         didSet {
             UserDefaults.standard.set(selectedAppearance.rawValue, forKey: "selectedAppearance")
             updateAppearance()
         }
     }
+#if !os(tvOS)
     @Published var readerSelectedAppearance: Appearance {
         didSet {
             UserDefaults.standard.set(readerSelectedAppearance.rawValue, forKey: "readerSelectedAppearance")
             updateAppearance()
         }
     }
+#endif
 
     var effectiveAccentColor: Color {
+#if os(tvOS)
+        accentColor
+#else
         UserDefaults.standard.bool(forKey: "showKanzen") && !EclipseTheme.shared.globalAppearanceEnabled ? readerAccentColor : accentColor
+#endif
     }
 
     var effectiveAppearance: Appearance {
+#if os(tvOS)
+        selectedAppearance
+#else
         UserDefaults.standard.bool(forKey: "showKanzen") && !EclipseTheme.shared.globalAppearanceEnabled ? readerSelectedAppearance : selectedAppearance
+#endif
     }
-    
+
     // In-App Player Settings
     private func migratedBool(genericKey: String, legacyKey: String, defaultValue: Bool) -> Bool {
         if UserDefaults.standard.object(forKey: genericKey) == nil {
@@ -1563,15 +2702,20 @@ class Settings: ObservableObject {
         get { UserDefaults.standard.bool(forKey: "enableSubtitlesByDefault") }
         set { UserDefaults.standard.set(newValue, forKey: "enableSubtitlesByDefault") }
     }
-    
+
     var defaultSubtitleLanguage: String {
         get { UserDefaults.standard.string(forKey: "defaultSubtitleLanguage") ?? "eng" }
         set { UserDefaults.standard.set(newValue, forKey: "defaultSubtitleLanguage") }
     }
-    
+
     var preferredAnimeAudioLanguage: String {
         get { UserDefaults.standard.string(forKey: "preferredAnimeAudioLanguage") ?? "jpn" }
         set { UserDefaults.standard.set(newValue, forKey: "preferredAnimeAudioLanguage") }
+    }
+
+    var preferredAutoAudioLanguage: String {
+        get { UserDefaults.standard.string(forKey: "preferredAutoAudioLanguage") ?? "eng" }
+        set { UserDefaults.standard.set(newValue, forKey: "preferredAutoAudioLanguage") }
     }
 
     var playerBrightnessGestureEnabled: Bool {
@@ -1642,13 +2786,11 @@ class Settings: ObservableObject {
 
     var mpvRenderBackend: MPVRenderBackend {
         get {
-            let raw = UserDefaults.standard.string(forKey: "mpvRenderBackend")
-                ?? MPVRenderBackend.defaultBackend.rawValue
-            let requested = MPVRenderBackend(rawValue: raw) ?? .defaultBackend
-            return MPVRenderBackendSupport.effectiveBackend(requested: requested, hasMetalDevice: true)
+            UserDefaults.standard.set(MPVRenderBackend.defaultBackend.rawValue, forKey: "mpvRenderBackend")
+            return .defaultBackend
         }
         set {
-            UserDefaults.standard.set(newValue.rawValue, forKey: "mpvRenderBackend")
+            UserDefaults.standard.set(MPVRenderBackend.defaultBackend.rawValue, forKey: "mpvRenderBackend")
         }
     }
 
@@ -1663,7 +2805,7 @@ class Settings: ObservableObject {
         }
     }
 
-    /// gpu-next upscaling/deband shader mode (Off / Auto / Upscale by one level). Read by the
+    /// gpu-next upscaling/deband shader mode. Read by the
     /// MoltenVK inline renderer; independent of `mpvMetalQualityProfile` (heat). Off by default.
     var mpvUpscalingMode: MPVUpscalingMode {
         get {
@@ -1754,6 +2896,11 @@ class Settings: ObservableObject {
         }
     }
 
+    var watchTogetherEnabled: Bool {
+        get { WatchTogetherSettings.isEnabled() }
+        set { UserDefaults.standard.set(newValue, forKey: WatchTogetherSettings.enabledKey) }
+    }
+
     var smartInAppPlayerChoosingEnabled: Bool {
         get { false }
         set { UserDefaults.standard.set(false, forKey: "smartInAppPlayerChoosingEnabled") }
@@ -1770,11 +2917,11 @@ class Settings: ObservableObject {
         }
         set { UserDefaults.standard.set(newValue, forKey: "playerSubtitleAppearanceEnabled") }
     }
-    
+
     enum PlayerChoice: String {
         case mpv
     }
-    
+
     var playerChoice: PlayerChoice {
         get {
             let normalized = Self.normalizedInAppPlayer(UserDefaults.standard.string(forKey: "inAppPlayer"))
@@ -1787,7 +2934,7 @@ class Settings: ObservableObject {
             UserDefaults.standard.set("mpv", forKey: "inAppPlayer")
         }
     }
-    
+
     init() {
         let resolvedAccentColor: Color
         if let colorData = UserDefaults.standard.data(forKey: "accentColor"),
@@ -1797,12 +2944,14 @@ class Settings: ObservableObject {
             resolvedAccentColor = .accentColor
         }
         self.accentColor = resolvedAccentColor
+#if !os(tvOS)
         if let colorData = UserDefaults.standard.data(forKey: "readerAccentColor"),
            let uiColor = try? NSKeyedUnarchiver.unarchivedObject(ofClass: UIColor.self, from: colorData) {
             self.readerAccentColor = Color(uiColor)
         } else {
             self.readerAccentColor = resolvedAccentColor
         }
+#endif
         let resolvedAppearance: Appearance
         if let appearanceRawValue = UserDefaults.standard.string(forKey: "selectedAppearance"),
            let appearance = Appearance(rawValue: appearanceRawValue) {
@@ -1811,26 +2960,33 @@ class Settings: ObservableObject {
             resolvedAppearance = .system
         }
         self.selectedAppearance = resolvedAppearance
+#if !os(tvOS)
         if let appearanceRawValue = UserDefaults.standard.string(forKey: "readerSelectedAppearance"),
            let appearance = Appearance(rawValue: appearanceRawValue) {
             self.readerSelectedAppearance = appearance
         } else {
             self.readerSelectedAppearance = resolvedAppearance
         }
+#endif
         updateAppearance()
     }
-    
+
     private func saveAccentColor(_ color: Color) {
-        
+
         let uiColor = UIColor(color)
         do {
             let colorData = try NSKeyedArchiver.archivedData(withRootObject: uiColor, requiringSecureCoding: false)
             UserDefaults.standard.set(colorData, forKey: "accentColor")
         } catch {
+#if os(tvOS)
+            Logger.shared.log("Failed to save accent color: \(error.localizedDescription)", type: "Settings")
+#else
             ReaderLogger.shared.log("Failed to save accent color: \(error.localizedDescription)")
+#endif
         }
     }
 
+#if !os(tvOS)
     private func saveReaderAccentColor(_ color: Color) {
         let uiColor = UIColor(color)
         do {
@@ -1840,7 +2996,8 @@ class Settings: ObservableObject {
             ReaderLogger.shared.log("Failed to save reader accent color: \(error.localizedDescription)")
         }
     }
-    
+#endif
+
     func updateAppearance() {
         guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
         switch effectiveAppearance {

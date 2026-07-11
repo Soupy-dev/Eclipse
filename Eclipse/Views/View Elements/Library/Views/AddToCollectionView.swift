@@ -7,6 +7,14 @@ struct AddToCollectionView: View {
     @StateObject private var accentColorManager = AccentColorManager.shared
     @ObservedObject private var libraryManager = LibraryManager.shared
     @State private var showingCreateSheet = false
+#if os(tvOS)
+    private enum TVFocus: Hashable {
+        case collection(UUID)
+        case create
+    }
+
+    @FocusState private var tvFocus: TVFocus?
+#endif
     
     var item: LibraryItem { LibraryItem(searchResult: searchResult) }
     
@@ -15,32 +23,41 @@ struct AddToCollectionView: View {
             VStack {
                 List {
                     ForEach(libraryManager.collections) { collection in
-                        HStack {
-                            Image(systemName: collection.name == "Bookmarks" ? "bookmark.fill" : "folder")
-                                .foregroundColor(collection.name == "Bookmarks" ? .yellow : .primary)
-                            VStack(alignment: .leading) {
-                                Text(collection.name)
-                                    .fontWeight(collection.name == "Bookmarks" ? .semibold : .regular)
-                                if let desc = collection.description {
-                                    Text(desc)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
+                        Button {
+                            toggleMembership(in: collection)
+                        } label: {
+                            HStack {
+                                Image(systemName: collection.name == "Bookmarks" ? "bookmark.fill" : "folder")
+                                    .foregroundColor(collection.name == "Bookmarks" ? .yellow : .primary)
+                                VStack(alignment: .leading) {
+                                    Text(collection.name)
+                                        .fontWeight(collection.name == "Bookmarks" ? .semibold : .regular)
+                                    if let desc = collection.description {
+                                        Text(desc)
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                }
+                                Spacer()
+                                if libraryManager.isItemInCollection(collection.id, item: item) {
+                                    Image(systemName: "checkmark")
+                                        .foregroundColor(accentColorManager.currentAccentColor)
                                 }
                             }
-                            Spacer()
-                            if libraryManager.isItemInCollection(collection.id, item: item) {
-                                Image(systemName: "checkmark")
-                                    .foregroundColor(accentColorManager.currentAccentColor)
-                            }
                         }
-                        .contentShape(Rectangle())
-                        .onTapGesture {
-                            if libraryManager.isItemInCollection(collection.id, item: item) {
-                                libraryManager.removeItem(from: collection.id, item: item)
-                            } else {
-                                libraryManager.addItem(to: collection.id, item: item)
-                            }
-                        }
+#if os(tvOS)
+                        .buttonStyle(.card)
+                        .focused($tvFocus, equals: .collection(collection.id))
+#else
+                        .buttonStyle(.plain)
+#endif
+                        .accessibilityLabel(collection.name)
+                        .accessibilityValue(
+                            libraryManager.isItemInCollection(collection.id, item: item)
+                                ? "Included"
+                                : "Not included"
+                        )
+                        .accessibilityHint("Toggles this title in the collection.")
                     }
                 }
                 
@@ -48,6 +65,10 @@ struct AddToCollectionView: View {
                     showingCreateSheet = true
                 }
                 .padding()
+#if os(tvOS)
+                .buttonStyle(.borderedProminent)
+                .focused($tvFocus, equals: .create)
+#endif
             }
             .navigationTitle("Add to Collection")
             .navigationBarItems(
@@ -57,6 +78,24 @@ struct AddToCollectionView: View {
         }
         .sheet(isPresented: $showingCreateSheet) {
             CreateCollectionView()
+        }
+#if os(tvOS)
+        .onAppear {
+            tvFocus = libraryManager.collections.first.map { .collection($0.id) } ?? .create
+        }
+        .onChange(of: showingCreateSheet) { _, isPresented in
+            if !isPresented {
+                tvFocus = .create
+            }
+        }
+#endif
+    }
+
+    private func toggleMembership(in collection: LibraryCollection) {
+        if libraryManager.isItemInCollection(collection.id, item: item) {
+            libraryManager.removeItem(from: collection.id, item: item)
+        } else {
+            libraryManager.addItem(to: collection.id, item: item)
         }
     }
 }

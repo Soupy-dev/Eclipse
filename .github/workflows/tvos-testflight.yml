@@ -1,0 +1,975 @@
+name: tvOS TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_number:
+        description: "tvOS CFBundleVersion. Empty uses the GitHub run number."
+        required: false
+        default: ""
+      upload:
+        description: "Validate and upload the exported tvOS IPA to App Store Connect."
+        required: true
+        type: boolean
+        default: false
+      production_cloudkit_confirmed:
+        description: "I confirmed the EclipseMediaState schema is deployed to CloudKit Production."
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tvos-testflight-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  testflight:
+    name: Test, archive, and optionally upload tvOS
+    runs-on: macos-26
+    timeout-minutes: 150
+    environment: tvos-testflight
+
+    env:
+      APP_NAME: ${{ vars.TVOS_APP_NAME || 'Eclipse' }}
+      BUNDLE_IDENTIFIER: ${{ vars.TVOS_BUNDLE_IDENTIFIER || 'app.Eclipse.Soupy' }}
+      DEVELOPMENT_TEAM: ${{ vars.TVOS_DEVELOPMENT_TEAM || 'ANMK3Y568U' }}
+      ICLOUD_CONTAINER_ID: ${{ vars.TVOS_ICLOUD_CONTAINER_ID || 'iCloud.Eclipse.Soupy' }}
+      PROJECT_PATH: Eclipse.xcodeproj
+      SCHEME: Eclipse-tvOS
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Xcode
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Validate release request and external configuration
+        env:
+          REQUEST_UPLOAD: ${{ inputs.upload }}
+          PRODUCTION_CLOUDKIT_CONFIRMED: ${{ inputs.production_cloudkit_confirmed }}
+          APP_STORE_CONNECT_API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          TVOS_DISTRIBUTION_CERTIFICATE_BASE64: ${{ secrets.TVOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
+          TVOS_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.TVOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+          TVOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.TVOS_PROVISIONING_PROFILE_BASE64 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          ANILIST_CLIENT_ID: ${{ secrets.ANILIST_CLIENT_ID }}
+          ANILIST_CLIENT_SECRET: ${{ secrets.ANILIST_CLIENT_SECRET }}
+          TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
+          TRAKT_CLIENT_SECRET: ${{ secrets.TRAKT_CLIENT_SECRET }}
+          MAL_CLIENT_ID: ${{ secrets.MAL_CLIENT_ID }}
+          MAL_CLIENT_SECRET: ${{ secrets.MAL_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+
+          if ! [[ "$BUNDLE_IDENTIFIER" =~ ^[A-Za-z0-9][A-Za-z0-9-]*(\.[A-Za-z0-9][A-Za-z0-9-]*)+$ ]]; then
+            echo "::error::TVOS_BUNDLE_IDENTIFIER '$BUNDLE_IDENTIFIER' is invalid."
+            exit 1
+          fi
+
+          if ! [[ "$DEVELOPMENT_TEAM" =~ ^[A-Z0-9]{10}$ ]]; then
+            echo "::error::TVOS_DEVELOPMENT_TEAM must be a 10-character Apple team identifier."
+            exit 1
+          fi
+
+          for name in \
+            TVOS_DISTRIBUTION_CERTIFICATE_BASE64 \
+            TVOS_DISTRIBUTION_CERTIFICATE_PASSWORD \
+            TVOS_PROVISIONING_PROFILE_BASE64 \
+            KEYCHAIN_PASSWORD \
+            TMDB_API_KEY \
+            ANILIST_CLIENT_ID \
+            ANILIST_CLIENT_SECRET \
+            TRAKT_CLIENT_ID \
+            TRAKT_CLIENT_SECRET \
+            MAL_CLIENT_ID \
+            MAL_CLIENT_SECRET
+          do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::$name is missing from the protected tvos-testflight environment."
+              exit 1
+            fi
+          done
+
+          if [[ "$REQUEST_UPLOAD" == "true" ]]; then
+            if [[ "$PRODUCTION_CLOUDKIT_CONFIRMED" != "true" ]]; then
+              echo "::error::Uploading is blocked until the EclipseMediaState schema is deployed to CloudKit Production and production_cloudkit_confirmed is checked."
+              exit 1
+            fi
+
+            for name in APP_STORE_CONNECT_API_KEY_P8 APP_STORE_CONNECT_ISSUER_ID APP_STORE_CONNECT_KEY_ID; do
+              if [[ -z "${!name:-}" ]]; then
+                echo "::error::$name is required when upload is enabled."
+                exit 1
+              fi
+            done
+          fi
+
+      - name: Resolve build number
+        env:
+          INPUT_BUILD_NUMBER: ${{ inputs.build_number }}
+        run: |
+          set -euo pipefail
+
+          BUILD_NUMBER="${INPUT_BUILD_NUMBER:-${GITHUB_RUN_NUMBER}}"
+          if ! [[ "$BUILD_NUMBER" =~ ^[0-9]+$ ]] || [[ "$BUILD_NUMBER" == "0" ]]; then
+            echo "::error::Build number must be a positive integer. Received '$BUILD_NUMBER'."
+            exit 1
+          fi
+
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+
+      - name: Create tvOS build configuration
+        env:
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          ANILIST_CLIENT_ID: ${{ secrets.ANILIST_CLIENT_ID }}
+          ANILIST_CLIENT_SECRET: ${{ secrets.ANILIST_CLIENT_SECRET }}
+          TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
+          TRAKT_CLIENT_SECRET: ${{ secrets.TRAKT_CLIENT_SECRET }}
+          MAL_CLIENT_ID: ${{ secrets.MAL_CLIENT_ID }}
+          MAL_CLIENT_SECRET: ${{ secrets.MAL_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+
+          {
+            printf 'APP_NAME = %s\n' "$APP_NAME"
+            printf 'BUNDLE_IDENTIFIER = %s\n' "$BUNDLE_IDENTIFIER"
+            printf 'DEVELOPMENT_TEAM = %s\n' "$DEVELOPMENT_TEAM"
+            printf '%s\n' 'CODE_SIGN_ENTITLEMENTS = EclipseTV/EclipseTV.entitlements'
+            printf 'ICLOUD_CONTAINER_ID = %s\n' "$ICLOUD_CONTAINER_ID"
+            printf '%s\n' 'ICLOUD_CONTAINER_ENVIRONMENT = Production'
+            printf '%s\n' 'ECLIPSE_DISTRIBUTION_CHANNEL = TestFlight'
+            printf 'TMDB_API_KEY = %s\n' "$TMDB_API_KEY"
+            printf 'ANILIST_CLIENT_ID = %s\n' "$ANILIST_CLIENT_ID"
+            printf 'ANILIST_CLIENT_SECRET = %s\n' "$ANILIST_CLIENT_SECRET"
+            printf '%s\n' 'ANILIST_REDIRECT_URI = luna:/$()/anilist-callback'
+            printf 'TRAKT_CLIENT_ID = %s\n' "$TRAKT_CLIENT_ID"
+            printf 'TRAKT_CLIENT_SECRET = %s\n' "$TRAKT_CLIENT_SECRET"
+            printf '%s\n' 'TRAKT_REDIRECT_URI = luna:/$()/trakt-callback'
+            printf 'MAL_CLIENT_ID = %s\n' "$MAL_CLIENT_ID"
+            printf 'MAL_CLIENT_SECRET = %s\n' "$MAL_CLIENT_SECRET"
+            printf '%s\n' 'MAL_REDIRECT_URI = luna:/$()/mal-callback'
+          } > Build.local.xcconfig
+
+      - name: Audit tvOS product boundary
+        run: |
+          set -euo pipefail
+
+          test -f "Eclipse.xcodeproj/xcshareddata/xcschemes/Eclipse-tvOS.xcscheme"
+          plutil -lint EclipseTV/Info.plist EclipseTV/EclipseTV.entitlements EclipseTV/PrivacyInfo.xcprivacy
+          srcroot="$PWD"
+          project_file="$PROJECT_PATH/project.pbxproj"
+
+          python3 - "$project_file" <<'PY'
+          import json
+          import subprocess
+          import sys
+
+          project_file = sys.argv[1]
+          raw = subprocess.check_output(["plutil", "-convert", "json", "-o", "-", project_file])
+          objects = json.loads(raw)["objects"]
+
+          target_id, target = next(
+              (identifier, value)
+              for identifier, value in objects.items()
+              if value.get("isa") == "PBXNativeTarget" and value.get("name") == "Eclipse-tvOS"
+          )
+
+          source_phase = next(
+              objects[phase_id]
+              for phase_id in target.get("buildPhases", [])
+              if objects[phase_id].get("isa") == "PBXSourcesBuildPhase"
+          )
+
+          resource_phase = next(
+              objects[phase_id]
+              for phase_id in target.get("buildPhases", [])
+              if objects[phase_id].get("isa") == "PBXResourcesBuildPhase"
+          )
+
+          parents = {}
+          for group_id, group in objects.items():
+              if group.get("isa") != "PBXGroup":
+                  continue
+              for child_id in group.get("children", []):
+                  parents[child_id] = group_id
+
+          def resolved_path(file_id):
+              node = objects[file_id]
+              parts = [node.get("path") or node.get("name") or ""]
+              cursor = parents.get(file_id)
+              while cursor:
+                  group = objects[cursor]
+                  if group.get("sourceTree") == "<group>" and group.get("path"):
+                      parts.append(group["path"])
+                  cursor = parents.get(cursor)
+              return "/".join(reversed([part for part in parts if part]))
+
+          forbidden_exact = {
+              "Eclipse/Models/DownloadManager.swift",
+              "Eclipse/Models/HLSDownloader.swift",
+              "Eclipse/Models/BackupManager.swift",
+              "Eclipse/Logger/ReaderLogger.swift",
+              "Eclipse/Views/DownloadsView.swift",
+              "Eclipse/Views/DownloadedShowDetailView.swift",
+              "Eclipse/Views/SettingsView/BackupManagementView.swift",
+              "Eclipse/Views/SettingsView/ReaderLoggerView.swift",
+              "Eclipse/Views/SettingsView/StorageView.swift",
+              "Eclipse/Localizable.xcstrings",
+          }
+
+          violations = []
+          for build_file_id in source_phase.get("files", []):
+              file_id = objects[build_file_id].get("fileRef")
+              if not file_id:
+                  continue
+              path = resolved_path(file_id)
+              if path.startswith("Kanzen/") or path in forbidden_exact:
+                  violations.append(path)
+
+          resource_paths = set()
+          for build_file_id in resource_phase.get("files", []):
+              file_id = objects[build_file_id].get("fileRef")
+              if not file_id:
+                  continue
+              path = resolved_path(file_id)
+              resource_paths.add(path)
+              if path.startswith("Kanzen/") or path in forbidden_exact:
+                  violations.append(path)
+
+          if "EclipseTV/Localizable.xcstrings" not in resource_paths:
+              violations.append("missing:EclipseTV/Localizable.xcstrings")
+
+          phase_names = {objects[phase_id].get("name", "") for phase_id in target.get("buildPhases", [])}
+          if "Audit tvOS Binary" not in phase_names:
+              violations.append("missing:Audit tvOS Binary build phase")
+
+          for dependency_id in target.get("packageProductDependencies", []):
+              product = objects[dependency_id].get("productName", "")
+              if product in {"AidokuRunner", "AsyncDisplayKit", "FakeWebKit", "Nuke", "ZIPFoundation"}:
+                  violations.append(f"package:{product}")
+
+          if violations:
+              print("error: Eclipse-tvOS contains forbidden reader/download/private-browser membership:")
+              for violation in sorted(set(violations)):
+                  print(f"error:   {violation}")
+              raise SystemExit(1)
+
+          print("Eclipse-tvOS project membership passed")
+          PY
+
+          python3 - "$srcroot/Eclipse/Localizable.xcstrings" "$srcroot/EclipseTV/Localizable.xcstrings" <<'PY'
+          import json
+          import re
+          import sys
+
+          source_path, tv_path = sys.argv[1:]
+          try:
+              with open(source_path, encoding="utf-8") as source_file:
+                  source = json.load(source_file)
+              with open(tv_path, encoding="utf-8") as tv_file:
+                  tv = json.load(tv_file)
+          except (OSError, json.JSONDecodeError) as error:
+              raise SystemExit(f"error: could not read curated tvOS localization catalog: {error}")
+
+          blocked = re.compile(r"reader|manga|kanzen|aidoku|download", re.IGNORECASE)
+          expected = {
+              key: value
+              for key, value in source.get("strings", {}).items()
+              if not blocked.search(key + " " + json.dumps(value, ensure_ascii=False))
+          }
+
+          if tv.get("sourceLanguage") != source.get("sourceLanguage") or tv.get("strings") != expected:
+              raise SystemExit(
+                  "error: EclipseTV/Localizable.xcstrings is stale; regenerate it from the shared catalog while excluding reader/download entries."
+              )
+          PY
+
+          echo "Eclipse-tvOS membership audit passed"
+
+          if ! xcodebuild -list -project "$PROJECT_PATH" | grep -Fq "$SCHEME"; then
+            echo "::error::The shared $SCHEME scheme is missing."
+            exit 1
+          fi
+
+      - name: Resolve pinned Swift packages
+        run: |
+          set -euo pipefail
+
+          RESOLVED="Eclipse.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+          SOURCE_PACKAGES_DIR="$RUNNER_TEMP/SourcePackages"
+
+          if [[ ! -f "$RESOLVED" ]]; then
+            echo "::error::Package.resolved is required for a reproducible tvOS release."
+            exit 1
+          fi
+
+          PINNED_MPVKIT_REVISION=$(jq -r '.pins[] | select(.identity == "mpvkit") | .state.revision // empty' "$RESOLVED")
+          if ! [[ "$PINNED_MPVKIT_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Package.resolved does not contain an immutable MPVKit revision."
+            exit 1
+          fi
+
+          rm -rf "$SOURCE_PACKAGES_DIR"
+          xcodebuild -resolvePackageDependencies \
+            -project "$PROJECT_PATH" \
+            -scheme "$SCHEME" \
+            -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_DIR" \
+            -disableAutomaticPackageResolution \
+            -skipPackagePluginValidation \
+            -skipMacroValidation
+
+          MPVKIT_CHECKOUT=$(find "$SOURCE_PACKAGES_DIR/checkouts" -maxdepth 1 -type d -iname 'mpvkit' -print -quit)
+          if [[ -z "$MPVKIT_CHECKOUT" ]]; then
+            echo "::error::The resolved MPVKit checkout was not found."
+            exit 1
+          fi
+
+          RESOLVED_MPVKIT_REVISION=$(git -C "$MPVKIT_CHECKOUT" rev-parse HEAD)
+          if [[ "$RESOLVED_MPVKIT_REVISION" != "$PINNED_MPVKIT_REVISION" ]]; then
+            echo "::error::Resolved MPVKit revision does not match Package.resolved."
+            exit 1
+          fi
+
+          checkout="$MPVKIT_CHECKOUT"
+          package_file="${checkout}/Package.swift"
+          gpu_renderer="${checkout}/Sources/MPVKitSampleBufferGPL/MPVGPUPlayerRenderer.swift"
+          sample_buffer_renderer="${checkout}/Sources/MPVKitSampleBufferGPL/MPVMetalSampleBufferRenderer.swift"
+
+          for required_file in "$package_file" "$gpu_renderer" "$sample_buffer_renderer"; do
+              if [[ ! -f "$required_file" ]]; then
+                  echo "::error::MPVKit checkout is missing ${required_file#"${checkout}/"}."
+                  exit 1
+              fi
+          done
+
+          mpvkit_failures=()
+
+          if ! grep -Eq 'linkedFramework\("UIKit",[[:space:]]*\.when\(platforms:[[:space:]]*\[[^]]*\.tvOS[^]]*\]\)\)' "$package_file"; then
+              mpvkit_failures+=("Package.swift does not link UIKit for tvOS")
+          fi
+
+          if ! grep -Eq '#if[[:space:]]+os\(iOS\)[[:space:]]*\|\|[[:space:]]*os\(tvOS\)' "$gpu_renderer"; then
+              mpvkit_failures+=("MPVGPUPlayerRenderer still resolves to its unsupported-platform tvOS stub")
+          fi
+
+          if ! grep -Eq '#if[[:space:]]+os\(iOS\)[[:space:]]*\|\|[[:space:]]*os\(tvOS\)' "$sample_buffer_renderer"; then
+              mpvkit_failures+=("MPVMetalSampleBufferRenderer still resolves to its unsupported-platform tvOS stub")
+          fi
+
+          if ! grep -Fq 'estimatedFramesPerSecond' "$gpu_renderer"; then
+              mpvkit_failures+=("MPV renderer diagnostics do not expose source frame cadence for Match Content")
+          fi
+
+          if ! grep -Fq 'videoCodec' "$gpu_renderer"; then
+              mpvkit_failures+=("MPV renderer diagnostics do not expose source codec metadata for Match Content")
+          fi
+
+          source_packages=$(cd "${checkout}/../.." 2>/dev/null && pwd || true)
+          artifact_roots=("${checkout}/.build/artifacts")
+          if [[ -n "$source_packages" ]]; then
+              artifact_roots+=("${source_packages}/artifacts")
+          fi
+
+          uavs3d_binary=""
+          for root in "${artifact_roots[@]}"; do
+              [[ -d "$root" ]] || continue
+              uavs3d_binary=$(find "$root" \
+                  -path '*Libuavs3d.xcframework/tvos-arm64_x86_64-simulator/Libuavs3d.framework/Libuavs3d' \
+                  -type f -print -quit)
+              [[ -n "$uavs3d_binary" ]] && break
+          done
+
+          if [[ -z "$uavs3d_binary" ]]; then
+              mpvkit_failures+=("resolved Libuavs3d tvOS artifact was not available for its deployment-target audit")
+          elif ! python3 - "$uavs3d_binary" <<'PY'
+          import re
+          import subprocess
+          import sys
+
+          output = subprocess.check_output(
+              ["xcrun", "otool", "-l", "-arch", "arm64", sys.argv[1]],
+              text=True,
+              stderr=subprocess.DEVNULL,
+          )
+          versions = [tuple(map(int, value.split("."))) for value in re.findall(r"\bminos\s+([0-9]+(?:\.[0-9]+)*)", output)]
+          raise SystemExit(0 if versions and max(versions) <= (17, 0) else 1)
+          PY
+          then
+              mpvkit_failures+=("Libuavs3d contains tvOS simulator objects requiring newer than the app's 17.0 deployment target")
+          fi
+
+          if (( ${#mpvkit_failures[@]} > 0 )); then
+              echo "::error::the resolved MPVKit checkout is not release-compatible with Eclipse-tvOS:"
+              for failure in "${mpvkit_failures[@]}"; do
+                  echo "::error::  $failure"
+              done
+              echo "::error::Publish the reviewed MPVKit tvOS changes and a tvOS 17.0-compatible codec artifact, then update Eclipse's committed Package.resolved pin before running the tvOS release lane."
+              exit 1
+          fi
+
+          mpvkit_revision=$(git -C "$checkout" rev-parse HEAD 2>/dev/null || true)
+          if [[ -n "$mpvkit_revision" ]]; then
+              echo "MPVKit tvOS renderer audit passed at revision $mpvkit_revision"
+          else
+              echo "MPVKit tvOS renderer audit passed"
+          fi
+
+          {
+            echo "SOURCE_PACKAGES_DIR=$SOURCE_PACKAGES_DIR"
+            echo "PINNED_MPVKIT_REVISION=$PINNED_MPVKIT_REVISION"
+          } >> "$GITHUB_ENV"
+
+      - name: Select tvOS simulator
+        run: |
+          set -euo pipefail
+
+          TVOS_SIMULATOR_UDID=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin).get("devices", {})
+          candidates = [
+              device
+              for runtime, entries in devices.items()
+              if "tvOS" in runtime or "AppleTVOS" in runtime
+              for device in entries
+              if device.get("isAvailable") and "Apple TV" in device.get("name", "")
+          ]
+          if not candidates:
+              raise SystemExit("No available tvOS simulator is installed")
+          preferred = next((item for item in candidates if "4K (3rd generation)" in item["name"]), candidates[0])
+          print(preferred["udid"])
+          ')
+
+          echo "TVOS_SIMULATOR_UDID=$TVOS_SIMULATOR_UDID" >> "$GITHUB_ENV"
+
+      - name: Run tvOS unit and remote UI tests
+        run: |
+          set -euo pipefail
+
+          RESULT_BUNDLE_PATH="$RUNNER_TEMP/Eclipse-tvOS.xcresult"
+          rm -rf "$RESULT_BUNDLE_PATH"
+
+          xcodebuild test \
+            -project "$PROJECT_PATH" \
+            -scheme "$SCHEME" \
+            -configuration Debug \
+            -destination "platform=tvOS Simulator,id=$TVOS_SIMULATOR_UDID" \
+            -resultBundlePath "$RESULT_BUNDLE_PATH" \
+            -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_DIR" \
+            -disableAutomaticPackageResolution \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            CODE_SIGN_STYLE=Automatic \
+            PROVISIONING_PROFILE_SPECIFIER=
+
+          echo "RESULT_BUNDLE_PATH=$RESULT_BUNDLE_PATH" >> "$GITHUB_ENV"
+
+      - name: Upload tvOS test results
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: Eclipse-tvOS-tests-${{ github.run_number }}
+          path: ${{ runner.temp }}/Eclipse-tvOS.xcresult
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Install and validate tvOS signing assets
+        env:
+          TVOS_DISTRIBUTION_CERTIFICATE_BASE64: ${{ secrets.TVOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
+          TVOS_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.TVOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+          TVOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.TVOS_PROVISIONING_PROFILE_BASE64 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          CERTIFICATE_PATH="$RUNNER_TEMP/tvos-distribution.p12"
+          PROFILE_PATH="$RUNNER_TEMP/tvos-app-store.mobileprovision"
+          PROFILE_PLIST="$RUNNER_TEMP/tvos-app-store-profile.plist"
+          KEYCHAIN_PATH="$RUNNER_TEMP/eclipse-tvos-signing.keychain-db"
+
+          printf '%s' "$TVOS_DISTRIBUTION_CERTIFICATE_BASE64" | base64 -D > "$CERTIFICATE_PATH"
+          printf '%s' "$TVOS_PROVISIONING_PROFILE_BASE64" | base64 -D > "$PROFILE_PATH"
+          security cms -D -i "$PROFILE_PATH" > "$PROFILE_PLIST"
+
+          python3 - "$PROFILE_PLIST" "$DEVELOPMENT_TEAM" "$BUNDLE_IDENTIFIER" "$ICLOUD_CONTAINER_ID" <<'PY'
+          import datetime
+          import plistlib
+          import sys
+
+          profile_path, team_id, bundle_id, container_id = sys.argv[1:]
+          with open(profile_path, "rb") as handle:
+              profile = plistlib.load(handle)
+
+          entitlements = profile.get("Entitlements", {})
+
+          def values(value):
+              if value is None:
+                  return []
+              return value if isinstance(value, list) else [value]
+
+          errors = []
+          if team_id not in values(profile.get("TeamIdentifier")):
+              errors.append("profile team does not match TVOS_DEVELOPMENT_TEAM")
+          if entitlements.get("application-identifier") != f"{team_id}.{bundle_id}":
+              errors.append("profile application identifier does not match the tvOS bundle id")
+          if not any(item in {"tvOS", "AppleTVOS"} for item in values(profile.get("Platform"))):
+              errors.append("profile is not a tvOS provisioning profile")
+          if container_id not in values(entitlements.get("com.apple.developer.icloud-container-identifiers")):
+              errors.append("profile does not include the Eclipse iCloud container")
+          if "CloudKit" not in values(entitlements.get("com.apple.developer.icloud-services")):
+              errors.append("profile does not include CloudKit")
+          if "runs-as-current-user-with-user-independent-keychain" not in values(entitlements.get("com.apple.developer.user-management")):
+              errors.append("profile does not include the current-user data-isolation entitlement")
+          environment = entitlements.get("com.apple.developer.icloud-container-environment")
+          if environment is not None and "Production" not in values(environment):
+              errors.append("profile does not permit the CloudKit Production environment")
+          if entitlements.get("get-task-allow") is True:
+              errors.append("profile permits debugging and is not an App Store distribution profile")
+          if profile.get("ProvisionsAllDevices") or profile.get("ProvisionedDevices"):
+              errors.append("profile is an ad hoc/development profile, not an App Store profile")
+          if entitlements.get("beta-reports-active") is not True:
+              errors.append("profile is not enabled for TestFlight beta reporting")
+
+          expiration = profile.get("ExpirationDate")
+          if not isinstance(expiration, datetime.datetime):
+              errors.append("profile expiration date is missing")
+          else:
+              if expiration.tzinfo is None:
+                  expiration = expiration.replace(tzinfo=datetime.timezone.utc)
+              if expiration <= datetime.datetime.now(datetime.timezone.utc):
+                  errors.append("profile is expired")
+
+          if errors:
+              for error in errors:
+                  print(f"::error::{error}")
+              raise SystemExit(1)
+          PY
+
+          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$PROFILE_PLIST")
+          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' "$PROFILE_PLIST")
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" \
+            -P "$TVOS_DISTRIBUTION_CERTIFICATE_PASSWORD" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          if ! security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -Fq 'Apple Distribution'; then
+            echo "::error::The p12 does not contain a valid Apple Distribution identity."
+            exit 1
+          fi
+
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$PROFILE_PATH" "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+
+          {
+            echo "KEYCHAIN_PATH=$KEYCHAIN_PATH"
+            echo "PROFILE_UUID=$PROFILE_UUID"
+            echo "PROFILE_NAME<<PROFILE_NAME_EOF"
+            echo "$PROFILE_NAME"
+            echo "PROFILE_NAME_EOF"
+          } >> "$GITHUB_ENV"
+
+      - name: Install App Store Connect API key
+        if: ${{ inputs.upload }}
+        env:
+          APP_STORE_CONNECT_API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+        run: |
+          set -euo pipefail
+
+          API_KEY_PATH="$RUNNER_TEMP/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8"
+          mkdir -p "$(dirname "$API_KEY_PATH")"
+          printf '%s' "$APP_STORE_CONNECT_API_KEY_P8" > "$API_KEY_PATH"
+          chmod 600 "$API_KEY_PATH"
+
+          {
+            echo "API_PRIVATE_KEYS_DIR=$(dirname "$API_KEY_PATH")"
+            echo "API_KEY_PATH=$API_KEY_PATH"
+          } >> "$GITHUB_ENV"
+
+      - name: Archive signed tvOS app
+        run: |
+          set -euo pipefail
+
+          ARCHIVE_PATH="$RUNNER_TEMP/$APP_NAME-tvOS.xcarchive"
+          DERIVED_DATA_PATH="$RUNNER_TEMP/DerivedData-tvOS"
+          rm -rf "$ARCHIVE_PATH" "$DERIVED_DATA_PATH"
+
+          xcodebuild archive \
+            -project "$PROJECT_PATH" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -archivePath "$ARCHIVE_PATH" \
+            -destination "generic/platform=tvOS" \
+            -sdk appletvos \
+            -derivedDataPath "$DERIVED_DATA_PATH" \
+            -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_DIR" \
+            -disableAutomaticPackageResolution \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            ECLIPSE_DISTRIBUTION_CHANNEL=TestFlight \
+            ICLOUD_CONTAINER_ENVIRONMENT=Production \
+            PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_IDENTIFIER" \
+            DEVELOPMENT_TEAM="$DEVELOPMENT_TEAM" \
+            CODE_SIGN_ENTITLEMENTS=EclipseTV/EclipseTV.entitlements \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
+            OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_PATH" \
+            ENABLE_USER_SCRIPT_SANDBOXING=NO
+
+          audit_tvos_binary() {
+              for candidate in "$@"; do
+                  if [[ ! -f "$candidate" ]]; then
+                      echo "::error::tvOS binary audit input does not exist: $candidate"
+                      exit 1
+                  fi
+
+                  if ! file "$candidate" | grep -Fq 'Mach-O'; then
+                      continue
+                  fi
+
+                  linked_frameworks=$(otool -L "$candidate" 2>/dev/null || true)
+                  if grep -Eq '/WebKit\.framework/|/JavaScriptCore\.framework/.*UIWebView' <<< "$linked_frameworks"; then
+                      echo "::error::private-browser WebKit linkage found in $(basename "$candidate")."
+                      exit 1
+                  fi
+
+                  raw_forbidden=$(strings -a "$candidate" 2>/dev/null \
+                      | grep -E 'UIWebView|FakeWebKit|AidokuRunner|AsyncDisplayKit|ReaderDownloadManager|DownloadManager|AVURLAssetHTTPHeaderFieldsKey' \
+                      | head -n 5 \
+                      || true)
+                  if [[ -n "$raw_forbidden" ]]; then
+                      echo "::error::forbidden reader/download/private-browser symbols found in $(basename "$candidate"):"
+                      echo "$raw_forbidden"
+                      exit 1
+                  fi
+
+                  # The tvOS target does not expose storage/download diagnostics, so these
+                  # required-reason APIs must stay compiled out instead of being declared for
+                  # a purpose the television product does not perform.
+                  privacy_forbidden=$(strings -a "$candidate" 2>/dev/null \
+                      | grep -E 'systemFreeSize|volumeAvailableCapacity(ForImportantUsage)?Key|contentModificationDateKey|creationDateKey' \
+                      | head -n 5 \
+                      || true)
+                  if [[ -n "$privacy_forbidden" ]]; then
+                      echo "::error::unused disk-space/file-timestamp required-reason APIs found in $(basename "$candidate"):"
+                      echo "$privacy_forbidden"
+                      exit 1
+                  fi
+
+                  symbol_dump=$(mktemp)
+                  {
+                      nm "$candidate" 2>/dev/null || true
+                      strings -a "$candidate" 2>/dev/null || true
+                  } | xcrun swift-demangle > "$symbol_dump"
+
+                  # Keep the expressions module-qualified so SwiftUI.GeometryReader and
+                  # third-party parser terms cannot create false positives.
+                  swift_forbidden=$(grep -Ei \
+                      'Eclipse\.TrackerManager.*manga|Eclipse\.EclipseTheme.*reader|Eclipse\.[A-Za-z0-9_]*(Manga|Kanzen|Aidoku|ReaderLogger|ReaderDownload)[A-Za-z0-9_]*|Eclipse\.(DownloadManager|HLSDownloader)' \
+                      "$symbol_dump" \
+                      | head -n 10 \
+                      || true)
+                  rm -f "$symbol_dump"
+
+                  if [[ -n "$swift_forbidden" ]]; then
+                      echo "::error::reader/manga/download Swift symbols found in $(basename "$candidate"):"
+                      echo "$swift_forbidden"
+                      exit 1
+                  fi
+              done
+
+              echo "tvOS binary audit passed"
+          }
+
+          archive_path="$ARCHIVE_PATH"
+          expected_bundle_id="$BUNDLE_IDENTIFIER"
+          expected_icloud_container="$ICLOUD_CONTAINER_ID"
+          applications_path="${archive_path}/Products/Applications"
+
+          if [[ ! -d "$applications_path" ]]; then
+              echo "::error::archive does not contain Products/Applications."
+              exit 1
+          fi
+
+          app_path=$(find "$applications_path" -maxdepth 1 -type d -name '*.app' -print -quit)
+          if [[ -z "$app_path" ]]; then
+              echo "::error::archive does not contain a tvOS app."
+              exit 1
+          fi
+
+          info_plist="${app_path}/Info.plist"
+          executable_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$info_plist")
+          executable_path="${app_path}/${executable_name}"
+
+          read_plist() {
+              /usr/libexec/PlistBuddy -c "Print :$1" "$info_plist"
+          }
+
+          require_equal() {
+              local label=$1
+              local actual=$2
+              local expected=$3
+              if [[ "$actual" != "$expected" ]]; then
+                  echo "::error::$label is '$actual'; expected '$expected'."
+                  exit 1
+              fi
+          }
+
+          require_equal "bundle identifier" "$(read_plist CFBundleIdentifier)" "$expected_bundle_id"
+          require_equal "archive platform" "$(read_plist DTPlatformName)" "appletvos"
+          require_equal "supported platform" "$(read_plist 'CFBundleSupportedPlatforms:0')" "AppleTVOS"
+          require_equal "device family" "$(read_plist 'UIDeviceFamily:0')" "3"
+          require_equal "distribution channel" "$(read_plist EclipseDistributionChannel)" "TestFlight"
+
+          for runtime_key in \
+              TMDBAPIKey \
+              AniListClientID \
+              AniListClientSecret \
+              AniListRedirectUri \
+              TraktClientID \
+              TraktClientSecret \
+              TraktRedirectUri \
+              MALClientID \
+              MALClientSecret \
+              MALRedirectUri
+          do
+              runtime_value=$(read_plist "$runtime_key" 2>/dev/null || true)
+              if [[ -z "$runtime_value" || "$runtime_value" == *'$('* ]]; then
+                  echo "::error::archived tvOS app is missing configured runtime value '$runtime_key'."
+                  exit 1
+              fi
+          done
+
+          device_family_count=$(/usr/libexec/PlistBuddy -c 'Print :UIDeviceFamily' "$info_plist" | grep -Ec '^[[:space:]]+[0-9]+$' || true)
+          if [[ "$device_family_count" != "1" ]]; then
+              echo "::error::tvOS archive must contain only device family 3."
+              exit 1
+          fi
+
+          minimum_os=$(read_plist MinimumOSVersion)
+          python3 - "$minimum_os" <<'PY'
+          import sys
+
+          def version(value):
+              try:
+                  return tuple(int(part) for part in value.split("."))
+              except ValueError:
+                  raise SystemExit(f"error: invalid MinimumOSVersion {value!r}")
+
+          if version(sys.argv[1]) < version("17.0"):
+              raise SystemExit(f"error: tvOS minimum version is {sys.argv[1]}; expected 17.0 or newer")
+          PY
+
+          read_plist 'CFBundleIcons:CFBundlePrimaryIcon' >/dev/null
+          read_plist 'TVTopShelfImage:TVTopShelfPrimaryImage' >/dev/null
+          read_plist 'TVTopShelfImage:TVTopShelfPrimaryImageWide' >/dev/null
+
+          if [[ ! -f "${app_path}/Assets.car" ]]; then
+              echo "::error::compiled tvOS app-icon/Top Shelf assets are missing."
+              exit 1
+          fi
+
+          if [[ ! -f "${app_path}/PrivacyInfo.xcprivacy" ]]; then
+              echo "::error::PrivacyInfo.xcprivacy is missing from the tvOS app."
+              exit 1
+          fi
+
+          if [[ ! -x "$executable_path" ]]; then
+              echo "::error::tvOS executable is missing."
+              exit 1
+          fi
+
+          if [[ ! -f "${app_path}/embedded.mobileprovision" ]]; then
+              echo "::error::archived tvOS app does not contain an embedded provisioning profile."
+              exit 1
+          fi
+
+          if ! file "$executable_path" | grep -Fq 'arm64'; then
+              echo "::error::generic tvOS archive does not contain an arm64 executable."
+              exit 1
+          fi
+
+          signing_details=$(codesign -dv --verbose=4 "$app_path" 2>&1 || true)
+          if ! grep -Fq 'Authority=Apple Distribution' <<< "$signing_details"; then
+              echo "::error::archived tvOS app is not signed with an Apple Distribution certificate."
+              exit 1
+          fi
+
+          entitlements_plist=$(mktemp)
+          trap 'rm -f "$entitlements_plist"' EXIT
+          if ! codesign -d --entitlements :- "$app_path" > "$entitlements_plist" 2>/dev/null; then
+              echo "::error::signed tvOS app entitlements could not be read."
+              exit 1
+          fi
+          plutil -lint "$entitlements_plist" >/dev/null
+
+          entitlement_value() {
+              /usr/libexec/PlistBuddy -c "Print :$1" "$entitlements_plist"
+          }
+
+          application_identifier=$(entitlement_value application-identifier)
+          if [[ "$application_identifier" != *."$expected_bundle_id" ]]; then
+              echo "::error::signed application identifier '$application_identifier' does not end in '.$expected_bundle_id'."
+              exit 1
+          fi
+
+          require_equal \
+              "CloudKit environment" \
+              "$(entitlement_value 'com.apple.developer.icloud-container-environment')" \
+              "Production"
+
+          icloud_services=$(entitlement_value 'com.apple.developer.icloud-services')
+          if ! grep -Fq 'CloudKit' <<< "$icloud_services"; then
+              echo "::error::signed tvOS app does not include the CloudKit service entitlement."
+              exit 1
+          fi
+
+          if [[ -n "$expected_icloud_container" ]]; then
+              icloud_containers=$(entitlement_value 'com.apple.developer.icloud-container-identifiers')
+              if ! grep -Fq "$expected_icloud_container" <<< "$icloud_containers"; then
+                  echo "::error::signed tvOS app does not include iCloud container '$expected_icloud_container'."
+                  exit 1
+              fi
+          fi
+
+          user_management=$(entitlement_value 'com.apple.developer.user-management')
+          if ! grep -Fq 'runs-as-current-user-with-user-independent-keychain' <<< "$user_management"; then
+              echo "::error::signed tvOS app does not include current-user data isolation."
+              exit 1
+          fi
+
+          # The entitlement permits an app to opt individual credentials into a shared,
+          # user-independent Keychain. Eclipse intentionally never requests that option:
+          # provider and tracker credentials must follow the active Apple TV user.
+          if strings -a "$executable_path" | grep -Fq 'kSecUseUserIndependentKeychain'; then
+              echo "::error::tvOS executable requests the user-independent Keychain."
+              exit 1
+          fi
+
+          for forbidden_path in FakeWebKit AidokuRunner AsyncDisplayKit Texture ZIPFoundation Nuke; do
+              if find "$app_path" -iname "*${forbidden_path}*" -print -quit | grep -q .; then
+                  echo "::error::forbidden reader/private-browser component '$forbidden_path' is bundled in the tvOS app."
+                  exit 1
+              fi
+          done
+
+          while IFS= read -r -d '' localization_file; do
+              localized_dump=$(plutil -p "$localization_file" 2>/dev/null || strings -a "$localization_file" 2>/dev/null || true)
+              if grep -Eiq 'reader|manga|kanzen|aidoku|download' <<< "$localized_dump"; then
+                  echo "::error::reader/download wording found in ${localization_file#"${app_path}/"}."
+                  exit 1
+              fi
+          done < <(find "$app_path" -type f -name 'Localizable.strings' -print0)
+
+          binary_candidates=()
+          while IFS= read -r -d '' candidate; do
+              if ! file "$candidate" | grep -Fq 'Mach-O'; then
+                  continue
+              fi
+              binary_candidates+=("$candidate")
+          done < <(find "$app_path" -type f -perm -111 -print0)
+
+          audit_tvos_binary "${binary_candidates[@]}"
+
+          echo "tvOS archive validation passed for $(basename "$app_path")"
+          echo "ARCHIVE_PATH=$ARCHIVE_PATH" >> "$GITHUB_ENV"
+
+      - name: Export App Store tvOS IPA
+        run: |
+          set -euo pipefail
+
+          EXPORT_DIR="$RUNNER_TEMP/tvos-testflight-export"
+          EXPORT_OPTIONS="$RUNNER_TEMP/tvOS-ExportOptions.plist"
+          rm -rf "$EXPORT_DIR"
+          mkdir -p "$EXPORT_DIR"
+
+          python3 - "$EXPORT_OPTIONS" "$BUNDLE_IDENTIFIER" "$PROFILE_NAME" "$DEVELOPMENT_TEAM" <<'PY'
+          import plistlib
+          import sys
+
+          output_path, bundle_id, profile_name, team_id = sys.argv[1:]
+          options = {
+              "method": "app-store-connect",
+              "destination": "export",
+              "distributionBundleIdentifier": bundle_id,
+              "signingStyle": "manual",
+              "signingCertificate": "Apple Distribution",
+              "teamID": team_id,
+              "provisioningProfiles": {bundle_id: profile_name},
+              "iCloudContainerEnvironment": "Production",
+              "manageAppVersionAndBuildNumber": False,
+              "stripSwiftSymbols": True,
+          }
+          with open(output_path, "wb") as handle:
+              plistlib.dump(options, handle, fmt=plistlib.FMT_XML, sort_keys=False)
+          PY
+
+          plutil -lint "$EXPORT_OPTIONS"
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportOptionsPlist "$EXPORT_OPTIONS" \
+            -exportPath "$EXPORT_DIR" \
+            -skipPackagePluginValidation \
+            -skipMacroValidation
+
+          IPA_PATH=$(find "$EXPORT_DIR" -maxdepth 1 -type f -name '*.ipa' -print -quit)
+          if [[ -z "$IPA_PATH" ]]; then
+            echo "::error::No tvOS IPA was exported."
+            find "$EXPORT_DIR" -maxdepth 2 -type f -print
+            exit 1
+          fi
+
+          shasum -a 256 "$IPA_PATH"
+          echo "IPA_PATH=$IPA_PATH" >> "$GITHUB_ENV"
+
+      - name: Validate and upload to App Store Connect
+        if: ${{ inputs.upload }}
+        env:
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+        run: |
+          set -euo pipefail
+
+          xcrun altool --validate-app \
+            --file "$IPA_PATH" \
+            --api-key "$APP_STORE_CONNECT_KEY_ID" \
+            --api-issuer "$APP_STORE_CONNECT_ISSUER_ID"
+
+          xcrun altool --upload-app \
+            --file "$IPA_PATH" \
+            --api-key "$APP_STORE_CONNECT_KEY_ID" \
+            --api-issuer "$APP_STORE_CONNECT_ISSUER_ID"
+
+      - name: Clean up signing and API credentials
+        if: always()
+        run: |
+          set +e
+
+          if [[ -n "${KEYCHAIN_PATH:-}" && -f "$KEYCHAIN_PATH" ]]; then
+            security delete-keychain "$KEYCHAIN_PATH"
+          fi
+          if [[ -n "${PROFILE_UUID:-}" ]]; then
+            rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision"
+          fi
+          if [[ -n "${API_KEY_PATH:-}" ]]; then
+            rm -f "$API_KEY_PATH"
+          fi
+          rm -f Build.local.xcconfig

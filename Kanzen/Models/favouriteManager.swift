@@ -7,9 +7,24 @@ class FavouriteManager: ObservableObject {
 
     init() {
         container = NSPersistentContainer(name: "ContentModel")
-        container.loadPersistentStores { _, error in
+        container.loadPersistentStores { [container] _, error in
             if let error = error {
-                fatalError("Unable to load Core Data store: \(error)")
+                ReaderLogger.shared.log(
+                    "Unable to load favorites store; using a temporary in-memory store: \(error.localizedDescription)",
+                    type: "Error"
+                )
+
+                let fallback = NSPersistentStoreDescription()
+                fallback.type = NSInMemoryStoreType
+                container.persistentStoreDescriptions = [fallback]
+                container.loadPersistentStores { _, fallbackError in
+                    if let fallbackError {
+                        ReaderLogger.shared.log(
+                            "Unable to load temporary favorites store: \(fallbackError.localizedDescription)",
+                            type: "Error"
+                        )
+                    }
+                }
             }
         }
     }

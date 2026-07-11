@@ -168,13 +168,25 @@ struct ExperimentalVisualTuning {
 
     static var current: ExperimentalVisualTuning {
         let defaults = UserDefaults.standard
+#if os(tvOS)
+        let mediaCardScale: Double
+        switch defaults.string(forKey: "tvCardDensity") ?? "standard" {
+        case "spacious": mediaCardScale = 1.12
+        case "compact": mediaCardScale = 0.86
+        default: mediaCardScale = 1.0
+        }
+#else
+        let mediaCardScale = sanitizedMediaCardScale(
+            defaults.doubleValue(forKey: mediaCardScaleKey, defaultValue: defaultMediaCardScale)
+        )
+#endif
         return ExperimentalVisualTuning(
             heroHeightScale: sanitizedHeroHeightScale(defaults.doubleValue(forKey: heroHeightScaleKey, defaultValue: defaultHeroHeightScale)),
             heroBleedStrength: sanitizedHeroBleedStrength(defaults.doubleValue(forKey: heroBleedStrengthKey, defaultValue: defaultHeroBleedStrength)),
             heroFadeDistanceScale: sanitizedHeroFadeDistanceScale(defaults.doubleValue(forKey: heroFadeDistanceScaleKey, defaultValue: defaultHeroFadeDistanceScale)),
             sectionSpacingScale: sanitizedSectionSpacingScale(defaults.doubleValue(forKey: sectionSpacingScaleKey, defaultValue: defaultSectionSpacingScale)),
             cardRadiusScale: sanitizedCardRadiusScale(defaults.doubleValue(forKey: cardRadiusScaleKey, defaultValue: defaultCardRadiusScale)),
-            mediaCardScale: sanitizedMediaCardScale(defaults.doubleValue(forKey: mediaCardScaleKey, defaultValue: defaultMediaCardScale)),
+            mediaCardScale: mediaCardScale,
             glassStrength: sanitizedGlassStrength(defaults.doubleValue(forKey: glassStrengthKey, defaultValue: defaultGlassStrength)),
             gradientBaseDarkness: sanitizedGradientBaseDarkness(defaults.doubleValue(forKey: gradientBaseDarknessKey, defaultValue: defaultGradientBaseDarkness)),
             gradientAccentIntensity: sanitizedGradientAccentIntensity(defaults.doubleValue(forKey: gradientAccentIntensityKey, defaultValue: defaultGradientAccentIntensity)),
@@ -514,6 +526,54 @@ enum HomeAnimatedBackgroundSettings {
     }
 }
 
+enum HomeAnimatedBackgroundQuality: String, CaseIterable, Identifiable {
+    static let storageKey = "homeAnimatedBackgroundQuality"
+
+    case low
+    case medium
+    case high
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .low: return "Low"
+        case .medium: return "Medium"
+        case .high: return "High"
+        }
+    }
+
+    var frameInterval: Double {
+        // Every tier animates at the same conservative 30fps cadence. The richer
+        // tiers add visual layers, not a higher refresh rate — bumping fps while
+        // also drawing more per frame is what actually kills performance. The
+        // motion is all slow and continuous, so 30fps stays perfectly smooth.
+        1.0 / 30.0
+    }
+
+    var layerOpacity: Double {
+        switch self {
+        case .low: return 0.96
+        case .medium: return 1.0
+        case .high: return 1.0
+        }
+    }
+
+    static var defaultValue: HomeAnimatedBackgroundQuality { .high }
+
+    static func resolved(_ rawValue: String?) -> HomeAnimatedBackgroundQuality {
+        guard let rawValue,
+              let quality = HomeAnimatedBackgroundQuality(rawValue: rawValue) else {
+            return defaultValue
+        }
+        return quality
+    }
+
+    static func current(defaults: UserDefaults = .standard) -> HomeAnimatedBackgroundQuality {
+        resolved(defaults.string(forKey: storageKey))
+    }
+}
+
 enum ModeSwitchAnimationSettings {
     static let enabledKey = "modeSwitchAnimationEnabled"
     static let defaultEnabled = true
@@ -528,6 +588,7 @@ struct EclipseAmbientMotionBackground: View {
     let ambientColor: Color?
     let accentColor: Color
     let motionEnabled: Bool
+    @AppStorage(HomeAnimatedBackgroundQuality.storageKey) private var qualityRawValue = HomeAnimatedBackgroundQuality.defaultValue.rawValue
 
     private let particles: [(x: CGFloat, y: CGFloat, size: CGFloat, drift: CGFloat, opacity: Double)] = [
         (0.25, 0.24, 2.8, 15, 0.34),
@@ -544,6 +605,10 @@ struct EclipseAmbientMotionBackground: View {
 
     private var primaryColor: Color {
         ambientColor ?? accentColor
+    }
+
+    private var quality: HomeAnimatedBackgroundQuality {
+        HomeAnimatedBackgroundQuality.resolved(qualityRawValue)
     }
 
     var body: some View {
@@ -589,23 +654,30 @@ struct EclipseAmbientMotionBackground: View {
     }
 
     private func ambientLayer(size: CGSize, motionEnabled: Bool) -> some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: !motionEnabled)) { timeline in
+        TimelineView(.animation(minimumInterval: quality.frameInterval, paused: !motionEnabled)) { timeline in
             Canvas(opaque: false, colorMode: .linear) { context, canvasSize in
                 var drawingContext = context
                 drawAmbientLayer(
                     context: &drawingContext,
                     size: canvasSize,
                     date: motionEnabled ? timeline.date : Date(timeIntervalSinceReferenceDate: 0),
-                    motionEnabled: motionEnabled
+                    motionEnabled: motionEnabled,
+                    quality: quality
                 )
             }
         }
         .blendMode(.screen)
-        .opacity(0.96)
+        .opacity(quality.layerOpacity)
         .compositingGroup()
     }
 
-    private func drawAmbientLayer(context: inout GraphicsContext, size: CGSize, date: Date, motionEnabled: Bool) {
+    private func drawAmbientLayer(
+        context: inout GraphicsContext,
+        size: CGSize,
+        date: Date,
+        motionEnabled: Bool,
+        quality: HomeAnimatedBackgroundQuality
+    ) {
         let width = max(size.width, 1)
         let height = max(size.height, 1)
         let center = CGPoint(x: width * 0.5, y: height * 0.5)
@@ -736,6 +808,525 @@ struct EclipseAmbientMotionBackground: View {
                 color: Color.white.opacity(particle.opacity * lerpDouble(0.38, 0.55, pulse))
             )
         }
+
+        guard quality != .low else { return }
+
+        drawMediumMotion(
+            context: &context,
+            size: size,
+            center: center,
+            seconds: seconds,
+            drift: drift,
+            pulse: pulse,
+            largeRingDiameter: largeRingDiameter,
+            smallRingDiameter: smallRingDiameter
+        )
+
+        guard quality == .high else { return }
+
+        drawHighMotion(
+            context: &context,
+            size: size,
+            center: center,
+            seconds: seconds,
+            drift: drift,
+            pulse: pulse,
+            largeRingDiameter: largeRingDiameter,
+            smallRingDiameter: smallRingDiameter
+        )
+    }
+
+    /// An analogous, in-palette color set keeps the energetic tiers cohesive
+    /// with the selected theme instead of introducing a fixed rainbow.
+    private struct CelestialPalette {
+        let core: Color
+        let cool: Color
+        let warm: Color
+        let bright: Color
+    }
+
+    // MARK: Medium — animated plasma field
+
+    private func drawMediumMotion(
+        context: inout GraphicsContext,
+        size: CGSize,
+        center: CGPoint,
+        seconds: TimeInterval,
+        drift: Double,
+        pulse: Double,
+        largeRingDiameter: CGFloat,
+        smallRingDiameter: CGFloat
+    ) {
+        let width = max(size.width, 1)
+        let height = max(size.height, 1)
+        let minDim = min(width, height)
+        let palette = celestialPalette()
+
+        // A restrained two-arm vortex ties the moving field back to the eclipse.
+        drawVortexFilaments(
+            context: &context,
+            center: center,
+            minRadius: smallRingDiameter * 0.30,
+            maxRadius: largeRingDiameter * 0.61,
+            seconds: seconds,
+            arms: 2,
+            steps: 48,
+            turns: 0.82,
+            rotationPeriod: 13.0,
+            palette: palette,
+            opacity: 0.20,
+            lineWidth: 1.2
+        )
+
+        // Constant particle motion keeps Medium visibly active.
+        drawStarfield(context: &context, size: size, seconds: seconds, count: 26, seedOffset: 0, speedScale: 1.0, palette: palette)
+        drawOrbitingEmbers(
+            context: &context,
+            center: center,
+            minDim: minDim,
+            seconds: seconds,
+            count: 18,
+            seedOffset: 0,
+            palette: palette,
+            intensity: 0.78
+        )
+        drawEnergyWavefronts(
+            context: &context,
+            center: center,
+            minDim: minDim,
+            seconds: seconds,
+            count: 1,
+            period: 4.6,
+            palette: palette,
+            opacity: 0.18
+        )
+        let coronaBreath = wave(seconds: seconds, period: 5.8)
+        let coronaWander = wave(seconds: seconds, period: 8.4)
+        drawCorona(
+            context: &context,
+            center: shifted(
+                center,
+                x: lerp(-width * 0.025, width * 0.025, coronaWander),
+                y: lerp(height * 0.018, -height * 0.018, coronaBreath)
+            ),
+            radius: largeRingDiameter * lerp(0.62, 0.74, coronaBreath),
+            color: palette.core,
+            peak: lerpDouble(0.11, 0.19, coronaBreath)
+        )
+    }
+
+    // MARK: High — cinematic kinetic scene
+
+    private func drawHighMotion(
+        context: inout GraphicsContext,
+        size: CGSize,
+        center: CGPoint,
+        seconds: TimeInterval,
+        drift: Double,
+        pulse: Double,
+        largeRingDiameter: CGFloat,
+        smallRingDiameter: CGFloat
+    ) {
+        let width = max(size.width, 1)
+        let height = max(size.height, 1)
+        let minDim = min(width, height)
+        let palette = celestialPalette()
+
+        // Counter-rotating filaments add depth without overwhelming the scene.
+        drawVortexFilaments(
+            context: &context,
+            center: center,
+            minRadius: smallRingDiameter * 0.18,
+            maxRadius: largeRingDiameter * 0.78,
+            seconds: -seconds,
+            arms: 3,
+            steps: 68,
+            turns: 1.22,
+            rotationPeriod: 10.5,
+            palette: palette,
+            opacity: 0.18,
+            lineWidth: 1.05
+        )
+
+        drawKineticMesh(context: &context, size: size, seconds: seconds, count: 20, palette: palette)
+        drawStarfield(context: &context, size: size, seconds: seconds, count: 44, seedOffset: 100, speedScale: 1.8, palette: palette)
+        drawOrbitingEmbers(
+            context: &context,
+            center: center,
+            minDim: minDim,
+            seconds: -seconds * 1.16,
+            count: 30,
+            seedOffset: 100,
+            palette: palette,
+            intensity: 1.0
+        )
+        drawEnergyWavefronts(
+            context: &context,
+            center: center,
+            minDim: minDim,
+            seconds: seconds + 1.1,
+            count: 1,
+            period: 3.2,
+            palette: palette,
+            opacity: 0.22
+        )
+        drawMeteorBursts(context: &context, size: size, seconds: seconds, palette: palette)
+    }
+
+    // MARK: Elevated-tier primitives
+
+    private func drawVortexFilaments(
+        context: inout GraphicsContext,
+        center: CGPoint,
+        minRadius: CGFloat,
+        maxRadius: CGFloat,
+        seconds: TimeInterval,
+        arms: Int,
+        steps: Int,
+        turns: Double,
+        rotationPeriod: Double,
+        palette: CelestialPalette,
+        opacity: Double,
+        lineWidth: CGFloat
+    ) {
+        guard arms > 0, steps > 1, maxRadius > minRadius else { return }
+        let rotation = 360 * normalized(seconds: seconds, period: rotationPeriod)
+
+        for arm in 0..<arms {
+            var path = Path()
+            for index in 0...steps {
+                let progress = Double(index) / Double(steps)
+                let eased = progress * progress * (3 - 2 * progress)
+                let wobble = sin(seconds * 1.05 + progress * 7.0 + Double(arm) * 1.7)
+                let radius = lerp(minRadius, maxRadius, eased) + CGFloat(wobble) * maxRadius * 0.025
+                let degrees = rotation
+                    + Double(arm) * (360 / Double(arms))
+                    + progress * 360 * turns
+                    + wobble * 7
+                let point = point(center: center, radius: radius, degrees: degrees)
+                if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
+            }
+
+            let color: Color
+            switch arm % 3 {
+            case 0: color = palette.cool
+            case 1: color = palette.core
+            default: color = palette.warm
+            }
+            context.stroke(
+                path,
+                with: .color(color.opacity(opacity * 0.22)),
+                style: StrokeStyle(lineWidth: lineWidth * 4.2, lineCap: .round, lineJoin: .round)
+            )
+            context.stroke(
+                path,
+                with: .color(color.opacity(opacity)),
+                style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round)
+            )
+        }
+    }
+
+    private func drawStarfield(
+        context: inout GraphicsContext,
+        size: CGSize,
+        seconds: TimeInterval,
+        count: Int,
+        seedOffset: Int,
+        speedScale: Double,
+        palette: CelestialPalette
+    ) {
+        let width = max(size.width, 1)
+        let height = max(size.height, 1)
+        for index in 0..<count {
+            let seed = Double(index + seedOffset)
+            let baseX = hash(seed * 3.17 + 1.0)
+            let baseY = hash(seed * 5.91 + 4.2)
+            let depth = hash(seed * 2.31 + 7.0)
+            let travel = seconds * (0.006 + 0.012 * depth) * speedScale
+            let x = width * CGFloat(unitFraction(baseX + travel * (index.isMultiple(of: 2) ? 1 : -1)))
+            let y = height * CGFloat(unitFraction(baseY + travel * 0.18))
+                + CGFloat(sin(seconds * (0.35 + depth * 0.4) + seed)) * (3 + 9 * CGFloat(depth))
+            let twinkle = wave(
+                seconds: seconds * (1.0 + depth) + seed * 0.7,
+                period: 1.2 + hash(seed + 9.0) * 2.3
+            )
+            let position = CGPoint(x: x, y: y)
+            let coreDiameter = CGFloat(0.7 + depth * 2.4) * lerp(0.65, 1.5, twinkle)
+            let alpha = (0.12 + 0.54 * twinkle) * (0.42 + 0.58 * depth)
+            if depth > 0.68 {
+                drawSoftGlow(
+                    context: &context,
+                    center: position,
+                    radius: coreDiameter * 3.2,
+                    color: index.isMultiple(of: 3) ? palette.cool : palette.warm,
+                    coreOpacity: alpha * 0.38
+                )
+            }
+            drawCircle(context: &context, center: position, diameter: coreDiameter, color: palette.bright.opacity(min(alpha, 0.86)))
+        }
+    }
+
+    private func drawOrbitingEmbers(
+        context: inout GraphicsContext,
+        center: CGPoint,
+        minDim: CGFloat,
+        seconds: TimeInterval,
+        count: Int,
+        seedOffset: Int,
+        palette: CelestialPalette,
+        intensity: Double
+    ) {
+        guard count > 0 else { return }
+        for index in 0..<count {
+            let seed = Double(index + seedOffset)
+            let depth = hash(seed * 4.17 + 0.8)
+            let baseRadius = minDim * CGFloat(0.17 + hash(seed * 1.91 + 3.0) * 0.52)
+            let direction = index.isMultiple(of: 2) ? 1.0 : -1.0
+            let angularSpeed = direction * (10 + 23 * depth)
+            let angle = hash(seed * 8.13) * 360 + seconds * angularSpeed
+            let radialWobble = sin(seconds * (0.8 + depth * 0.9) + seed) * Double(minDim) * 0.025
+            let radius = max(baseRadius + CGFloat(radialWobble), minDim * 0.08)
+            let radians = angle * .pi / 180
+            let position = CGPoint(
+                x: center.x + CGFloat(cos(radians)) * radius,
+                y: center.y + CGFloat(sin(radians)) * radius * (0.68 + 0.18 * CGFloat(depth))
+            )
+            let twinkle = wave(seconds: seconds + seed, period: 1.4 + depth * 2.2)
+            let diameter = CGFloat(1.2 + depth * 3.4) * lerp(0.78, 1.28, twinkle)
+            let color = index.isMultiple(of: 3) ? palette.warm : palette.cool
+
+            if index.isMultiple(of: 4) {
+                drawArc(
+                    context: &context,
+                    center: center,
+                    radius: radius,
+                    startDegrees: angle - direction * (9 + depth * 15),
+                    endDegrees: angle,
+                    color: color.opacity(intensity * (0.08 + depth * 0.10)),
+                    lineWidth: max(0.6, diameter * 0.36)
+                )
+            }
+            drawSoftGlow(
+                context: &context,
+                center: position,
+                radius: diameter * 3.0,
+                color: color,
+                coreOpacity: intensity * (0.14 + 0.20 * twinkle)
+            )
+            drawCircle(
+                context: &context,
+                center: position,
+                diameter: diameter,
+                color: palette.bright.opacity(min(intensity * (0.34 + 0.48 * twinkle), 0.92))
+            )
+        }
+    }
+
+    private func drawEnergyWavefronts(
+        context: inout GraphicsContext,
+        center: CGPoint,
+        minDim: CGFloat,
+        seconds: TimeInterval,
+        count: Int,
+        period: Double,
+        palette: CelestialPalette,
+        opacity: Double
+    ) {
+        guard count > 0, period > 0 else { return }
+        let basePhase = normalized(seconds: seconds, period: period)
+        for index in 0..<count {
+            let progress = unitFraction(basePhase + Double(index) / Double(count))
+            let eased = 1 - pow(1 - progress, 2)
+            let fade = pow(1 - progress, 1.4)
+            let diameter = minDim * CGFloat(0.36 + eased * 1.22)
+            let color = index.isMultiple(of: 2) ? palette.cool : palette.warm
+            drawEllipseStroke(
+                context: &context,
+                center: center,
+                diameter: diameter,
+                color: color.opacity(opacity * fade),
+                lineWidth: lerp(2.6, 0.55, progress)
+            )
+        }
+    }
+
+    private func drawKineticMesh(
+        context: inout GraphicsContext,
+        size: CGSize,
+        seconds: TimeInterval,
+        count: Int,
+        palette: CelestialPalette
+    ) {
+        guard count > 2 else { return }
+        let width = max(size.width, 1)
+        let height = max(size.height, 1)
+        var nodes: [CGPoint] = []
+        nodes.reserveCapacity(count)
+
+        for index in 0..<count {
+            let seed = Double(index)
+            let depth = hash(seed * 3.73 + 5.0)
+            let x = width * CGFloat(unitFraction(hash(seed * 7.1) + seconds * (0.007 + depth * 0.009)))
+            let y = height * CGFloat(unitFraction(
+                hash(seed * 4.9 + 2.0)
+                    + seconds * (index.isMultiple(of: 2) ? 0.0038 : -0.0038)
+                    + sin(seconds * 0.32 + seed) * 0.035
+            ))
+            nodes.append(CGPoint(x: x, y: y))
+        }
+
+        let connectionLimit = max(width, height) * 0.42
+        var connections = Path()
+        for index in nodes.indices {
+            let partnerIndex = (index * 7 + 3) % nodes.count
+            guard partnerIndex != index else { continue }
+            let a = nodes[index]
+            let b = nodes[partnerIndex]
+            let distance = hypot(b.x - a.x, b.y - a.y)
+            guard distance < connectionLimit else { continue }
+            connections.move(to: a)
+            connections.addLine(to: b)
+        }
+        context.stroke(
+            connections,
+            with: .color(palette.core.opacity(0.075)),
+            style: StrokeStyle(lineWidth: 0.65, lineCap: .round)
+        )
+
+        for (index, node) in nodes.enumerated() {
+            let pulse = wave(seconds: seconds + Double(index) * 0.31, period: 1.7 + hash(Double(index)) * 2.0)
+            let color = index.isMultiple(of: 2) ? palette.cool : palette.warm
+            drawCircle(
+                context: &context,
+                center: node,
+                diameter: lerp(1.2, 3.3, pulse),
+                color: color.opacity(lerpDouble(0.25, 0.68, pulse))
+            )
+        }
+    }
+
+    private func drawMeteorBursts(
+        context: inout GraphicsContext,
+        size: CGSize,
+        seconds: TimeInterval,
+        palette: CelestialPalette
+    ) {
+        let width = max(size.width, 1)
+        let height = max(size.height, 1)
+        for index in 0..<3 {
+            let period = 6.2 + Double(index) * 0.9
+            let cycle = normalized(seconds: seconds + Double(index) * 2.05, period: period)
+            let activeSpan = 0.34
+            guard cycle < activeSpan else { continue }
+            let progress = cycle / activeSpan
+            let visibility = sin(progress * .pi)
+            guard visibility > 0.02 else { continue }
+
+            let lane = hash(Double(index) * 7.3 + floor(seconds / period))
+            let direction: CGFloat = index.isMultiple(of: 2) ? 1 : -1
+            let start = CGPoint(
+                x: direction > 0 ? -width * 0.18 : width * 1.18,
+                y: height * CGFloat(0.08 + lane * 0.54)
+            )
+            let travel = CGVector(dx: direction * width * 1.36, dy: height * CGFloat(0.20 + lane * 0.10))
+            let head = CGPoint(
+                x: start.x + travel.dx * CGFloat(progress),
+                y: start.y + travel.dy * CGFloat(progress)
+            )
+            let magnitude = max(hypot(travel.dx, travel.dy), 1)
+            let unit = CGVector(dx: travel.dx / magnitude, dy: travel.dy / magnitude)
+            let tail = CGPoint(
+                x: head.x - unit.dx * width * 0.20,
+                y: head.y - unit.dy * width * 0.20
+            )
+            let color = index.isMultiple(of: 2) ? palette.cool : palette.warm
+            let tailGradient = Gradient(stops: [
+                .init(color: color.opacity(0), location: 0),
+                .init(color: color.opacity(0.34 * visibility), location: 0.72),
+                .init(color: palette.bright.opacity(0.82 * visibility), location: 1)
+            ])
+            var streak = Path()
+            streak.move(to: tail)
+            streak.addLine(to: head)
+            context.stroke(
+                streak,
+                with: .linearGradient(tailGradient, startPoint: tail, endPoint: head),
+                style: StrokeStyle(lineWidth: 1.6, lineCap: .round)
+            )
+            drawSoftGlow(context: &context, center: head, radius: 8, color: color, coreOpacity: 0.32 * visibility)
+            drawCircle(context: &context, center: head, diameter: 2.4, color: palette.bright.opacity(0.78 * visibility))
+        }
+    }
+
+    /// Radial and linear gradients do the softening here; keeping blur filters
+    /// out of the dense particle loops is what makes High practical at 30 fps.
+    private func drawSoftGlow(context: inout GraphicsContext, center: CGPoint, radius: CGFloat, color: Color, coreOpacity: Double) {
+        guard radius > 1, coreOpacity > 0.001 else { return }
+        let rect = CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)
+        let gradient = Gradient(stops: [
+            .init(color: color.opacity(coreOpacity), location: 0.0),
+            .init(color: color.opacity(coreOpacity * 0.5), location: 0.45),
+            .init(color: color.opacity(coreOpacity * 0.16), location: 0.72),
+            .init(color: color.opacity(0), location: 1.0)
+        ])
+        context.fill(Path(ellipseIn: rect), with: .radialGradient(gradient, center: center, startRadius: 0, endRadius: radius))
+    }
+
+    private func drawCorona(context: inout GraphicsContext, center: CGPoint, radius: CGFloat, color: Color, peak: Double) {
+        guard radius > 1, peak > 0.001 else { return }
+        let rect = CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)
+        let gradient = Gradient(stops: [
+            .init(color: color.opacity(peak * 0.35), location: 0.0),
+            .init(color: color.opacity(peak), location: 0.32),
+            .init(color: color.opacity(peak * 0.55), location: 0.55),
+            .init(color: color.opacity(0), location: 1.0)
+        ])
+        context.fill(Path(ellipseIn: rect), with: .radialGradient(gradient, center: center, startRadius: 0, endRadius: radius))
+    }
+
+    private func celestialPalette() -> CelestialPalette {
+        let base = primaryColor
+        return CelestialPalette(
+            core: base,
+            cool: hueShifted(base, by: -26, saturationScale: 0.9, brightnessScale: 1.14),
+            warm: hueShifted(base, by: 28, saturationScale: 0.95, brightnessScale: 1.08),
+            bright: blend(base, .white, 0.42)
+        )
+    }
+
+    private func blend(_ base: Color, _ other: Color, _ t: Double) -> Color {
+        #if canImport(UIKit)
+        var r1: CGFloat = 0, g1: CGFloat = 0, b1: CGFloat = 0, a1: CGFloat = 0
+        var r2: CGFloat = 0, g2: CGFloat = 0, b2: CGFloat = 0, a2: CGFloat = 0
+        guard UIColor(base).getRed(&r1, green: &g1, blue: &b1, alpha: &a1),
+              UIColor(other).getRed(&r2, green: &g2, blue: &b2, alpha: &a2) else { return base }
+        let f = CGFloat(min(max(t, 0), 1))
+        return Color(
+            red: Double(r1 + (r2 - r1) * f),
+            green: Double(g1 + (g2 - g1) * f),
+            blue: Double(b1 + (b2 - b1) * f),
+            opacity: Double(a1 + (a2 - a1) * f)
+        )
+        #else
+        return t < 0.5 ? base : other
+        #endif
+    }
+
+    private func hueShifted(_ color: Color, by degrees: Double, saturationScale: Double = 1, brightnessScale: Double = 1) -> Color {
+        #if canImport(UIKit)
+        var h: CGFloat = 0, s: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        guard UIColor(color).getHue(&h, saturation: &s, brightness: &b, alpha: &a) else { return color }
+        var hue = (h + CGFloat(degrees / 360)).truncatingRemainder(dividingBy: 1)
+        if hue < 0 { hue += 1 }
+        return Color(
+            hue: Double(hue),
+            saturation: Double(min(max(s * CGFloat(saturationScale), 0), 1)),
+            brightness: Double(min(max(b * CGFloat(brightnessScale), 0), 1)),
+            opacity: Double(a)
+        )
+        #else
+        return color
+        #endif
     }
 
     private func drawEllipseStroke(context: inout GraphicsContext, center: CGPoint, diameter: CGFloat, color: Color, lineWidth: CGFloat) {
@@ -789,6 +1380,16 @@ struct EclipseAmbientMotionBackground: View {
 
     private func lerpDouble(_ start: Double, _ end: Double, _ progress: Double) -> Double {
         start + (end - start) * progress
+    }
+
+    private func hash(_ value: Double) -> Double {
+        let x = sin(value * 12.9898) * 43758.5453
+        return x - floor(x)
+    }
+
+    private func unitFraction(_ value: Double) -> Double {
+        let fraction = value.truncatingRemainder(dividingBy: 1)
+        return fraction < 0 ? fraction + 1 : fraction
     }
 }
 
@@ -1472,11 +2073,13 @@ enum AppearanceConfig {
     static let backgroundIntensityKey = "appearanceBackgroundIntensity"
     static let motionKey = "appearanceMotion"
     static let customColorsKey = "appearanceCustomColors"
+#if !os(tvOS)
     static let readerPaletteKey = "readerAppearancePalette"
     static let readerBleedStrengthKey = "readerAppearanceBleedStrength"
     static let readerBackgroundIntensityKey = "readerAppearanceBackgroundIntensity"
     static let readerMotionKey = "readerAppearanceMotion"
     static let readerCustomColorsKey = "readerAppearanceCustomColors"
+#endif
     private static let migratedKey = "appearanceMigratedV1"
 
     static let defaultBleedStrength = 1.0

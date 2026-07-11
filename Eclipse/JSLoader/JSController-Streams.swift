@@ -1,59 +1,95 @@
 import JavaScriptCore
 
-extension JSController {
-    func fetchStreamUrlJS(episodeUrl: String, softsub: Bool = false, module: Service, completion: @escaping ((streams: [String]?, subtitles: [String]?,sources: [[String:Any]]? )) -> Void) {
-        let operation = beginServiceOperation(service: module, operation: "extractStreamUrl", primaryURL: episodeUrl)
+typealias ServiceStreamExtractionResult = (
+    streams: [String]?,
+    subtitles: [String]?,
+    sources: [[String: Any]]?
+)
 
-        if let exception = context.exception {
-            Logger.shared.log("Service stream JavaScript exception service=\(module.metadata.sourceName): \(exception)", type: "Error")
-            endServiceOperation(operation, reason: "exception")
-            completion((nil, nil,nil))
-            return
+extension JSController {
+    private static let streamExtractionTimeoutNanoseconds: UInt64 = 20_000_000_000
+
+    @discardableResult
+    func fetchStreamUrlJS(
+        episodeUrl: String,
+        softsub: Bool = false,
+        module: Service,
+        timeoutNanoseconds: UInt64 = JSController.streamExtractionTimeoutNanoseconds,
+        completion: @escaping (ServiceStreamExtractionResult) -> Void
+    ) -> JSCallbackDeadline<ServiceStreamExtractionResult> {
+        let emptyResult: ServiceStreamExtractionResult = (nil, nil, nil)
+        let request = JSCallbackDeadline<ServiceStreamExtractionResult> { result in
+            DispatchQueue.main.async {
+                completion(result)
+            }
+        }
+        let operation = beginStreamExtractionOperation(service: module, primaryURL: episodeUrl)
+        request.setCancellationHandler { [weak self] in
+            self?.cancelPendingServiceOperation(operation, reason: "stream-extraction-cancelled")
+        }
+        let finish: (ServiceStreamExtractionResult, String) -> Void = { [weak self, request] result, reason in
+            _ = request.finish(with: result) {
+                self?.endServiceOperation(operation, reason: reason)
+            }
+        }
+
+        if context.exception != nil {
+            Logger.shared.log("Service stream JavaScript exception; untrusted body suppressed", type: "Error")
+            finish(emptyResult, "exception")
+            return request
         }
         
         guard let extractStreamUrlFunction = context.objectForKeyedSubscript("extractStreamUrl") else {
             Logger.shared.log("No JavaScript function extractStreamUrl found service=\(module.metadata.sourceName)", type: "Error")
-            endServiceOperation(operation, reason: "missing-function")
-            completion((nil, nil,nil))
-            return
+            finish(emptyResult, "missing-function")
+            return request
         }
         
         let promiseValue = extractStreamUrlFunction.call(withArguments: [episodeUrl])
         guard let promise = promiseValue else {
             Logger.shared.log("extractStreamUrl did not return a Promise service=\(module.metadata.sourceName)", type: "Error")
-            endServiceOperation(operation, reason: "invalid-promise")
-            completion((nil, nil,nil))
-            return
+            finish(emptyResult, "invalid-promise")
+            return request
+        }
+
+        request.armTimeout(
+            nanoseconds: timeoutNanoseconds,
+            value: emptyResult
+        ) { [weak self] in
+            Logger.shared.log(
+                "Service stream extraction timed out service=\(module.metadata.sourceName)",
+                type: "Stream"
+            )
+            self?.cancelPendingServiceOperation(operation, reason: "stream-extraction-timeout")
         }
         
         let thenBlock: @convention(block) (JSValue) -> Void = { [weak self] result in
-            guard let self else { return }
+            guard let self else {
+                finish(emptyResult, "controller-released")
+                return
+            }
             
             if result.isNull || result.isUndefined {
                 Logger.shared.log("Received null or undefined stream result service=\(module.metadata.sourceName)", type: "Error")
-                self.endServiceOperation(operation, reason: "empty-result")
-                DispatchQueue.main.async { completion((nil, nil, nil)) }
+                finish(emptyResult, "empty-result")
                 return
             }
             
             if let resultString = result.toString(), resultString == "[object Promise]" {
                 Logger.shared.log("Received Promise object instead of resolved stream value service=\(module.metadata.sourceName)", type: "Error")
-                self.endServiceOperation(operation, reason: "promise-object")
-                DispatchQueue.main.async { completion((nil, nil, nil)) }
+                finish(emptyResult, "promise-object")
                 return
             }
             
             guard let jsonString = result.toString() else {
                 Logger.shared.log("Failed to convert stream JSValue to string service=\(module.metadata.sourceName)", type: "Error")
-                self.endServiceOperation(operation, reason: "invalid-result")
-                DispatchQueue.main.async { completion((nil, nil, nil)) }
+                finish(emptyResult, "invalid-result")
                 return
             }
             
             guard let data = jsonString.data(using: .utf8) else {
                 Logger.shared.log("Failed to convert stream string to data service=\(module.metadata.sourceName)", type: "Error")
-                self.endServiceOperation(operation, reason: "invalid-data")
-                DispatchQueue.main.async { completion((nil, nil, nil)) }
+                finish(emptyResult, "invalid-data")
                 return
             }
             
@@ -90,17 +126,13 @@ extension JSController {
                     }
                     
                     Logger.shared.log("Service stream extraction completed service=\(module.metadata.sourceName) plainStreams=\(streamUrls?.count ?? 0) structuredSources=\(streamUrlsAndHeaders?.count ?? 0) subtitles=\(subtitleUrls?.count ?? 0)", type: "Stream")
-                    self.endServiceOperation(operation, reason: "resolved")
-                    DispatchQueue.main.async {
-                        completion((streamUrls, subtitleUrls, streamUrlsAndHeaders))
-                    }
+                    finish((streamUrls, subtitleUrls, streamUrlsAndHeaders), "resolved")
                     return
                 }
                 
                 if let streamsArray = try JSONSerialization.jsonObject(with: data, options: []) as? [String] {
                     Logger.shared.log("Starting multi-stream with \(streamsArray.count) sources service=\(module.metadata.sourceName)", type: "Stream")
-                    self.endServiceOperation(operation, reason: "resolved-array")
-                    DispatchQueue.main.async { completion((streamsArray, nil, nil)) }
+                    finish((streamsArray, nil, nil), "resolved-array")
                     return
                 }
             } catch {
@@ -108,19 +140,12 @@ extension JSController {
             }
             
             Logger.shared.log("Starting stream from raw string service=\(module.metadata.sourceName) target=\(ServiceSandboxState.redactedURL(jsonString))", type: "Stream")
-            self.endServiceOperation(operation, reason: "raw-string")
-            DispatchQueue.main.async {
-                completion(([jsonString], nil, nil))
-            }
+            finish(([jsonString], nil, nil), "raw-string")
         }
         
-        let catchBlock: @convention(block) (JSValue) -> Void = { error in
-            let errorMessage = error.toString() ?? "Unknown JavaScript error"
-            Logger.shared.log("Stream promise rejected service=\(module.metadata.sourceName): \(errorMessage)", type: "Error")
-            self.endServiceOperation(operation, reason: "rejected")
-            DispatchQueue.main.async {
-                completion((nil, nil, nil))
-            }
+        let catchBlock: @convention(block) (JSValue) -> Void = { _ in
+            Logger.shared.log("Service stream promise rejected; untrusted body suppressed", type: "Error")
+            finish(emptyResult, "rejected")
         }
         
         let thenFunction = JSValue(object: thenBlock, in: context)
@@ -128,13 +153,13 @@ extension JSController {
         
         guard let thenFunction = thenFunction, let catchFunction = catchFunction else {
             Logger.shared.log("Failed to create JSValue objects for stream Promise handling service=\(module.metadata.sourceName)", type: "Error")
-            endServiceOperation(operation, reason: "handler-create-failed")
-            completion((nil, nil, nil))
-            return
+            finish(emptyResult, "handler-create-failed")
+            return request
         }
         
         promise.invokeMethod("then", withArguments: [thenFunction])
         promise.invokeMethod("catch", withArguments: [catchFunction])
+        return request
     }
 
     private func logStreamSourceDiagnostics(_ sources: [[String: Any]], serviceName: String) {

@@ -1,6 +1,36 @@
 import SwiftUI
 import Kingfisher
 import AVKit
+#if os(iOS)
+import Photos
+import UIKit
+#endif
+
+#if os(iOS)
+private struct StillPhotoSaveNotice: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+    let offersSettings: Bool
+}
+
+private enum StillPhotoSaveError: LocalizedError {
+    case invalidURL
+    case invalidResponse
+    case httpStatus(Int)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidURL:
+            return "The still image URL is invalid."
+        case .invalidResponse:
+            return "The downloaded file was not a valid image."
+        case .httpStatus(let status):
+            return "The image server returned HTTP \(status)."
+        }
+    }
+}
+#endif
 
 // MARK: - View-Level Detail Cache
 // Stores the fully-loaded state for a media detail screen so back-navigation is instant.
@@ -76,6 +106,15 @@ private final class MediaDetailCacheStore {
     }
 }
 
+enum MediaDetailTitleArtworkSettings {
+    static let enabledKey = "mediaDetailTitleArtworkEnabled"
+    static let defaultEnabled = true
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: enabledKey) == nil ? defaultEnabled : defaults.bool(forKey: enabledKey)
+    }
+}
+
 struct MediaDetailView: View {
     let searchResult: TMDBSearchResult
     
@@ -93,7 +132,9 @@ struct MediaDetailView: View {
     @State private var synopsis: String = ""
     @State private var isBookmarked: Bool = false
     @State private var showingSearchResults = false
+#if !os(tvOS)
     @State private var showingDownloadSheet = false
+#endif
     @State private var showingAddToCollection = false
     @State private var selectedEpisodeForSearch: TMDBEpisode?
     @State private var romajiTitle: String?
@@ -114,8 +155,15 @@ struct MediaDetailView: View {
     
     @State private var castMembers: [TMDBCastMember] = []
     @State private var detailStills: [TMDBImage] = []
+#if os(iOS)
+    @State private var savingStillURL: String?
+    @State private var stillPhotoSaveNotice: StillPhotoSaveNotice?
+#endif
     @State private var detailTrailers: [TMDBVideo] = []
+    @State private var similarTitles: [TMDBSearchResult] = []
     @State private var isLoadingExperimentalExtras = false
+    @State private var isLoadingSimilarTitles = false
+    @State private var similarTitlesLoadFailed = false
     @State private var traktComments: [TraktCommentReview] = []
     @State private var traktRating: TraktMediaRating?
     @State private var isLoadingTraktComments = false
@@ -124,13 +172,15 @@ struct MediaDetailView: View {
     @State private var specialsLoadTask: Task<Void, Never>?
     @State private var traktFeatureLoadTask: Task<Void, Never>?
     @State private var experimentalExtrasLoadTask: Task<Void, Never>?
+    @State private var similarTitlesLoadTask: Task<Void, Never>?
     @State private var specialsLoadGeneration = 0
     @State private var detailContentRefreshTick = 0
     
     @StateObject private var serviceManager = ServiceManager.shared
     @StateObject private var stremioManager = StremioAddonManager.shared
-    @StateObject private var pluginManager = NuvioPluginManager.shared
+#if !os(tvOS)
     private let downloadManager = DownloadManager.shared
+#endif
     @ObservedObject private var libraryManager = LibraryManager.shared
     @ObservedObject private var theme = EclipseTheme.shared
     @StateObject private var accentManager = AccentColorManager.shared
@@ -144,6 +194,8 @@ struct MediaDetailView: View {
     @AppStorage("mediaDetailHiddenElements") private var mediaDetailHiddenElements = ""
     @AppStorage("showCastSection") private var legacyShowCastSection = true
     @AppStorage("seasonMenu") private var useSeasonMenu = false
+    @AppStorage(MediaDetailTitleArtworkSettings.enabledKey) private var mediaDetailTitleArtworkEnabled = MediaDetailTitleArtworkSettings.defaultEnabled
+    @AppStorage(MediaDetailSimilarTitlesSettings.enabledKey) private var mediaDetailSimilarTitlesEnabled = MediaDetailSimilarTitlesSettings.defaultEnabled
     @AppStorage(ExperimentalMediaDesignPreset.storageKey) private var experimentalDesignPreset = ExperimentalMediaDesignPreset.defaultValue.rawValue
     @AppStorage(ExperimentalHeroBleedLevel.storageKey) private var experimentalHeroBleedLevel = ExperimentalHeroBleedLevel.defaultValue.rawValue
     @AppStorage(ExperimentalHomeCardShape.storageKey) private var experimentalHomeCardShape = ExperimentalHomeCardShape.defaultValue.rawValue
@@ -185,17 +237,23 @@ struct MediaDetailView: View {
 
     private var hasActiveSources: Bool {
         !serviceManager.activeServices.isEmpty ||
-        !stremioManager.activeAddons.isEmpty ||
-        !pluginManager.activeSources(for: searchResult.isMovie ? "movie" : "tv").isEmpty
+        !stremioManager.activeAddons.isEmpty
     }
 
     private var preferDownloadedMedia: Bool {
+#if os(tvOS)
+        false
+#else
         UserDefaults.standard.bool(forKey: "preferDownloadedMedia")
+#endif
     }
 
     private var visibleMediaDetailElements: [MediaDetailElement] {
         MediaDetailElement.orderedElements(from: mediaDetailElementOrder).filter { element in
             guard ExperimentalFeatureState.isEnabledAtLaunch || (element != .stills && element != .trailers) else {
+                return false
+            }
+            guard element != .similarTitles || mediaDetailSimilarTitlesEnabled else {
                 return false
             }
             guard MediaDetailElement.isVisible(
@@ -237,6 +295,9 @@ struct MediaDetailView: View {
     }
 
     private var hasPlayableDownloadForMainButton: Bool {
+#if os(tvOS)
+        false
+#else
         guard preferDownloadedMedia else { return false }
         if searchResult.isMovie {
             return downloadManager.completedDownloadItem(tmdbId: searchResult.id, isMovie: true) != nil
@@ -244,6 +305,7 @@ struct MediaDetailView: View {
         return downloadManager.completedDownloads.contains {
             !$0.isMovie && $0.tmdbId == searchResult.id && downloadManager.localFileURL(for: $0) != nil
         }
+#endif
     }
 
     private var canUseMainPlayButton: Bool {
@@ -340,6 +402,7 @@ struct MediaDetailView: View {
             } else {
                 startTraktFeatureLoad()
                 startExperimentalExtrasLoadIfNeeded()
+                startSimilarTitlesLoadIfNeeded()
             }
             updateBookmarkStatus()
         }
@@ -362,6 +425,11 @@ struct MediaDetailView: View {
                 experimentalExtrasLoadTask.cancel()
                 self.experimentalExtrasLoadTask = nil
             }
+            if let similarTitlesLoadTask {
+                Logger.shared.log("MediaDetail similar titles task cancelled on disappear: id=\(searchResult.id)", type: "TMDB")
+                similarTitlesLoadTask.cancel()
+                self.similarTitlesLoadTask = nil
+            }
             specialsLoadGeneration += 1
         }
         .onChange(of: trackerManager.trackerState.traktCommentsEnabled) { _ in
@@ -373,6 +441,9 @@ struct MediaDetailView: View {
             handleMediaDetailLayoutPreferenceChange()
         }
         .onChange(of: mediaDetailHiddenElements) { _ in
+            handleMediaDetailLayoutPreferenceChange()
+        }
+        .onChange(of: mediaDetailSimilarTitlesEnabled) { _ in
             handleMediaDetailLayoutPreferenceChange()
         }
         .onReceive(NotificationCenter.default.publisher(for: .requestNextEpisode)) { notification in
@@ -403,7 +474,52 @@ struct MediaDetailView: View {
                     showingSearchResults = true
                 }
             } else {
-                Logger.shared.log("NextEpisode: Could not find S\(seasonNumber)E\(episodeNumber) in loaded season detail for tmdbId=\(tmdbId) loadedEpisodes=\(seasonDetail?.episodes.count ?? 0)", type: "Player")
+                Task { @MainActor in
+                    if let specialContext = selectedSpecialEpisodeContext,
+                       let currentIndex = specialContext.episodes.firstIndex(where: {
+                           $0.seasonNumber == seasonNumber && $0.episodeNumber == episodeNumber - 1
+                       }),
+                       specialContext.episodes.indices.contains(currentIndex + 1) {
+                        let next = specialContext.episodes[currentIndex + 1]
+                        selectedEpisodeForSearch = next
+                        scheduleNextEpisodePresentation {
+                            beginSpecialSearch(context: specialContext, episode: next)
+                        }
+                        return
+                    }
+
+                    if isAnimeShow,
+                       let orderedEpisodes = anilistEpisodes?.sorted(by: episodeSort),
+                       let currentIndex = orderedEpisodes.firstIndex(where: {
+                           $0.seasonNumber == seasonNumber && $0.number == episodeNumber - 1
+                       }),
+                       orderedEpisodes.indices.contains(currentIndex + 1) {
+                        let next = tmdbEpisode(from: orderedEpisodes[currentIndex + 1])
+                        selectedEpisodeForSearch = next
+                        showingSearchResults = false
+                        scheduleNextEpisodePresentation {
+                            playSheetRequestId = UUID()
+                            showingSearchResults = true
+                        }
+                        return
+                    }
+
+                    if let nextSeasonNumber = tvShowDetail?.seasons
+                        .filter({ $0.seasonNumber > seasonNumber && $0.seasonNumber > 0 })
+                        .map(\.seasonNumber)
+                        .min(),
+                       let next = await episodeForPlayback(seasonNumber: nextSeasonNumber, episodeNumber: 1) {
+                        selectedEpisodeForSearch = next
+                        showingSearchResults = false
+                        scheduleNextEpisodePresentation {
+                            playSheetRequestId = UUID()
+                            showingSearchResults = true
+                        }
+                        return
+                    }
+
+                    Logger.shared.log("NextEpisode: Could not resolve an episode after S\(seasonNumber)E\(episodeNumber - 1) for tmdbId=\(tmdbId)", type: "Player")
+                }
             }
         }
         .onChangeComp(of: libraryManager.collections) { _, _ in
@@ -414,11 +530,13 @@ struct MediaDetailView: View {
                 refreshDetailContentLayout(reason: "play sheet dismissed")
             }
         }
+#if !os(tvOS)
         .onChangeComp(of: showingDownloadSheet) { _, newValue in
             if !newValue {
                 refreshDetailContentLayout(reason: "download sheet dismissed")
             }
         }
+#endif
         .onChangeComp(of: specialSearchRequest?.id) { _, newValue in
             if newValue == nil {
                 refreshDetailContentLayout(reason: "special search sheet dismissed")
@@ -469,6 +587,7 @@ struct MediaDetailView: View {
             )
             .id(playSheetRequestId)
         }
+#if !os(tvOS)
         .sheet(isPresented: $showingDownloadSheet) {
             let playbackContext = playbackContextForSearchSheet(selectedEpisodeForSearch)
             ModulesSearchResultsSheet(
@@ -502,6 +621,7 @@ struct MediaDetailView: View {
                 isAnimationGenre16: detailGenres.contains { $0.id == 16 }
             )
         }
+#endif
         .sheet(item: $specialSearchRequest) { request in
             ModulesSearchResultsSheet(
                 mediaTitle: request.title,
@@ -525,6 +645,26 @@ struct MediaDetailView: View {
         .sheet(isPresented: $showingAddToCollection) {
             AddToCollectionView(searchResult: searchResult)
         }
+#if os(iOS)
+        .alert(item: $stillPhotoSaveNotice) { notice in
+            if notice.offersSettings {
+                return Alert(
+                    title: Text(notice.title),
+                    message: Text(notice.message),
+                    primaryButton: .default(Text("Open Settings")) {
+                        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+                        UIApplication.shared.open(url)
+                    },
+                    secondaryButton: .cancel()
+                )
+            }
+            return Alert(
+                title: Text(notice.title),
+                message: Text(notice.message),
+                dismissButton: .default(Text("OK"))
+            )
+        }
+#endif
     }
 
     @ViewBuilder
@@ -558,7 +698,7 @@ struct MediaDetailView: View {
     @ViewBuilder
     private var loadingView: some View {
         VStack {
-            ProgressView()
+            EclipseLoadingIndicator()
                 .scaleEffect(1.5)
             Text("Loading...")
                 .font(.caption)
@@ -685,6 +825,7 @@ struct MediaDetailView: View {
         refreshDetailContentLayout(reason: "media-detail-layout-preferences")
         if hasLoadedContent {
             startExperimentalExtrasLoadIfNeeded()
+            startSimilarTitlesLoadIfNeeded()
         }
     }
 
@@ -808,6 +949,7 @@ struct MediaDetailView: View {
     }
 
     private var detailHeroImageURL: String? {
+#if !os(tvOS)
         if ExperimentalFeatureState.isEnabledAtLaunch && !isIPad && !isTvOS {
             if searchResult.isMovie {
                 return movieDetail?.fullPosterURL
@@ -820,6 +962,7 @@ struct MediaDetailView: View {
                 ?? tvShowDetail?.fullBackdropURL
                 ?? searchResult.fullBackdropURL
         }
+#endif
 
         if searchResult.isMovie {
             return movieDetail?.fullBackdropURL ?? searchResult.fullBackdropURL ?? movieDetail?.fullPosterURL ?? searchResult.fullPosterURL
@@ -882,7 +1025,9 @@ struct MediaDetailView: View {
 
     @ViewBuilder
     private var titleArtwork: some View {
-        if let logoURL = logoURL {
+        if !mediaDetailTitleArtworkEnabled {
+            EmptyView()
+        } else if let logoURL = logoURL {
             KFImage(URL(string: logoURL))
                 .placeholder {
                     titleText
@@ -999,11 +1144,19 @@ struct MediaDetailView: View {
                     .lineLimit(showFullSynopsis ? nil : 3)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal)
+#if !os(tvOS)
                     .onTapGesture {
                         withAnimation(.easeInOut(duration: 0.3)) {
                             showFullSynopsis.toggle()
                         }
                     }
+#endif
+#if os(tvOS)
+                if overviewText.count > 200 {
+                    tvSynopsisToggleButton
+                        .padding(.top, 12)
+                }
+#endif
             }
         }
     }
@@ -1019,11 +1172,18 @@ struct MediaDetailView: View {
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
                     .shadow(color: .black.opacity(0.42), radius: 6, x: 0, y: 3)
+#if !os(tvOS)
                     .onTapGesture {
                         withAnimation(.easeInOut(duration: 0.3)) {
                             showFullSynopsis.toggle()
                         }
                     }
+#endif
+#if os(tvOS)
+                if overviewText.count > 240 {
+                    tvSynopsisToggleButton
+                }
+#endif
             }
             .frame(maxWidth: .infinity)
             .padding(.horizontal, isIPad ? 80 : 28)
@@ -1037,6 +1197,22 @@ struct MediaDetailView: View {
             // here grows the section downward - pushing the cast/episodes below it
             // down, never the title/buttons above it up.
             let canExpand = overviewText.count > 150
+#if os(tvOS)
+            VStack(spacing: 12) {
+                Text(overviewText)
+                    .font(.system(size: isIPad ? 21 : 18, weight: .regular))
+                    .foregroundColor(.white.opacity(0.92))
+                    .lineLimit(showFullSynopsis ? nil : 4)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, isIPad ? 98 : 28)
+                    .shadow(color: .black.opacity(0.60), radius: 7, x: 0, y: 3)
+
+                if canExpand {
+                    tvSynopsisToggleButton
+                }
+            }
+#else
             Text(overviewText)
                 .font(.system(size: isIPad ? 21 : 18, weight: .regular))
                 .foregroundColor(.white.opacity(0.92))
@@ -1052,8 +1228,26 @@ struct MediaDetailView: View {
                         showFullSynopsis.toggle()
                     }
                 }
+#endif
         }
     }
+
+#if os(tvOS)
+    private var tvSynopsisToggleButton: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.28)) {
+                showFullSynopsis.toggle()
+            }
+        } label: {
+            Label(
+                showFullSynopsis ? "Show Less" : "Read More",
+                systemImage: showFullSynopsis ? "chevron.up" : "chevron.down"
+            )
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+    }
+#endif
 
     private var currentOverviewText: String? {
         let trimmedSynopsis = synopsis.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1113,6 +1307,7 @@ struct MediaDetailView: View {
                     .cornerRadius(8)
             }
             
+#if !os(tvOS)
             if searchResult.isMovie {
                 Button(action: {
                     downloadInServices()
@@ -1129,6 +1324,7 @@ struct MediaDetailView: View {
                 }
                 .disabled(!hasActiveSources || isCurrentlyDownloading)
             }
+#endif
             
             Button(action: {
                 showingAddToCollection = true
@@ -1171,30 +1367,61 @@ struct MediaDetailView: View {
                             .stroke(Color.white.opacity(0.32), lineWidth: 1)
                     )
             }
+#if os(tvOS)
+            .buttonStyle(.card)
+            .accessibilityLabel(canUseMainPlayButton ? playButtonText : "No playable source")
+            .accessibilityHint("Finds a stream and starts playback.")
+#else
             .buttonStyle(PlainButtonStyle())
+#endif
             .disabled(!canUseMainPlayButton)
 
             HStack(spacing: isIPad ? 30 : 22) {
-                experimentalActionButton(systemName: "rectangle.stack.badge.plus", foregroundColor: .white) {
+                experimentalActionButton(
+                    systemName: "rectangle.stack.badge.plus",
+                    foregroundColor: .white,
+                    title: "Add to Collection",
+                    hint: "Opens the collection picker."
+                ) {
                     showingAddToCollection = true
                 }
 
-                experimentalActionButton(systemName: isBookmarked ? "heart.fill" : "heart", foregroundColor: isBookmarked ? .white : .white) {
+                experimentalActionButton(
+                    systemName: isBookmarked ? "heart.fill" : "heart",
+                    foregroundColor: .white,
+                    title: "Bookmark",
+                    hint: "Adds or removes this title from Bookmarks.",
+                    selectionState: isBookmarked
+                ) {
                     toggleBookmark()
                 }
 
+#if !os(tvOS)
                 if searchResult.isMovie {
-                    experimentalActionButton(systemName: downloadButtonIcon, foregroundColor: downloadButtonColor) {
+                    experimentalActionButton(
+                        systemName: downloadButtonIcon,
+                        foregroundColor: downloadButtonColor,
+                        title: "Download",
+                        hint: "Finds a downloadable stream."
+                    ) {
                         downloadInServices()
                     }
                     .disabled(!hasActiveSources || isCurrentlyDownloading)
                 }
+#endif
             }
         }
         .padding(.horizontal, isIPad ? 90 : 28)
     }
 
-    private func experimentalActionButton(systemName: String, foregroundColor: Color, action: @escaping () -> Void) -> some View {
+    private func experimentalActionButton(
+        systemName: String,
+        foregroundColor: Color,
+        title: String,
+        hint: String,
+        selectionState: Bool? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: isIPad ? 26 : 22, weight: .semibold))
@@ -1203,7 +1430,14 @@ struct MediaDetailView: View {
                 .shadow(color: .black.opacity(0.45), radius: 6, x: 0, y: 2)
                 .contentShape(Circle())
         }
+#if os(tvOS)
+        .buttonStyle(.card)
+#else
         .buttonStyle(PlainButtonStyle())
+#endif
+        .accessibilityLabel(title)
+        .accessibilityValue(selectionState.map { $0 ? "Selected" : "Not selected" } ?? "")
+        .accessibilityHint(hint)
     }
     
     @ViewBuilder
@@ -1219,6 +1453,7 @@ struct MediaDetailView: View {
                 seasonSelectorInsertedContent: AnyView(specialsOVASection),
                 hasSpecialEpisodeChoices: !animeSpecialEntries.isEmpty,
                 animeEpisodes: anilistEpisodes,
+                animeEpisodeContextIndex: AnimeEpisodeContextIndex(episodes: anilistEpisodes ?? []),
                 animeSeasonTitles: animeSeasonTitles,
                 animeSeasonRomajiTitles: animeSeasonRomajiTitles,
                 animeSeasonAniListIds: animeSeasonAniListIds,
@@ -1256,6 +1491,8 @@ struct MediaDetailView: View {
             if !castMembers.isEmpty {
                 castSection
             }
+        case .similarTitles:
+            similarTitlesSection
         case .ratingNotes:
             StarRatingView(mediaId: searchResult.id, isAnime: isAnimeShow)
         case .traktComments:
@@ -1282,7 +1519,10 @@ struct MediaDetailView: View {
     private func playbackContextForSearchSheet(_ episode: TMDBEpisode?) -> EpisodePlaybackContext? {
         guard isAnimeShow, let episode else { return nil }
 
-        if PerformanceModeSettings.isEnabled || PerformanceModeSettings.skipsAniListTraversalForAnimeDetails {
+        // Performance Mode only changes Home catalog sourcing. The separate
+        // detail-traversal toggle is the setting that intentionally gives up
+        // AniList/Kitsu episode identity and absolute-number mappings.
+        if PerformanceModeSettings.skipsAniListTraversalForAnimeDetails {
             return EpisodePlaybackContext(
                 localSeasonNumber: episode.seasonNumber,
                 localEpisodeNumber: episode.episodeNumber,
@@ -1363,19 +1603,54 @@ struct MediaDetailView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 14) {
                         ForEach(Array(detailStills.prefix(10).enumerated()), id: \.offset) { _, still in
-                            KFImage(URL(string: still.fullURL))
-                                .placeholder {
-                                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                        .fill(Color.white.opacity(0.08))
+                            ZStack(alignment: .topTrailing) {
+                                KFImage(URL(string: still.fullURL))
+                                    .placeholder {
+                                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                            .fill(Color.white.opacity(0.08))
+                                    }
+                                    .resizable()
+                                    .aspectRatio(16/9, contentMode: .fill)
+                                    .frame(width: isIPad ? 330 : 250, height: isIPad ? 186 : 142)
+                                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                            .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                                    )
+
+#if os(iOS)
+                                Button {
+                                    saveStillToPhotos(still)
+                                } label: {
+                                    Group {
+                                        if savingStillURL == still.fullURL {
+                                            ProgressView()
+                                                .tint(.white)
+                                        } else {
+                                            Image(systemName: "square.and.arrow.down")
+                                        }
+                                    }
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .foregroundColor(.white)
+                                    .frame(width: 38, height: 38)
+                                    .background(.ultraThinMaterial, in: Circle())
                                 }
-                                .resizable()
-                                .aspectRatio(16/9, contentMode: .fill)
-                                .frame(width: isIPad ? 330 : 250, height: isIPad ? 186 : 142)
-                                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
-                                )
+                                .buttonStyle(.plain)
+                                .disabled(savingStillURL != nil)
+                                .padding(10)
+                                .accessibilityLabel(savingStillURL == still.fullURL ? "Saving still" : "Save still to Photos")
+#endif
+                            }
+#if os(iOS)
+                            .contextMenu {
+                                Button {
+                                    saveStillToPhotos(still)
+                                } label: {
+                                    Label("Save to Photos", systemImage: "square.and.arrow.down")
+                                }
+                                .disabled(savingStillURL != nil)
+                            }
+#endif
                         }
                     }
                     .padding(.horizontal)
@@ -1383,6 +1658,90 @@ struct MediaDetailView: View {
             }
         }
     }
+
+#if os(iOS)
+    @MainActor
+    private func saveStillToPhotos(_ still: TMDBImage) {
+        guard savingStillURL == nil else { return }
+        let stillURLString = still.fullURL
+        savingStillURL = stillURLString
+
+        Task {
+            do {
+                let authorization = await photoAddAuthorizationStatus()
+                guard authorization == .authorized || authorization == .limited else {
+                    savingStillURL = nil
+                    stillPhotoSaveNotice = StillPhotoSaveNotice(
+                        title: "Photos Access Needed",
+                        message: "Allow Eclipse to add photos in Settings, then try saving this still again.",
+                        offersSettings: authorization == .denied || authorization == .restricted
+                    )
+                    return
+                }
+
+                guard let url = URL(string: stillURLString) else {
+                    throw StillPhotoSaveError.invalidURL
+                }
+                let (data, response) = try await URLSession.shared.data(from: url)
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw StillPhotoSaveError.invalidResponse
+                }
+                guard (200...299).contains(httpResponse.statusCode) else {
+                    throw StillPhotoSaveError.httpStatus(httpResponse.statusCode)
+                }
+                let mimeType = response.mimeType?.lowercased()
+                guard !data.isEmpty,
+                      mimeType == nil || mimeType?.hasPrefix("image/") == true else {
+                    throw StillPhotoSaveError.invalidResponse
+                }
+
+                try await addStillDataToPhotos(data)
+                savingStillURL = nil
+                stillPhotoSaveNotice = StillPhotoSaveNotice(
+                    title: "Saved to Photos",
+                    message: "The full-resolution still was added to your photo library.",
+                    offersSettings: false
+                )
+            } catch {
+                savingStillURL = nil
+                stillPhotoSaveNotice = StillPhotoSaveNotice(
+                    title: "Couldn’t Save Still",
+                    message: error.localizedDescription,
+                    offersSettings: false
+                )
+                Logger.shared.log("Failed to save TMDB still to Photos: \(error.localizedDescription)", type: "Error")
+            }
+        }
+    }
+
+    private func photoAddAuthorizationStatus() async -> PHAuthorizationStatus {
+        let currentStatus = PHPhotoLibrary.authorizationStatus(for: .addOnly)
+        guard currentStatus == .notDetermined else { return currentStatus }
+
+        return await withCheckedContinuation { continuation in
+            PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+                continuation.resume(returning: status)
+            }
+        }
+    }
+
+    private func addStillDataToPhotos(_ data: Data) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            PHPhotoLibrary.shared().performChanges {
+                let request = PHAssetCreationRequest.forAsset()
+                request.addResource(with: .photo, data: data, options: nil)
+            } completionHandler: { success, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else if success {
+                    continuation.resume()
+                } else {
+                    continuation.resume(throwing: StillPhotoSaveError.invalidResponse)
+                }
+            }
+        }
+    }
+#endif
 
     @ViewBuilder
     private var experimentalTrailersSection: some View {
@@ -1461,7 +1820,7 @@ struct MediaDetailView: View {
                 .foregroundColor(.white)
 
             if isLoading {
-                ProgressView()
+                EclipseLoadingIndicator()
                     .scaleEffect(0.75)
             }
 
@@ -1499,6 +1858,91 @@ struct MediaDetailView: View {
             )
         }
         .padding(.horizontal)
+    }
+
+    @ViewBuilder
+    private var similarTitlesSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            experimentalSectionTitle(similarTitlesSectionTitle, isLoading: isLoadingSimilarTitles && similarTitles.isEmpty)
+
+            if similarTitles.isEmpty && !isLoadingSimilarTitles {
+                experimentalEmptyCard(
+                    title: nil,
+                    message: similarTitlesLoadFailed ? "Similar titles unavailable" : "No similar titles available"
+                )
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    LazyHStack(alignment: .top, spacing: 14) {
+                        ForEach(Array(similarTitles.prefix(15)), id: \.stableIdentity) { item in
+                            NavigationLink(destination: MediaDetailView(searchResult: item)) {
+                                similarTitleCard(item)
+                            }
+                            .buttonStyle(PlainButtonStyle())
+                        }
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 2)
+                }
+            }
+        }
+        .padding(.top, 8)
+    }
+
+    private var similarTitlesSectionTitle: String {
+        searchResult.isMovie ? "Similar Movies" : "Similar Shows"
+    }
+
+    private func similarTitleCard(_ item: TMDBSearchResult) -> some View {
+        let posterWidth: CGFloat = isTvOS ? 180 : (isIPad ? 132 : 104)
+        let posterHeight: CGFloat = posterWidth * 1.5
+
+        return VStack(alignment: .leading, spacing: 8) {
+            KFImage(URL(string: item.fullPosterURL ?? ""))
+                .setProcessor(DownsamplingImageProcessor(size: homeImageDecodeSize(width: posterWidth, height: posterHeight)))
+                .placeholder {
+                    FallbackImageView(
+                        isMovie: item.isMovie,
+                        size: CGSize(width: posterWidth, height: posterHeight)
+                    )
+                }
+                .resizable()
+                .aspectRatio(2/3, contentMode: .fill)
+                .frame(width: posterWidth, height: posterHeight)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Color.white.opacity(0.08), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.24), radius: 8, x: 0, y: 4)
+
+            Text(item.displayTitle)
+                .font(.subheadline)
+                .fontWeight(.medium)
+                .foregroundColor(.white)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(width: posterWidth, alignment: .leading)
+
+            if let metadata = similarTitleMetadata(item) {
+                Text(metadata)
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.58))
+                    .lineLimit(1)
+                    .frame(width: posterWidth, alignment: .leading)
+            }
+        }
+        .frame(width: posterWidth, alignment: .leading)
+    }
+
+    private func similarTitleMetadata(_ item: TMDBSearchResult) -> String? {
+        var parts: [String] = []
+        if !item.displayDate.isEmpty {
+            parts.append(String(item.displayDate.prefix(4)))
+        }
+        if let voteAverage = item.voteAverage, voteAverage > 0 {
+            parts.append(String(format: "%.1f TMDB", voteAverage))
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " - ")
     }
 
     // MARK: - Cast Section
@@ -1573,7 +2017,7 @@ struct MediaDetailView: View {
                         .foregroundColor(.white)
 
                     if isLoadingTraktComments {
-                        ProgressView()
+                        EclipseLoadingIndicator()
                             .scaleEffect(0.75)
                     }
 
@@ -1645,7 +2089,7 @@ struct MediaDetailView: View {
                         .foregroundColor(.white)
 
                     if isLoadingAnimeSpecials {
-                        ProgressView()
+                        EclipseLoadingIndicator()
                             .scaleEffect(0.75)
                             .padding(.leading, 2)
                     } else if !animeSpecialEntries.isEmpty {
@@ -2078,11 +2522,13 @@ struct MediaDetailView: View {
     private func searchInServices() {
         if searchResult.isMovie {
             selectedEpisodeForSearch = nil
+#if !os(tvOS)
             if preferDownloadedMedia,
                let item = downloadManager.completedDownloadItem(tmdbId: searchResult.id, isMovie: true) {
                 playDownloadedItem(item)
                 return
             }
+#endif
 
             guard hasActiveSources else { return }
             playSheetRequestId = UUID()
@@ -2102,12 +2548,14 @@ struct MediaDetailView: View {
                 specialContext.episodes.first(where: { $0.id == selected.id })
             } ?? specialContext.episodes.first
             selectedEpisodeForSearch = episode
+#if !os(tvOS)
             if preferDownloadedMedia,
                let episode,
                let item = downloadedItem(for: episode) {
                 playDownloadedItem(item)
                 return
             }
+#endif
             guard hasActiveSources else { return }
             beginSpecialSearch(context: specialContext, episode: episode)
             return
@@ -2116,6 +2564,7 @@ struct MediaDetailView: View {
         let episode = await resolveContinueEpisodeForMainPlay()
         selectedEpisodeForSearch = episode
 
+#if !os(tvOS)
         if preferDownloadedMedia,
            let episode,
            let item = downloadedItem(for: episode) {
@@ -2128,6 +2577,7 @@ struct MediaDetailView: View {
             playDownloadedItem(item)
             return
         }
+#endif
 
         guard hasActiveSources else { return }
         playSheetRequestId = UUID()
@@ -2232,6 +2682,7 @@ struct MediaDetailView: View {
         return lhs.seasonNumber < rhs.seasonNumber
     }
 
+#if !os(tvOS)
     private func downloadedItem(for episode: TMDBEpisode) -> DownloadItem? {
         downloadManager.completedDownloadItem(
             tmdbId: searchResult.id,
@@ -2408,6 +2859,7 @@ struct MediaDetailView: View {
         }
         return nil
     }
+#endif
 
     private func startTraktFeatureLoad() {
         traktFeatureLoadTask?.cancel()
@@ -2504,6 +2956,158 @@ struct MediaDetailView: View {
         }
     }
 
+    private func startSimilarTitlesLoadIfNeeded() {
+        similarTitlesLoadTask?.cancel()
+
+        let similarElementVisible = mediaDetailSimilarTitlesEnabled && MediaDetailElement.isVisible(
+            .similarTitles,
+            hiddenRawValue: mediaDetailHiddenElements,
+            legacyShowCastSection: legacyShowCastSection
+        )
+
+        guard similarElementVisible else {
+            similarTitles = []
+            isLoadingSimilarTitles = false
+            similarTitlesLoadFailed = false
+            similarTitlesLoadTask = nil
+            return
+        }
+
+        let tmdbId = searchResult.id
+        let isMovie = searchResult.isMovie
+        isLoadingSimilarTitles = similarTitles.isEmpty
+        similarTitlesLoadFailed = false
+
+        similarTitlesLoadTask = Task {
+            let loadedResults: [TMDBSearchResult]?
+            if isMovie {
+                loadedResults = (try? await tmdbService.getMovieRecommendations(id: tmdbId))?.map(\.asSearchResult)
+            } else {
+                loadedResults = (try? await tmdbService.getTVRecommendations(id: tmdbId))?.map(\.asSearchResult)
+            }
+
+            let filteredResults = Self.filteredSimilarTitles(
+                loadedResults ?? [],
+                currentId: tmdbId,
+                isMovie: isMovie
+            )
+
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard !Task.isCancelled, self.searchResult.id == tmdbId, self.searchResult.isMovie == isMovie else { return }
+                self.similarTitles = filteredResults
+                self.similarTitlesLoadFailed = loadedResults == nil
+                self.isLoadingSimilarTitles = false
+                self.similarTitlesLoadTask = nil
+                self.refreshDetailContentLayout(reason: "similar-titles")
+            }
+        }
+    }
+
+    private static func filteredSimilarTitles(
+        _ results: [TMDBSearchResult],
+        currentId: Int,
+        isMovie: Bool
+    ) -> [TMDBSearchResult] {
+        var seen = Set<String>()
+        var filtered: [TMDBSearchResult] = []
+
+        for result in results {
+            guard result.id != currentId,
+                  result.isMovie == isMovie,
+                  result.adult != true,
+                  seen.insert(result.stableIdentity).inserted else {
+                continue
+            }
+            filtered.append(result)
+            if filtered.count >= 15 { break }
+        }
+
+        return filtered
+    }
+
+    private struct ResolvedAnimeDetailMetadata {
+        let anime: AniListAnimeWithSeasons?
+        let rating: AnimeMetadataRating?
+    }
+
+    /// Resolves the expensive provider graph independently from images, title
+    /// artwork and credits. `loadMediaDetails` still publishes the page only
+    /// after every required branch has completed, so this reduces wall time
+    /// without exposing a partially assembled detail screen.
+    private func resolveAnimeDetailMetadata(
+        for detail: TMDBTVShowWithSeasons,
+        detectedAsAnime: Bool,
+        performanceModeEnabled: Bool,
+        skipAniListTraversal: Bool
+    ) async -> ResolvedAnimeDetailMetadata {
+        guard detectedAsAnime else {
+            Logger.shared.log("MediaDetailView: Skipping AniList fetch - not detected as anime", type: "AniList")
+            return ResolvedAnimeDetailMetadata(anime: nil, rating: nil)
+        }
+
+        if skipAniListTraversal {
+            Logger.shared.log(
+                "MediaDetailView: Skipping AniList traversal for \(detail.name) because detail traversal performance mode is enabled",
+                type: "AniList"
+            )
+            // The explicit skip setting promises reduced metadata accuracy. Do
+            // not replace the skipped AniList graph with MAL's much larger
+            // title-search/detail traversal; use the already-loaded TMDB value.
+            let rating = detail.voteAverage > 0
+                ? AnimeMetadataRating(value: detail.voteAverage, source: .tmdb)
+                : nil
+            return ResolvedAnimeDetailMetadata(anime: nil, rating: rating)
+        }
+
+        var animeData: AniListAnimeWithSeasons?
+        do {
+            try Task.checkCancellation()
+            Logger.shared.log(
+                "MediaDetailView: Starting AniMap-backed anime detail fetch for \(detail.name) (tmdbId=\(detail.id)) performanceMode=\(performanceModeEnabled)",
+                type: "AniList"
+            )
+            animeData = try await AniListService.shared.fetchAnimeDetailsWithEpisodes(
+                title: detail.name,
+                tmdbShowId: detail.id,
+                tmdbService: tmdbService,
+                tmdbShowPoster: detail.fullPosterURL,
+                token: nil
+            )
+            try Task.checkCancellation()
+            Logger.shared.log(
+                "MediaDetailView: Fetched AniList hybrid data for \(detail.name) with \(animeData?.seasons.count ?? 0) seasons, \(animeData?.totalEpisodes ?? 0) total episodes",
+                type: "AniList"
+            )
+
+            if let animeData {
+                let seasonMappings = animeData.seasons.map {
+                    (seasonNumber: $0.seasonNumber, anilistId: $0.anilistId)
+                }
+                TrackerManager.shared.registerAniListAnimeData(tmdbId: detail.id, seasons: seasonMappings)
+            }
+        } catch is CancellationError {
+            return ResolvedAnimeDetailMetadata(anime: nil, rating: nil)
+        } catch {
+            Logger.shared.log(
+                "MediaDetailView: FAILED AniList fetch for \(detail.name): \(error.localizedDescription)",
+                type: "Error"
+            )
+        }
+
+        guard !Task.isCancelled else {
+            return ResolvedAnimeDetailMetadata(anime: nil, rating: nil)
+        }
+        let rating = await AniListService.shared.preferredAnimeRating(
+            title: detail.name,
+            tmdbShowId: detail.id,
+            tmdbShowDetail: detail,
+            tmdbService: tmdbService,
+            animeData: animeData
+        )
+        return ResolvedAnimeDetailMetadata(anime: animeData, rating: rating)
+    }
+
     private func formattedTraktDate(_ raw: String?) -> String? {
         guard let raw, !raw.isEmpty else { return nil }
         let fractional = ISO8601DateFormatter()
@@ -2535,6 +3139,11 @@ struct MediaDetailView: View {
             Logger.shared.log("MediaDetail cancelling stale experimental extras task before reload: id=\(searchResult.id)", type: "TMDB")
             experimentalExtrasLoadTask.cancel()
             self.experimentalExtrasLoadTask = nil
+        }
+        if let similarTitlesLoadTask {
+            Logger.shared.log("MediaDetail cancelling stale similar titles task before reload: id=\(searchResult.id)", type: "TMDB")
+            similarTitlesLoadTask.cancel()
+            self.similarTitlesLoadTask = nil
         }
         specialsLoadGeneration += 1
         let detailCacheKey = PerformanceModeSettings.detailCacheKey(for: searchResult.stableIdentity)
@@ -2574,6 +3183,7 @@ struct MediaDetailView: View {
                 }
                 self.startTraktFeatureLoad()
                 self.startExperimentalExtrasLoadIfNeeded()
+                self.startSimilarTitlesLoadIfNeeded()
             }
             return
         }
@@ -2592,8 +3202,11 @@ struct MediaDetailView: View {
         traktRating = nil
         detailStills = []
         detailTrailers = []
+        similarTitles = []
+        similarTitlesLoadFailed = false
         isLoadingTraktComments = false
         isLoadingExperimentalExtras = false
+        isLoadingSimilarTitles = false
         selectedSpecialEpisodeContext = nil
         
         detailLoadTask = Task {
@@ -2646,6 +3259,7 @@ struct MediaDetailView: View {
                         ))
                         self.startTraktFeatureLoad()
                         self.startExperimentalExtrasLoadIfNeeded()
+                        self.startSimilarTitlesLoadIfNeeded()
                     }
                 } else {
                     async let detailTask = tmdbService.getTVShowWithSeasons(id: searchResult.id)
@@ -2654,6 +3268,24 @@ struct MediaDetailView: View {
                     async let creditsTask = tmdbService.getTVCredits(id: searchResult.id)
 
                     let detail = try await detailTask
+
+                    // Detect anime/donghua as soon as the primary TMDB detail
+                    // arrives, then overlap its provider traversal with the
+                    // already-running image/title/credit requests.
+                    let asianAnimationCountries: Set<String> = ["JP", "CN", "KR", "TW"]
+                    let isAsianAnimation = detail.originCountry?.contains(where: { asianAnimationCountries.contains($0) }) ?? false
+                    let isAnimation = detail.genres.contains { $0.id == 16 }
+                    let detectedAsAnime = isAsianAnimation && isAnimation
+                    let performanceModeEnabled = PerformanceModeSettings.isEnabled
+                    let skipAniListTraversal = PerformanceModeSettings.skipsAniListTraversalForAnimeDetails
+                    Logger.shared.log("MediaDetailView: \(detail.name) - isAsianAnimation=\(isAsianAnimation) isAnimation=\(isAnimation) detectedAsAnime=\(detectedAsAnime) originCountry=\(detail.originCountry ?? []) genres=\(detail.genres.map { $0.id })", type: "AniList")
+
+                    async let animeMetadataTask = resolveAnimeDetailMetadata(
+                        for: detail,
+                        detectedAsAnime: detectedAsAnime,
+                        performanceModeEnabled: performanceModeEnabled,
+                        skipAniListTraversal: skipAniListTraversal
+                    )
 
                     let images: TMDBImagesResponse?
                     do {
@@ -2671,56 +3303,9 @@ struct MediaDetailView: View {
                         credits = nil
                     }
 
-                    
-                    // Detect anime/donghua for tracking/catalog - includes JP, CN, KR, TW animation
-                    let asianAnimationCountries: Set<String> = ["JP", "CN", "KR", "TW"]
-                    let isAsianAnimation = detail.originCountry?.contains(where: { asianAnimationCountries.contains($0) }) ?? false
-                    let isAnimation = detail.genres.contains { $0.id == 16 }
-                    let detectedAsAnime = isAsianAnimation && isAnimation
-                    let performanceModeEnabled = PerformanceModeSettings.isEnabled
-                    let skipAniListTraversal = PerformanceModeSettings.skipsAniListTraversalForAnimeDetails
-                    Logger.shared.log("MediaDetailView: \(detail.name) - isAsianAnimation=\(isAsianAnimation) isAnimation=\(isAnimation) detectedAsAnime=\(detectedAsAnime) originCountry=\(detail.originCountry ?? []) genres=\(detail.genres.map { $0.id })", type: "AniList")
-                    
-                    // Full anime structure stays available unless the user opts into the detail-only skip mode.
-                    var animeData: AniListAnimeWithSeasons? = nil
-                    if detectedAsAnime && !skipAniListTraversal {
-                        do {
-                            Logger.shared.log("MediaDetailView: Starting AniMap-backed anime detail fetch for \(detail.name) (tmdbId=\(detail.id)) performanceMode=\(performanceModeEnabled)", type: "AniList")
-                            animeData = try await AniListService.shared.fetchAnimeDetailsWithEpisodes(
-                                title: detail.name,
-                                tmdbShowId: detail.id,
-                                tmdbService: tmdbService,
-                                tmdbShowPoster: detail.fullPosterURL,
-                                token: nil
-                            )
-                            Logger.shared.log("MediaDetailView: Fetched AniList hybrid data for \(detail.name) with \(animeData?.seasons.count ?? 0) seasons, \(animeData?.totalEpisodes ?? 0) total episodes", type: "AniList")
-                            
-                            // Register AniList season IDs with tracker for accurate syncing
-                            if let animeData = animeData {
-                                let seasonMappings = animeData.seasons.map { (seasonNumber: $0.seasonNumber, anilistId: $0.anilistId) }
-                                TrackerManager.shared.registerAniListAnimeData(tmdbId: detail.id, seasons: seasonMappings)
-                            }
-                        } catch {
-                            Logger.shared.log("MediaDetailView: FAILED AniList fetch for \(detail.name): \(error.localizedDescription)", type: "Error")
-                        }
-                    } else if detectedAsAnime {
-                        Logger.shared.log("MediaDetailView: Skipping AniList traversal for \(detail.name) because detail traversal performance mode is enabled", type: "AniList")
-                    } else {
-                        Logger.shared.log("MediaDetailView: Skipping AniList fetch - not detected as anime", type: "AniList")
-                    }
-                    
-                    let resolvedAnimeRating: AnimeMetadataRating?
-                    if detectedAsAnime {
-                        resolvedAnimeRating = await AniListService.shared.preferredAnimeRating(
-                            title: detail.name,
-                            tmdbShowId: detail.id,
-                            tmdbShowDetail: detail,
-                            tmdbService: tmdbService,
-                            animeData: animeData
-                        )
-                    } else {
-                        resolvedAnimeRating = nil
-                    }
+                    let animeMetadata = await animeMetadataTask
+                    let animeData = animeMetadata.anime
+                    let resolvedAnimeRating = animeMetadata.rating
 
                     if Task.isCancelled { return }
                     await MainActor.run {
@@ -2873,6 +3458,7 @@ struct MediaDetailView: View {
                         }
                         self.startTraktFeatureLoad()
                         self.startExperimentalExtrasLoadIfNeeded()
+                        self.startSimilarTitlesLoadIfNeeded()
                     }
                 }
             } catch is CancellationError {

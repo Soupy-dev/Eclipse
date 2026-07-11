@@ -3,6 +3,37 @@
 import Foundation
 
 enum AutoModeStreamSelection {
+    private static let resolutionMatchers: [(height: Int, regex: NSRegularExpression)] = [
+        (2160, try! NSRegularExpression(
+            pattern: #"(?<![a-wyz0-9])(?:2160(?:p|i)?|4k|uhd)(?![a-z0-9])(?!\s*(?:mb|mib|gb|gib)\b)"#,
+            options: [.caseInsensitive]
+        )),
+        (1440, try! NSRegularExpression(
+            pattern: #"(?<![a-wyz0-9])1440(?:p|i)?(?![a-z0-9])(?!\s*(?:mb|mib|gb|gib)\b)"#,
+            options: [.caseInsensitive]
+        )),
+        (1080, try! NSRegularExpression(
+            pattern: #"(?<![a-wyz0-9])1080(?:p|i)?(?![a-z0-9])(?!\s*(?:mb|mib|gb|gib)\b)"#,
+            options: [.caseInsensitive]
+        )),
+        (720, try! NSRegularExpression(
+            pattern: #"(?<![a-wyz0-9])720(?:p|i)?(?![a-z0-9])(?!\s*(?:mb|mib|gb|gib)\b)"#,
+            options: [.caseInsensitive]
+        )),
+        (480, try! NSRegularExpression(
+            pattern: #"(?<![a-wyz0-9])480(?:p|i)?(?![a-z0-9])(?!\s*(?:mb|mib|gb|gib)\b)"#,
+            options: [.caseInsensitive]
+        )),
+        (360, try! NSRegularExpression(
+            pattern: #"(?<![a-wyz0-9])360(?:p|i)?(?![a-z0-9])(?!\s*(?:mb|mib|gb|gib)\b)"#,
+            options: [.caseInsensitive]
+        ))
+    ]
+    private static let fileSizeMatcher = try! NSRegularExpression(
+        pattern: #"(\d+(?:\.\d+)?)\s*(gb|gib|mb|mib)"#,
+        options: [.caseInsensitive]
+    )
+
     struct StreamQualityInfo {
         let resolutionHeight: Int?
         let sizeMB: Double?
@@ -12,22 +43,7 @@ enum AutoModeStreamSelection {
 
     static func streamQualityInfo(from label: String) -> StreamQualityInfo {
         let lower = label.lowercased()
-        let resolutionHeight: Int?
-        if lower.contains("2160") || lower.contains("4k") || lower.contains("uhd") {
-            resolutionHeight = 2160
-        } else if lower.contains("1440") {
-            resolutionHeight = 1440
-        } else if lower.contains("1080") {
-            resolutionHeight = 1080
-        } else if lower.contains("720") {
-            resolutionHeight = 720
-        } else if lower.contains("480") {
-            resolutionHeight = 480
-        } else if lower.contains("360") {
-            resolutionHeight = 360
-        } else {
-            resolutionHeight = nil
-        }
+        let resolutionHeight = detectedResolutionHeight(in: label)
 
         let sizeMB = largestFileSizeMB(in: label)
 
@@ -63,13 +79,16 @@ enum AutoModeStreamSelection {
         )
     }
 
+    private static func detectedResolutionHeight(in label: String) -> Int? {
+        let range = NSRange(label.startIndex..<label.endIndex, in: label)
+        return resolutionMatchers.first { matcher in
+            matcher.regex.firstMatch(in: label, range: range) != nil
+        }?.height
+    }
+
     static func largestFileSizeMB(in label: String) -> Double? {
-        let pattern = #"(\d+(?:\.\d+)?)\s*(gb|gib|mb|mib)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
-            return nil
-        }
         let nsRange = NSRange(label.startIndex..<label.endIndex, in: label)
-        let matches = regex.matches(in: label, range: nsRange)
+        let matches = fileSizeMatcher.matches(in: label, range: nsRange)
         let sizes = matches.compactMap { match -> Double? in
             guard let valueRange = Range(match.range(at: 1), in: label),
                   let unitRange = Range(match.range(at: 2), in: label),
@@ -83,7 +102,14 @@ enum AutoModeStreamSelection {
     }
 
     static func streamPreferenceScore(label: String, preference: AutoModeQualityPreference, index: Int) -> Double {
-        let info = streamQualityInfo(from: label)
+        streamPreferenceScore(
+            info: streamQualityInfo(from: label),
+            preference: preference,
+            index: index
+        )
+    }
+
+    static func streamPreferenceScore(info: StreamQualityInfo, preference: AutoModeQualityPreference, index: Int) -> Double {
         let earlierTieBreak = -Double(index) * 0.001
         let sizeScore = min(info.sizeMB ?? 0, 80_000) / 10_000
         let qualityBonus = info.sourceScore + info.featureScore + sizeScore + earlierTieBreak
@@ -117,46 +143,50 @@ enum AutoModeStreamSelection {
         streamQualityInfo(from: label).resolutionHeight != nil
     }
 
-    /// Mirrors `ServicesResultsSheet.bestPluginStream`. Returns nil unless Auto Quality is on
-    /// and at least one stream exposes a detectable resolution (matching the real flow, which
-    /// otherwise shows a manual picker).
-    static func bestPluginStream(from streams: [NuvioPluginStream]) -> NuvioPluginStream? {
-        guard !streams.isEmpty else { return nil }
-        guard AutoModeQualityPreference.current.usesAutomaticSelection else { return nil }
-        guard streams.contains(where: { streamLabelHasDetectedQuality($0.qualitySearchLabel) }) else { return nil }
-        return streams.enumerated().max(by: { lhs, rhs in
-            let lhsScore = streamPreferenceScore(label: lhs.element.qualitySearchLabel, preference: AutoModeQualityPreference.current, index: lhs.offset)
-            let rhsScore = streamPreferenceScore(label: rhs.element.qualitySearchLabel, preference: AutoModeQualityPreference.current, index: rhs.offset)
-            if lhsScore == rhsScore {
-                return lhs.offset > rhs.offset
-            }
-            return lhsScore < rhsScore
-        })?.element
-    }
-
     // MARK: - Stremio
 
     /// Mirrors `ServicesResultsSheet.bestStremioStream`.
-    static func bestStremioStream(from streams: [StremioStream]) -> StremioStream? {
-        guard !streams.isEmpty else { return nil }
-        guard AutoModeQualityPreference.current.usesAutomaticSelection else {
+    static func bestStremioStream(
+        from streams: [StremioStream],
+        sourceId: String? = nil,
+        streamsAreFiltered: Bool = false
+    ) -> StremioStream? {
+        let preference = AutoModeQualityPreference.current
+        guard preference.usesAutomaticSelection else {
             return nil
         }
-        guard streams.contains(where: { streamLabelHasDetectedQuality(smartPlayerMetadata(for: $0)) }) else {
-            return nil
-        }
-        return streams.enumerated().max(by: { lhs, rhs in
-            let lhsLabel = smartPlayerMetadata(for: lhs.element)
-            let rhsLabel = smartPlayerMetadata(for: rhs.element)
-            let lhsScore = streamPreferenceScore(label: lhsLabel, preference: AutoModeQualityPreference.current, index: lhs.offset)
-                + legacyStremioStreamScore(lhs.element)
-            let rhsScore = streamPreferenceScore(label: rhsLabel, preference: AutoModeQualityPreference.current, index: rhs.offset)
-                + legacyStremioStreamScore(rhs.element)
-            if lhsScore == rhsScore {
-                return lhs.offset > rhs.offset
+
+        let visibleStreams: [StremioStream]
+        if streamsAreFiltered {
+            visibleStreams = streams
+        } else if let configuration = StreamLanguageFilter.configuration(sourceId: sourceId) {
+            visibleStreams = streams.filter {
+                !StreamLanguageFilter.shouldHide(stremio: $0, configuration: configuration)
             }
-            return lhsScore < rhsScore
-        })?.element
+        } else {
+            visibleStreams = streams
+        }
+
+        let rankedStreams = visibleStreams.enumerated().map { index, stream in
+            let label = smartPlayerMetadata(for: stream)
+            let info = streamQualityInfo(from: label)
+            return (
+                index: index,
+                stream: stream,
+                hasDetectedQuality: info.resolutionHeight != nil,
+                score: streamPreferenceScore(info: info, preference: preference, index: index)
+                    + legacyStremioStreamScore(stream)
+            )
+        }
+        guard rankedStreams.contains(where: { $0.hasDetectedQuality }) else {
+            return nil
+        }
+        return rankedStreams.max(by: { lhs, rhs in
+            if lhs.score == rhs.score {
+                return lhs.index > rhs.index
+            }
+            return lhs.score < rhs.score
+        })?.stream
     }
 
     static func legacyStremioStreamScore(_ stream: StremioStream) -> Double {
@@ -477,5 +507,445 @@ enum AutoModeStreamSelection {
         }
 
         return tags.joined(separator: " · ")
+    }
+}
+
+enum StreamLanguageFilter {
+    static let storageKey = "servicesHiddenStreamLanguages"
+    static let includedLanguagesKey = "servicesIncludedStreamLanguages"
+    static let hideUnknownLanguageStreamsKey = "servicesHideStreamsWithoutLanguageData"
+    static let hiddenStreamQualitiesKey = "servicesHiddenStreamQualities"
+    static let hideUnknownQualityStreamsKey = "servicesHideStreamsWithoutDetectedQuality"
+    static let extraRulesSourceIdsKey = "servicesExtraRulesSourceIds"
+    static let supportedQualityHeights = [2160, 1440, 1080, 720, 480, 360]
+
+    struct Matcher {
+        let keys: Set<String>
+        let markers: [String]
+    }
+
+    struct Configuration {
+        let hidesStreamsWithoutLanguageData: Bool
+        let includedLanguageMatchers: [Matcher]
+        let hiddenLanguageMatchers: [Matcher]
+        let hiddenQualityHeights: Set<Int>
+        let hidesStreamsWithoutDetectedQuality: Bool
+
+        var hasLanguageRules: Bool {
+            hidesStreamsWithoutLanguageData
+                || !includedLanguageMatchers.isEmpty
+                || !hiddenLanguageMatchers.isEmpty
+        }
+
+        var hasQualityRules: Bool {
+            hidesStreamsWithoutDetectedQuality || !hiddenQualityHeights.isEmpty
+        }
+    }
+
+    static func hiddenLanguages(defaults: UserDefaults = .standard) -> [String] {
+        sanitizedLanguageList(defaults.stringArray(forKey: storageKey) ?? [])
+    }
+
+    static func includedLanguages(defaults: UserDefaults = .standard) -> [String] {
+        sanitizedLanguageList(defaults.stringArray(forKey: includedLanguagesKey) ?? [])
+    }
+
+    static func hidesStreamsWithoutLanguageData(defaults: UserDefaults = .standard) -> Bool {
+        defaults.bool(forKey: hideUnknownLanguageStreamsKey)
+    }
+
+    static func hiddenQualityHeights(defaults: UserDefaults = .standard) -> [Int] {
+        sanitizedQualityHeights(defaults.array(forKey: hiddenStreamQualitiesKey)?.compactMap { value in
+            if let intValue = value as? Int { return intValue }
+            if let number = value as? NSNumber { return number.intValue }
+            if let string = value as? String { return Int(string) }
+            return nil
+        } ?? [])
+    }
+
+    static func hidesStreamsWithoutDetectedQuality(defaults: UserDefaults = .standard) -> Bool {
+        defaults.bool(forKey: hideUnknownQualityStreamsKey)
+    }
+
+    /// A missing value means rules apply to every Service and Stremio addon. An explicit empty
+    /// array means the user disabled the rules for every connected source.
+    static func extraRulesSourceIds(defaults: UserDefaults = .standard) -> [String]? {
+        guard defaults.object(forKey: extraRulesSourceIdsKey) != nil else { return nil }
+        return sanitizedExtraRulesSourceIds(defaults.stringArray(forKey: extraRulesSourceIdsKey) ?? [])
+    }
+
+    static func extraRulesApply(to sourceId: String?, defaults: UserDefaults = .standard) -> Bool {
+        guard let sourceId else { return true }
+        guard let selectedSourceIds = extraRulesSourceIds(defaults: defaults) else { return true }
+        return selectedSourceIds.contains(sourceId)
+    }
+
+    /// Returns `nil` when this source has no active rules. Callers processing a
+    /// stream list can snapshot this once and avoid UserDefaults, metadata, and
+    /// regex work for every element in the common default configuration.
+    static func configuration(
+        sourceId: String? = nil,
+        defaults: UserDefaults = .standard
+    ) -> Configuration? {
+        guard extraRulesApply(to: sourceId, defaults: defaults) else { return nil }
+
+        let included = includedLanguages(defaults: defaults)
+        let hidden = hiddenLanguages(defaults: defaults)
+        let hiddenQualities = Set(hiddenQualityHeights(defaults: defaults))
+        let hideUnknownLanguage = hidesStreamsWithoutLanguageData(defaults: defaults)
+        let hideUnknownQuality = hidesStreamsWithoutDetectedQuality(defaults: defaults)
+
+        guard hideUnknownLanguage
+                || hideUnknownQuality
+                || !included.isEmpty
+                || !hidden.isEmpty
+                || !hiddenQualities.isEmpty else {
+            return nil
+        }
+
+        return Configuration(
+            hidesStreamsWithoutLanguageData: hideUnknownLanguage,
+            includedLanguageMatchers: included.map(matcher(for:)),
+            hiddenLanguageMatchers: hidden.map(matcher(for:)),
+            hiddenQualityHeights: hiddenQualities,
+            hidesStreamsWithoutDetectedQuality: hideUnknownQuality
+        )
+    }
+
+    static func setHiddenLanguages(_ values: [String], defaults: UserDefaults = .standard) {
+        let sanitized = sanitizedLanguageList(values)
+        if sanitized.isEmpty {
+            defaults.removeObject(forKey: storageKey)
+        } else {
+            defaults.set(sanitized, forKey: storageKey)
+        }
+    }
+
+    static func setIncludedLanguages(_ values: [String], defaults: UserDefaults = .standard) {
+        let sanitized = sanitizedLanguageList(values)
+        if sanitized.isEmpty {
+            defaults.removeObject(forKey: includedLanguagesKey)
+        } else {
+            defaults.set(sanitized, forKey: includedLanguagesKey)
+        }
+    }
+
+    static func setHidesStreamsWithoutLanguageData(_ enabled: Bool, defaults: UserDefaults = .standard) {
+        if enabled {
+            defaults.set(true, forKey: hideUnknownLanguageStreamsKey)
+        } else {
+            defaults.removeObject(forKey: hideUnknownLanguageStreamsKey)
+        }
+    }
+
+    static func setHiddenQualityHeights(_ values: [Int], defaults: UserDefaults = .standard) {
+        let sanitized = sanitizedQualityHeights(values)
+        if sanitized.isEmpty {
+            defaults.removeObject(forKey: hiddenStreamQualitiesKey)
+        } else {
+            defaults.set(sanitized, forKey: hiddenStreamQualitiesKey)
+        }
+    }
+
+    static func setHidesStreamsWithoutDetectedQuality(_ enabled: Bool, defaults: UserDefaults = .standard) {
+        if enabled {
+            defaults.set(true, forKey: hideUnknownQualityStreamsKey)
+        } else {
+            defaults.removeObject(forKey: hideUnknownQualityStreamsKey)
+        }
+    }
+
+    static func setExtraRulesSourceIds(_ values: [String]?, defaults: UserDefaults = .standard) {
+        guard let values else {
+            defaults.removeObject(forKey: extraRulesSourceIdsKey)
+            return
+        }
+        defaults.set(sanitizedExtraRulesSourceIds(values), forKey: extraRulesSourceIdsKey)
+    }
+
+    static func languages(from editorText: String) -> [String] {
+        sanitizedLanguageList(editorText.components(separatedBy: CharacterSet(charactersIn: ",;\n")))
+    }
+
+    static func editorText(from values: [String]) -> String {
+        sanitizedLanguageList(values).joined(separator: ", ")
+    }
+
+    static func sanitizedLanguageList(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        let sanitized = values.compactMap { value -> String? in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            let language = String(trimmed.prefix(40))
+            let dedupeKey = languageKeys(in: language).first ?? normalizedKey(language)
+            guard seen.insert(dedupeKey).inserted else { return nil }
+            return language
+        }
+        return Array(sanitized.prefix(40))
+    }
+
+    static func sanitizedQualityHeights(_ values: [Int]) -> [Int] {
+        let supported = Set(supportedQualityHeights)
+        return Array(Set(values.filter { supported.contains($0) })).sorted(by: >)
+    }
+
+    static func sanitizedExtraRulesSourceIds(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        return values.compactMap { value -> String? in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("service:") || trimmed.hasPrefix("stremio:") else { return nil }
+            let sourceId = String(trimmed.prefix(160))
+            guard seen.insert(sourceId).inserted else { return nil }
+            return sourceId
+        }
+        .prefix(200)
+        .map { $0 }
+    }
+
+    static func qualityLabel(for height: Int) -> String {
+        height == 2160 ? "4K / 2160p" : "\(height)p"
+    }
+
+    static func shouldHide(
+        languageHints: [String],
+        metadata: [String],
+        sourceId: String? = nil,
+        defaults: UserDefaults = .standard
+    ) -> Bool {
+        guard let configuration = configuration(sourceId: sourceId, defaults: defaults) else {
+            return false
+        }
+        return shouldHide(
+            languageHints: languageHints,
+            metadata: metadata,
+            configuration: configuration
+        )
+    }
+
+    static func shouldHide(
+        languageHints: [String],
+        metadata: [String],
+        configuration: Configuration
+    ) -> Bool {
+        if configuration.hasQualityRules {
+            let metadataText = metadataText(from: metadata)
+            let detectedQuality = AutoModeStreamSelection.streamQualityInfo(from: metadataText).resolutionHeight
+            if configuration.hidesStreamsWithoutDetectedQuality, detectedQuality == nil {
+                return true
+            }
+            if let detectedQuality,
+               configuration.hiddenQualityHeights.contains(detectedQuality) {
+                return true
+            }
+        }
+
+        guard configuration.hasLanguageRules else { return false }
+        return shouldHideForLanguage(
+            languageHints: languageHints,
+            metadata: metadata,
+            configuration: configuration
+        )
+    }
+
+    private static func shouldHideForLanguage(
+        languageHints: [String],
+        metadata: [String],
+        configuration: Configuration
+    ) -> Bool {
+        if configuration.hidesStreamsWithoutLanguageData,
+           !hasLanguageData(languageHints: languageHints, metadata: metadata) {
+            return true
+        }
+
+        guard !configuration.includedLanguageMatchers.isEmpty
+                || !configuration.hiddenLanguageMatchers.isEmpty else {
+            return false
+        }
+
+        let hintKeys = Set(languageHints.flatMap { languageKeys(in: $0) })
+        let metadataText = metadataText(from: metadata)
+        let detectedMetadataKeys = Set(AutoModeStreamSelection.detectedStremioLanguageNames(in: metadataText).flatMap { languageKeys(in: $0) })
+
+        if !configuration.includedLanguageMatchers.isEmpty {
+            guard matchesAnyLanguage(
+                configuration.includedLanguageMatchers,
+                hintKeys: hintKeys,
+                detectedMetadataKeys: detectedMetadataKeys,
+                metadataText: metadataText
+            ) else {
+                return true
+            }
+        }
+
+        if matchesAnyLanguage(
+            configuration.hiddenLanguageMatchers,
+            hintKeys: hintKeys,
+            detectedMetadataKeys: detectedMetadataKeys,
+            metadataText: metadataText
+        ) {
+            return true
+        }
+
+        return false
+    }
+
+    private static func matchesAnyLanguage(
+        _ matchers: [Matcher],
+        hintKeys: Set<String>,
+        detectedMetadataKeys: Set<String>,
+        metadataText: String
+    ) -> Bool {
+        guard !matchers.isEmpty else { return false }
+
+        if !hintKeys.isEmpty,
+           matchers.contains(where: { !$0.keys.isDisjoint(with: hintKeys) }) {
+            return true
+        }
+        if !detectedMetadataKeys.isEmpty,
+           matchers.contains(where: { !$0.keys.isDisjoint(with: detectedMetadataKeys) }) {
+            return true
+        }
+        guard !metadataText.isEmpty else { return false }
+
+        return matchers.contains { matcher in
+            matcher.markers.contains { marker in
+                AutoModeStreamSelection.containsStremioLanguageMarker(marker, in: metadataText)
+            }
+        }
+    }
+
+    static func hasLanguageData(languageHints: [String], metadata: [String]) -> Bool {
+        let hintValues = languageHints
+            .flatMap(AutoModeStreamSelection.splitStremioLanguageHint)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        if hintValues.contains(where: isMeaningfulLanguageHint) {
+            return true
+        }
+
+        let metadataText = metadataText(from: metadata)
+        guard !metadataText.isEmpty else { return false }
+        if !AutoModeStreamSelection.detectedStremioLanguageNames(in: metadataText).isEmpty {
+            return true
+        }
+
+        return AutoModeStreamSelection.containsStremioLanguageMarker("multi audio", in: metadataText)
+            || AutoModeStreamSelection.containsStremioLanguageMarker("multi-language", in: metadataText)
+            || AutoModeStreamSelection.containsStremioLanguageMarker("multilang", in: metadataText)
+            || AutoModeStreamSelection.containsStremioLanguageMarker("dual audio", in: metadataText)
+    }
+
+    static func shouldHide(
+        stremio stream: StremioStream,
+        sourceId: String? = nil,
+        defaults: UserDefaults = .standard
+    ) -> Bool {
+        shouldHide(
+            languageHints: stream.languageHints,
+            metadata: [
+                stream.name,
+                stream.title,
+                stream.description,
+                stream.behaviorHints?.filename,
+                AutoModeStreamSelection.stremioLanguageLabel(for: stream),
+                AutoModeStreamSelection.smartPlayerMetadata(for: stream)
+            ].compactMap { $0 },
+            sourceId: sourceId,
+            defaults: defaults
+        )
+    }
+
+    static func shouldHide(
+        stremio stream: StremioStream,
+        configuration: Configuration
+    ) -> Bool {
+        shouldHide(
+            languageHints: stream.languageHints,
+            metadata: [
+                stream.name,
+                stream.title,
+                stream.description,
+                stream.behaviorHints?.filename,
+                AutoModeStreamSelection.stremioLanguageLabel(for: stream),
+                AutoModeStreamSelection.smartPlayerMetadata(for: stream)
+            ].compactMap { $0 },
+            configuration: configuration
+        )
+    }
+
+    private static func matcher(for value: String) -> Matcher {
+        let keys = Set(languageKeys(in: value))
+        let markers = markerCandidates(for: value, keys: keys)
+        return Matcher(keys: keys, markers: markers)
+    }
+
+    private static func languageKeys(in value: String) -> [String] {
+        var keys: [String] = []
+        let candidates = [value] + AutoModeStreamSelection.splitStremioLanguageHint(value)
+        for candidate in candidates {
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            if let normalized = AutoModeStreamSelection.normalizedStremioLanguageName(trimmed) {
+                keys.append(normalizedKey(normalized))
+            }
+            if let prefix = trimmed.split(separator: "-").first,
+               prefix.count < trimmed.count,
+               let normalized = AutoModeStreamSelection.normalizedStremioLanguageName(String(prefix)) {
+                keys.append(normalizedKey(normalized))
+            }
+            keys.append(normalizedKey(trimmed))
+        }
+        var seen = Set<String>()
+        return keys.filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
+
+    private static func isMeaningfulLanguageHint(_ value: String) -> Bool {
+        let key = normalizedKey(value)
+        guard !key.isEmpty else { return false }
+        let placeholders: Set<String> = [
+            "unknown",
+            "unknown language",
+            "unk",
+            "und",
+            "undefined",
+            "undetermined",
+            "none",
+            "null",
+            "n a",
+            "na",
+            "not available",
+            "no language"
+        ]
+        return !placeholders.contains(key)
+    }
+
+    private static func metadataText(from metadata: [String]) -> String {
+        metadata
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private static func markerCandidates(for value: String, keys: Set<String>) -> [String] {
+        var markers = AutoModeStreamSelection.splitStremioLanguageHint(value)
+        markers.append(value)
+        if keys.contains("multi audio") {
+            markers.append(contentsOf: ["multi audio", "multi-audio", "multilang", "multi-language"])
+        }
+        if keys.contains("dual audio") {
+            markers.append(contentsOf: ["dual audio", "dual-audio"])
+        }
+        var seen = Set<String>()
+        return markers
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .filter { seen.insert(normalizedKey($0)).inserted }
+    }
+
+    private static func normalizedKey(_ value: String) -> String {
+        value
+            .folding(options: [.diacriticInsensitive, .widthInsensitive], locale: .current)
+            .lowercased()
+            .replacingOccurrences(of: #"[^a-z0-9]+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

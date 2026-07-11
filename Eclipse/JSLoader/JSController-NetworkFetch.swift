@@ -1,16 +1,38 @@
-#if os(tvOS)
-    import FakeWebKit
-#else
-    import WebKit
+import Combine
+import Foundation
+import JavaScriptCore
+
+#if !os(tvOS)
+import WebKit
+#if os(iOS)
+import UIKit
 #endif
 
-import JavaScriptCore
+/// A viewport that contradicts the declared User-Agent (e.g. a fixed 1920x1080 desktop
+/// canvas under a mobile UA) is an internal-consistency tell bot detection checks for.
+/// Keep the two in the same class so they always agree.
+private func serviceWebViewViewportBounds(forUserAgent userAgent: String) -> CGRect {
+    let lowerUA = userAgent.lowercased()
+    let isMobile = lowerUA.contains("mobile") || lowerUA.contains("iphone") || lowerUA.contains("android")
+    #if os(iOS)
+    if isMobile {
+        return UIScreen.main.bounds
+    }
+    #endif
+    return isMobile
+        ? CGRect(x: 0, y: 0, width: 414, height: 896)
+        : CGRect(x: 0, y: 0, width: 1920, height: 1080)
+}
 
 private enum ServiceWebViewCookieLoader {
     static func load(_ request: URLRequest, in webView: WKWebView, for url: URL) {
         if let host = url.host,
            let userAgent = CloudflareBypassManager.shared.bypassUserAgent(for: host) {
+            // This overrides whatever UA setupWebView() picked (and sized the frame for), so
+            // the frame has to be re-paired here too or we reintroduce the exact
+            // viewport/UA mismatch this pairing exists to avoid.
             webView.customUserAgent = userAgent
+            webView.frame = serviceWebViewViewportBounds(forUserAgent: userAgent)
         }
 
         #if os(tvOS)
@@ -59,6 +81,7 @@ private enum ServiceWebViewCookieLoader {
     }
     #endif
 }
+#endif
 
 struct NetworkFetchOptions {
     let timeoutSeconds: Int
@@ -309,6 +332,7 @@ extension JSContext {
     }
 }
 
+#if !os(tvOS)
 class NetworkFetchSimpleManager: NSObject, ObservableObject {
     static let shared = NetworkFetchSimpleManager()
 
@@ -399,17 +423,23 @@ class NetworkFetchSimpleMonitor: NSObject, ObservableObject {
         config.userContentController.addUserScript(userScript)
         config.userContentController.add(self, name: "networkLogger")
 
+        // Desktop-only pool paired with the fixed desktop frame below: existing service
+        // scrapers' clickSelectors/waitForSelectors were built and tested against a guaranteed
+        // desktop-shaped DOM, so this deliberately doesn't vary the viewport by UA pick — only
+        // the cached-bypass-session path (ServiceWebViewCookieLoader.load) resizes the frame,
+        // for the specific hosts where the resulting UA is a real, non-desktop device profile.
+        let userAgent = URLSession.randomDesktopUserAgent
         webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 1920, height: 1080), configuration: config)
         webView?.navigationDelegate = self
 
-        webView?.customUserAgent = URLSession.randomUserAgent
+        webView?.customUserAgent = userAgent
     }
 
     private func loadURL(url: URL, headers: [String: String] = [:]) {
         guard let webView = webView else { return }
         addRequest(url.absoluteString)
         var request = URLRequest(url: url)
-        request.setValue(URLSession.randomUserAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue(webView.customUserAgent ?? URLSession.randomUserAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8", forHTTPHeaderField: "Accept")
         request.setValue("en-US,en;q=0.5", forHTTPHeaderField: "Accept-Language")
         request.setValue("gzip, deflate, br", forHTTPHeaderField: "Accept-Encoding")
@@ -693,7 +723,7 @@ class NetworkFetchMonitor: NSObject, ObservableObject {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
-        
+
         let jsCode = """
         (function() {
             const eclipseBlockedHostSuffixes = [
@@ -1093,12 +1123,18 @@ class NetworkFetchMonitor: NSObject, ObservableObject {
         config.userContentController.addUserScript(userScript)
         config.userContentController.add(self, name: "networkLogger")
         
+        // Desktop-only pool paired with the fixed desktop frame below: existing service
+        // scrapers' clickSelectors/waitForSelectors were built and tested against a guaranteed
+        // desktop-shaped DOM, so this deliberately doesn't vary the viewport by UA pick — only
+        // the cached-bypass-session path (ServiceWebViewCookieLoader.load) resizes the frame,
+        // for the specific hosts where the resulting UA is a real, non-desktop device profile.
+        let userAgent = URLSession.randomDesktopUserAgent
         webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 1920, height: 1080), configuration: config)
         webView?.navigationDelegate = self
-        
-        webView?.customUserAgent = URLSession.randomUserAgent
+
+        webView?.customUserAgent = userAgent
     }
-    
+
     private func loadHTMLContent(_ htmlContent: String) {
         guard let webView = webView else { return }
         
@@ -1122,8 +1158,8 @@ class NetworkFetchMonitor: NSObject, ObservableObject {
         addRequest(url.absoluteString)
         
         var request = URLRequest(url: url)
-        
-        request.setValue(URLSession.randomUserAgent, forHTTPHeaderField: "User-Agent")
+
+        request.setValue(webView.customUserAgent ?? URLSession.randomUserAgent, forHTTPHeaderField: "User-Agent")
         request.setValue("text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8", forHTTPHeaderField: "Accept")
         request.setValue("en-US,en;q=0.5", forHTTPHeaderField: "Accept-Language")
         request.setValue("gzip, deflate, br", forHTTPHeaderField: "Accept-Encoding")
@@ -1368,3 +1404,266 @@ extension NetworkFetchMonitor: WKScriptMessageHandler {
         }
     }
 }
+#else
+private enum TVNetworkFetchExecutor {
+    private static let maximumResponseBytes = 10_000_000
+    private static let blockedRequestHeaders: Set<String> = [
+        "connection", "content-length", "host", "proxy-authenticate",
+        "proxy-authorization", "te", "trailer", "transfer-encoding", "upgrade"
+    ]
+
+    static func execute(
+        urlString: String,
+        options: NetworkFetchOptions,
+        operation: ServiceSandboxOperation
+    ) async -> [String: Any] {
+        if options.htmlContent?.isEmpty == false
+            || !options.clickSelectors.isEmpty
+            || !options.waitForSelectors.isEmpty {
+            return failure(
+                originalURL: urlString,
+                error: ServiceCompatibilityError.browserAutomationRequired.localizedDescription
+            )
+        }
+
+        guard let url = URL(string: urlString),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "https" || scheme == "http" else {
+            return failure(
+                originalURL: urlString,
+                error: ServiceCompatibilityError.unsupportedTransport.localizedDescription
+            )
+        }
+
+        var request = URLRequest(url: url)
+        request.timeoutInterval = TimeInterval(min(max(options.timeoutSeconds, 1), 60))
+        request.setValue(URLSession.randomUserAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue("text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.8", forHTTPHeaderField: "Accept")
+        for (key, value) in sanitizedHeaders(options.headers) {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = request.timeoutInterval
+        configuration.timeoutIntervalForResource = request.timeoutInterval
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieAcceptPolicy = .always
+        let session = URLSession(
+            configuration: configuration,
+            delegate: FetchDelegate(allowRedirects: true),
+            delegateQueue: nil
+        )
+        defer { session.finishTasksAndInvalidate() }
+
+        do {
+            let (data, response) = try await session.boundedData(
+                for: request,
+                maximumResponseBytes: maximumResponseBytes
+            )
+
+            let httpResponse = response as? HTTPURLResponse
+            let body = decodedText(from: data, response: httpResponse)
+            let responseHeaders = CloudflareBypassManager.headersDictionary(from: httpResponse)
+            if CloudflareBypassManager.isChallengeResponse(
+                status: httpResponse?.statusCode ?? 0,
+                body: body,
+                headers: responseHeaders
+            ) {
+                Logger.shared.log(
+                    "Service networkFetch hit Cloudflare challenge service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(url.absoluteString)) \(CloudflareBypassManager.challengeDebugSummary(status: httpResponse?.statusCode ?? 0, body: body, headers: responseHeaders))",
+                    type: "Service"
+                )
+                await CloudflareBypassManager.shared.flagPendingVerification(for: url)
+                return failure(
+                    originalURL: url.absoluteString,
+                    error: ServiceCompatibilityError.interactiveChallengeRequired.localizedDescription
+                )
+            }
+
+            let finalURL = httpResponse?.url?.absoluteString ?? url.absoluteString
+            let cutoffMatched = options.cutoff.map {
+                !$0.isEmpty && finalURL.localizedCaseInsensitiveContains($0)
+            } ?? false
+            let cookieValues = options.returnCookies
+                ? responseCookies(from: httpResponse, for: httpResponse?.url ?? url)
+                : [:]
+            let htmlValue: Any = options.returnHTML ? body : NSNull()
+            let cookieValue: Any = cookieValues.isEmpty ? NSNull() : cookieValues
+
+            Logger.shared.log(
+                "Service networkFetch completed service=\(operation.serviceName) operation=\(operation.operation) requestCount=1 original=\(ServiceSandboxState.redactedURL(finalURL)) cutoff=\(cutoffMatched)",
+                type: "Service"
+            )
+
+            return [
+                "originalUrl": finalURL,
+                "requests": [finalURL],
+                "html": htmlValue,
+                "cookies": cookieValue,
+                "success": true,
+                "cutoffTriggered": cutoffMatched,
+                "cutoffUrl": cutoffMatched ? finalURL : NSNull(),
+                "htmlCaptured": options.returnHTML,
+                "cookiesCaptured": !cookieValues.isEmpty,
+                "elementsClicked": [],
+                "waitResults": [:]
+            ]
+        } catch is BoundedURLSessionError {
+            Logger.shared.log(
+                "Service networkFetch rejected oversized response service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString)) limitBytes=\(maximumResponseBytes)",
+                type: "Error"
+            )
+            return failure(
+                originalURL: urlString,
+                error: ServiceCompatibilityError.responseTooLarge.localizedDescription
+            )
+        } catch {
+            let safeError: String
+            if let urlError = error as? URLError {
+                safeError = "Network request failed (\(urlError.code.rawValue))."
+            } else {
+                safeError = "Network request failed."
+            }
+            Logger.shared.log(
+                "Service networkFetch failed service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString))",
+                type: "Error"
+            )
+            return failure(originalURL: urlString, error: safeError)
+        }
+    }
+
+    private static func failure(originalURL: String, error: String) -> [String: Any] {
+        [
+            "originalUrl": ServiceSandboxState.redactedURL(originalURL),
+            "requests": [],
+            "html": NSNull(),
+            "cookies": NSNull(),
+            "success": false,
+            "error": error,
+            "cutoffTriggered": false,
+            "cutoffUrl": NSNull(),
+            "htmlCaptured": false,
+            "cookiesCaptured": false,
+            "elementsClicked": [],
+            "waitResults": [:]
+        ]
+    }
+
+    private static func sanitizedHeaders(_ headers: [String: String]) -> [String: String] {
+        var result: [String: String] = [:]
+        for (key, value) in headers.prefix(64) {
+            let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+            let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmedKey.isEmpty,
+                  !trimmedValue.isEmpty,
+                  trimmedKey.count <= 128,
+                  trimmedValue.utf8.count <= 8_192,
+                  !blockedRequestHeaders.contains(trimmedKey.lowercased()),
+                  !trimmedKey.contains("\r"),
+                  !trimmedKey.contains("\n"),
+                  !trimmedValue.contains("\r"),
+                  !trimmedValue.contains("\n") else { continue }
+            result[trimmedKey] = trimmedValue
+        }
+        return result
+    }
+
+    private static func decodedText(from data: Data, response: HTTPURLResponse?) -> String {
+        if let utf8 = String(data: data, encoding: .utf8) { return utf8 }
+        if let encodingName = response?.textEncodingName {
+            let cfEncoding = CFStringConvertIANACharSetNameToEncoding(encodingName as CFString)
+            guard cfEncoding != kCFStringEncodingInvalidId else {
+                return String(decoding: data, as: UTF8.self)
+            }
+            let nsEncoding = CFStringConvertEncodingToNSStringEncoding(cfEncoding)
+            if let decoded = String(data: data, encoding: String.Encoding(rawValue: nsEncoding)) {
+                return decoded
+            }
+        }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private static func responseCookies(from response: HTTPURLResponse?, for url: URL) -> [String: String] {
+        guard let response else { return [:] }
+        let headerFields = response.allHeaderFields.reduce(into: [String: String]()) { result, pair in
+            result[String(describing: pair.key)] = String(describing: pair.value)
+        }
+        return HTTPCookie.cookies(withResponseHeaderFields: headerFields, for: url)
+            .reduce(into: [String: String]()) { result, cookie in
+                result[cookie.name] = cookie.value
+            }
+    }
+}
+
+final class NetworkFetchSimpleManager: NSObject, ObservableObject {
+    static let shared = NetworkFetchSimpleManager()
+
+    private override init() {
+        super.init()
+    }
+
+    func performNetworkFetch(
+        urlString: String,
+        timeoutSeconds: Int,
+        htmlContent: String? = nil,
+        headers: [String: String] = [:],
+        operation: ServiceSandboxOperation,
+        resolve: JSValue,
+        reject: JSValue
+    ) {
+        let options = NetworkFetchOptions(
+            timeoutSeconds: timeoutSeconds,
+            headers: headers,
+            returnHTML: false,
+            returnCookies: false,
+            htmlContent: htmlContent
+        )
+        Task {
+            let result = await TVNetworkFetchExecutor.execute(
+                urlString: urlString,
+                options: options,
+                operation: operation
+            )
+            await MainActor.run {
+                if !resolve.isUndefined {
+                    resolve.call(withArguments: [[
+                        "originalUrl": result["originalUrl"] ?? ServiceSandboxState.redactedURL(urlString),
+                        "requests": result["requests"] ?? [],
+                        "success": result["success"] ?? false,
+                        "error": result["error"] ?? NSNull()
+                    ]])
+                }
+            }
+        }
+    }
+}
+
+final class NetworkFetchManager: NSObject, ObservableObject {
+    static let shared = NetworkFetchManager()
+
+    private override init() {
+        super.init()
+    }
+
+    func performNetworkFetch(
+        urlString: String,
+        options: NetworkFetchOptions,
+        operation: ServiceSandboxOperation,
+        resolve: JSValue,
+        reject: JSValue
+    ) {
+        Task {
+            let result = await TVNetworkFetchExecutor.execute(
+                urlString: urlString,
+                options: options,
+                operation: operation
+            )
+            await MainActor.run {
+                if !resolve.isUndefined {
+                    resolve.call(withArguments: [result])
+                }
+            }
+        }
+    }
+}
+#endif

@@ -6,6 +6,8 @@ struct AlternativeUIView: View {
     // Retained display options
     @AppStorage("seasonMenu") private var useSeasonMenu = false
     @AppStorage("horizontalEpisodeList") private var horizontalEpisodeList = false
+    @AppStorage(MediaDetailTitleArtworkSettings.enabledKey) private var mediaDetailTitleArtworkEnabled = MediaDetailTitleArtworkSettings.defaultEnabled
+    @AppStorage(MediaDetailSimilarTitlesSettings.enabledKey) private var mediaDetailSimilarTitlesEnabled = MediaDetailSimilarTitlesSettings.defaultEnabled
 
     // Layout knobs retained for Reset Appearance; their controls now live in Home Layout.
     @AppStorage(ExperimentalMediaDesignPreset.storageKey) private var experimentalDesignPreset = ExperimentalMediaDesignPreset.defaultValue.rawValue
@@ -16,8 +18,11 @@ struct AlternativeUIView: View {
     @AppStorage(ExperimentalVisualTuning.glassStrengthKey) private var experimentalGlassStrength = ExperimentalVisualTuning.defaultGlassStrength
     @AppStorage(ExperimentalVisualTuning.heroHeightScaleKey) private var experimentalHeroHeightScale = ExperimentalVisualTuning.defaultHeroHeightScale
     @AppStorage(HomeAnimatedBackgroundSettings.enabledKey) private var homeAnimatedBackgroundEnabled = HomeAnimatedBackgroundSettings.defaultEnabled
+    @AppStorage(HomeAnimatedBackgroundQuality.storageKey) private var homeAnimatedBackgroundQuality = HomeAnimatedBackgroundQuality.defaultValue.rawValue
+#if !os(tvOS)
     @AppStorage(ModeSwitchAnimationSettings.enabledKey) private var modeSwitchAnimationEnabled = ModeSwitchAnimationSettings.defaultEnabled
     @AppStorage("hideSplashScreen") private var hideSplashScreen = false
+#endif
 
     // Interface (modern vs classic) - restart applied gate
     @AppStorage(ExperimentalFeatureState.enabledKey) private var modernInterfaceEnabled = true
@@ -33,28 +38,121 @@ struct AlternativeUIView: View {
     var body: some View {
         List {
             previewSection
-            themeSection
+            customizationSection
                 .eclipseExperimentalSettingsRows()
-            interfaceSection
+            behaviorSection
                 .eclipseExperimentalSettingsRows()
-            appExperienceSection
-                .eclipseExperimentalSettingsRows()
-            homeLayoutSection
-                .eclipseExperimentalSettingsRows()
-            detailPagesSection
-                .eclipseExperimentalSettingsRows()
-            mediaDetailSection
+            layoutAndDetailsSection
                 .eclipseExperimentalSettingsRows()
             resetSection
                 .eclipseExperimentalSettingsRows()
         }
         .navigationTitle("Appearance")
+        .accessibilityIdentifier("tv.settings.appearance.screen")
         .eclipseSettingsStyle()
         .onAppear(perform: reloadMediaDetailElements)
         .alert("Restart Required", isPresented: $showRestartAlert) {
             Button("OK", role: .cancel) { }
         } message: {
             Text("The interface style is applied when Eclipse launches. Restart the app to switch between the Modern and Classic layouts.")
+        }
+    }
+
+    // MARK: - Appearance categories
+
+    private var customizationSection: some View {
+        Section {
+            NavigationLink {
+                AppearanceSettingsSubpage(title: "Theme") {
+                    themeSection
+                        .eclipseExperimentalSettingsRows()
+                }
+            } label: {
+                appearanceCategoryLabel(
+                    title: "Theme",
+                    description: "Palette, background style, and color intensity.",
+                    systemImage: "paintpalette"
+                )
+            }
+        } header: {
+            Text("Customize")
+        }
+    }
+
+    private var behaviorSection: some View {
+        Section {
+#if !os(tvOS)
+            NavigationLink {
+                AppearanceSettingsSubpage(title: "Interface") {
+                    interfaceSection
+                        .eclipseExperimentalSettingsRows()
+                }
+            } label: {
+                appearanceCategoryLabel(
+                    title: "Interface",
+                    description: "Layout style, global appearance, and accent color.",
+                    systemImage: "rectangle.3.group"
+                )
+            }
+#endif
+
+            NavigationLink {
+                AppearanceSettingsSubpage(title: "Motion & Startup") {
+                    appExperienceSection
+                        .eclipseExperimentalSettingsRows()
+                }
+            } label: {
+                appearanceCategoryLabel(
+                    title: "Motion & Startup",
+                    description: "Mode switching, ambient background, and launch behavior.",
+                    systemImage: "sparkles"
+                )
+            }
+        } header: {
+            Text("Behavior")
+        }
+    }
+
+    private var layoutAndDetailsSection: some View {
+        Section {
+            NavigationLink {
+                HomeLayoutView()
+            } label: {
+                appearanceCategoryLabel(
+                    title: "Home Layout",
+                    description: "Size and orientation of home rows, globally or per catalog.",
+                    systemImage: "rectangle.grid.1x2"
+                )
+            }
+            .accessibilityIdentifier("tv.appearance.homeLayout")
+
+            NavigationLink {
+                AppearanceSettingsSubpage(title: "Detail Pages") {
+                    detailPagesSection
+                        .eclipseExperimentalSettingsRows()
+                }
+            } label: {
+                appearanceCategoryLabel(
+                    title: "Detail Pages",
+                    description: "Season menus, episode lists, and title artwork.",
+                    systemImage: "text.below.photo"
+                )
+            }
+
+            NavigationLink {
+                AppearanceSettingsSubpage(title: "Media Detail Layout") {
+                    mediaDetailSection
+                        .eclipseExperimentalSettingsRows()
+                }
+            } label: {
+                appearanceCategoryLabel(
+                    title: "Media Detail Layout",
+                    description: "Choose and order sections on media detail pages.",
+                    systemImage: "rectangle.3.group"
+                )
+            }
+        } header: {
+            Text("Layout & Details")
         }
     }
 
@@ -65,7 +163,9 @@ struct AlternativeUIView: View {
             AppearancePreviewCard()
                 .listRowInsets(EdgeInsets(top: 6, leading: 14, bottom: 6, trailing: 14))
                 .listRowBackground(Color.clear)
+#if !os(tvOS)
                 .listRowSeparator(.hidden)
+#endif
         }
     }
 
@@ -80,7 +180,7 @@ struct AlternativeUIView: View {
 
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 14) {
-                        ForEach(AtmospherePaletteID.allCases) { id in
+                        ForEach(availablePaletteIDs) { id in
                             paletteSwatch(id)
                         }
                     }
@@ -116,6 +216,7 @@ struct AlternativeUIView: View {
             }
 
             if theme.atmosphereStyle == .solid {
+#if !os(tvOS)
                 settingRow(
                     title: "Solid Color Source",
                     description: "Use the poster's color where available, or a custom color everywhere."
@@ -128,7 +229,6 @@ struct AlternativeUIView: View {
                     .pickerStyle(.menu)
                 }
 
-#if !os(tvOS)
                 if theme.atmosphereSolidColorSource == .custom {
                     ColorPicker("Custom Background Color", selection: $theme.atmosphereSolidColor)
                 }
@@ -159,6 +259,7 @@ struct AlternativeUIView: View {
 
     // MARK: - Interface & scope
 
+#if !os(tvOS)
     private var interfaceSection: some View {
         Section {
             settingRow(
@@ -206,52 +307,47 @@ struct AlternativeUIView: View {
             Text("Interface & Scope")
         }
     }
+#endif
 
     // MARK: - App experience
 
     private var appExperienceSection: some View {
         Section {
+#if !os(tvOS)
             toggleRow(
                 title: "Switch Mode Animation",
                 description: "Animate the top-right Media and Reader mode switch.",
                 isOn: $modeSwitchAnimationEnabled
             )
+#endif
 
             toggleRow(
                 title: "Animated Background",
-                description: "Show ambient motion behind the home screen.",
+                description: "Show ambient motion behind broad app surfaces.",
                 isOn: $homeAnimatedBackgroundEnabled
             )
 
+            settingRow(
+                title: "Animation Quality",
+                description: "All levels animate at 30 FPS. Low keeps the core eclipse rings and particles. Medium adds a plasma field, starfield, orbiting embers, energy wavefronts, and a corona. High adds denser motion, a kinetic mesh, more orbiting embers, and meteor bursts."
+            ) {
+                Picker("", selection: $homeAnimatedBackgroundQuality) {
+                    ForEach(HomeAnimatedBackgroundQuality.allCases) { quality in
+                        Text(quality.displayName).tag(quality.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+
+#if !os(tvOS)
             toggleRow(
                 title: "Hide Splash Screen",
                 description: "Skip the launch splash once Eclipse opens.",
                 isOn: $hideSplashScreen
             )
+#endif
         } header: {
             Text("App Experience")
-        }
-    }
-
-    // MARK: - Home layout
-
-    private var homeLayoutSection: some View {
-        Section {
-            NavigationLink {
-                HomeLayoutView()
-            } label: {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Home Layout")
-                        .font(.subheadline)
-                        .fontWeight(.medium)
-                    Text("Size and orientation of home rows - globally or per catalog.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .multilineTextAlignment(.leading)
-                }
-            }
-        } header: {
-            Text("Home")
         }
     }
 
@@ -268,6 +364,11 @@ struct AlternativeUIView: View {
                 title: "Horizontal Episode List",
                 description: "Use a horizontal instead of vertical episode list.",
                 isOn: $horizontalEpisodeList
+            )
+            toggleRow(
+                title: "TMDB Title Art",
+                description: "Use TMDB logo artwork for media titles when available.",
+                isOn: $mediaDetailTitleArtworkEnabled
             )
         } header: {
             Text("Detail Pages")
@@ -303,10 +404,35 @@ struct AlternativeUIView: View {
 
     private var mediaDetailSection: some View {
         Section {
+#if os(tvOS)
+            ForEach(Array(mediaDetailElements.enumerated()), id: \.element.id) { index, element in
+                HStack(spacing: 18) {
+                    mediaDetailElementRow(element)
+                    VStack(spacing: 8) {
+                        Button {
+                            moveMediaDetailElement(at: index, by: -1)
+                        } label: {
+                            Label("Move Up", systemImage: "chevron.up")
+                                .labelStyle(.iconOnly)
+                        }
+                        .disabled(index == 0)
+
+                        Button {
+                            moveMediaDetailElement(at: index, by: 1)
+                        } label: {
+                            Label("Move Down", systemImage: "chevron.down")
+                                .labelStyle(.iconOnly)
+                        }
+                        .disabled(index == mediaDetailElements.count - 1)
+                    }
+                }
+            }
+#else
             ForEach(mediaDetailElements) { element in
                 mediaDetailElementRow(element)
             }
             .onMove(perform: moveMediaDetailElements)
+#endif
 
             Button(action: resetMediaDetailElements) {
                 HStack {
@@ -327,9 +453,15 @@ struct AlternativeUIView: View {
         } header: {
             Text("Media Detail Page")
         } footer: {
+#if os(tvOS)
+            Text("Use the arrow buttons to change section order. Hidden rows will not appear on media detail pages.")
+#else
             Text("Drag rows to change their order. Hidden rows will not appear on media detail pages. Episodes only appear for series. Stills and Trailers appear in the Modern interface.")
+#endif
         }
+#if !os(tvOS)
         .environment(\.editMode, .constant(.active))
+#endif
     }
 
     // MARK: - Bindings
@@ -356,6 +488,14 @@ struct AlternativeUIView: View {
                 showRestartAlert = true
             }
         )
+    }
+
+    private var availablePaletteIDs: [AtmospherePaletteID] {
+#if os(tvOS)
+        AtmospherePaletteID.allCases.filter { $0 != .custom }
+#else
+        AtmospherePaletteID.allCases
+#endif
     }
 
 #if !os(tvOS)
@@ -409,6 +549,30 @@ struct AlternativeUIView: View {
     }
 
     // MARK: - Row helpers
+
+    private func appearanceCategoryLabel(
+        title: String,
+        description: String,
+        systemImage: String
+    ) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: systemImage)
+                .font(.body)
+                .foregroundColor(accent)
+                .frame(width: 24)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline)
+                    .fontWeight(.medium)
+                Text(description)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.leading)
+            }
+        }
+        .padding(.vertical, 2)
+    }
 
     private func settingRow<Trailing: View>(
         title: String,
@@ -472,8 +636,26 @@ struct AlternativeUIView: View {
                     .foregroundColor(.secondary)
                     .monospacedDigit()
             }
+#if os(tvOS)
+            HStack(spacing: 18) {
+                Button {
+                    value.wrappedValue = max(range.lowerBound, value.wrappedValue - step)
+                } label: {
+                    Label("Decrease", systemImage: "minus")
+                }
+                .disabled(value.wrappedValue <= range.lowerBound)
+
+                Button {
+                    value.wrappedValue = min(range.upperBound, value.wrappedValue + step)
+                } label: {
+                    Label("Increase", systemImage: "plus")
+                }
+                .disabled(value.wrappedValue >= range.upperBound)
+            }
+#else
             Slider(value: value, in: range, step: step)
                 .tint(accent)
+#endif
         }
         .padding(.vertical, 2)
     }
@@ -488,13 +670,13 @@ struct AlternativeUIView: View {
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.leading)
-                Text(hiddenMediaDetailElements.contains(element) ? "Hidden" : "Visible")
+                Text(isMediaDetailElementVisible(element) ? "Visible" : "Hidden")
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
             Spacer()
             Toggle("", isOn: Binding(
-                get: { !hiddenMediaDetailElements.contains(element) },
+                get: { isMediaDetailElementVisible(element) },
                 set: { setMediaDetailElement(element, visible: $0) }
             ))
             .labelsHidden()
@@ -515,7 +697,18 @@ struct AlternativeUIView: View {
         MediaDetailElement.saveOrder(mediaDetailElements)
     }
 
+    private func moveMediaDetailElement(at index: Int, by offset: Int) {
+        let destination = index + offset
+        guard mediaDetailElements.indices.contains(index), mediaDetailElements.indices.contains(destination) else { return }
+        mediaDetailElements.swapAt(index, destination)
+        MediaDetailElement.saveOrder(mediaDetailElements)
+    }
+
     private func setMediaDetailElement(_ element: MediaDetailElement, visible: Bool) {
+        if element == .similarTitles {
+            mediaDetailSimilarTitlesEnabled = visible
+        }
+
         if visible {
             hiddenMediaDetailElements.remove(element)
         } else {
@@ -524,9 +717,17 @@ struct AlternativeUIView: View {
         MediaDetailElement.saveHiddenElements(hiddenMediaDetailElements)
     }
 
+    private func isMediaDetailElementVisible(_ element: MediaDetailElement) -> Bool {
+        if element == .similarTitles {
+            return mediaDetailSimilarTitlesEnabled && !hiddenMediaDetailElements.contains(element)
+        }
+        return !hiddenMediaDetailElements.contains(element)
+    }
+
     private func resetMediaDetailElements() {
         mediaDetailElements = MediaDetailElement.defaultOrder
         hiddenMediaDetailElements = []
+        mediaDetailSimilarTitlesEnabled = MediaDetailSimilarTitlesSettings.defaultEnabled
         MediaDetailElement.saveOrder(mediaDetailElements)
         MediaDetailElement.saveHiddenElements(hiddenMediaDetailElements)
     }
@@ -547,9 +748,32 @@ struct AlternativeUIView: View {
         experimentalMediaCardScale = ExperimentalVisualTuning.defaultMediaCardScale
         experimentalGlassStrength = ExperimentalVisualTuning.defaultGlassStrength
         homeAnimatedBackgroundEnabled = HomeAnimatedBackgroundSettings.defaultEnabled
+        homeAnimatedBackgroundQuality = HomeAnimatedBackgroundQuality.defaultValue.rawValue
+#if !os(tvOS)
         modeSwitchAnimationEnabled = ModeSwitchAnimationSettings.defaultEnabled
         hideSplashScreen = false
+#endif
+        mediaDetailTitleArtworkEnabled = MediaDetailTitleArtworkSettings.defaultEnabled
+        mediaDetailSimilarTitlesEnabled = MediaDetailSimilarTitlesSettings.defaultEnabled
         HomeCatalogLayoutStore.shared.resetAll()
+    }
+}
+
+private struct AppearanceSettingsSubpage<Content: View>: View {
+    let title: String
+    private let content: Content
+
+    init(title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        List {
+            content
+        }
+        .navigationTitle(title)
+        .eclipseSettingsStyle()
     }
 }
 

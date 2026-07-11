@@ -21,6 +21,21 @@ class Logger: @unchecked Sendable {
     private var logs: [LogEntry] = []
     private let logFileURL: URL
     private let sessionMarkerURL: URL
+    // Accessed only from fileQueue. Keeping the handle open avoids an
+    // open/seek/fsync/close cycle for every MPV, tracker, and stream log.
+    private var logFileHandle: FileHandle?
+    private var logFileBytes = 0
+    private lazy var diskDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "dd-MM HH:mm:ss"
+        return formatter
+    }()
+    // Accessed only from the barrier-backed logger queue.
+    private lazy var debugDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "dd-MM HH:mm:ss"
+        return formatter
+    }()
     private let maxLogEntries = 1000
     private let maxLogFileBytes = 1_000_000
     private let noisyTypes: Set<String> = ["AniList", "Tracker", "Progress", "Stream", "General", "Info", "TMDB", "MPV", "Matching"]
@@ -32,6 +47,42 @@ class Logger: @unchecked Sendable {
     private var suppressedTypeCounts: [String: Int] = [:]
     private var lastEntryForRepeat: LogEntry?
     private var repeatCount = 0
+
+    private static let sensitiveURLRegex = try! NSRegularExpression(
+        pattern: #"(?i)(?:https?|stremio)://[^\s<>\"'\)\]]+"#
+    )
+    private static let sensitiveValuePatterns: [(regex: NSRegularExpression, replacement: String)] = [
+        (
+            try! NSRegularExpression(
+                pattern: #"(?i)\b(authorization|proxy-authorization)\b[\"']?\s*[:=]\s*[\"']?(?:bearer\s+|basic\s+)?[^\"'\s,;}\]\r\n]+"#
+            ),
+            "$1=<redacted>"
+        ),
+        (
+            try! NSRegularExpression(
+                pattern: #"(?i)\b(authorization|proxy-authorization)\b\s+(?:bearer|basic)\s+[^\s,;}\]\r\n]+"#
+            ),
+            "$1=<redacted>"
+        ),
+        (
+            try! NSRegularExpression(
+                pattern: #"(?i)\b(cookie|set-cookie)\b[\"']?\s*[:=]\s*[\"']?[^\"'\r\n]+"#
+            ),
+            "$1=<redacted>"
+        ),
+        (
+            try! NSRegularExpression(
+                pattern: #"(?i)\b(access[_-]?token|refresh[_-]?token|id[_-]?token|token|api[_-]?key|x-api-key|client[_-]?secret|password|passwd)\b[\"']?\s*[:=]\s*[\"']?[^\"'\s,;}&\]\r\n]+"#
+            ),
+            "$1=<redacted>"
+        ),
+        (
+            try! NSRegularExpression(
+                pattern: #"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"#
+            ),
+            "Bearer <redacted>"
+        )
+    ]
     
     private init() {
         // Use Documents folder for persistent logs (easier to access)
@@ -56,14 +107,77 @@ class Logger: @unchecked Sendable {
             return trimmed
         }
     }
+
+    /// Removes secrets before a message can reach memory, disk, debug output,
+    /// notifications, exports, or crash-adjacent diagnostics. HTTP and Stremio
+    /// URLs are reduced to their origin because provider tokens can be stored
+    /// in opaque path segments as well as conventional query items.
+    static func redactedSensitiveMessage(_ message: String, maximumLength: Int? = nil) -> String {
+        let lowercaseMessage = message.lowercased()
+        let mightContainSensitiveValue = lowercaseMessage.contains("://")
+            || lowercaseMessage.contains("authorization")
+            || lowercaseMessage.contains("cookie")
+            || lowercaseMessage.contains("token")
+            || lowercaseMessage.contains("api")
+            || lowercaseMessage.contains("secret")
+            || lowercaseMessage.contains("password")
+            || lowercaseMessage.contains("passwd")
+            || lowercaseMessage.contains("bearer")
+
+        guard mightContainSensitiveValue else {
+            if let maximumLength, maximumLength > 0, message.count > maximumLength {
+                return String(message.prefix(maximumLength)) + "...<truncated>"
+            }
+            return message
+        }
+
+        var result = message
+        let range = NSRange(result.startIndex..., in: result)
+        for match in sensitiveURLRegex.matches(in: result, range: range).reversed() {
+            guard let stringRange = Range(match.range, in: result) else { continue }
+            let rawURL = String(result[stringRange])
+            guard let components = URLComponents(string: rawURL),
+                  let scheme = components.scheme?.lowercased(),
+                  let host = components.host,
+                  !host.isEmpty else {
+                result.replaceSubrange(stringRange, with: "<redacted-url>")
+                continue
+            }
+
+            var origin = URLComponents()
+            origin.scheme = scheme == "stremio" ? "stremio" : scheme
+            origin.host = host
+            origin.port = components.port
+            result.replaceSubrange(
+                stringRange,
+                with: origin.string ?? "\(scheme)://\(host)"
+            )
+        }
+
+        for pattern in sensitiveValuePatterns {
+            let fullRange = NSRange(result.startIndex..., in: result)
+            result = pattern.regex.stringByReplacingMatches(
+                in: result,
+                range: fullRange,
+                withTemplate: pattern.replacement
+            )
+        }
+
+        if let maximumLength, maximumLength > 0, result.count > maximumLength {
+            result = String(result.prefix(maximumLength)) + "...<truncated>"
+        }
+        return result
+    }
     
     func log(_ message: String, type: String = "General") {
-        let normalizedMessage = message.replacingOccurrences(of: "\n", with: " ")
-        let entry = LogEntry(message: normalizedMessage, type: type, timestamp: Date())
+        let timestamp = Date()
 
         // Crash diagnostics must survive hard crashes immediately.
-        if Self.isCrashDiagnosticType(type) || Self.isCrashDiagnosticMessage(normalizedMessage) {
-            appendToDisk(entry)
+        if Self.isCrashDiagnosticType(type) || Self.isCrashDiagnosticMessage(message) {
+            let normalizedMessage = Self.redactedSensitiveMessage(message)
+                .replacingOccurrences(of: "\n", with: " ")
+            let entry = LogEntry(message: normalizedMessage, type: type, timestamp: timestamp)
+            appendToDisk(entry, synchronize: true)
 
             queue.async(flags: .barrier) {
                 self.logs.append(entry)
@@ -88,6 +202,11 @@ class Logger: @unchecked Sendable {
         }
         
         queue.async(flags: .barrier) {
+            // URL parsing and the redaction regexes are intentionally kept off
+            // UI, player, and networking caller threads for ordinary logs.
+            let normalizedMessage = Self.redactedSensitiveMessage(message)
+                .replacingOccurrences(of: "\n", with: " ")
+            let entry = LogEntry(message: normalizedMessage, type: type, timestamp: timestamp)
             let now = entry.timestamp
             var entriesToRecord = self.rolloverNoisyWindowIfNeeded(now: now)
 
@@ -158,8 +277,10 @@ class Logger: @unchecked Sendable {
             self.suppressedTypeCounts.removeAll()
             self.noisyWindowStart = Date()
             self.fileQueue.sync {
+                self.closeLogFileHandle(synchronize: false)
                 try? FileManager.default.removeItem(at: self.logFileURL)
                 self.ensureLogFileExists()
+                self.logFileBytes = 0
             }
         }
     }
@@ -174,8 +295,10 @@ class Logger: @unchecked Sendable {
                 self.suppressedTypeCounts.removeAll()
                 self.noisyWindowStart = Date()
                 self.fileQueue.sync {
+                    self.closeLogFileHandle(synchronize: false)
                     try? FileManager.default.removeItem(at: self.logFileURL)
                     self.ensureLogFileExists()
+                    self.logFileBytes = 0
                 }
                 continuation.resume()
             }
@@ -217,9 +340,7 @@ class Logger: @unchecked Sendable {
     
     private func debugLog(_ entry: LogEntry) {
 #if DEBUG
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "dd-MM HH:mm:ss"
-        let formattedMessage = "[\(dateFormatter.string(from: entry.timestamp))] [\(Self.displayCategory(for: entry.type))] \(entry.message)"
+        let formattedMessage = "[\(debugDateFormatter.string(from: entry.timestamp))] [\(Self.displayCategory(for: entry.type))] \(entry.message)"
         print(formattedMessage)
 #endif
     }
@@ -242,7 +363,7 @@ class Logger: @unchecked Sendable {
             timestamp: Date()
         )
 
-        appendToDisk(entry)
+        appendToDisk(entry, synchronize: false)
         queue.async(flags: .barrier) {
             self.logs.append(entry)
             if self.logs.count > self.maxLogEntries {
@@ -271,6 +392,7 @@ class Logger: @unchecked Sendable {
 
     private func markSessionClean(reason: String) {
         fileQueue.sync {
+            try? logFileHandle?.synchronize()
             let marker = "clean:\(reason):\(Int(Date().timeIntervalSince1970))"
             try? marker.write(to: sessionMarkerURL, atomically: true, encoding: .utf8)
         }
@@ -319,7 +441,7 @@ class Logger: @unchecked Sendable {
             logs.removeFirst(logs.count - maxLogEntries)
         }
 
-        appendToDisk(entry)
+        appendToDisk(entry, synchronize: false)
         debugLog(entry)
 
         DispatchQueue.main.async {
@@ -426,32 +548,66 @@ class Logger: @unchecked Sendable {
             || lowercasedMessage.contains("vlcheaderproxy")
     }
 
-    private func appendToDisk(_ entry: LogEntry) {
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "dd-MM HH:mm:ss"
-        let line = "[\(dateFormatter.string(from: entry.timestamp))] [\(entry.type)] \(entry.message)\n"
+    private func appendToDisk(_ entry: LogEntry, synchronize: Bool) {
+        let write = {
+            let line = "[\(self.diskDateFormatter.string(from: entry.timestamp))] [\(entry.type)] \(entry.message)\n"
+            guard let data = line.data(using: .utf8) else { return }
 
-        guard let data = line.data(using: .utf8) else { return }
+            self.prepareLogFileHandleIfNeeded()
+            self.rotateLogFileIfNeeded(incomingBytes: data.count)
+            self.prepareLogFileHandleIfNeeded()
 
-        fileQueue.sync {
-            rotateLogFileIfNeeded(incomingBytes: data.count)
+            guard let handle = self.logFileHandle else { return }
+            do {
+                try handle.write(contentsOf: data)
+                self.logFileBytes += data.count
+                if synchronize {
+                    try handle.synchronize()
+                }
+            } catch {
+                self.closeLogFileHandle(synchronize: false)
+            }
+        }
 
-            guard let handle = try? FileHandle(forWritingTo: logFileURL) else { return }
-            defer { try? handle.close() }
-
-            handle.seekToEndOfFile()
-            handle.write(data)
-            handle.synchronizeFile()
+        if synchronize {
+            fileQueue.sync(execute: write)
+        } else {
+            fileQueue.async(execute: write)
         }
     }
 
-    private func rotateLogFileIfNeeded(incomingBytes: Int) {
-        let attrs = try? FileManager.default.attributesOfItem(atPath: logFileURL.path)
-        let currentSize = (attrs?[.size] as? NSNumber)?.intValue ?? 0
-        if currentSize + incomingBytes <= maxLogFileBytes { return }
+    private func prepareLogFileHandleIfNeeded() {
+        guard logFileHandle == nil else { return }
+        ensureLogFileExists()
 
+        let attrs = try? FileManager.default.attributesOfItem(atPath: logFileURL.path)
+        logFileBytes = (attrs?[.size] as? NSNumber)?.intValue ?? 0
+
+        guard let handle = try? FileHandle(forWritingTo: logFileURL) else { return }
+        do {
+            try handle.seekToEnd()
+            logFileHandle = handle
+        } catch {
+            try? handle.close()
+        }
+    }
+
+    private func closeLogFileHandle(synchronize: Bool) {
+        guard let handle = logFileHandle else { return }
+        if synchronize {
+            try? handle.synchronize()
+        }
+        try? handle.close()
+        logFileHandle = nil
+    }
+
+    private func rotateLogFileIfNeeded(incomingBytes: Int) {
+        if logFileBytes + incomingBytes <= maxLogFileBytes { return }
+
+        closeLogFileHandle(synchronize: false)
         try? FileManager.default.removeItem(at: logFileURL)
         ensureLogFileExists()
+        logFileBytes = 0
     }
 
     private func loadLogsFromDisk() -> [LogEntry] {
@@ -467,8 +623,12 @@ class Logger: @unchecked Sendable {
         let pattern = #"\[([^\]]+)\] \[([^\]]+)\] (.+)"#
         let regex = try? NSRegularExpression(pattern: pattern)
 
-        var parsed: [LogEntry] = []
-        for line in content.split(separator: "\n") {
+        // Walk backward and stop once the newest maxLogEntries valid records
+        // are decoded. This preserves the exact retained history while
+        // avoiding thousands of DateFormatter/regex parses at launch.
+        var parsedNewestFirst: [LogEntry] = []
+        parsedNewestFirst.reserveCapacity(maxLogEntries)
+        for line in content.split(separator: "\n").reversed() {
             let lineStr = String(line)
             guard let regex,
                   let match = regex.firstMatch(in: lineStr, range: NSRange(lineStr.startIndex..., in: lineStr)),
@@ -480,18 +640,18 @@ class Logger: @unchecked Sendable {
                 continue
             }
 
-            parsed.append(
+            parsedNewestFirst.append(
                 LogEntry(
                     message: String(lineStr[messageRange]),
                     type: String(lineStr[typeRange]),
                     timestamp: timestamp
                 )
             )
+            if parsedNewestFirst.count == maxLogEntries {
+                break
+            }
         }
 
-        if parsed.count > maxLogEntries {
-            return Array(parsed.suffix(maxLogEntries))
-        }
-        return parsed
+        return Array(parsedNewestFirst.reversed())
     }
 }

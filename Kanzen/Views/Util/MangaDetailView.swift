@@ -640,7 +640,7 @@ struct MangaDetailView: View {
                 .padding(.vertical, 12)
             } else if sourceFinder.isSearching {
                 HStack(spacing: 10) {
-                    ProgressView()
+                    EclipseLoadingIndicator()
                     Text("Searching modules…")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
@@ -753,7 +753,7 @@ struct MangaDetailView: View {
 
             if loadingChapters {
                 HStack(spacing: 10) {
-                    ProgressView()
+                    EclipseLoadingIndicator()
                     Text("Loading chapters…")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
@@ -1208,6 +1208,7 @@ struct MangaDetailView: View {
                             if let chapters = value as? [Any?] {
                                 for (idx, chapter) in chapters.enumerated() {
                                     if let chapter = chapter as? [Any?],
+                                       chapter.count >= 2,
                                        let name = chapter[0] as? String,
                                        let rawData = chapter[1] as? [[String: Any]],
                                        let data = rawData.compactMap({ ChapterData(dict: $0) }) as? [ChapterData] {

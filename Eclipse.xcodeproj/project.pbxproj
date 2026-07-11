@@ -7,8 +7,51 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		TVUTBF0100000000000000001 /* PlatformCapabilitiesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVUTFR0100000000000000001 /* PlatformCapabilitiesTests.swift */; };
+		TVUTBF0200000000000000002 /* MediaStateMergeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVUTFR0200000000000000002 /* MediaStateMergeTests.swift */; };
+		TVUTBF0300000000000000003 /* ServiceCompatibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVUTFR0300000000000000003 /* ServiceCompatibilityTests.swift */; };
+		TVUTBF0500000000000000005 /* NextEpisodeResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVUTFR0400000000000000004 /* NextEpisodeResolverTests.swift */; };
+		TVUTBF0600000000000000006 /* DownloadPathIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVUTFR0500000000000000005 /* DownloadPathIdentityTests.swift */; };
+		DLPATHBF100000000000000001 /* DownloadPathIdentityPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = DLPATHFR000000000000000001 /* DownloadPathIdentityPolicy.swift */; };
+		DLPATHBF200000000000000002 /* DownloadPathIdentityPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = DLPATHFR000000000000000001 /* DownloadPathIdentityPolicy.swift */; };
+		TVUIBF0100000000000000001 /* EclipseTVRemoteSmokeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVUIFR0100000000000000001 /* EclipseTVRemoteSmokeTests.swift */; };
+		TVUTBF0400000000000000004 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = TVTSFR0100000000000000001 /* XCTest.framework */; };
+		TVUIBF0200000000000000002 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = TVTSFR0100000000000000001 /* XCTest.framework */; };
+		TVBF00400000000000000040 /* PlaybackLaunchContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00400000000000000040 /* PlaybackLaunchContext.swift */; };
+		TVBF00410000000000000041 /* PlaybackLaunchContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00400000000000000040 /* PlaybackLaunchContext.swift */; };
+		TVBF00420000000000000042 /* AVPlayerResourceLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00410000000000000041 /* AVPlayerResourceLoader.swift */; };
+		TVBF00430000000000000043 /* NextEpisodeResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00420000000000000042 /* NextEpisodeResolver.swift */; };
+		TVBF00440000000000000044 /* NextEpisodeResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00420000000000000042 /* NextEpisodeResolver.swift */; };
+		TVBF00300000000000000030 /* PlaybackEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00300000000000000030 /* PlaybackEngine.swift */; };
+		TVBF00310000000000000031 /* PlaybackEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00300000000000000030 /* PlaybackEngine.swift */; };
+		TVBF00320000000000000032 /* PlaybackRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00310000000000000031 /* PlaybackRequest.swift */; };
+		TVBF00330000000000000033 /* PlaybackRequest.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00310000000000000031 /* PlaybackRequest.swift */; };
+		TVBF00340000000000000034 /* PlaybackCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00320000000000000032 /* PlaybackCoordinator.swift */; };
+		TVBF00350000000000000035 /* PlaybackCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00320000000000000032 /* PlaybackCoordinator.swift */; };
+		TVBF00360000000000000036 /* MPVTVRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00330000000000000033 /* MPVTVRenderer.swift */; };
+		TVBF00370000000000000037 /* MPVTVRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00330000000000000033 /* MPVTVRenderer.swift */; };
+		TVBF00380000000000000038 /* TVMPVPlayerViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00340000000000000034 /* TVMPVPlayerViewController.swift */; };
+		TVBF00390000000000000039 /* TVMPVPlayerViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00340000000000000034 /* TVMPVPlayerViewController.swift */; };
+		TVBF00200000000000000020 /* MediaStateModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00200000000000000020 /* MediaStateModels.swift */; };
+		TVBF00210000000000000021 /* MediaStateModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00200000000000000020 /* MediaStateModels.swift */; };
+		TVBF00220000000000000022 /* MediaStateSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00210000000000000021 /* MediaStateSync.swift */; };
+		TVBF00230000000000000023 /* MediaStateSync.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00210000000000000021 /* MediaStateSync.swift */; };
+		TVBF00010000000000000001 /* PlatformCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00010000000000000001 /* PlatformCapabilities.swift */; };
+		TVBF00020000000000000002 /* PlatformCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00010000000000000001 /* PlatformCapabilities.swift */; };
+		TVBF00030000000000000003 /* EclipseTVApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00020000000000000002 /* EclipseTVApp.swift */; };
+		TVBF00040000000000000004 /* TVRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00030000000000000003 /* TVRootView.swift */; };
+		TVBF00050000000000000005 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = TVFR00060000000000000006 /* PrivacyInfo.xcprivacy */; };
+		IOSPRIVBF000000000000001 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = IOSPRIVFR000000000000001 /* PrivacyInfo.xcprivacy */; };
+		TVBF00060000000000000006 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13F072622E4B2D3700EF90EB /* Assets.xcassets */; };
+		TVBF00070000000000000007 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = TVFR00090000000000000009 /* Localizable.xcstrings */; };
+		TVBF00080000000000000008 /* TVAssets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = TVFR00080000000000000008 /* TVAssets.xcassets */; };
+		TVBF00100000000000000010 /* Kingfisher in Frameworks */ = {isa = PBXBuildFile; productRef = 13A46CFF2EF5944C00423BC6 /* Kingfisher */; };
+		TVBF00110000000000000011 /* SoraCore in Frameworks */ = {isa = PBXBuildFile; productRef = 13A46D022EF5945700423BC6 /* SoraCore */; };
+		TVBF00120000000000000012 /* MPVKit-GPL in Frameworks */ = {isa = PBXBuildFile; productRef = 136C25C52EFE950300E37A6E /* MPVKit-GPL */; };
+		TVBF00130000000000000013 /* CrashReporter in Frameworks */ = {isa = PBXBuildFile; productRef = C0A5A0042FD1000000C0A504 /* CrashReporter */; };
 		A1B2C3012FA0000100A1B2C1 /* EclipseTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3002FA0000100A1B2C0 /* EclipseTheme.swift */; };
 		A1B2C3032FA0000100A1B2C3 /* HeroTransition.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3022FA0000100A1B2C2 /* HeroTransition.swift */; };
+		EC10AD1300000000EC10AD13 /* EclipseLoadingIndicator.swift in Sources */ = {isa = PBXBuildFile; fileRef = EC10AD1200000000EC10AD12 /* EclipseLoadingIndicator.swift */; };
 		A1B2C3052FA0000100A1B2C5 /* GlassCardGroup.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3042FA0000100A1B2C4 /* GlassCardGroup.swift */; };
 		A1B2C3072FA0000100A1B2C7 /* GradientBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3062FA0000100A1B2C6 /* GradientBackground.swift */; };
 		CC1111102FC0000000CC1110 /* WidgetMetadata.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1111002FC0000000CC1100 /* WidgetMetadata.swift */; };
@@ -22,11 +65,6 @@
 		5E2222212F60000000AE2221 /* StremioClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E2222202F60000000AE2220 /* StremioClient.swift */; };
 		5E3333312F60000000AE3331 /* StremioAddonStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E3333302F60000000AE3330 /* StremioAddonStore.swift */; };
 		5E4444412F60000000AE4441 /* StremioAddonManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E4444402F60000000AE4440 /* StremioAddonManager.swift */; };
-		BEEF00202FE2000000BEEF20 /* NuvioPluginModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEEF00102FE2000000BEEF10 /* NuvioPluginModels.swift */; };
-		BEEF00212FE2000000BEEF21 /* NuvioPluginManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEEF00112FE2000000BEEF11 /* NuvioPluginManager.swift */; };
-		BEEF00222FE2000000BEEF22 /* NuvioPluginRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEEF00122FE2000000BEEF12 /* NuvioPluginRuntime.swift */; };
-		BEEF00232FE2000000BEEF23 /* NuvioPluginsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEEF00132FE2000000BEEF13 /* NuvioPluginsView.swift */; };
-		BEEF00322FE2000000BEEF32 /* SwiftSoup in Frameworks */ = {isa = PBXBuildFile; productRef = BEEF00312FE2000000BEEF31 /* SwiftSoup */; };
 		129CC90C2EBA920C00D2D84B /* Bundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 129CC90B2EBA920A00D2D84B /* Bundle.swift */; };
 		12DF1FC22F040D6700E80375 /* AdaptiveConfirmationDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12DF1FC12F040D6500E80375 /* AdaptiveConfirmationDialog.swift */; };
 		12E7AF5E2EB7FDB7003B7664 /* FakeWebKit in Frameworks */ = {isa = PBXBuildFile; productRef = 12E7AF5D2EB7FDB7003B7664 /* FakeWebKit */; };
@@ -34,6 +72,7 @@
 		1324E7BB2E940BD70036B5F5 /* PlayerPreset.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1324E7B32E940BD70036B5F5 /* PlayerPreset.swift */; };
 		1324E7BC2E940BD70036B5F5 /* MPVNativeRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1324E7B42E940BD70036B5F5 /* MPVNativeRenderer.swift */; };
 		1324E7BD2E940BD70036B5F5 /* PlayerViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1324E7B52E940BD70036B5F5 /* PlayerViewController.swift */; };
+		7BC72B40F59C41D6B2D8EB9B /* WatchTogetherCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BCFA99B6F2344E8850E02AD /* WatchTogetherCoordinator.swift */; };
 		1324E7BE2E940BD70036B5F5 /* SampleBufferDisplayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1324E7B62E940BD70036B5F5 /* SampleBufferDisplayView.swift */; };
 		1324E7BF2E940BD70036B5F5 /* MusicProgressSlider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1324E7B82E940BD70036B5F5 /* MusicProgressSlider.swift */; };
 		1324E7C12E940BD70036B5F5 /* PiPController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1324E7BA2E940BD70036B5F5 /* PiPController.swift */; };
@@ -198,9 +237,57 @@
 		};
 /* End PBXCopyFilesBuildPhase section */
 
+/* Begin PBXContainerItemProxy section */
+		TVUTPX0100000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 13F072532E4B2D3300EF90EB /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = TVTG00010000000000000001;
+			remoteInfo = "Eclipse-tvOS";
+		};
+		TVUIPX0100000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 13F072532E4B2D3300EF90EB /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = TVTG00010000000000000001;
+			remoteInfo = "Eclipse-tvOS";
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		TVUTFR0100000000000000001 /* PlatformCapabilitiesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlatformCapabilitiesTests.swift; sourceTree = "<group>"; };
+		TVUTFR0200000000000000002 /* MediaStateMergeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaStateMergeTests.swift; sourceTree = "<group>"; };
+		TVUTFR0300000000000000003 /* ServiceCompatibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceCompatibilityTests.swift; sourceTree = "<group>"; };
+		TVUTFR0400000000000000004 /* NextEpisodeResolverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NextEpisodeResolverTests.swift; sourceTree = "<group>"; };
+		TVUTFR0500000000000000005 /* DownloadPathIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadPathIdentityTests.swift; sourceTree = "<group>"; };
+		DLPATHFR000000000000000001 /* DownloadPathIdentityPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadPathIdentityPolicy.swift; sourceTree = "<group>"; };
+		TVUIFR0100000000000000001 /* EclipseTVRemoteSmokeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EclipseTVRemoteSmokeTests.swift; sourceTree = "<group>"; };
+		TVUTPR0100000000000000001 /* Eclipse-tvOSTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Eclipse-tvOSTests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		TVUIPR0100000000000000001 /* Eclipse-tvOSUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "Eclipse-tvOSUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
+		TVTSFR0100000000000000001 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = System/Library/Frameworks/XCTest.framework; sourceTree = SDKROOT; };
+		TVFR00400000000000000040 /* PlaybackLaunchContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackLaunchContext.swift; sourceTree = "<group>"; };
+		TVFR00410000000000000041 /* AVPlayerResourceLoader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AVPlayerResourceLoader.swift; sourceTree = "<group>"; };
+		TVFR00300000000000000030 /* PlaybackEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackEngine.swift; sourceTree = "<group>"; };
+		TVFR00310000000000000031 /* PlaybackRequest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackRequest.swift; sourceTree = "<group>"; };
+		TVFR00320000000000000032 /* PlaybackCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackCoordinator.swift; sourceTree = "<group>"; };
+		TVFR00330000000000000033 /* MPVTVRenderer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MPVTVRenderer.swift; sourceTree = "<group>"; };
+		TVFR00340000000000000034 /* TVMPVPlayerViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVMPVPlayerViewController.swift; sourceTree = "<group>"; };
+		TVFR00420000000000000042 /* NextEpisodeResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NextEpisodeResolver.swift; sourceTree = "<group>"; };
+		TVFR00200000000000000020 /* MediaStateModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaStateModels.swift; sourceTree = "<group>"; };
+		TVFR00210000000000000021 /* MediaStateSync.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaStateSync.swift; sourceTree = "<group>"; };
+		TVFR00010000000000000001 /* PlatformCapabilities.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlatformCapabilities.swift; sourceTree = "<group>"; };
+		TVFR00020000000000000002 /* EclipseTVApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EclipseTVApp.swift; sourceTree = "<group>"; };
+		TVFR00030000000000000003 /* TVRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVRootView.swift; sourceTree = "<group>"; };
+		TVFR00040000000000000004 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		TVFR00050000000000000005 /* EclipseTV.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = EclipseTV.entitlements; sourceTree = "<group>"; };
+		TVFR00060000000000000006 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		IOSPRIVFR000000000000001 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		TVFR00070000000000000007 /* Eclipse.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Eclipse.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		TVFR00080000000000000008 /* TVAssets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = TVAssets.xcassets; sourceTree = "<group>"; };
+		TVFR00090000000000000009 /* Localizable.xcstrings */ = {isa = PBXFileReference; lastKnownFileType = text.json.xcstrings; path = Localizable.xcstrings; sourceTree = "<group>"; };
 		A1B2C3002FA0000100A1B2C0 /* EclipseTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EclipseTheme.swift; sourceTree = "<group>"; };
 		A1B2C3022FA0000100A1B2C2 /* HeroTransition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HeroTransition.swift; sourceTree = "<group>"; };
+		EC10AD1200000000EC10AD12 /* EclipseLoadingIndicator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EclipseLoadingIndicator.swift; sourceTree = "<group>"; };
 		A1B2C3042FA0000100A1B2C4 /* GlassCardGroup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassCardGroup.swift; sourceTree = "<group>"; };
 		A1B2C3062FA0000100A1B2C6 /* GradientBackground.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GradientBackground.swift; sourceTree = "<group>"; };
 		CC1111002FC0000000CC1100 /* WidgetMetadata.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetMetadata.swift; sourceTree = "<group>"; };
@@ -214,10 +301,6 @@
 		5E2222202F60000000AE2220 /* StremioClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StremioClient.swift; sourceTree = "<group>"; };
 		5E3333302F60000000AE3330 /* StremioAddonStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StremioAddonStore.swift; sourceTree = "<group>"; };
 		5E4444402F60000000AE4440 /* StremioAddonManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StremioAddonManager.swift; sourceTree = "<group>"; };
-		BEEF00102FE2000000BEEF10 /* NuvioPluginModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioPluginModels.swift; sourceTree = "<group>"; };
-		BEEF00112FE2000000BEEF11 /* NuvioPluginManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioPluginManager.swift; sourceTree = "<group>"; };
-		BEEF00122FE2000000BEEF12 /* NuvioPluginRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioPluginRuntime.swift; sourceTree = "<group>"; };
-		BEEF00132FE2000000BEEF13 /* NuvioPluginsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioPluginsView.swift; sourceTree = "<group>"; };
 		1240112B2EFF3B8B00CEC6EB /* Eclipse.local.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Eclipse.local.entitlements; sourceTree = "<group>"; };
 		129CC9062EBA1D4600D2D84B /* Build.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Build.xcconfig; sourceTree = "<group>"; };
 		129CC9082EBA1F8400D2D84B /* Build.local.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Build.local.xcconfig; sourceTree = "<group>"; };
@@ -227,6 +310,7 @@
 		1324E7B32E940BD70036B5F5 /* PlayerPreset.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = PlayerPreset.swift; sourceTree = "<group>"; };
 		1324E7B42E940BD70036B5F5 /* MPVNativeRenderer.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MPVNativeRenderer.swift; sourceTree = "<group>"; };
 		1324E7B52E940BD70036B5F5 /* PlayerViewController.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = PlayerViewController.swift; sourceTree = "<group>"; };
+		6BCFA99B6F2344E8850E02AD /* WatchTogetherCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchTogetherCoordinator.swift; sourceTree = "<group>"; };
 		1324E7B62E940BD70036B5F5 /* SampleBufferDisplayView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SampleBufferDisplayView.swift; sourceTree = "<group>"; };
 		1324E7B82E940BD70036B5F5 /* MusicProgressSlider.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MusicProgressSlider.swift; sourceTree = "<group>"; };
 		1324E7BA2E940BD70036B5F5 /* PiPController.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = PiPController.swift; sourceTree = "<group>"; };
@@ -374,6 +458,33 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		TVUTPH0200000000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				TVUTBF0400000000000000004 /* XCTest.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		TVUIPH0200000000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				TVUIBF0200000000000000002 /* XCTest.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		TVPH00020000000000000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				TVBF00100000000000000010 /* Kingfisher in Frameworks */,
+				TVBF00110000000000000011 /* SoraCore in Frameworks */,
+				TVBF00120000000000000012 /* MPVKit-GPL in Frameworks */,
+				TVBF00130000000000000013 /* CrashReporter in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		13F072582E4B2D3300EF90EB /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -388,21 +499,63 @@
 				AD0000072FD9000000AD0007 /* ZIPFoundation in Frameworks */,
 				AD0000332FDA000000AD0033 /* Nuke in Frameworks */,
 				AD0000432FDB000000AD0043 /* AsyncDisplayKit in Frameworks */,
-				BEEF00322FE2000000BEEF32 /* SwiftSoup in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		TVUTGR0100000000000000001 /* EclipseTVTests */ = {
+			isa = PBXGroup;
+			children = (
+				TVUTFR0100000000000000001 /* PlatformCapabilitiesTests.swift */,
+				TVUTFR0200000000000000002 /* MediaStateMergeTests.swift */,
+				TVUTFR0300000000000000003 /* ServiceCompatibilityTests.swift */,
+				TVUTFR0400000000000000004 /* NextEpisodeResolverTests.swift */,
+				TVUTFR0500000000000000005 /* DownloadPathIdentityTests.swift */,
+			);
+			path = EclipseTVTests;
+			sourceTree = "<group>";
+		};
+		TVUIGR0100000000000000001 /* EclipseTVUITests */ = {
+			isa = PBXGroup;
+			children = (
+				TVUIFR0100000000000000001 /* EclipseTVRemoteSmokeTests.swift */,
+			);
+			path = EclipseTVUITests;
+			sourceTree = "<group>";
+		};
+		TVGR00010000000000000001 /* EclipseTV */ = {
+			isa = PBXGroup;
+			children = (
+				TVFR00020000000000000002 /* EclipseTVApp.swift */,
+				TVFR00030000000000000003 /* TVRootView.swift */,
+				TVFR00040000000000000004 /* Info.plist */,
+				TVFR00050000000000000005 /* EclipseTV.entitlements */,
+				TVFR00060000000000000006 /* PrivacyInfo.xcprivacy */,
+				TVFR00080000000000000008 /* TVAssets.xcassets */,
+				TVFR00090000000000000009 /* Localizable.xcstrings */,
+			);
+			path = EclipseTV;
+			sourceTree = "<group>";
+		};
 		1324E7B22E940BD70036B5F5 /* Player */ = {
 			isa = PBXGroup;
 			children = (
+				TVFR00400000000000000040 /* PlaybackLaunchContext.swift */,
+				TVFR00410000000000000041 /* AVPlayerResourceLoader.swift */,
+				TVFR00420000000000000042 /* NextEpisodeResolver.swift */,
+				TVFR00300000000000000030 /* PlaybackEngine.swift */,
+				TVFR00310000000000000031 /* PlaybackRequest.swift */,
+				TVFR00320000000000000032 /* PlaybackCoordinator.swift */,
+				TVFR00330000000000000033 /* MPVTVRenderer.swift */,
+				TVFR00340000000000000034 /* TVMPVPlayerViewController.swift */,
 				1324E7B72E940BD70036B5F5 /* Elements */,
 				1324E7B32E940BD70036B5F5 /* PlayerPreset.swift */,
 				1324E7BA2E940BD70036B5F5 /* PiPController.swift */,
 				13F315AF2EAD03F70025BD7A /* SubtitleLoader.swift */,
 				1324E7B52E940BD70036B5F5 /* PlayerViewController.swift */,
+				6BCFA99B6F2344E8850E02AD /* WatchTogetherCoordinator.swift */,
 				1324E7B42E940BD70036B5F5 /* MPVNativeRenderer.swift */,
 				F9A1B2D12F90000100A1B2D1 /* MPVHeaderProxy.swift */,
 				1324E7B62E940BD70036B5F5 /* SampleBufferDisplayView.swift */,
@@ -499,7 +652,6 @@
 				13E1EDA32ED9E65F00087629 /* readingMode.swift */,
 				13E1EDA42ED9E65F00087629 /* readerManager.swift */,
 				13E1EDA52ED9E65F00087629 /* favouriteManager.swift */,
-				13E1EDA62ED9E65F00087629 /* Settings.swift */,
 				13E1EDA72ED9E65F00087629 /* pageData.swift */,
 				FF1111102F30000000FF1110 /* AniListMangaService.swift */,
 				FF2222202F30000000FF2220 /* MangaCatalogManager.swift */,
@@ -691,6 +843,9 @@
 		13F072522E4B2D3300EF90EB = {
 			isa = PBXGroup;
 			children = (
+				TVGR00010000000000000001 /* EclipseTV */,
+				TVUTGR0100000000000000001 /* EclipseTVTests */,
+				TVUIGR0100000000000000001 /* EclipseTVUITests */,
 				13F0725D2E4B2D3300EF90EB /* Eclipse */,
 				13E1ED992ED9E65F00087629 /* Kanzen */,
 				129CC9062EBA1D4600D2D84B /* Build.xcconfig */,
@@ -704,6 +859,9 @@
 			isa = PBXGroup;
 			children = (
 				13F0725B2E4B2D3300EF90EB /* Eclipse.app */,
+				TVFR00070000000000000007 /* Eclipse.app */,
+				TVUTPR0100000000000000001 /* Eclipse-tvOSTests.xctest */,
+				TVUIPR0100000000000000001 /* Eclipse-tvOSUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -712,6 +870,7 @@
 			isa = PBXGroup;
 			children = (
 				13B6F3472EA4C82600DECD2B /* Info.plist */,
+				IOSPRIVFR000000000000001 /* PrivacyInfo.xcprivacy */,
 				1324E7B22E940BD70036B5F5 /* Player */,
 				13F5B5902E73090000565E75 /* Models */,
 				1375466E2E5F078B00B29944 /* Tracking */,
@@ -817,6 +976,8 @@
 				A1B2C3002FA0000100A1B2C0 /* EclipseTheme.swift */,
 				A1B2C3022FA0000100A1B2C2 /* HeroTransition.swift */,
 				12E7AF5F2EB80771003B7664 /* Platform.swift */,
+				TVFR00010000000000000001 /* PlatformCapabilities.swift */,
+				EC10AD1200000000EC10AD12 /* EclipseLoadingIndicator.swift */,
 			);
 			path = Extensions;
 			sourceTree = "<group>";
@@ -898,9 +1059,6 @@
 				5E2222202F60000000AE2220 /* StremioClient.swift */,
 				5E3333302F60000000AE3330 /* StremioAddonStore.swift */,
 				5E4444402F60000000AE4440 /* StremioAddonManager.swift */,
-				BEEF00102FE2000000BEEF10 /* NuvioPluginModels.swift */,
-				BEEF00112FE2000000BEEF11 /* NuvioPluginManager.swift */,
-				BEEF00122FE2000000BEEF12 /* NuvioPluginRuntime.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -915,7 +1073,6 @@
 				14CC00030000000000CC0003 /* HomeLayoutView.swift */,
 				13F072792E4B2D9000EF90EB /* ServicesView.swift */,
 				5E2222202F70000000AE2220 /* StremioConfigureView.swift */,
-				BEEF00132FE2000000BEEF13 /* NuvioPluginsView.swift */,
 				13F518422EBCE42B00DEF778 /* StorageView.swift */,
 				13F0727E2E4B2D9000EF90EB /* LoggerView.swift */,
 				AD0000112FD9000000AD0011 /* ReaderLoggerView.swift */,
@@ -948,11 +1105,15 @@
 		13F5B5902E73090000565E75 /* Models */ = {
 			isa = PBXGroup;
 			children = (
+				13E1EDA62ED9E65F00087629 /* Settings.swift */,
+				TVFR00200000000000000020 /* MediaStateModels.swift */,
+				TVFR00210000000000000021 /* MediaStateSync.swift */,
 				13F5B5932E730B0200565E75 /* Library */,
 				14BBB0063FFF111100AAAAAA /* BackupManager.swift */,
 				14CC00010000000000CC0001 /* HomeCatalogLayout.swift */,
 				13C6F3452EA4C6BC00DECD2B /* CacheManager.swift */,
 				DD1111102FB0000000DD1110 /* DownloadManager.swift */,
+				DLPATHFR000000000000000001 /* DownloadPathIdentityPolicy.swift */,
 				DD1111142FB0000000DD1114 /* HLSDownloader.swift */,
 				AA5555502F10000000AA5550 /* CatalogManager.swift */,
 				AA7777702F10000000AA7770 /* HomeViewModel.swift */,
@@ -976,6 +1137,67 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		TVUTTG0100000000000000001 /* Eclipse-tvOSTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = TVUTCL0100000000000000001 /* Build configuration list for PBXNativeTarget "Eclipse-tvOSTests" */;
+			buildPhases = (
+				TVUTPH0100000000000000001 /* Sources */,
+				TVUTPH0200000000000000002 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				TVUTDP0100000000000000001 /* PBXTargetDependency */,
+			);
+			name = "Eclipse-tvOSTests";
+			packageProductDependencies = (
+			);
+			productName = "Eclipse-tvOSTests";
+			productReference = TVUTPR0100000000000000001 /* Eclipse-tvOSTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		TVUITG0100000000000000001 /* Eclipse-tvOSUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = TVUICL0100000000000000001 /* Build configuration list for PBXNativeTarget "Eclipse-tvOSUITests" */;
+			buildPhases = (
+				TVUIPH0100000000000000001 /* Sources */,
+				TVUIPH0200000000000000002 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				TVUIDP0100000000000000001 /* PBXTargetDependency */,
+			);
+			name = "Eclipse-tvOSUITests";
+			packageProductDependencies = (
+			);
+			productName = "Eclipse-tvOSUITests";
+			productReference = TVUIPR0100000000000000001 /* Eclipse-tvOSUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		TVTG00010000000000000001 /* Eclipse-tvOS */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = TVCL00010000000000000001 /* Build configuration list for PBXNativeTarget "Eclipse-tvOS" */;
+			buildPhases = (
+				TVPH00010000000000000001 /* Sources */,
+				TVPH00020000000000000002 /* Frameworks */,
+				TVPH00030000000000000003 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Eclipse-tvOS";
+			packageProductDependencies = (
+				13A46CFF2EF5944C00423BC6 /* Kingfisher */,
+				13A46D022EF5945700423BC6 /* SoraCore */,
+				136C25C52EFE950300E37A6E /* MPVKit-GPL */,
+				C0A5A0042FD1000000C0A504 /* CrashReporter */,
+			);
+			productName = Eclipse;
+			productReference = TVFR00070000000000000007 /* Eclipse.app */;
+			productType = "com.apple.product-type.application";
+		};
 		13F0725A2E4B2D3300EF90EB /* Eclipse */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = 13F0726A2E4B2D3700EF90EB /* Build configuration list for PBXNativeTarget "Eclipse" */;
@@ -1002,7 +1224,6 @@
 				AD0000232FD9000000AD0023 /* ZIPFoundation */,
 				AD0000322FDA000000AD0032 /* Nuke */,
 				AD0000422FDB000000AD0042 /* AsyncDisplayKit */,
-				BEEF00312FE2000000BEEF31 /* SwiftSoup */,
 			);
 			productName = Eclipse;
 			productReference = 13F0725B2E4B2D3300EF90EB /* Eclipse.app */;
@@ -1020,6 +1241,17 @@
 				TargetAttributes = {
 					13F0725A2E4B2D3300EF90EB = {
 						CreatedOnToolsVersion = 15.2;
+					};
+					TVTG00010000000000000001 = {
+						CreatedOnToolsVersion = 26.0;
+					};
+					TVUTTG0100000000000000001 = {
+						CreatedOnToolsVersion = 26.0;
+						TestTargetID = TVTG00010000000000000001;
+					};
+					TVUITG0100000000000000001 = {
+						CreatedOnToolsVersion = 26.0;
+						TestTargetID = TVTG00010000000000000001;
 					};
 				};
 			};
@@ -1042,18 +1274,31 @@
 				AD0000212FD9000000AD0021 /* XCRemoteSwiftPackageReference "ZIPFoundation" */,
 				AD0000312FDA000000AD0031 /* XCRemoteSwiftPackageReference "Nuke" */,
 				AD0000412FDB000000AD0041 /* XCRemoteSwiftPackageReference "Texture" */,
-				BEEF00302FE2000000BEEF30 /* XCRemoteSwiftPackageReference "SwiftSoup" */,
 			);
 			productRefGroup = 13F0725C2E4B2D3300EF90EB /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
 				13F0725A2E4B2D3300EF90EB /* Eclipse */,
+				TVTG00010000000000000001 /* Eclipse-tvOS */,
+				TVUTTG0100000000000000001 /* Eclipse-tvOSTests */,
+				TVUITG0100000000000000001 /* Eclipse-tvOSUITests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		TVPH00030000000000000003 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				TVBF00060000000000000006 /* Assets.xcassets in Resources */,
+				TVBF00080000000000000008 /* TVAssets.xcassets in Resources */,
+				TVBF00070000000000000007 /* Localizable.xcstrings in Resources */,
+				TVBF00050000000000000005 /* PrivacyInfo.xcprivacy in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		13F072592E4B2D3300EF90EB /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -1061,6 +1306,7 @@
 				13F072632E4B2D3700EF90EB /* Assets.xcassets in Resources */,
 				AD10000B2FE1000000AD100B /* Localizable.xcstrings in Resources */,
 				13E1EDDA2ED9E65F00087629 /* bundle.js in Resources */,
+				IOSPRIVBF000000000000001 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1090,10 +1336,150 @@
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		TVUTPH0100000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				TVUTBF0100000000000000001 /* PlatformCapabilitiesTests.swift in Sources */,
+				TVUTBF0200000000000000002 /* MediaStateMergeTests.swift in Sources */,
+				TVUTBF0300000000000000003 /* ServiceCompatibilityTests.swift in Sources */,
+				TVUTBF0500000000000000005 /* NextEpisodeResolverTests.swift in Sources */,
+				TVUTBF0600000000000000006 /* DownloadPathIdentityTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		TVUIPH0100000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				TVUIBF0100000000000000001 /* EclipseTVRemoteSmokeTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		TVPH00010000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				TVBF00410000000000000041 /* PlaybackLaunchContext.swift in Sources */,
+				DLPATHBF200000000000000002 /* DownloadPathIdentityPolicy.swift in Sources */,
+				TVBF00420000000000000042 /* AVPlayerResourceLoader.swift in Sources */,
+				TVBF00440000000000000044 /* NextEpisodeResolver.swift in Sources */,
+				TVBF00310000000000000031 /* PlaybackEngine.swift in Sources */,
+				TVBF00330000000000000033 /* PlaybackRequest.swift in Sources */,
+				TVBF00350000000000000035 /* PlaybackCoordinator.swift in Sources */,
+				TVBF00370000000000000037 /* MPVTVRenderer.swift in Sources */,
+				TVBF00390000000000000039 /* TVMPVPlayerViewController.swift in Sources */,
+				TVBF00210000000000000021 /* MediaStateModels.swift in Sources */,
+				TVBF00230000000000000023 /* MediaStateSync.swift in Sources */,
+				TVBF00030000000000000003 /* EclipseTVApp.swift in Sources */,
+				TVBF00040000000000000004 /* TVRootView.swift in Sources */,
+				TVBF00020000000000000002 /* PlatformCapabilities.swift in Sources */,
+				12E7AF602EB80775003B7664 /* Platform.swift in Sources */,
+				129CC90C2EBA920C00D2D84B /* Bundle.swift in Sources */,
+				13DCC4F62E58B40F0028AE91 /* HybridSimilarity.swift in Sources */,
+				13F072A32E4B2D9200EF90EB /* SearchView.swift in Sources */,
+				13830AEC2E55BD9200B3CDE4 /* AlgorithmManager.swift in Sources */,
+				13F072AD2E4B2D9200EF90EB /* DetailRow.swift in Sources */,
+				139509A22E7DDAE100CB60D4 /* PlayerSettingsView.swift in Sources */,
+				BB7777912F20000000BB7791 /* PlayerLanguageSelectionView.swift in Sources */,
+				13F072B02E4B2D9200EF90EB /* SearchResultCard.swift in Sources */,
+				136D3E5C2EB75D7E0094210C /* LiquidGlassBackground.swift in Sources */,
+				13B6F3452EA4C6BC00DECD2B /* ProgressManager.swift in Sources */,
+				13C6F3462EA4C6BC00DECD2B /* CacheManager.swift in Sources */,
+				13F072B42E4B2D9200EF90EB /* resized.swift in Sources */,
+				13F5B5952E730CB200565E75 /* TMDBContentFilter.swift in Sources */,
+				CC8888812FA0000000CC8881 /* AniSkipService.swift in Sources */,
+				EE1111112FC0000000EE1111 /* IntroDBService.swift in Sources */,
+				13F072AF2E4B2D9200EF90EB /* StretchyHeader.swift in Sources */,
+				13F0729D2E4B2D9200EF90EB /* JSController-Search.swift in Sources */,
+				13F072A02E4B2D9200EF90EB /* JSController-Streams.swift in Sources */,
+				13F072AC2E4B2D9200EF90EB /* Shows-Details.swift in Sources */,
+				13830AF22E55F51300B3CDE4 /* AlternativeUIView.swift in Sources */,
+				14CC00040000000000CC0004 /* HomeLayoutView.swift in Sources */,
+				13F072BA2E4B2D9200EF90EB /* TMDBService.swift in Sources */,
+				13F072C22E4B2D9200EF90EB /* AniListService.swift in Sources */,
+				AD20000B2FE2000000AD200B /* Localization.swift in Sources */,
+				13F187AD2E6F38CE00747F7E /* LibraryItem.swift in Sources */,
+				13F187B02E6F38CE00747F7E /* CreateCollectionView.swift in Sources */,
+				13F072A42E4B2D9200EF90EB /* ServicesView.swift in Sources */,
+				5E2222212F70000000AE2221 /* StremioConfigureView.swift in Sources */,
+				13F072A62E4B2D9200EF90EB /* LibraryView.swift in Sources */,
+				13F072A92E4B2D9200EF90EB /* LoggerView.swift in Sources */,
+				13F072A72E4B2D9200EF90EB /* MediaDetailView.swift in Sources */,
+				13F072A22E4B2D9200EF90EB /* SettingsView.swift in Sources */,
+				13F072AE2E4B2D9200EF90EB /* EpisodeCell.swift in Sources */,
+				13F072AB2E4B2D9200EF90EB /* Movie-Details.swift in Sources */,
+				13F0729B2E4B2D9200EF90EB /* ServicesEntity.swift in Sources */,
+				13F0729C2E4B2D9200EF90EB /* JavaScriptCore+Extensions.swift in Sources */,
+				13F072B22E4B2D9200EF90EB /* FallbackImageView.swift in Sources */,
+				13F072B62E4B2D9200EF90EB /* AmbientColor.swift in Sources */,
+				13E1EDD82ED9E65F00087629 /* Settings.swift in Sources */,
+				13F187AE2E6F38CE00747F7E /* LibraryCollection.swift in Sources */,
+				13F0729E2E4B2D9200EF90EB /* JSController-Details.swift in Sources */,
+				13F187AF2E6F38CE00747F7E /* AddToCollectionView.swift in Sources */,
+				13830AEE2E55BEDD00B3CDE4 /* JaroWinklerSimilarity.swift in Sources */,
+				12201F542EBE922D0033073C /* ServiceModels.xcdatamodeld in Sources */,
+				13F072B92E4B2D9200EF90EB /* TMDBModels.swift in Sources */,
+				13F072AA2E4B2D9200EF90EB /* CircularProgressBar.swift in Sources */,
+				13F072B52E4B2D9200EF90EB /* URLSession.swift in Sources */,
+				1324E7BB2E940BD70036B5F5 /* PlayerPreset.swift in Sources */,
+				12DF1FC22F040D6700E80375 /* AdaptiveConfirmationDialog.swift in Sources */,
+				13F072B72E4B2D9200EF90EB /* Logger.swift in Sources */,
+				C0A5A0022FD1000000C0A502 /* CrashReportManager.swift in Sources */,
+				13B2E5742E7597B9009F3271 /* JSController-NetworkFetch.swift in Sources */,
+				CFB000022FE7000000CFB002 /* CloudflareBypassManager.swift in Sources */,
+				13F072B82E4B2D9200EF90EB /* LevenshteinDistance.swift in Sources */,
+				13631B322E4F1A200035C39F /* ServiceSettingsView.swift in Sources */,
+				AA1111112F10000000AA1111 /* TrackerManager.swift in Sources */,
+				AA2222222F10000000AA2222 /* TrackerModels.swift in Sources */,
+				AA3333332F10000000AA3333 /* TrackersSettingsView.swift in Sources */,
+				AA4444442F10000000AA4444 /* ScheduleView.swift in Sources */,
+				AA5555552F10000000AA5555 /* CatalogManager.swift in Sources */,
+				AA6666662F10000000AA6666 /* CatalogsSettingsView.swift in Sources */,
+				AA7777712F10000000AA7771 /* HomeViewModel.swift in Sources */,
+				AA8888812F10000000AA8881 /* ScheduleViewModel.swift in Sources */,
+				BB9999912F50000000BB9991 /* RecommendationEngine.swift in Sources */,
+				DD2222012FD0000000DD2201 /* UserRatingManager.swift in Sources */,
+				DD2222032FD0000000DD2203 /* StarRatingView.swift in Sources */,
+				CC1111102FC0000000CC1110 /* WidgetMetadata.swift in Sources */,
+				CC2222202FC0000000CC2220 /* HomeWidgets.swift in Sources */,
+				CC3333302FC0000000CC3330 /* DiscoverDetailView.swift in Sources */,
+				13F072B32E4B2D9200EF90EB /* ServicesResultsSheet.swift in Sources */,
+				13F072A52E4B2D9200EF90EB /* HomeView.swift in Sources */,
+				13F187B12E6F38CE00747F7E /* CollectionDetailView.swift in Sources */,
+				13830AF42E55F5FF00B3CDE4 /* AccentColorManager.swift in Sources */,
+				13F072A12E4B2D9200EF90EB /* JSController.swift in Sources */,
+				13F0729F2E4B2D9200EF90EB /* ServiceManager.swift in Sources */,
+				14CC00060000000000CC0006 /* AutoModeStreamSelection.swift in Sources */,
+				12201F512EBE918D0033073C /* ServiceStore.swift in Sources */,
+				5E1111112F60000000AE1111 /* StremioModels.swift in Sources */,
+				5E2222212F60000000AE2221 /* StremioClient.swift in Sources */,
+				5E3333312F60000000AE3331 /* StremioAddonStore.swift in Sources */,
+				5E4444412F60000000AE4441 /* StremioAddonManager.swift in Sources */,
+				13F187AC2E6F38CE00747F7E /* LibraryManager.swift in Sources */,
+				14CC00020000000000CC0002 /* HomeCatalogLayout.swift in Sources */,
+				A1B2C3012FA0000100A1B2C1 /* EclipseTheme.swift in Sources */,
+				A1B2C3032FA0000100A1B2C3 /* HeroTransition.swift in Sources */,
+				EC10AD1300000000EC10AD13 /* EclipseLoadingIndicator.swift in Sources */,
+				A1B2C3052FA0000100A1B2C5 /* GlassCardGroup.swift in Sources */,
+				A1B2C3072FA0000100A1B2C7 /* GradientBackground.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		13F072572E4B2D3300EF90EB /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				TVBF00400000000000000040 /* PlaybackLaunchContext.swift in Sources */,
+				TVBF00430000000000000043 /* NextEpisodeResolver.swift in Sources */,
+				TVBF00300000000000000030 /* PlaybackEngine.swift in Sources */,
+				TVBF00320000000000000032 /* PlaybackRequest.swift in Sources */,
+				TVBF00340000000000000034 /* PlaybackCoordinator.swift in Sources */,
+				TVBF00360000000000000036 /* MPVTVRenderer.swift in Sources */,
+				TVBF00380000000000000038 /* TVMPVPlayerViewController.swift in Sources */,
+				TVBF00200000000000000020 /* MediaStateModels.swift in Sources */,
+				TVBF00220000000000000022 /* MediaStateSync.swift in Sources */,
+				TVBF00010000000000000001 /* PlatformCapabilities.swift in Sources */,
 				12E7AF602EB80775003B7664 /* Platform.swift in Sources */,
 				129CC90C2EBA920C00D2D84B /* Bundle.swift in Sources */,
 				13DCC4F62E58B40F0028AE91 /* HybridSimilarity.swift in Sources */,
@@ -1116,6 +1502,7 @@
 				CC8888812FA0000000CC8881 /* AniSkipService.swift in Sources */,
 				EE1111112FC0000000EE1111 /* IntroDBService.swift in Sources */,
 				DD1111112FB0000000DD1111 /* DownloadManager.swift in Sources */,
+				DLPATHBF100000000000000001 /* DownloadPathIdentityPolicy.swift in Sources */,
 				DD1111152FB0000000DD1115 /* HLSDownloader.swift in Sources */,
 				DD2222222FB0000000DD2222 /* DownloadsView.swift in Sources */,
 				DD4444442FB0000000DD4444 /* DownloadedShowDetailView.swift in Sources */,
@@ -1155,6 +1542,7 @@
 				1324E7C12E940BD70036B5F5 /* PiPController.swift in Sources */,
 				13F072AB2E4B2D9200EF90EB /* Movie-Details.swift in Sources */,
 				1324E7BD2E940BD70036B5F5 /* PlayerViewController.swift in Sources */,
+				7BC72B40F59C41D6B2D8EB9B /* WatchTogetherCoordinator.swift in Sources */,
 				1324E7BE2E940BD70036B5F5 /* SampleBufferDisplayView.swift in Sources */,
 				13E1EDD32ED9E65F00087629 /* mangaModel.xcdatamodeld in Sources */,
 				13F0729B2E4B2D9200EF90EB /* ServicesEntity.swift in Sources */,
@@ -1221,10 +1609,6 @@
 				5E2222212F60000000AE2221 /* StremioClient.swift in Sources */,
 				5E3333312F60000000AE3331 /* StremioAddonStore.swift in Sources */,
 				5E4444412F60000000AE4441 /* StremioAddonManager.swift in Sources */,
-				BEEF00202FE2000000BEEF20 /* NuvioPluginModels.swift in Sources */,
-				BEEF00212FE2000000BEEF21 /* NuvioPluginManager.swift in Sources */,
-				BEEF00222FE2000000BEEF22 /* NuvioPluginRuntime.swift in Sources */,
-				BEEF00232FE2000000BEEF23 /* NuvioPluginsView.swift in Sources */,
 				13E1EDD52ED9E65F00087629 /* readingMode.swift in Sources */,
 				13E1EDED2ED9E66000087629 /* contentView.swift in Sources */,
 				13F187AC2E6F38CE00747F7E /* LibraryManager.swift in Sources */,
@@ -1255,6 +1639,7 @@
 				GG1111012F60000000GG1111 /* NovelReaderView.swift in Sources */,
 				A1B2C3012FA0000100A1B2C1 /* EclipseTheme.swift in Sources */,
 				A1B2C3032FA0000100A1B2C3 /* HeroTransition.swift in Sources */,
+				EC10AD1300000000EC10AD13 /* EclipseLoadingIndicator.swift in Sources */,
 				A1B2C3052FA0000100A1B2C5 /* GlassCardGroup.swift in Sources */,
 				A1B2C3072FA0000100A1B2C7 /* GradientBackground.swift in Sources */,
 			);
@@ -1262,7 +1647,164 @@
 		};
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		TVUTDP0100000000000000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = TVTG00010000000000000001 /* Eclipse-tvOS */;
+			targetProxy = TVUTPX0100000000000000001 /* PBXContainerItemProxy */;
+		};
+		TVUIDP0100000000000000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = TVTG00010000000000000001 /* Eclipse-tvOS */;
+			targetProxy = TVUIPX0100000000000000001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
 /* Begin XCBuildConfiguration section */
+		TVUTCF0100000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "${DEVELOPMENT_TEAM}";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks";
+				PRODUCT_BUNDLE_IDENTIFIER = "${BUNDLE_IDENTIFIER}.tvOSTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = appletvos;
+				SUPPORTED_PLATFORMS = "appletvos appletvsimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG ECLIPSE_TVOS";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Eclipse.app/Eclipse";
+				TVOS_DEPLOYMENT_TARGET = 17.0;
+			};
+			name = Debug;
+		};
+		TVUTCF0200000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "${DEVELOPMENT_TEAM}";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks";
+				PRODUCT_BUNDLE_IDENTIFIER = "${BUNDLE_IDENTIFIER}.tvOSTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = appletvos;
+				SUPPORTED_PLATFORMS = "appletvos appletvsimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) ECLIPSE_TVOS";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Eclipse.app/Eclipse";
+				TVOS_DEPLOYMENT_TARGET = 17.0;
+			};
+			name = Release;
+		};
+		TVUICF0100000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "${DEVELOPMENT_TEAM}";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks";
+				PRODUCT_BUNDLE_IDENTIFIER = "${BUNDLE_IDENTIFIER}.tvOSUITests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = appletvos;
+				SUPPORTED_PLATFORMS = "appletvos appletvsimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG ECLIPSE_TVOS";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TEST_TARGET_NAME = "Eclipse-tvOS";
+				TVOS_DEPLOYMENT_TARGET = 17.0;
+			};
+			name = Debug;
+		};
+		TVUICF0200000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "${DEVELOPMENT_TEAM}";
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks";
+				PRODUCT_BUNDLE_IDENTIFIER = "${BUNDLE_IDENTIFIER}.tvOSUITests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = appletvos;
+				SUPPORTED_PLATFORMS = "appletvos appletvsimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) ECLIPSE_TVOS";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TEST_TARGET_NAME = "Eclipse-tvOS";
+				TVOS_DEPLOYMENT_TARGET = 17.0;
+			};
+			name = Release;
+		};
+		TVCF00010000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 129CC9062EBA1D4600D2D84B /* Build.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = EclipseTV/EclipseTV.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 12;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = "${DEVELOPMENT_TEAM}";
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = EclipseTV/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MARKETING_VERSION = 1.2.0;
+				OTHER_LDFLAGS = "$(inherited)";
+				PRODUCT_BUNDLE_IDENTIFIER = "${BUNDLE_IDENTIFIER}";
+				PRODUCT_MODULE_NAME = Eclipse;
+				PRODUCT_NAME = Eclipse;
+				SDKROOT = appletvos;
+				SUPPORTED_PLATFORMS = "appletvos appletvsimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG ECLIPSE_TVOS ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE ECLIPSE_MPVKIT_METAL_LIVE_QUALITY_RECONFIGURE";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TVOS_DEPLOYMENT_TARGET = 17.0;
+			};
+			name = Debug;
+		};
+		TVCF00020000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 129CC9062EBA1D4600D2D84B /* Build.xcconfig */;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = "App Icon & Top Shelf Image";
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = EclipseTV/EclipseTV.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 12;
+				DEAD_CODE_STRIPPING = YES;
+				DEVELOPMENT_TEAM = "${DEVELOPMENT_TEAM}";
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = EclipseTV/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
+				MARKETING_VERSION = 1.2.0;
+				OTHER_LDFLAGS = "$(inherited)";
+				PRODUCT_BUNDLE_IDENTIFIER = "${BUNDLE_IDENTIFIER}";
+				PRODUCT_MODULE_NAME = Eclipse;
+				PRODUCT_NAME = Eclipse;
+				SDKROOT = appletvos;
+				SUPPORTED_PLATFORMS = "appletvos appletvsimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) ECLIPSE_TVOS ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE ECLIPSE_MPVKIT_METAL_LIVE_QUALITY_RECONFIGURE";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 3;
+				TVOS_DEPLOYMENT_TARGET = 17.0;
+			};
+			name = Release;
+		};
 		13F072682E4B2D3700EF90EB /* Debug */ = {
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 129CC9062EBA1D4600D2D84B /* Build.xcconfig */;
@@ -1502,6 +2044,33 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		TVUTCL0100000000000000001 /* Build configuration list for PBXNativeTarget "Eclipse-tvOSTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				TVUTCF0100000000000000001 /* Debug */,
+				TVUTCF0200000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		TVUICL0100000000000000001 /* Build configuration list for PBXNativeTarget "Eclipse-tvOSUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				TVUICF0100000000000000001 /* Debug */,
+				TVUICF0200000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		TVCL00010000000000000001 /* Build configuration list for PBXNativeTarget "Eclipse-tvOS" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				TVCF00010000000000000001 /* Debug */,
+				TVCF00020000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		13F072562E4B2D3300EF90EB /* Build configuration list for PBXProject "Eclipse" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -1595,14 +2164,6 @@
 				minimumVersion = 3.1.1;
 			};
 		};
-		BEEF00302FE2000000BEEF30 /* XCRemoteSwiftPackageReference "SwiftSoup" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/scinfu/SwiftSoup.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.11.1;
-			};
-		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -1654,11 +2215,6 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AD0000412FDB000000AD0041 /* XCRemoteSwiftPackageReference "Texture" */;
 			productName = AsyncDisplayKit;
-		};
-		BEEF00312FE2000000BEEF31 /* SwiftSoup */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = BEEF00302FE2000000BEEF30 /* XCRemoteSwiftPackageReference "SwiftSoup" */;
-			productName = SwiftSoup;
 		};
 /* End XCSwiftPackageProductDependency section */
 

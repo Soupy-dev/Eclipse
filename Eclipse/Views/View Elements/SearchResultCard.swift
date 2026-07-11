@@ -35,6 +35,10 @@ struct SearchResultCard: View {
             }
             .frame(maxWidth: .infinity)
         }
+#if os(tvOS)
+        .buttonStyle(.card)
+#else
         .buttonStyle(PlainButtonStyle())
+#endif
     }
 }

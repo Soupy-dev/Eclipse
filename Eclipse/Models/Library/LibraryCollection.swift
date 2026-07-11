@@ -1,9 +1,10 @@
 import Foundation
+import Combine
 
 final class LibraryCollection: ObservableObject, Codable, Identifiable, Equatable {
     @Published var items: [LibraryItem] = []
     var id: UUID
-    var name: String
+    @Published var name: String
     var description: String?
     
     init(id: UUID = UUID(), name: String, items: [LibraryItem] = [], description: String? = nil) {

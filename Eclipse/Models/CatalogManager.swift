@@ -13,10 +13,9 @@ class CatalogManager: ObservableObject {
     init() {
         loadCatalogs()
     }
-    
-    private func loadCatalogs() {
-        // Default catalogs
-        let defaultCatalogs: [Catalog] = [
+
+    private static func makeDefaultCatalogs() -> [Catalog] {
+        [
             Catalog(id: "forYou", name: "Just For You", source: .local, isEnabled: true, order: 0),
             Catalog(id: "becauseYouWatched", name: "Because You Watched", source: .local, isEnabled: true, order: 1),
             Catalog(id: "trending", name: "Trending This Week", source: .tmdb, isEnabled: true, order: 2),
@@ -43,6 +42,22 @@ class CatalogManager: ObservableObject {
             Catalog(id: Catalog.upNextCatalogId, name: "Up Next", source: .local, isEnabled: false, order: 23, displayStyle: .continueWatching),
             Catalog(id: Catalog.traktContinueWatchingCatalogId, name: "Trakt Continue Watching", source: .trakt, isEnabled: false, order: 24, displayStyle: .continueWatching)
         ]
+    }
+
+    var hasMeaningfulLocalCustomization: Bool {
+        catalogs != Self.makeDefaultCatalogs()
+    }
+
+    /// Provider-generated Stremio shelves are only valid on devices that hold
+    /// that addon's Keychain URL and local manifest. Sync the common catalog
+    /// ordering, but never manufacture provider shelves on another device.
+    var catalogsForMediaStateSync: [Catalog] {
+        catalogs.filter(\.isMediaStateSyncEligible)
+    }
+
+    private func loadCatalogs() {
+        // Default catalogs
+        let defaultCatalogs = Self.makeDefaultCatalogs()
         
         // Try to load saved catalogs
         if let data = userDefaults.data(forKey: catalogsKey),
@@ -61,7 +76,9 @@ class CatalogManager: ObservableObject {
             }
             
             self.catalogs = merged
-            saveCatalogs()
+            if merged != savedCatalogs {
+                saveCatalogs()
+            }
         } else {
             self.catalogs = defaultCatalogs
             saveCatalogs()
@@ -71,12 +88,37 @@ class CatalogManager: ObservableObject {
     func saveCatalogs() {
         if let data = try? JSONEncoder().encode(catalogs) {
             userDefaults.set(data, forKey: catalogsKey)
-            userDefaults.synchronize()
         }
+        NotificationCenter.default.post(name: .catalogDataDidChange, object: self)
         // Dispatch to main thread to notify observers after persistence
         DispatchQueue.main.async { [weak self] in
             self?.objectWillChange.send()
         }
+    }
+
+    /// Replaces streaming catalog state after a media-state merge. The payload
+    /// contains no reader catalogs and is sanitized by the sync coordinator.
+    func replaceCatalogsForMediaState(_ newCatalogs: [Catalog]) {
+        let localProviderCatalogs = catalogs.filter { !$0.isMediaStateSyncEligible }
+        let sharedCatalogs = newCatalogs.filter(\.isMediaStateSyncEligible)
+        catalogs = (sharedCatalogs + localProviderCatalogs)
+            .sorted { lhs, rhs in
+                if lhs.order == rhs.order { return lhs.id < rhs.id }
+                return lhs.order < rhs.order
+            }
+            .enumerated().map { index, catalog in
+            var updated = catalog
+            updated.order = index
+            return updated
+        }
+        saveCatalogs()
+    }
+
+    /// Drops another iCloud account's catalog ordering and rebuilds the
+    /// product defaults before the incoming private database is applied.
+    func resetCatalogsForMediaStateAccountChange() {
+        userDefaults.removeObject(forKey: catalogsKey)
+        loadCatalogs()
     }
     
     func toggleCatalog(id: String) {
@@ -224,7 +266,7 @@ class CatalogManager: ObservableObject {
                     return nil
                 }
                 let catalogId = Catalog.stremioCatalogId(addon: addon, stremioCatalog: stremioCatalog)
-                let name = Self.stremioCatalogDisplayName(addon: addon, stremioCatalog: stremioCatalog)
+                let name = Self.stremioCatalogDisplayName(stremioCatalog: stremioCatalog)
                 return Catalog(
                     id: catalogId,
                     name: name,
@@ -241,7 +283,10 @@ class CatalogManager: ObservableObject {
         }
 
         let validStremioIds = Set(addonCatalogs.map(\.id))
-        var existingById = Dictionary(uniqueKeysWithValues: catalogs.map { ($0.id, $0) })
+        var existingById = Dictionary(
+            catalogs.map { ($0.id, $0) },
+            uniquingKeysWith: { existing, _ in existing }
+        )
         var merged = catalogs.filter { catalog in
             catalog.source != .stremio || validStremioIds.contains(catalog.id)
         }
@@ -287,15 +332,9 @@ class CatalogManager: ObservableObject {
         saveCatalogs()
     }
 
-    private static func stremioCatalogDisplayName(addon: StremioAddon, stremioCatalog: StremioCatalog) -> String {
+    private static func stremioCatalogDisplayName(stremioCatalog: StremioCatalog) -> String {
         let rawName = stremioCatalog.name?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let catalogName = rawName?.isEmpty == false ? rawName! : stremioCatalog.type.capitalized
-        let addonName = addon.manifest.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !addonName.isEmpty else { return catalogName }
-        if catalogName.localizedCaseInsensitiveContains(addonName) {
-            return catalogName
-        }
-        return "\(addonName) - \(catalogName)"
+        return rawName?.isEmpty == false ? rawName! : stremioCatalog.type.capitalized
     }
 }
 
@@ -369,7 +408,7 @@ enum PerformanceModeSettings {
     }
 }
 
-struct Catalog: Identifiable, Codable {
+struct Catalog: Identifiable, Codable, Equatable {
     static let upNextCatalogId = "upNext"
     static let traktContinueWatchingCatalogId = "traktContinueWatching"
 
@@ -384,6 +423,8 @@ struct Catalog: Identifiable, Codable {
     var stremioCatalogId: String?
     var stremioCatalogType: String?
     var stremioMediaType: String?
+
+    var isMediaStateSyncEligible: Bool { source != .stremio }
     var traktListId: Int?
     var traktListUser: String?
     var traktListSlug: String?
@@ -397,7 +438,7 @@ struct Catalog: Identifiable, Codable {
         case traktListId, traktListUser, traktListSlug, traktListMediaType, traktListSortBy, traktListSortHow
     }
     
-    enum CatalogSource: String, Codable {
+    enum CatalogSource: String, Codable, Equatable {
         case tmdb = "TMDB"
         case anilist = "AniList"
         case local = "Local"
@@ -405,7 +446,7 @@ struct Catalog: Identifiable, Codable {
         case trakt = "Trakt"
     }
     
-    enum CatalogDisplayStyle: String, Codable {
+    enum CatalogDisplayStyle: String, Codable, Equatable {
         case standard
         case network
         case genre

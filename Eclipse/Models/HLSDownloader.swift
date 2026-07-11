@@ -171,7 +171,10 @@ final class HLSDownloader: @unchecked Sendable {
                 let encryptionKey = self.parseEncryptionKey(from: mediaPlaylistContent, baseURL: mediaPlaylistURL)
                 var keyData: Data? = nil
                 if let encKey = encryptionKey, encKey.method == "AES-128" {
-                    keyData = try await self.fetchData(url: encKey.keyURL)
+                    keyData = try await self.fetchData(
+                        url: encKey.keyURL,
+                        maximumResponseBytes: Self.maximumEncryptionKeyBytes
+                    )
                     try self.checkCancelled()
                     Logger.shared.log("HLS: Downloaded AES-128 encryption key", type: "Download")
                 }
@@ -246,16 +249,26 @@ final class HLSDownloader: @unchecked Sendable {
     }
     
     // MARK: - Playlist Fetching
+
+    private static let maximumPlaylistBytes = 5 * 1024 * 1024
+    private static let maximumEncryptionKeyBytes = 64 * 1024
+    private static let maximumMediaObjectBytes = 128 * 1024 * 1024
     
     private func fetchPlaylist(url: URL) async throws -> String {
-        let data = try await fetchData(url: url)
+        let data = try await fetchData(
+            url: url,
+            maximumResponseBytes: Self.maximumPlaylistBytes
+        )
         guard let content = String(data: data, encoding: .utf8) else {
             throw HLSError.invalidPlaylistData
         }
         return content
     }
     
-    private func fetchData(url: URL) async throws -> Data {
+    private func fetchData(
+        url: URL,
+        maximumResponseBytes: Int = HLSDownloader.maximumMediaObjectBytes
+    ) async throws -> Data {
         try checkCancelled()
 
         let effectiveHeaders = CloudflareBypassManager.shared.headersByApplyingCachedBypass(headers, for: url)
@@ -264,7 +277,10 @@ final class HLSDownloader: @unchecked Sendable {
             request.setValue(value, forHTTPHeaderField: key)
         }
         
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await session.boundedData(
+            for: request,
+            maximumResponseBytes: maximumResponseBytes
+        )
         try checkCancelled()
         
         if let httpResponse = response as? HTTPURLResponse {

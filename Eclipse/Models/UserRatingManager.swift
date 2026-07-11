@@ -96,16 +96,22 @@ final class UserRatingManager {
 
     /// Restores ratings and notes from backup, replacing current data.
     func restoreRatingsAndNotes(ratings backupRatings: [String: Double], notes backupNotes: [String: String]) {
-        let restoredRatings = Dictionary(uniqueKeysWithValues: backupRatings.compactMap { key, value -> (Int, Double)? in
-            guard let intKey = Int(key) else { return nil }
-            return (intKey, Self.normalizedRating(value))
-        })
-        let restoredNotes = Dictionary(uniqueKeysWithValues: backupNotes.compactMap { key, value -> (Int, String)? in
-            guard let intKey = Int(key) else { return nil }
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return nil }
-            return (intKey, value)
-        })
+        let restoredRatings = Dictionary(
+            backupRatings.compactMap { key, value -> (Int, Double)? in
+                guard let intKey = Int(key) else { return nil }
+                return (intKey, Self.normalizedRating(value))
+            },
+            uniquingKeysWith: { _, incoming in incoming }
+        )
+        let restoredNotes = Dictionary(
+            backupNotes.compactMap { key, value -> (Int, String)? in
+                guard let intKey = Int(key) else { return nil }
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return nil }
+                return (intKey, value)
+            },
+            uniquingKeysWith: { _, incoming in incoming }
+        )
 
         lock.lock()
         ratings = restoredRatings
@@ -140,6 +146,7 @@ final class UserRatingManager {
     private func save(_ store: RatingStore) {
         guard let jsonData = try? JSONEncoder().encode(store) else { return }
         try? jsonData.write(to: fileURL, options: .atomic)
+        NotificationCenter.default.post(name: .userRatingDataDidChange, object: self)
     }
 
     private static func load(from url: URL) -> (ratings: [Int: Double], notes: [Int: String]) {
@@ -174,19 +181,25 @@ final class UserRatingManager {
     }
 
     private static func parseRatings(_ source: [String: Double]) -> [Int: Double] {
-        Dictionary(uniqueKeysWithValues: source.compactMap { key, value in
-            guard let intKey = Int(key) else { return nil }
-            return (intKey, normalizedRating(value))
-        })
+        Dictionary(
+            source.compactMap { key, value in
+                guard let intKey = Int(key) else { return nil }
+                return (intKey, normalizedRating(value))
+            },
+            uniquingKeysWith: { _, incoming in incoming }
+        )
     }
 
     private static func parseNotes(_ source: [String: String]) -> [Int: String] {
-        Dictionary(uniqueKeysWithValues: source.compactMap { key, value in
-            guard let intKey = Int(key) else { return nil }
-            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty else { return nil }
-            return (intKey, value)
-        })
+        Dictionary(
+            source.compactMap { key, value in
+                guard let intKey = Int(key) else { return nil }
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty else { return nil }
+                return (intKey, value)
+            },
+            uniquingKeysWith: { _, incoming in incoming }
+        )
     }
 
     private static func normalizedRating(_ value: Double) -> Double {

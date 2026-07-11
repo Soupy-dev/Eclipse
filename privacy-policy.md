@@ -1,6 +1,6 @@
 # Eclipse Privacy Policy
 
-Effective date: June 11, 2026
+Effective date: July 10, 2026
 
 Eclipse is designed to run locally on your device. Eclipse does not operate a user account system, analytics backend, advertising network, or server-side tracking service.
 
@@ -27,7 +27,9 @@ Eclipse may store app data locally on your device so the app can function. This 
 - Locally saved logs that you can choose to export.
 - Authentication tokens for third-party services you choose to connect.
 
-This data is stored by the app on your device and is not sent to the developer. If you enable iCloud Sync in a supported build, selected app data, including tracker connection data needed to keep those accounts connected, may be stored in your personal iCloud account.
+This data is stored by the app on your device and is not sent to the developer. If you enable Cloud Sync in a supported build, selected app data may be stored in your personal iCloud, Google Drive, or OneDrive account. Cloud Sync excludes downloaded media, caches, logs, temporary files, cloud account tokens, and unsafe source secrets.
+
+Cloud Sync is optional. Eclipse is not responsible for availability, restrictions, data loss, account action, or other issues affecting your chosen cloud service. Use Cloud Sync at your own risk. iCloud, Google Drive, OneDrive, Apple, Google, and Microsoft are trademarks of their respective owners and are not affiliated with Eclipse.
 
 ## Third-Party Services
 

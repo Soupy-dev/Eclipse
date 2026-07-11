@@ -30,8 +30,7 @@ struct StorageView: View {
                     VStack(spacing: 0) {
                         GlassDetailRow(icon: "externaldrive.fill", iconColor: .gray, title: "Cache Size") {
                             if isLoading {
-                                ProgressView()
-                                    .progressViewStyle(.circular)
+                                EclipseLoadingIndicator()
                                     .tint(.white.opacity(0.6))
                             } else {
                                 Text(formattedCacheSize)
@@ -47,8 +46,7 @@ struct StorageView: View {
                         } label: {
                             GlassDetailRow(icon: "trash.fill", iconColor: .red, title: isClearing ? "Clearing Cache..." : "Clear Cache") {
                                 if isClearing {
-                                    ProgressView()
-                                        .progressViewStyle(.circular)
+                                    EclipseLoadingIndicator()
                                         .tint(.white.opacity(0.6))
                                 } else {
                                     EmptyView()
@@ -67,8 +65,7 @@ struct StorageView: View {
                             ForEach(storageBreakdown) { item in
                                 GlassDetailRow(icon: "doc.fill", iconColor: .blue, title: item.title) {
                                     if isLoading {
-                                        ProgressView()
-                                            .progressViewStyle(.circular)
+                                        EclipseLoadingIndicator()
                                             .tint(.white.opacity(0.6))
                                     } else {
                                         Text(ByteCountFormatter.string(fromByteCount: item.sizeBytes, countStyle: .file))
@@ -299,7 +296,7 @@ struct StorageView: View {
             StorageBreakdownItem(title: "MPV Warmup Cache", sizeBytes: ExperimentalMPVPreloadManager.shared.cacheSizeBytes),
             StorageBreakdownItem(title: "Downloads / Video Storage", sizeBytes: calculateDirectorySize(at: downloads)),
             StorageBreakdownItem(title: "Subtitle Cache", sizeBytes: calculateFileSize(in: [documents, caches, downloads], extensions: ["srt", "vtt", "ass", "ssa"])),
-            StorageBreakdownItem(title: "Service / Plugin / Source Cache", sizeBytes: calculateNamedCacheSize(in: caches, matching: ["service", "plugin", "source", "stremio", "nuvio"])),
+            StorageBreakdownItem(title: "Service / Addon Cache", sizeBytes: calculateNamedCacheSize(in: caches, matching: ["service", "source", "stremio"])),
             StorageBreakdownItem(title: "Reader Cache", sizeBytes: calculateNamedCacheSize(in: caches, matching: ["kanzen", "aidoku", "reader", "manga"]))
         ].map { item in
             if item.title == "Document Directory" {

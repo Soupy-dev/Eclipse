@@ -280,7 +280,7 @@ private struct KanzenHistoryResumeDestination: View {
                 }
             } else {
                 fallbackNavigation {
-                    ProgressView("Opening reader...")
+                    EclipseLoadingIndicator("Opening reader...")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .task {
                             await load()

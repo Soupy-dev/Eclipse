@@ -81,6 +81,64 @@ struct TVShowDetailsSection: View {
     }
 }
 
+struct AnimeEpisodeContextIndex {
+    struct Key: Hashable {
+        let seasonNumber: Int
+        let episodeNumber: Int
+    }
+
+    private let episodeByKey: [Key: AniListEpisode]
+    private let absoluteNumberByKey: [Key: Int]
+    private let episodesBySeason: [Int: [AniListEpisode]]
+
+    init(episodes: [AniListEpisode]) {
+        let ordered = episodes.sorted { lhs, rhs in
+            if lhs.seasonNumber == rhs.seasonNumber {
+                return lhs.number < rhs.number
+            }
+            return lhs.seasonNumber < rhs.seasonNumber
+        }
+
+        var episodeByKey: [Key: AniListEpisode] = [:]
+        var absoluteNumberByKey: [Key: Int] = [:]
+        var episodesBySeason: [Int: [AniListEpisode]] = [:]
+        episodeByKey.reserveCapacity(ordered.count)
+        absoluteNumberByKey.reserveCapacity(ordered.count)
+
+        for (index, episode) in ordered.enumerated() {
+            let key = Key(seasonNumber: episode.seasonNumber, episodeNumber: episode.number)
+            // Preserve the first occurrence if malformed provider data repeats
+            // a number; that matches the previous `first(where:)` behavior.
+            if episodeByKey[key] == nil {
+                episodeByKey[key] = episode
+                absoluteNumberByKey[key] = index + 1
+            }
+            episodesBySeason[episode.seasonNumber, default: []].append(episode)
+        }
+
+        self.episodeByKey = episodeByKey
+        self.absoluteNumberByKey = absoluteNumberByKey
+        self.episodesBySeason = episodesBySeason
+    }
+
+    func episode(seasonNumber: Int, episodeNumber: Int) -> AniListEpisode? {
+        episodeByKey[Key(seasonNumber: seasonNumber, episodeNumber: episodeNumber)]
+    }
+
+    func absoluteNumber(seasonNumber: Int, episodeNumber: Int) -> Int? {
+        absoluteNumberByKey[Key(seasonNumber: seasonNumber, episodeNumber: episodeNumber)]
+    }
+
+    func episodes(seasonNumber: Int) -> [AniListEpisode] {
+        episodesBySeason[seasonNumber] ?? []
+    }
+
+    func episodeCount(seasonNumber: Int) -> Int? {
+        guard let count = episodesBySeason[seasonNumber]?.count, count > 0 else { return nil }
+        return count
+    }
+}
+
 struct TVShowSeasonsSection<InsertedContent: View>: View {
     let tvShow: TMDBTVShowWithSeasons?
     let isAnime: Bool
@@ -91,6 +149,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     let seasonSelectorInsertedContent: AnyView
     let hasSpecialEpisodeChoices: Bool
     var animeEpisodes: [AniListEpisode]? = nil
+    let animeEpisodeContextIndex: AnimeEpisodeContextIndex
     var animeSeasonTitles: [Int: String]? = nil
     var animeSeasonRomajiTitles: [Int: String] = [:]
     var animeSeasonAniListIds: [Int: Int] = [:]
@@ -102,29 +161,37 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     
     @State private var isLoadingSeason = false
     @State private var showingSearchResults = false
+    @State private var selectedEpisodePlaybackContext: EpisodePlaybackContext?
+#if !os(tvOS)
     @State private var showingDownloadSheet = false
     @State private var downloadEpisode: TMDBEpisode? = nil
-    @State private var selectedEpisodePlaybackContext: EpisodePlaybackContext?
     @State private var downloadEpisodePlaybackContext: EpisodePlaybackContext?
     @State private var downloadAllQueue: [TMDBEpisode] = []
     @State private var downloadAllSpecialContext: SpecialEpisodeListContext?
     @State private var isDownloadingAll = false
     @State private var downloadWasEnqueued = false
     @State private var downloadWasSkipped = false
+#endif
     @State private var showingNoServicesAlert = false
     @State private var romajiTitle: String?
     @State private var currentSeasonTitle: String?
     @State private var seasonLoadTask: Task<Void, Never>?
     @State private var seasonLoadGeneration = 0
     @State private var selectedEpisodePageStartByKey: [String: Int] = [:]
+#if os(iOS)
+    @State private var fillerEpisodeNumbersBySeason: [Int: Set<Int>] = [:]
+#endif
     
     @StateObject private var serviceManager = ServiceManager.shared
     @StateObject private var stremioManager = StremioAddonManager.shared
-    @StateObject private var pluginManager = NuvioPluginManager.shared
     @StateObject private var accentManager = AccentColorManager.shared
+#if !os(tvOS)
     private let downloadManager = DownloadManager.shared
+#endif
     @AppStorage("horizontalEpisodeList") private var horizontalEpisodeList: Bool = false
+#if !os(tvOS)
     @AppStorage("preferDownloadedMedia") private var preferDownloadedMedia: Bool = false
+#endif
     private var isGroupedBySeasons: Bool {
         return tvShow?.seasons.filter { $0.seasonNumber > 0 }.count ?? 0 > 1
     }
@@ -139,8 +206,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
 
     private var hasActiveSources: Bool {
         !serviceManager.activeServices.isEmpty ||
-        !stremioManager.activeAddons.isEmpty ||
-        !pluginManager.activeSources(for: "tv").isEmpty
+        !stremioManager.activeAddons.isEmpty
     }
 
     private var activeSeasonDetail: TMDBSeasonDetail? {
@@ -216,7 +282,10 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
 
         guard isAnime else { return nil }
 
-        if PerformanceModeSettings.isEnabled || PerformanceModeSettings.skipsAniListTraversalForAnimeDetails {
+        // Performance Mode keeps Home catalogs on their fast path but, per its
+        // Settings description, detail pages retain full anime metadata. Only
+        // the explicit traversal-skip toggle should discard provider identity.
+        if PerformanceModeSettings.skipsAniListTraversalForAnimeDetails {
             return EpisodePlaybackContext(
                 localSeasonNumber: episode.seasonNumber,
                 localEpisodeNumber: episode.episodeNumber,
@@ -232,10 +301,14 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             )
         }
 
-        let aniEpisode = animeEpisodes?.first {
-            $0.seasonNumber == episode.seasonNumber && $0.number == episode.episodeNumber
-        }
-        let absoluteEpisodeNumber = animeAbsoluteEpisodeNumber(for: episode)
+        let aniEpisode = animeEpisodeContextIndex.episode(
+            seasonNumber: episode.seasonNumber,
+            episodeNumber: episode.episodeNumber
+        )
+        let absoluteEpisodeNumber = animeEpisodeContextIndex.absoluteNumber(
+            seasonNumber: episode.seasonNumber,
+            episodeNumber: episode.episodeNumber
+        )
 
         guard aniEpisode != nil ||
               absoluteEpisodeNumber != nil ||
@@ -253,39 +326,12 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             tmdbEpisodeNumber: aniEpisode?.tmdbEpisodeNumber,
             tmdbEpisodeOffset: nil,
             animeAbsoluteEpisodeNumber: absoluteEpisodeNumber,
-            animeSeasonEpisodeCount: animeSeasonEpisodeCount(for: episode.seasonNumber),
+            animeSeasonEpisodeCount: animeEpisodeContextIndex.episodeCount(seasonNumber: episode.seasonNumber),
             isSpecial: false,
             titleOnlySearch: false
         )
     }
 
-    private func animeAbsoluteEpisodeNumber(for episode: TMDBEpisode) -> Int? {
-        guard let animeEpisodes else { return nil }
-
-        var absolute = 0
-        for aniEpisode in animeEpisodes.sorted(by: episodeSort) {
-            absolute += 1
-            if aniEpisode.seasonNumber == episode.seasonNumber && aniEpisode.number == episode.episodeNumber {
-                return absolute
-            }
-        }
-
-        return nil
-    }
-
-    private func animeSeasonEpisodeCount(for seasonNumber: Int) -> Int? {
-        guard let animeEpisodes else { return nil }
-        let count = animeEpisodes.filter { $0.seasonNumber == seasonNumber }.count
-        return count > 0 ? count : nil
-    }
-
-    private func episodeSort(_ lhs: AniListEpisode, _ rhs: AniListEpisode) -> Bool {
-        if lhs.seasonNumber == rhs.seasonNumber {
-            return lhs.number < rhs.number
-        }
-        return lhs.seasonNumber < rhs.seasonNumber
-    }
-    
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let tvShow = tvShow {
@@ -325,6 +371,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                                 episodePageMenu(for: activeSeasonDetail)
                             }
                             
+#if !os(tvOS)
                             if activeSeasonDetail != nil && hasActiveSources {
                                 Button(action: startDownloadAllSeason) {
                                     Image(systemName: "arrow.down.circle")
@@ -333,6 +380,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                                 }
                                 .disabled(isDownloadingAll)
                             }
+#endif
                         }
                         .foregroundColor(.white)
                         .padding(.horizontal)
@@ -366,6 +414,11 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             seasonLoadTask?.cancel()
             seasonLoadTask = nil
         }
+#if os(iOS)
+        .task(id: animeFillerRequestKey) {
+            await loadFillerMarkersForSelectedSeason()
+        }
+#endif
         .sheet(isPresented: $showingSearchResults) {
             ModulesSearchResultsSheet(
                 mediaTitle: getSearchTitle(),
@@ -386,6 +439,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 isAnimationGenre16: tvShow?.genres.contains { $0.id == 16 } ?? false
             )
         }
+#if !os(tvOS)
         .sheet(isPresented: $showingDownloadSheet, onDismiss: {
             if isDownloadingAll {
                 if downloadWasEnqueued || downloadWasSkipped {
@@ -436,6 +490,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 isAnimationGenre16: tvShow?.genres.contains { $0.id == 16 } ?? false
             )
         }
+#endif
         .alert("No Active Services", isPresented: $showingNoServicesAlert) {
             Button("OK") { }
         } message: {
@@ -459,6 +514,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 episodePageMenu(for: activeSeasonDetail)
             }
             
+#if !os(tvOS)
             if activeSeasonDetail != nil && hasActiveSources {
                 Button(action: startDownloadAllSeason) {
                     Image(systemName: "arrow.down.circle")
@@ -467,6 +523,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 }
                 .disabled(isDownloadingAll)
             }
+#endif
             
             if let tvShow = tvShow, showSeasonSwitcher && useSeasonMenu {
                 seasonMenu(for: tvShow)
@@ -683,7 +740,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 }
             } else if isLoadingSeason {
                 VStack(spacing: 12) {
-                    ProgressView()
+                    EclipseLoadingIndicator()
                         .scaleEffect(1.2)
                     Text("Loading episodes...")
                         .font(.caption)
@@ -719,36 +776,113 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 onTap: { episodeTapAction(episode: episode, playbackContext: playbackContext) },
                 onMarkWatched: { markAsWatched(episode: episode, playbackContext: playbackContext) },
                 onResetProgress: { resetProgress(episode: episode) },
-                onDownload: {
-                    if hasActiveSources {
-                        downloadEpisode = episode
-                        selectedEpisodeForSearch = episode
-                        selectedEpisodePlaybackContext = playbackContext
-                        downloadEpisodePlaybackContext = playbackContext
-                        showingDownloadSheet = true
-                    } else {
-                        showingNoServicesAlert = true
-                    }
-                },
+                onDownload: episodeDownloadAction(for: episode, playbackContext: playbackContext),
                 playbackContext: playbackContext,
-                isAnimeContent: isAnime
+                isAnimeContent: isAnime,
+                isFiller: isFillerEpisode(episode)
             )
         } else {
             EmptyView()
         }
     }
+
+    private func isFillerEpisode(_ episode: TMDBEpisode) -> Bool {
+#if os(iOS)
+        fillerEpisodeNumbersBySeason[episode.seasonNumber]?.contains(episode.episodeNumber) == true
+#else
+        false
+#endif
+    }
+
+#if os(iOS)
+    private var animeFillerRequestKey: String {
+        guard isAnime,
+              specialEpisodeContext == nil,
+              let seasonNumber = selectedSeason?.seasonNumber,
+              let providerId = animeSeasonAniListIds[seasonNumber] else {
+            return "none"
+        }
+        return "\(seasonNumber):\(providerId)"
+    }
+
+    @MainActor
+    private func loadFillerMarkersForSelectedSeason() async {
+        guard isAnime,
+              specialEpisodeContext == nil,
+              let seasonNumber = selectedSeason?.seasonNumber,
+              fillerEpisodeNumbersBySeason[seasonNumber] == nil,
+              let providerId = animeSeasonAniListIds[seasonNumber] else {
+            return
+        }
+
+        let malId: Int?
+        if providerId < 0 {
+            // MAL fallback entries use a negative provider-safe ID whose magnitude is MAL's ID.
+            malId = abs(providerId)
+        } else if let cached = TrackerManager.shared.cachedMyAnimeListAnimeId(fromAniListId: providerId) {
+            malId = cached
+        } else {
+            malId = await TrackerManager.shared.resolveMyAnimeListAnimeId(fromAniListId: providerId)
+        }
+
+        guard !Task.isCancelled, let malId, malId > 0 else { return }
+
+        do {
+            let episodeNumbers = try await AnimeFillerService.shared.fillerEpisodeNumbers(malId: malId)
+            guard !Task.isCancelled,
+                  selectedSeason?.seasonNumber == seasonNumber,
+                  animeSeasonAniListIds[seasonNumber] == providerId else { return }
+            fillerEpisodeNumbersBySeason[seasonNumber] = episodeNumbers
+            Logger.shared.log(
+                "AnimeFiller: loaded season=\(seasonNumber) malId=\(malId) fillerEpisodes=\(episodeNumbers.count)",
+                type: "AniList"
+            )
+        } catch is CancellationError {
+            return
+        } catch {
+            Logger.shared.log(
+                "AnimeFiller: failed season=\(seasonNumber) malId=\(malId) error=\(error.localizedDescription)",
+                type: "Error"
+            )
+        }
+    }
+#endif
+
+    private func episodeDownloadAction(
+        for episode: TMDBEpisode,
+        playbackContext: EpisodePlaybackContext?
+    ) -> (() -> Void)? {
+#if os(tvOS)
+        nil
+#else
+        return {
+            if hasActiveSources {
+                downloadEpisode = episode
+                selectedEpisodeForSearch = episode
+                selectedEpisodePlaybackContext = playbackContext
+                downloadEpisodePlaybackContext = playbackContext
+                showingDownloadSheet = true
+            } else {
+                showingNoServicesAlert = true
+            }
+        }
+#endif
+    }
     
     private func episodeTapAction(episode: TMDBEpisode, playbackContext: EpisodePlaybackContext? = nil) {
         selectedEpisodeForSearch = episode
         selectedEpisodePlaybackContext = playbackContext
+#if !os(tvOS)
         if preferDownloadedMedia,
            let item = downloadedItem(for: episode) {
             playDownloadedItem(item)
             return
         }
+#endif
         searchInServicesForEpisode(episode: episode, playbackContext: playbackContext)
     }
 
+#if !os(tvOS)
     private func downloadedItem(for episode: TMDBEpisode) -> DownloadItem? {
         guard let tvShow else { return nil }
         return downloadManager.completedDownloadItem(
@@ -821,6 +955,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             }
         }
     }
+#endif
 
     private func episodePages(for detail: TMDBSeasonDetail) -> [EpisodePage] {
         stride(from: 0, to: detail.episodes.count, by: episodePageSize).map { startIndex in
@@ -852,6 +987,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         return Array(items[page.startIndex..<page.endIndex])
     }
 
+#if !os(tvOS)
     private func nextDownloadedEpisode(
         for tmdbId: Int,
         requestedSeasonNumber: Int,
@@ -884,14 +1020,17 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         guard nextIndex < episodes.endIndex else { return nil }
         return episodes[nextIndex]
     }
+#endif
     
     /// Look up the original TMDB season/episode numbers for the currently selected episode.
     /// Returns nil for non-anime or when no AniList episode match is found.
     private var originalTMDBNumbers: (season: Int, episode: Int)? {
         guard isAnime,
               let ep = selectedEpisodeForSearch,
-              let animeEps = animeEpisodes,
-              let match = animeEps.first(where: { $0.seasonNumber == ep.seasonNumber && $0.number == ep.episodeNumber }),
+              let match = animeEpisodeContextIndex.episode(
+                seasonNumber: ep.seasonNumber,
+                episodeNumber: ep.episodeNumber
+              ),
               let s = match.tmdbSeasonNumber,
               let e = match.tmdbEpisodeNumber
         else { return nil }
@@ -940,8 +1079,10 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         let wasShowingSpecial = specialEpisodeContext != nil
         specialEpisodeContext = nil
         selectedEpisodePlaybackContext = nil
+#if !os(tvOS)
         downloadEpisodePlaybackContext = nil
         downloadAllSpecialContext = nil
+#endif
         selectedSeason = season
         if wasShowingSpecial {
             selectedEpisodeForSearch = seasonDetail?.episodes.first
@@ -967,13 +1108,15 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         seasonDetail = nil
         selectedEpisodeForSearch = nil
         selectedEpisodePlaybackContext = nil
+#if !os(tvOS)
         downloadEpisodePlaybackContext = nil
+#endif
         
         seasonLoadTask = Task {
             do {
                 // For anime, build season detail from cached AniList episodes with TMDB metadata
-                if isAnime, let animeEpisodes = animeEpisodes {
-                    let seasonEpisodes = animeEpisodes.filter { $0.seasonNumber == season.seasonNumber }
+                if isAnime, animeEpisodes != nil {
+                    let seasonEpisodes = animeEpisodeContextIndex.episodes(seasonNumber: season.seasonNumber)
                     
                     let tmdbEpisodes: [TMDBEpisode] = seasonEpisodes.map { aniEp in
                         TMDBEpisode(
@@ -1053,6 +1196,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         loadSeasonDetails(tvShowId: tvShowId, season: season)
     }
     
+#if !os(tvOS)
     private func startDownloadAllSeason() {
         let detail = activeSeasonDetail
         guard let episodes = detail?.episodes, !episodes.isEmpty else {
@@ -1127,4 +1271,5 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             return false
         }
     }
+#endif
 }

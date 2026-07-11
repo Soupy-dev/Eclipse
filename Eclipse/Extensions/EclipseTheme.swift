@@ -72,41 +72,51 @@ class EclipseTheme: ObservableObject {
     
     // MARK: - Persisted Settings
 
+#if !os(tvOS)
     @Published var globalAppearanceEnabled: Bool {
         didSet { UserDefaults.standard.set(globalAppearanceEnabled, forKey: "readerGlobalAppearanceEnabled") }
     }
-    
+#endif
+
     @Published var settingsGradientColor: Color {
         didSet { saveColor(settingsGradientColor, key: "eclipseThemeGradientColor") }
     }
 
+#if !os(tvOS)
     @Published var readerSettingsGradientColor: Color {
         didSet { saveColor(readerSettingsGradientColor, key: "readerThemeGradientColor") }
     }
+#endif
 
     @Published var atmosphereStyle: AtmosphereStyle {
         didSet { UserDefaults.standard.set(atmosphereStyle.rawValue, forKey: "atmosphereStyle") }
     }
 
+#if !os(tvOS)
     @Published var readerAtmosphereStyle: AtmosphereStyle {
         didSet { UserDefaults.standard.set(readerAtmosphereStyle.rawValue, forKey: "readerAtmosphereStyle") }
     }
+#endif
 
     @Published var atmosphereSolidColorSource: AtmosphereSolidColorSource {
         didSet { UserDefaults.standard.set(atmosphereSolidColorSource.rawValue, forKey: "atmosphereSolidColorSource") }
     }
 
+#if !os(tvOS)
     @Published var readerAtmosphereSolidColorSource: AtmosphereSolidColorSource {
         didSet { UserDefaults.standard.set(readerAtmosphereSolidColorSource.rawValue, forKey: "readerAtmosphereSolidColorSource") }
     }
+#endif
 
     @Published var atmosphereSolidColor: Color {
         didSet { saveColor(atmosphereSolidColor, key: "atmosphereSolidColor") }
     }
 
+#if !os(tvOS)
     @Published var readerAtmosphereSolidColor: Color {
         didSet { saveColor(readerAtmosphereSolidColor, key: "readerAtmosphereSolidColor") }
     }
+#endif
 
     // MARK: - Appearance (modern atmosphere)
 
@@ -114,33 +124,41 @@ class EclipseTheme: ObservableObject {
         didSet { UserDefaults.standard.set(appearancePaletteRaw, forKey: AppearanceConfig.paletteKey) }
     }
 
+#if !os(tvOS)
     @Published var readerAppearancePaletteRaw: String {
         didSet { UserDefaults.standard.set(readerAppearancePaletteRaw, forKey: AppearanceConfig.readerPaletteKey) }
     }
+#endif
 
     @Published var bleedStrength: Double {
         didSet { UserDefaults.standard.set(bleedStrength, forKey: AppearanceConfig.bleedStrengthKey) }
     }
 
+#if !os(tvOS)
     @Published var readerBleedStrength: Double {
         didSet { UserDefaults.standard.set(readerBleedStrength, forKey: AppearanceConfig.readerBleedStrengthKey) }
     }
+#endif
 
     @Published var backgroundIntensity: Double {
         didSet { UserDefaults.standard.set(backgroundIntensity, forKey: AppearanceConfig.backgroundIntensityKey) }
     }
 
+#if !os(tvOS)
     @Published var readerBackgroundIntensity: Double {
         didSet { UserDefaults.standard.set(readerBackgroundIntensity, forKey: AppearanceConfig.readerBackgroundIntensityKey) }
     }
+#endif
 
     @Published var atmosphereMotion: Double {
         didSet { UserDefaults.standard.set(atmosphereMotion, forKey: AppearanceConfig.motionKey) }
     }
 
+#if !os(tvOS)
     @Published var readerAtmosphereMotion: Double {
         didSet { UserDefaults.standard.set(readerAtmosphereMotion, forKey: AppearanceConfig.readerMotionKey) }
     }
+#endif
 
     @Published var customPaletteColors: [Color] {
         didSet {
@@ -150,6 +168,7 @@ class EclipseTheme: ObservableObject {
         }
     }
 
+#if !os(tvOS)
     @Published var readerCustomPaletteColors: [Color] {
         didSet {
             if let data = AppearanceConfig.encodeColors(readerCustomPaletteColors) {
@@ -157,6 +176,7 @@ class EclipseTheme: ObservableObject {
             }
         }
     }
+#endif
 
     // MARK: - Constants
     
@@ -214,55 +234,96 @@ class EclipseTheme: ObservableObject {
         AppearanceConfig.migrateIfNeeded()
         let styleRaw = UserDefaults.standard.string(forKey: "atmosphereStyle") ?? Self.defaultAtmosphereStyle.rawValue
         let sourceRaw = UserDefaults.standard.string(forKey: "atmosphereSolidColorSource") ?? AtmosphereSolidColorSource.dominant.rawValue
+#if !os(tvOS)
         let readerStyleRaw = UserDefaults.standard.string(forKey: "readerAtmosphereStyle") ?? styleRaw
         let readerSourceRaw = UserDefaults.standard.string(forKey: "readerAtmosphereSolidColorSource") ?? sourceRaw
 
         self.globalAppearanceEnabled = UserDefaults.standard.object(forKey: "readerGlobalAppearanceEnabled") == nil
             ? true
             : UserDefaults.standard.bool(forKey: "readerGlobalAppearanceEnabled")
+#endif
         self.settingsGradientColor = Self.loadColor(key: "eclipseThemeGradientColor") ?? Self.gradientPresets[0].color
+#if !os(tvOS)
         self.readerSettingsGradientColor = Self.loadColor(key: "readerThemeGradientColor") ?? Self.loadColor(key: "eclipseThemeGradientColor") ?? Self.gradientPresets[0].color
+#endif
         self.atmosphereStyle = AtmosphereStyle(rawValue: styleRaw) ?? .gradient
+#if !os(tvOS)
         self.readerAtmosphereStyle = AtmosphereStyle(rawValue: readerStyleRaw) ?? .gradient
+#endif
         self.atmosphereSolidColorSource = AtmosphereSolidColorSource(rawValue: sourceRaw) ?? .dominant
+#if !os(tvOS)
         self.readerAtmosphereSolidColorSource = AtmosphereSolidColorSource(rawValue: readerSourceRaw) ?? .dominant
+#endif
         self.atmosphereSolidColor = Self.loadColor(key: "atmosphereSolidColor") ?? Self.gradientPresets[0].color
+#if !os(tvOS)
         self.readerAtmosphereSolidColor = Self.loadColor(key: "readerAtmosphereSolidColor") ?? Self.loadColor(key: "atmosphereSolidColor") ?? Self.gradientPresets[0].color
+#endif
 
         let defaults = UserDefaults.standard
         self.appearancePaletteRaw = defaults.string(forKey: AppearanceConfig.paletteKey) ?? AtmospherePaletteID.defaultValue.rawValue
+#if !os(tvOS)
         self.readerAppearancePaletteRaw = defaults.string(forKey: AppearanceConfig.readerPaletteKey)
             ?? defaults.string(forKey: AppearanceConfig.paletteKey)
             ?? AtmospherePaletteID.defaultValue.rawValue
+#endif
         self.bleedStrength = defaults.object(forKey: AppearanceConfig.bleedStrengthKey) != nil
             ? AppearanceConfig.clampBleed(defaults.double(forKey: AppearanceConfig.bleedStrengthKey))
             : AppearanceConfig.defaultBleedStrength
+#if !os(tvOS)
         self.readerBleedStrength = defaults.object(forKey: AppearanceConfig.readerBleedStrengthKey) != nil
             ? AppearanceConfig.clampBleed(defaults.double(forKey: AppearanceConfig.readerBleedStrengthKey))
             : (defaults.object(forKey: AppearanceConfig.bleedStrengthKey) != nil
                 ? AppearanceConfig.clampBleed(defaults.double(forKey: AppearanceConfig.bleedStrengthKey))
                 : AppearanceConfig.defaultBleedStrength)
+#endif
         self.backgroundIntensity = defaults.object(forKey: AppearanceConfig.backgroundIntensityKey) != nil
             ? AppearanceConfig.clampIntensity(defaults.double(forKey: AppearanceConfig.backgroundIntensityKey))
             : AppearanceConfig.defaultBackgroundIntensity
+#if !os(tvOS)
         self.readerBackgroundIntensity = defaults.object(forKey: AppearanceConfig.readerBackgroundIntensityKey) != nil
             ? AppearanceConfig.clampIntensity(defaults.double(forKey: AppearanceConfig.readerBackgroundIntensityKey))
             : (defaults.object(forKey: AppearanceConfig.backgroundIntensityKey) != nil
                 ? AppearanceConfig.clampIntensity(defaults.double(forKey: AppearanceConfig.backgroundIntensityKey))
                 : AppearanceConfig.defaultBackgroundIntensity)
+#endif
         self.atmosphereMotion = defaults.object(forKey: AppearanceConfig.motionKey) != nil
             ? AppearanceConfig.clampMotion(defaults.double(forKey: AppearanceConfig.motionKey))
             : AppearanceConfig.defaultMotion
+#if !os(tvOS)
         self.readerAtmosphereMotion = defaults.object(forKey: AppearanceConfig.readerMotionKey) != nil
             ? AppearanceConfig.clampMotion(defaults.double(forKey: AppearanceConfig.readerMotionKey))
             : (defaults.object(forKey: AppearanceConfig.motionKey) != nil
                 ? AppearanceConfig.clampMotion(defaults.double(forKey: AppearanceConfig.motionKey))
                 : AppearanceConfig.defaultMotion)
+#endif
         self.customPaletteColors = AppearanceConfig.decodeColors(defaults.data(forKey: AppearanceConfig.customColorsKey))
             ?? AppearanceConfig.defaultCustomColors
+#if !os(tvOS)
         self.readerCustomPaletteColors = AppearanceConfig.decodeColors(defaults.data(forKey: AppearanceConfig.readerCustomColorsKey))
             ?? AppearanceConfig.decodeColors(defaults.data(forKey: AppearanceConfig.customColorsKey))
             ?? AppearanceConfig.defaultCustomColors
+#endif
+    }
+
+    /// Refresh the media-only theme fields after CloudKit applies shared settings.
+    /// Reader-scoped values deliberately remain untouched.
+    @MainActor
+    func reloadMediaAppearanceFromDefaults() {
+        let defaults = UserDefaults.standard
+        let styleRaw = defaults.string(forKey: "atmosphereStyle") ?? Self.defaultAtmosphereStyle.rawValue
+        atmosphereStyle = AtmosphereStyle(rawValue: styleRaw) ?? Self.defaultAtmosphereStyle
+
+        let paletteRaw = defaults.string(forKey: AppearanceConfig.paletteKey) ?? AtmospherePaletteID.defaultValue.rawValue
+        appearancePaletteRaw = paletteRaw
+        bleedStrength = defaults.object(forKey: AppearanceConfig.bleedStrengthKey) != nil
+            ? AppearanceConfig.clampBleed(defaults.double(forKey: AppearanceConfig.bleedStrengthKey))
+            : AppearanceConfig.defaultBleedStrength
+        backgroundIntensity = defaults.object(forKey: AppearanceConfig.backgroundIntensityKey) != nil
+            ? AppearanceConfig.clampIntensity(defaults.double(forKey: AppearanceConfig.backgroundIntensityKey))
+            : AppearanceConfig.defaultBackgroundIntensity
+        atmosphereMotion = defaults.object(forKey: AppearanceConfig.motionKey) != nil
+            ? AppearanceConfig.clampMotion(defaults.double(forKey: AppearanceConfig.motionKey))
+            : AppearanceConfig.defaultMotion
     }
 
     private static var defaultAtmosphereStyle: AtmosphereStyle {
@@ -277,6 +338,113 @@ class EclipseTheme: ObservableObject {
         atmosphereSolidColorSource == .custom ? atmosphereSolidColor : dominant
     }
 
+#if os(tvOS)
+    // tvOS has one media-only appearance scope. Keep no reader-labelled API or
+    // persisted reader state in the television binary.
+    func scopedGradientColor() -> Color {
+        settingsGradientColor
+    }
+
+    func scopedAtmosphereStyle() -> AtmosphereStyle {
+        atmosphereStyle
+    }
+
+    func scopedAtmosphereColor(dominant: Color) -> Color {
+        atmosphereColor(dominant: dominant)
+    }
+
+    func scopedPaletteID() -> AtmospherePaletteID {
+        let palette = AtmospherePaletteID.from(appearancePaletteRaw)
+#if os(tvOS)
+        // A custom iPhone palette is a shared preference, but custom color
+        // editing/data is intentionally unavailable on Apple TV. Render a safe
+        // preset without rewriting the shared value back to CloudKit.
+        return palette == .custom ? .defaultValue : palette
+#else
+        return palette
+#endif
+    }
+
+    func scopedCustomColors() -> [Color] {
+        customPaletteColors
+    }
+
+    func scopedPalette() -> AtmospherePalette {
+        AppearancePalettes.resolved(
+            id: scopedPaletteID(),
+            customColors: scopedCustomColors()
+        )
+    }
+
+    func scopedBleedStrength() -> Double {
+        AppearanceConfig.clampBleed(bleedStrength)
+    }
+
+    func scopedBackgroundIntensity() -> Double {
+        AppearanceConfig.clampIntensity(backgroundIntensity)
+    }
+
+    func scopedMotion() -> Double {
+        AppearanceConfig.clampMotion(atmosphereMotion)
+    }
+
+    func atmosphereBackgroundMode() -> AtmosphereBackgroundMode {
+        switch scopedAtmosphereStyle() {
+        case .solid: return .solid
+        case .gradient: return .classicGradient
+        case .multiGradient, .aurora, .ember: return .multiGradient
+        }
+    }
+
+    func atmosphereInput(
+        dominant: Color?,
+        hasHeroBleed: Bool,
+        heroHeight: CGFloat,
+        fadeDistance: CGFloat
+    ) -> AtmosphereInput {
+        let usableDominant = Self.usableDominant(dominant)
+        let mode = atmosphereBackgroundMode()
+        let accent = scopedGradientColor()
+        let classicColor: Color
+        switch mode {
+        case .solid:
+            classicColor = scopedAtmosphereColor(dominant: usableDominant ?? accent)
+        case .classicGradient, .multiGradient:
+            classicColor = accent
+        }
+        return AtmosphereInput(
+            mode: mode,
+            palette: scopedPalette(),
+            classicColor: classicColor,
+            baseColor: backgroundBase,
+            dominant: hasHeroBleed ? usableDominant : nil,
+            hasHeroBleed: hasHeroBleed,
+            heroHeight: heroHeight,
+            fadeDistance: fadeDistance,
+            bleedStrength: scopedBleedStrength(),
+            backgroundIntensity: scopedBackgroundIntensity(),
+            motion: scopedMotion()
+        )
+    }
+
+    func atmosphereBackdropColor() -> Color {
+        let intensity = scopedBackgroundIntensity()
+        switch atmosphereBackgroundMode() {
+        case .solid:
+            return scopedAtmosphereColor(dominant: scopedGradientColor())
+        case .classicGradient:
+            return scopedGradientColor().atmosphereScaled(intensity)
+        case .multiGradient:
+            let palette = scopedPalette()
+            let base = palette.mesh.indices.contains(4) ? palette.mesh[4] : backgroundBase
+            return base.atmosphereScaled(intensity)
+        }
+    }
+
+    func heroBlendColor(dominant: Color?) -> Color {
+        Self.usableDominant(dominant) ?? atmosphereBackdropColor()
+    }
+#else
     func scopedGradientColor(isReaderMode: Bool? = nil) -> Color {
         let readerMode = isReaderMode ?? UserDefaults.standard.bool(forKey: "showKanzen")
         return readerMode && !globalAppearanceEnabled ? readerSettingsGradientColor : settingsGradientColor
@@ -393,6 +561,7 @@ class EclipseTheme: ObservableObject {
     func heroBlendColor(dominant: Color?, isReaderMode: Bool? = nil) -> Color {
         Self.usableDominant(dominant) ?? atmosphereBackdropColor(isReaderMode: isReaderMode)
     }
+#endif
 
     /// Treat near-black extracted colors as "no bleed" so the app gradient is
     /// not muddied before a real poster color is available.
@@ -448,6 +617,7 @@ extension View {
         self.modifier(EclipseAutoGradientModifier(allowsAnimatedBackground: allowsAnimatedBackground))
     }
 
+#if !os(tvOS)
     /// Apply the app-wide gradient used by Reader Mode/Kanzen shell screens.
     func kanzenGradientBackground(scrollOffset: CGFloat = 0, allowsAnimatedBackground: Bool = true) -> some View {
         self.background(
@@ -455,6 +625,7 @@ extension View {
                 .ignoresSafeArea()
         )
     }
+#endif
     
     /// Hide list/scroll-view chrome (iOS 16+, unavailable on tvOS)
     @ViewBuilder

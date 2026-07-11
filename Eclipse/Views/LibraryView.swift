@@ -3,12 +3,25 @@ import Kingfisher
 
 struct LibraryView: View {
     @State private var showingCreateSheet = false
+
+#if os(tvOS)
+    private enum TVCollectionFocus: Hashable {
+        case open(UUID)
+        case delete(UUID)
+        case create
+    }
+
+    @FocusState private var tvCollectionFocus: TVCollectionFocus?
+#endif
     
     @StateObject private var accentColorManager = AccentColorManager.shared
     @ObservedObject private var libraryManager = LibraryManager.shared
     @Environment(\.heroNamespace) private var heroNamespace
     
     var body: some View {
+#if os(tvOS)
+        libraryContent
+#else
         if #available(iOS 16.0, *) {
             NavigationStack {
                 libraryContent
@@ -19,6 +32,7 @@ struct LibraryView: View {
             }
             .navigationViewStyle(StackNavigationViewStyle())
         }
+#endif
     }
     
     private var libraryContent: some View {
@@ -36,7 +50,11 @@ struct LibraryView: View {
         }) {
             Image(systemName: "plus")
                 .foregroundColor(accentColorManager.currentAccentColor)
-        })
+        }
+#if os(tvOS)
+        .focused($tvCollectionFocus, equals: .create)
+#endif
+        )
         .sheet(isPresented: $showingCreateSheet) {
             CreateCollectionView()
         }
@@ -62,7 +80,11 @@ struct LibraryView: View {
                             ) {
                                 BookmarkItemCard(item: item, heroID: heroID)
                             }
+#if os(tvOS)
+                            .buttonStyle(.card)
+#else
                             .buttonStyle(PlainButtonStyle())
+#endif
                         }
                     }
                     .padding(.horizontal)
@@ -91,10 +113,32 @@ struct LibraryView: View {
                 ScrollView(.horizontal, showsIndicators: false) {
                     LazyHStack(spacing: 16) {
                         ForEach(nonBookmarkCollections) { collection in
+#if os(tvOS)
+                            VStack(spacing: 10) {
+                                NavigationLink(destination: CollectionDetailView(collection: collection)) {
+                                    CollectionCard(collection: collection)
+                                }
+                                .buttonStyle(.card)
+                                .focused($tvCollectionFocus, equals: .open(collection.id))
+
+                                Button(role: .destructive) {
+                                    deleteCollectionAndRestoreFocus(
+                                        collection,
+                                        from: nonBookmarkCollections
+                                    )
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .focused($tvCollectionFocus, equals: .delete(collection.id))
+                            }
+#else
                             NavigationLink(destination: CollectionDetailView(collection: collection)) {
                                 CollectionCard(collection: collection)
                             }
                             .buttonStyle(PlainButtonStyle())
+#endif
                         }
                     }
                     .padding(.horizontal)
@@ -108,6 +152,29 @@ struct LibraryView: View {
             }
         }
     }
+
+#if os(tvOS)
+    private func deleteCollectionAndRestoreFocus(
+        _ collection: LibraryCollection,
+        from collections: [LibraryCollection]
+    ) {
+        guard let removedIndex = collections.firstIndex(where: { $0.id == collection.id }) else { return }
+        let survivingCollections = collections.filter { $0.id != collection.id }
+        let nextFocus: TVCollectionFocus
+        if survivingCollections.isEmpty {
+            nextFocus = .create
+        } else {
+            let nearestCollectionID = survivingCollections[min(removedIndex, survivingCollections.count - 1)].id
+            nextFocus = .open(nearestCollectionID)
+        }
+
+        LibraryManager.shared.deleteCollection(collection)
+
+        DispatchQueue.main.async {
+            tvCollectionFocus = nextFocus
+        }
+    }
+#endif
 }
 
 struct BookmarkItemCard: View {
@@ -146,6 +213,8 @@ struct BookmarkItemCard: View {
 
 struct CollectionCard: View {
     @ObservedObject var collection: LibraryCollection
+    @State private var showingRenameAlert = false
+    @State private var renameText = ""
     
     var body: some View {
         VStack(spacing: 8) {
@@ -169,8 +238,16 @@ struct CollectionCard: View {
             }
             .frame(width: 160 * iPadScale)
         }
+#if !os(tvOS)
         .contextMenu {
             if collection.name != "Bookmarks" {
+                Button {
+                    renameText = collection.name
+                    showingRenameAlert = true
+                } label: {
+                    Label("Rename", systemImage: "pencil")
+                }
+
                 Button(role: .destructive) {
                     LibraryManager.shared.deleteCollection(collection)
                 } label: {
@@ -178,6 +255,16 @@ struct CollectionCard: View {
                 }
             }
         }
+        .alert("Rename Collection", isPresented: $showingRenameAlert) {
+            TextField("Collection Name", text: $renameText)
+            Button("Cancel", role: .cancel) { }
+            Button("Save") {
+                LibraryManager.shared.renameCollection(collection, name: renameText)
+            }
+        } message: {
+            Text("Enter a new name for this collection.")
+        }
+#endif
     }
     
     @ViewBuilder

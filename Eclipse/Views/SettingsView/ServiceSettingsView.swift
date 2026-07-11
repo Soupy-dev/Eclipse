@@ -30,13 +30,13 @@ struct ServiceSettingsView: View {
             .navigationBarTitleDisplayMode(.inline)
 #endif
             .toolbar {
-                ToolbarItem(placement: .navigationBarLeading) {
+                ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
                         dismiss()
                     }
                 }
                 
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
                         saveSettings()
                     }
@@ -64,7 +64,7 @@ struct ServiceSettingsView: View {
     @ViewBuilder
     private var loadingView: some View {
         VStack {
-            ProgressView()
+            EclipseLoadingIndicator()
                 .scaleEffect(1.5)
             Text("Loading settings...")
                 .font(.caption)
@@ -258,7 +258,9 @@ struct SettingRow: View {
                 }
             ))
             .textFieldStyle(modernTextFieldStyle)
+#if os(iOS)
             .keyboardType(.numberPad)
+#endif
             
         case .float:
             TextField("Enter decimal number", text: Binding(
@@ -269,7 +271,9 @@ struct SettingRow: View {
                 }
             ))
             .textFieldStyle(modernTextFieldStyle)
+#if os(iOS)
             .keyboardType(.decimalPad)
+#endif
             
         case .string:
             if let options = setting.options, !options.isEmpty {
@@ -303,8 +307,19 @@ struct SettingRow: View {
                     )
                 }
             } else {
+#if os(tvOS)
+                if setting.isSensitive {
+                    SecureField("Enter secure value", text: $value)
+                        .textFieldStyle(modernTextFieldStyle)
+                        .privacySensitive()
+                } else {
+                    TextField("Enter text", text: $value)
+                        .textFieldStyle(modernTextFieldStyle)
+                }
+#else
                 TextField("Enter text", text: $value)
                     .textFieldStyle(modernTextFieldStyle)
+#endif
             }
         }
     }

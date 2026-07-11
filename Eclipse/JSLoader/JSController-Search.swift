@@ -11,8 +11,8 @@ extension JSController {
     func fetchJsSearchResults(keyword: String, module: Service, maxResults: Int? = nil, completion: @escaping ([SearchItem]) -> Void) {
         let operation = beginServiceOperation(service: module, operation: "searchResults", primaryURL: keyword)
 
-        if let exception = context.exception {
-            Logger.shared.log("Service search JavaScript exception service=\(module.metadata.sourceName): \(exception)", type: "Error")
+        if context.exception != nil {
+            Logger.shared.log("Service search JavaScript exception; untrusted body suppressed", type: "Error")
             endServiceOperation(operation, reason: "exception")
             completion([])
             return
@@ -78,8 +78,8 @@ extension JSController {
             }
         }
         
-        let catchBlock: @convention(block) (JSValue) -> Void = { error in
-            Logger.shared.log("Search operation failed service=\(module.metadata.sourceName): \(String(describing: error.toString()))", type: "Error")
+        let catchBlock: @convention(block) (JSValue) -> Void = { _ in
+            Logger.shared.log("Service search promise rejected; untrusted body suppressed", type: "Error")
             self.endServiceOperation(operation, reason: "rejected")
             DispatchQueue.main.async {
                 completion([])

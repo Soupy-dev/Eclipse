@@ -69,6 +69,15 @@ final class MangaLibraryManager: ObservableObject {
         collections.append(collection)
     }
 
+    func renameCollection(_ collection: MangaLibraryCollection, name: String) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty,
+              trimmedName.caseInsensitiveCompare("Bookmarks") != .orderedSame,
+              let index = collections.firstIndex(where: { $0.id == collection.id }) else { return }
+
+        collections[index].name = trimmedName
+    }
+
     func deleteCollection(_ collection: MangaLibraryCollection) {
         guard collection.name != "Bookmarks" else { return }
         collectionCancellables[collection.id] = nil

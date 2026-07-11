@@ -96,7 +96,7 @@ struct KanzenHomeView: View {
                 sourceContent(source)
             }
         } else {
-            ProgressView()
+            EclipseLoadingIndicator()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
@@ -109,7 +109,7 @@ struct KanzenHomeView: View {
         switch state {
         case .idle, .loading:
             VStack(spacing: 10) {
-                ProgressView()
+                EclipseLoadingIndicator()
                 Text("Loading \(source.name)")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
@@ -222,7 +222,7 @@ struct KanzenHomeView: View {
 
     private func preparingSourceView(_ source: MangaHomeSource) -> some View {
         VStack(spacing: 10) {
-            ProgressView()
+            EclipseLoadingIndicator()
             Text("Preparing \(source.name)")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
@@ -498,7 +498,7 @@ private struct MangaHomeSectionDetailView: View {
                 }
 
                 if isLoading {
-                    ProgressView()
+                    EclipseLoadingIndicator()
                         .frame(width: 116, height: 40)
                         .padding(.vertical, 20)
                 } else if !endOfPage {

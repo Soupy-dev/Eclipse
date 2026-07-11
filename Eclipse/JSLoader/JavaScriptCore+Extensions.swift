@@ -1,6 +1,21 @@
 import SoraCore
 import JavaScriptCore
 
+private let serviceFetchMaximumResponseBytes = 10_000_000
+
+private func serviceFetchErrorDescription(_ error: Error) -> String {
+    if error is BoundedURLSessionError {
+        return ServiceCompatibilityError.responseTooLarge.localizedDescription
+    }
+    if error is CancellationError {
+        return "Network request cancelled."
+    }
+    if let urlError = error as? URLError {
+        return "Network request failed (\(urlError.code.rawValue))."
+    }
+    return "Network request failed."
+}
+
 extension JSContext {
     func setupConsoleLogging(sandbox: ServiceSandboxState) {
         let consoleObject = JSValue(newObjectIn: self)
@@ -8,8 +23,8 @@ extension JSContext {
         let consoleLogFunction: @convention(block) (String) -> Void = { _ in }
         consoleObject?.setObject(consoleLogFunction, forKeyedSubscript: "log" as NSString)
         
-        let consoleErrorFunction: @convention(block) (String) -> Void = { message in
-            Logger.shared.log("Service console.error \(sandbox.contextLabel()): \(message)", type: "Error")
+        let consoleErrorFunction: @convention(block) (String) -> Void = { _ in
+            Logger.shared.log("Service console.error reported; untrusted body suppressed", type: "Error")
         }
         consoleObject?.setObject(consoleErrorFunction, forKeyedSubscript: "error" as NSString)
         
@@ -21,14 +36,17 @@ extension JSContext {
     
     func setupNativeFetch(sandbox: ServiceSandboxState) {
         let fetchNativeFunction: @convention(block) (String, [String: String]?, JSValue, JSValue) -> Void = { urlString, headers, resolve, reject in
-            guard let operation = sandbox.allowServiceNetworkRequest(api: "fetch", urlString: urlString) else {
-                reject.call(withArguments: ["Service network request blocked by sandbox"])
+            guard let url = ServiceSandboxState.validatedHTTPURL(urlString) else {
+                Logger.shared.log(
+                    "Service fetch rejected non-HTTP target \(sandbox.contextLabel()) target=unsupported-url",
+                    type: "Error"
+                )
+                reject.call(withArguments: [ServiceCompatibilityError.unsupportedTransport.localizedDescription])
                 return
             }
 
-            guard let url = URL(string: urlString) else {
-                Logger.shared.log("Invalid URL in service fetch service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString))", type: "Error")
-                reject.call(withArguments: ["Invalid URL"])
+            guard let operation = sandbox.allowServiceNetworkRequest(api: "fetch", urlString: urlString) else {
+                reject.call(withArguments: ["Service network request blocked by sandbox"])
                 return
             }
             var request = URLRequest(url: url)
@@ -37,27 +55,72 @@ extension JSContext {
                     request.setValue(value, forHTTPHeaderField: key)
                 }
             }
-            let task = URLSession.custom.dataTask(with: request) { data, response, error in
-                if let error = error {
-                    Logger.shared.log("Service fetch failed service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString)) error=\(error.localizedDescription)", type: "Error")
-                    reject.call(withArguments: [error.localizedDescription])
-                    return
-                }
-                guard let data = data else {
-                    Logger.shared.log("Service fetch returned no data service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString)) status=\((response as? HTTPURLResponse)?.statusCode ?? 0)", type: "Error")
-                    reject.call(withArguments: ["No data"])
-                    return
-                }
-                if let text = String(data: data, encoding: .utf8) {
-                    Logger.shared.log("Service fetch completed service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString)) status=\((response as? HTTPURLResponse)?.statusCode ?? 0) bytes=\(data.count)", type: "Service")
-                    resolve.call(withArguments: [text])
-                } else {
-                    let contentType = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type") ?? "unknown"
-                    Logger.shared.log("Service fetch decode failed service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString)) status=\((response as? HTTPURLResponse)?.statusCode ?? 0) bytes=\(data.count) contentType=\(contentType)", type: "Error")
-                    reject.call(withArguments: ["Unable to decode data"])
+            CloudflareBypassManager.shared.applyCachedBypass(to: &request, for: url)
+            let callResolve: (String) -> Void = { value in
+                DispatchQueue.main.async {
+                    if !resolve.isUndefined {
+                        resolve.call(withArguments: [value])
+                    }
                 }
             }
-            task.resume()
+            let callReject: (String) -> Void = { message in
+                DispatchQueue.main.async {
+                    if !reject.isUndefined {
+                        reject.call(withArguments: [message])
+                    }
+                }
+            }
+
+            Task {
+                do {
+                    let (data, response) = try await URLSession.custom.boundedData(
+                        for: request,
+                        maximumResponseBytes: serviceFetchMaximumResponseBytes
+                    )
+                    if let text = String(data: data, encoding: .utf8) {
+                        if let httpResponse = response as? HTTPURLResponse,
+                           CloudflareBypassManager.isChallengeResponse(
+                            status: httpResponse.statusCode,
+                            body: text,
+                            headers: CloudflareBypassManager.headersDictionary(from: httpResponse)
+                           ) {
+                            Logger.shared.log(
+                                "Service fetch hit Cloudflare challenge service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(httpResponse.url?.absoluteString ?? urlString)) requested=\(ServiceSandboxState.redactedURL(urlString)) \(CloudflareBypassManager.challengeDebugSummary(status: httpResponse.statusCode, body: text, headers: CloudflareBypassManager.headersDictionary(from: httpResponse)))",
+                                type: "Service"
+                            )
+                            if let recovered = await CloudflareBypassManager.shared.recoverChallengedRequest(
+                                for: url,
+                                method: request.httpMethod ?? "GET",
+                                body: request.httpBody,
+                                extraHeaders: request.allHTTPHeaderFields ?? [:],
+                                allowRedirects: true
+                            ), let recoveredText = String(data: recovered.data, encoding: .utf8) {
+                                Logger.shared.log(
+                                    "Service fetch recovered after Cloudflare verification service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString)) status=\(recovered.response.statusCode) bytes=\(recovered.data.count)",
+                                    type: "Service"
+                                )
+                                callResolve(recoveredText)
+                            } else {
+                                callReject(ServiceCompatibilityError.interactiveChallengeRequired.localizedDescription)
+                            }
+                            return
+                        }
+                        Logger.shared.log("Service fetch completed service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString)) status=\((response as? HTTPURLResponse)?.statusCode ?? 0) bytes=\(data.count)", type: "Service")
+                        callResolve(text)
+                    } else {
+                        let contentType = (response as? HTTPURLResponse)?.value(forHTTPHeaderField: "Content-Type") ?? "unknown"
+                        Logger.shared.log("Service fetch decode failed service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString)) status=\((response as? HTTPURLResponse)?.statusCode ?? 0) bytes=\(data.count) contentType=\(contentType)", type: "Error")
+                        callReject("Unable to decode data")
+                    }
+                } catch {
+                    let safeError = serviceFetchErrorDescription(error)
+                    Logger.shared.log(
+                        "Service fetch failed service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString)) error=\(safeError)",
+                        type: "Error"
+                    )
+                    callReject(safeError)
+                }
+            }
         }
         self.setObject(fetchNativeFunction, forKeyedSubscript: "fetchNative" as NSString)
         
@@ -81,6 +144,20 @@ extension JSContext {
                 }
             }
 
+            guard let url = ServiceSandboxState.validatedHTTPURL(urlString) else {
+                Logger.shared.log(
+                    "Service fetchv2 rejected non-HTTP target \(sandbox.contextLabel()) target=unsupported-url",
+                    type: "Error"
+                )
+                callResolveEarly([
+                    "status": 0,
+                    "headers": [:],
+                    "body": "",
+                    "error": ServiceCompatibilityError.unsupportedTransport.localizedDescription
+                ])
+                return
+            }
+
             guard let operation = sandbox.allowServiceNetworkRequest(api: "fetchv2", urlString: urlString) else {
                 callResolveEarly([
                     "status": 0,
@@ -88,12 +165,6 @@ extension JSContext {
                     "body": "",
                     "error": "Service network request blocked by sandbox"
                 ])
-                return
-            }
-
-            guard let url = URL(string: urlString) else {
-                Logger.shared.log("Invalid URL in service fetchv2 service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString))", type: "Error")
-                callResolveEarly(["error": "Invalid URL"])
                 return
             }
             
@@ -183,9 +254,6 @@ extension JSContext {
             if httpMethod != "GET" && !bodyIsEmpty {
                 if let bodyString = body {
                     request.httpBody = bodyString.data(using: .utf8)
-                } else {
-                    let bodyString = String(describing: body!)
-                    request.httpBody = bodyString.data(using: .utf8)
                 }
             }
             
@@ -197,40 +265,24 @@ extension JSContext {
             CloudflareBypassManager.shared.applyCachedBypass(to: &request, for: url)
             
             let session = URLSession.fetchData(allowRedirects: redirect.boolValue)
-            
-            let task = session.downloadTask(with: request) { tempFileURL, response, error in
+            let callResolve: ([String: Any]) -> Void = { dict in
+                DispatchQueue.main.async {
+                    if !resolve.isUndefined {
+                        resolve.call(withArguments: [dict])
+                    } else {
+                        Logger.shared.log("Resolve callback is undefined", type: "Error")
+                    }
+                }
+            }
+
+            Task {
                 defer { session.finishTasksAndInvalidate() }
-                
-                let callResolve: ([String: Any]) -> Void = { dict in
-                    DispatchQueue.main.async {
-                        if !resolve.isUndefined {
-                            resolve.call(withArguments: [dict])
-                        } else {
-                            Logger.shared.log("Resolve callback is undefined", type: "Error")
-                        }
-                    }
-                }
-                
-                if let error = error {
-                    Logger.shared.log("Service fetchv2 failed service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString)) error=\(error.localizedDescription)", type: "Error")
-                    callResolve(["error": error.localizedDescription])
-                    return
-                }
-                
-                guard let tempFileURL = tempFileURL else {
-                    Logger.shared.log("Service fetchv2 returned no data service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString)) status=\((response as? HTTPURLResponse)?.statusCode ?? 0)", type: "Error")
-                    callResolve(["error": "No data"])
-                    return
-                }
-                
+
                 do {
-                    let data = try Data(contentsOf: tempFileURL)
-                    
-                    if data.count > 10_000_000 {
-                        Logger.shared.log("Response exceeds maximum size", type: "Error")
-                        callResolve(["error": "Response exceeds maximum size"])
-                        return
-                    }
+                    let (data, response) = try await session.boundedData(
+                        for: request,
+                        maximumResponseBytes: serviceFetchMaximumResponseBytes
+                    )
 
                     func resolveResponse(data: Data, httpResponse: HTTPURLResponse?) {
                         let status = httpResponse?.statusCode ?? 0
@@ -262,38 +314,57 @@ extension JSContext {
 
                     let httpResponse = response as? HTTPURLResponse
                     let responseText = String(data: data, encoding: textEncoding) ?? String(data: data, encoding: .utf8) ?? ""
-                    if let httpResponse,
-                       CloudflareBypassManager.isChallengeResponse(
-                        status: httpResponse.statusCode,
-                        body: responseText,
-                        headers: CloudflareBypassManager.headersDictionary(from: httpResponse)
-                       ) {
-                        let challengeURL = httpResponse.url ?? url
-                        Logger.shared.log("Service fetchv2 hit Cloudflare challenge service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(challengeURL.absoluteString))", type: "Service")
-                        Task {
-                            if let recovered = await CloudflareBypassManager.shared.recoverChallengedRequest(
-                                for: challengeURL,
-                                method: request.httpMethod ?? httpMethod,
-                                body: request.httpBody,
-                                extraHeaders: request.allHTTPHeaderFields ?? [:],
-                                allowRedirects: redirect.boolValue
-                            ) {
-                                resolveResponse(data: recovered.data, httpResponse: recovered.response)
-                            } else {
-                                resolveResponse(data: data, httpResponse: httpResponse)
+                    if let httpResponse {
+                        let responseHeaders = CloudflareBypassManager.headersDictionary(from: httpResponse)
+                        if CloudflareBypassManager.isChallengeResponse(
+                            status: httpResponse.statusCode,
+                            body: responseText,
+                            headers: responseHeaders
+                        ) {
+                            // The response URL may be Cloudflare's challenge/landing redirect,
+                            // not the content URL the service asked for. Recover and retry the
+                            // original request identity so a provider landing page cannot be
+                            // parsed as the selected episode.
+                            let challengeResponseURL = httpResponse.url ?? url
+                            Logger.shared.log(
+                                "Service fetchv2 hit Cloudflare challenge service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(challengeResponseURL.absoluteString)) requested=\(ServiceSandboxState.redactedURL(url.absoluteString)) \(CloudflareBypassManager.challengeDebugSummary(status: httpResponse.statusCode, body: responseText, headers: responseHeaders))",
+                                type: "Service"
+                            )
+                            Task {
+                                if let recovered = await CloudflareBypassManager.shared.recoverChallengedRequest(
+                                    for: url,
+                                    method: request.httpMethod ?? httpMethod,
+                                    body: request.httpBody,
+                                    extraHeaders: request.allHTTPHeaderFields ?? [:],
+                                    allowRedirects: redirect.boolValue
+                                ) {
+                                    resolveResponse(data: recovered.data, httpResponse: recovered.response)
+                                } else {
+                                    callResolve([
+                                        "status": httpResponse.statusCode,
+                                        "ok": false,
+                                        "url": url.absoluteString,
+                                        "headers": [:],
+                                        "body": "",
+                                        "error": ServiceCompatibilityError.interactiveChallengeRequired.localizedDescription
+                                    ])
+                                }
                             }
+                            return
                         }
-                        return
                     }
 
                     resolveResponse(data: data, httpResponse: httpResponse)
                     
                 } catch {
-                    Logger.shared.log("Service fetchv2 failed reading downloaded file service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString)) error=\(error.localizedDescription)", type: "Error")
-                    callResolve(["error": "Error reading downloaded file"])
+                    let safeError = serviceFetchErrorDescription(error)
+                    Logger.shared.log(
+                        "Service fetchv2 failed service=\(operation.serviceName) operation=\(operation.operation) target=\(ServiceSandboxState.redactedURL(urlString)) error=\(safeError)",
+                        type: "Error"
+                    )
+                    callResolve(["error": safeError])
                 }
             }
-            task.resume()
         }
         
         self.setObject(fetchV2NativeFunction, forKeyedSubscript: "fetchV2Native" as NSString)

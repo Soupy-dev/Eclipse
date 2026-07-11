@@ -5,7 +5,7 @@ import Kingfisher
 struct ScheduleView: View {
     @AppStorage("showLocalScheduleTime") private var showLocalScheduleTime = true
     @AppStorage("defaultScheduleMode") private var defaultScheduleModeRaw = ScheduleMode.anime.rawValue
-    @StateObject private var viewModel = ScheduleViewModel()
+    @StateObject private var viewModel: ScheduleViewModel
     @StateObject private var accentColorManager = AccentColorManager.shared
     
     @State private var selectedTMDBResult: TMDBSearchResult?
@@ -18,14 +18,21 @@ struct ScheduleView: View {
     
     private let isActive: Bool
     private let dayChangeTimer = Timer.publish(every: 300, on: .main, in: .common).autoconnect()
+    private var scheduleLoadTaskID: String {
+        "\(isActive ? "active" : "inactive")-\(selectedScheduleMode.rawValue)"
+    }
 
     init(isActive: Bool = true) {
         self.isActive = isActive
         let savedMode = UserDefaults.standard.string(forKey: "defaultScheduleMode")
         _selectedScheduleMode = State(initialValue: ScheduleMode.sanitized(savedMode))
+        _viewModel = StateObject(wrappedValue: ScheduleViewModel.shared)
     }
     
     var body: some View {
+#if os(tvOS)
+        scheduleContent
+#else
         if #available(iOS 16.0, *) {
             NavigationStack {
                 scheduleContent
@@ -36,6 +43,7 @@ struct ScheduleView: View {
             }
             .navigationViewStyle(StackNavigationViewStyle())
         }
+#endif
     }
     
     private var scheduleContent: some View {
@@ -43,40 +51,25 @@ struct ScheduleView: View {
             Color.black.ignoresSafeArea()
             SettingsGradientBackground().ignoresSafeArea()
             
-            if viewModel.isLoading {
-                loadingView
-            } else if let errorMessage = viewModel.errorMessage {
-                errorView(errorMessage)
-            } else if viewModel.dayBuckets.allSatisfy({ $0.items.isEmpty }) {
-                emptyStateView
-            } else {
-                mainScheduleView
-            }
+            mainScheduleView
         }
         .navigationTitle("Schedule")
-        .task {
-            if isActive, viewModel.scheduleEntries.isEmpty {
-                await viewModel.loadSchedule(mode: selectedScheduleMode, localTimeZone: showLocalScheduleTime)
-            }
+        .task(id: scheduleLoadTaskID) {
+            guard isActive else { return }
+            guard viewModel.scheduleEntries.isEmpty || viewModel.loadedScheduleMode != selectedScheduleMode else { return }
+            await viewModel.loadSchedule(mode: selectedScheduleMode, localTimeZone: showLocalScheduleTime)
         }
         .refreshable {
             await viewModel.loadSchedule(mode: selectedScheduleMode, localTimeZone: showLocalScheduleTime, forceRefresh: true)
         }
-        .onChange(of: selectedScheduleMode) { newValue in
+        .onChange(of: selectedScheduleMode) { _ in
             selectedScheduleDate = nil
-            Task {
-                await viewModel.loadSchedule(mode: newValue, localTimeZone: showLocalScheduleTime)
-            }
         }
         .onChange(of: isActive) { active in
             guard active else { return }
             let defaultMode = ScheduleMode.sanitized(defaultScheduleModeRaw)
             if selectedScheduleMode != defaultMode {
                 selectedScheduleMode = defaultMode
-            } else if viewModel.scheduleEntries.isEmpty {
-                Task {
-                    await viewModel.loadSchedule(mode: defaultMode, localTimeZone: showLocalScheduleTime)
-                }
             }
         }
         .onChange(of: showLocalScheduleTime) { newValue in
@@ -120,7 +113,7 @@ struct ScheduleView: View {
     
     private var loadingView: some View {
         VStack(spacing: 16) {
-            ProgressView()
+            EclipseLoadingIndicator()
                 .scaleEffect(1.2)
             Text("Loading \(selectedScheduleMode.displayName.lowercased()) schedule...")
                 .font(.headline)
@@ -159,8 +152,19 @@ struct ScheduleView: View {
                 scheduleModePickerSection
 
                 timeZoneToggleSection
-                dayPickerSection
-                selectedDaySection
+                if viewModel.isLoading {
+                    loadingView
+                        .frame(minHeight: 360)
+                } else if let errorMessage = viewModel.errorMessage {
+                    errorView(errorMessage)
+                        .frame(minHeight: 360)
+                } else if viewModel.dayBuckets.allSatisfy({ $0.items.isEmpty }) {
+                    emptyStateView
+                        .frame(minHeight: 360)
+                } else {
+                    dayPickerSection
+                    selectedDaySection
+                }
             }
             .padding(.top)
             .padding(.bottom, 100)
@@ -266,7 +270,11 @@ struct ScheduleView: View {
                     )
             )
         }
+#if os(tvOS)
+        .buttonStyle(.card)
+#else
         .buttonStyle(.plain)
+#endif
     }
 
     private var selectedDaySection: some View {
@@ -328,11 +336,15 @@ struct ScheduleView: View {
         } label: {
             compactScheduleItemContent(item: item)
         }
+#if os(tvOS)
+        .buttonStyle(.card)
+#else
         .buttonStyle(.plain)
+#endif
         .opacity(loadingItemId == item.id ? 0.6 : 1.0)
         .overlay {
             if loadingItemId == item.id {
-                ProgressView()
+                EclipseLoadingIndicator()
                     .tint(.white)
             }
         }

@@ -19,7 +19,7 @@ struct contentCell: View {
                 
                 KFImage(url)
                     .placeholder {
-                        ProgressView()
+                        EclipseLoadingIndicator()
                     }
                     .fade(duration: 0.25)
                     .setProcessor(DownsamplingImageProcessor(size: CGSize(width: width, height: width * 1.5)))

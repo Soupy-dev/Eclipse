@@ -158,7 +158,52 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             AD_HOC_CODE_SIGNING_ALLOWED=NO \
+            'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) ECLIPSE_UNSIGNED_BUILD' \
             ENABLE_USER_SCRIPT_SANDBOXING=NO
+
+          APP_PATH="$(find "$ARCHIVE_PATH/Products/Applications" -maxdepth 1 -type d -name '*.app' -print -quit)"
+
+          MANIFEST_PATH="$APP_PATH/PrivacyInfo.xcprivacy"
+          if [[ ! -f "$MANIFEST_PATH" ]]; then
+            echo "::error::PrivacyInfo.xcprivacy is missing from the iOS app bundle."
+            exit 1
+          fi
+          plutil -lint "$MANIFEST_PATH" >/dev/null
+
+          python3 - "$MANIFEST_PATH" <<'PY'
+          import plistlib
+          import sys
+
+          manifest_path = sys.argv[1]
+          with open(manifest_path, "rb") as handle:
+              manifest = plistlib.load(handle)
+
+          if manifest.get("NSPrivacyTracking") is not False:
+              raise SystemExit("error: iOS privacy manifest must declare NSPrivacyTracking=false.")
+
+          if manifest.get("NSPrivacyCollectedDataTypes") != []:
+              raise SystemExit("error: iOS privacy manifest must contain an empty NSPrivacyCollectedDataTypes array.")
+
+          required = {
+              "NSPrivacyAccessedAPICategoryUserDefaults": {"CA92.1"},
+              "NSPrivacyAccessedAPICategoryFileTimestamp": {"C617.1"},
+              "NSPrivacyAccessedAPICategoryDiskSpace": {"85F4.1", "E174.1"},
+          }
+          declared = {
+              entry.get("NSPrivacyAccessedAPIType"): set(entry.get("NSPrivacyAccessedAPITypeReasons", []))
+              for entry in manifest.get("NSPrivacyAccessedAPITypes", [])
+              if isinstance(entry, dict)
+          }
+
+          for category, reasons in required.items():
+              missing = reasons - declared.get(category, set())
+              if missing:
+                  raise SystemExit(
+                      f"error: iOS privacy manifest is missing {category} reason(s) {', '.join(sorted(missing))}."
+                  )
+          PY
+
+          echo "iOS privacy manifest validation passed"
 
       - name: Package unsigned IPA
         run: |

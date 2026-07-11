@@ -379,7 +379,7 @@ struct KanzenGlobalSearchView: View {
 
                 if viewModel.isSearching {
                     HStack(spacing: 10) {
-                        ProgressView()
+                        EclipseLoadingIndicator()
                         Text("Searching more sources...")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
@@ -397,7 +397,7 @@ struct KanzenGlobalSearchView: View {
             }
         } else if viewModel.isSearching {
             HStack(spacing: 10) {
-                ProgressView()
+                EclipseLoadingIndicator()
                 Text("Searching sources...")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
@@ -771,7 +771,7 @@ private struct MangaAidokuAdvancedSearchView: View {
     private var filtersContent: some View {
         if viewModel.isLoadingFilters {
             HStack(spacing: 10) {
-                ProgressView()
+                EclipseLoadingIndicator()
                 Text("Loading filters...")
                     .foregroundColor(.secondary)
             }
@@ -801,7 +801,7 @@ private struct MangaAidokuAdvancedSearchView: View {
     private var resultsContent: some View {
         if viewModel.isSearching {
             HStack(spacing: 10) {
-                ProgressView()
+                EclipseLoadingIndicator()
                 Text("Searching...")
                     .font(.subheadline)
                     .foregroundColor(.secondary)

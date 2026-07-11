@@ -154,6 +154,16 @@ struct ContentView: View {
     }
 
     private func runBackgroundAutoChecks() async {
+        // Give Home's first user-visible catalog request priority over hourly
+        // service maintenance and daily source probes. These checks retain
+        // their existing eligibility intervals and still run on foreground.
+        do {
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+        } catch {
+            return
+        }
+        guard !Task.isCancelled else { return }
+
         await ServiceManager.shared.autoUpdateServicesIfNeeded()
         await SourceHealthMonitor.shared.runDailyEnabledSourceChecksIfNeeded()
         await GitHubReleaseChecker.checkForUpdatesIfNeeded()
@@ -217,14 +227,10 @@ struct ContentView: View {
             
             if #available(iOS 16.0, *) {
                 NavigationStack {
-                    SettingsView()
+                    SettingsView(onRootDismiss: dismissSettings)
                         .toolbar {
                             ToolbarItem(placement: .navigationBarLeading) {
-                                Button(action: {
-                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
-                                        showingSettings = false
-                                    }
-                                }) {
+                                Button(action: dismissSettings) {
                                     HStack(spacing: 4) {
                                         Image(systemName: "chevron.left")
                                         Text("Back")
@@ -235,14 +241,10 @@ struct ContentView: View {
                 }
             } else {
                 NavigationView {
-                    SettingsView()
+                    SettingsView(onRootDismiss: dismissSettings)
                         .toolbar {
                             ToolbarItem(placement: .navigationBarLeading) {
-                                Button(action: {
-                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
-                                        showingSettings = false
-                                    }
-                                }) {
+                                Button(action: dismissSettings) {
                                     HStack(spacing: 4) {
                                         Image(systemName: "chevron.left")
                                         Text("Back")
@@ -255,17 +257,12 @@ struct ContentView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 24, coordinateSpace: .local)
-                .onEnded { value in
-                    // Swipe right (the direction it slid in from) to dismiss.
-                    if value.translation.width > 110 && abs(value.translation.height) < 70 {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
-                            showingSettings = false
-                        }
-                    }
-                }
-        )
+    }
+
+    private func dismissSettings() {
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
+            showingSettings = false
+        }
     }
 
     private func publishScenePhase(_ phase: ScenePhase) {
@@ -492,7 +489,7 @@ struct ExperimentalContentView: View {
 
             if #available(iOS 16.0, *) {
                 NavigationStack {
-                    SettingsView()
+                    SettingsView(onRootDismiss: dismissSettings)
                         .toolbar {
                             ToolbarItem(placement: .navigationBarLeading) {
                                 closeSettingsButton
@@ -501,7 +498,7 @@ struct ExperimentalContentView: View {
                 }
             } else {
                 NavigationView {
-                    SettingsView()
+                    SettingsView(onRootDismiss: dismissSettings)
                         .toolbar {
                             ToolbarItem(placement: .navigationBarLeading) {
                                 closeSettingsButton
@@ -511,22 +508,10 @@ struct ExperimentalContentView: View {
                 .navigationViewStyle(StackNavigationViewStyle())
             }
         }
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 24, coordinateSpace: .local)
-                .onEnded { value in
-                    if value.translation.width > 110 && abs(value.translation.height) < 70 {
-                        withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
-                            showingSettings = false
-                        }
-                    }
-                }
-        )
     }
 
     private var closeSettingsButton: some View {
-        Button {
-            showingSettings = false
-        } label: {
+        Button(action: dismissSettings) {
             HStack(spacing: 4) {
                 Image(systemName: "chevron.left")
                 Text("Back")
@@ -534,7 +519,21 @@ struct ExperimentalContentView: View {
         }
     }
 
+    private func dismissSettings() {
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
+            showingSettings = false
+        }
+    }
+
     private func runBackgroundAutoChecks() async {
+        // Keep launch maintenance from contending with Home's first paint.
+        do {
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+        } catch {
+            return
+        }
+        guard !Task.isCancelled else { return }
+
         await ServiceManager.shared.autoUpdateServicesIfNeeded()
         await SourceHealthMonitor.shared.runDailyEnabledSourceChecksIfNeeded()
         await GitHubReleaseChecker.checkForUpdatesIfNeeded()

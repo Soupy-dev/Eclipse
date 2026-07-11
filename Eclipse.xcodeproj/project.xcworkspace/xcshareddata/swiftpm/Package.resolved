@@ -1,5 +1,5 @@
 {
-  "originHash" : "e8fcbbf86d3234f4ca2fd9cf317996117498f9c359e2e49dd7e0fea1744d604c",
+  "originHash" : "aa66300db926706f596ed95d2239dcbdf0f39cceaf019cbeba612134304be5f3",
   "pins" : [
     {
       "identity" : "aidokurunner",
@@ -43,7 +43,7 @@
       "location" : "https://github.com/Soupy-dev/MPVKit",
       "state" : {
         "branch" : "eclipse-mpv-metal",
-        "revision" : "e5198064b2629c868c1345113accadc18ebc4938"
+          "revision" : "f840f80fc4277ac373932e7c015255521f930b75"
       }
     },
     {

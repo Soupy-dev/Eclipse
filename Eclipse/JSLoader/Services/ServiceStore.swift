@@ -49,7 +49,14 @@ public final class ServiceStore {
         }
     }
 
-    public func storeService(id: UUID, url: String, jsonMetadata: String, jsScript: String, isActive: Bool) {
+    public func storeService(
+        id: UUID,
+        url: String,
+        jsonMetadata: String,
+        jsScript: String,
+        isActive: Bool,
+        sortIndex: Int64? = nil
+    ) {
         guard let container = container else {
             Logger.shared.log("Persistent container not initialized: storeService", type: "Storage")
             return
@@ -80,13 +87,16 @@ public final class ServiceStore {
                     countRequest.includesSubentities = false
                     let count = try context.count(for: countRequest)
 
-                    service.sortIndex = Int64(count)
+                    service.sortIndex = sortIndex ?? Int64(count)
                 }
 
                 service.url = url
                 service.jsonMetadata = jsonMetadata
                 service.jsScript = jsScript
                 service.isActive = isActive
+                if let sortIndex {
+                    service.sortIndex = sortIndex
+                }
 
                 do {
                     if context.hasChanges {

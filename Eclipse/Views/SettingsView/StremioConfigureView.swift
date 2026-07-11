@@ -1,6 +1,8 @@
 import SwiftUI
 
-#if !os(tvOS)
+#if os(tvOS)
+import AuthenticationServices
+#else
 import WebKit
 #endif
 
@@ -11,14 +13,16 @@ struct StremioConfigureView: View {
     @State private var isLoading = true
     @State private var error: String?
     @State private var manualConfiguredURL = ""
+#if os(tvOS)
+    @State private var authenticationSession: ASWebAuthenticationSession?
+    @State private var authenticationMessage: String?
+#endif
 
     /// Derive the configure page URL, preserving the current config path.
     /// e.g. "https://torrentio.strem.fun/sort=qualitysize|..." to ".../sort=qualitysize|.../configure"
     /// If the base has no config path, falls back to "{origin}/configure".
     private var configureURL: URL? {
-        var base = addon.configuredURL
-        if base.hasSuffix("/") { base = String(base.dropLast()) }
-        return URL(string: "\(base)/configure")
+        StremioClient.configurationPageURL(from: addon.configuredURL)
     }
 
     var body: some View {
@@ -41,7 +45,13 @@ struct StremioConfigureView: View {
 #endif
             }
             .navigationTitle("Configure \(addon.manifest.name)")
-#if !os(tvOS)
+#if os(tvOS)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Close") { dismiss() }
+                }
+            }
+#else
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -81,7 +91,7 @@ struct StremioConfigureView: View {
         )
         .overlay {
             if isLoading {
-                ProgressView("Loading configuration...")
+                EclipseLoadingIndicator("Loading configuration...")
             }
         }
     }
@@ -113,24 +123,91 @@ struct StremioConfigureView: View {
     }
 #endif
 
+#if os(tvOS)
     @ViewBuilder
     private var tvOSFallbackView: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 24) {
             Image(systemName: "safari")
                 .font(.system(size: 40))
                 .foregroundColor(.secondary)
-            Text("Configure this addon on the web, then use \"Update URL\" to paste the new URL.")
+            Text("Open the addon's secure configuration page. If it cannot return automatically, paste the configured manifest URL below.")
                 .font(.body)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
+
             if let url = configureURL {
-                Text(url.absoluteString)
+                Button {
+                    startAuthenticationSession(url: url)
+                } label: {
+                    Label("Open Configuration", systemImage: "rectangle.portrait.and.arrow.right")
+                }
+
+                Text("Configuration is provided by \(url.host ?? "the addon provider").")
                     .font(.caption)
                     .foregroundColor(.gray)
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Configured manifest URL")
+                    .font(.headline)
+
+                TextField("https://addon.example/.../manifest.json", text: $manualConfiguredURL)
+
+                Button {
+                    applyConfiguration(manualConfiguredURL)
+                } label: {
+                    Label("Save Configured URL", systemImage: "checkmark.circle")
+                }
+                .disabled(manualConfiguredURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            .frame(maxWidth: 900)
+
+            if let authenticationMessage {
+                Text(authenticationMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+
+            if let error {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                    .multilineTextAlignment(.center)
             }
         }
         .padding()
     }
+
+    private func startAuthenticationSession(url: URL) {
+        authenticationMessage = nil
+        error = nil
+
+        let session = ASWebAuthenticationSession(
+            url: url,
+            callbackURLScheme: "stremio"
+        ) { callbackURL, sessionError in
+            DispatchQueue.main.async {
+                self.authenticationSession = nil
+
+                if let callbackURL {
+                    let configuredURL = StremioClient.normalizedConfiguredURL(from: callbackURL.absoluteString)
+                    self.applyConfiguration(configuredURL)
+                    return
+                }
+
+                if sessionError != nil {
+                    self.authenticationMessage = "Configuration did not return to Eclipse. Your typed URL is still here, so you can paste the configured manifest manually."
+                }
+            }
+        }
+        authenticationSession = session
+        if !session.start() {
+            authenticationSession = nil
+            authenticationMessage = "The configuration page could not be opened. Paste the configured manifest URL manually."
+        }
+    }
+#endif
 
     private func applyConfiguration(_ newURL: String) {
         Task {

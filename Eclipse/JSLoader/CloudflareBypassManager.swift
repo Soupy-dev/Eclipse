@@ -2,10 +2,115 @@ import Combine
 import Foundation
 
 #if os(tvOS)
-import FakeWebKit
+enum CloudflareBypassError: LocalizedError {
+    case unavailableOnTV
+
+    var errorDescription: String? {
+        "Interactive browser verification is not available on Apple TV."
+    }
+}
+
+extension Notification.Name {
+    static let cloudflareBypassSolved = Notification.Name("CloudflareBypassSolved")
+}
+
+/// tvOS deliberately has no browser-backed Cloudflare bypass. Keeping the public HTTP
+/// surface here lets JavaScriptCore services use URLSession while challenge pages fail
+/// immediately and Auto Mode can continue to the next source.
+final class CloudflareBypassManager: ObservableObject {
+    static let shared = CloudflareBypassManager()
+
+    @Published private(set) var pendingVerificationURL: URL?
+
+    private init() {}
+
+    func applyCachedBypass(to request: inout URLRequest, for url: URL) {}
+
+    func headersByApplyingCachedBypass(_ headers: [String: String], for url: URL) -> [String: String] {
+        headers
+    }
+
+    func fullCookieHeader(for host: String) -> String? { nil }
+    func bypassUserAgent(for host: String) -> String? { nil }
+
+    @MainActor
+    func flagPendingVerification(for url: URL) {
+        var redacted = URLComponents()
+        redacted.scheme = url.scheme
+        redacted.host = url.host
+        redacted.port = url.port
+        redacted.path = "/"
+        pendingVerificationURL = redacted.url
+        Logger.shared.log(
+            "CloudflareBypass: interactive challenge unavailable on tvOS host=\(url.host?.lowercased() ?? "unknown-host")",
+            type: "Service"
+        )
+    }
+
+    func recoverChallengedRequest(
+        for url: URL,
+        method: String,
+        body: Data?,
+        extraHeaders: [String: String],
+        allowRedirects: Bool
+    ) async -> (data: Data, response: HTTPURLResponse)? {
+        await flagPendingVerification(for: url)
+        return nil
+    }
+
+    static func isChallengeResponse(status: Int, body: String, headers: [String: String] = [:]) -> Bool {
+        let lowerBody = body.lowercased()
+        let isBlockedStatus = [403, 429, 503].contains(status)
+
+        // Tokens that appear only on the actual interstitial/challenge document, never on an
+        // already-cleared page — reliable on any status.
+        if lowerBody.contains("__cf_chl_")
+            || lowerBody.contains("enable javascript and cookies")
+            || lowerBody.contains("check.ddos-guard.net")
+            || lowerBody.contains("/.well-known/ddos-guard/")
+            || (lowerBody.contains("just a moment") && lowerBody.contains("cloudflare")) {
+            return true
+        }
+
+        // Cloudflare injects its challenge-platform / Turnstile scripts (and a "cloudflare"
+        // footer) into normal, already-solved responses too, and provider pages routinely mention
+        // "ddos-guard" — so these markers only signal a wall when the response is itself a block.
+        // Gating on status is what stops a solved 200 content page (which still carries
+        // challenge-platform) from being misread as still-challenged: the re-solve loop that then
+        // tripped Cloudflare's 429 rate limit.
+        if isBlockedStatus {
+            let hasProviderMarker = lowerBody.contains("challenges.cloudflare.com")
+                || lowerBody.contains("cf-turnstile")
+                || lowerBody.contains("challenge-platform")
+                || lowerBody.contains("cf-spinner")
+                || lowerBody.contains("jschl")
+                || lowerBody.contains("cloudflare ray id")
+                || lowerBody.contains("ddos-guard")
+            if hasProviderMarker {
+                return true
+            }
+        }
+
+        let lowerHeaders = headers.reduce(into: [String: String]()) { result, pair in
+            result[pair.key.lowercased()] = pair.value.lowercased()
+        }
+        let server = lowerHeaders["server"] ?? ""
+        let hasCloudflareHeader = server.contains("cloudflare") || lowerHeaders["cf-ray"] != nil
+        let hasDDoSGuardHeader = server.contains("ddos-guard")
+        return (hasCloudflareHeader || hasDDoSGuardHeader)
+            && isBlockedStatus
+            && lowerBody.contains("<html")
+    }
+
+    static func headersDictionary(from response: HTTPURLResponse?) -> [String: String] {
+        guard let response else { return [:] }
+        return response.allHeaderFields.reduce(into: [String: String]()) { result, pair in
+            result[String(describing: pair.key)] = String(describing: pair.value)
+        }
+    }
+}
 #else
 import WebKit
-#endif
 
 #if os(iOS)
 import SwiftUI
@@ -34,6 +139,7 @@ final class CloudflareBypassManager: ObservableObject {
 
     private enum Keys {
         static let persistedCache = "serviceCloudflareBypassCache"
+        static let interactiveHosts = "serviceCloudflareInteractiveHosts"
     }
 
     private let lock = NSLock()
@@ -41,8 +147,50 @@ final class CloudflareBypassManager: ObservableObject {
     private var inProgressHosts: Set<String> = []
     private var bypassWebViews: [String: WKWebView] = [:]
 
+    /// Hosts observed to require an interactive tap — the silent phase failed and we had to
+    /// show the box. Persisted so that once cf_clearance expires, the next challenge on that
+    /// host shows the box immediately instead of hanging through the whole silent budget first.
+    private var interactiveHosts: Set<String> = []
+
+    /// The single host currently allowed to own the silent host window / visible sheet
+    /// singletons in `triggerBypass`. `inProgressHosts` only dedupes the SAME host; this
+    /// additionally serializes DIFFERENT hosts so two concurrent challenges (e.g. from Auto
+    /// Mode's concurrent per-source search) can't tear down or strand each other's flow.
+    private var activeFlowHost: String?
+
+    /// Cloudflare's non-interactive JS challenge ("Just a moment...") and low-risk managed
+    /// challenges resolve on their own within a few seconds of real JS execution — no tap
+    /// required. Only an explicit Turnstile widget needs a human. Budgets below make the
+    /// common case silent and fast, and only escalate to visible UI for the genuine minority.
+    private static let silentSolveBudgetSeconds: TimeInterval = 5
+    private static let totalSolveBudgetSeconds: TimeInterval = 45
+
     private init() {
         loadPersistedCache()
+        loadInteractiveHosts()
+    }
+
+    private func isKnownInteractiveHost(_ host: String) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return interactiveHosts.contains(host)
+    }
+
+    private func markHostInteractive(_ host: String) {
+        lock.lock()
+        let inserted = interactiveHosts.insert(host).inserted
+        let snapshot = Array(interactiveHosts)
+        lock.unlock()
+        guard inserted else { return }
+        UserDefaults.standard.set(snapshot, forKey: Keys.interactiveHosts)
+        Logger.shared.log("CloudflareBypass: host marked interactive host=\(host)", type: "Service")
+    }
+
+    private func loadInteractiveHosts() {
+        let stored = UserDefaults.standard.stringArray(forKey: Keys.interactiveHosts) ?? []
+        lock.lock()
+        interactiveHosts = Set(stored)
+        lock.unlock()
     }
 
     func applyCachedBypass(to request: inout URLRequest, for url: URL) {
@@ -58,7 +206,7 @@ final class CloudflareBypassManager: ObservableObject {
         }
 
         Logger.shared.log(
-            "CloudflareBypass: applied cached session host=\(host) cachedCookies=\(cookiePairCount(in: entry.cookieHeader)) mergedWithExisting=\(!existingCookie.isEmpty) userAgent=\(!entry.userAgent.isEmpty)",
+            "CloudflareBypass: applied cached session host=\(host) cachedCookies=\(cookiePairCount(in: entry.cookieHeader)) cookieNames=\(cookieNameSummary(entry.cookieHeader)) mergedWithExisting=\(!existingCookie.isEmpty) userAgent=\(!entry.userAgent.isEmpty) uaProfile=\(userAgentProfile(entry.userAgent))",
             type: "Service"
         )
     }
@@ -89,13 +237,15 @@ final class CloudflareBypassManager: ObservableObject {
         cache[normalizedHost] = CachedBypass(
             cookieHeader: cookieHeader,
             userAgent: userAgent,
-            expires: Date().addingTimeInterval(3600)
+            // Retain a browser clearance until the provider actually rejects it. The old
+            // one-hour client timeout discarded valid iPad sessions and prompted again.
+            expires: Date().addingTimeInterval(24 * 60 * 60)
         )
         lock.unlock()
 
         persistCache()
         Logger.shared.log(
-            "CloudflareBypass: stored solved session host=\(normalizedHost) cookies=\(cookiePairCount(in: cookieHeader)) userAgent=\(!userAgent.isEmpty) ttlSeconds=3600",
+            "CloudflareBypass: stored solved session host=\(normalizedHost) cookies=\(cookiePairCount(in: cookieHeader)) cookieNames=\(cookieNameSummary(cookieHeader)) userAgent=\(!userAgent.isEmpty) uaProfile=\(userAgentProfile(userAgent)) ttlSeconds=86400",
             type: "Service"
         )
         NotificationCenter.default.post(name: .cloudflareBypassSolved, object: normalizedHost)
@@ -104,7 +254,6 @@ final class CloudflareBypassManager: ObservableObject {
     @MainActor
     func flagPendingVerification(for url: URL) {
         guard let host = normalizedHost(from: url) else { return }
-        removeCachedEntry(for: host)
         pendingVerificationURL = url
         Logger.shared.log(
             "CloudflareBypass: pending manual verification host=\(host)",
@@ -119,6 +268,7 @@ final class CloudflareBypassManager: ObservableObject {
         extraHeaders: [String: String],
         allowRedirects: Bool
     ) async -> (data: Data, response: HTTPURLResponse)? {
+        let recoveryStartedAt = Date()
         Logger.shared.log(
             "CloudflareBypass: recovery requested host=\(redactedHost(url)) method=\(method) bodyBytes=\(body?.count ?? 0) extraHeaders=\(extraHeaders.count) redirects=\(allowRedirects)",
             type: "Service"
@@ -132,21 +282,28 @@ final class CloudflareBypassManager: ObservableObject {
             allowRedirects: allowRedirects
         ) {
             Logger.shared.log(
-                "CloudflareBypass: recovered with existing solved session host=\(redactedHost(url)) status=\(recovered.response.statusCode) bytes=\(recovered.data.count)",
+                "CloudflareBypass: recovered with existing solved session host=\(redactedHost(url)) status=\(recovered.response.statusCode) bytes=\(recovered.data.count) elapsedMs=\(elapsedMilliseconds(since: recoveryStartedAt))",
                 type: "Service"
             )
             return recovered
         }
 
         Logger.shared.log(
-            "CloudflareBypass: opening verification flow host=\(redactedHost(url))",
+            "CloudflareBypass: attempting automatic verification host=\(redactedHost(url))",
             type: "Service"
         )
-        do {
-            try await triggerBypass(for: url)
-        } catch {
+        // Most Cloudflare/DDoS-Guard challenges resolve on their own with no UI. When one
+        // doesn't (typically an interactive Turnstile checkbox), attemptAutomaticBypass shows
+        // the verification box ITSELF (via a top-level window) and waits for the user to solve
+        // it — this recovery path fires deep in the fetch layer, during search as well as stream
+        // extraction, where no button UI is reachable, so it can't rely on the caller to surface
+        // it. It returns false only if the user cancels or the whole budget elapses unsolved.
+        guard await attemptAutomaticBypass(for: url) else {
             await flagPendingVerification(for: url)
-            Logger.shared.log("CloudflareBypass: verification failed host=\(redactedHost(url)) error=\(error)", type: "Error")
+            Logger.shared.log(
+                "CloudflareBypass: automatic verification unavailable host=\(redactedHost(url)) elapsedMs=\(elapsedMilliseconds(since: recoveryStartedAt))",
+                type: "Service"
+            )
             return nil
         }
 
@@ -161,12 +318,12 @@ final class CloudflareBypassManager: ObservableObject {
         if recovered == nil {
             await flagPendingVerification(for: url)
             Logger.shared.log(
-                "CloudflareBypass: recovery unavailable after verification host=\(redactedHost(url))",
+                "CloudflareBypass: recovery unavailable after silent verification host=\(redactedHost(url)) elapsedMs=\(elapsedMilliseconds(since: recoveryStartedAt))",
                 type: "Service"
             )
         } else if let recovered {
             Logger.shared.log(
-                "CloudflareBypass: recovered after verification host=\(redactedHost(url)) status=\(recovered.response.statusCode) bytes=\(recovered.data.count)",
+                "CloudflareBypass: recovered after silent verification host=\(redactedHost(url)) status=\(recovered.response.statusCode) bytes=\(recovered.data.count) elapsedMs=\(elapsedMilliseconds(since: recoveryStartedAt))",
                 type: "Service"
             )
         }
@@ -180,6 +337,7 @@ final class CloudflareBypassManager: ObservableObject {
         extraHeaders: [String: String],
         allowRedirects: Bool
     ) async -> (data: Data, response: HTTPURLResponse)? {
+        let retryStartedAt = Date()
         guard let host = normalizedHost(from: url) else {
             Logger.shared.log("CloudflareBypass: retry skipped because URL has no host", type: "Service")
             return nil
@@ -200,7 +358,7 @@ final class CloudflareBypassManager: ObservableObject {
         }
 
         Logger.shared.log(
-            "CloudflareBypass: retrying challenged request host=\(host) source=\(sessionInfo.source) method=\(method) bodyBytes=\(body?.count ?? 0) cookies=\(cookiePairCount(in: sessionInfo.cookieHeader)) redirects=\(allowRedirects)",
+            "CloudflareBypass: retrying challenged request host=\(host) source=\(sessionInfo.source) method=\(method) bodyBytes=\(body?.count ?? 0) cookies=\(cookiePairCount(in: sessionInfo.cookieHeader)) cookieNames=\(cookieNameSummary(sessionInfo.cookieHeader)) uaProfile=\(userAgentProfile(sessionInfo.userAgent)) redirects=\(allowRedirects)",
             type: "Service"
         )
 
@@ -219,7 +377,10 @@ final class CloudflareBypassManager: ObservableObject {
         defer { session.finishTasksAndInvalidate() }
 
         do {
-            let (data, response) = try await session.data(for: request)
+            let (data, response) = try await session.boundedData(
+                for: request,
+                maximumResponseBytes: 10_000_000
+            )
             guard let httpResponse = response as? HTTPURLResponse else { return nil }
             let bodyText = String(data: data, encoding: .utf8) ?? ""
             if Self.isChallengeResponse(
@@ -230,61 +391,158 @@ final class CloudflareBypassManager: ObservableObject {
                 if sessionInfo.source == "liveWebView",
                    let recovered = await browserRecoveredResponse(for: url, host: host) {
                     Logger.shared.log(
-                        "CloudflareBypass: recovered challenged request from live browser document host=\(host) status=\(recovered.response.statusCode) bytes=\(recovered.data.count)",
+                        "CloudflareBypass: recovered challenged request from live browser document host=\(host) status=\(recovered.response.statusCode) bytes=\(recovered.data.count) elapsedMs=\(elapsedMilliseconds(since: retryStartedAt))",
                         type: "Service"
                     )
                     return recovered
                 }
                 removeCachedEntry(for: host)
                 Logger.shared.log(
-                    "CloudflareBypass: solved session still challenged host=\(host) status=\(httpResponse.statusCode); cache cleared",
+                    "CloudflareBypass: solved session still challenged host=\(host) elapsedMs=\(elapsedMilliseconds(since: retryStartedAt)) \(Self.challengeDebugSummary(status: httpResponse.statusCode, body: bodyText, headers: Self.headersDictionary(from: httpResponse))) cacheCleared=true",
                     type: "Service"
                 )
                 return nil
             }
             Logger.shared.log(
-                "CloudflareBypass: session retry succeeded host=\(redactedHost(url)) source=\(sessionInfo.source) status=\(httpResponse.statusCode) bytes=\(data.count)",
+                "CloudflareBypass: session retry succeeded host=\(redactedHost(url)) source=\(sessionInfo.source) status=\(httpResponse.statusCode) bytes=\(data.count) elapsedMs=\(elapsedMilliseconds(since: retryStartedAt))",
                 type: "Service"
             )
             return (data, httpResponse)
         } catch {
-            Logger.shared.log("CloudflareBypass: session retry failed host=\(redactedHost(url)) error=\(error.localizedDescription)", type: "Error")
+            Logger.shared.log("CloudflareBypass: session retry failed host=\(redactedHost(url)) elapsedMs=\(elapsedMilliseconds(since: retryStartedAt)) error=\(error.localizedDescription)", type: "Error")
             return nil
         }
     }
 
+    private enum BypassPresentation: Equatable {
+        /// Automatic recovery path: try invisibly first, and if the silent budget elapses
+        /// unsolved, move the challenge into a visible sheet so the user can complete it. This
+        /// is what actually resolves interactive Turnstile challenges without any UI wiring at
+        /// the call site.
+        case silentThenEscalate
+        /// Show the sheet immediately: used by the manual "Verify Cloudflare" action and for
+        /// hosts already known to require an interactive tap (skips the wasted silent phase).
+        case visible
+    }
+
+    /// Automatic recovery path used by `recoverChallengedRequest`. Tries to solve invisibly
+    /// within the silent budget; if that isn't enough (typically a genuine interactive
+    /// Turnstile checkbox), it escalates to a visible sheet and waits for the user to solve it.
+    /// Returns true once solved, false if the user cancels or the whole budget elapses.
+    @MainActor
+    @discardableResult
+    func attemptAutomaticBypass(for url: URL) async -> Bool {
+        guard let host = normalizedHost(from: url) else { return false }
+        // A host we've already learned needs a human tap skips straight to the box instead of
+        // burning the silent budget it can never satisfy; everything else tries silently first.
+        let presentation: BypassPresentation = isKnownInteractiveHost(host) ? .visible : .silentThenEscalate
+        return (try? await runBypassFlow(for: url, presentation: presentation)) ?? false
+    }
+
+    /// User-initiated verification: shows the bypass sheet immediately and waits for the user
+    /// to complete it. Intended to be called from a "Verify Cloudflare" affordance driven by
+    /// `pendingVerificationURL`.
     @MainActor
     func triggerBypass(for url: URL) async throws {
-        guard let host = normalizedHost(from: url) else { return }
+        // Cancellation (or any other non-solved exit) makes runBypassFlow return false rather
+        // than throw, since it's a normal, expected outcome for the automatic path — but
+        // callers of this .visible entry point need throws to mean "not solved" so they don't
+        // mistake a cancelled/unsolved sheet for success and retry with no usable session.
+        guard try await runBypassFlow(for: url, presentation: .visible) else {
+            throw CloudflareBypassError.timeout
+        }
+    }
+
+    @MainActor
+    private func runBypassFlow(for url: URL, presentation: BypassPresentation) async throws -> Bool {
+        let requestedAt = Date()
+        guard let host = normalizedHost(from: url) else { return false }
         if cachedEntry(for: host) != nil {
             Logger.shared.log("CloudflareBypass: verification skipped because cache exists host=\(host)", type: "Service")
-            return
+            return true
         }
-
         if inProgressHosts.contains(host) {
             Logger.shared.log("CloudflareBypass: verification already in progress; waiting host=\(host)", type: "Service")
+            var existingFlowFinished = false
             for _ in 0..<120 {
                 try? await Task.sleep(nanoseconds: 250_000_000)
-                if !inProgressHosts.contains(host) { return }
+                if !inProgressHosts.contains(host) {
+                    existingFlowFinished = true
+                    break
+                }
             }
-            Logger.shared.log("CloudflareBypass: verification wait timed out host=\(host)", type: "Service")
-            return
+            if let cached = cachedEntry(for: host), !cached.cookieHeader.isEmpty {
+                Logger.shared.log("CloudflareBypass: shared verification produced solved session host=\(host) elapsedMs=\(elapsedMilliseconds(since: requestedAt)) cookieNames=\(cookieNameSummary(cached.cookieHeader)) uaProfile=\(userAgentProfile(cached.userAgent))", type: "Service")
+                return true
+            }
+            if !existingFlowFinished {
+                Logger.shared.log("CloudflareBypass: verification wait timed out host=\(host) elapsedMs=\(elapsedMilliseconds(since: requestedAt))", type: "Service")
+                throw CloudflareBypassError.timeout
+            }
+            // The other flow finished without a usable session. Do not silently return and strand
+            // every waiter; let this request open a fresh verification flow.
+            Logger.shared.log("CloudflareBypass: shared verification ended unsolved; retrying host=\(host) elapsedMs=\(elapsedMilliseconds(since: requestedAt))", type: "Service")
         }
 
         inProgressHosts.insert(host)
         defer { inProgressHosts.remove(host) }
 
+        // The silent host and the visible sheet are both single-slot: only one host's flow may
+        // own them at a time. inProgressHosts above only dedupes the SAME host; two DIFFERENT
+        // challenged hosts can otherwise reach here concurrently (e.g. Auto Mode's concurrent
+        // per-source search) and stomp each other's window. Queue behind whichever flow is
+        // currently running rather than silently losing the race.
+        if activeFlowHost != nil {
+            Logger.shared.log("CloudflareBypass: waiting for another host's verification slot host=\(host) blockedBy=\(activeFlowHost ?? "unknown")", type: "Service")
+            var acquiredSlot = false
+            for _ in 0..<Int(Self.totalSolveBudgetSeconds * 4) {
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                if activeFlowHost == nil {
+                    acquiredSlot = true
+                    break
+                }
+            }
+            if !acquiredSlot {
+                Logger.shared.log("CloudflareBypass: gave up waiting for verification slot host=\(host)", type: "Service")
+                throw CloudflareBypassError.timeout
+            }
+        }
+        activeFlowHost = host
+        defer { activeFlowHost = nil }
+
+        // Only this call may touch activeBypassWebView / the silent host / the visible window
+        // for the rest of this function, so the budgets below measure this flow's own runtime,
+        // not time spent waiting behind another host or another same-host caller.
+        let verificationStartedAt = Date()
+
         let webView = makeBypassWebView()
+        // Load the exact URL that got challenged, not the bare host. cf_clearance is domain-wide,
+        // but many providers (e.g. AnimePahe) only present the interactive Turnstile widget — the
+        // "blue box" the user actually taps — on the specific deep/API path that was walled; the
+        // landing page often isn't challenged at all, so loading it would show no widget to solve.
+        // Autoplay video escaping into the system AVPlayer is prevented separately, by
+        // makeBypassWebView's `mediaTypesRequiringUserActionForPlayback = .all`, so loading a
+        // content/player URL here is safe.
         let verificationURL = url
-        Logger.shared.log("CloudflareBypass: verification web view opened host=\(host)", type: "Service")
+        Logger.shared.log("CloudflareBypass: verification web view opened host=\(host) presentation=\(presentation)", type: "Service")
 
         activeBypassWebView = webView
+        var isVisible = presentation == .visible
         #if os(iOS)
-        CloudflareBypassWindowController.shared.show()
+        switch presentation {
+        case .visible:
+            CloudflareBypassWindowController.shared.show()
+        case .silentThenEscalate:
+            // Attach to a real, live, correctly-sized window but keep it invisible: most
+            // Cloudflare/DDoS-Guard JS challenges resolve on their own in a few seconds and
+            // never need to interrupt the user.
+            CloudflareBypassSilentHost.shared.attach(webView)
+        }
         #endif
         defer {
             activeBypassWebView = nil
             #if os(iOS)
+            CloudflareBypassSilentHost.shared.detach(webView)
             CloudflareBypassWindowController.shared.hide()
             #endif
         }
@@ -292,31 +550,73 @@ final class CloudflareBypassManager: ObservableObject {
         webView.load(URLRequest(url: verificationURL))
         Logger.shared.log("CloudflareBypass: verification web view loading host=\(host) target=\(Self.redactedURL(verificationURL.absoluteString))", type: "Service")
 
-        for _ in 0..<60 {
-            try await Task.sleep(nanoseconds: 500_000_000)
+        var attempt = 0
+        var lastLoggedAt = verificationStartedAt
+        while Date().timeIntervalSince(verificationStartedAt) < Self.totalSolveBudgetSeconds {
+            attempt += 1
+            let elapsed = Date().timeIntervalSince(verificationStartedAt)
+            try await Task.sleep(nanoseconds: Self.pollingIntervalNanoseconds(elapsed: elapsed))
             guard activeBypassWebView != nil else {
                 Logger.shared.log("CloudflareBypass: verification cancelled host=\(host)", type: "Service")
-                return
+                flagPendingVerification(for: url)
+                return false
             }
-            if let cookieHeader = await allCookiesHeader(for: host, in: webView),
-               Self.isSolvedCookieHeader(cookieHeader) {
-                let userAgent = await userAgent(for: webView)
+            if let solved = await captureSolvedSessionIfPresent(originalHost: host, in: webView) {
                 Logger.shared.log(
-                    "CloudflareBypass: solved cookie observed host=\(host) cookies=\(cookiePairCount(in: cookieHeader)) userAgent=\(!userAgent.isEmpty)",
+                    "CloudflareBypass: verification solved host=\(host) resolvedHost=\(solved.resolvedHost ?? "nil") cachedHosts=\(solved.cachedHosts.joined(separator: ",")) cookieNames=\(cookieNameSummary(solved.cookieHeader)) uaProfile=\(userAgentProfile(solved.userAgent)) elapsedMs=\(elapsedMilliseconds(since: verificationStartedAt)) shownInteractiveUI=\(isVisible)",
                     type: "Service"
                 )
-                store(cookieHeader: cookieHeader, userAgent: userAgent, for: host)
-                bypassWebViews[host] = webView
-                if pendingVerificationURL?.host?.lowercased() == host {
-                    pendingVerificationURL = nil
-                }
-                Logger.shared.log("CloudflareBypass: verification solved host=\(host)", type: "Service")
-                return
+                return true
+            }
+
+            #if os(iOS)
+            if presentation == .silentThenEscalate, !isVisible, elapsed >= Self.silentSolveBudgetSeconds {
+                // The silent attempt didn't resolve on its own, so this challenge needs a human
+                // (typically an interactive Turnstile checkbox). Surface the SAME flow in a
+                // visible sheet and reload the page so the widget renders and is tappable in the
+                // now-interactive window, and remember this host so its next challenge skips the
+                // wasted silent phase entirely.
+                Logger.shared.log("CloudflareBypass: escalating to visible verification host=\(host) elapsedMs=\(elapsedMilliseconds(since: verificationStartedAt))", type: "Service")
+                markHostInteractive(host)
+                CloudflareBypassSilentHost.shared.detach(webView)
+                CloudflareBypassWindowController.shared.show()
+                webView.load(URLRequest(url: verificationURL))
+                isVisible = true
+            }
+            #endif
+
+            if Date().timeIntervalSince(lastLoggedAt) >= 5 {
+                lastLoggedAt = Date()
+                let cookieHeader = await allCookiesHeader(for: host, in: webView) ?? ""
+                let html = await documentHTML(for: webView)
+                Logger.shared.log(
+                    "CloudflareBypass: verification waiting host=\(host) attempt=\(attempt) elapsedMs=\(elapsedMilliseconds(since: verificationStartedAt)) solvedCookie=\(Self.isSolvedCookieHeader(cookieHeader)) cookieNames=\(cookieNameSummary(cookieHeader)) challengeDocument=\(Self.isChallengeResponse(status: 200, body: html)) htmlBytes=\(html.utf8.count) markers=\(Self.challengeMarkerSummary(from: html)) visible=\(isVisible)",
+                    type: "Service"
+                )
             }
         }
 
-        Logger.shared.log("CloudflareBypass: verification timed out host=\(host)", type: "Service")
-        throw CloudflareBypassError.timeout
+        Logger.shared.log("CloudflareBypass: verification timed out host=\(host) elapsedMs=\(elapsedMilliseconds(since: verificationStartedAt)) presentation=\(presentation)", type: "Service")
+        flagPendingVerification(for: url)
+        if presentation == .visible {
+            throw CloudflareBypassError.timeout
+        }
+        return false
+    }
+
+    /// Front-loads polling so a fast, silent solve (the common case) is detected within a
+    /// couple hundred milliseconds instead of up to 500ms late, while keeping the same
+    /// eventual cadence for slow challenges so we don't spin needlessly.
+    private static func pollingIntervalNanoseconds(elapsed: TimeInterval) -> UInt64 {
+        let seconds: TimeInterval
+        if elapsed < 5 {
+            seconds = 0.2
+        } else if elapsed < 20 {
+            seconds = 0.4
+        } else {
+            seconds = 0.75
+        }
+        return UInt64(seconds * 1_000_000_000)
     }
 
     @MainActor
@@ -331,19 +631,35 @@ final class CloudflareBypassManager: ObservableObject {
 
     static func isChallengeResponse(status: Int, body: String, headers: [String: String] = [:]) -> Bool {
         let lowerBody = body.lowercased()
-        let hasDDoSGuardChallenge = lowerBody.contains("ddos-guard")
+        let isBlockedStatus = [403, 429, 503].contains(status)
+
+        // Tokens that appear only on the actual interstitial/challenge document, never on an
+        // already-cleared page — reliable on any status.
+        if lowerBody.contains("__cf_chl_")
+            || lowerBody.contains("enable javascript and cookies")
             || lowerBody.contains("check.ddos-guard.net")
             || lowerBody.contains("/.well-known/ddos-guard/")
-
-        if lowerBody.contains("challenges.cloudflare.com")
-            || lowerBody.contains("__cf_chl_")
-            || lowerBody.contains("cf-turnstile")
-            || lowerBody.contains("challenge-platform")
-            || lowerBody.contains("enable javascript and cookies")
-            || lowerBody.contains("cloudflare ray id")
-            || (hasDDoSGuardChallenge && (lowerBody.contains("<html") || [403, 429, 503].contains(status)))
             || (lowerBody.contains("just a moment") && lowerBody.contains("cloudflare")) {
             return true
+        }
+
+        // Cloudflare injects its challenge-platform / Turnstile scripts (and a "cloudflare"
+        // footer) into normal, already-solved responses too, and provider pages routinely mention
+        // "ddos-guard" — so these markers only signal a wall when the response is itself a block.
+        // Gating on status is what stops a solved 200 content page (which still carries
+        // challenge-platform) from being misread as still-challenged: the re-solve loop that then
+        // tripped Cloudflare's 429 rate limit.
+        if isBlockedStatus {
+            let hasProviderMarker = lowerBody.contains("challenges.cloudflare.com")
+                || lowerBody.contains("cf-turnstile")
+                || lowerBody.contains("challenge-platform")
+                || lowerBody.contains("cf-spinner")
+                || lowerBody.contains("jschl")
+                || lowerBody.contains("cloudflare ray id")
+                || lowerBody.contains("ddos-guard")
+            if hasProviderMarker {
+                return true
+            }
         }
 
         let lowerHeaders = headers.reduce(into: [String: String]()) { result, pair in
@@ -352,7 +668,7 @@ final class CloudflareBypassManager: ObservableObject {
         let server = lowerHeaders["server"] ?? ""
         let hasCloudflareHeader = server.contains("cloudflare") || lowerHeaders["cf-ray"] != nil
         let hasDDoSGuardHeader = server.contains("ddos-guard")
-        return (hasCloudflareHeader || hasDDoSGuardHeader) && [403, 429, 503].contains(status) && lowerBody.contains("<html")
+        return (hasCloudflareHeader || hasDDoSGuardHeader) && isBlockedStatus && lowerBody.contains("<html")
     }
 
     static func headersDictionary(from response: HTTPURLResponse?) -> [String: String] {
@@ -368,20 +684,12 @@ final class CloudflareBypassManager: ObservableObject {
     func captureSolvedCookies(from webView: WKWebView, for url: URL?) {
         guard let url, let host = normalizedHost(from: url) else { return }
         Task { @MainActor in
-            guard let cookieHeader = await allCookiesHeader(for: host, in: webView),
-                  Self.isSolvedCookieHeader(cookieHeader) else { return }
-            let resolvedUserAgent: String
-            if let customUserAgent = webView.customUserAgent, !customUserAgent.isEmpty {
-                resolvedUserAgent = customUserAgent
-            } else {
-                resolvedUserAgent = await userAgent(for: webView)
+            if let solved = await captureSolvedSessionIfPresent(originalHost: host, in: webView) {
+                Logger.shared.log(
+                    "CloudflareBypass: captured solved cookies from web view host=\(host) resolvedHost=\(solved.resolvedHost ?? "nil") cachedHosts=\(solved.cachedHosts.joined(separator: ",")) cookieNames=\(cookieNameSummary(solved.cookieHeader)) uaProfile=\(userAgentProfile(solved.userAgent))",
+                    type: "Service"
+                )
             }
-            store(cookieHeader: cookieHeader, userAgent: resolvedUserAgent, for: host)
-            bypassWebViews[host] = webView
-            Logger.shared.log(
-                "CloudflareBypass: captured solved cookies from web view host=\(host) cookies=\(cookiePairCount(in: cookieHeader)) userAgent=\(!resolvedUserAgent.isEmpty)",
-                type: "Service"
-            )
         }
     }
 
@@ -425,6 +733,19 @@ final class CloudflareBypassManager: ObservableObject {
         guard let data = UserDefaults.standard.data(forKey: Keys.persistedCache),
               let decoded = try? JSONDecoder().decode([String: CachedBypass].self, from: data) else { return }
         cache = decoded.filter { $0.value.expires > Date() }
+        #if os(iOS)
+        // A short-lived build used an iPhone UA for iPad verification. Those cookies are tied to
+        // that profile and can make AnimePahe return its landing page instead of the requested
+        // episode. Start a native iPad verification rather than replaying that incompatible cache.
+        if UIDevice.current.userInterfaceIdiom == .pad {
+            let before = cache.count
+            cache = cache.filter { !$0.value.userAgent.contains("(iPhone;") }
+            if cache.count != before {
+                persistCache()
+                Logger.shared.log("CloudflareBypass: discarded incompatible iPhone-profile cache on iPad", type: "Service")
+            }
+        }
+        #endif
         Logger.shared.log("CloudflareBypass: loaded persisted sessions count=\(cache.count)", type: "Service")
     }
 
@@ -438,6 +759,7 @@ final class CloudflareBypassManager: ObservableObject {
 
     @MainActor
     private func browserRecoveredResponse(for url: URL, host: String) async -> (data: Data, response: HTTPURLResponse)? {
+        let browserRecoveryStartedAt = Date()
         guard let webView = bypassWebViews[host] else { return nil }
 
         if !browserURL(webView.url, matchesRequestedURL: url, host: host) {
@@ -448,7 +770,10 @@ final class CloudflareBypassManager: ObservableObject {
             webView.load(URLRequest(url: url))
         }
 
-        for attempt in 1...20 {
+        // iPad WebKit often reaches the solved cookie several seconds before the provider's
+        // JavaScript finishes inserting the playable iframe. Give the completed document time to
+        // stabilize instead of accepting an incomplete /play/ page or immediately failing it.
+        for attempt in 1...40 {
             let currentURL = webView.url
             let html = await documentHTML(for: webView)
             let readyState = await documentReadyState(for: webView)
@@ -457,11 +782,15 @@ final class CloudflareBypassManager: ObservableObject {
             let isChallenge = Self.isChallengeResponse(status: 200, body: html)
             let isUsefulDocument = browserDocumentLooksUseful(html, for: url)
             let hasPlayableEmbed = browserDocumentHasPlayableEmbed(html, for: url)
+            let isPlaybackDocument = url.path.lowercased().contains("/play/")
+            let isDocumentComplete = readyState.caseInsensitiveCompare("complete") == .orderedSame
+            let hasRequiredContent = isPlaybackDocument ? hasPlayableEmbed : isUsefulDocument
 
             if urlMatches,
+               isDocumentComplete,
                bodyBytes > 0,
-               (!isChallenge || hasPlayableEmbed),
-               isUsefulDocument,
+               !isChallenge,
+               hasRequiredContent,
                let data = html.data(using: .utf8),
                let response = HTTPURLResponse(
                 url: currentURL ?? url,
@@ -470,22 +799,28 @@ final class CloudflareBypassManager: ObservableObject {
                 headerFields: ["Content-Type": "text/html; charset=utf-8"]
                ) {
                 Logger.shared.log(
-                    "CloudflareBypass: browser document accepted host=\(host) readyState=\(readyState) url=\(Self.redactedURL(currentURL?.absoluteString ?? "nil")) bytes=\(bodyBytes) challenge=\(isChallenge) playable=\(hasPlayableEmbed) markers=\(browserDocumentMarkerSummary(html))",
+                    "CloudflareBypass: browser document accepted host=\(host) elapsedMs=\(elapsedMilliseconds(since: browserRecoveryStartedAt)) readyState=\(readyState) url=\(Self.redactedURL(currentURL?.absoluteString ?? "nil")) bytes=\(bodyBytes) challenge=\(isChallenge) playable=\(hasPlayableEmbed) markers=\(browserDocumentMarkerSummary(html))",
                     type: "Service"
                 )
                 return (data, response)
             }
 
-            if attempt == 1 || attempt == 10 || attempt == 20 {
+            if attempt == 1 || attempt == 20 || attempt == 40 {
                 Logger.shared.log(
-                    "CloudflareBypass: browser document not ready host=\(host) attempt=\(attempt) readyState=\(readyState) url=\(Self.redactedURL(currentURL?.absoluteString ?? "nil")) matchesRequest=\(urlMatches) bytes=\(bodyBytes) challenge=\(isChallenge) useful=\(isUsefulDocument) playable=\(hasPlayableEmbed) markers=\(browserDocumentMarkerSummary(html))",
+                    "CloudflareBypass: browser document not ready host=\(host) attempt=\(attempt) elapsedMs=\(elapsedMilliseconds(since: browserRecoveryStartedAt)) readyState=\(readyState) url=\(Self.redactedURL(currentURL?.absoluteString ?? "nil")) matchesRequest=\(urlMatches) bytes=\(bodyBytes) challenge=\(isChallenge) useful=\(isUsefulDocument) playable=\(hasPlayableEmbed) markers=\(browserDocumentMarkerSummary(html))",
                     type: "Service"
                 )
             }
 
-            try? await Task.sleep(nanoseconds: 500_000_000)
+            // Front-load polling: the completed document is usually ready within a second or
+            // two, so checking every 200ms early on shaves real latency off the common case.
+            try? await Task.sleep(nanoseconds: attempt <= 10 ? 200_000_000 : 500_000_000)
         }
 
+        Logger.shared.log(
+            "CloudflareBypass: browser document recovery gave up host=\(host) elapsedMs=\(elapsedMilliseconds(since: browserRecoveryStartedAt))",
+            type: "Service"
+        )
         return nil
     }
 
@@ -536,23 +871,48 @@ final class CloudflareBypassManager: ObservableObject {
 
         let currentPath = currentURL.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let requestedPath = requestedURL.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        if requestedPath.isEmpty {
-            return currentPath.isEmpty
+        guard currentPath == requestedPath else { return false }
+
+        // Some providers identify the selected episode entirely in query parameters.
+        // Comparing only the path lets a live verification web view reuse the previous
+        // episode's completed document for a new request with the same path, handing a stale
+        // (and apparently random) stream back to the service parser.
+        return normalizedQueryIdentity(for: currentURL) == normalizedQueryIdentity(for: requestedURL)
+    }
+
+    private func normalizedQueryIdentity(for url: URL) -> [String] {
+        guard let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else {
+            return []
         }
-        return currentPath == requestedPath
+        return items.map { item in
+            "\(item.name)=\(item.value ?? "")"
+        }.sorted()
     }
 
     @MainActor
     private func makeBypassWebView() -> WKWebView {
         let config = WKWebViewConfiguration()
-        #if !os(tvOS)
         config.websiteDataStore = .nonPersistent()
-        #endif
         #if os(iOS)
+        // iPad defaults to a desktop browsing profile. Keep the verification web view in
+        // mobile content mode, matching the normal iPhone/iPad browser configuration.
+        config.defaultWebpagePreferences.preferredContentMode = .mobile
         config.allowsInlineMediaPlayback = true
         #endif
-        config.mediaTypesRequiringUserActionForPlayback = []
-        return WKWebView(frame: .zero, configuration: config)
+        // This web view exists only to establish the anti-bot session. Allowing provider
+        // pages to autoplay media here can make an advertisement or featured video escape
+        // the hidden verification window into WebKit's system AVPlayer. Requiring an explicit
+        // media gesture does not interfere with Cloudflare/Turnstile JavaScript.
+        config.mediaTypesRequiringUserActionForPlayback = .all
+        #if os(iOS)
+        let bounds = UIScreen.main.bounds
+        #else
+        let bounds = CGRect(x: 0, y: 0, width: 390, height: 844)
+        #endif
+        // A zero-size frame is a well-known headless/automation tell (bot checks read
+        // window.innerWidth/getBoundingClientRect). Give the view a real, device-sized frame
+        // from the start even while it is only attached to the invisible silent host.
+        return WKWebView(frame: bounds, configuration: config)
     }
 
     @MainActor
@@ -571,6 +931,69 @@ final class CloudflareBypassManager: ObservableObject {
             }
         }
         #endif
+    }
+
+    private struct SolvedSession {
+        let cookieHeader: String
+        let userAgent: String
+        let resolvedHost: String?
+        let cachedHosts: [String]
+    }
+
+    /// Detects whether the challenge has produced a clearance cookie and, if so, captures the
+    /// session. cf_clearance / __ddg is issued for whichever host actually served the challenge
+    /// — which, after a redirect (e.g. animepahe.com → animepahe.pw), is NOT the host the module
+    /// asked for. So this looks for the clearance across ALL of the web view's cookies rather
+    /// than pre-filtering by the original host (the old bug that made an interactive solve poll
+    /// forever), mirrors every cookie into `HTTPCookieStorage.shared` so plain URLSession fetches
+    /// carry them across that same cross-domain redirect, and caches the session under both the
+    /// originally-requested host and the resolved challenge host.
+    @MainActor
+    private func captureSolvedSessionIfPresent(originalHost: String, in webView: WKWebView) async -> SolvedSession? {
+        let cookies = await allCookies(in: webView)
+        guard cookies.contains(where: { Self.isClearanceCookieName($0.name) }) else { return nil }
+
+        let userAgent = await userAgent(for: webView)
+        let resolvedHost = webView.url?.host?.lowercased()
+        let fullHeader = cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+
+        // Put every cookie in the shared jar honoring its own domain, so a later URLSession
+        // request to the original host is served the clearance after it redirects to the host
+        // that actually issued it.
+        let storage = HTTPCookieStorage.shared
+        for cookie in cookies { storage.setCookie(cookie) }
+
+        var cachedHosts: [String] = []
+        for candidate in [originalHost, resolvedHost].compactMap({ $0 }) where !cachedHosts.contains(candidate) {
+            store(cookieHeader: fullHeader, userAgent: userAgent, for: candidate)
+            bypassWebViews[candidate] = webView
+            cachedHosts.append(candidate)
+        }
+
+        if let pendingHost = pendingVerificationURL?.host?.lowercased(), cachedHosts.contains(pendingHost) {
+            pendingVerificationURL = nil
+        }
+
+        return SolvedSession(
+            cookieHeader: fullHeader,
+            userAgent: userAgent,
+            resolvedHost: resolvedHost,
+            cachedHosts: cachedHosts
+        )
+    }
+
+    @MainActor
+    private func allCookies(in webView: WKWebView) async -> [HTTPCookie] {
+        await withCheckedContinuation { continuation in
+            webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
+                continuation.resume(returning: cookies)
+            }
+        }
+    }
+
+    private static func isClearanceCookieName(_ name: String) -> Bool {
+        let lower = name.lowercased()
+        return lower == "cf_clearance" || lower.hasPrefix("__ddg")
     }
 
     @MainActor
@@ -646,6 +1069,32 @@ final class CloudflareBypassManager: ObservableObject {
         cookiePairs(from: header).count
     }
 
+    private func cookieNameSummary(_ header: String, limit: Int = 6) -> String {
+        let names = cookiePairs(from: header).map(\.name)
+        guard !names.isEmpty else { return "none" }
+        let prefix = names.prefix(limit)
+        let suffix = names.count > limit ? ",..." : ""
+        return prefix.joined(separator: ",") + suffix
+    }
+
+    private func userAgentProfile(_ userAgent: String) -> String {
+        let lowerUserAgent = userAgent.lowercased()
+        guard !lowerUserAgent.isEmpty else { return "unknown" }
+        if lowerUserAgent.contains("ipad;") { return "ipad" }
+        if lowerUserAgent.contains("iphone;") { return "iphone" }
+        if lowerUserAgent.contains("android") && lowerUserAgent.contains("mobile") { return "android-mobile" }
+        if lowerUserAgent.contains("android") { return "android-tablet" }
+        if lowerUserAgent.contains("mobile") { return "mobile-other" }
+        if lowerUserAgent.contains("macintosh") { return "mac-desktop" }
+        if lowerUserAgent.contains("windows") { return "windows-desktop" }
+        if lowerUserAgent.contains("linux") { return "linux-desktop" }
+        return "other"
+    }
+
+    private func elapsedMilliseconds(since startDate: Date) -> Int {
+        Int(Date().timeIntervalSince(startDate) * 1000)
+    }
+
     private static func isSolvedCookieHeader(_ header: String) -> Bool {
         let lowerHeader = header.lowercased()
         if lowerHeader.contains("cf_clearance=") {
@@ -662,6 +1111,7 @@ final class CloudflareBypassManager: ObservableObject {
     private func redactedHost(_ url: URL) -> String {
         normalizedHost(from: url) ?? "unknown-host"
     }
+
 }
 
 #if os(iOS)
@@ -675,7 +1125,7 @@ private struct CloudflareBypassSheetView: View {
                     CloudflareBypassWebView(webView: webView)
                         .ignoresSafeArea(edges: .bottom)
                 } else {
-                    ProgressView()
+                    EclipseLoadingIndicator()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
@@ -733,4 +1183,91 @@ private final class CloudflareBypassWindowController {
         window = nil
     }
 }
+
+/// Hosts a bypass web view inside a real, live window (so it lays out and runs JS timers
+/// exactly like a visible page) while staying imperceptible and non-interactive. This lets
+/// the common, non-interactive Cloudflare/DDoS-Guard challenge resolve without ever showing
+/// UI to the user; `triggerBypass` only escalates to `CloudflareBypassWindowController` when
+/// a challenge turns out to need a real tap.
+@MainActor
+private final class CloudflareBypassSilentHost {
+    static let shared = CloudflareBypassSilentHost()
+    private var window: UIWindow?
+    private weak var hostedWebView: WKWebView?
+
+    private init() {}
+
+    func attach(_ webView: WKWebView) {
+        guard window == nil else { return }
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else { return }
+
+        let hostViewController = UIViewController()
+        webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        hostViewController.view.addSubview(webView)
+
+        let window = UIWindow(windowScene: scene)
+        window.windowLevel = .normal - 1
+        window.isUserInteractionEnabled = false
+        // Not fully 0: a zero-alpha layer can be treated as non-rendering by the compositor
+        // on some OS versions, which would reintroduce the throttling we're trying to avoid.
+        window.alpha = 0.01
+        window.rootViewController = hostViewController
+        window.isHidden = false
+
+        self.window = window
+        hostedWebView = webView
+    }
+
+    func detach(_ webView: WKWebView) {
+        guard hostedWebView === webView else { return }
+        webView.removeFromSuperview()
+        window?.isHidden = true
+        window = nil
+        hostedWebView = nil
+    }
+}
 #endif
+#endif
+
+/// Challenge diagnostics are platform-neutral even though interactive browser
+/// recovery is unavailable on tvOS. Shared JavaScript fetch logging uses this
+/// surface on every platform.
+extension CloudflareBypassManager {
+    static func challengeDebugSummary(status: Int, body: String, headers: [String: String] = [:]) -> String {
+        let lowerHeaders = headers.reduce(into: [String: String]()) { result, pair in
+            result[pair.key.lowercased()] = pair.value
+        }
+        let server = lowerHeaders["server"]?.lowercased() ?? "none"
+        let contentType = lowerHeaders["content-type"]?.split(separator: ";", maxSplits: 1).first.map(String.init) ?? "unknown"
+        let locationHost: String
+        if let locationValue = lowerHeaders["location"],
+           let locationURL = URL(string: locationValue),
+           let host = locationURL.host?.lowercased() {
+            locationHost = host
+        } else {
+            locationHost = "none"
+        }
+        let hasCFRay = lowerHeaders["cf-ray"] != nil
+        let hasSetCookie = lowerHeaders["set-cookie"] != nil
+        let hasDDoSGuardHeader = server.contains("ddos-guard")
+        return "status=\(status) server=\(server) cfRay=\(hasCFRay) ddgHeader=\(hasDDoSGuardHeader) contentType=\(contentType) locationHost=\(locationHost) setCookie=\(hasSetCookie) bodyBytes=\(body.utf8.count) markers=\(challengeMarkerSummary(from: body))"
+    }
+
+    private static func challengeMarkerSummary(from body: String) -> String {
+        let lowerBody = body.lowercased()
+        var markers: [String] = []
+        if lowerBody.contains("ddos-guard") { markers.append("ddos") }
+        if lowerBody.contains("cloudflare") { markers.append("cloudflare") }
+        if lowerBody.contains("__cf_chl_") { markers.append("cf-chl") }
+        if lowerBody.contains("cf-turnstile") { markers.append("turnstile") }
+        if lowerBody.contains("challenge-platform") { markers.append("platform") }
+        if lowerBody.contains("just a moment") { markers.append("just-a-moment") }
+        if lowerBody.contains(".m3u8") { markers.append("m3u8") }
+        if lowerBody.contains("<video") { markers.append("video") }
+        if lowerBody.contains("<source") { markers.append("source") }
+        if lowerBody.contains("<iframe") { markers.append("iframe") }
+        if lowerBody.contains("kwik") { markers.append("kwik") }
+        return markers.isEmpty ? "none" : markers.joined(separator: ",")
+    }
+}

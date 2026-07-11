@@ -8,9 +8,6 @@
   <a href="https://github.com/Soupy-dev/Eclipse/releases">
     <img alt="GitHub release downloads" src="https://img.shields.io/github/downloads/Soupy-dev/Eclipse/total.svg?style=for-the-badge&label=Downloads&cacheSeconds=3600">
   </a>
-  <a href="https://www.patreon.com/soupy698">
-    <img alt="Patreon" src="https://img.shields.io/badge/Patreon-Support%20Development-FF424D?style=for-the-badge&logo=patreon&logoColor=white">
-  </a>
   <a href="https://ko-fi.com/soupydev">
     <img alt="Ko-fi" src="https://img.shields.io/badge/Ko--fi-Support%20Development-FF5E5B?style=for-the-badge&logo=kofi&logoColor=white">
   </a>
@@ -31,7 +28,7 @@
 
 ## Why Eclipse
 
-Eclipse was designed to bridge Luna services (more well known as Sora modules) with Stremio addons in one polished app. The goal is simple: search faster, pick the right result with better metadata, watch with stronger controls, keep progress synced, and continue across anime, movies, shows, manga, and novels. Now powered by Aidoku as well. Star the repo, join the Discord, or support on Patreon or Ko-fi if you like my work!
+Eclipse was designed to bridge Luna services (more well known as Sora modules) with Stremio addons in one polished app. The goal is simple: search faster, pick the right result with better metadata, watch with stronger controls, keep progress synced, and continue across anime, movies, shows, manga, and novels. Now powered by Aidoku as well. Star the repo, join the Discord, or support on Ko-fi if you like my work!
 
 ## Screenshots
 
@@ -89,7 +86,7 @@ https://raw.githubusercontent.com/Soupy-dev/Eclipse/main/altsource.json
 ## Support
 
 - Join the Discord server for help, updates, and community discussion: https://discord.gg/UjHgGaEbn
-- Patreon and Ko-fi are available if you want to support development: https://www.patreon.com/soupy698 or https://ko-fi.com/soupydev but they will never unlock features or paywall anything. They're just ways to support development if you want to. And no, ads/telemetry will never be a thing in this app, so you don't have to worry about that either.
+- Ko-fi is available if you want to support development: https://ko-fi.com/soupydev but it will never unlock features or paywall anything. It's just a way to support development if you want to. And no, ads/telemetry will never be a thing in this app, so you don't have to worry about that either.
 
 ## Notes
 
@@ -117,8 +114,6 @@ The original Luna project is available at `https://github.com/cranci1/Luna`.
 Source code for builds distributed from this repository is available at `https://github.com/Soupy-dev/Eclipse`. If you redistribute an IPA or another binary, provide the corresponding source under GPLv3.
 
 Credits to https://github.com/Aidoku/Aidoku for powering Reader Mode.
-
-Credit to https://github.com/NuvioMedia/NuvioMobile for Nuvio Plugins. (Soon to be removed due to Apple's policies)
 
 Acknowledgments inherited from parent repo:
 

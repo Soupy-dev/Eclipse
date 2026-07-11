@@ -6,6 +6,7 @@ import Kingfisher
 
 struct DownloadsView: View {
     @StateObject private var downloadManager = DownloadManager.shared
+    @StateObject private var progressManager = ProgressManager.shared
     @State private var showingDeleteAllConfirmation = false
     @State private var showingDeleteCompletedConfirmation = false
     @State private var showingDeleteSeriesConfirmation = false
@@ -401,7 +402,9 @@ struct DownloadsView: View {
     // MARK: - Completed Download Row
     
     private func completedDownloadRow(_ item: DownloadItem) -> some View {
-        Button(action: {
+        let isWatched = item.isMovie && movieIsWatched(item)
+
+        return Button(action: {
             playDownloadedItem(item)
         }) {
             HStack(spacing: 12) {
@@ -434,6 +437,15 @@ struct DownloadsView: View {
                                 .font(.caption2)
                                 .foregroundColor(.secondary)
                         }
+
+                        if isWatched {
+                            Text("•")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                            Text("Watched")
+                                .font(.caption2)
+                                .foregroundColor(.blue)
+                        }
                     }
                 }
                 
@@ -451,6 +463,17 @@ struct DownloadsView: View {
         .contextMenu {
             Button(action: { playDownloadedItem(item) }) {
                 Label("Play", systemImage: "play.fill")
+            }
+            if item.isMovie {
+                if isWatched {
+                    Button(action: { markMovieAsUnwatched(item) }) {
+                        Label("Mark as Not Watched", systemImage: "eye.slash")
+                    }
+                } else {
+                    Button(action: { markMovieAsWatched(item) }) {
+                        Label("Mark as Watched", systemImage: "checkmark.circle")
+                    }
+                }
             }
 #if os(iOS)
             if downloadManager.localFileURL(for: item) != nil {
@@ -561,17 +584,6 @@ struct DownloadsView: View {
                                 completedDownloadRow(item)
                                     .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
                                     .listRowBackground(Color.clear)
-                                    .contextMenu {
-                                        Button(action: { playDownloadedItem(item) }) {
-                                            Label("Play", systemImage: "play.fill")
-                                        }
-                                        Button(role: .destructive) {
-                                            seriesToDelete = (tmdbId: show.id, title: show.title)
-                                            showingDeleteSeriesConfirmation = true
-                                        } label: {
-                                            Label("Delete Download", systemImage: "trash")
-                                        }
-                                    }
                             }
                         } else {
                             // TV Shows: navigate to full detail page
@@ -767,6 +779,26 @@ struct DownloadsView: View {
         formatter.dateStyle = .medium
         formatter.timeStyle = .short
         return formatter.string(from: date)
+    }
+
+    private func movieIsWatched(_ item: DownloadItem) -> Bool {
+        progressManager.isMovieWatched(movieId: item.tmdbId)
+    }
+
+    private func markMovieAsWatched(_ item: DownloadItem) {
+        progressManager.markMovieAsWatched(
+            movieId: item.tmdbId,
+            title: item.playerTitleBase,
+            posterURL: item.posterURL
+        )
+    }
+
+    private func markMovieAsUnwatched(_ item: DownloadItem) {
+        progressManager.markMovieAsUnwatched(
+            movieId: item.tmdbId,
+            title: item.playerTitleBase,
+            posterURL: item.posterURL
+        )
     }
     
     private func shareDownloadedItem(_ item: DownloadItem) {

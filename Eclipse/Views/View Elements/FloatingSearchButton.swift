@@ -35,7 +35,7 @@ struct ModeSwitchButtonPulse: View {
             Circle()
                 .stroke(
                     LinearGradient(
-                        colors: [Color.white.opacity(0.9), tint.opacity(0.5), Color.clear],
+                        colors: [tint.opacity(0.7), tint.opacity(0.3), Color.clear],
                         startPoint: .topTrailing,
                         endPoint: .bottomLeading
                     ),
@@ -52,7 +52,9 @@ struct ModeSwitchButtonPulse: View {
 struct FloatingModeSwitchButton: View {
     @AppStorage("showKanzen") private var showKanzen: Bool = false
     @AppStorage(ModeSwitchAnimationSettings.enabledKey) private var modeSwitchAnimationEnabled = ModeSwitchAnimationSettings.defaultEnabled
+    @EnvironmentObject private var modeSwitchTransitionCoordinator: ModeSwitchTransitionCoordinator
     @State private var isLaunching = false
+    @State private var buttonFrame: CGRect = .zero
 
     var body: some View {
         Button {
@@ -71,6 +73,17 @@ struct FloatingModeSwitchButton: View {
             .applyLiquidGlassBackground(cornerRadius: 22)
             .scaleEffect(isLaunching ? 0.94 : 1)
         }
+        .background {
+            GeometryReader { proxy in
+                Color.clear.preference(
+                    key: ModeSwitchButtonOriginPreferenceKey.self,
+                    value: proxy.frame(in: .named(ModeSwitchTransitionCoordinator.coordinateSpaceName))
+                )
+            }
+        }
+        .onPreferenceChange(ModeSwitchButtonOriginPreferenceKey.self) { frame in
+            buttonFrame = frame
+        }
         .accessibilityLabel("Switch to Reader Mode")
         .shadow(color: .black.opacity(0.3), radius: 8, x: 0, y: 4)
     }
@@ -83,6 +96,9 @@ struct FloatingModeSwitchButton: View {
             return
         }
 
+        recordSwitchOrigin()
+        modeSwitchTransitionCoordinator.beginBurst(toReaderMode: true)
+
 #if os(iOS)
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
 #endif
@@ -91,11 +107,18 @@ struct FloatingModeSwitchButton: View {
             isLaunching = true
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            withAnimation(.spring(response: 0.72, dampingFraction: 0.82, blendDuration: 0.08)) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) {
+            withAnimation(.easeInOut(duration: 0.84)) {
                 showKanzen = true
             }
         }
+    }
+
+    private func recordSwitchOrigin() {
+        guard buttonFrame != .zero else { return }
+        modeSwitchTransitionCoordinator.record(
+            origin: CGPoint(x: buttonFrame.midX, y: buttonFrame.midY)
+        )
     }
 }
 #endif

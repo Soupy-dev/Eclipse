@@ -2,6 +2,25 @@
 
 import SwiftUI
 
+#if os(tvOS)
+private enum TVCardDensity: String, CaseIterable, Identifiable {
+    case spacious
+    case standard
+    case compact
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .spacious: return "Spacious"
+        case .standard: return "Standard"
+        case .compact: return "Compact"
+        }
+    }
+
+}
+#endif
+
 struct HomeLayoutView: View {
     // Global layout knobs (shared keys with the rest of the app)
     @AppStorage(ExperimentalHomeCardShape.storageKey) private var globalCardShape = ExperimentalHomeCardShape.defaultValue.rawValue
@@ -11,6 +30,10 @@ struct HomeLayoutView: View {
     @AppStorage(ExperimentalVisualTuning.sectionSpacingScaleKey) private var sectionSpacingScale = ExperimentalVisualTuning.defaultSectionSpacingScale
     @AppStorage(ExperimentalVisualTuning.heroHeightScaleKey) private var heroHeightScale = ExperimentalVisualTuning.defaultHeroHeightScale
     @AppStorage(HomeAnimatedBackgroundSettings.enabledKey) private var animatedBackgroundEnabled = HomeAnimatedBackgroundSettings.defaultEnabled
+    @AppStorage(HomeAnimatedBackgroundQuality.storageKey) private var animatedBackgroundQuality = HomeAnimatedBackgroundQuality.defaultValue.rawValue
+#if os(tvOS)
+    @AppStorage("tvCardDensity") private var tvCardDensityRaw = TVCardDensity.standard.rawValue
+#endif
 
     // Hero
     @AppStorage("heroBannerCatalogId") private var heroBannerCatalogId = "trending"
@@ -36,7 +59,14 @@ struct HomeLayoutView: View {
                 .eclipseExperimentalSettingsRows()
         }
         .navigationTitle("Home Layout")
+        .accessibilityIdentifier("tv.appearance.homeLayout.screen")
         .eclipseSettingsStyle()
+#if os(tvOS)
+        .onAppear {
+            let density = TVCardDensity(rawValue: tvCardDensityRaw) ?? .standard
+            tvCardDensityRaw = density.rawValue
+        }
+#endif
     }
 
     // MARK: - Global
@@ -50,6 +80,20 @@ struct HomeLayoutView: View {
                 values: ExperimentalHomeCardShape.allCases.map { ($0.rawValue, $0.displayName) }
             )
 
+#if os(tvOS)
+            pickerRow(
+                title: "Card Density",
+                description: "Choose comfortable ten-foot spacing without using phone column counts.",
+                selection: Binding(
+                    get: { (TVCardDensity(rawValue: tvCardDensityRaw) ?? .standard).rawValue },
+                    set: { newValue in
+                        let density = TVCardDensity(rawValue: newValue) ?? .standard
+                        tvCardDensityRaw = density.rawValue
+                    }
+                ),
+                values: TVCardDensity.allCases.map { ($0.rawValue, $0.displayName) }
+            )
+#else
             sliderRow(
                 title: "Size",
                 description: "Scale every home row's cards and widgets.",
@@ -58,6 +102,7 @@ struct HomeLayoutView: View {
                 step: 0.05,
                 format: "%.2fx"
             )
+#endif
 
             pickerRow(
                 title: "Layout Density",
@@ -90,6 +135,13 @@ struct HomeLayoutView: View {
                     .labelsHidden()
                     .tint(accent)
             }
+
+            pickerRow(
+                title: "Animation Quality",
+                description: "All levels animate at 30 FPS. Low keeps the core eclipse rings and particles. Medium adds a plasma field, starfield, orbiting embers, energy wavefronts, and a corona. High adds denser motion, a kinetic mesh, more orbiting embers, and meteor bursts.",
+                selection: $animatedBackgroundQuality,
+                values: HomeAnimatedBackgroundQuality.allCases.map { ($0.rawValue, $0.displayName) }
+            )
         } header: {
             Text("Global")
         } footer: {
@@ -251,8 +303,26 @@ struct HomeLayoutView: View {
                     .foregroundColor(.secondary)
                     .monospacedDigit()
             }
+#if os(tvOS)
+            HStack(spacing: 18) {
+                Button {
+                    value.wrappedValue = max(range.lowerBound, value.wrappedValue - step)
+                } label: {
+                    Label("Decrease", systemImage: "minus")
+                }
+                .disabled(value.wrappedValue <= range.lowerBound)
+
+                Button {
+                    value.wrappedValue = min(range.upperBound, value.wrappedValue + step)
+                } label: {
+                    Label("Increase", systemImage: "plus")
+                }
+                .disabled(value.wrappedValue >= range.upperBound)
+            }
+#else
             Slider(value: value, in: range, step: step)
                 .tint(accent)
+#endif
         }
         .padding(.vertical, 2)
     }
@@ -269,6 +339,13 @@ private struct CatalogLayoutEditorView: View {
 
     private var accent: Color { accentColorManager.currentAccentColor }
     private var supportsOrientation: Bool { catalog.displayStyle == .standard }
+    private var effectiveGlobalCardScale: Double {
+#if os(tvOS)
+        ExperimentalVisualTuning.current.mediaCardScale
+#else
+        globalCardScale
+#endif
+    }
 
     var body: some View {
         List {
@@ -302,8 +379,30 @@ private struct CatalogLayoutEditorView: View {
                             .foregroundColor(.secondary)
                             .monospacedDigit()
                     }
+#if os(tvOS)
+                    HStack(spacing: 18) {
+                        Button {
+                            sizeValueBinding.wrappedValue = max(
+                                HomeCatalogLayoutStore.sizeRange.lowerBound,
+                                sizeValueBinding.wrappedValue - 0.05
+                            )
+                        } label: {
+                            Label("Decrease Size", systemImage: "minus")
+                        }
+
+                        Button {
+                            sizeValueBinding.wrappedValue = min(
+                                HomeCatalogLayoutStore.sizeRange.upperBound,
+                                sizeValueBinding.wrappedValue + 0.05
+                            )
+                        } label: {
+                            Label("Increase Size", systemImage: "plus")
+                        }
+                    }
+#else
                     Slider(value: sizeValueBinding, in: HomeCatalogLayoutStore.sizeRange, step: 0.05)
                         .tint(accent)
+#endif
                 }
             } header: {
                 Text("Size")
@@ -343,14 +442,14 @@ private struct CatalogLayoutEditorView: View {
         Binding(
             get: { layoutStore.override(for: catalog.id).sizeScale != nil },
             set: { isOn in
-                layoutStore.setSizeScale(isOn ? globalCardScale : nil, for: catalog.id)
+                layoutStore.setSizeScale(isOn ? effectiveGlobalCardScale : nil, for: catalog.id)
             }
         )
     }
 
     private var sizeValueBinding: Binding<Double> {
         Binding(
-            get: { layoutStore.override(for: catalog.id).sizeScale ?? globalCardScale },
+            get: { layoutStore.override(for: catalog.id).sizeScale ?? effectiveGlobalCardScale },
             set: { layoutStore.setSizeScale($0, for: catalog.id) }
         )
     }

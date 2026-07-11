@@ -7,6 +7,78 @@ struct CatalogsSettingsView: View {
     @State private var editMode = EditMode.active
     
     var body: some View {
+        catalogsContent
+            .navigationTitle("Catalogs")
+            .accessibilityIdentifier("tv.settings.catalogs.screen")
+            .eclipseSettingsStyle()
+#if !os(tvOS)
+            .environment(\.editMode, $editMode)
+#endif
+            .onAppear {
+                StremioAddonManager.shared.loadAddons()
+            }
+    }
+
+    @ViewBuilder
+    private var catalogsContent: some View {
+#if os(tvOS)
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 22) {
+                Text("Content Catalogs")
+                    .font(.title2.weight(.semibold))
+
+                ForEach(Array(catalogManager.visibleCatalogs.enumerated()), id: \.element.id) { index, catalog in
+                    HStack(spacing: 22) {
+                        catalogIdentity(catalog)
+
+                        Spacer(minLength: 20)
+
+                        Toggle("Enabled", isOn: Binding(
+                            get: { catalogManager.isCatalogEffectivelyEnabled(catalog) },
+                            set: { _ in catalogManager.toggleCatalog(id: catalog.id) }
+                        ))
+                        .labelsHidden()
+                        .tint(accentColorManager.currentAccentColor)
+                        .accessibilityLabel("Enable \(catalog.name)")
+
+                        Button {
+                            moveCatalog(at: index, by: -1)
+                        } label: {
+                            Label("Move Up", systemImage: "chevron.up")
+                        }
+                        .disabled(index == 0)
+                        .accessibilityIdentifier("tv.catalog.\(catalog.id).moveUp")
+
+                        Button {
+                            moveCatalog(at: index, by: 1)
+                        } label: {
+                            Label("Move Down", systemImage: "chevron.down")
+                        }
+                        .disabled(index == catalogManager.visibleCatalogs.count - 1)
+                        .accessibilityIdentifier("tv.catalog.\(catalog.id).moveDown")
+                    }
+                    .padding(.horizontal, 30)
+                    .padding(.vertical, 22)
+                    .background(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(Color.white.opacity(0.075))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.10), lineWidth: 1)
+                    )
+                    .focusSection()
+                }
+
+                Text("Enable or disable content catalogs and use the arrow buttons to reorder them. The order here determines the order on your home screen.")
+                    .font(.footnote)
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 8)
+            }
+            .padding(.horizontal, 70)
+            .padding(.vertical, 34)
+        }
+#else
         List {
             Section {
                 ForEach(catalogManager.visibleCatalogs) { catalog in
@@ -42,6 +114,7 @@ struct CatalogsSettingsView: View {
                             set: { _ in catalogManager.toggleCatalog(id: catalog.id) }
                         ))
                         .tint(accentColorManager.currentAccentColor)
+
                     }
                 }
                 .onMove(perform: catalogManager.moveVisibleCatalog)
@@ -53,9 +126,42 @@ struct CatalogsSettingsView: View {
             .eclipseExperimentalSettingsRows()
             .background(EclipseScrollTracker())
         }
-        .navigationTitle("Catalogs")
-        .eclipseSettingsStyle()
-        .environment(\.editMode, $editMode)
+#endif
+    }
+
+    private func catalogIdentity(_ catalog: Catalog) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(catalog.name)
+                .font(.headline)
+
+            HStack(spacing: 6) {
+                Text(sourceText(for: catalog))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+
+                if catalogManager.isCatalogLockedByPerformanceMode(catalog) {
+                    Image(systemName: "lock.fill")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+
+                if catalog.displayStyle != .standard {
+                    Text("\u{00B7} \(displayStyleText(for: catalog.displayStyle))")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+    }
+
+    private func moveCatalog(at index: Int, by offset: Int) {
+        let destination = index + offset
+        let catalogs = catalogManager.visibleCatalogs
+        guard catalogs.indices.contains(index), catalogs.indices.contains(destination) else { return }
+        catalogManager.moveVisibleCatalog(
+            from: IndexSet(integer: index),
+            to: offset < 0 ? destination : destination + 1
+        )
     }
 
     private func sourceText(for catalog: Catalog) -> String {

@@ -266,7 +266,7 @@ private struct KanzenTrackerSettingsView: View {
             Spacer()
 
             if isLoading {
-                ProgressView()
+                EclipseLoadingIndicator()
             } else {
                 Button("Import", action: action)
                     .font(.caption.weight(.semibold))

@@ -375,7 +375,7 @@ enum AidokuBackupBridge {
     }
 
     private static func validateArchivePaths(at url: URL) throws {
-        guard let archive = Archive(url: url, accessMode: .read) else {
+        guard let archive = try? Archive(url: url, accessMode: .read, pathEncoding: nil) else {
             throw AidokuSourceError.missingPayload
         }
         var totalUncompressed: UInt64 = 0
@@ -546,7 +546,7 @@ enum AidokuNetworkClient {
 final class AidokuSourceManager: ObservableObject {
     static let shared = AidokuSourceManager()
 
-    static let maxPackageBytes: UInt64 = 80 * 1024 * 1024
+    nonisolated static let maxPackageBytes: UInt64 = 80 * 1024 * 1024
     static let rootDirectory = FileManager.default
         .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("KanzenAidoku", isDirectory: true)
@@ -1075,7 +1075,7 @@ final class AidokuSourceManager: ObservableObject {
             throw AidokuSourceError.packageTooLarge
         }
 
-        guard let archive = Archive(url: url, accessMode: .read) else {
+        guard let archive = try? Archive(url: url, accessMode: .read, pathEncoding: nil) else {
             throw AidokuSourceError.missingPayload
         }
 
@@ -1244,7 +1244,7 @@ final class AidokuSourceManager: ObservableObject {
             localURL = cacheURL
         }
 
-        guard let archive = Archive(url: localURL, accessMode: .read),
+        guard let archive = try? Archive(url: localURL, accessMode: .read, pathEncoding: nil),
               let entry = archive[filePath] else {
             throw AidokuSourceError.unsupportedPage
         }
