@@ -77,7 +77,7 @@ Get the TestFlight build (Recommended for most iOS users, easiest to download an
 
 https://testflight.apple.com/join/FDXvrxVg
 
-AltStore and SideStore users can add this source:
+AltStore and SideStore users can add this source (not recommended, discontinued):
 
 ```text
 https://raw.githubusercontent.com/Soupy-dev/Eclipse/main/altsource.json
@@ -92,8 +92,9 @@ https://raw.githubusercontent.com/Soupy-dev/Eclipse/main/altsource.json
 
 - MPV is the advanced in-app player and is default
 - VLC is not supported anymore, but may come back if v4 is good.
-- Use GitHub Issues for feature requests and bug reports.
+- Use GitHub Issues or the discord for feature requests and bug reports.
 - Development started in December 2025
+- Ipas are no longer supported
 
 
 ## Bring Your Own Sources
