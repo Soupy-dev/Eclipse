@@ -49,6 +49,10 @@ final class HLSDownloader: @unchecked Sendable {
     private var workerTask: Task<Void, Never>?
     private var didFinish = false
     private let stateLock = NSLock()
+    private let transportStateLock = NSLock()
+    private var nextRequestStartByHost: [String: TimeInterval] = [:]
+    private var rateLimitedUntilByHost: [String: TimeInterval] = [:]
+    private var rateLimitCountByHost: [String: Int] = [:]
     private let session: URLSession
     #if canImport(UIKit)
     private var backgroundTaskId: UIBackgroundTaskIdentifier = .invalid
@@ -171,7 +175,7 @@ final class HLSDownloader: @unchecked Sendable {
                 let encryptionKey = self.parseEncryptionKey(from: mediaPlaylistContent, baseURL: mediaPlaylistURL)
                 var keyData: Data? = nil
                 if let encKey = encryptionKey, encKey.method == "AES-128" {
-                    keyData = try await self.fetchData(
+                    keyData = try await self.fetchDataWithRetry(
                         url: encKey.keyURL,
                         maximumResponseBytes: Self.maximumEncryptionKeyBytes
                     )
@@ -253,9 +257,11 @@ final class HLSDownloader: @unchecked Sendable {
     private static let maximumPlaylistBytes = 5 * 1024 * 1024
     private static let maximumEncryptionKeyBytes = 64 * 1024
     private static let maximumMediaObjectBytes = 128 * 1024 * 1024
+    private static let minimumRequestStartInterval: TimeInterval = 0.15
+    private static let maximumRetryAfterSeconds: TimeInterval = 30
     
     private func fetchPlaylist(url: URL) async throws -> String {
-        let data = try await fetchData(
+        let data = try await fetchDataWithRetry(
             url: url,
             maximumResponseBytes: Self.maximumPlaylistBytes
         )
@@ -270,6 +276,7 @@ final class HLSDownloader: @unchecked Sendable {
         maximumResponseBytes: Int = HLSDownloader.maximumMediaObjectBytes
     ) async throws -> Data {
         try checkCancelled()
+        try await waitForRequestStartSlot(for: url)
 
         let effectiveHeaders = CloudflareBypassManager.shared.headersByApplyingCachedBypass(headers, for: url)
         var request = URLRequest(url: url)
@@ -290,14 +297,157 @@ final class HLSDownloader: @unchecked Sendable {
                 body: bodyPreview,
                 headers: CloudflareBypassManager.headersDictionary(from: httpResponse)
             ) {
-                throw HLSError.cloudflareVerificationRequired
+                let rejectedCookieHeader = effectiveHeaders.first {
+                    $0.key.caseInsensitiveCompare("Cookie") == .orderedSame
+                }?.value
+                throw HLSError.cloudflareVerificationRequired(
+                    url: httpResponse.url ?? url,
+                    rejectedCookieHeader: rejectedCookieHeader
+                )
+            }
+            if httpResponse.statusCode == 429 {
+                throw HLSError.rateLimited(
+                    retryAfterSeconds: Self.retryAfterSeconds(from: httpResponse)
+                )
             }
             if !(200...299).contains(httpResponse.statusCode) {
                 throw HLSError.httpError(statusCode: httpResponse.statusCode)
             }
+            clearRateLimitState(for: url)
         }
         
         return data
+    }
+
+    /// HLS CDNs commonly return a generic Cloudflare 429 page when segments arrive too quickly.
+    /// That response has no human-solvable widget, so retry it as transport backpressure instead
+    /// of routing it into Cloudflare verification. The shared pacing slot also covers playlists,
+    /// keys, and init objects so a resumed download cannot immediately recreate the same burst.
+    private func fetchDataWithRetry(
+        url: URL,
+        maximumResponseBytes: Int = HLSDownloader.maximumMediaObjectBytes,
+        maxRetries: Int = 3
+    ) async throws -> Data {
+        let attemptCount = max(maxRetries, 1)
+        var lastError: Error = HLSError.unknownError
+
+        for attempt in 0..<attemptCount {
+            do {
+                return try await fetchData(url: url, maximumResponseBytes: maximumResponseBytes)
+            } catch {
+                lastError = error
+                if isCancellationError(error) { throw currentCancellationError() }
+
+                if let hlsError = error as? HLSError {
+                    switch hlsError {
+                    case .cloudflareVerificationRequired:
+                        // Explicit Turnstile/cf-chl/DDoS-Guard responses need browser recovery;
+                        // repeated URLSession requests only add load and can trigger a 429.
+                        throw hlsError
+                    case .rateLimited(let retryAfterSeconds):
+                        let delay = recordRateLimit(for: url, retryAfterSeconds: retryAfterSeconds)
+                        if attempt < attemptCount - 1 {
+                            Logger.shared.log(
+                                "HLS: CDN rate limit host=\(url.host?.lowercased() ?? "unknown") retryIn=\(String(format: "%.1f", delay))s attempt=\(attempt + 1)/\(attemptCount)",
+                                type: "Download"
+                            )
+                        }
+                        // The next iteration waits on the host's reserved rate-limit slot.
+                        continue
+                    default:
+                        break
+                    }
+                }
+
+                if attempt < attemptCount - 1 {
+                    let delay = min(pow(2.0, Double(attempt)), 8)
+                    try await Task.sleep(nanoseconds: Self.nanoseconds(for: delay))
+                    try checkCancelled()
+                }
+            }
+        }
+
+        throw lastError
+    }
+
+    private func waitForRequestStartSlot(for url: URL) async throws {
+        let scheduledStart = reserveRequestStart(for: url)
+        let delay = max(0, scheduledStart - ProcessInfo.processInfo.systemUptime)
+        if delay > 0 {
+            try await Task.sleep(nanoseconds: Self.nanoseconds(for: delay))
+            try checkCancelled()
+        }
+    }
+
+    private func reserveRequestStart(for url: URL) -> TimeInterval {
+        let host = url.host?.lowercased() ?? "unknown"
+        let now = ProcessInfo.processInfo.systemUptime
+        transportStateLock.lock()
+        defer { transportStateLock.unlock() }
+        let scheduledStart = max(
+            now,
+            max(
+                nextRequestStartByHost[host] ?? now,
+                rateLimitedUntilByHost[host] ?? now
+            )
+        )
+        nextRequestStartByHost[host] = scheduledStart + Self.minimumRequestStartInterval
+        return scheduledStart
+    }
+
+    private func recordRateLimit(for url: URL, retryAfterSeconds: TimeInterval?) -> TimeInterval {
+        let host = url.host?.lowercased() ?? "unknown"
+        let now = ProcessInfo.processInfo.systemUptime
+
+        transportStateLock.lock()
+        let count = min((rateLimitCountByHost[host] ?? 0) + 1, 4)
+        rateLimitCountByHost[host] = count
+        let exponentialDelay = pow(2.0, Double(count - 1))
+        let serverDelay = min(max(retryAfterSeconds ?? 0, 0), Self.maximumRetryAfterSeconds)
+        let delay = max(exponentialDelay, serverDelay)
+        let limitedUntil = now + delay
+        rateLimitedUntilByHost[host] = max(rateLimitedUntilByHost[host] ?? 0, limitedUntil)
+        nextRequestStartByHost[host] = max(nextRequestStartByHost[host] ?? 0, limitedUntil)
+        transportStateLock.unlock()
+
+        return delay
+    }
+
+    private func clearRateLimitState(for url: URL) {
+        let host = url.host?.lowercased() ?? "unknown"
+        transportStateLock.lock()
+        rateLimitedUntilByHost.removeValue(forKey: host)
+        rateLimitCountByHost.removeValue(forKey: host)
+        transportStateLock.unlock()
+    }
+
+    private static func retryAfterSeconds(from response: HTTPURLResponse) -> TimeInterval? {
+        guard let rawValue = response.value(forHTTPHeaderField: "Retry-After")?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawValue.isEmpty else { return nil }
+
+        if let seconds = TimeInterval(rawValue) {
+            return min(max(seconds, 0), maximumRetryAfterSeconds)
+        }
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        for format in [
+            "EEE',' dd MMM yyyy HH':'mm':'ss z",
+            "EEEE',' dd-MMM-yy HH':'mm':'ss z",
+            "EEE MMM d HH':'mm':'ss yyyy"
+        ] {
+            formatter.dateFormat = format
+            if let date = formatter.date(from: rawValue) {
+                return min(max(date.timeIntervalSinceNow, 0), maximumRetryAfterSeconds)
+            }
+        }
+        return nil
+    }
+
+    private static func nanoseconds(for seconds: TimeInterval) -> UInt64 {
+        UInt64((max(seconds, 0) * 1_000_000_000).rounded(.up))
     }
     
     // MARK: - Playlist Parsing
@@ -463,7 +613,7 @@ final class HLSDownloader: @unchecked Sendable {
             // fresh run - never re-appended on resume.
             if !isResuming, let initURL = initSegmentURL {
                 try checkSystemBackoff()
-                let initData = try await fetchData(url: initURL)
+                let initData = try await fetchDataWithRetry(url: initURL)
                 try checkCancelled()
                 let decrypted = try decryptIfNeeded(data: initData, key: encryptionKey, keyData: keyData, segmentIndex: -1)
                 fileHandle.write(decrypted)
@@ -503,25 +653,7 @@ final class HLSDownloader: @unchecked Sendable {
     }
     
     private func fetchSegmentWithRetry(url: URL, maxRetries: Int) async throws -> Data {
-        var lastError: Error = HLSError.unknownError
-        
-        for attempt in 0..<maxRetries {
-            do {
-                return try await fetchData(url: url)
-            } catch {
-                lastError = error
-                if isCancellationError(error) { throw currentCancellationError() }
-                
-                // Wait before retrying (exponential backoff)
-                if attempt < maxRetries - 1 {
-                    let delay = UInt64(pow(2.0, Double(attempt))) * 1_000_000_000
-                    try await Task.sleep(nanoseconds: delay)
-                    try checkCancelled()
-                }
-            }
-        }
-        
-        throw lastError
+        try await fetchDataWithRetry(url: url, maxRetries: maxRetries)
     }
     
     // MARK: - AES-128 Decryption
@@ -658,7 +790,7 @@ final class HLSDownloader: @unchecked Sendable {
     private func isResumableInterruption(_ error: Error) -> Bool {
         if let hlsError = error as? HLSError {
             switch hlsError {
-            case .cancelled, .backgroundTimeExpired, .systemBackoff:
+            case .cancelled, .backgroundTimeExpired, .systemBackoff, .rateLimited:
                 return true
             default:
                 return false
@@ -727,8 +859,9 @@ enum HLSError: LocalizedError {
     case noSegmentsFound
     case invalidPlaylistData
     case httpError(statusCode: Int)
+    case rateLimited(retryAfterSeconds: TimeInterval?)
     case decryptionFailed(status: Int)
-    case cloudflareVerificationRequired
+    case cloudflareVerificationRequired(url: URL, rejectedCookieHeader: String?)
     case cancelled
     case backgroundTimeExpired
     case couldNotCreateOutput
@@ -745,6 +878,11 @@ enum HLSError: LocalizedError {
             return "Could not read HLS playlist data"
         case .httpError(let code):
             return "HTTP error \(code) while downloading HLS content"
+        case .rateLimited(let retryAfterSeconds):
+            if let retryAfterSeconds {
+                return "HLS source rate limited requests (retry after \(Int(ceil(retryAfterSeconds))) seconds)"
+            }
+            return "HLS source rate limited requests"
         case .decryptionFailed(let status):
             return "AES-128 decryption failed (status: \(status))"
         case .cloudflareVerificationRequired:

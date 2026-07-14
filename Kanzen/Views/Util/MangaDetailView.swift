@@ -47,7 +47,11 @@ struct MangaDetailView: View {
 
     private var heroHeight: CGFloat {
         if ExperimentalFeatureState.isEnabledAtLaunch {
-            return designMetrics.detailHeroHeight(screenHeight: UIScreen.main.bounds.height, isIPad: isIPad)
+            let measuredHeight = designMetrics.detailHeroHeight(
+                screenHeight: UIScreen.main.bounds.height,
+                isIPad: isIPad
+            )
+            return isIPad ? min(measuredHeight, 600) : measuredHeight
         }
         let mediaStyleHeight: CGFloat = isIPad ? 680 : 550
         let rotationSafeLimit = max(isIPad ? 520 : 360, UIScreen.main.bounds.height * 0.78)
@@ -189,11 +193,15 @@ struct MangaDetailView: View {
             VStack(alignment: .leading, spacing: experimental ? designMetrics.sectionSpacing : 18) {
                 headerSection
                 primaryActionSection
-                    .padding(.horizontal, 16)
+                    .frame(maxWidth: isIPad ? 880 : .infinity)
+                    .padding(.horizontal, isIPad ? 32 : 16)
+                    .frame(maxWidth: .infinity)
 
                 ForEach(visibleReaderDetailElements) { element in
                     readerDetailElementView(element)
-                        .padding(.horizontal, 16)
+                        .frame(maxWidth: isIPad ? 880 : .infinity)
+                        .padding(.horizontal, isIPad ? 32 : 16)
+                        .frame(maxWidth: .infinity)
                 }
             }
             .padding(.bottom, experimental ? 40 : 24)
@@ -218,6 +226,7 @@ struct MangaDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .ignoresSafeArea(edges: .top)
         .background(readerDetailBackground.ignoresSafeArea())
+        .preferredColorScheme(isIPad ? .dark : nil)
         .sheet(isPresented: $showAddToCollection) {
             MangaAddToCollectionView(item: libraryItem)
                 .environmentObject(libraryManager)
@@ -277,7 +286,7 @@ struct MangaDetailView: View {
             let textAlignment: HorizontalAlignment = experimental ? .center : .leading
             let posterWidth = experimental ? min(viewportWidth * 0.84, heroHeight * 0.66) : max(viewportWidth - 20, 0)
             let posterHeight = experimental ? max(heroHeight * 0.74, 270) : max(heroHeight - 26, 260)
-            let titleSize: CGFloat = experimental ? (isIPad ? 48 : 40) : (isIPad ? 40 : 32)
+            let titleSize: CGFloat = experimental ? (isIPad ? 42 : 40) : (isIPad ? 40 : 32)
             let gradientColors: [Color] = experimental ? [
                 Color.black.opacity(0.10),
                 readerHeroBlendColor.opacity(0.36),
@@ -290,6 +299,10 @@ struct MangaDetailView: View {
             ]
 
             ZStack(alignment: contentAlignment) {
+                if isIPad && experimental {
+                    readerHeroBlendColor.opacity(0.58)
+                }
+
                 // Modern: a sharp full-bleed cover banner whose extracted color
                 // drives the gradient + bleed, exactly like a media hero. Legacy:
                 // blurred fill behind a centered cover poster.
@@ -299,7 +312,7 @@ struct MangaDetailView: View {
                         headerAmbientColor = Color.ambientColor(from: result.image)
                     }
                     .resizable()
-                    .scaledToFill()
+                    .aspectRatio(contentMode: isIPad && experimental ? .fit : .fill)
                     .frame(width: viewportWidth, height: stretchedHeight)
                     .clipped()
                     .blur(radius: experimental ? 0 : 18)
@@ -482,12 +495,12 @@ struct MangaDetailView: View {
             .replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
 
         if ExperimentalFeatureState.isEnabledAtLaunch {
-            VStack(alignment: .center, spacing: 8) {
+            VStack(alignment: isIPad ? .leading : .center, spacing: 8) {
                 Text(cleaned)
                     .font(isIPad ? .title3 : .body)
                     .lineSpacing(4)
                     .foregroundColor(.white.opacity(0.86))
-                    .multilineTextAlignment(.center)
+                    .multilineTextAlignment(isIPad ? .leading : .center)
                     .lineLimit(expandedDescription ? nil : 5)
                     .onTapGesture {
                         withAnimation { expandedDescription.toggle() }

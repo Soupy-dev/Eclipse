@@ -18,7 +18,7 @@ struct EpisodeCell: View {
     
     @State private var isWatched: Bool = false
     @State private var progressValue: Double = 0
-    @AppStorage("horizontalEpisodeList") private var horizontalEpisodeList: Bool = false
+    @AppStorage(MediaDetailPlatformDefaults.horizontalEpisodeListKey) private var horizontalEpisodeList = MediaDetailPlatformDefaults.prefersHorizontalEpisodes
 
     private var horizontalCellWidth: CGFloat { 240 * iPadScaleSmall }
     private var horizontalImageHeight: CGFloat { 135 * iPadScaleSmall }
@@ -41,9 +41,125 @@ struct EpisodeCell: View {
     var body: some View {
         if horizontalEpisodeList {
             horizontalLayout
+        } else if isIPad {
+            iPadGridLayout
         } else {
             verticalLayout
         }
+    }
+
+    @MainActor private var iPadGridLayout: some View {
+        Button(action: onTap) {
+            VStack(alignment: .leading, spacing: 10) {
+                ZStack(alignment: .topTrailing) {
+                    KFImage(URL(string: episode.fullStillURL ?? ""))
+                        .placeholder {
+                            Rectangle()
+                                .fill(Color.white.opacity(0.08))
+                                .overlay(
+                                    Image(systemName: "tv")
+                                        .font(.title2)
+                                        .foregroundColor(.white.opacity(0.65))
+                                )
+                        }
+                        .resizable()
+                        .aspectRatio(16/9, contentMode: .fill)
+                        .frame(maxWidth: .infinity)
+                        .clipped()
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                    if isWatched {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 12, weight: .heavy))
+                            .foregroundColor(.white)
+                            .frame(width: 25, height: 25)
+                            .background(Circle().fill(Color.blue))
+                            .overlay(Circle().stroke(Color.white.opacity(0.8), lineWidth: 1))
+                            .padding(9)
+                    }
+                }
+                .overlay(alignment: .bottom) {
+                    if progressValue > 0 && progressValue < 0.85 {
+                        ProgressView(value: progressValue)
+                            .progressViewStyle(LinearProgressViewStyle(tint: .accentColor))
+                            .frame(height: 4)
+                            .padding(.horizontal, 8)
+                            .padding(.bottom, 7)
+                    }
+                }
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(
+                            isSelected ? Color.accentColor : Color.white.opacity(0.10),
+                            lineWidth: isSelected ? 2 : 1
+                        )
+                )
+                .shadow(color: .black.opacity(0.26), radius: 8, x: 0, y: 4)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 7) {
+                        Text("Episode \(episode.episodeNumber)")
+                            .font(.caption.weight(.medium))
+                            .foregroundColor(.white.opacity(0.62))
+
+                        if isFiller {
+                            fillerBadge
+                        }
+
+                        Spacer(minLength: 8)
+
+                        if episode.voteAverage > 0 {
+                            Label(
+                                String(format: "%.1f", episode.voteAverage),
+                                systemImage: "star.fill"
+                            )
+                            .labelStyle(.titleAndIcon)
+                            .foregroundColor(.white.opacity(0.72))
+                        }
+
+                        if let runtime = episode.runtime, runtime > 0 {
+                            Text(episode.runtimeFormatted)
+                                .foregroundColor(.white.opacity(0.72))
+                        }
+                    }
+                    .font(.caption2)
+
+                    if !episode.name.isEmpty {
+                        Text(episode.name)
+                            .font(.headline)
+                            .foregroundColor(.white)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                    }
+
+                    if let overview = episode.overview, !overview.isEmpty {
+                        Text(overview)
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.58))
+                            .lineLimit(3)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.horizontal, 2)
+            }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+            .contentShape(Rectangle())
+        }
+        .modifier(EpisodePlayButtonModifier())
+#if !os(tvOS)
+        .contextMenu {
+            episodeContextMenu
+        }
+#endif
+        .onAppear {
+            progressValue = progress
+            loadEpisodeProgress()
+        }
+        .onReceive(ProgressManager.shared.$episodeProgressList) { entries in
+            handleEpisodeProgressListChange(entries)
+        }
+        .preferredColorScheme(.dark)
     }
     
     @MainActor private var horizontalLayout: some View {

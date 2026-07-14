@@ -23,6 +23,52 @@ private extension UIViewController {
 }
 #endif
 
+private struct ServicesSheetPresentationAnchor: UIViewRepresentable {
+    let onResolve: (UIViewController) -> Void
+
+    func makeUIView(context: Context) -> ProbeView {
+        let view = ProbeView()
+        view.onResolve = onResolve
+        return view
+    }
+
+    func updateUIView(_ uiView: ProbeView, context: Context) {
+        uiView.onResolve = onResolve
+        uiView.resolveIfAttached()
+    }
+
+    final class ProbeView: UIView {
+        var onResolve: ((UIViewController) -> Void)?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            resolveIfAttached()
+        }
+
+        func resolveIfAttached() {
+            guard window != nil else { return }
+            var responder: UIResponder? = self
+            var nearestController: UIViewController?
+            var presentedSheetController: UIViewController?
+            while let current = responder?.next {
+                if let controller = current as? UIViewController {
+                    nearestController = nearestController ?? controller
+                    if controller.presentingViewController != nil {
+                        presentedSheetController = controller
+                        break
+                    }
+                }
+                responder = current
+            }
+            guard let controller = presentedSheetController ?? nearestController else { return }
+            DispatchQueue.main.async { [weak self, weak controller] in
+                guard let controller else { return }
+                self?.onResolve?(controller)
+            }
+        }
+    }
+}
+
 struct StreamOption: Identifiable {
     let id = UUID()
     let name: String
@@ -62,6 +108,129 @@ struct ServiceSubtitleTrack: Hashable {
     let headers: [String: String]?
 }
 
+/// A Service search hit is only a title/details link. The Stremio-style sheet must resolve that
+/// link into real stream metadata before it can truthfully apply the user's language/quality
+/// rules and present the row as a stream.
+private struct StremioStyleResolvedServiceStream: Identifiable {
+    let id = UUID()
+    let service: Service
+    let result: SearchItem
+    let option: StreamOption
+    let topLevelSubtitles: [String]?
+    let resolvedAt: Date
+}
+
+private enum StremioStyleServiceResolutionState {
+    case queued
+    case checking
+    case resolved([StremioStyleResolvedServiceStream])
+    case failed
+    case verificationRequired(URL)
+
+    var isPending: Bool {
+        switch self {
+        case .queued, .checking:
+            return true
+        case .resolved, .failed, .verificationRequired:
+            return false
+        }
+    }
+}
+
+/// Each probe owns a separate JavaScript context. ServiceSandboxState tracks one live operation
+/// per controller, so sharing a controller across candidates would let one cancellation detach a
+/// different candidate's callbacks.
+private final class StremioStyleServiceResolutionWork {
+    let id = UUID()
+    let key: String
+    let controller: JSController
+    var streamRequest: JSCallbackDeadline<ServiceStreamExtractionResult>?
+
+    init(key: String, service: Service) {
+        self.key = key
+        controller = JSController()
+        controller.loadScript(service.jsScript, service: service)
+    }
+
+    func cancel() {
+        if streamRequest?.cancel() != true {
+            controller.cancelPendingServiceOperation(reason: "stremio-style-service-resolution-cancelled")
+        }
+        streamRequest = nil
+    }
+}
+
+@MainActor
+final class AutoModeRetrySession: ObservableObject {
+    private(set) var id = UUID()
+    private(set) var targetToken: String?
+    private(set) var attemptedSourceIds: Set<String> = []
+    private(set) var retryCount = 0
+    private(set) var lastFailureMessage: String?
+
+    func reset(targetToken: String? = nil) {
+        id = UUID()
+        self.targetToken = targetToken
+        attemptedSourceIds.removeAll()
+        retryCount = 0
+        lastFailureMessage = nil
+    }
+
+    func recoveryIdentity(for targetToken: String) -> AutoModePlaybackRecoveryIdentity? {
+        guard self.targetToken == targetToken else { return nil }
+        return AutoModePlaybackRecoveryIdentity(sessionID: id, targetToken: targetToken)
+    }
+
+    func matches(_ identity: AutoModePlaybackRecoveryIdentity) -> Bool {
+        id == identity.sessionID && targetToken == identity.targetToken
+    }
+
+    func recordAttempt(sourceId: String) {
+        attemptedSourceIds.insert(sourceId)
+    }
+
+    func recordPlaybackFailure(_ report: PlaybackFailureReport) {
+        attemptedSourceIds.insert(report.context.sourceId)
+        retryCount = max(retryCount, report.context.retryCount + 1)
+        lastFailureMessage = "\(report.context.sourceName): \(report.message)"
+    }
+
+    func recordStatus(sourceName: String, message: String) {
+        lastFailureMessage = "\(sourceName): \(message)"
+    }
+}
+
+struct AutoModePlaybackRecoveryIdentity: Equatable {
+    let sessionID: UUID
+    let targetToken: String
+}
+
+enum AutoModeMediaTargetToken {
+    static func make(
+        tmdbID: Int,
+        isMovie: Bool,
+        episode: TMDBEpisode?,
+        playbackContext: EpisodePlaybackContext?
+    ) -> String {
+        func value(_ number: Int?) -> String { number.map(String.init) ?? "-" }
+        let context = playbackContext
+        return [
+            isMovie ? "movie" : "episode",
+            String(tmdbID),
+            value(episode?.seasonNumber),
+            value(episode?.episodeNumber),
+            value(context?.localSeasonNumber),
+            value(context?.localEpisodeNumber),
+            value(context?.anilistMediaId),
+            value(context?.kitsuMediaId),
+            value(context?.resolvedTMDBSeasonNumber),
+            value(context?.resolvedTMDBEpisodeNumber),
+            context?.isSpecial == true ? "special" : "regular",
+            context?.titleOnlySearch == true ? "title-only" : "episode-search"
+        ].joined(separator: ":")
+    }
+}
+
 struct PlayerResolvedPlaybackRequest {
     let url: URL
     let preset: PlayerPreset
@@ -77,6 +246,7 @@ struct PlayerResolvedPlaybackRequest {
     let originalTMDBEpisodeNumber: Int?
     let episodePlaybackContext: EpisodePlaybackContext?
     let launchContext: PlaybackLaunchContext?
+    var autoModeRecoveryIdentity: AutoModePlaybackRecoveryIdentity? = nil
 }
 
 @MainActor
@@ -131,6 +301,8 @@ final class ModulesSearchResultsViewModel: ObservableObject {
     var pendingJSController: JSController?
     var pendingStreamURL: String?
     var pendingStreamName: String?
+    var pendingStreamLanguageHints: [String] = []
+    var pendingStreamMetadataHints: [String] = []
     var pendingHeaders: [String: String]?
     var pendingSubtitleHeadersByURL: [String: [String: String]]?
     /// Show/details URL from the selected service search result. This is the URL accepted by
@@ -164,6 +336,8 @@ final class ModulesSearchResultsViewModel: ObservableObject {
         pendingService = nil
         pendingServiceHref = nil
         pendingStreamName = nil
+        pendingStreamLanguageHints = []
+        pendingStreamMetadataHints = []
         pendingSubtitleHeadersByURL = nil
         pendingPlaybackAutoMode = false
         pendingPlaybackRetryCount = 0
@@ -183,6 +357,8 @@ struct ModulesSearchResultsSheet: View {
     /// Non-nil for anime to force E## format
     let animeSeasonTitle: String?
     let posterPath: String?
+    /// TMDB's original language, used by the optional original-audio stream filter.
+    var originalAudioLanguage: String? = nil
     /// IMDB ID for Stremio addon lookups (tt-prefixed)
     var imdbId: String? = nil
     /// Original TMDB season/episode numbers for anime (before AniList restructuring), used by TheIntroDB.
@@ -195,12 +371,37 @@ struct ModulesSearchResultsSheet: View {
     var downloadMode: Bool = false
     /// When true, show only the compact Auto Mode runner instead of the full results picker.
     var autoModeOnly: Bool = false
+    /// Explicit player source changes must remain manual even when global Auto Mode is enabled.
+    /// This does not disable the separate Auto-Select Episodes preference.
+    var ignoresAutoMode: Bool = false
+    /// Watch Together can request automatic local source resolution without changing the user's
+    /// global Auto Mode preference. It still uses the normal source ordering and matching rules.
+    var forceAutomaticPlayback: Bool = false
+    /// Caller-owned state that survives a dismissed Auto Mode sheet so a failed player can
+    /// resume at the next source instead of starting the same provider again from retry zero.
+    var autoModeRetrySession: AutoModeRetrySession? = nil
+    /// Immutable identity for the caller's exact playback target. Unlike the session reference,
+    /// this value cannot drift if another tap resets that shared session while resolution is live.
+    var autoModeRecoveryIdentity: AutoModePlaybackRecoveryIdentity? = nil
+    /// Live recovery owner used after the Auto Mode sheet has been dismissed for playback.
+    var onAutoModePlaybackFailure: ((PlaybackFailureReport, AutoModePlaybackRecoveryIdentity) -> Void)? = nil
+    /// An in-player Watch Together transition is not the shared media yet, but it still requires
+    /// fail-closed anime title/context matching before the coordinator commits that revision.
+    var watchTogetherExactHandoff: Bool = false
     /// Called when a download has been enqueued (for Download All flow)
     var onDownloadEnqueued: (() -> Void)? = nil
     /// Called when user taps "Skip" (for Download All flow)
     var onSkipRequested: (() -> Void)? = nil
     /// When provided, selecting a source resolves a request instead of presenting a new player.
     var onResolvedPlaybackRequest: ((PlayerResolvedPlaybackRequest) -> Void)? = nil
+    /// Called synchronously after a source has been resolved but before this sheet begins
+    /// dismissing. In-player replacements use this to fence callbacks from the outgoing item
+    /// during the short dismissal-to-resolution handoff without treating a cancelled sheet as a
+    /// committed source change.
+    var onPlaybackSelectionCommitted: (() -> Void)? = nil
+    /// Scopes legacy next-episode notifications to the detail window that launched playback.
+    /// UUID routing avoids waking a second Stage Manager window showing the same title.
+    var nextEpisodeNotificationRoute: UUID? = nil
     /// TMDB genre 16 (animation) hint, used to distinguish western cartoons from live action.
     var isAnimationGenre16: Bool = false
 
@@ -216,20 +417,65 @@ struct ModulesSearchResultsSheet: View {
     @State private var autoModeAttemptedSourceIds: Set<String> = []
     @State private var autoModeRetryScheduled = false
     @State private var autoModeLastFailureMessage: String?
+    @State private var autoModeSelectionTask: Task<Void, Never>?
+    @State private var isSheetActive = false
     @State private var autoModeDownloadTask: Task<Void, Never>?
     @State private var serviceStreamExtractionRequest: JSCallbackDeadline<ServiceStreamExtractionResult>?
     @State private var serviceStreamExtractionGeneration: UUID?
     @State private var showManualPicker = false
     @State private var sheetHostController: UIViewController?
     @AppStorage(ServicesSheetPresentationSettings.stremioStyleEnabledKey) private var stremioStyleSheetEnabled = ServicesSheetPresentationSettings.defaultStremioStyleEnabled
+    @AppStorage(ServicesResultRankingSettings.minimumSimilarityKey) private var storedServiceResultMinimumSimilarity = ServicesResultRankingSettings.defaultMinimumSimilarity
+    @AppStorage(ServicesResultRankingSettings.dropMismatchedResultsKey) private var dropMismatchedServiceResults = ServicesResultRankingSettings.defaultDropMismatchedResults
     @State private var selectedStremioStyleSourceId: String?
-    private static let autoModeInitialMatchThreshold = 0.85
+    @State private var thresholdEditorValue = ServicesResultRankingSettings.defaultMinimumSimilarity
+    @State private var manualSearchGeneration = UUID()
+    @State private var stremioStyleServiceResolutionGeneration = UUID()
+    @State private var stremioStyleServiceResolutionStates: [String: StremioStyleServiceResolutionState] = [:]
+    @State private var stremioStyleServiceResolutionWork: [UUID: StremioStyleServiceResolutionWork] = [:]
+    @State private var selectedResolvedServiceStream: StremioStyleResolvedServiceStream?
+    @State private var showingResolvedServiceStreamAlert = false
     private static let maxRetainedServiceResultsPerService = 300
     private static let maxVisibleServiceResultsPerService = 80
     private static let maxRetainedStremioStreamsPerAddon = 300
     private static let maxVisibleStremioStreamsPerAddon = 80
+    // Probes are intentionally bounded because timed-out provider networking can outlive its JS
+    // context. The larger ranked pool still lets resolution backfill past early rule-rejected hits.
+    private static let maxStremioStyleServiceCandidatesPerSource = 80
+    private static let maxStremioStyleServiceCandidatesPerSheet = 80
+    private static let maxConcurrentStremioStyleServiceResolutions = 2
+    private static let resolvedServiceStreamFreshness: TimeInterval = 120
+
+    private var activeAutoModeRetrySession: AutoModeRetrySession? {
+        guard let session = autoModeRetrySession,
+              let identity = autoModeRecoveryIdentity,
+              session.matches(identity) else {
+            return nil
+        }
+        return session
+    }
+
+    private var playbackRecoveryIdentityIsCurrent: Bool {
+        guard let identity = autoModeRecoveryIdentity else { return true }
+        return autoModeRetrySession?.matches(identity) == true
+    }
+
+    private var serviceResultMinimumSimilarity: Double {
+        ServicesResultRankingSettings.clampedMinimumSimilarity(storedServiceResultMinimumSimilarity)
+    }
+
+    private var shouldDropMismatchedServiceResults: Bool {
+        dropMismatchedServiceResults
+    }
 
     private var effectiveTitle: String { seasonTitleOverride ?? mediaTitle }
+    private var isForcedWatchTogetherAnimePlayback: Bool {
+        (forceAutomaticPlayback || watchTogetherExactHandoff)
+            && !isMovie
+            && (isAnimeContent
+                || animeSeasonTitle != nil
+                || episodePlaybackContext?.hasAnimeMediaId == true)
+    }
     private var playerMediaTitle: String {
         if isAnimeContent || animeSeasonTitle != nil {
             if let title = nonPlaceholderAnimeTitle(seasonTitleOverride) {
@@ -327,8 +573,31 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private var effectivePlaybackContext: EpisodePlaybackContext? {
-        guard let selectedEpisode else { return episodePlaybackContext }
-        return episodePlaybackContext?.forEpisodeNumber(selectedEpisode.episodeNumber)
+        guard let context = episodePlaybackContext,
+              let selectedEpisode else { return episodePlaybackContext }
+        if (forceAutomaticPlayback || watchTogetherExactHandoff),
+           isAnimeContent || animeSeasonTitle != nil || context.hasAnimeMediaId {
+            // Forced automatic anime playback is the Watch Together path. It must keep the
+            // exact carried context; retargeting a near match can turn a cross-cour handoff
+            // into the receiver's local S1E1.
+            guard context.localSeasonNumber == selectedEpisode.seasonNumber,
+                  context.localEpisodeNumber == selectedEpisode.episodeNumber else {
+                return nil
+            }
+            return context
+        }
+        if context.localSeasonNumber == selectedEpisode.seasonNumber,
+           context.localEpisodeNumber == selectedEpisode.episodeNumber {
+            // The context supplied by MediaDetail/Watch Together is already exact. Re-projecting
+            // it through a fallback episode number can corrupt an anime handoff into S1E1.
+            return context
+        }
+        guard !context.isSpecial,
+              context.localSeasonNumber == selectedEpisode.seasonNumber else {
+            // EpisodePlaybackContext cannot safely translate across anime seasons/cours.
+            return nil
+        }
+        return context.forEpisodeNumber(selectedEpisode.episodeNumber)
     }
 
     private var hasAnimeLookupContext: Bool {
@@ -377,13 +646,15 @@ struct ModulesSearchResultsSheet: View {
     private var stremioCatalogTitleCandidates: [String] {
         var candidates: [String] = []
         if hasAnimeLookupContext,
+           !isForcedWatchTogetherAnimePlayback,
            let originalTitle,
            !originalTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             candidates.append(originalTitle)
         }
         candidates.append(contentsOf: titleRankingCandidates())
         candidates.append(displayTitle)
-        if let fallbackAnimeSearchQuery {
+        if !isForcedWatchTogetherAnimePlayback,
+           let fallbackAnimeSearchQuery {
             candidates.append(fallbackAnimeSearchQuery)
         }
         if let episodeName = selectedEpisode?.name, !episodeName.isEmpty {
@@ -404,11 +675,14 @@ struct ModulesSearchResultsSheet: View {
             let total = viewModel.totalServicesCount + stremioManager.activeAddons.count
             return "Searching... (\(completed)/\(total))"
         }
+        if isResolvingStremioStyleServiceStreams {
+            return "Checking streams against Extra Service Settings..."
+        }
         return "Search complete"
     }
     
     private var searchStatusColor: Color {
-        (viewModel.isSearching || viewModel.isSearchingStremio) ? .secondary : .green
+        isStremioStyleSearchActive ? .secondary : .green
     }
     
     private func lowerQualityResultsText(count: Int) -> String {
@@ -594,6 +868,9 @@ struct ModulesSearchResultsSheet: View {
         let orderedIds = AutoModeSourceSelection.orderedSelectedSourceIds(
             availableSourceIds: items.map { autoModeSourceId(for: $0) }
         )
+        if forceAutomaticPlayback && orderedIds.isEmpty {
+            return items
+        }
         return orderedIds.compactMap { byId[$0] }
     }
 
@@ -614,16 +891,121 @@ struct ModulesSearchResultsSheet: View {
         return sortedResultItems.filter { $0.sourceId == selectedStremioStyleSourceId }
     }
 
+    private var isResolvingStremioStyleServiceStreams: Bool {
+        stremioStyleServiceResolutionStates.values.contains(where: \.isPending)
+    }
+
+    private var isStremioStyleSearchActive: Bool {
+        viewModel.isSearching || viewModel.isSearchingStremio || isResolvingStremioStyleServiceStreams
+    }
+
+    private func stremioStyleServiceNeedsResolvedStreams(_ service: Service) -> Bool {
+        StreamLanguageFilter.configuration(sourceId: SourceHealth.serviceId(service))?.canHideStreams == true
+    }
+
+    private func stremioStyleServiceResolutionKey(service: Service, result: SearchItem) -> String {
+        "\(stremioStyleServiceResolutionGeneration.uuidString)|\(service.id.uuidString)|\(result.href)"
+    }
+
+    private func allStremioStyleServiceResolutionCandidates() -> [(service: Service, result: SearchItem)] {
+        var candidatesByService: [(service: Service, results: [SearchItem])] = []
+        for item in sortedResultItems {
+            guard case .service(let service) = item,
+                  stremioStyleServiceNeedsResolvedStreams(service),
+                  let results = viewModel.moduleResults[service.id] else {
+                continue
+            }
+
+            let filtered = filterResults(for: results)
+            let sourceCandidates = Array(
+                (filtered.highQuality + filtered.lowQuality)
+                    .prefix(Self.maxStremioStyleServiceCandidatesPerSource)
+            )
+            if !sourceCandidates.isEmpty {
+                candidatesByService.append((service, sourceCandidates))
+            }
+        }
+
+        // Interleave sources so the global safety cap cannot be consumed entirely by the first
+        // one or two providers in the user's ordering.
+        var candidates: [(service: Service, result: SearchItem)] = []
+        for index in 0..<Self.maxStremioStyleServiceCandidatesPerSource {
+            for source in candidatesByService where source.results.indices.contains(index) {
+                guard candidates.count < Self.maxStremioStyleServiceCandidatesPerSheet else { break }
+                candidates.append((source.service, source.results[index]))
+            }
+            if candidates.count == Self.maxStremioStyleServiceCandidatesPerSheet { break }
+        }
+        return candidates
+    }
+
+    private func stremioStyleServiceCandidates(for service: Service) -> [SearchItem] {
+        allStremioStyleServiceResolutionCandidates()
+            .filter { $0.service.id == service.id }
+            .map(\.result)
+    }
+
+    private func visibleResolvedServiceStreams(for service: Service) -> [StremioStyleResolvedServiceStream] {
+        var visible: [StremioStyleResolvedServiceStream] = []
+        for result in stremioStyleServiceCandidates(for: service) {
+            let key = stremioStyleServiceResolutionKey(service: service, result: result)
+            guard case .resolved(let resolvedStreams) = stremioStyleServiceResolutionStates[key] else {
+                continue
+            }
+            for resolved in resolvedStreams where !filteredServiceStreamOptions([resolved.option], service: service).isEmpty {
+                visible.append(resolved)
+                if visible.count == Self.maxVisibleServiceResultsPerService {
+                    return visible
+                }
+            }
+        }
+        return visible
+    }
+
+    private func hasPendingStremioStyleServiceResolution(for service: Service) -> Bool {
+        stremioStyleServiceCandidates(for: service).contains { result in
+            let key = stremioStyleServiceResolutionKey(service: service, result: result)
+            return stremioStyleServiceResolutionStates[key]?.isPending == true
+        }
+    }
+
+    private func stremioStyleServiceResolutionAttention(
+        for service: Service
+    ) -> (failedCount: Int, verificationURL: URL?) {
+        var failedCount = 0
+        var verificationURL: URL?
+        for result in stremioStyleServiceCandidates(for: service) {
+            let key = stremioStyleServiceResolutionKey(service: service, result: result)
+            switch stremioStyleServiceResolutionStates[key] {
+            case .failed:
+                failedCount += 1
+            case .verificationRequired(let url):
+                failedCount += 1
+                if verificationURL == nil {
+                    verificationURL = url
+                }
+            case .queued, .checking, .resolved, .none:
+                break
+            }
+        }
+        return (failedCount, verificationURL)
+    }
+
     private var hasStremioStyleResults: Bool {
         stremioStyleResultItems.contains { item in
             switch item {
             case .service(let service):
+                if stremioStyleServiceNeedsResolvedStreams(service) {
+                    let attention = stremioStyleServiceResolutionAttention(for: service)
+                    return hasPendingStremioStyleServiceResolution(for: service)
+                        || !visibleResolvedServiceStreams(for: service).isEmpty
+                        || attention.failedCount > 0
+                }
                 guard let results = viewModel.moduleResults[service.id] else { return false }
-                // `filterResults` ranks every element and then partitions a
-                // non-empty prefix, so existence is exactly `!results.isEmpty`.
-                return !results.isEmpty
+                let filtered = filterResults(for: results)
+                return !filtered.highQuality.isEmpty || !filtered.lowQuality.isEmpty
             case .stremio(let addon):
-                return !(viewModel.stremioResults[addon.id] ?? []).isEmpty
+                return !visibleStremioStreams(for: addon).isEmpty
             }
         }
     }
@@ -642,7 +1024,7 @@ struct ModulesSearchResultsSheet: View {
             }
 
             HStack(spacing: 6) {
-                if viewModel.isSearching || viewModel.isSearchingStremio {
+                if isStremioStyleSearchActive {
                     EclipseLoadingIndicator()
                         .scaleEffect(0.55)
                         .frame(width: 12, height: 12)
@@ -685,7 +1067,18 @@ struct ModulesSearchResultsSheet: View {
         ForEach(stremioStyleResultItems) { item in
             switch item {
             case .service(let service):
-                if let results = viewModel.moduleResults[service.id] {
+                if stremioStyleServiceNeedsResolvedStreams(service) {
+                    let streams = visibleResolvedServiceStreams(for: service)
+                    ForEach(streams) { stream in
+                        stremioStyleResolvedServiceRow(stream)
+                    }
+                    if hasPendingStremioStyleServiceResolution(for: service) {
+                        stremioStyleServiceResolutionRow(service: service)
+                    }
+                    if stremioStyleServiceResolutionAttention(for: service).failedCount > 0 {
+                        stremioStyleServiceAttentionRow(service: service)
+                    }
+                } else if let results = viewModel.moduleResults[service.id] {
                     let filtered = filterResults(for: results)
                     let visibleResults = filtered.highQuality + filtered.lowQuality
                     ForEach(visibleResults, id: \.id) { result in
@@ -693,7 +1086,8 @@ struct ModulesSearchResultsSheet: View {
                     }
                 }
             case .stremio(let addon):
-                if let streams = viewModel.stremioResults[addon.id] {
+                let streams = visibleStremioStreams(for: addon)
+                if !streams.isEmpty {
                     ForEach(Array(streams.prefix(Self.maxVisibleStremioStreamsPerAddon).enumerated()), id: \.offset) { _, stream in
                         stremioStyleStreamRow(stream: stream, addon: addon)
                     }
@@ -746,6 +1140,104 @@ struct ModulesSearchResultsSheet: View {
         .listRowBackground(Color.clear)
         .eclipseHideListRowSeparator()
         .listRowInsets(EdgeInsets(top: 5, leading: 14, bottom: 5, trailing: 14))
+    }
+
+    private func stremioStyleResolvedServiceRow(_ resolved: StremioStyleResolvedServiceStream) -> some View {
+        let similarity = max(
+            algorithmManager.calculateSimilarity(original: effectiveTitle, result: resolved.result.title),
+            originalTitle.map { algorithmManager.calculateSimilarity(original: $0, result: resolved.result.title) } ?? 0
+        )
+
+        return Button {
+            selectStremioStyleResolvedServiceStream(resolved)
+        } label: {
+            HStack(alignment: .top, spacing: 12) {
+                stremioStyleActionIcon
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("\(resolved.service.metadata.sourceName) · \(resolved.option.name)")
+                        .font(.subheadline)
+                        .fontWeight(.bold)
+                        .foregroundColor(.primary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+
+                    Text(resolved.result.title)
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .lineLimit(3)
+                        .multilineTextAlignment(.leading)
+
+                    HStack(spacing: 6) {
+                        Text("\(Int(similarity * 100))% match")
+                        if let episode = selectedEpisode {
+                            Text("•")
+                            Text("Episode \(episode.episodeNumber)")
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .stremioStyleStreamCard()
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(Color.clear)
+        .eclipseHideListRowSeparator()
+        .listRowInsets(EdgeInsets(top: 5, leading: 14, bottom: 5, trailing: 14))
+    }
+
+    private func stremioStyleServiceResolutionRow(service: Service) -> some View {
+        HStack(spacing: 10) {
+            EclipseLoadingIndicator()
+                .scaleEffect(0.55)
+                .frame(width: 14, height: 14)
+            Text("Checking \(service.metadata.sourceName) streams against Extra Service Settings…")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, 8)
+        .listRowBackground(Color.clear)
+        .eclipseHideListRowSeparator()
+    }
+
+    private func stremioStyleServiceAttentionRow(service: Service) -> some View {
+        let attention = stremioStyleServiceResolutionAttention(for: service)
+        let hasVerification = attention.verificationURL != nil
+
+        return Button {
+            handleStremioStyleServiceResolutionAttention(
+                service: service,
+                verificationURL: attention.verificationURL
+            )
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: hasVerification ? "checkmark.shield" : "arrow.clockwise.circle")
+                    .foregroundColor(.orange)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(hasVerification
+                         ? "Cloudflare verification is needed for \(service.metadata.sourceName)."
+                         : "Some \(service.metadata.sourceName) streams could not be checked.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.leading)
+                    Text(stremioStyleServiceAttentionActionTitle(hasVerification: hasVerification))
+                        .font(.caption)
+                        .fontWeight(.semibold)
+                        .foregroundColor(.accentColor)
+                }
+
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, 8)
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(Color.clear)
+        .eclipseHideListRowSeparator()
     }
 
     private func stremioStyleStreamRow(stream: StremioStream, addon: StremioAddon) -> some View {
@@ -826,7 +1318,7 @@ struct ModulesSearchResultsSheet: View {
             
             Section(header: serviceHeader(for: service, highQualityCount: filteredResults.highQuality.count, lowQualityCount: filteredResults.lowQuality.count, isSearching: false)) {
                 healthWarningRow(sourceId: SourceHealth.serviceId(service))
-                if results.isEmpty {
+                if results.isEmpty || (filteredResults.highQuality.isEmpty && filteredResults.lowQuality.isEmpty) {
                     noResultsRow
                 } else {
                     serviceResultsContent(filteredResults: filteredResults, service: service)
@@ -990,6 +1482,44 @@ struct ModulesSearchResultsSheet: View {
             Text("\(actionVerb) '\(result.title)'?")
         }
     }
+
+    @ViewBuilder
+    private var resolvedServiceStreamAlertButtons: some View {
+        Button(actionVerb) {
+            showingResolvedServiceStreamAlert = false
+            guard let resolved = selectedResolvedServiceStream,
+                  !filteredServiceStreamOptions([resolved.option], service: resolved.service).isEmpty else {
+                selectedResolvedServiceStream = nil
+                return
+            }
+
+            viewModel.pendingPlaybackAutoMode = false
+            viewModel.pendingPlaybackRetryCount = 0
+            resolveSubtitleSelection(
+                subtitles: resolved.topLevelSubtitles,
+                defaultSubtitle: resolved.option.subtitle,
+                service: resolved.service,
+                streamURL: resolved.option.url,
+                headers: resolved.option.headers,
+                structuredSubtitleTracks: resolved.option.subtitleTracks,
+                streamName: resolved.option.name,
+                streamLanguageHints: resolved.option.languageHints,
+                streamMetadataHints: resolved.option.metadataHints,
+                serviceHref: resolved.result.href
+            )
+            selectedResolvedServiceStream = nil
+        }
+        Button("Cancel", role: .cancel) {
+            selectedResolvedServiceStream = nil
+        }
+    }
+
+    @ViewBuilder
+    private var resolvedServiceStreamAlertMessage: some View {
+        if let resolved = selectedResolvedServiceStream {
+            Text("\(actionVerb) '\(resolved.option.name)' from \(resolved.service.metadata.sourceName)?")
+        }
+    }
     
     @ViewBuilder
     private var streamFetchingOverlay: some View {
@@ -1031,27 +1561,38 @@ struct ModulesSearchResultsSheet: View {
     
     @ViewBuilder
     private var qualityThresholdAlertContent: some View {
-        TextField("Threshold (0.0 - 1.0)", value: $viewModel.highQualityThreshold, format: .number)
+        TextField(stremioStyleSheetEnabled ? "Threshold (0.5 - 1.0)" : "Threshold (0.0 - 1.0)", value: $thresholdEditorValue, format: .number)
             .keyboardType(.decimalPad)
         
         Button("Save") {
-            viewModel.highQualityThreshold = max(0.0, min(1.0, viewModel.highQualityThreshold))
-            UserDefaults.standard.set(viewModel.highQualityThreshold, forKey: "highQualityThreshold")
+            if stremioStyleSheetEnabled {
+                storedServiceResultMinimumSimilarity = ServicesResultRankingSettings.clampedMinimumSimilarity(thresholdEditorValue)
+            } else {
+                viewModel.highQualityThreshold = max(0.0, min(1.0, thresholdEditorValue))
+                UserDefaults.standard.set(viewModel.highQualityThreshold, forKey: "highQualityThreshold")
+            }
         }
         
-        Button("Cancel", role: .cancel) {
-            viewModel.highQualityThreshold = UserDefaults.standard.object(forKey: "highQualityThreshold") as? Double ?? 0.9
-        }
+        Button("Cancel", role: .cancel) {}
     }
     
     @ViewBuilder
     private var qualityThresholdAlertMessage: some View {
-        Text("Set the minimum similarity score (0.0 to 1.0) for results to be considered high quality. Current: \(String(format: "%.2f", viewModel.highQualityThreshold)) (\(Int(viewModel.highQualityThreshold * 100))%)")
+        if stremioStyleSheetEnabled {
+            Text("Set the ranking similarity used by Extra Service Settings to drop unmatched service results. Current: \(String(format: "%.2f", thresholdEditorValue)) (\(Int(thresholdEditorValue * 100))%)")
+        } else {
+            Text("Set the minimum similarity score (0.0 to 1.0) for results to be considered high quality. Current: \(String(format: "%.2f", thresholdEditorValue)) (\(Int(thresholdEditorValue * 100))%)")
+        }
     }
     
     @ViewBuilder
     private var serverSelectionDialogContent: some View {
-        ForEach(viewModel.streamOptions) { option in
+        let visibleOptions: [StreamOption] = {
+            guard let service = viewModel.pendingService else { return [] }
+            return filteredServiceStreamOptions(viewModel.streamOptions, service: service)
+        }()
+
+        ForEach(visibleOptions) { option in
             Button(option.name) {
                 viewModel.showingStreamMenu = false
                 if let service = viewModel.pendingService {
@@ -1063,6 +1604,8 @@ struct ModulesSearchResultsSheet: View {
                         headers: option.headers,
                         structuredSubtitleTracks: option.subtitleTracks,
                         streamName: option.name,
+                        streamLanguageHints: option.languageHints,
+                        streamMetadataHints: option.metadataHints,
                         serviceHref: viewModel.pendingServiceHref
                     )
                 }
@@ -1134,6 +1677,8 @@ struct ModulesSearchResultsSheet: View {
                         subtitleHeadersByURL: viewModel.pendingSubtitleHeadersByURL,
                         headers: viewModel.pendingHeaders,
                         streamName: viewModel.pendingStreamName,
+                        streamLanguageHints: viewModel.pendingStreamLanguageHints,
+                        streamMetadataHints: viewModel.pendingStreamMetadataHints,
                         serviceHref: viewModel.pendingServiceHref
                     )
                 }
@@ -1143,7 +1688,16 @@ struct ModulesSearchResultsSheet: View {
             viewModel.showingSubtitlePicker = false
             if let service = viewModel.pendingService,
                let streamURL = viewModel.pendingStreamURL {
-                dispatchStreamAction(streamURL, service: service, subtitle: nil, headers: viewModel.pendingHeaders, streamName: viewModel.pendingStreamName, serviceHref: viewModel.pendingServiceHref)
+                dispatchStreamAction(
+                    streamURL,
+                    service: service,
+                    subtitle: nil,
+                    headers: viewModel.pendingHeaders,
+                    streamName: viewModel.pendingStreamName,
+                    streamLanguageHints: viewModel.pendingStreamLanguageHints,
+                    streamMetadataHints: viewModel.pendingStreamMetadataHints,
+                    serviceHref: viewModel.pendingServiceHref
+                )
             }
         }
         Button("Cancel", role: .cancel) {
@@ -1158,15 +1712,23 @@ struct ModulesSearchResultsSheet: View {
     
     private func filterResults(for results: [SearchItem]) -> (highQuality: [SearchItem], lowQuality: [SearchItem]) {
         let sortedResults = rankedServiceResults(results).prefix(Self.maxVisibleServiceResultsPerService)
+        let visibleResults: [RankedSearchResult]
+        if shouldDropMismatchedServiceResults {
+            visibleResults = sortedResults.filter { $0.initialSimilarity >= serviceResultMinimumSimilarity }
+        } else {
+            visibleResults = Array(sortedResults)
+        }
         let threshold = viewModel.highQualityThreshold
-        let highQuality = sortedResults.filter { $0.initialSimilarity >= threshold }.map { $0.result }
-        let lowQuality = sortedResults.filter { $0.initialSimilarity < threshold }.map { $0.result }
+        let highQuality = visibleResults.filter { $0.initialSimilarity >= threshold }.map { $0.result }
+        let lowQuality = visibleResults.filter { $0.initialSimilarity < threshold }.map { $0.result }
         
         return (highQuality, lowQuality)
     }
 
     private var isAutoModeEnabled: Bool {
-        UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled")
+        !ignoresAutoMode && (forceAutomaticPlayback
+            || watchTogetherExactHandoff
+            || UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"))
     }
 
     private var selectedAutoModeSourceIds: Set<String> {
@@ -1207,8 +1769,8 @@ struct ModulesSearchResultsSheet: View {
             )
         }
         .sorted { lhs, rhs in
-            let lhsEligible = lhs.initialSimilarity >= Self.autoModeInitialMatchThreshold
-            let rhsEligible = rhs.initialSimilarity >= Self.autoModeInitialMatchThreshold
+            let lhsEligible = lhs.initialSimilarity >= serviceResultMinimumSimilarity
+            let rhsEligible = rhs.initialSimilarity >= serviceResultMinimumSimilarity
 
             if lhsEligible != rhsEligible {
                 return lhsEligible && !rhsEligible
@@ -1272,14 +1834,17 @@ struct ModulesSearchResultsSheet: View {
 
     private func titleMatchCandidates() -> [String] {
         var seen = Set<String>()
-        return [
+        var candidates: [String?] = [
             sheetTitleBaseForMatching,
             effectiveTitle,
             mediaTitle,
-            normalizedAnimeSequelTitle,
-            strippedAnimeFallbackTitle,
-            originalTitle
+            normalizedAnimeSequelTitle
         ]
+        if !isForcedWatchTogetherAnimePlayback {
+            candidates.append(strippedAnimeFallbackTitle)
+            candidates.append(originalTitle)
+        }
+        return candidates
         .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
         .filter { !$0.isEmpty }
         .filter { seen.insert(normalizeTitle($0)).inserted }
@@ -1291,11 +1856,15 @@ struct ModulesSearchResultsSheet: View {
             sheetTitleBaseForMatching,
             effectiveTitle,
             mediaTitle,
-            normalizedAnimeSequelTitle,
-            strippedAnimeFallbackTitle
+            normalizedAnimeSequelTitle
         ]
 
-        if !(isAnimeContent || animeSeasonTitle != nil) {
+        if !isForcedWatchTogetherAnimePlayback {
+            candidates.append(strippedAnimeFallbackTitle)
+        }
+
+        if !(isAnimeContent || animeSeasonTitle != nil),
+           !isForcedWatchTogetherAnimePlayback {
             candidates.append(originalTitle)
         }
 
@@ -1330,6 +1899,72 @@ struct ModulesSearchResultsSheet: View {
         let displayScore = titleSimilarityForRanking(expected: sheetTitleBaseForMatching, result: result.title)
         let alternateScore = titleSimilarityForRanking(expected: alternateTitle, result: result.title)
         return alternateScore >= 0.82 && alternateScore > displayScore + 0.06
+    }
+
+    private func forcedWatchTogetherAnimeResultMatchesDestination(
+        _ result: SearchItem
+    ) -> Bool {
+        guard isForcedWatchTogetherAnimePlayback else { return true }
+        let resultKey = exactWatchTogetherAnimeTitleKey(result.title)
+        guard !resultKey.isEmpty else { return false }
+        let targetKeys = [
+            seasonTitleOverride,
+            Optional(effectiveTitle),
+            Optional(mediaTitle),
+            normalizedAnimeSequelTitle
+        ]
+        .compactMap { $0 }
+        .map(exactWatchTogetherAnimeTitleKey)
+        .filter { !$0.isEmpty }
+
+        // Only known technical suffixes are ignored. Arbitrary prefix matching is unsafe for
+        // anime because sequel/cour titles often begin with the base title, and punctuation can
+        // itself distinguish entries (for example Gintama variants).
+        return targetKeys.contains(resultKey)
+    }
+
+    private func exactWatchTogetherAnimeTitleKey(_ rawTitle: String) -> String {
+        func collapsedWhitespace(_ value: String) -> String {
+            value
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        var value = collapsedWhitespace(
+            rawTitle
+                .lowercased()
+                .replacingOccurrences(of: "’", with: "'")
+                .replacingOccurrences(of: "‘", with: "'")
+                .replacingOccurrences(of: "–", with: "-")
+                .replacingOccurrences(of: "—", with: "-")
+        )
+        let technicalSuffixes = [
+            " (english dub)", " [english dub]", " - english dub", " english dub",
+            " (english sub)", " [english sub]", " - english sub", " english sub",
+            " (dual audio)", " [dual audio]", " - dual audio", " dual audio",
+            " (multi audio)", " [multi audio]", " - multi audio", " multi audio",
+            " (uncensored)", " [uncensored]", " - uncensored", " uncensored",
+            " (remastered)", " [remastered]", " - remastered", " remastered",
+            " (dubbed)", " [dubbed]", " - dubbed", " dubbed",
+            " (subbed)", " [subbed]", " - subbed", " subbed",
+            " (dub)", " [dub]", " - dub", " dub",
+            " (sub)", " [sub]", " - sub", " sub",
+            " (1080p)", " [1080p]", " - 1080p", " 1080p",
+            " (720p)", " [720p]", " - 720p", " 720p",
+            " (4k)", " [4k]", " - 4k", " 4k",
+            " (hd)", " [hd]", " - hd", " hd"
+        ]
+        var removedSuffix = true
+        while removedSuffix {
+            removedSuffix = false
+            for suffix in technicalSuffixes where value.hasSuffix(suffix) {
+                value.removeLast(suffix.count)
+                value = collapsedWhitespace(value)
+                removedSuffix = true
+                break
+            }
+        }
+        return collapsedWhitespace(stripEpisodeSuffix(from: value))
     }
 
     private func titleSimilarityForRanking(expected: String, result: String) -> Double {
@@ -1505,9 +2140,16 @@ struct ModulesSearchResultsSheet: View {
 
     private func bestServiceResult(for service: Service) -> SearchItem? {
         guard let results = viewModel.moduleResults[service.id], !results.isEmpty else { return nil }
-        return rankedServiceResults(results)
-            .first { $0.initialSimilarity >= Self.autoModeInitialMatchThreshold }?
-            .result
+        let ranked = rankedServiceResults(results)
+        let best: RankedSearchResult?
+        if isForcedWatchTogetherAnimePlayback {
+            best = ranked.first { forcedWatchTogetherAnimeResultMatchesDestination($0.result) }
+        } else {
+            best = ranked.first
+        }
+        guard let best else { return nil }
+        guard shouldDropMismatchedServiceResults else { return best.result }
+        return best.initialSimilarity >= serviceResultMinimumSimilarity ? best.result : nil
     }
 
     private func retainedServiceResults(_ results: [SearchItem]) -> [SearchItem] {
@@ -1558,7 +2200,9 @@ struct ModulesSearchResultsSheet: View {
         AutoModeStreamSelection.bestStremioStream(
             from: filteredStremioStreams(streams, addon: addon),
             sourceId: SourceHealth.stremioId(addon),
-            streamsAreFiltered: true
+            streamsAreFiltered: true,
+            isAnime: hasAnimeLookupContext,
+            originalAudioLanguage: originalAudioLanguage
         )
     }
 
@@ -1569,9 +2213,24 @@ struct ModulesSearchResultsSheet: View {
         }
         return Array(
             streams.lazy
-                .filter { !StreamLanguageFilter.shouldHide(stremio: $0, configuration: configuration) }
+                .filter {
+                    !StreamLanguageFilter.shouldHide(
+                        stremio: $0,
+                        configuration: configuration,
+                        originalAudioLanguage: originalAudioLanguage,
+                        isAnime: hasAnimeLookupContext
+                    )
+                }
                 .prefix(Self.maxRetainedStremioStreamsPerAddon)
         )
+    }
+
+    /// Re-evaluate stored results at the presentation boundary so changing
+    /// Extra Service Settings cannot leave an already-loaded forbidden stream
+    /// visible in either sheet layout.
+    private func visibleStremioStreams(for addon: StremioAddon) -> [StremioStream] {
+        guard let streams = viewModel.stremioResults[addon.id] else { return [] }
+        return filteredStremioStreams(streams, addon: addon)
     }
 
     private func filteredServiceStreamOptions(_ options: [StreamOption], service: Service) -> [StreamOption] {
@@ -1583,9 +2242,324 @@ struct ModulesSearchResultsSheet: View {
             !StreamLanguageFilter.shouldHide(
                 languageHints: option.languageHints,
                 metadata: [option.name, option.url] + option.metadataHints,
-                configuration: configuration
+                configuration: configuration,
+                originalAudioLanguage: originalAudioLanguage,
+                isAnime: hasAnimeLookupContext
             )
         }
+    }
+
+    @MainActor
+    private func selectStremioStyleResolvedServiceStream(_ resolved: StremioStyleResolvedServiceStream) {
+        guard Date().timeIntervalSince(resolved.resolvedAt) <= Self.resolvedServiceStreamFreshness else {
+            let key = stremioStyleServiceResolutionKey(service: resolved.service, result: resolved.result)
+            stremioStyleServiceResolutionStates[key] = .queued
+            startNextStremioStyleServiceResolutions()
+            return
+        }
+
+        selectedResolvedServiceStream = resolved
+        showingResolvedServiceStreamAlert = true
+    }
+
+    private func stremioStyleServiceAttentionActionTitle(hasVerification: Bool) -> String {
+#if os(tvOS)
+        return "Retry check"
+#else
+        return hasVerification ? "Verify and retry" : "Retry check"
+#endif
+    }
+
+    @MainActor
+    private func handleStremioStyleServiceResolutionAttention(
+        service: Service,
+        verificationURL: URL?
+    ) {
+#if !os(tvOS)
+        if let verificationURL {
+            Task { @MainActor in
+                do {
+                    try await CloudflareBypassManager.shared.triggerBypass(for: verificationURL)
+                    guard isSheetActive else { return }
+                    retryFailedStremioStyleServiceResolutions(for: service)
+                } catch {
+                    Logger.shared.log(
+                        "Stremio-style stream verification did not complete source=\(service.metadata.sourceName) error=\(error.localizedDescription)",
+                        type: "Service"
+                    )
+                }
+            }
+            return
+        }
+#endif
+        retryFailedStremioStyleServiceResolutions(for: service)
+    }
+
+    @MainActor
+    private func retryFailedStremioStyleServiceResolutions(for service: Service) {
+        for result in stremioStyleServiceCandidates(for: service) {
+            let key = stremioStyleServiceResolutionKey(service: service, result: result)
+            switch stremioStyleServiceResolutionStates[key] {
+            case .failed, .verificationRequired:
+                stremioStyleServiceResolutionStates[key] = .queued
+            case .queued, .checking, .resolved, .none:
+                break
+            }
+        }
+        startNextStremioStyleServiceResolutions()
+    }
+
+    /// The bypass manager's pending URL is process-wide. Only associate it with a background
+    /// probe when its host matches that Service's known page/base hosts; otherwise another
+    /// concurrent source may have raised it and this candidate remains a generic retryable failure.
+    @MainActor
+    private func matchingPendingCloudflareURL(
+        requestURLStrings: [String],
+        service: Service
+    ) -> URL? {
+        guard let pendingURL = CloudflareBypassManager.shared.pendingVerificationURL,
+              let pendingHost = pendingURL.host?.lowercased() else {
+            return nil
+        }
+
+        let expectedHosts = Set((requestURLStrings + [service.metadata.baseUrl]).compactMap {
+            URL(string: $0)?.host?.lowercased()
+        })
+        return expectedHosts.contains(pendingHost) ? pendingURL : nil
+    }
+
+    @MainActor
+    private func resetStremioStyleServiceResolution() {
+        // Advance the generation before cancelling contexts so timeout/Promise callbacks from the
+        // old request can never publish into the replacement sheet state.
+        stremioStyleServiceResolutionGeneration = UUID()
+        let work = Array(stremioStyleServiceResolutionWork.values)
+        stremioStyleServiceResolutionWork.removeAll()
+        stremioStyleServiceResolutionStates.removeAll()
+        selectedResolvedServiceStream = nil
+        showingResolvedServiceStreamAlert = false
+        work.forEach { $0.cancel() }
+    }
+
+    @MainActor
+    private func beginNewManualSearchGeneration() {
+        manualSearchGeneration = UUID()
+    }
+
+    @MainActor
+    private func isCurrentManualSearchGeneration(_ generation: UUID) -> Bool {
+        isSheetActive && generation == manualSearchGeneration
+    }
+
+    @MainActor
+    private func scheduleStremioStyleServiceResolution() {
+        guard isSheetActive,
+              stremioStyleSheetEnabled,
+              !(autoModeOnly && !showManualPicker) else {
+            resetStremioStyleServiceResolution()
+            return
+        }
+
+        let candidates = allStremioStyleServiceResolutionCandidates()
+        let validKeys = Set(candidates.map {
+            stremioStyleServiceResolutionKey(service: $0.service, result: $0.result)
+        })
+
+        let obsoleteWork = stremioStyleServiceResolutionWork.filter { !validKeys.contains($0.value.key) }
+        for (serviceID, work) in obsoleteWork {
+            stremioStyleServiceResolutionWork.removeValue(forKey: serviceID)
+            work.cancel()
+        }
+        stremioStyleServiceResolutionStates = stremioStyleServiceResolutionStates.filter {
+            validKeys.contains($0.key)
+        }
+
+        for candidate in candidates {
+            let key = stremioStyleServiceResolutionKey(service: candidate.service, result: candidate.result)
+            if stremioStyleServiceResolutionStates[key] == nil {
+                stremioStyleServiceResolutionStates[key] = .queued
+            }
+        }
+
+        startNextStremioStyleServiceResolutions()
+    }
+
+    @MainActor
+    private func startNextStremioStyleServiceResolutions() {
+        guard isSheetActive, stremioStyleSheetEnabled else { return }
+
+        while stremioStyleServiceResolutionWork.count < Self.maxConcurrentStremioStyleServiceResolutions {
+            guard let candidate = allStremioStyleServiceResolutionCandidates().first(where: { candidate in
+                let key = stremioStyleServiceResolutionKey(service: candidate.service, result: candidate.result)
+                guard case .queued = stremioStyleServiceResolutionStates[key] else { return false }
+                return stremioStyleServiceResolutionWork[candidate.service.id] == nil
+            }) else {
+                return
+            }
+            beginStremioStyleServiceResolution(service: candidate.service, result: candidate.result)
+        }
+    }
+
+    @MainActor
+    private func beginStremioStyleServiceResolution(service: Service, result: SearchItem) {
+        let generation = stremioStyleServiceResolutionGeneration
+        let key = stremioStyleServiceResolutionKey(service: service, result: result)
+        guard case .queued = stremioStyleServiceResolutionStates[key],
+              stremioStyleServiceResolutionWork[service.id] == nil else {
+            return
+        }
+
+        let work = StremioStyleServiceResolutionWork(key: key, service: service)
+        stremioStyleServiceResolutionStates[key] = .checking
+        stremioStyleServiceResolutionWork[service.id] = work
+
+        work.controller.fetchEpisodesJS(url: result.href, module: service) { episodes in
+            Task { @MainActor in
+                guard isCurrentStremioStyleServiceResolution(
+                    work,
+                    generation: generation,
+                    service: service,
+                    result: result
+                ) else { return }
+
+                guard let targetHref = stremioStyleTargetStreamHref(episodes: episodes, result: result) else {
+                    let failureState: StremioStyleServiceResolutionState
+                    if let verificationURL = matchingPendingCloudflareURL(
+                        requestURLStrings: [result.href],
+                        service: service
+                    ) {
+                        failureState = .verificationRequired(verificationURL)
+                    } else {
+                        failureState = .failed
+                    }
+                    finishStremioStyleServiceResolution(
+                        work,
+                        generation: generation,
+                        service: service,
+                        state: failureState
+                    )
+                    return
+                }
+
+                let softsub = service.metadata.softsub ?? false
+                work.streamRequest = work.controller.fetchStreamUrlJS(
+                    episodeUrl: targetHref,
+                    softsub: softsub,
+                    module: service,
+                    timeoutNanoseconds: 8_000_000_000
+                ) { streamResult in
+                    Task { @MainActor in
+                        guard isCurrentStremioStyleServiceResolution(
+                            work,
+                            generation: generation,
+                            service: service,
+                            result: result
+                        ) else { return }
+
+                        let parsed = parseStreamOptions(
+                            streams: streamResult.streams,
+                            sources: streamResult.sources
+                        )
+                        guard !parsed.isEmpty else {
+                            let failureState: StremioStyleServiceResolutionState
+                            if let verificationURL = matchingPendingCloudflareURL(
+                                requestURLStrings: [result.href, targetHref],
+                                service: service
+                            ) {
+                                failureState = .verificationRequired(verificationURL)
+                            } else {
+                                failureState = .failed
+                            }
+                            finishStremioStyleServiceResolution(
+                                work,
+                                generation: generation,
+                                service: service,
+                                state: failureState
+                            )
+                            return
+                        }
+
+                        let allowed = filteredServiceStreamOptions(parsed, service: service)
+                        let resolvedAt = Date()
+                        let resolved = allowed.prefix(Self.maxVisibleServiceResultsPerService).map { option in
+                            StremioStyleResolvedServiceStream(
+                                service: service,
+                                result: result,
+                                option: option,
+                                topLevelSubtitles: streamResult.subtitles,
+                                resolvedAt: resolvedAt
+                            )
+                        }
+                        if resolved.isEmpty {
+                            Logger.shared.log(
+                                "Stremio-style sheet hid all \(parsed.count) resolved streams from \(service.metadata.sourceName) before presentation",
+                                type: "Stream"
+                            )
+                        }
+                        finishStremioStyleServiceResolution(
+                            work,
+                            generation: generation,
+                            service: service,
+                            state: .resolved(resolved)
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @MainActor
+    private func isCurrentStremioStyleServiceResolution(
+        _ work: StremioStyleServiceResolutionWork,
+        generation: UUID,
+        service: Service,
+        result: SearchItem
+    ) -> Bool {
+        guard isSheetActive,
+              stremioStyleSheetEnabled,
+              generation == stremioStyleServiceResolutionGeneration,
+              let currentWork = stremioStyleServiceResolutionWork[service.id],
+              currentWork.id == work.id,
+              currentWork.key == work.key,
+              stremioStyleServiceNeedsResolvedStreams(service) else {
+            return false
+        }
+        return viewModel.moduleResults[service.id]?.contains(where: { $0.href == result.href }) == true
+    }
+
+    @MainActor
+    private func finishStremioStyleServiceResolution(
+        _ work: StremioStyleServiceResolutionWork,
+        generation: UUID,
+        service: Service,
+        state: StremioStyleServiceResolutionState
+    ) {
+        guard generation == stremioStyleServiceResolutionGeneration,
+              stremioStyleServiceResolutionWork[service.id]?.id == work.id else {
+            return
+        }
+        stremioStyleServiceResolutionStates[work.key] = state
+        stremioStyleServiceResolutionWork.removeValue(forKey: service.id)
+        work.streamRequest = nil
+        startNextStremioStyleServiceResolutions()
+    }
+
+    private func stremioStyleTargetStreamHref(episodes: [EpisodeLink], result: SearchItem) -> String? {
+        guard !episodes.isEmpty else { return nil }
+        if isMovie {
+            let firstHref = episodes.first?.href.trimmingCharacters(in: .whitespacesAndNewlines)
+            return firstHref?.isEmpty == false ? firstHref : result.href
+        }
+
+        guard let selectedEpisode else { return nil }
+        let seasons = parseSeasons(from: episodes)
+        return findEpisodeHref(
+            seasons: seasons,
+            seasonIndex: selectedEpisode.seasonNumber - 1,
+            episodeNumber: selectedEpisode.episodeNumber,
+            bundledEpisodeNumbers: bundledEpisodeNumberCandidates(for: selectedEpisode),
+            allowAutomaticEpisodeResolution: standaloneAutoSelectEpisodesEnabled
+        )
     }
 
     @MainActor
@@ -1662,8 +2636,42 @@ struct ModulesSearchResultsSheet: View {
     }
 
     @MainActor
+    private func deactivateSheetForDismissal() {
+        isSheetActive = false
+        beginNewManualSearchGeneration()
+        resetStremioStyleServiceResolution()
+        autoModeCancelled = true
+        autoModeSelectionTask?.cancel()
+        autoModeSelectionTask = nil
+        cancelAutoModeDownloadValidation()
+        serviceStreamExtractionGeneration = nil
+        serviceStreamExtractionRequest?.cancel()
+        serviceStreamExtractionRequest = nil
+    }
+
+    @MainActor
+    private func dismissSheetWithoutPlaybackHandoff() {
+        deactivateSheetForDismissal()
+        presentationMode.wrappedValue.dismiss()
+    }
+
+    @MainActor
     private func finishResolvedPlayback(_ request: PlayerResolvedPlaybackRequest) {
         guard let onResolvedPlaybackRequest else { return }
+
+        // Resolution may finish after the user has manually dismissed the source sheet. In that
+        // case the caller's short post-dismissal selection grace must not turn a cancelled picker
+        // into a playback change. Authorize the handoff while this sheet is still active, before
+        // we intentionally dismiss it below; the delayed callback must not re-check this state
+        // because a normal selection and Watch Together Auto Mode both dismiss before delivery.
+        guard isSheetActive else {
+            Logger.shared.log(
+                "ServicesResultsSheet: discarded resolved playback request because the source sheet is no longer active",
+                type: "Player"
+            )
+            return
+        }
+        onPlaybackSelectionCommitted?()
 
         if shouldDismissAutoModeSheetBeforePlayback {
             dismissAutoModeSheetBeforePlaybackIfNeeded { _ in
@@ -1679,40 +2687,32 @@ struct ModulesSearchResultsSheet: View {
     }
 
     @MainActor
-    private func captureSheetHostControllerIfNeeded() {
-        guard sheetHostController == nil,
-              let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let rootVC = windowScene.windows.first?.rootViewController else {
-            return
-        }
-
-        sheetHostController = rootVC.topmostViewController()
-    }
-
-    @MainActor
-    private func currentTopmostViewController() -> UIViewController? {
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let rootVC = windowScene.windows.first?.rootViewController else {
-            return nil
-        }
-
-        return rootVC.topmostViewController()
-    }
-
-    @MainActor
-    private func dismissAutoModeSheetBeforePlaybackIfNeeded(_ completion: @escaping (UIViewController?) -> Void) {
+    private func dismissAutoModeSheetBeforePlaybackIfNeeded(
+        presentationRetryCount: Int = 0,
+        _ completion: @escaping (UIViewController?) -> Void
+    ) {
         guard shouldDismissAutoModeSheetBeforePlayback else {
-            completion(currentTopmostViewController())
+            completion(sheetHostController)
             return
         }
 
         if let hostController = sheetHostController,
-           hostController.presentingViewController != nil {
+           let originatingPresenter = hostController.presentingViewController {
             hostController.dismiss(animated: true) {
                 Task { @MainActor in
                     self.sheetHostController = nil
-                    completion(self.currentTopmostViewController())
+                    completion(originatingPresenter.topmostViewController())
                 }
+            }
+            return
+        }
+
+        if presentationRetryCount < 10 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                dismissAutoModeSheetBeforePlaybackIfNeeded(
+                    presentationRetryCount: presentationRetryCount + 1,
+                    completion
+                )
             }
             return
         }
@@ -1721,7 +2721,7 @@ struct ModulesSearchResultsSheet: View {
         sheetHostController = nil
         DispatchQueue.main.async {
             Task { @MainActor in
-                completion(self.currentTopmostViewController())
+                completion(nil)
             }
         }
     }
@@ -1770,10 +2770,8 @@ struct ModulesSearchResultsSheet: View {
                 }
 
                 Button(role: .cancel) {
-                    autoModeCancelled = true
                     autoModeDidRun = true
-                    cancelAutoModeDownloadValidation()
-                    presentationMode.wrappedValue.dismiss()
+                    dismissSheetWithoutPlaybackHandoff()
                 } label: {
                     Text(downloadMode ? "Stop" : "Cancel")
                         .fontWeight(.semibold)
@@ -1790,16 +2788,53 @@ struct ModulesSearchResultsSheet: View {
     }
 
     @MainActor
+    private func forcedWatchTogetherMediaIsCurrent() -> Bool {
+        guard forceAutomaticPlayback || watchTogetherExactHandoff else { return true }
+        guard isSheetActive else { return false }
+        guard forceAutomaticPlayback else { return true }
+        return forcedWatchTogetherSharedMediaMatchesCurrent()
+    }
+
+    @MainActor
+    private func forcedWatchTogetherSharedMediaMatchesCurrent() -> Bool {
+        guard forceAutomaticPlayback else { return true }
+
+        let context = effectivePlaybackContext
+        let descriptor = WatchTogetherMediaDescriptor(
+            tmdbID: tmdbId,
+            mediaType: isMovie ? "movie" : "tv",
+            seasonNumber: isMovie
+                ? nil
+                : context?.resolvedTMDBSeasonNumber ?? originalTMDBSeasonNumber ?? selectedEpisode?.seasonNumber,
+            episodeNumber: isMovie
+                ? nil
+                : context?.resolvedTMDBEpisodeNumber ?? originalTMDBEpisodeNumber ?? selectedEpisode?.episodeNumber,
+            playbackContext: context,
+            isAnime: isAnimeContent || context?.hasAnimeMediaId == true,
+            title: playerMediaTitle
+        )
+        return WatchTogetherCoordinator.shared.isCurrentSharedMedia(descriptor)
+    }
+
+    @MainActor
     private func startAutoModeIfNeeded() {
         guard isAutoModeEnabled, !showManualPicker else { return }
         guard autoModeRunToken != requestToken else { return }
+        if isForcedWatchTogetherAnimePlayback,
+           effectivePlaybackContext == nil {
+            showAutoModeFailure("Watch Together lost the exact anime episode context. Playback stopped instead of guessing S1E1.")
+            return
+        }
+        guard forcedWatchTogetherMediaIsCurrent() else { return }
 
         autoModeRunToken = requestToken
+        beginNewManualSearchGeneration()
+        resetStremioStyleServiceResolution()
         autoModeDidRun = true
         autoModeCancelled = false
-        autoModeAttemptedSourceIds.removeAll()
+        autoModeAttemptedSourceIds = activeAutoModeRetrySession?.attemptedSourceIds ?? []
         autoModeRetryScheduled = false
-        autoModeLastFailureMessage = nil
+        autoModeLastFailureMessage = activeAutoModeRetrySession?.lastFailureMessage
         viewModel.moduleResults.removeAll()
         viewModel.stremioResults.removeAll()
         viewModel.searchedServices.removeAll()
@@ -1812,8 +2847,13 @@ struct ModulesSearchResultsSheet: View {
         viewModel.currentFetchingTitle = ""
         viewModel.streamFetchProgress = "Checking selected sources..."
 
-        Task { @MainActor in
+        autoModeSelectionTask?.cancel()
+        autoModeSelectionTask = Task { @MainActor in
+            guard !Task.isCancelled else { return }
             await runOrderedAutoModeSelection()
+            if !Task.isCancelled {
+                autoModeSelectionTask = nil
+            }
         }
     }
 
@@ -1836,21 +2876,28 @@ struct ModulesSearchResultsSheet: View {
            normalizedAnimeSequelSearchQuery.caseInsensitiveCompare(primary) != .orderedSame {
             queries.append(normalizedAnimeSequelSearchQuery)
         }
-        if let fallbackAnimeSearchQuery,
-           fallbackAnimeSearchQuery.caseInsensitiveCompare(primary) != .orderedSame {
-            queries.append(fallbackAnimeSearchQuery)
-        }
         if primary.caseInsensitiveCompare(effectiveTitle) != .orderedSame {
             queries.append(effectiveTitle)
         }
-        if let originalTitle, !originalTitle.isEmpty && originalTitle.lowercased() != effectiveTitle.lowercased() {
-            queries.append(originalTitle)
+        if !isForcedWatchTogetherAnimePlayback {
+            if let fallbackAnimeSearchQuery,
+               fallbackAnimeSearchQuery.caseInsensitiveCompare(primary) != .orderedSame {
+                queries.append(fallbackAnimeSearchQuery)
+            }
+            if let originalTitle,
+               !originalTitle.isEmpty,
+               originalTitle.lowercased() != effectiveTitle.lowercased() {
+                queries.append(originalTitle)
+            }
         }
-        return queries
+        var seen = Set<String>()
+        return queries.filter { seen.insert(normalizeTitle($0)).inserted }
     }
 
     @MainActor
     private func runOrderedAutoModeSelection() async {
+        guard !Task.isCancelled,
+              forcedWatchTogetherMediaIsCurrent() else { return }
         let orderedItems = activeAutoModeItems
         guard !orderedItems.isEmpty else {
             showAutoModeFailure(autoModeUnavailableMessage())
@@ -1858,17 +2905,26 @@ struct ModulesSearchResultsSheet: View {
         }
 
         for item in orderedItems where !autoModeAttemptedSourceIds.contains(item.sourceId) {
-            guard !autoModeCancelled else { return }
+            guard !Task.isCancelled,
+                  !autoModeCancelled,
+                  forcedWatchTogetherMediaIsCurrent() else { return }
             autoModeAttemptedSourceIds.insert(item.sourceId)
+            activeAutoModeRetrySession?.recordAttempt(sourceId: item.sourceId)
             switch item {
             case .service(let service):
                 viewModel.currentFetchingTitle = service.metadata.sourceName
                 viewModel.streamFetchProgress = "Searching \(service.metadata.sourceName)..."
                 if let result = await findAutoModeServiceResult(service) {
-                    guard !autoModeCancelled else { return }
+                    guard !Task.isCancelled,
+                          !autoModeCancelled,
+                          forcedWatchTogetherMediaIsCurrent() else { return }
                     viewModel.currentFetchingTitle = result.title
                     viewModel.streamFetchProgress = "Found match in \(service.metadata.sourceName). Fetching stream..."
-                    await playContent(result, autoModeLaunch: true)
+                    await playContent(
+                        result,
+                        autoModeLaunch: true,
+                        retryCount: activeAutoModeRetrySession?.retryCount ?? 0
+                    )
                     return
                 }
                 updateAutoModeSourceStatus(
@@ -1879,10 +2935,17 @@ struct ModulesSearchResultsSheet: View {
                 viewModel.currentFetchingTitle = addon.manifest.name
                 viewModel.streamFetchProgress = "Checking \(addon.manifest.name)..."
                 if let stream = await findAutoModeStremioStream(addon) {
-                    guard !autoModeCancelled else { return }
+                    guard !Task.isCancelled,
+                          !autoModeCancelled,
+                          forcedWatchTogetherMediaIsCurrent() else { return }
                     viewModel.currentFetchingTitle = stream.displayName
                     viewModel.streamFetchProgress = "Found stream in \(addon.manifest.name)."
-                    playStremioStream(stream, addon: addon, autoModeLaunch: true)
+                    playStremioStream(
+                        stream,
+                        addon: addon,
+                        autoModeLaunch: true,
+                        retryCount: activeAutoModeRetrySession?.retryCount ?? 0
+                    )
                     return
                 }
                 if !autoModeCancelled {
@@ -1908,10 +2971,14 @@ struct ModulesSearchResultsSheet: View {
         var seenHrefs = Set<String>()
 
         for query in autoModeSearchQueries {
-            guard !autoModeCancelled else { return nil }
+            guard !Task.isCancelled,
+                  !autoModeCancelled,
+                  forcedWatchTogetherMediaIsCurrent() else { return nil }
             viewModel.streamFetchProgress = "Searching \(service.metadata.sourceName) for \(query)..."
             let results = await serviceManager.searchSingleActiveService(service: service, query: query)
-            guard !autoModeCancelled else { return nil }
+            guard !Task.isCancelled,
+                  !autoModeCancelled,
+                  forcedWatchTogetherMediaIsCurrent() else { return nil }
             let newResults = results.filter { seenHrefs.insert($0.href).inserted }
             combined.append(contentsOf: newResults)
             combined = retainedServiceResults(combined)
@@ -1924,6 +2991,8 @@ struct ModulesSearchResultsSheet: View {
 
     @MainActor
     private func findAutoModeStremioStream(_ addon: StremioAddon) async -> StremioStream? {
+        guard !Task.isCancelled,
+              forcedWatchTogetherMediaIsCurrent() else { return nil }
         guard shouldSearchStremio else {
             viewModel.stremioResults[addon.id] = []
             viewModel.stremioSearchedAddons.insert(addon.id)
@@ -1946,6 +3015,8 @@ struct ModulesSearchResultsSheet: View {
             playbackContext: effectivePlaybackContext,
             titleCandidates: stremioCatalogTitleCandidates
         )
+        guard !Task.isCancelled,
+              forcedWatchTogetherMediaIsCurrent() else { return nil }
         let streams = filteredStremioStreams(fetchedStreams, addon: addon)
 
         viewModel.stremioResults[addon.id] = streams
@@ -1978,6 +3049,7 @@ struct ModulesSearchResultsSheet: View {
     @MainActor
     private func updateAutoModeSourceStatus(sourceName: String, message: String) {
         autoModeLastFailureMessage = "\(sourceName): \(message)"
+        activeAutoModeRetrySession?.recordStatus(sourceName: sourceName, message: message)
         viewModel.currentFetchingTitle = sourceName
         viewModel.streamFetchProgress = "Continuing Auto Mode..."
     }
@@ -2106,6 +3178,8 @@ struct ModulesSearchResultsSheet: View {
     private func switchToManualPicker() {
         autoModeCancelled = true
         cancelAutoModeDownloadValidation()
+        beginNewManualSearchGeneration()
+        resetStremioStyleServiceResolution()
         showManualPicker = true
         viewModel.moduleResults.removeAll()
         viewModel.stremioResults.removeAll()
@@ -2131,7 +3205,7 @@ struct ModulesSearchResultsSheet: View {
                             noActiveServicesSection
                         } else if hasStremioStyleResults {
                             stremioStyleResults
-                        } else if !(viewModel.isSearching || viewModel.isSearchingStremio) {
+                        } else if !isStremioStyleSearchActive {
                             noResultsRow
                                 .listRowBackground(Color.clear)
                                 .eclipseHideListRowSeparator()
@@ -2159,38 +3233,45 @@ struct ModulesSearchResultsSheet: View {
 #endif
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Menu {
-                        Section("Matching Algorithm") {
-                            ForEach(SimilarityAlgorithm.allCases, id: \.self) { algorithm in
-                                Button(action: {
-                                    algorithmManager.selectedAlgorithm = algorithm
-                                }) {
-                                    HStack {
-                                        Text(algorithm.displayName)
-                                        if algorithmManager.selectedAlgorithm == algorithm {
-                                            Spacer()
-                                            Image(systemName: "checkmark")
+                    if !stremioStyleSheetEnabled || shouldDropMismatchedServiceResults {
+                        Menu {
+                            if !stremioStyleSheetEnabled {
+                                Section("Matching Algorithm") {
+                                    ForEach(SimilarityAlgorithm.allCases, id: \.self) { algorithm in
+                                        Button(action: {
+                                            algorithmManager.selectedAlgorithm = algorithm
+                                        }) {
+                                            HStack {
+                                                Text(algorithm.displayName)
+                                                if algorithmManager.selectedAlgorithm == algorithm {
+                                                    Spacer()
+                                                    Image(systemName: "checkmark")
+                                                }
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
-                        
-                        Section("Filter Settings") {
-                            Button(action: {
-                                viewModel.showingFilterEditor = true
-                            }) {
-                                HStack {
-                                    Image(systemName: "slider.horizontal.3")
-                                    Text("Quality Threshold")
-                                    Spacer()
-                                    Text("\(Int(viewModel.highQualityThreshold * 100))%")
-                                        .foregroundColor(.secondary)
+
+                            Section("Filter Settings") {
+                                Button(action: {
+                                    thresholdEditorValue = stremioStyleSheetEnabled
+                                        ? serviceResultMinimumSimilarity
+                                        : viewModel.highQualityThreshold
+                                    viewModel.showingFilterEditor = true
+                                }) {
+                                    HStack {
+                                        Image(systemName: "slider.horizontal.3")
+                                        Text(stremioStyleSheetEnabled ? "Ranking Similarity" : "Quality Threshold")
+                                        Spacer()
+                                        Text("\(Int((stremioStyleSheetEnabled ? serviceResultMinimumSimilarity : viewModel.highQualityThreshold) * 100))%")
+                                            .foregroundColor(.secondary)
+                                    }
                                 }
                             }
+                        } label: {
+                            Image(systemName: "line.3.horizontal.decrease.circle")
                         }
-                    } label: {
-                        Image(systemName: "line.3.horizontal.decrease.circle")
                     }
                 }
                 
@@ -2198,26 +3279,52 @@ struct ModulesSearchResultsSheet: View {
                     HStack(spacing: 12) {
                         if downloadMode && onSkipRequested != nil {
                             Button("Skip") {
+                                deactivateSheetForDismissal()
                                 onSkipRequested?()
                                 presentationMode.wrappedValue.dismiss()
                             }
                         }
                         
                         Button("Done") {
-                            presentationMode.wrappedValue.dismiss()
+                            dismissSheetWithoutPlaybackHandoff()
                         }
                     }
                 }
             }
         }
+        .navigationViewStyle(StackNavigationViewStyle())
         .alert(downloadMode ? "Download Content" : "Play Content", isPresented: $viewModel.showingPlayAlert) {
             playAlertButtons
         } message: {
             playAlertMessage
         }
+        .alert(downloadMode ? "Download Stream" : "Play Stream", isPresented: $showingResolvedServiceStreamAlert) {
+            resolvedServiceStreamAlertButtons
+        } message: {
+            resolvedServiceStreamAlertMessage
+        }
         .overlay(streamFetchingOverlay)
+        // SwiftUI does not expose an interactive-dismiss callback on the iOS 15 deployment
+        // target. Callback-based source pickers therefore use their explicit Done/Cancel paths,
+        // which can deactivate resolution synchronously before the dismissal animation begins.
+        .interactiveDismissDisabled(onResolvedPlaybackRequest != nil)
+        .background(
+            ServicesSheetPresentationAnchor { controller in
+                if sheetHostController !== controller {
+                    sheetHostController = controller
+                }
+                if onResolvedPlaybackRequest != nil {
+                    // These sheets are also presented from UIKit hosting controllers, where the
+                    // SwiftUI modifier alone is not guaranteed to own adaptive dismissal.
+                    controller.isModalInPresentation = true
+                }
+            }
+            .frame(width: 0, height: 0)
+        )
         .onAppear {
-            captureSheetHostControllerIfNeeded()
+            isSheetActive = true
+            beginNewManualSearchGeneration()
+            resetStremioStyleServiceResolution()
             autoModeDidRun = false
             if autoModeOnly && !showManualPicker {
                 startAutoModeIfNeeded()
@@ -2228,13 +3335,38 @@ struct ModulesSearchResultsSheet: View {
         }
         .onChangeComp(of: requestToken) { _, _ in
             Logger.shared.log("ServicesResultsSheet request token changed: \(requestToken)", type: "Stream")
+            beginNewManualSearchGeneration()
+            resetStremioStyleServiceResolution()
             cancelAutoModeDownloadValidation()
+            autoModeSelectionTask?.cancel()
+            autoModeSelectionTask = nil
             autoModeDidRun = false
             autoModeRunToken = nil
             autoModeCancelled = false
             if autoModeOnly && !showManualPicker {
                 startAutoModeIfNeeded()
+            } else {
+                viewModel.moduleResults.removeAll()
+                viewModel.stremioResults.removeAll()
+                viewModel.searchedServices.removeAll()
+                viewModel.stremioSearchedAddons.removeAll()
+                viewModel.failedServices.removeAll()
+                startProgressiveSearch()
+                startStremioSearch()
             }
+        }
+        .onChangeComp(of: stremioStyleSheetEnabled) { _, enabled in
+            if enabled {
+                scheduleStremioStyleServiceResolution()
+            } else {
+                resetStremioStyleServiceResolution()
+            }
+        }
+        .onChangeComp(of: storedServiceResultMinimumSimilarity) { _, _ in
+            scheduleStremioStyleServiceResolution()
+        }
+        .onChangeComp(of: dropMismatchedServiceResults) { _, _ in
+            scheduleStremioStyleServiceResolution()
         }
         .onChangeComp(of: viewModel.isSearching) { _, _ in
             maybeRunAutoModeSelection()
@@ -2242,7 +3374,7 @@ struct ModulesSearchResultsSheet: View {
         .onChangeComp(of: viewModel.isSearchingStremio) { _, _ in
             maybeRunAutoModeSelection()
         }
-        .alert("Quality Threshold", isPresented: $viewModel.showingFilterEditor) {
+        .alert(stremioStyleSheetEnabled ? "Ranking Similarity" : "Quality Threshold", isPresented: $viewModel.showingFilterEditor) {
             qualityThresholdAlertContent
         } message: {
             qualityThresholdAlertMessage
@@ -2271,8 +3403,7 @@ struct ModulesSearchResultsSheet: View {
             if autoModeOnly && !showManualPicker {
                 if downloadMode && onSkipRequested != nil {
                     Button("Skip Episode") {
-                        autoModeCancelled = true
-                        cancelAutoModeDownloadValidation()
+                        deactivateSheetForDismissal()
                         viewModel.streamError = nil
                         onSkipRequested?()
                         presentationMode.wrappedValue.dismiss()
@@ -2282,10 +3413,8 @@ struct ModulesSearchResultsSheet: View {
                     switchToManualPicker()
                 }
                 Button(downloadMode && onSkipRequested != nil ? "Stop Downloads" : "Cancel", role: .cancel) {
-                    autoModeCancelled = true
-                    cancelAutoModeDownloadValidation()
                     viewModel.streamError = nil
-                    presentationMode.wrappedValue.dismiss()
+                    dismissSheetWithoutPlaybackHandoff()
                 }
             } else {
                 #if !os(tvOS)
@@ -2309,10 +3438,7 @@ struct ModulesSearchResultsSheet: View {
             }
         }
         .onDisappear {
-            cancelAutoModeDownloadValidation()
-            serviceStreamExtractionGeneration = nil
-            serviceStreamExtractionRequest?.cancel()
-            serviceStreamExtractionRequest = nil
+            deactivateSheetForDismissal()
         }
         .alert(downloadMode ? "Download Stream" : "Play Stream", isPresented: $viewModel.showingStremioPlayAlert) {
             Button(actionVerb) {
@@ -2338,9 +3464,12 @@ struct ModulesSearchResultsSheet: View {
         }
     }
     
+    @MainActor
     private func startProgressiveSearch() {
+        let searchGeneration = manualSearchGeneration
         let activeServices = serviceManager.activeServices
         viewModel.totalServicesCount = activeServices.count
+        viewModel.isSearching = !activeServices.isEmpty
         
         guard !activeServices.isEmpty else {
             viewModel.isSearching = false
@@ -2371,8 +3500,10 @@ struct ModulesSearchResultsSheet: View {
                 query: searchQuery,
                 onResult: { service, results in
                     Task { @MainActor in
+                        guard self.isCurrentManualSearchGeneration(searchGeneration) else { return }
                         self.viewModel.moduleResults[service.id] = self.retainedServiceResults(results ?? [])
                         self.viewModel.searchedServices.insert(service.id)
+                        self.scheduleStremioStyleServiceResolution()
                         
                         if results == nil {
                             self.viewModel.failedServices.insert(service.id)
@@ -2389,9 +3520,11 @@ struct ModulesSearchResultsSheet: View {
                                 query: baseTitleQuery,
                                 onResult: { service, additionalResults in
                                     Task { @MainActor in
+                                        guard self.isCurrentManualSearchGeneration(searchGeneration) else { return }
                                         let additional = additionalResults ?? []
                                         let existing = self.viewModel.moduleResults[service.id] ?? []
                                         self.viewModel.moduleResults[service.id] = self.mergedServiceResults(existing: existing, additional: additional)
+                                        self.scheduleStremioStyleServiceResolution()
                                         
                                         if additionalResults == nil {
                                             self.viewModel.failedServices.insert(service.id)
@@ -2406,9 +3539,11 @@ struct ModulesSearchResultsSheet: View {
                                                 query: altTitle,
                                                 onResult: { service, additionalResults in
                                                     Task { @MainActor in
+                                                        guard self.isCurrentManualSearchGeneration(searchGeneration) else { return }
                                                         let additional = additionalResults ?? []
                                                         let existing = self.viewModel.moduleResults[service.id] ?? []
                                                         self.viewModel.moduleResults[service.id] = self.mergedServiceResults(existing: existing, additional: additional)
+                                                        self.scheduleStremioStyleServiceResolution()
                                                         
                                                         if additionalResults == nil {
                                                             self.viewModel.failedServices.insert(service.id)
@@ -2417,6 +3552,7 @@ struct ModulesSearchResultsSheet: View {
                                                 },
                                                 onComplete: {
                                                     Task { @MainActor in
+                                                        guard self.isCurrentManualSearchGeneration(searchGeneration) else { return }
                                                         self.viewModel.isSearching = false
                                                     }
                                                 }
@@ -2424,6 +3560,7 @@ struct ModulesSearchResultsSheet: View {
                                         }
                                     } else {
                                         Task { @MainActor in
+                                            guard self.isCurrentManualSearchGeneration(searchGeneration) else { return }
                                             self.viewModel.isSearching = false
                                         }
                                     }
@@ -2437,9 +3574,11 @@ struct ModulesSearchResultsSheet: View {
                                 query: altTitle,
                                 onResult: { service, additionalResults in
                                     Task { @MainActor in
+                                        guard self.isCurrentManualSearchGeneration(searchGeneration) else { return }
                                         let additional = additionalResults ?? []
                                         let existing = self.viewModel.moduleResults[service.id] ?? []
                                         self.viewModel.moduleResults[service.id] = self.mergedServiceResults(existing: existing, additional: additional)
+                                        self.scheduleStremioStyleServiceResolution()
                                         
                                         if additionalResults == nil {
                                             self.viewModel.failedServices.insert(service.id)
@@ -2448,6 +3587,7 @@ struct ModulesSearchResultsSheet: View {
                                 },
                                 onComplete: {
                                     Task { @MainActor in
+                                        guard self.isCurrentManualSearchGeneration(searchGeneration) else { return }
                                         self.viewModel.isSearching = false
                                     }
                                 }
@@ -2455,6 +3595,7 @@ struct ModulesSearchResultsSheet: View {
                         }
                     } else {
                         Task { @MainActor in
+                            guard self.isCurrentManualSearchGeneration(searchGeneration) else { return }
                             self.viewModel.isSearching = false
                         }
                     }
@@ -2465,9 +3606,14 @@ struct ModulesSearchResultsSheet: View {
 
     // MARK: - Stremio Addon Search
 
+    @MainActor
     private func startStremioSearch() {
+        let searchGeneration = manualSearchGeneration
         let active = stremioManager.activeAddons
-        guard !active.isEmpty else { return }
+        guard !active.isEmpty else {
+            viewModel.isSearchingStremio = false
+            return
+        }
 
         guard shouldSearchStremio else {
             for addon in active {
@@ -2499,12 +3645,14 @@ struct ModulesSearchResultsSheet: View {
                 titleCandidates: stremioCatalogTitleCandidates,
                 onResult: { addon, streams in
                     Task { @MainActor in
+                        guard self.isCurrentManualSearchGeneration(searchGeneration) else { return }
                         self.viewModel.stremioResults[addon.id] = self.filteredStremioStreams(streams, addon: addon)
                         self.viewModel.stremioSearchedAddons.insert(addon.id)
                     }
                 },
                 onComplete: {
                     Task { @MainActor in
+                        guard self.isCurrentManualSearchGeneration(searchGeneration) else { return }
                         self.viewModel.isSearchingStremio = false
                     }
                 }
@@ -2516,11 +3664,11 @@ struct ModulesSearchResultsSheet: View {
 
     @ViewBuilder
     private func stremioAddonSection(addon: StremioAddon) -> some View {
-        let streams = viewModel.stremioResults[addon.id]
+        let streams = visibleStremioStreams(for: addon)
         let hasSearched = viewModel.stremioSearchedAddons.contains(addon.id)
         let isCurrentlySearching = viewModel.isSearchingStremio && !hasSearched
 
-        if let streams = streams {
+        if viewModel.stremioResults[addon.id] != nil {
             Section(header: stremioAddonHeader(for: addon, streamCount: streams.count, isSearching: false)) {
                 healthWarningRow(sourceId: SourceHealth.stremioId(addon))
                 if streams.isEmpty {
@@ -2675,13 +3823,13 @@ struct ModulesSearchResultsSheet: View {
 
     @ViewBuilder
     private var stremioStreamPickerContent: some View {
-        if let streams = viewModel.stremioStreamOptions {
+        if let addon = viewModel.selectedStremioAddon,
+           let streamOptions = viewModel.stremioStreamOptions {
+            let streams = filteredStremioStreams(streamOptions, addon: addon)
             ForEach(Array(streams.prefix(Self.maxVisibleStremioStreamsPerAddon))) { stream in
                 Button {
                     viewModel.showingStremioStreamPicker = false
-                    if let addon = viewModel.selectedStremioAddon {
-                        playStremioStream(stream, addon: addon, autoModeLaunch: viewModel.pendingPlaybackAutoMode)
-                    }
+                    playStremioStream(stream, addon: addon, autoModeLaunch: viewModel.pendingPlaybackAutoMode)
                 } label: {
                     Text(stremioStreamLabel(for: stream))
                 }
@@ -2716,7 +3864,9 @@ struct ModulesSearchResultsSheet: View {
     private func playStremioStream(_ stream: StremioStream, addon: StremioAddon, autoModeLaunch: Bool = false, retryCount: Int = 0) {
         guard !StreamLanguageFilter.shouldHide(
             stremio: stream,
-            sourceId: SourceHealth.stremioId(addon)
+            sourceId: SourceHealth.stremioId(addon),
+            originalAudioLanguage: originalAudioLanguage,
+            isAnime: hasAnimeLookupContext
         ) else {
             Logger.shared.log("Stremio: stream hidden by extra service settings addon=\(addon.manifest.name)", type: "Stream")
             handleStremioPlaybackPreparationFailure(
@@ -2775,6 +3925,9 @@ struct ModulesSearchResultsSheet: View {
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 300_000_000)
 
+            guard !Task.isCancelled,
+                  forcedWatchTogetherMediaIsCurrent() else { return }
+
             guard let streamURL = URL(string: url) else {
                 Logger.shared.log("Invalid Stremio stream URL: \(ServiceSandboxState.redactedURL(url))", type: "Error")
                 handleStremioPlaybackPreparationFailure(addon, message: "Invalid stream URL from Stremio addon.", autoModeLaunch: autoModeLaunch)
@@ -2793,7 +3946,8 @@ struct ModulesSearchResultsSheet: View {
             let external = ExternalPlayer(rawValue: externalRaw) ?? .none
             let schemeUrl = external.schemeURL(for: url)
 
-            if onResolvedPlaybackRequest == nil,
+            if !forceAutomaticPlayback,
+               onResolvedPlaybackRequest == nil,
                let scheme = schemeUrl,
                UIApplication.shared.canOpenURL(scheme) {
                 dismissAutoModeSheetBeforePlaybackIfNeeded { _ in
@@ -2816,9 +3970,12 @@ struct ModulesSearchResultsSheet: View {
 
             Logger.shared.log("Stremio: Final header keys: \(finalHeaders.keys.sorted())", type: "Stream")
 
-            let inAppPlayer = Settings.normalizedInAppPlayer(UserDefaults.standard.string(forKey: "inAppPlayer"))
-            Logger.shared.log("Playback resolve diagnostics source=\(addon.manifest.name) kind=stremio player=\(inAppPlayer) host=\(streamURL.host ?? "nil") ext=\(streamURL.pathExtension.isEmpty ? "none" : streamURL.pathExtension) namedStream=\(streamName?.isEmpty == false) headerKeys=[\(finalHeaders.keys.sorted().joined(separator: ","))] subtitles=\(subtitles.count) autoMode=\(autoModeLaunch)", type: "StreamDiagnostics")
-            Logger.shared.log("[PlaybackTrace \(playbackTraceID)] stage=resolved source=\(addon.manifest.name) kind=stremio player=\(inAppPlayer) host=\(streamURL.host ?? "nil") autoMode=\(autoModeLaunch) retry=\(retryCount)", type: "PlaybackTrace")
+            let playbackPlan = PlaybackLaunchPlan.make(
+                selection: forceAutomaticPlayback ? .mpv : .selected,
+                deviceFamily: .current
+            )
+            Logger.shared.log("Playback resolve diagnostics source=\(addon.manifest.name) kind=stremio player=\(playbackPlan.primary.rawValue) host=\(streamURL.host ?? "nil") ext=\(streamURL.pathExtension.isEmpty ? "none" : streamURL.pathExtension) namedStream=\(streamName?.isEmpty == false) headerKeys=[\(finalHeaders.keys.sorted().joined(separator: ","))] subtitles=\(subtitles.count) autoMode=\(autoModeLaunch)", type: "StreamDiagnostics")
+            Logger.shared.log("[PlaybackTrace \(playbackTraceID)] stage=resolved source=\(addon.manifest.name) kind=stremio player=\(playbackPlan.primary.rawValue) host=\(streamURL.host ?? "nil") autoMode=\(autoModeLaunch) retry=\(retryCount)", type: "PlaybackTrace")
 
             var playerMediaInfo: MediaInfo? = nil
             let posterURL = resolvedPosterURL
@@ -2848,6 +4005,10 @@ struct ModulesSearchResultsSheet: View {
             let resolvedAnimeHint = hasAnimeLookupContext
 
             if onResolvedPlaybackRequest != nil {
+                guard playbackRecoveryIdentityIsCurrent else {
+                    Logger.shared.log("ServicesResultsSheet: discarded stale Stremio resolution before caller handoff", type: "Player")
+                    return
+                }
                 let request = PlayerResolvedPlaybackRequest(
                     url: streamURL,
                     preset: resolvedPreset,
@@ -2861,14 +4022,14 @@ struct ModulesSearchResultsSheet: View {
                     originalTMDBSeasonNumber: effectivePlaybackContext?.resolvedTMDBSeasonNumber ?? originalTMDBSeasonNumber,
                     originalTMDBEpisodeNumber: effectivePlaybackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBEpisodeNumber,
                     episodePlaybackContext: effectivePlaybackContext,
-                    launchContext: resolvedLaunchContext
+                    launchContext: resolvedLaunchContext,
+                    autoModeRecoveryIdentity: autoModeRecoveryIdentity
                 )
                 finishResolvedPlayback(request)
                 return
             }
 
-#if os(tvOS)
-            presentTVPlayback(
+            presentCoordinatedPlayback(
                 url: streamURL,
                 preset: resolvedPreset,
                 headers: finalHeaders,
@@ -2885,111 +4046,11 @@ struct ModulesSearchResultsSheet: View {
                 sourceName: addon.manifest.name
             )
             return
-#else
-            if inAppPlayer == "mpv" {
-                let preset = PlayerPreset.presets.first
-                let subtitleArray: [String]? = subtitles.isEmpty ? nil : subtitles
-
-                let pvc = PlayerViewController(
-                    url: streamURL,
-                    preset: preset ?? PlayerPreset(id: .sdrRec709, title: "Default", summary: "", stream: nil, commands: []),
-                    headers: finalHeaders,
-                    subtitles: subtitleArray,
-                    subtitleNames: subtitleNames.isEmpty ? nil : subtitleNames,
-                    mediaInfo: playerMediaInfo,
-                    imdbId: imdbId
-                )
-                let launchContext = PlaybackLaunchContext(
-                    traceID: playbackTraceID,
-                    traceCreatedAt: playbackTraceCreatedAt,
-                    sourceId: SourceHealth.stremioId(addon),
-                    sourceName: addon.manifest.name,
-                    sourceKind: .stremio,
-                    autoMode: autoModeLaunch,
-                    streamURL: url,
-                    streamName: streamName,
-                    headers: finalHeaders,
-                    subtitles: subtitleArray ?? [],
-                    subtitleNames: subtitleNames,
-                    retryCount: retryCount,
-                    titleCandidates: stremioCatalogTitleCandidates
-                )
-                configurePlaybackRecovery(pvc, context: launchContext)
-                let isAnimeHint = hasAnimeLookupContext
-                pvc.isAnimeHint = isAnimeHint
-                pvc.isAnimationContentHint = isAnimationGenre16
-                pvc.originalTMDBSeasonNumber = effectivePlaybackContext?.resolvedTMDBSeasonNumber ?? originalTMDBSeasonNumber
-                pvc.originalTMDBEpisodeNumber = effectivePlaybackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBEpisodeNumber
-                pvc.episodePlaybackContext = effectivePlaybackContext
-                pvc.onRequestNextEpisode = { seasonNumber, nextEpisodeNumber in
-                    NotificationCenter.default.post(
-                        name: .requestNextEpisode,
-                        object: nil,
-                        userInfo: [
-                            "tmdbId": tmdbId,
-                            "seasonNumber": seasonNumber,
-                            "episodeNumber": nextEpisodeNumber
-                        ]
-                    )
-                }
-
-                Logger.shared.log("Stremio: presenting \(inAppPlayer) player", type: "Stream")
-                pvc.modalPresentationStyle = .fullScreen
-
-                dismissAutoModeSheetBeforePlaybackIfNeeded { topmostVC in
-                    if let topmostVC {
-                        topmostVC.present(pvc, animated: true, completion: nil)
-                    } else {
-                        Logger.shared.log("Failed to find root view controller to present player", type: "Error")
-                    }
-                }
-                return
-            }
-
-            // Default AVPlayer path
-            let asset = AVURLAsset(url: streamURL, options: ["AVURLAssetHTTPHeaderFieldsKey": finalHeaders])
-            let playerVC = NormalPlayer()
-            let item = AVPlayerItem(asset: asset)
-            playerVC.player = AVPlayer(playerItem: item)
-            let launchContext = PlaybackLaunchContext(
-                traceID: playbackTraceID,
-                traceCreatedAt: playbackTraceCreatedAt,
-                sourceId: SourceHealth.stremioId(addon),
-                sourceName: addon.manifest.name,
-                sourceKind: .stremio,
-                autoMode: autoModeLaunch,
-                streamURL: url,
-                streamName: streamName,
-                headers: finalHeaders,
-                subtitles: subtitles,
-                subtitleNames: subtitleNames,
-                retryCount: retryCount
-            )
-            configurePlaybackRecovery(playerVC, context: launchContext)
-            if isMovie {
-                playerVC.mediaInfo = .movie(id: tmdbId, title: playerMediaTitle, posterURL: posterURL, isAnime: isAnimeContent)
-            } else if let episode = selectedEpisode {
-                playerVC.mediaInfo = .episode(showId: tmdbId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, showTitle: playerMediaTitle, showPosterURL: posterURL, isAnime: isAnimeContent)
-            }
-            playerVC.episodePlaybackContext = effectivePlaybackContext
-            playerVC.modalPresentationStyle = .fullScreen
-
-            dismissAutoModeSheetBeforePlaybackIfNeeded { topmostVC in
-                if let topmostVC {
-                    topmostVC.present(playerVC, animated: true) {
-                        playerVC.playAtDefaultSpeed()
-                    }
-                } else {
-                    Logger.shared.log("Failed to find root view controller to present player", type: "Error")
-                }
-            }
-#endif
         }
     }
 
-#if os(tvOS)
     @MainActor
-    private func presentTVPlayback(
+    private func presentCoordinatedPlayback(
         url: URL,
         preset: PlayerPreset,
         headers: [String: String],
@@ -3005,6 +4066,8 @@ struct ModulesSearchResultsSheet: View {
         originalTMDBEpisodeNumber: Int?,
         sourceName: String
     ) {
+        guard forcedWatchTogetherMediaIsCurrent(),
+              playbackRecoveryIdentityIsCurrent else { return }
         let resumePosition: Double? = {
             let position: Double
             if isMovie {
@@ -3034,17 +4097,44 @@ struct ModulesSearchResultsSheet: View {
 
         let requestedTMDBID = tmdbId
         let nextEpisodeRequest: ((_ seasonNumber: Int, _ episodeNumber: Int) -> Void)? = isMovie ? nil : { seasonNumber, nextEpisodeNumber in
+            var userInfo: [String: Any] = [
+                "tmdbId": requestedTMDBID,
+                "seasonNumber": seasonNumber,
+                "episodeNumber": nextEpisodeNumber
+            ]
+            if forceAutomaticPlayback {
+                userInfo["watchTogether"] = true
+            }
             NotificationCenter.default.post(
                 name: .requestNextEpisode,
-                object: nil,
-                userInfo: [
-                    "tmdbId": requestedTMDBID,
-                    "seasonNumber": seasonNumber,
-                    "episodeNumber": nextEpisodeNumber
-                ]
+                object: nextEpisodeNotificationRoute,
+                userInfo: userInfo
+            )
+        }
+        let resolvedNextEpisodeRequest: ((ResolvedNextEpisodeTarget) -> Void)? = isMovie ? nil : { target in
+            var userInfo: [String: Any] = [
+                "tmdbId": target.showID,
+                "seasonNumber": target.episode.seasonNumber,
+                "episodeNumber": target.episode.episodeNumber,
+                "isAnime": target.isAnime,
+                "exactTarget": true
+            ]
+            if let playbackContext = target.playbackContext {
+                userInfo["playbackContext"] = playbackContext
+            }
+            userInfo["resolvedTarget"] = target
+            if forceAutomaticPlayback {
+                userInfo["watchTogether"] = true
+            }
+            NotificationCenter.default.post(
+                name: .requestNextEpisode,
+                object: nextEpisodeNotificationRoute,
+                userInfo: userInfo
             )
         }
 
+        let recoveryIdentity = autoModeRecoveryIdentity
+        let recoveryCallback = onAutoModePlaybackFailure
         let request = PlaybackRequest(
             url: url,
             preset: preset,
@@ -3064,26 +4154,54 @@ struct ModulesSearchResultsSheet: View {
             isAnimation: isAnimation,
             originalTMDBSeasonNumber: originalTMDBSeasonNumber,
             originalTMDBEpisodeNumber: originalTMDBEpisodeNumber,
-            onRequestNextEpisode: nextEpisodeRequest
+            servicesOriginalTitle: originalTitle,
+            servicesOriginalAudioLanguage: originalAudioLanguage,
+            onRequestNextEpisode: nextEpisodeRequest,
+            onRequestResolvedNextEpisode: resolvedNextEpisodeRequest,
+            onPlaybackStartupFailure: { report in
+                Task { @MainActor in
+                    if report.context.autoMode,
+                       let recoveryIdentity,
+                       let recoveryCallback {
+                        recoveryCallback(report, recoveryIdentity)
+                    } else {
+                        handlePlaybackStartupFailure(report)
+                    }
+                }
+            }
         )
-        let controller = PlaybackCoordinator.shared.makeViewController(for: request)
-        controller.modalPresentationStyle = .fullScreen
 
         Logger.shared.log(
-            "ServicesResultsSheet: presenting tvOS playback source=\(sourceName) subtitles=\(subtitles.count) resume=\(resumePosition != nil)",
+            "ServicesResultsSheet: presenting coordinated playback source=\(sourceName) subtitles=\(subtitles.count) resume=\(resumePosition != nil)",
             type: "Player"
         )
         dismissAutoModeSheetBeforePlaybackIfNeeded { topmostVC in
+            guard self.forcedWatchTogetherSharedMediaMatchesCurrent(),
+                  self.playbackRecoveryIdentityIsCurrent else { return }
             guard let topmostVC else {
-                self.viewModel.streamError = "Failed to open player. Please try again."
-                self.viewModel.showingStreamError = true
-                Logger.shared.log("ServicesResultsSheet: no presenter for tvOS playback", type: "Error")
+                let report = PlaybackFailureReport(
+                    context: launchContext,
+                    message: "Failed to locate the originating window for player presentation.",
+                    isSourceFailure: false
+                )
+                if launchContext.autoMode,
+                   let recoveryIdentity,
+                   let recoveryCallback {
+                    recoveryCallback(report, recoveryIdentity)
+                } else {
+                    self.viewModel.streamError = "Failed to open player. Please try again."
+                    self.viewModel.showingStreamError = true
+                }
+                Logger.shared.log("ServicesResultsSheet: no presenter for coordinated playback", type: "Error")
                 return
             }
-            topmostVC.present(controller, animated: true)
+            PlaybackCoordinator.shared.present(
+                request,
+                from: topmostVC,
+                engine: forceAutomaticPlayback ? .mpv : .selected
+            )
         }
     }
-#endif
 
 #if !os(tvOS)
     private func downloadStremioStream(_ url: String, addon: StremioAddon, subtitle: String?, headers: [String: String]?, autoModeLaunch: Bool = false) {
@@ -3163,6 +4281,22 @@ struct ModulesSearchResultsSheet: View {
                         addon,
                         message: "Download verification failed. \(reason)",
                         autoModeLaunch: true
+                    )
+                case .cloudflareChallenge(let challengeURL):
+                    viewModel.pendingCloudflareURL = challengeURL
+                    viewModel.pendingCloudflareRetry = {
+                        self.downloadStremioStream(
+                            url,
+                            addon: addon,
+                            subtitle: subtitle,
+                            headers: headers,
+                            autoModeLaunch: true
+                        )
+                    }
+                    resolveCloudflareChallengeDuringAutoMode(
+                        challengeURL,
+                        sourceName: addon.manifest.name,
+                        fallbackMessage: "Download verification failed. Cloudflare verification is required before this source can download."
                     )
                 case .cancelled:
                     viewModel.isFetchingStreams = false
@@ -3465,6 +4599,16 @@ struct ModulesSearchResultsSheet: View {
     
     @MainActor
     private func handleEpisodesFetched(_ episodes: [EpisodeLink], result: SearchItem, service: Service, jsController: JSController) {
+        guard forcedWatchTogetherMediaIsCurrent() else { return }
+        if isForcedWatchTogetherAnimePlayback,
+           !forcedWatchTogetherAnimeResultMatchesDestination(result) {
+            handleServicePlaybackPreparationFailure(
+                service,
+                message: "Watch Together rejected a service result for a different anime cour instead of guessing S1E1.",
+                autoModeLaunch: true
+            )
+            return
+        }
         Logger.shared.log("Fetched \(episodes.count) episodes for: \(result.title)", type: "Stream")
         viewModel.streamFetchProgress = "Found \(episodes.count) episode\(episodes.count == 1 ? "" : "s")"
         
@@ -3798,6 +4942,8 @@ struct ModulesSearchResultsSheet: View {
                         headers: selectedStream.headers,
                         structuredSubtitleTracks: selectedStream.subtitleTracks,
                         streamName: selectedStream.name,
+                        streamLanguageHints: selectedStream.languageHints,
+                        streamMetadataHints: selectedStream.metadataHints,
                         serviceHref: viewModel.pendingServiceHref
                     )
                     return
@@ -3825,13 +4971,17 @@ struct ModulesSearchResultsSheet: View {
                 headers: firstStream.headers,
                 structuredSubtitleTracks: firstStream.subtitleTracks,
                 streamName: firstStream.name,
+                streamLanguageHints: firstStream.languageHints,
+                streamMetadataHints: firstStream.metadataHints,
                 serviceHref: viewModel.pendingServiceHref
             )
         } else if let streamURL = extractSingleStreamURL(streams: streams, sources: sources) {
             if StreamLanguageFilter.shouldHide(
                 languageHints: [],
                 metadata: [streamURL.url],
-                sourceId: SourceHealth.serviceId(service)
+                sourceId: SourceHealth.serviceId(service),
+                originalAudioLanguage: originalAudioLanguage,
+                isAnime: hasAnimeLookupContext
             ) {
                 Logger.shared.log("Single stream hidden by extra service settings for \(service.metadata.sourceName)", type: "Stream")
                 handleServicePlaybackPreparationFailure(service, message: "This stream is hidden by your extra service settings.")
@@ -3856,7 +5006,7 @@ struct ModulesSearchResultsSheet: View {
         
         if let sources = sources, !sources.isEmpty {
             for (idx, source) in sources.enumerated() {
-                guard let rawUrl = source["streamUrl"] as? String ?? source["url"] as? String, !rawUrl.isEmpty else { continue }
+                guard let rawUrl = firstStringValue(in: source, keys: ["streamUrl", "url", "file", "src", "link", "stream"]), !rawUrl.isEmpty else { continue }
                 let title = ["title", "name", "label", "quality"]
                     .compactMap { source[$0] as? String }
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -3875,7 +5025,7 @@ struct ModulesSearchResultsSheet: View {
                 )
                 availableStreams.append(option)
             }
-        } else if let streams = streams, streams.count > 1 {
+        } else if let streams = streams, !streams.isEmpty {
             availableStreams = parseStreamStrings(streams)
         }
         
@@ -3908,11 +5058,18 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private func languageHints(in source: [String: Any]) -> [String] {
-        stringValues(in: source, keys: ["lang", "language", "languages", "audioLanguage", "audioLanguages", "dubLanguage", "dubLanguages"])
+        stringValues(in: source, keys: [
+            "lang", "language", "languages", "languageCode", "languageCodes", "langCode", "langCodes",
+            "locale", "locales", "audio", "audioLang", "audioLangs", "audioLanguage", "audioLanguages",
+            "dub", "dubLang", "dubLanguage", "dubLanguages"
+        ])
     }
 
     private func metadataHints(in source: [String: Any]) -> [String] {
-        stringValues(in: source, keys: ["title", "name", "label", "quality", "provider", "type", "filename", "file", "streamName", "server"])
+        stringValues(in: source, keys: [
+            "title", "name", "label", "quality", "provider", "type", "filename", "file", "streamName", "server",
+            "source", "codec", "video", "audio", "audioTrack", "audioTracks"
+        ])
     }
 
     private func stringValues(in source: [String: Any], keys: [String]) -> [String] {
@@ -3944,9 +5101,7 @@ struct ModulesSearchResultsSheet: View {
     
     private func extractSingleStreamURL(streams: [String]?, sources: [[String: Any]]?) -> (url: String, headers: [String: String]?)? {
         if let sources = sources, let firstSource = sources.first {
-            if let streamUrl = firstSource["streamUrl"] as? String {
-                return (streamUrl, safeConvertToHeaders(firstSource["headers"]))
-            } else if let urlString = firstSource["url"] as? String {
+            if let urlString = firstStringValue(in: firstSource, keys: ["streamUrl", "url", "file", "src", "link", "stream"]) {
                 return (urlString, safeConvertToHeaders(firstSource["headers"]))
             }
         } else if let streams = streams, !streams.isEmpty {
@@ -4001,7 +5156,18 @@ struct ModulesSearchResultsSheet: View {
     }
     
     @MainActor
-    private func resolveSubtitleSelection(subtitles: [String]?, defaultSubtitle: String?, service: Service, streamURL: String, headers: [String: String]?, structuredSubtitleTracks: [ServiceSubtitleTrack] = [], streamName: String? = nil, serviceHref: String? = nil) {
+    private func resolveSubtitleSelection(
+        subtitles: [String]?,
+        defaultSubtitle: String?,
+        service: Service,
+        streamURL: String,
+        headers: [String: String]?,
+        structuredSubtitleTracks: [ServiceSubtitleTrack] = [],
+        streamName: String? = nil,
+        streamLanguageHints: [String] = [],
+        streamMetadataHints: [String] = [],
+        serviceHref: String? = nil
+    ) {
         if !structuredSubtitleTracks.isEmpty {
             dispatchStreamAction(
                 streamURL,
@@ -4010,24 +5176,53 @@ struct ModulesSearchResultsSheet: View {
                 subtitleTracks: structuredSubtitleTracks,
                 headers: headers,
                 streamName: streamName,
+                streamLanguageHints: streamLanguageHints,
+                streamMetadataHints: streamMetadataHints,
                 serviceHref: serviceHref
             )
             return
         }
 
         guard let subtitles = subtitles, !subtitles.isEmpty else {
-            dispatchStreamAction(streamURL, service: service, subtitle: defaultSubtitle, headers: headers, streamName: streamName, serviceHref: serviceHref)
+            dispatchStreamAction(
+                streamURL,
+                service: service,
+                subtitle: defaultSubtitle,
+                headers: headers,
+                streamName: streamName,
+                streamLanguageHints: streamLanguageHints,
+                streamMetadataHints: streamMetadataHints,
+                serviceHref: serviceHref
+            )
             return
         }
         
         let options = parseSubtitleOptions(from: subtitles)
         guard !options.isEmpty else {
-            dispatchStreamAction(streamURL, service: service, subtitle: defaultSubtitle, headers: headers, streamName: streamName, serviceHref: serviceHref)
+            dispatchStreamAction(
+                streamURL,
+                service: service,
+                subtitle: defaultSubtitle,
+                headers: headers,
+                streamName: streamName,
+                streamLanguageHints: streamLanguageHints,
+                streamMetadataHints: streamMetadataHints,
+                serviceHref: serviceHref
+            )
             return
         }
         
         if options.count == 1 {
-            dispatchStreamAction(streamURL, service: service, subtitle: options[0].url, headers: headers, streamName: streamName, serviceHref: serviceHref)
+            dispatchStreamAction(
+                streamURL,
+                service: service,
+                subtitle: options[0].url,
+                headers: headers,
+                streamName: streamName,
+                streamLanguageHints: streamLanguageHints,
+                streamMetadataHints: streamMetadataHints,
+                serviceHref: serviceHref
+            )
             return
         }
         
@@ -4046,12 +5241,46 @@ struct ModulesSearchResultsSheet: View {
         viewModel.pendingService = service
         viewModel.pendingServiceHref = serviceHref
         viewModel.pendingStreamName = streamName
+        viewModel.pendingStreamLanguageHints = streamLanguageHints
+        viewModel.pendingStreamMetadataHints = streamMetadataHints
         viewModel.isFetchingStreams = false
         viewModel.showingSubtitlePicker = true
     }
     
     /// Routes to either play or download based on downloadMode
-    private func dispatchStreamAction(_ url: String, service: Service, subtitle: String?, subtitleTracks: [ServiceSubtitleTrack] = [], subtitleNames: [String]? = nil, subtitleHeadersByURL: [String: [String: String]]? = nil, headers: [String: String]?, streamName: String? = nil, serviceHref: String? = nil) {
+    private func dispatchStreamAction(
+        _ url: String,
+        service: Service,
+        subtitle: String?,
+        subtitleTracks: [ServiceSubtitleTrack] = [],
+        subtitleNames: [String]? = nil,
+        subtitleHeadersByURL: [String: [String: String]]? = nil,
+        headers: [String: String]?,
+        streamName: String? = nil,
+        streamLanguageHints: [String] = [],
+        streamMetadataHints: [String] = [],
+        serviceHref: String? = nil
+    ) {
+        let ruleMetadata = [streamName].compactMap { $0 } + streamMetadataHints + [url]
+        guard !StreamLanguageFilter.shouldHide(
+            languageHints: streamLanguageHints,
+            metadata: ruleMetadata,
+            sourceId: SourceHealth.serviceId(service),
+            originalAudioLanguage: originalAudioLanguage,
+            isAnime: hasAnimeLookupContext
+        ) else {
+            Logger.shared.log(
+                "Service stream blocked by extra service settings source=\(service.metadata.sourceName) name=\(streamName ?? "unnamed")",
+                type: "Stream"
+            )
+            handleServicePlaybackPreparationFailure(
+                service,
+                message: "This Service stream is hidden by your extra service settings.",
+                autoModeLaunch: viewModel.pendingPlaybackAutoMode
+            )
+            return
+        }
+
         let structuredSubtitleURLs = subtitleTracks.map(\.url)
         let structuredSubtitleNames = subtitleTracks.map(\.title)
         let structuredSubtitleHeaders = subtitleHeadersByURL ?? subtitleHeadersDictionary(from: subtitleTracks)
@@ -4085,6 +5314,8 @@ struct ModulesSearchResultsSheet: View {
                 subtitle: downloadSubtitleURL,
                 subtitleHeaders: downloadSubtitleHeaders,
                 headers: headers,
+                streamName: streamName,
+                serviceHref: serviceHref,
                 autoModeLaunch: viewModel.pendingPlaybackAutoMode
             )
 #endif
@@ -4156,7 +5387,10 @@ struct ModulesSearchResultsSheet: View {
         
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 300_000_000)
-            
+
+            guard !Task.isCancelled,
+                  forcedWatchTogetherMediaIsCurrent() else { return }
+
             guard let streamURL = URL(string: url) else {
                 Logger.shared.log("Invalid stream URL: \(ServiceSandboxState.redactedURL(url))", type: "Error")
                 handleServicePlaybackPreparationFailure(service, message: "Invalid stream URL. The source returned a malformed URL.", autoModeLaunch: autoModeLaunch)
@@ -4174,7 +5408,8 @@ struct ModulesSearchResultsSheet: View {
             let external = ExternalPlayer(rawValue: externalRaw) ?? .none
             let schemeUrl = external.schemeURL(for: url)
             
-            if onResolvedPlaybackRequest == nil,
+            if !forceAutomaticPlayback,
+               onResolvedPlaybackRequest == nil,
                let scheme = schemeUrl,
                UIApplication.shared.canOpenURL(scheme) {
                 dismissAutoModeSheetBeforePlaybackIfNeeded { _ in
@@ -4215,9 +5450,12 @@ struct ModulesSearchResultsSheet: View {
             )
 #endif
 
-            let inAppPlayer = Settings.normalizedInAppPlayer(UserDefaults.standard.string(forKey: "inAppPlayer"))
-            Logger.shared.log("Playback resolve diagnostics source=\(service.metadata.sourceName) kind=service player=\(inAppPlayer) host=\(streamURL.host ?? "nil") ext=\(streamURL.pathExtension.isEmpty ? "none" : streamURL.pathExtension) namedStream=\(streamName?.isEmpty == false) headerKeys=[\(finalHeaders.keys.sorted().joined(separator: ","))] subtitles=\(subtitles?.count ?? 0) autoMode=\(autoModeLaunch) retry=\(retryCount)", type: "StreamDiagnostics")
-            Logger.shared.log("[PlaybackTrace \(playbackTraceID)] stage=resolved source=\(service.metadata.sourceName) kind=service player=\(inAppPlayer) host=\(streamURL.host ?? "nil") autoMode=\(autoModeLaunch) retry=\(retryCount)", type: "PlaybackTrace")
+            let playbackPlan = PlaybackLaunchPlan.make(
+                selection: forceAutomaticPlayback ? .mpv : .selected,
+                deviceFamily: .current
+            )
+            Logger.shared.log("Playback resolve diagnostics source=\(service.metadata.sourceName) kind=service player=\(playbackPlan.primary.rawValue) host=\(streamURL.host ?? "nil") ext=\(streamURL.pathExtension.isEmpty ? "none" : streamURL.pathExtension) namedStream=\(streamName?.isEmpty == false) headerKeys=[\(finalHeaders.keys.sorted().joined(separator: ","))] subtitles=\(subtitles?.count ?? 0) autoMode=\(autoModeLaunch) retry=\(retryCount)", type: "StreamDiagnostics")
+            Logger.shared.log("[PlaybackTrace \(playbackTraceID)] stage=resolved source=\(service.metadata.sourceName) kind=service player=\(playbackPlan.primary.rawValue) host=\(streamURL.host ?? "nil") autoMode=\(autoModeLaunch) retry=\(retryCount)", type: "PlaybackTrace")
             
             // Record service usage (async to avoid blocking player launch)
             Task {
@@ -4263,6 +5501,10 @@ struct ModulesSearchResultsSheet: View {
             let resolvedAnimeHint = hasAnimeLookupContext
 
             if onResolvedPlaybackRequest != nil {
+                guard playbackRecoveryIdentityIsCurrent else {
+                    Logger.shared.log("ServicesResultsSheet: discarded stale service resolution before caller handoff", type: "Player")
+                    return
+                }
                 let request = PlayerResolvedPlaybackRequest(
                     url: streamURL,
                     preset: resolvedPreset,
@@ -4277,14 +5519,14 @@ struct ModulesSearchResultsSheet: View {
                     originalTMDBSeasonNumber: effectivePlaybackContext?.resolvedTMDBSeasonNumber ?? originalTMDBSeasonNumber,
                     originalTMDBEpisodeNumber: effectivePlaybackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBEpisodeNumber,
                     episodePlaybackContext: effectivePlaybackContext,
-                    launchContext: resolvedLaunchContext
+                    launchContext: resolvedLaunchContext,
+                    autoModeRecoveryIdentity: autoModeRecoveryIdentity
                 )
                 finishResolvedPlayback(request)
                 return
             }
 
-#if os(tvOS)
-            presentTVPlayback(
+            presentCoordinatedPlayback(
                 url: streamURL,
                 preset: resolvedPreset,
                 headers: finalHeaders,
@@ -4301,136 +5543,20 @@ struct ModulesSearchResultsSheet: View {
                 sourceName: service.metadata.sourceName
             )
             return
-#else
-            if inAppPlayer == "mpv" {
-                let preset = PlayerPreset.presets.first
-                let subtitleArray = resolvedSubtitleArray
-                
-                // Prepare mediaInfo before creating player
-                var playerMediaInfo: MediaInfo? = nil
-                let posterURL = resolvedPosterURL
-                if isMovie {
-                    playerMediaInfo = .movie(id: tmdbId, title: playerMediaTitle, posterURL: posterURL, isAnime: isAnimeContent)
-                } else if let episode = selectedEpisode {
-                    playerMediaInfo = .episode(showId: tmdbId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, showTitle: playerMediaTitle, showPosterURL: posterURL, isAnime: isAnimeContent)
-                }
-                
-                let pvc = PlayerViewController(
-                    url: streamURL,
-                    preset: preset ?? PlayerPreset(id: .sdrRec709, title: "Default", summary: "", stream: nil, commands: []),
-                    headers: finalHeaders,
-                    subtitles: subtitleArray,
-                    subtitleNames: subtitleNames,
-                    subtitleHeadersByURL: subtitleHeadersByURL,
-                    mediaInfo: playerMediaInfo,
-                    imdbId: imdbId
-                )
-                let launchContext = PlaybackLaunchContext(
-                    traceID: playbackTraceID,
-                    traceCreatedAt: playbackTraceCreatedAt,
-                    sourceId: SourceHealth.serviceId(service),
-                    sourceName: service.metadata.sourceName,
-                    sourceKind: .service,
-                    autoMode: autoModeLaunch,
-                    streamURL: url,
-                    streamName: streamName,
-                    headers: finalHeaders,
-                    subtitles: subtitleArray ?? [],
-                    subtitleNames: subtitleNames,
-                    subtitleHeadersByURL: subtitleHeadersByURL,
-                    retryCount: retryCount,
-                    titleCandidates: titleMatchCandidates(),
-                    serviceContentHref: serviceHref
-                )
-                configurePlaybackRecovery(pvc, context: launchContext)
-                let isAnimeHint = hasAnimeLookupContext
-                pvc.isAnimeHint = isAnimeHint
-                pvc.isAnimationContentHint = isAnimationGenre16
-                pvc.originalTMDBSeasonNumber = effectivePlaybackContext?.resolvedTMDBSeasonNumber ?? originalTMDBSeasonNumber
-                pvc.originalTMDBEpisodeNumber = effectivePlaybackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBEpisodeNumber
-                pvc.episodePlaybackContext = effectivePlaybackContext
-                pvc.onRequestNextEpisode = { seasonNumber, nextEpisodeNumber in
-                    NotificationCenter.default.post(
-                        name: .requestNextEpisode,
-                        object: nil,
-                        userInfo: [
-                            "tmdbId": tmdbId,
-                            "seasonNumber": seasonNumber,
-                            "episodeNumber": nextEpisodeNumber
-                        ]
-                    )
-                }
-                let mediaInfoLabel: String = {
-                    guard let info = playerMediaInfo else { return "nil" }
-                    switch info {
-                    case .movie(let id, let title, _, let isAnime):
-                        return "movie id=\(id) title=\(title) isAnime=\(isAnime)"
-                    case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, _, let isAnime):
-                        return "episode showId=\(showId) s=\(seasonNumber) e=\(episodeNumber) title=\(String(describing: showTitle)) isAnime=\(isAnime)"
-                    }
-                }()
-                Logger.shared.log("ServicesResultsSheet: presenting MPV isAnimeHint=\(isAnimeHint) isAnimeContent=\(isAnimeContent) mediaInfo=\(mediaInfoLabel)", type: "Stream")
-                pvc.modalPresentationStyle = .fullScreen
-                
-                dismissAutoModeSheetBeforePlaybackIfNeeded { topmostVC in
-                    if let topmostVC {
-                        topmostVC.present(pvc, animated: true, completion: nil)
-                    } else {
-                        Logger.shared.log("Failed to find root view controller to present MPV player", type: "Error")
-                    }
-                }
-                return
-            } else {
-                let playerVC = NormalPlayer()
-                let asset = AVURLAsset(url: streamURL, options: ["AVURLAssetHTTPHeaderFieldsKey": finalHeaders])
-                let item = AVPlayerItem(asset: asset)
-                playerVC.player = AVPlayer(playerItem: item)
-                let launchContext = PlaybackLaunchContext(
-                    traceID: playbackTraceID,
-                    traceCreatedAt: playbackTraceCreatedAt,
-                    sourceId: SourceHealth.serviceId(service),
-                    sourceName: service.metadata.sourceName,
-                    sourceKind: .service,
-                    autoMode: autoModeLaunch,
-                    streamURL: url,
-                    streamName: streamName,
-                    headers: finalHeaders,
-                    subtitles: resolvedSubtitleArray ?? [],
-                    subtitleNames: subtitleNames,
-                    subtitleHeadersByURL: subtitleHeadersByURL,
-                    retryCount: retryCount,
-                    titleCandidates: titleMatchCandidates(),
-                    serviceContentHref: serviceHref
-                )
-                configurePlaybackRecovery(playerVC, context: launchContext)
-                if isMovie {
-                    let posterURL = resolvedPosterURL
-                    playerVC.mediaInfo = .movie(id: tmdbId, title: playerMediaTitle, posterURL: posterURL, isAnime: isAnimeContent)
-                } else if let episode = selectedEpisode {
-                    let posterURL = resolvedPosterURL
-                    playerVC.mediaInfo = .episode(showId: tmdbId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, showTitle: playerMediaTitle, showPosterURL: posterURL, isAnime: isAnimeContent)
-                }
-                playerVC.episodePlaybackContext = effectivePlaybackContext
-                playerVC.modalPresentationStyle = .fullScreen
-                
-                dismissAutoModeSheetBeforePlaybackIfNeeded { topmostVC in
-                    if let topmostVC {
-                        topmostVC.present(playerVC, animated: true) {
-                            playerVC.playAtDefaultSpeed()
-                        }
-                    } else {
-                        Logger.shared.log("Failed to find root view controller to present player", type: "Error")
-                        self.viewModel.streamError = "Failed to open player. Please try again."
-                        self.viewModel.showingStreamError = true
-                    }
-                }
-            }
-#endif
         }
     }
     
 #if !os(tvOS)
-    private func downloadStreamURL(_ url: String, service: Service, subtitle: String?, subtitleHeaders: [String: String]? = nil, headers: [String: String]?, autoModeLaunch: Bool = false) {
+    private func downloadStreamURL(
+        _ url: String,
+        service: Service,
+        subtitle: String?,
+        subtitleHeaders: [String: String]? = nil,
+        headers: [String: String]?,
+        streamName: String? = nil,
+        serviceHref: String? = nil,
+        autoModeLaunch: Bool = false
+    ) {
         guard let parsed = URL(string: url),
               parsed.scheme == "http" || parsed.scheme == "https" else {
             Logger.shared.log("Invalid download stream URL: \(ServiceSandboxState.redactedURL(url))", type: "Error")
@@ -4497,6 +5623,9 @@ struct ModulesSearchResultsSheet: View {
                     subtitleURL: subtitle,
                     subtitleHeaders: subtitleHeaders,
                     serviceBaseURL: serviceURL,
+                    sourceId: SourceHealth.serviceId(service),
+                    serviceContentHref: serviceHref,
+                    streamName: streamName,
                     isAnime: isAnimeContent,
                     episodePlaybackContext: effectivePlaybackContext,
                     cancellationRequested: { autoModeCancelled }
@@ -4513,6 +5642,27 @@ struct ModulesSearchResultsSheet: View {
                         service,
                         message: "Download verification failed. \(reason)",
                         autoModeLaunch: true
+                    )
+                case .cloudflareChallenge(let challengeURL):
+                    // Same recovery as auto-mode streaming: show the verification once, then retry
+                    // THIS source's download rather than skipping to a worse candidate.
+                    viewModel.pendingCloudflareURL = challengeURL
+                    viewModel.pendingCloudflareRetry = {
+                        self.downloadStreamURL(
+                            url,
+                            service: service,
+                            subtitle: subtitle,
+                            subtitleHeaders: subtitleHeaders,
+                            headers: headers,
+                            streamName: streamName,
+                            serviceHref: serviceHref,
+                            autoModeLaunch: true
+                        )
+                    }
+                    resolveCloudflareChallengeDuringAutoMode(
+                        challengeURL,
+                        sourceName: service.metadata.sourceName,
+                        fallbackMessage: "Download verification failed. Cloudflare verification is required before this source can download."
                     )
                 case .cancelled:
                     viewModel.isFetchingStreams = false
@@ -4535,6 +5685,9 @@ struct ModulesSearchResultsSheet: View {
             subtitleURL: subtitle,
             subtitleHeaders: subtitleHeaders,
             serviceBaseURL: serviceURL,
+            sourceId: SourceHealth.serviceId(service),
+            serviceContentHref: serviceHref,
+            streamName: streamName,
             isAnime: isAnimeContent,
             episodePlaybackContext: effectivePlaybackContext
         )

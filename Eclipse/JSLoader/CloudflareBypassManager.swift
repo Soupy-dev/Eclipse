@@ -47,6 +47,16 @@ final class CloudflareBypassManager: ObservableObject {
         )
     }
 
+    @MainActor
+    @discardableResult
+    func refreshSessionAfterChallenge(
+        for url: URL,
+        rejectedCookieHeader: String? = nil
+    ) async -> Bool {
+        flagPendingVerification(for: url)
+        return false
+    }
+
     func recoverChallengedRequest(
         for url: URL,
         method: String,
@@ -61,10 +71,21 @@ final class CloudflareBypassManager: ObservableObject {
     static func isChallengeResponse(status: Int, body: String, headers: [String: String] = [:]) -> Bool {
         let lowerBody = body.lowercased()
         let isBlockedStatus = [403, 429, 503].contains(status)
+        let lowerHeaders = headers.reduce(into: [String: String]()) { result, pair in
+            result[pair.key.lowercased()] = pair.value.lowercased()
+        }
+
+        // Cloudflare explicitly labels challenge responses with this header. Unlike `Server:
+        // cloudflare` and `CF-Ray`, it is not also present on ordinary rate-limit, access-denied,
+        // or origin-error pages that no amount of human verification can solve.
+        if lowerHeaders["cf-mitigated"]?.contains("challenge") == true {
+            return true
+        }
 
         // Tokens that appear only on the actual interstitial/challenge document, never on an
         // already-cleared page — reliable on any status.
         if lowerBody.contains("__cf_chl_")
+            || lowerBody.contains("cf_chl_opt")
             || lowerBody.contains("enable javascript and cookies")
             || lowerBody.contains("check.ddos-guard.net")
             || lowerBody.contains("/.well-known/ddos-guard/")
@@ -84,22 +105,18 @@ final class CloudflareBypassManager: ObservableObject {
                 || lowerBody.contains("challenge-platform")
                 || lowerBody.contains("cf-spinner")
                 || lowerBody.contains("jschl")
-                || lowerBody.contains("cloudflare ray id")
-                || lowerBody.contains("ddos-guard")
+                || (lowerBody.contains("ddos-guard")
+                    && (lowerBody.contains("checking your browser")
+                        || lowerBody.contains("please wait")))
             if hasProviderMarker {
                 return true
             }
         }
 
-        let lowerHeaders = headers.reduce(into: [String: String]()) { result, pair in
-            result[pair.key.lowercased()] = pair.value.lowercased()
-        }
-        let server = lowerHeaders["server"] ?? ""
-        let hasCloudflareHeader = server.contains("cloudflare") || lowerHeaders["cf-ray"] != nil
-        let hasDDoSGuardHeader = server.contains("ddos-guard")
-        return (hasCloudflareHeader || hasDDoSGuardHeader)
-            && isBlockedStatus
-            && lowerBody.contains("<html")
+        // A generic HTML 403/429/503 served by Cloudflare is commonly a rate limit (Error 1015),
+        // access denial (1020), or origin failure. Those pages carry Server/CF-Ray headers and a
+        // Cloudflare footer but do not contain a challenge a user can complete.
+        return false
     }
 
     static func headersDictionary(from response: HTTPURLResponse?) -> [String: String] {
@@ -261,6 +278,44 @@ final class CloudflareBypassManager: ObservableObject {
         )
     }
 
+    /// Starts a new browser-backed solve after a request proves that its reused clearance is no
+    /// longer accepted by the server. Callers may pass the Cookie header used by that rejected
+    /// request so a late response cannot discard a newer session established in the meantime.
+    /// This deliberately performs no media fetch; download/player transports retry themselves
+    /// after the replacement session is ready.
+    @MainActor
+    @discardableResult
+    func refreshSessionAfterChallenge(
+        for url: URL,
+        rejectedCookieHeader: String? = nil
+    ) async -> Bool {
+        guard let host = normalizedHost(from: url) else { return false }
+
+        if retainedSessionIsNewer(than: rejectedCookieHeader, for: host) {
+            Logger.shared.log(
+                "CloudflareBypass: ignored rejection from older session host=\(host); newer session retained",
+                type: "Service"
+            )
+            return true
+        }
+
+        if inProgressHosts.contains(host) {
+            Logger.shared.log(
+                "CloudflareBypass: confirmed challenge joining active replacement flow host=\(host)",
+                type: "Service"
+            )
+        } else {
+            invalidateRejectedSession(
+                for: url,
+                rejectedCookieHeader: rejectedCookieHeader,
+                reason: "confirmed-challenge"
+            )
+        }
+
+        let presentation: BypassPresentation = isKnownInteractiveHost(host) ? .visible : .silentThenEscalate
+        return (try? await runBypassFlow(for: url, presentation: presentation)) ?? false
+    }
+
     func recoverChallengedRequest(
         for url: URL,
         method: String,
@@ -389,16 +444,24 @@ final class CloudflareBypassManager: ObservableObject {
                 headers: Self.headersDictionary(from: httpResponse)
             ) {
                 if sessionInfo.source == "liveWebView",
-                   let recovered = await browserRecoveredResponse(for: url, host: host) {
+                   let recovered = await browserRecoveredResponse(
+                    for: url,
+                    host: host,
+                    reloadAfterRejectedReuse: true
+                   ) {
                     Logger.shared.log(
                         "CloudflareBypass: recovered challenged request from live browser document host=\(host) status=\(recovered.response.statusCode) bytes=\(recovered.data.count) elapsedMs=\(elapsedMilliseconds(since: retryStartedAt))",
                         type: "Service"
                     )
                     return recovered
                 }
-                removeCachedEntry(for: host)
+                await invalidateRejectedSession(
+                    for: url,
+                    rejectedCookieHeader: sessionInfo.cookieHeader,
+                    reason: "session-retry-challenged"
+                )
                 Logger.shared.log(
-                    "CloudflareBypass: solved session still challenged host=\(host) elapsedMs=\(elapsedMilliseconds(since: retryStartedAt)) \(Self.challengeDebugSummary(status: httpResponse.statusCode, body: bodyText, headers: Self.headersDictionary(from: httpResponse))) cacheCleared=true",
+                    "CloudflareBypass: solved session still challenged host=\(host) elapsedMs=\(elapsedMilliseconds(since: retryStartedAt)) \(Self.challengeDebugSummary(status: httpResponse.statusCode, body: bodyText, headers: Self.headersDictionary(from: httpResponse))) rejectedSessionCleared=true",
                     type: "Service"
                 )
                 return nil
@@ -448,6 +511,23 @@ final class CloudflareBypassManager: ObservableObject {
         // than throw, since it's a normal, expected outcome for the automatic path — but
         // callers of this .visible entry point need throws to mean "not solved" so they don't
         // mistake a cancelled/unsolved sheet for success and retry with no usable session.
+        // This entry point is only surfaced after a request was challenged. A cached entry here
+        // is therefore evidence of rejected reuse, not proof that verification is still valid.
+        // Clear both the persisted header and its retained browser before runBypassFlow performs
+        // its normal cache fast-path.
+        let host = normalizedHost(from: url)
+        if let host, inProgressHosts.contains(host) {
+            Logger.shared.log(
+                "CloudflareBypass: manual verification joining active replacement flow host=\(host)",
+                type: "Service"
+            )
+        } else {
+            invalidateRejectedSession(
+                for: url,
+                rejectedCookieHeader: nil,
+                reason: "manual-verification"
+            )
+        }
         guard try await runBypassFlow(for: url, presentation: .visible) else {
             throw CloudflareBypassError.timeout
         }
@@ -632,10 +712,21 @@ final class CloudflareBypassManager: ObservableObject {
     static func isChallengeResponse(status: Int, body: String, headers: [String: String] = [:]) -> Bool {
         let lowerBody = body.lowercased()
         let isBlockedStatus = [403, 429, 503].contains(status)
+        let lowerHeaders = headers.reduce(into: [String: String]()) { result, pair in
+            result[pair.key.lowercased()] = pair.value.lowercased()
+        }
+
+        // Cloudflare explicitly labels challenge responses with this header. Unlike `Server:
+        // cloudflare` and `CF-Ray`, it is not also present on ordinary rate-limit, access-denied,
+        // or origin-error pages that no amount of human verification can solve.
+        if lowerHeaders["cf-mitigated"]?.contains("challenge") == true {
+            return true
+        }
 
         // Tokens that appear only on the actual interstitial/challenge document, never on an
         // already-cleared page — reliable on any status.
         if lowerBody.contains("__cf_chl_")
+            || lowerBody.contains("cf_chl_opt")
             || lowerBody.contains("enable javascript and cookies")
             || lowerBody.contains("check.ddos-guard.net")
             || lowerBody.contains("/.well-known/ddos-guard/")
@@ -655,20 +746,18 @@ final class CloudflareBypassManager: ObservableObject {
                 || lowerBody.contains("challenge-platform")
                 || lowerBody.contains("cf-spinner")
                 || lowerBody.contains("jschl")
-                || lowerBody.contains("cloudflare ray id")
-                || lowerBody.contains("ddos-guard")
+                || (lowerBody.contains("ddos-guard")
+                    && (lowerBody.contains("checking your browser")
+                        || lowerBody.contains("please wait")))
             if hasProviderMarker {
                 return true
             }
         }
 
-        let lowerHeaders = headers.reduce(into: [String: String]()) { result, pair in
-            result[pair.key.lowercased()] = pair.value.lowercased()
-        }
-        let server = lowerHeaders["server"] ?? ""
-        let hasCloudflareHeader = server.contains("cloudflare") || lowerHeaders["cf-ray"] != nil
-        let hasDDoSGuardHeader = server.contains("ddos-guard")
-        return (hasCloudflareHeader || hasDDoSGuardHeader) && isBlockedStatus && lowerBody.contains("<html")
+        // A generic HTML 403/429/503 served by Cloudflare is commonly a rate limit (Error 1015),
+        // access denial (1020), or origin failure. Those pages carry Server/CF-Ray headers and a
+        // Cloudflare footer but do not contain a challenge a user can complete.
+        return false
     }
 
     static func headersDictionary(from response: HTTPURLResponse?) -> [String: String] {
@@ -717,6 +806,89 @@ final class CloudflareBypassManager: ObservableObject {
         }
     }
 
+    /// Returns true when a challenge response belongs to an older request and the cache now
+    /// contains a different clearance. Cookie values are compared only in memory and never
+    /// emitted to logs.
+    private func retainedSessionIsNewer(than rejectedCookieHeader: String?, for host: String) -> Bool {
+        guard let rejectedCookieHeader,
+              !rejectedCookieHeader.isEmpty,
+              let current = cachedEntry(for: host) else {
+            return false
+        }
+
+        let rejectedClearance = clearanceCookieFingerprint(in: rejectedCookieHeader)
+        let currentClearance = clearanceCookieFingerprint(in: current.cookieHeader)
+        guard !rejectedClearance.isEmpty, !currentClearance.isEmpty else { return false }
+        return rejectedClearance != currentClearance
+    }
+
+    /// Drops every retained alias of a browser session that the server just rejected. This is
+    /// intentionally MainActor-isolated because bypassWebViews contains UIKit/WebKit objects.
+    /// If the caller supplies the rejected Cookie header, shared-jar cleanup only deletes those
+    /// exact clearance tokens, protecting a newer solve from a late response.
+    @MainActor
+    private func invalidateRejectedSession(
+        for url: URL,
+        rejectedCookieHeader: String?,
+        reason: String
+    ) {
+        guard let host = normalizedHost(from: url) else { return }
+
+        if retainedSessionIsNewer(than: rejectedCookieHeader, for: host) {
+            Logger.shared.log(
+                "CloudflareBypass: skipped rejected-session cleanup because a newer session exists host=\(host) reason=\(reason)",
+                type: "Service"
+            )
+            return
+        }
+
+        let staleWebView = bypassWebViews[host]
+        var invalidatedHosts = Set([host])
+        if let staleWebView {
+            for (candidateHost, candidateWebView) in bypassWebViews where candidateWebView === staleWebView {
+                invalidatedHosts.insert(candidateHost)
+            }
+        }
+
+        for candidateHost in invalidatedHosts {
+            bypassWebViews.removeValue(forKey: candidateHost)
+            removeCachedEntry(for: candidateHost)
+        }
+        staleWebView?.stopLoading()
+
+        let rejectedClearance: [String: String]
+        if let rejectedCookieHeader {
+            rejectedClearance = clearanceCookieFingerprint(in: rejectedCookieHeader)
+        } else {
+            rejectedClearance = [:]
+        }
+        let sharedCookieStorage = HTTPCookieStorage.shared
+        var removedSharedClearanceCount = 0
+        for cookie in sharedCookieStorage.cookies ?? [] where Self.isClearanceCookieName(cookie.name) {
+            let domain = cookie.domain
+                .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                .lowercased()
+            let domainMatches = invalidatedHosts.contains { candidateHost in
+                candidateHost == domain
+                    || candidateHost.hasSuffix("." + domain)
+                    || domain.hasSuffix("." + candidateHost)
+            }
+            guard domainMatches else { continue }
+
+            if !rejectedClearance.isEmpty,
+               rejectedClearance[cookie.name.lowercased()] != cookie.value {
+                continue
+            }
+            sharedCookieStorage.deleteCookie(cookie)
+            removedSharedClearanceCount += 1
+        }
+
+        Logger.shared.log(
+            "CloudflareBypass: invalidated rejected session host=\(host) aliases=\(invalidatedHosts.count) retainedBrowser=\(staleWebView != nil) sharedClearanceCookiesRemoved=\(removedSharedClearanceCount) reason=\(reason)",
+            type: "Service"
+        )
+    }
+
     private func persistCache() {
         lock.lock()
         let live = cache.filter { $0.value.expires > Date() }
@@ -758,11 +930,30 @@ final class CloudflareBypassManager: ObservableObject {
     }
 
     @MainActor
-    private func browserRecoveredResponse(for url: URL, host: String) async -> (data: Data, response: HTTPURLResponse)? {
+    private func browserRecoveredResponse(
+        for url: URL,
+        host: String,
+        reloadAfterRejectedReuse: Bool
+    ) async -> (data: Data, response: HTTPURLResponse)? {
         let browserRecoveryStartedAt = Date()
         guard let webView = bypassWebViews[host] else { return nil }
 
-        if !browserURL(webView.url, matchesRequestedURL: url, host: host) {
+        var previousDocumentMarker: String?
+        if reloadAfterRejectedReuse {
+            // URLSession just proved that this browser session's reused clearance was rejected.
+            // Mark the currently retained DOM, then navigate even when its URL already matches.
+            // Without this freshness check an old, previously solved /play/ document can be
+            // accepted immediately and the app never opens a new human verification flow.
+            previousDocumentMarker = UUID().uuidString
+            if let previousDocumentMarker {
+                await setBrowserRecoveryMarker(previousDocumentMarker, in: webView)
+            }
+            Logger.shared.log(
+                "CloudflareBypass: browser recovery reloading rejected session host=\(host) target=\(Self.redactedURL(url.absoluteString))",
+                type: "Service"
+            )
+            webView.load(URLRequest(url: url))
+        } else if !browserURL(webView.url, matchesRequestedURL: url, host: host) {
             Logger.shared.log(
                 "CloudflareBypass: browser recovery navigating host=\(host) from=\(Self.redactedURL(webView.url?.absoluteString ?? "nil")) to=\(Self.redactedURL(url.absoluteString))",
                 type: "Service"
@@ -774,6 +965,11 @@ final class CloudflareBypassManager: ObservableObject {
         // JavaScript finishes inserting the playable iframe. Give the completed document time to
         // stabilize instead of accepting an incomplete /play/ page or immediately failing it.
         for attempt in 1...40 {
+            // Read the freshness sentinel first. If this still comes from the retained document,
+            // nothing else sampled in this iteration is eligible for recovery. Once navigation
+            // replaces that JavaScript world, subsequent document reads belong to the new page.
+            let currentDocumentMarker = await browserRecoveryMarker(in: webView)
+            let isFreshDocument = previousDocumentMarker == nil || currentDocumentMarker != previousDocumentMarker
             let currentURL = webView.url
             let html = await documentHTML(for: webView)
             let readyState = await documentReadyState(for: webView)
@@ -784,9 +980,12 @@ final class CloudflareBypassManager: ObservableObject {
             let hasPlayableEmbed = browserDocumentHasPlayableEmbed(html, for: url)
             let isPlaybackDocument = url.path.lowercased().contains("/play/")
             let isDocumentComplete = readyState.caseInsensitiveCompare("complete") == .orderedSame
+            let hasCompletedNavigation = !webView.isLoading
             let hasRequiredContent = isPlaybackDocument ? hasPlayableEmbed : isUsefulDocument
 
-            if urlMatches,
+            if isFreshDocument,
+               urlMatches,
+               hasCompletedNavigation,
                isDocumentComplete,
                bodyBytes > 0,
                !isChallenge,
@@ -805,9 +1004,25 @@ final class CloudflareBypassManager: ObservableObject {
                 return (data, response)
             }
 
+            // Once the forced navigation has completed on another challenge page, the retained
+            // browser session is definitively stale. Fail fast so retryWithSolvedSession can
+            // discard it and run a fresh silent-then-visible verification instead of polling the
+            // interstitial for the entire browser-recovery budget.
+            if isFreshDocument,
+               urlMatches,
+               hasCompletedNavigation,
+               isDocumentComplete,
+               isChallenge {
+                Logger.shared.log(
+                    "CloudflareBypass: reloaded browser session still challenged host=\(host) elapsedMs=\(elapsedMilliseconds(since: browserRecoveryStartedAt)) markers=\(browserDocumentMarkerSummary(html))",
+                    type: "Service"
+                )
+                return nil
+            }
+
             if attempt == 1 || attempt == 20 || attempt == 40 {
                 Logger.shared.log(
-                    "CloudflareBypass: browser document not ready host=\(host) attempt=\(attempt) elapsedMs=\(elapsedMilliseconds(since: browserRecoveryStartedAt)) readyState=\(readyState) url=\(Self.redactedURL(currentURL?.absoluteString ?? "nil")) matchesRequest=\(urlMatches) bytes=\(bodyBytes) challenge=\(isChallenge) useful=\(isUsefulDocument) playable=\(hasPlayableEmbed) markers=\(browserDocumentMarkerSummary(html))",
+                    "CloudflareBypass: browser document not ready host=\(host) attempt=\(attempt) elapsedMs=\(elapsedMilliseconds(since: browserRecoveryStartedAt)) readyState=\(readyState) navigationComplete=\(hasCompletedNavigation) url=\(Self.redactedURL(currentURL?.absoluteString ?? "nil")) fresh=\(isFreshDocument) matchesRequest=\(urlMatches) bytes=\(bodyBytes) challenge=\(isChallenge) useful=\(isUsefulDocument) playable=\(hasPlayableEmbed) markers=\(browserDocumentMarkerSummary(html))",
                     type: "Service"
                 )
             }
@@ -822,6 +1037,24 @@ final class CloudflareBypassManager: ObservableObject {
             type: "Service"
         )
         return nil
+    }
+
+    @MainActor
+    private func setBrowserRecoveryMarker(_ marker: String, in webView: WKWebView) async {
+        await withCheckedContinuation { continuation in
+            webView.evaluateJavaScript("window.__eclipseCloudflareRecoveryMarker = '\(marker)'") { _, _ in
+                continuation.resume()
+            }
+        }
+    }
+
+    @MainActor
+    private func browserRecoveryMarker(in webView: WKWebView) async -> String? {
+        await withCheckedContinuation { continuation in
+            webView.evaluateJavaScript("window.__eclipseCloudflareRecoveryMarker || null") { result, _ in
+                continuation.resume(returning: result as? String)
+            }
+        }
     }
 
     private func browserDocumentLooksUseful(_ html: String, for url: URL) -> Bool {
@@ -953,6 +1186,12 @@ final class CloudflareBypassManager: ObservableObject {
         let cookies = await allCookies(in: webView)
         guard cookies.contains(where: { Self.isClearanceCookieName($0.name) }) else { return nil }
 
+        // A provider can reject a clearance before its client-side expiry. The stale cookie is
+        // still present in WebKit while the interstitial is displayed, so cookie presence alone
+        // must never turn that rejected reuse back into a fresh 24-hour cache entry.
+        let html = await documentHTML(for: webView)
+        guard !Self.isChallengeResponse(status: 200, body: html) else { return nil }
+
         let userAgent = await userAgent(for: webView)
         let resolvedHost = webView.url?.host?.lowercased()
         let fullHeader = cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
@@ -1065,6 +1304,13 @@ final class CloudflareBypassManager: ObservableObject {
         }
     }
 
+    private func clearanceCookieFingerprint(in header: String) -> [String: String] {
+        cookiePairs(from: header).reduce(into: [String: String]()) { result, pair in
+            guard Self.isClearanceCookieName(pair.name) else { return }
+            result[pair.name.lowercased()] = pair.value
+        }
+    }
+
     private func cookiePairCount(in header: String) -> Int {
         cookiePairs(from: header).count
     }
@@ -1115,6 +1361,14 @@ final class CloudflareBypassManager: ObservableObject {
 }
 
 #if os(iOS)
+@MainActor
+private func cloudflarePresentationScene() -> UIWindowScene? {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    return scenes.flatMap(\.windows).first(where: \.isKeyWindow)?.windowScene
+        ?? scenes.first(where: { $0.activationState == .foregroundActive })
+        ?? scenes.first
+}
+
 private struct CloudflareBypassSheetView: View {
     @ObservedObject private var manager = CloudflareBypassManager.shared
 
@@ -1165,8 +1419,7 @@ private final class CloudflareBypassWindowController {
 
     func show() {
         guard window == nil else { return }
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else { return }
+        guard let scene = cloudflarePresentationScene() else { return }
 
         let host = UIHostingController(rootView: CloudflareBypassSheetView())
         host.view.backgroundColor = UIColor.systemBackground
@@ -1199,8 +1452,7 @@ private final class CloudflareBypassSilentHost {
 
     func attach(_ webView: WKWebView) {
         guard window == nil else { return }
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        guard let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first else { return }
+        guard let scene = cloudflarePresentationScene() else { return }
 
         let hostViewController = UIViewController()
         webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]

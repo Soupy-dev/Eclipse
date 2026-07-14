@@ -1113,7 +1113,7 @@ struct WatchNextCandidate {
 
 // MARK: - MediaInfo Enum
 
-struct EpisodePlaybackContext: Codable, Equatable {
+struct EpisodePlaybackContext: Codable, Equatable, Sendable {
     let localSeasonNumber: Int
     let localEpisodeNumber: Int
     let anilistMediaId: Int?

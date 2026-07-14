@@ -1,5 +1,8 @@
 import Foundation
 import SwiftUI
+#if os(iOS)
+import UIKit
+#endif
 
 final class HomeViewModel: ObservableObject {
     @Published var catalogResults: [String: [TMDBSearchResult]] = [:]
@@ -9,6 +12,7 @@ final class HomeViewModel: ObservableObject {
     @Published var ambientColor: Color = Color.black
     @Published var hasLoadedContent = false
     @Published var hasCompletedInitialLoad = false
+    @Published var hasRenderableStartupContent = false
     @Published var widgetData: [String: [TMDBSearchResult]] = [:]
     @Published var becauseYouWatchedTitle: String = ""
     private var heroCarouselItems: [TMDBSearchResult] = []
@@ -20,6 +24,14 @@ final class HomeViewModel: ObservableObject {
     var heroCarouselCount: Int { heroCarouselItems.count }
     /// Current index within the hero carousel (for pager dots).
     var heroCarouselCurrentIndex: Int { min(heroCarouselIndex, max(0, heroCarouselItems.count - 1)) }
+
+    func upcomingHeroCarouselItems(limit: Int) -> [TMDBSearchResult] {
+        guard limit > 0, heroCarouselItems.count > 1 else { return [] }
+        let itemCount = min(limit, heroCarouselItems.count - 1)
+        return (1...itemCount).map { offset in
+            heroCarouselItems[(heroCarouselCurrentIndex + offset) % heroCarouselItems.count]
+        }
+    }
     private var activeLoadTask: Task<Void, Never>?
     
     init() {
@@ -45,10 +57,15 @@ final class HomeViewModel: ObservableObject {
         }
         errorMessage = nil
         hasCompletedInitialLoad = false
+        if catalogResults.values.allSatisfy(\.isEmpty) && widgetData.values.allSatisfy(\.isEmpty) {
+            hasRenderableStartupContent = false
+        }
         
         activeLoadTask = Task {
             let (enabledCatalogSnapshot, performanceModeEnabled) = await MainActor.run {
-                StremioAddonManager.shared.loadAddons()
+                // First access performs the initial Core Data load. Calling loadAddons()
+                // again here repeated that synchronous fetch during every cold Home start.
+                _ = StremioAddonManager.shared
                 return (catalogManager.getEnabledCatalogs(), catalogManager.performanceModeEnabled)
             }
             let enabledCatalogIds = Set(enabledCatalogSnapshot.map(\.id))
@@ -109,6 +126,7 @@ final class HomeViewModel: ObservableObject {
                     self.catalogResults = tmdbLoadedCatalogs
                     self.applyHeroBannerSelection()
                     self.errorMessage = nil
+                    self.hasRenderableStartupContent = true
                 }
             }
 
@@ -145,14 +163,16 @@ final class HomeViewModel: ObservableObject {
                 "upcomingAnime": upcomingAnime
             ]
             let loadedCatalogs = tmdbLoadedCatalogs.merging(animeLoadedCatalogs) { _, anime in anime }
+            let loadedCatalogCount = loadedCatalogs.values.filter { !$0.isEmpty }.count
 
             await MainActor.run {
                 self.catalogResults = loadedCatalogs
                 self.applyHeroBannerSelection()
                 self.errorMessage = nil
+                if loadedCatalogCount > 0 {
+                    self.hasRenderableStartupContent = true
+                }
             }
-
-            let loadedCatalogCount = loadedCatalogs.values.filter { !$0.isEmpty }.count
 
             // Run the remaining independent row sources concurrently instead of one after another.
             async let stremioCatalogs = self.loadStremioCatalogs(
@@ -197,6 +217,7 @@ final class HomeViewModel: ObservableObject {
                 self.isLoading = false
                 self.hasLoadedContent = finalLoadedCount > 0
                 self.hasCompletedInitialLoad = true
+                self.hasRenderableStartupContent = finalLoadedCount > 0
                 self.errorMessage = finalLoadedCount == 0
                     ? "Unable to load home catalogs. Check your internet connection and API configuration, then try again."
                     : nil
@@ -288,14 +309,16 @@ final class HomeViewModel: ObservableObject {
         guard !requiredKinds.isEmpty else { return [:] }
 
         do {
-            let catalogs = try await AniListService.shared.fetchAllAnimeCatalogs(tmdbService: tmdbService)
-            let filteredCatalogs = catalogs.filter { requiredKinds.contains($0.key) }
-            let loadedSummary = filteredCatalogs
+            let catalogs = try await AniListService.shared.fetchAnimeCatalogs(
+                kinds: requiredKinds,
+                tmdbService: tmdbService
+            )
+            let loadedSummary = catalogs
                 .map { "\(String(describing: $0.key))=\($0.value.count)" }
                 .sorted()
                 .joined(separator: ",")
             Logger.shared.log("HomeViewModel: enabled anime catalogs loaded \(loadedSummary)", type: "AniList")
-            return filteredCatalogs
+            return catalogs
         } catch {
             Logger.shared.log("HomeViewModel: anime catalogs failed: \(error.localizedDescription)", type: "Error")
             return [:]
@@ -567,7 +590,15 @@ final class HomeViewModel: ObservableObject {
         let catalogId = UserDefaults.standard.string(forKey: "heroBannerCatalogId") ?? "trending"
         let behaviorRaw = UserDefaults.standard.string(forKey: "heroBannerBehavior") ?? HeroBannerBehavior.defaultValue.rawValue
         let behavior = HeroBannerBehavior(rawValue: behaviorRaw) ?? .defaultValue
-        let candidates = heroCandidates(for: catalogId)
+        let rawCandidates = heroCandidates(for: catalogId)
+#if os(iOS)
+        let iPadBackdropCandidates = rawCandidates.filter { $0.fullBackdropURL != nil }
+        let candidates = UIDevice.current.userInterfaceIdiom == .pad && !iPadBackdropCandidates.isEmpty
+            ? iPadBackdropCandidates
+            : rawCandidates
+#else
+        let candidates = rawCandidates
+#endif
 
         guard !candidates.isEmpty else { return }
 
@@ -642,6 +673,7 @@ final class HomeViewModel: ObservableObject {
             heroLaunchSelectionCatalogId = nil
             featuredGenreName = ""
             becauseYouWatchedTitle = ""
+            hasRenderableStartupContent = false
         }
         errorMessage = nil
         hasLoadedContent = false

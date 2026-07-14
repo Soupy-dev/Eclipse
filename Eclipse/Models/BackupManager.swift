@@ -82,6 +82,14 @@ struct BackupData: Codable {
     var showScheduleTab: Bool
     var showLocalScheduleTime: Bool
     var defaultScheduleMode: String = ScheduleMode.anime.rawValue
+    var scheduleWindowDays: Int = ScheduleWindow.defaultValue.rawValue
+    // Device authorization and pending UNNotificationRequests intentionally stay local.
+    // Nil preserves the current notification choices when restoring an older backup.
+    var localNotificationSubscriptions: String?
+    var localNotificationEpisodeReminders: String?
+    var localNotificationEpisodeLeadTime: Int?
+    var localNotificationSeasonLeadTime: Int?
+    var localNotificationIncludeAnimeSpecials: Bool?
 
     // Player Settings
     var defaultPlaybackSpeed: Double = 1.0
@@ -89,6 +97,7 @@ struct BackupData: Codable {
     var externalPlayer: String = "none"
     var preferDownloadedMedia: Bool = false
     var alwaysLandscape: Bool = false
+    var playerPlaybackLockEnabled: Bool = PlayerPlaybackLockSettings.defaultEnabled
     var aniSkipEnabled: Bool = true
     var introDBEnabled: Bool = true
     var introDBAppEnabled: Bool = true
@@ -97,6 +106,7 @@ struct BackupData: Codable {
     var skip85sAlwaysVisible: Bool = false
     var showNextEpisodeButton: Bool = true
     var showEpisodeBrowserButton: Bool = true
+    var showPlayerServicesButton: Bool = false
     var showNextEpisodePosterButton: Bool = false
     var nextEpisodeThreshold: Double = 0.90
     var nextEpisodeSkipFillerEnabled: Bool = NextEpisodeFillerSettings.defaultEnabled
@@ -117,6 +127,8 @@ struct BackupData: Codable {
     var mpvPlayerSkinCustomPrimaryColor: Data?
     var mpvPlayerSkinCustomSecondaryColor: Data?
     var mpvPlayerSkinAnimationsEnabled: Bool = MPVPlayerSkinSettings.defaultAnimationsEnabled
+    var mpvPlayerSkinTintControlsOnly: Bool = MPVPlayerSkinSettings.defaultTintControlsOnly
+    var mpvPictureInPictureEnabled: Bool = true
     var mpvAppExitPictureInPictureEnabled: Bool = false
     var mpvHDRMode: String = MPVHDRMode.defaultMode.rawValue
     var mpvSurroundSoundEnabled: Bool = true
@@ -159,6 +171,8 @@ struct BackupData: Codable {
     var homeCatalogLayoutOverrides: String = ""
     var homeAnimatedBackgroundEnabled: Bool?
     var homeAnimatedBackgroundQuality: String = HomeAnimatedBackgroundQuality.defaultValue.rawValue
+    var homeAnimatedBackgroundFrameRate: String = HomeAnimatedBackgroundFrameRate.defaultValue.rawValue
+    var appPerformanceOverlayEnabled: Bool = AppPerformanceOverlaySettings.defaultEnabled
     var experimentalMediaDesignPreset: String = ExperimentalMediaDesignPreset.defaultValue.rawValue
     var experimentalHeroBleedLevel: String = ExperimentalHeroBleedLevel.defaultValue.rawValue
     var experimentalHomeCardShape: String = ExperimentalHomeCardShape.defaultValue.rawValue
@@ -245,10 +259,14 @@ struct BackupData: Codable {
     var servicesAutoModeSourceIds: [String] = []
     var servicesAutoModeSourceOrderIds: [String] = []
     var servicesAutoModeQualityPreference: String = AutoModeQualityPreference.defaultPreference.rawValue
+    var servicesResultMinimumSimilarity: Double = ServicesResultRankingSettings.defaultMinimumSimilarity
+    var servicesDropMismatchedResults: Bool = ServicesResultRankingSettings.defaultDropMismatchedResults
     var servicesStremioStyleSheetEnabled: Bool = ServicesSheetPresentationSettings.defaultStremioStyleEnabled
     var servicesIncludedStreamLanguages: [String] = []
     var servicesHiddenStreamLanguages: [String] = []
     var servicesHideStreamsWithoutLanguageData: Bool = false
+    var servicesAssumeOriginalAudio: Bool = false
+    var servicesTreatDubbedAnimeAsEnglish: Bool = false
     var servicesHiddenStreamQualities: [Int] = []
     var servicesHideStreamsWithoutDetectedQuality: Bool = false
     /// nil preserves the default of applying rules to every Service/Stremio addon; [] means none.
@@ -490,14 +508,15 @@ struct BackupData: Codable {
 
     enum CodingKeys: String, CodingKey {
         case version, createdDate
-        case accentColor, settingsGradientColor, readerAccentColor, tmdbLanguage, selectedAppearance, readerSelectedAppearance, readerGlobalAppearanceEnabled, readerSettingsGradientColor, enableSubtitlesByDefault, defaultSubtitleLanguage, playerSubtitleAppearanceEnabled, enableVLCSubtitleEditMenu, preferredAutoAudioLanguage, preferredAnimeAudioLanguage, inAppPlayer, playerChoice, showScheduleTab, showLocalScheduleTime, defaultScheduleMode
-        case defaultPlaybackSpeed, holdSpeedPlayer, externalPlayer, preferDownloadedMedia, alwaysLandscape, aniSkipEnabled, introDBEnabled, introDBAppEnabled, aniSkipAutoSkip, skip85sEnabled, skip85sAlwaysVisible, showNextEpisodeButton, showEpisodeBrowserButton, showVLCEpisodeBrowserButton, showNextEpisodePosterButton, nextEpisodeThreshold, nextEpisodeSkipFillerEnabled, vlcHeaderProxyEnabled
-        case playerBrightnessGestureEnabled, playerVolumeGestureEnabled, vlcBrightnessGestureEnabled, vlcVolumeGestureEnabled, playerTwoFingerTapPlayPauseEnabled, playerCenterTapPlayPauseEnabled, playerDoubleTapSeekEnabled, vlcDoubleTapSeekEnabled, playerDoubleTapSeekSeconds, vlcDoubleTapSeekSeconds, playerOpenSubtitlesEnabled, vlcOpenSubtitlesEnabled, playerOpenSubtitlesAutoFallbackEnabled, vlcOpenSubtitlesAutoFallbackEnabled, playerPerformanceOverlayEnabled, mpvForegroundFPS, mpvRenderBackend, mpvMetalQualityProfile, mpvUpscalingMode, mpvPlayerSkin, mpvPlayerSkinCustomPrimaryColor, mpvPlayerSkinCustomSecondaryColor, mpvPlayerSkinAnimationsEnabled, mpvAppExitPictureInPictureEnabled, mpvHDRMode, mpvSurroundSoundEnabled, watchTogetherEnabled, smartInAppPlayerChoosingEnabled, experimentalFeaturesEnabled, experimentalFeaturesLastChangedAt, experimentalMPVPreloadEnabled, experimentalMPVSmoothTransitionEnabled, experimentalMPVPreloadCellularEnabled, experimentalMPVPreloadWifiLimitMB, experimentalMPVPreloadCellularLimitMB, experimentalMPVShowRemainingTime, experimentalMPVPreciseProgress, experimentalMPVIgnoreSpecialSubtitleStyles, experimentalMPVPreloadAutoClear, experimentalICloudSyncEnabled
+        case accentColor, settingsGradientColor, readerAccentColor, tmdbLanguage, selectedAppearance, readerSelectedAppearance, readerGlobalAppearanceEnabled, readerSettingsGradientColor, enableSubtitlesByDefault, defaultSubtitleLanguage, playerSubtitleAppearanceEnabled, enableVLCSubtitleEditMenu, preferredAutoAudioLanguage, preferredAnimeAudioLanguage, inAppPlayer, playerChoice, showScheduleTab, showLocalScheduleTime, defaultScheduleMode, scheduleWindowDays
+        case localNotificationSubscriptions, localNotificationEpisodeReminders, localNotificationEpisodeLeadTime, localNotificationSeasonLeadTime, localNotificationIncludeAnimeSpecials
+        case defaultPlaybackSpeed, holdSpeedPlayer, externalPlayer, preferDownloadedMedia, alwaysLandscape, playerPlaybackLockEnabled, aniSkipEnabled, introDBEnabled, introDBAppEnabled, aniSkipAutoSkip, skip85sEnabled, skip85sAlwaysVisible, showNextEpisodeButton, showEpisodeBrowserButton, showVLCEpisodeBrowserButton, showPlayerServicesButton, showNextEpisodePosterButton, nextEpisodeThreshold, nextEpisodeSkipFillerEnabled, vlcHeaderProxyEnabled
+        case playerBrightnessGestureEnabled, playerVolumeGestureEnabled, vlcBrightnessGestureEnabled, vlcVolumeGestureEnabled, playerTwoFingerTapPlayPauseEnabled, playerCenterTapPlayPauseEnabled, playerDoubleTapSeekEnabled, vlcDoubleTapSeekEnabled, playerDoubleTapSeekSeconds, vlcDoubleTapSeekSeconds, playerOpenSubtitlesEnabled, vlcOpenSubtitlesEnabled, playerOpenSubtitlesAutoFallbackEnabled, vlcOpenSubtitlesAutoFallbackEnabled, playerPerformanceOverlayEnabled, mpvForegroundFPS, mpvRenderBackend, mpvMetalQualityProfile, mpvUpscalingMode, mpvPlayerSkin, mpvPlayerSkinCustomPrimaryColor, mpvPlayerSkinCustomSecondaryColor, mpvPlayerSkinAnimationsEnabled, mpvPlayerSkinTintControlsOnly, mpvPictureInPictureEnabled, mpvAppExitPictureInPictureEnabled, mpvHDRMode, mpvSurroundSoundEnabled, watchTogetherEnabled, smartInAppPlayerChoosingEnabled, experimentalFeaturesEnabled, experimentalFeaturesLastChangedAt, experimentalMPVPreloadEnabled, experimentalMPVSmoothTransitionEnabled, experimentalMPVPreloadCellularEnabled, experimentalMPVPreloadWifiLimitMB, experimentalMPVPreloadCellularLimitMB, experimentalMPVShowRemainingTime, experimentalMPVPreciseProgress, experimentalMPVIgnoreSpecialSubtitleStyles, experimentalMPVPreloadAutoClear, experimentalICloudSyncEnabled
         case subtitleForegroundColor, subtitleStrokeColor, subtitleStrokeWidth, subtitleFontSize, subtitleVerticalOffset, subtitlesVisible
-        case showKanzen, hideSplashScreen, modeSwitchAnimationEnabled, kanzenAutoUpdateModules, seasonMenu, horizontalEpisodeList, mediaDetailTitleArtworkEnabled, mediaDetailSimilarTitlesEnabled, useClassicScheduleUI, heroBannerCatalogId, heroBannerBehavior, homeCatalogLayoutOverrides, homeAnimatedBackgroundEnabled, homeAnimatedBackgroundQuality, experimentalMediaDesignPreset, experimentalHeroBleedLevel, experimentalHomeCardShape, experimentalMultiGradientPalette, experimentalHeroHeightScale, experimentalHeroBleedStrength, experimentalHeroFadeDistanceScale, experimentalSectionSpacingScale, experimentalCardRadiusScale, experimentalMediaCardScale, experimentalGlassStrength, experimentalGradientBaseDarkness, experimentalGradientAccentIntensity, experimentalGradientScrollMotion, experimentalGradientUseCustomColors, experimentalGradientColorA, experimentalGradientColorB, experimentalGradientColorC, atmosphereStyle, atmosphereSolidColorSource, atmosphereSolidColor, readerAtmosphereStyle, readerAtmosphereSolidColorSource, readerAtmosphereSolidColor, mediaDetailElementOrder, mediaDetailHiddenElements, readerDetailElementOrder, readerDetailHiddenElements, mediaColumnsPortrait, mediaColumnsLandscape
+        case showKanzen, hideSplashScreen, modeSwitchAnimationEnabled, kanzenAutoUpdateModules, seasonMenu, horizontalEpisodeList, mediaDetailTitleArtworkEnabled, mediaDetailSimilarTitlesEnabled, useClassicScheduleUI, heroBannerCatalogId, heroBannerBehavior, homeCatalogLayoutOverrides, homeAnimatedBackgroundEnabled, homeAnimatedBackgroundQuality, homeAnimatedBackgroundFrameRate, appPerformanceOverlayEnabled, experimentalMediaDesignPreset, experimentalHeroBleedLevel, experimentalHomeCardShape, experimentalMultiGradientPalette, experimentalHeroHeightScale, experimentalHeroBleedStrength, experimentalHeroFadeDistanceScale, experimentalSectionSpacingScale, experimentalCardRadiusScale, experimentalMediaCardScale, experimentalGlassStrength, experimentalGradientBaseDarkness, experimentalGradientAccentIntensity, experimentalGradientScrollMotion, experimentalGradientUseCustomColors, experimentalGradientColorA, experimentalGradientColorB, experimentalGradientColorC, atmosphereStyle, atmosphereSolidColorSource, atmosphereSolidColor, readerAtmosphereStyle, readerAtmosphereSolidColorSource, readerAtmosphereSolidColor, mediaDetailElementOrder, mediaDetailHiddenElements, readerDetailElementOrder, readerDetailHiddenElements, mediaColumnsPortrait, mediaColumnsLandscape
         case readingMode, kanzenReaderMode, kanzenReaderModeOverrides, readerDownsampleImages, readerCropBorders, readerDisableQuickActions, readerDisableDoubleTap, readerLiveText, readerHideBarsOnSwipe, readerBackgroundColor, readerOrientation, readerTapZones, readerInvertTapZones, readerAnimatePageTransitions, readerUpscaleImages, readerUpscaleMaxHeight, readerUpscaleModelName, readerPagesToPreload, readerPagedPageLayout, readerPagedPageOffset, readerPagedPageOffsetOverrides, readerSplitWideImages, readerReverseSplitOrder, readerVerticalInfiniteScroll, readerPillarbox, readerPillarboxAmount, readerPillarboxOrientation, readerOrientationLockEnabled, readerOrientationLockMask, readerReadThresholdPercent
         case readerFontSize, readerFontFamily, readerFontWeight, readerColorPreset, readerTextAlignment, readerLineSpacing, readerMargin
-        case autoClearCacheEnabled, autoClearCacheThresholdMB, highQualityThreshold, backgroundHLSPipelineEnabled, readerDownloadsBackgroundEnabled, readerDownloadsWifiOnly, readerDownloadsParallelLimit, autoUpdateServicesEnabled, servicesAutoModeEnabled, servicesAutoSelectEpisodesEnabled, servicesAutoModeSourceIds, servicesAutoModeSourceOrderIds, servicesAutoModeQualityPreference, servicesStremioStyleSheetEnabled, servicesIncludedStreamLanguages, servicesHiddenStreamLanguages, servicesHideStreamsWithoutLanguageData, servicesHiddenStreamQualities, servicesHideStreamsWithoutDetectedQuality, servicesExtraRulesSourceIds, githubReleaseAutoCheckEnabled, githubReleaseUpdateAvailable, githubReleaseLatestVersion, githubReleaseURL, githubReleaseShowAlertPending, githubReleaseLastPromptedVersion, filterHorrorContent = "filterHorror", selectedSimilarityAlgorithm, performanceModeEnabled, performanceModeSkipAniListTraversalForAnimeDetails, performanceModeFastAnimeCatalogOverrides
+        case autoClearCacheEnabled, autoClearCacheThresholdMB, highQualityThreshold, backgroundHLSPipelineEnabled, readerDownloadsBackgroundEnabled, readerDownloadsWifiOnly, readerDownloadsParallelLimit, autoUpdateServicesEnabled, servicesAutoModeEnabled, servicesAutoSelectEpisodesEnabled, servicesAutoModeSourceIds, servicesAutoModeSourceOrderIds, servicesAutoModeQualityPreference, servicesResultMinimumSimilarity, servicesDropMismatchedResults, servicesStremioStyleSheetEnabled, servicesIncludedStreamLanguages, servicesHiddenStreamLanguages, servicesHideStreamsWithoutLanguageData, servicesAssumeOriginalAudio, servicesTreatDubbedAnimeAsEnglish, servicesHiddenStreamQualities, servicesHideStreamsWithoutDetectedQuality, servicesExtraRulesSourceIds, githubReleaseAutoCheckEnabled, githubReleaseUpdateAvailable, githubReleaseLatestVersion, githubReleaseURL, githubReleaseShowAlertPending, githubReleaseLastPromptedVersion, filterHorrorContent = "filterHorror", selectedSimilarityAlgorithm, performanceModeEnabled, performanceModeSkipAniListTraversalForAnimeDetails, performanceModeFastAnimeCatalogOverrides
         case kanzenHomeSelectedSourceID, kanzenRecentSourceSearches
         case collections, progressData, trackerState, catalogs, services, stremioAddons
         case mangaCollections, mangaReadingProgress, mangaCatalogs, kanzenModules, aidokuState
@@ -538,6 +557,12 @@ struct BackupData: Codable {
         showScheduleTab = try container.decodeIfPresent(Bool.self, forKey: .showScheduleTab) ?? true
         showLocalScheduleTime = try container.decodeIfPresent(Bool.self, forKey: .showLocalScheduleTime) ?? true
         defaultScheduleMode = ScheduleMode.sanitizedRawValue(try container.decodeIfPresent(String.self, forKey: .defaultScheduleMode))
+        scheduleWindowDays = ScheduleWindow.sanitizedDays(try container.decodeIfPresent(Int.self, forKey: .scheduleWindowDays))
+        localNotificationSubscriptions = try container.decodeIfPresent(String.self, forKey: .localNotificationSubscriptions)
+        localNotificationEpisodeReminders = try container.decodeIfPresent(String.self, forKey: .localNotificationEpisodeReminders)
+        localNotificationEpisodeLeadTime = try container.decodeIfPresent(Int.self, forKey: .localNotificationEpisodeLeadTime)
+        localNotificationSeasonLeadTime = try container.decodeIfPresent(Int.self, forKey: .localNotificationSeasonLeadTime)
+        localNotificationIncludeAnimeSpecials = try container.decodeIfPresent(Bool.self, forKey: .localNotificationIncludeAnimeSpecials)
 
         // Player settings
         defaultPlaybackSpeed = try container.decodeIfPresent(Double.self, forKey: .defaultPlaybackSpeed) ?? 1.0
@@ -545,6 +570,7 @@ struct BackupData: Codable {
         externalPlayer = try container.decodeIfPresent(String.self, forKey: .externalPlayer) ?? "none"
         preferDownloadedMedia = try container.decodeIfPresent(Bool.self, forKey: .preferDownloadedMedia) ?? false
         alwaysLandscape = try container.decodeIfPresent(Bool.self, forKey: .alwaysLandscape) ?? false
+        playerPlaybackLockEnabled = try container.decodeIfPresent(Bool.self, forKey: .playerPlaybackLockEnabled) ?? PlayerPlaybackLockSettings.defaultEnabled
         aniSkipEnabled = try container.decodeIfPresent(Bool.self, forKey: .aniSkipEnabled) ?? true
         introDBEnabled = try container.decodeIfPresent(Bool.self, forKey: .introDBEnabled) ?? true
         introDBAppEnabled = try container.decodeIfPresent(Bool.self, forKey: .introDBAppEnabled) ?? true
@@ -555,6 +581,7 @@ struct BackupData: Codable {
         showEpisodeBrowserButton = try container.decodeIfPresent(Bool.self, forKey: .showEpisodeBrowserButton)
             ?? container.decodeIfPresent(Bool.self, forKey: .showVLCEpisodeBrowserButton)
             ?? true
+        showPlayerServicesButton = try container.decodeIfPresent(Bool.self, forKey: .showPlayerServicesButton) ?? false
         showNextEpisodePosterButton = try container.decodeIfPresent(Bool.self, forKey: .showNextEpisodePosterButton) ?? false
         nextEpisodeThreshold = try container.decodeIfPresent(Double.self, forKey: .nextEpisodeThreshold) ?? 0.90
         nextEpisodeSkipFillerEnabled = try container.decodeIfPresent(Bool.self, forKey: .nextEpisodeSkipFillerEnabled) ?? NextEpisodeFillerSettings.defaultEnabled
@@ -587,6 +614,8 @@ struct BackupData: Codable {
         mpvPlayerSkinCustomPrimaryColor = try Self.decodeColorData(from: container, forKey: .mpvPlayerSkinCustomPrimaryColor)
         mpvPlayerSkinCustomSecondaryColor = try Self.decodeColorData(from: container, forKey: .mpvPlayerSkinCustomSecondaryColor)
         mpvPlayerSkinAnimationsEnabled = try container.decodeIfPresent(Bool.self, forKey: .mpvPlayerSkinAnimationsEnabled) ?? MPVPlayerSkinSettings.defaultAnimationsEnabled
+        mpvPlayerSkinTintControlsOnly = try container.decodeIfPresent(Bool.self, forKey: .mpvPlayerSkinTintControlsOnly) ?? MPVPlayerSkinSettings.defaultTintControlsOnly
+        mpvPictureInPictureEnabled = try container.decodeIfPresent(Bool.self, forKey: .mpvPictureInPictureEnabled) ?? true
         mpvAppExitPictureInPictureEnabled = try container.decodeIfPresent(Bool.self, forKey: .mpvAppExitPictureInPictureEnabled) ?? false
         mpvHDRMode = MPVHDRMode(rawValue: try container.decodeIfPresent(String.self, forKey: .mpvHDRMode) ?? MPVHDRMode.defaultMode.rawValue)?.rawValue ?? MPVHDRMode.defaultMode.rawValue
         mpvSurroundSoundEnabled = try container.decodeIfPresent(Bool.self, forKey: .mpvSurroundSoundEnabled) ?? true
@@ -627,6 +656,8 @@ struct BackupData: Codable {
         homeCatalogLayoutOverrides = try container.decodeIfPresent(String.self, forKey: .homeCatalogLayoutOverrides) ?? ""
         homeAnimatedBackgroundEnabled = try container.decodeIfPresent(Bool.self, forKey: .homeAnimatedBackgroundEnabled)
         homeAnimatedBackgroundQuality = Self.sanitizedHomeAnimatedBackgroundQuality(try container.decodeIfPresent(String.self, forKey: .homeAnimatedBackgroundQuality))
+        homeAnimatedBackgroundFrameRate = Self.sanitizedHomeAnimatedBackgroundFrameRate(try container.decodeIfPresent(String.self, forKey: .homeAnimatedBackgroundFrameRate))
+        appPerformanceOverlayEnabled = try container.decodeIfPresent(Bool.self, forKey: .appPerformanceOverlayEnabled) ?? AppPerformanceOverlaySettings.defaultEnabled
         heroBannerBehavior = Self.sanitizedHeroBannerBehavior(try container.decodeIfPresent(String.self, forKey: .heroBannerBehavior))
         experimentalMediaDesignPreset = Self.sanitizedExperimentalMediaDesignPreset(try container.decodeIfPresent(String.self, forKey: .experimentalMediaDesignPreset))
         experimentalHeroBleedLevel = Self.sanitizedExperimentalHeroBleedLevel(try container.decodeIfPresent(String.self, forKey: .experimentalHeroBleedLevel))
@@ -724,10 +755,14 @@ struct BackupData: Codable {
         servicesAutoModeSourceIds = Self.sanitizedStringList(try container.decodeIfPresent([String].self, forKey: .servicesAutoModeSourceIds))
         servicesAutoModeSourceOrderIds = Self.sanitizedStringList(try container.decodeIfPresent([String].self, forKey: .servicesAutoModeSourceOrderIds))
         servicesAutoModeQualityPreference = AutoModeQualityPreference.sanitizedRawValue(try container.decodeIfPresent(String.self, forKey: .servicesAutoModeQualityPreference))
+        servicesResultMinimumSimilarity = Self.sanitizedServicesResultMinimumSimilarity(try container.decodeIfPresent(Double.self, forKey: .servicesResultMinimumSimilarity))
+        servicesDropMismatchedResults = try container.decodeIfPresent(Bool.self, forKey: .servicesDropMismatchedResults) ?? ServicesResultRankingSettings.defaultDropMismatchedResults
         servicesStremioStyleSheetEnabled = try container.decodeIfPresent(Bool.self, forKey: .servicesStremioStyleSheetEnabled) ?? ServicesSheetPresentationSettings.defaultStremioStyleEnabled
         servicesIncludedStreamLanguages = StreamLanguageFilter.sanitizedLanguageList(try container.decodeIfPresent([String].self, forKey: .servicesIncludedStreamLanguages) ?? [])
         servicesHiddenStreamLanguages = StreamLanguageFilter.sanitizedLanguageList(try container.decodeIfPresent([String].self, forKey: .servicesHiddenStreamLanguages) ?? [])
         servicesHideStreamsWithoutLanguageData = try container.decodeIfPresent(Bool.self, forKey: .servicesHideStreamsWithoutLanguageData) ?? false
+        servicesAssumeOriginalAudio = try container.decodeIfPresent(Bool.self, forKey: .servicesAssumeOriginalAudio) ?? false
+        servicesTreatDubbedAnimeAsEnglish = try container.decodeIfPresent(Bool.self, forKey: .servicesTreatDubbedAnimeAsEnglish) ?? false
         servicesHiddenStreamQualities = StreamLanguageFilter.sanitizedQualityHeights(try container.decodeIfPresent([Int].self, forKey: .servicesHiddenStreamQualities) ?? [])
         servicesHideStreamsWithoutDetectedQuality = try container.decodeIfPresent(Bool.self, forKey: .servicesHideStreamsWithoutDetectedQuality) ?? false
         if let decodedSourceIds = try container.decodeIfPresent([String].self, forKey: .servicesExtraRulesSourceIds) {
@@ -850,6 +885,12 @@ struct BackupData: Codable {
         try container.encode(showScheduleTab, forKey: .showScheduleTab)
         try container.encode(showLocalScheduleTime, forKey: .showLocalScheduleTime)
         try container.encode(ScheduleMode.sanitizedRawValue(defaultScheduleMode), forKey: .defaultScheduleMode)
+        try container.encode(ScheduleWindow.sanitizedDays(scheduleWindowDays), forKey: .scheduleWindowDays)
+        try container.encodeIfPresent(localNotificationSubscriptions, forKey: .localNotificationSubscriptions)
+        try container.encodeIfPresent(localNotificationEpisodeReminders, forKey: .localNotificationEpisodeReminders)
+        try container.encodeIfPresent(localNotificationEpisodeLeadTime, forKey: .localNotificationEpisodeLeadTime)
+        try container.encodeIfPresent(localNotificationSeasonLeadTime, forKey: .localNotificationSeasonLeadTime)
+        try container.encodeIfPresent(localNotificationIncludeAnimeSpecials, forKey: .localNotificationIncludeAnimeSpecials)
 
         // Player settings
         try container.encode(defaultPlaybackSpeed, forKey: .defaultPlaybackSpeed)
@@ -857,6 +898,7 @@ struct BackupData: Codable {
         try container.encode(externalPlayer, forKey: .externalPlayer)
         try container.encode(preferDownloadedMedia, forKey: .preferDownloadedMedia)
         try container.encode(alwaysLandscape, forKey: .alwaysLandscape)
+        try container.encode(playerPlaybackLockEnabled, forKey: .playerPlaybackLockEnabled)
         try container.encode(aniSkipEnabled, forKey: .aniSkipEnabled)
         try container.encode(introDBEnabled, forKey: .introDBEnabled)
         try container.encode(introDBAppEnabled, forKey: .introDBAppEnabled)
@@ -865,6 +907,7 @@ struct BackupData: Codable {
         try container.encode(skip85sAlwaysVisible, forKey: .skip85sAlwaysVisible)
         try container.encode(showNextEpisodeButton, forKey: .showNextEpisodeButton)
         try container.encode(showEpisodeBrowserButton, forKey: .showEpisodeBrowserButton)
+        try container.encode(showPlayerServicesButton, forKey: .showPlayerServicesButton)
         try container.encode(showNextEpisodePosterButton, forKey: .showNextEpisodePosterButton)
         try container.encode(nextEpisodeThreshold, forKey: .nextEpisodeThreshold)
         try container.encode(nextEpisodeSkipFillerEnabled, forKey: .nextEpisodeSkipFillerEnabled)
@@ -885,6 +928,8 @@ struct BackupData: Codable {
         try container.encodeIfPresent(mpvPlayerSkinCustomPrimaryColor, forKey: .mpvPlayerSkinCustomPrimaryColor)
         try container.encodeIfPresent(mpvPlayerSkinCustomSecondaryColor, forKey: .mpvPlayerSkinCustomSecondaryColor)
         try container.encode(mpvPlayerSkinAnimationsEnabled, forKey: .mpvPlayerSkinAnimationsEnabled)
+        try container.encode(mpvPlayerSkinTintControlsOnly, forKey: .mpvPlayerSkinTintControlsOnly)
+        try container.encode(mpvPictureInPictureEnabled, forKey: .mpvPictureInPictureEnabled)
         try container.encode(mpvAppExitPictureInPictureEnabled, forKey: .mpvAppExitPictureInPictureEnabled)
         try container.encode(mpvHDRMode, forKey: .mpvHDRMode)
         try container.encode(mpvSurroundSoundEnabled, forKey: .mpvSurroundSoundEnabled)
@@ -925,6 +970,8 @@ struct BackupData: Codable {
         try container.encode(homeCatalogLayoutOverrides, forKey: .homeCatalogLayoutOverrides)
         try container.encodeIfPresent(homeAnimatedBackgroundEnabled, forKey: .homeAnimatedBackgroundEnabled)
         try container.encode(Self.sanitizedHomeAnimatedBackgroundQuality(homeAnimatedBackgroundQuality), forKey: .homeAnimatedBackgroundQuality)
+        try container.encode(Self.sanitizedHomeAnimatedBackgroundFrameRate(homeAnimatedBackgroundFrameRate), forKey: .homeAnimatedBackgroundFrameRate)
+        try container.encode(appPerformanceOverlayEnabled, forKey: .appPerformanceOverlayEnabled)
         try container.encode(Self.sanitizedHeroBannerBehavior(heroBannerBehavior), forKey: .heroBannerBehavior)
         try container.encode(Self.sanitizedExperimentalMediaDesignPreset(experimentalMediaDesignPreset), forKey: .experimentalMediaDesignPreset)
         try container.encode(Self.sanitizedExperimentalHeroBleedLevel(experimentalHeroBleedLevel), forKey: .experimentalHeroBleedLevel)
@@ -1012,10 +1059,14 @@ struct BackupData: Codable {
         try container.encode(Self.sanitizedStringList(servicesAutoModeSourceIds), forKey: .servicesAutoModeSourceIds)
         try container.encode(Self.sanitizedStringList(servicesAutoModeSourceOrderIds), forKey: .servicesAutoModeSourceOrderIds)
         try container.encode(AutoModeQualityPreference.sanitizedRawValue(servicesAutoModeQualityPreference), forKey: .servicesAutoModeQualityPreference)
+        try container.encode(Self.sanitizedServicesResultMinimumSimilarity(servicesResultMinimumSimilarity), forKey: .servicesResultMinimumSimilarity)
+        try container.encode(servicesDropMismatchedResults, forKey: .servicesDropMismatchedResults)
         try container.encode(servicesStremioStyleSheetEnabled, forKey: .servicesStremioStyleSheetEnabled)
         try container.encode(StreamLanguageFilter.sanitizedLanguageList(servicesIncludedStreamLanguages), forKey: .servicesIncludedStreamLanguages)
         try container.encode(StreamLanguageFilter.sanitizedLanguageList(servicesHiddenStreamLanguages), forKey: .servicesHiddenStreamLanguages)
         try container.encode(servicesHideStreamsWithoutLanguageData, forKey: .servicesHideStreamsWithoutLanguageData)
+        try container.encode(servicesAssumeOriginalAudio, forKey: .servicesAssumeOriginalAudio)
+        try container.encode(servicesTreatDubbedAnimeAsEnglish, forKey: .servicesTreatDubbedAnimeAsEnglish)
         try container.encode(StreamLanguageFilter.sanitizedQualityHeights(servicesHiddenStreamQualities), forKey: .servicesHiddenStreamQualities)
         try container.encode(servicesHideStreamsWithoutDetectedQuality, forKey: .servicesHideStreamsWithoutDetectedQuality)
         if let servicesExtraRulesSourceIds {
@@ -1077,6 +1128,12 @@ struct BackupData: Codable {
         showScheduleTab: Bool,
         showLocalScheduleTime: Bool,
         defaultScheduleMode: String = ScheduleMode.anime.rawValue,
+        scheduleWindowDays: Int = ScheduleWindow.defaultValue.rawValue,
+        localNotificationSubscriptions: String? = nil,
+        localNotificationEpisodeReminders: String? = nil,
+        localNotificationEpisodeLeadTime: Int? = nil,
+        localNotificationSeasonLeadTime: Int? = nil,
+        localNotificationIncludeAnimeSpecials: Bool? = nil,
 
         // Player settings
         defaultPlaybackSpeed: Double = 1.0,
@@ -1084,6 +1141,7 @@ struct BackupData: Codable {
         externalPlayer: String = "none",
         preferDownloadedMedia: Bool = false,
         alwaysLandscape: Bool = false,
+        playerPlaybackLockEnabled: Bool = PlayerPlaybackLockSettings.defaultEnabled,
         aniSkipEnabled: Bool = true,
         introDBEnabled: Bool = true,
         introDBAppEnabled: Bool = true,
@@ -1092,6 +1150,7 @@ struct BackupData: Codable {
         skip85sAlwaysVisible: Bool = false,
         showNextEpisodeButton: Bool = true,
         showEpisodeBrowserButton: Bool = true,
+        showPlayerServicesButton: Bool = false,
         showNextEpisodePosterButton: Bool = false,
         nextEpisodeThreshold: Double = 0.90,
         nextEpisodeSkipFillerEnabled: Bool = NextEpisodeFillerSettings.defaultEnabled,
@@ -1112,6 +1171,8 @@ struct BackupData: Codable {
         mpvPlayerSkinCustomPrimaryColor: Data? = nil,
         mpvPlayerSkinCustomSecondaryColor: Data? = nil,
         mpvPlayerSkinAnimationsEnabled: Bool = MPVPlayerSkinSettings.defaultAnimationsEnabled,
+        mpvPlayerSkinTintControlsOnly: Bool = MPVPlayerSkinSettings.defaultTintControlsOnly,
+        mpvPictureInPictureEnabled: Bool = true,
         mpvAppExitPictureInPictureEnabled: Bool = false,
         mpvHDRMode: String = MPVHDRMode.defaultMode.rawValue,
         mpvSurroundSoundEnabled: Bool = true,
@@ -1153,6 +1214,8 @@ struct BackupData: Codable {
         homeCatalogLayoutOverrides: String = "",
         homeAnimatedBackgroundEnabled: Bool? = nil,
         homeAnimatedBackgroundQuality: String = HomeAnimatedBackgroundQuality.defaultValue.rawValue,
+        homeAnimatedBackgroundFrameRate: String = HomeAnimatedBackgroundFrameRate.defaultValue.rawValue,
+        appPerformanceOverlayEnabled: Bool = AppPerformanceOverlaySettings.defaultEnabled,
         experimentalMediaDesignPreset: String = ExperimentalMediaDesignPreset.defaultValue.rawValue,
         experimentalHeroBleedLevel: String = ExperimentalHeroBleedLevel.defaultValue.rawValue,
         experimentalHomeCardShape: String = ExperimentalHomeCardShape.defaultValue.rawValue,
@@ -1239,10 +1302,14 @@ struct BackupData: Codable {
         servicesAutoModeSourceIds: [String] = [],
         servicesAutoModeSourceOrderIds: [String] = [],
         servicesAutoModeQualityPreference: String = AutoModeQualityPreference.defaultPreference.rawValue,
+        servicesResultMinimumSimilarity: Double = ServicesResultRankingSettings.defaultMinimumSimilarity,
+        servicesDropMismatchedResults: Bool = ServicesResultRankingSettings.defaultDropMismatchedResults,
         servicesStremioStyleSheetEnabled: Bool = ServicesSheetPresentationSettings.defaultStremioStyleEnabled,
         servicesIncludedStreamLanguages: [String] = [],
         servicesHiddenStreamLanguages: [String] = [],
         servicesHideStreamsWithoutLanguageData: Bool = false,
+        servicesAssumeOriginalAudio: Bool = false,
+        servicesTreatDubbedAnimeAsEnglish: Bool = false,
         servicesHiddenStreamQualities: [Int] = [],
         servicesHideStreamsWithoutDetectedQuality: Bool = false,
         servicesExtraRulesSourceIds: [String]? = nil,
@@ -1302,12 +1369,19 @@ struct BackupData: Codable {
         self.showScheduleTab = showScheduleTab
         self.showLocalScheduleTime = showLocalScheduleTime
         self.defaultScheduleMode = ScheduleMode.sanitizedRawValue(defaultScheduleMode)
+        self.scheduleWindowDays = ScheduleWindow.sanitizedDays(scheduleWindowDays)
+        self.localNotificationSubscriptions = localNotificationSubscriptions
+        self.localNotificationEpisodeReminders = localNotificationEpisodeReminders
+        self.localNotificationEpisodeLeadTime = localNotificationEpisodeLeadTime
+        self.localNotificationSeasonLeadTime = localNotificationSeasonLeadTime
+        self.localNotificationIncludeAnimeSpecials = localNotificationIncludeAnimeSpecials
 
         self.defaultPlaybackSpeed = defaultPlaybackSpeed
         self.holdSpeedPlayer = holdSpeedPlayer
         self.externalPlayer = externalPlayer
         self.preferDownloadedMedia = preferDownloadedMedia
         self.alwaysLandscape = alwaysLandscape
+        self.playerPlaybackLockEnabled = playerPlaybackLockEnabled
         self.aniSkipEnabled = aniSkipEnabled
         self.introDBEnabled = introDBEnabled
         self.introDBAppEnabled = introDBAppEnabled
@@ -1316,6 +1390,7 @@ struct BackupData: Codable {
         self.skip85sAlwaysVisible = skip85sAlwaysVisible
         self.showNextEpisodeButton = showNextEpisodeButton
         self.showEpisodeBrowserButton = showEpisodeBrowserButton
+        self.showPlayerServicesButton = showPlayerServicesButton
         self.showNextEpisodePosterButton = showNextEpisodePosterButton
         self.nextEpisodeThreshold = nextEpisodeThreshold
         self.nextEpisodeSkipFillerEnabled = nextEpisodeSkipFillerEnabled
@@ -1336,6 +1411,8 @@ struct BackupData: Codable {
         self.mpvPlayerSkinCustomPrimaryColor = mpvPlayerSkinCustomPrimaryColor
         self.mpvPlayerSkinCustomSecondaryColor = mpvPlayerSkinCustomSecondaryColor
         self.mpvPlayerSkinAnimationsEnabled = mpvPlayerSkinAnimationsEnabled
+        self.mpvPlayerSkinTintControlsOnly = mpvPlayerSkinTintControlsOnly
+        self.mpvPictureInPictureEnabled = mpvPictureInPictureEnabled
         self.mpvAppExitPictureInPictureEnabled = mpvAppExitPictureInPictureEnabled
         self.mpvHDRMode = MPVHDRMode(rawValue: mpvHDRMode)?.rawValue ?? MPVHDRMode.defaultMode.rawValue
         self.mpvSurroundSoundEnabled = mpvSurroundSoundEnabled
@@ -1375,6 +1452,8 @@ struct BackupData: Codable {
         self.homeCatalogLayoutOverrides = homeCatalogLayoutOverrides
         self.homeAnimatedBackgroundEnabled = homeAnimatedBackgroundEnabled
         self.homeAnimatedBackgroundQuality = Self.sanitizedHomeAnimatedBackgroundQuality(homeAnimatedBackgroundQuality)
+        self.homeAnimatedBackgroundFrameRate = Self.sanitizedHomeAnimatedBackgroundFrameRate(homeAnimatedBackgroundFrameRate)
+        self.appPerformanceOverlayEnabled = appPerformanceOverlayEnabled
         self.experimentalMediaDesignPreset = Self.sanitizedExperimentalMediaDesignPreset(experimentalMediaDesignPreset)
         self.experimentalHeroBleedLevel = Self.sanitizedExperimentalHeroBleedLevel(experimentalHeroBleedLevel)
         self.experimentalHomeCardShape = Self.sanitizedExperimentalHomeCardShape(experimentalHomeCardShape)
@@ -1458,10 +1537,14 @@ struct BackupData: Codable {
         self.servicesAutoModeSourceIds = Self.sanitizedStringList(servicesAutoModeSourceIds)
         self.servicesAutoModeSourceOrderIds = Self.sanitizedStringList(servicesAutoModeSourceOrderIds)
         self.servicesAutoModeQualityPreference = AutoModeQualityPreference.sanitizedRawValue(servicesAutoModeQualityPreference)
+        self.servicesResultMinimumSimilarity = Self.sanitizedServicesResultMinimumSimilarity(servicesResultMinimumSimilarity)
+        self.servicesDropMismatchedResults = servicesDropMismatchedResults
         self.servicesStremioStyleSheetEnabled = servicesStremioStyleSheetEnabled
         self.servicesIncludedStreamLanguages = StreamLanguageFilter.sanitizedLanguageList(servicesIncludedStreamLanguages)
         self.servicesHiddenStreamLanguages = StreamLanguageFilter.sanitizedLanguageList(servicesHiddenStreamLanguages)
         self.servicesHideStreamsWithoutLanguageData = servicesHideStreamsWithoutLanguageData
+        self.servicesAssumeOriginalAudio = servicesAssumeOriginalAudio
+        self.servicesTreatDubbedAnimeAsEnglish = servicesTreatDubbedAnimeAsEnglish
         self.servicesHiddenStreamQualities = StreamLanguageFilter.sanitizedQualityHeights(servicesHiddenStreamQualities)
         self.servicesHideStreamsWithoutDetectedQuality = servicesHideStreamsWithoutDetectedQuality
         self.servicesExtraRulesSourceIds = servicesExtraRulesSourceIds.map(StreamLanguageFilter.sanitizedExtraRulesSourceIds)
@@ -1596,6 +1679,10 @@ struct BackupData: Codable {
 
     static func sanitizedHomeAnimatedBackgroundQuality(_ value: String?) -> String {
         HomeAnimatedBackgroundQuality.resolved(value).rawValue
+    }
+
+    static func sanitizedHomeAnimatedBackgroundFrameRate(_ value: String?) -> String {
+        HomeAnimatedBackgroundFrameRate.resolved(value).rawValue
     }
 
     static func sanitizedExperimentalMediaDesignPreset(_ value: String?) -> String {
@@ -1816,6 +1903,12 @@ struct BackupData: Codable {
             return SimilarityAlgorithm.hybrid.rawValue
         }
         return algorithm.rawValue
+    }
+
+    static func sanitizedServicesResultMinimumSimilarity(_ value: Double?) -> Double {
+        ServicesResultRankingSettings.clampedMinimumSimilarity(
+            value ?? ServicesResultRankingSettings.defaultMinimumSimilarity
+        )
     }
 
     static func optionalInt(from value: Any?, defaultValue: Int) -> Int {
@@ -2207,11 +2300,21 @@ class BackupManager {
 
         let preferredAutoAudioLanguage = userDefaults.string(forKey: "preferredAutoAudioLanguage") ?? "eng"
         let preferredAnimeAudioLanguage = userDefaults.string(forKey: "preferredAnimeAudioLanguage") ?? "jpn"
-        let inAppPlayer = Settings.normalizedInAppPlayer(userDefaults.string(forKey: "inAppPlayer"))
+        let inAppPlayer = PlaybackEngine.selected(
+            persistedEngine: userDefaults.string(forKey: PlaybackEngine.defaultsKey),
+            legacyInAppPlayer: userDefaults.object(forKey: "inAppPlayer") as? String,
+            deviceFamily: .current
+        ).rawValue
         let tmdbLanguage = userDefaults.string(forKey: "tmdbLanguage") ?? "en-US"
         let showScheduleTab = userDefaults.bool(forKey: "showScheduleTab")
         let showLocalScheduleTime = userDefaults.bool(forKey: "showLocalScheduleTime")
         let defaultScheduleMode = ScheduleMode.sanitizedRawValue(userDefaults.string(forKey: "defaultScheduleMode"))
+        let scheduleWindowDays = ScheduleWindow.sanitizedDays(userDefaults.object(forKey: ScheduleWindow.storageKey) as? Int)
+        let localNotificationSubscriptions = userDefaults.string(forKey: "localNotificationSubscriptions")
+        let localNotificationEpisodeReminders = userDefaults.string(forKey: "localNotificationEpisodeReminders")
+        let localNotificationEpisodeLeadTime = userDefaults.object(forKey: "localNotificationEpisodeLeadTime") as? Int
+        let localNotificationSeasonLeadTime = userDefaults.object(forKey: "localNotificationSeasonLeadTime") as? Int
+        let localNotificationIncludeAnimeSpecials = userDefaults.object(forKey: "localNotificationIncludeAnimeSpecials") as? Bool
         
         // Player settings
         let savedDefaultPlaybackSpeed = userDefaults.double(forKey: "defaultPlaybackSpeed")
@@ -2221,6 +2324,7 @@ class BackupManager {
         let externalPlayer = userDefaults.string(forKey: "externalPlayer") ?? "none"
         let preferDownloadedMedia = userDefaults.bool(forKey: "preferDownloadedMedia")
         let alwaysLandscape = userDefaults.bool(forKey: "alwaysLandscape")
+        let playerPlaybackLockEnabled = PlayerPlaybackLockSettings.isEnabled(defaults: userDefaults)
         let aniSkipEnabled = userDefaults.object(forKey: "aniSkipEnabled") == nil ? true : userDefaults.bool(forKey: "aniSkipEnabled")
         let introDBEnabled = userDefaults.object(forKey: "introDBEnabled") == nil ? true : userDefaults.bool(forKey: "introDBEnabled")
         let introDBAppEnabled = userDefaults.object(forKey: "introDBAppEnabled") == nil ? true : userDefaults.bool(forKey: "introDBAppEnabled")
@@ -2231,6 +2335,7 @@ class BackupManager {
         let showEpisodeBrowserButton = userDefaults.object(forKey: "showEpisodeBrowserButton") == nil
             ? (userDefaults.object(forKey: "showVLCEpisodeBrowserButton") as? Bool ?? true)
             : userDefaults.bool(forKey: "showEpisodeBrowserButton")
+        let showPlayerServicesButton = PlayerServicesButtonSettings.isEnabled(defaults: userDefaults)
         let showNextEpisodePosterButton = userDefaults.bool(forKey: "showNextEpisodePosterButton")
         let savedNextThreshold = userDefaults.double(forKey: "nextEpisodeThreshold")
         let nextEpisodeThreshold = savedNextThreshold > 0 ? savedNextThreshold : 0.90
@@ -2270,6 +2375,8 @@ class BackupManager {
         let mpvPlayerSkinCustomPrimaryColor = userDefaults.data(forKey: MPVPlayerSkinSettings.customPrimaryColorKey)
         let mpvPlayerSkinCustomSecondaryColor = userDefaults.data(forKey: MPVPlayerSkinSettings.customSecondaryColorKey)
         let mpvPlayerSkinAnimationsEnabled = MPVPlayerSkinSettings.animationsEnabled(defaults: userDefaults)
+        let mpvPlayerSkinTintControlsOnly = MPVPlayerSkinSettings.tintControlsOnly(defaults: userDefaults)
+        let mpvPictureInPictureEnabled = userDefaults.object(forKey: "mpvPictureInPictureEnabled") as? Bool ?? true
         let mpvAppExitPictureInPictureEnabled = userDefaults.bool(forKey: "mpvAppExitPictureInPictureEnabled")
         let mpvHDRMode = MPVHDRMode(rawValue: userDefaults.string(forKey: "mpvHDRMode") ?? MPVHDRMode.defaultMode.rawValue)?.rawValue ?? MPVHDRMode.defaultMode.rawValue
         let mpvSurroundSoundEnabled = userDefaults.object(forKey: "mpvSurroundSoundEnabled") == nil ? true : userDefaults.bool(forKey: "mpvSurroundSoundEnabled")
@@ -2311,8 +2418,8 @@ class BackupManager {
         let hideSplashScreen = userDefaults.bool(forKey: "hideSplashScreen")
         let modeSwitchAnimationEnabled = ModeSwitchAnimationSettings.isEnabled(defaults: userDefaults)
         let kanzenAutoUpdateModules = ModuleManager.isAutoUpdateEnabled
-        let seasonMenu = userDefaults.bool(forKey: "seasonMenu")
-        let horizontalEpisodeList = userDefaults.bool(forKey: "horizontalEpisodeList")
+        let seasonMenu = MediaDetailPlatformDefaults.usesCompactSeasonMenu(defaults: userDefaults)
+        let horizontalEpisodeList = MediaDetailPlatformDefaults.usesHorizontalEpisodes(defaults: userDefaults)
         let mediaDetailTitleArtworkEnabled = MediaDetailTitleArtworkSettings.isEnabled(defaults: userDefaults)
         let mediaDetailSimilarTitlesEnabled = MediaDetailSimilarTitlesSettings.isEnabled(defaults: userDefaults)
         let useClassicScheduleUI = userDefaults.bool(forKey: "useClassicScheduleUI")
@@ -2321,6 +2428,8 @@ class BackupManager {
         let homeCatalogLayoutOverrides = userDefaults.data(forKey: HomeCatalogLayoutStore.storageKey).flatMap { String(data: $0, encoding: .utf8) } ?? ""
         let homeAnimatedBackgroundEnabled = HomeAnimatedBackgroundSettings.isEnabled(defaults: userDefaults)
         let homeAnimatedBackgroundQuality = BackupData.sanitizedHomeAnimatedBackgroundQuality(userDefaults.string(forKey: HomeAnimatedBackgroundQuality.storageKey))
+        let homeAnimatedBackgroundFrameRate = BackupData.sanitizedHomeAnimatedBackgroundFrameRate(userDefaults.string(forKey: HomeAnimatedBackgroundFrameRate.storageKey))
+        let appPerformanceOverlayEnabled = AppPerformanceOverlaySettings.isEnabled(defaults: userDefaults)
         let experimentalMediaDesignPreset = BackupData.sanitizedExperimentalMediaDesignPreset(userDefaults.string(forKey: ExperimentalMediaDesignPreset.storageKey))
         let experimentalHeroBleedLevel = BackupData.sanitizedExperimentalHeroBleedLevel(userDefaults.string(forKey: ExperimentalHeroBleedLevel.storageKey))
         let experimentalHomeCardShape = BackupData.sanitizedExperimentalHomeCardShape(userDefaults.string(forKey: ExperimentalHomeCardShape.storageKey))
@@ -2425,10 +2534,14 @@ class BackupManager {
         let servicesAutoModeSourceIds = BackupData.sanitizedStringList(userDefaults.stringArray(forKey: "servicesAutoModeSourceIds"))
         let servicesAutoModeSourceOrderIds = BackupData.sanitizedStringList(userDefaults.stringArray(forKey: "servicesAutoModeSourceOrderIds"))
         let servicesAutoModeQualityPreference = AutoModeQualityPreference.sanitizedRawValue(userDefaults.string(forKey: AutoModeQualityPreference.storageKey))
+        let servicesResultMinimumSimilarity = ServicesResultRankingSettings.minimumSimilarity(defaults: userDefaults)
+        let servicesDropMismatchedResults = ServicesResultRankingSettings.dropsMismatchedResults(defaults: userDefaults)
         let servicesStremioStyleSheetEnabled = ServicesSheetPresentationSettings.usesStremioStyle(defaults: userDefaults)
         let servicesIncludedStreamLanguages = StreamLanguageFilter.includedLanguages(defaults: userDefaults)
         let servicesHiddenStreamLanguages = StreamLanguageFilter.hiddenLanguages(defaults: userDefaults)
         let servicesHideStreamsWithoutLanguageData = StreamLanguageFilter.hidesStreamsWithoutLanguageData(defaults: userDefaults)
+        let servicesAssumeOriginalAudio = StreamLanguageFilter.assumesOriginalAudio(defaults: userDefaults)
+        let servicesTreatDubbedAnimeAsEnglish = StreamLanguageFilter.treatsDubbedAnimeAsEnglish(defaults: userDefaults)
         let servicesHiddenStreamQualities = StreamLanguageFilter.hiddenQualityHeights(defaults: userDefaults)
         let servicesHideStreamsWithoutDetectedQuality = StreamLanguageFilter.hidesStreamsWithoutDetectedQuality(defaults: userDefaults)
         let servicesExtraRulesSourceIds = StreamLanguageFilter.extraRulesSourceIds(defaults: userDefaults)
@@ -2560,12 +2673,19 @@ class BackupManager {
             showScheduleTab: showScheduleTab,
             showLocalScheduleTime: showLocalScheduleTime,
             defaultScheduleMode: defaultScheduleMode,
+            scheduleWindowDays: scheduleWindowDays,
+            localNotificationSubscriptions: localNotificationSubscriptions,
+            localNotificationEpisodeReminders: localNotificationEpisodeReminders,
+            localNotificationEpisodeLeadTime: localNotificationEpisodeLeadTime,
+            localNotificationSeasonLeadTime: localNotificationSeasonLeadTime,
+            localNotificationIncludeAnimeSpecials: localNotificationIncludeAnimeSpecials,
 
             defaultPlaybackSpeed: defaultPlaybackSpeed,
             holdSpeedPlayer: holdSpeedPlayer,
             externalPlayer: externalPlayer,
             preferDownloadedMedia: preferDownloadedMedia,
             alwaysLandscape: alwaysLandscape,
+            playerPlaybackLockEnabled: playerPlaybackLockEnabled,
             aniSkipEnabled: aniSkipEnabled,
             introDBEnabled: introDBEnabled,
             introDBAppEnabled: introDBAppEnabled,
@@ -2574,6 +2694,7 @@ class BackupManager {
             skip85sAlwaysVisible: skip85sAlwaysVisible,
             showNextEpisodeButton: showNextEpisodeButton,
             showEpisodeBrowserButton: showEpisodeBrowserButton,
+            showPlayerServicesButton: showPlayerServicesButton,
             showNextEpisodePosterButton: showNextEpisodePosterButton,
             nextEpisodeThreshold: nextEpisodeThreshold,
             nextEpisodeSkipFillerEnabled: nextEpisodeSkipFillerEnabled,
@@ -2594,6 +2715,8 @@ class BackupManager {
             mpvPlayerSkinCustomPrimaryColor: mpvPlayerSkinCustomPrimaryColor,
             mpvPlayerSkinCustomSecondaryColor: mpvPlayerSkinCustomSecondaryColor,
             mpvPlayerSkinAnimationsEnabled: mpvPlayerSkinAnimationsEnabled,
+            mpvPlayerSkinTintControlsOnly: mpvPlayerSkinTintControlsOnly,
+            mpvPictureInPictureEnabled: mpvPictureInPictureEnabled,
             mpvAppExitPictureInPictureEnabled: mpvAppExitPictureInPictureEnabled,
             mpvHDRMode: mpvHDRMode,
             mpvSurroundSoundEnabled: mpvSurroundSoundEnabled,
@@ -2633,6 +2756,8 @@ class BackupManager {
             homeCatalogLayoutOverrides: homeCatalogLayoutOverrides,
             homeAnimatedBackgroundEnabled: homeAnimatedBackgroundEnabled,
             homeAnimatedBackgroundQuality: homeAnimatedBackgroundQuality,
+            homeAnimatedBackgroundFrameRate: homeAnimatedBackgroundFrameRate,
+            appPerformanceOverlayEnabled: appPerformanceOverlayEnabled,
             experimentalMediaDesignPreset: experimentalMediaDesignPreset,
             experimentalHeroBleedLevel: experimentalHeroBleedLevel,
             experimentalHomeCardShape: experimentalHomeCardShape,
@@ -2716,10 +2841,14 @@ class BackupManager {
             servicesAutoModeSourceIds: servicesAutoModeSourceIds,
             servicesAutoModeSourceOrderIds: servicesAutoModeSourceOrderIds,
             servicesAutoModeQualityPreference: servicesAutoModeQualityPreference,
+            servicesResultMinimumSimilarity: servicesResultMinimumSimilarity,
+            servicesDropMismatchedResults: servicesDropMismatchedResults,
             servicesStremioStyleSheetEnabled: servicesStremioStyleSheetEnabled,
             servicesIncludedStreamLanguages: servicesIncludedStreamLanguages,
             servicesHiddenStreamLanguages: servicesHiddenStreamLanguages,
             servicesHideStreamsWithoutLanguageData: servicesHideStreamsWithoutLanguageData,
+            servicesAssumeOriginalAudio: servicesAssumeOriginalAudio,
+            servicesTreatDubbedAnimeAsEnglish: servicesTreatDubbedAnimeAsEnglish,
             servicesHiddenStreamQualities: servicesHiddenStreamQualities,
             servicesHideStreamsWithoutDetectedQuality: servicesHideStreamsWithoutDetectedQuality,
             servicesExtraRulesSourceIds: servicesExtraRulesSourceIds,
@@ -2830,6 +2959,12 @@ class BackupManager {
         let showScheduleTab = json["showScheduleTab"] as? Bool ?? true
         let showLocalScheduleTime = json["showLocalScheduleTime"] as? Bool ?? true
         let defaultScheduleMode = ScheduleMode.sanitizedRawValue(json["defaultScheduleMode"] as? String)
+        let scheduleWindowDays = ScheduleWindow.sanitizedDays(json["scheduleWindowDays"] as? Int)
+        let localNotificationSubscriptions = json["localNotificationSubscriptions"] as? String
+        let localNotificationEpisodeReminders = json["localNotificationEpisodeReminders"] as? String
+        let localNotificationEpisodeLeadTime = json["localNotificationEpisodeLeadTime"] as? Int
+        let localNotificationSeasonLeadTime = json["localNotificationSeasonLeadTime"] as? Int
+        let localNotificationIncludeAnimeSpecials = json["localNotificationIncludeAnimeSpecials"] as? Bool
 
         // Player settings
         let defaultPlaybackSpeed = json["defaultPlaybackSpeed"] as? Double ?? 1.0
@@ -2837,6 +2972,7 @@ class BackupManager {
         let externalPlayer = json["externalPlayer"] as? String ?? "none"
         let preferDownloadedMedia = json["preferDownloadedMedia"] as? Bool ?? false
         let alwaysLandscape = json["alwaysLandscape"] as? Bool ?? false
+        let playerPlaybackLockEnabled = json["playerPlaybackLockEnabled"] as? Bool ?? PlayerPlaybackLockSettings.defaultEnabled
         let aniSkipEnabled = json["aniSkipEnabled"] as? Bool ?? true
         let introDBEnabled = json["introDBEnabled"] as? Bool ?? true
         let introDBAppEnabled = json["introDBAppEnabled"] as? Bool ?? true
@@ -2845,6 +2981,7 @@ class BackupManager {
         let skip85sAlwaysVisible = json["skip85sAlwaysVisible"] as? Bool ?? false
         let showNextEpisodeButton = json["showNextEpisodeButton"] as? Bool ?? true
         let showEpisodeBrowserButton = json["showEpisodeBrowserButton"] as? Bool ?? json["showVLCEpisodeBrowserButton"] as? Bool ?? true
+        let showPlayerServicesButton = json["showPlayerServicesButton"] as? Bool ?? false
         let showNextEpisodePosterButton = json["showNextEpisodePosterButton"] as? Bool ?? false
         let nextEpisodeThreshold = json["nextEpisodeThreshold"] as? Double ?? 0.90
         let nextEpisodeSkipFillerEnabled = json["nextEpisodeSkipFillerEnabled"] as? Bool ?? NextEpisodeFillerSettings.defaultEnabled
@@ -2866,6 +3003,8 @@ class BackupManager {
         let mpvPlayerSkinCustomPrimaryColor = BackupData.backupColorData(from: json["mpvPlayerSkinCustomPrimaryColor"])
         let mpvPlayerSkinCustomSecondaryColor = BackupData.backupColorData(from: json["mpvPlayerSkinCustomSecondaryColor"])
         let mpvPlayerSkinAnimationsEnabled = json["mpvPlayerSkinAnimationsEnabled"] as? Bool ?? MPVPlayerSkinSettings.defaultAnimationsEnabled
+        let mpvPlayerSkinTintControlsOnly = json["mpvPlayerSkinTintControlsOnly"] as? Bool ?? MPVPlayerSkinSettings.defaultTintControlsOnly
+        let mpvPictureInPictureEnabled = json["mpvPictureInPictureEnabled"] as? Bool ?? true
         let mpvAppExitPictureInPictureEnabled = json["mpvAppExitPictureInPictureEnabled"] as? Bool ?? false
         let mpvHDRMode = MPVHDRMode(rawValue: json["mpvHDRMode"] as? String ?? MPVHDRMode.defaultMode.rawValue)?.rawValue ?? MPVHDRMode.defaultMode.rawValue
         let mpvSurroundSoundEnabled = json["mpvSurroundSoundEnabled"] as? Bool ?? true
@@ -2907,6 +3046,8 @@ class BackupManager {
         let homeCatalogLayoutOverrides = json["homeCatalogLayoutOverrides"] as? String ?? ""
         let homeAnimatedBackgroundEnabled = json["homeAnimatedBackgroundEnabled"] as? Bool
         let homeAnimatedBackgroundQuality = BackupData.sanitizedHomeAnimatedBackgroundQuality(json["homeAnimatedBackgroundQuality"] as? String)
+        let homeAnimatedBackgroundFrameRate = BackupData.sanitizedHomeAnimatedBackgroundFrameRate(json["homeAnimatedBackgroundFrameRate"] as? String)
+        let appPerformanceOverlayEnabled = json["appPerformanceOverlayEnabled"] as? Bool ?? AppPerformanceOverlaySettings.defaultEnabled
         let experimentalMediaDesignPreset = BackupData.sanitizedExperimentalMediaDesignPreset(json["experimentalMediaDesignPreset"] as? String)
         let experimentalHeroBleedLevel = BackupData.sanitizedExperimentalHeroBleedLevel(json["experimentalHeroBleedLevel"] as? String)
         let experimentalHomeCardShape = BackupData.sanitizedExperimentalHomeCardShape(json["experimentalHomeCardShape"] as? String)
@@ -2994,10 +3135,16 @@ class BackupManager {
         let servicesAutoModeSourceIds = BackupData.sanitizedStringList(BackupData.stringList(from: json["servicesAutoModeSourceIds"]))
         let servicesAutoModeSourceOrderIds = BackupData.sanitizedStringList(BackupData.stringList(from: json["servicesAutoModeSourceOrderIds"]))
         let servicesAutoModeQualityPreference = AutoModeQualityPreference.sanitizedRawValue(json["servicesAutoModeQualityPreference"] as? String)
+        let servicesResultMinimumSimilarity = BackupData.sanitizedServicesResultMinimumSimilarity(
+            BackupData.optionalDouble(from: json["servicesResultMinimumSimilarity"], defaultValue: ServicesResultRankingSettings.defaultMinimumSimilarity)
+        )
+        let servicesDropMismatchedResults = json["servicesDropMismatchedResults"] as? Bool ?? ServicesResultRankingSettings.defaultDropMismatchedResults
         let servicesStremioStyleSheetEnabled = json["servicesStremioStyleSheetEnabled"] as? Bool ?? ServicesSheetPresentationSettings.defaultStremioStyleEnabled
         let servicesIncludedStreamLanguages = StreamLanguageFilter.sanitizedLanguageList(BackupData.stringList(from: json["servicesIncludedStreamLanguages"]))
         let servicesHiddenStreamLanguages = StreamLanguageFilter.sanitizedLanguageList(BackupData.stringList(from: json["servicesHiddenStreamLanguages"]))
         let servicesHideStreamsWithoutLanguageData = json["servicesHideStreamsWithoutLanguageData"] as? Bool ?? false
+        let servicesAssumeOriginalAudio = json["servicesAssumeOriginalAudio"] as? Bool ?? false
+        let servicesTreatDubbedAnimeAsEnglish = json["servicesTreatDubbedAnimeAsEnglish"] as? Bool ?? false
         let servicesHiddenStreamQualities = StreamLanguageFilter.sanitizedQualityHeights(BackupData.intList(from: json["servicesHiddenStreamQualities"]))
         let servicesHideStreamsWithoutDetectedQuality = json["servicesHideStreamsWithoutDetectedQuality"] as? Bool ?? false
         let servicesExtraRulesSourceIds: [String]?
@@ -3189,11 +3336,18 @@ class BackupManager {
             showScheduleTab: showScheduleTab,
             showLocalScheduleTime: showLocalScheduleTime,
             defaultScheduleMode: defaultScheduleMode,
+            scheduleWindowDays: scheduleWindowDays,
+            localNotificationSubscriptions: localNotificationSubscriptions,
+            localNotificationEpisodeReminders: localNotificationEpisodeReminders,
+            localNotificationEpisodeLeadTime: localNotificationEpisodeLeadTime,
+            localNotificationSeasonLeadTime: localNotificationSeasonLeadTime,
+            localNotificationIncludeAnimeSpecials: localNotificationIncludeAnimeSpecials,
             defaultPlaybackSpeed: defaultPlaybackSpeed,
             holdSpeedPlayer: holdSpeedPlayer,
             externalPlayer: externalPlayer,
             preferDownloadedMedia: preferDownloadedMedia,
             alwaysLandscape: alwaysLandscape,
+            playerPlaybackLockEnabled: playerPlaybackLockEnabled,
             aniSkipEnabled: aniSkipEnabled,
             introDBEnabled: introDBEnabled,
             introDBAppEnabled: introDBAppEnabled,
@@ -3202,6 +3356,7 @@ class BackupManager {
             skip85sAlwaysVisible: skip85sAlwaysVisible,
             showNextEpisodeButton: showNextEpisodeButton,
             showEpisodeBrowserButton: showEpisodeBrowserButton,
+            showPlayerServicesButton: showPlayerServicesButton,
             showNextEpisodePosterButton: showNextEpisodePosterButton,
             nextEpisodeThreshold: nextEpisodeThreshold,
             nextEpisodeSkipFillerEnabled: nextEpisodeSkipFillerEnabled,
@@ -3222,6 +3377,8 @@ class BackupManager {
             mpvPlayerSkinCustomPrimaryColor: mpvPlayerSkinCustomPrimaryColor,
             mpvPlayerSkinCustomSecondaryColor: mpvPlayerSkinCustomSecondaryColor,
             mpvPlayerSkinAnimationsEnabled: mpvPlayerSkinAnimationsEnabled,
+            mpvPlayerSkinTintControlsOnly: mpvPlayerSkinTintControlsOnly,
+            mpvPictureInPictureEnabled: mpvPictureInPictureEnabled,
             mpvAppExitPictureInPictureEnabled: mpvAppExitPictureInPictureEnabled,
             mpvHDRMode: mpvHDRMode,
             mpvSurroundSoundEnabled: mpvSurroundSoundEnabled,
@@ -3259,6 +3416,8 @@ class BackupManager {
             homeCatalogLayoutOverrides: homeCatalogLayoutOverrides,
             homeAnimatedBackgroundEnabled: homeAnimatedBackgroundEnabled,
             homeAnimatedBackgroundQuality: homeAnimatedBackgroundQuality,
+            homeAnimatedBackgroundFrameRate: homeAnimatedBackgroundFrameRate,
+            appPerformanceOverlayEnabled: appPerformanceOverlayEnabled,
             experimentalMediaDesignPreset: experimentalMediaDesignPreset,
             experimentalHeroBleedLevel: experimentalHeroBleedLevel,
             experimentalHomeCardShape: experimentalHomeCardShape,
@@ -3339,10 +3498,14 @@ class BackupManager {
             servicesAutoModeSourceIds: servicesAutoModeSourceIds,
             servicesAutoModeSourceOrderIds: servicesAutoModeSourceOrderIds,
             servicesAutoModeQualityPreference: servicesAutoModeQualityPreference,
+            servicesResultMinimumSimilarity: servicesResultMinimumSimilarity,
+            servicesDropMismatchedResults: servicesDropMismatchedResults,
             servicesStremioStyleSheetEnabled: servicesStremioStyleSheetEnabled,
             servicesIncludedStreamLanguages: servicesIncludedStreamLanguages,
             servicesHiddenStreamLanguages: servicesHiddenStreamLanguages,
             servicesHideStreamsWithoutLanguageData: servicesHideStreamsWithoutLanguageData,
+            servicesAssumeOriginalAudio: servicesAssumeOriginalAudio,
+            servicesTreatDubbedAnimeAsEnglish: servicesTreatDubbedAnimeAsEnglish,
             servicesHiddenStreamQualities: servicesHiddenStreamQualities,
             servicesHideStreamsWithoutDetectedQuality: servicesHideStreamsWithoutDetectedQuality,
             servicesExtraRulesSourceIds: servicesExtraRulesSourceIds,
@@ -3423,10 +3586,36 @@ class BackupManager {
 
         userDefaults.set(backup.preferredAutoAudioLanguage, forKey: "preferredAutoAudioLanguage")
         userDefaults.set(backup.preferredAnimeAudioLanguage, forKey: "preferredAnimeAudioLanguage")
-        userDefaults.set(Settings.normalizedInAppPlayer(backup.inAppPlayer), forKey: "inAppPlayer")
+        let restoredEngineRaw = Settings.normalizedInAppPlayer(backup.inAppPlayer)
+        let decodedEngine = PlaybackEngine(rawValue: restoredEngineRaw)
+            ?? PlaybackEngine.defaultSelection(deviceFamily: .current)
+        let restoredEngine = PlaybackEngine.supportedSelection(
+            decodedEngine,
+            deviceFamily: .current
+        )
+        userDefaults.set(restoredEngine.rawValue, forKey: PlaybackEngine.defaultsKey)
+        // Keep the legacy key readable by older Eclipse builds after applying this device's
+        // supported-selection policy.
+        userDefaults.set(restoredEngine.rawValue, forKey: "inAppPlayer")
         userDefaults.set(backup.showScheduleTab, forKey: "showScheduleTab")
         userDefaults.set(backup.showLocalScheduleTime, forKey: "showLocalScheduleTime")
         userDefaults.set(ScheduleMode.sanitizedRawValue(backup.defaultScheduleMode), forKey: "defaultScheduleMode")
+        userDefaults.set(ScheduleWindow.sanitizedDays(backup.scheduleWindowDays), forKey: ScheduleWindow.storageKey)
+        if let value = backup.localNotificationSubscriptions {
+            userDefaults.set(value, forKey: "localNotificationSubscriptions")
+        }
+        if let value = backup.localNotificationEpisodeReminders {
+            userDefaults.set(value, forKey: "localNotificationEpisodeReminders")
+        }
+        if let value = backup.localNotificationEpisodeLeadTime {
+            userDefaults.set(value, forKey: "localNotificationEpisodeLeadTime")
+        }
+        if let value = backup.localNotificationSeasonLeadTime {
+            userDefaults.set(value, forKey: "localNotificationSeasonLeadTime")
+        }
+        if let value = backup.localNotificationIncludeAnimeSpecials {
+            userDefaults.set(value, forKey: "localNotificationIncludeAnimeSpecials")
+        }
 
         // Player settings
         userDefaults.set(backup.defaultPlaybackSpeed, forKey: "defaultPlaybackSpeed")
@@ -3434,6 +3623,7 @@ class BackupManager {
         userDefaults.set(backup.externalPlayer, forKey: "externalPlayer")
         userDefaults.set(backup.preferDownloadedMedia, forKey: "preferDownloadedMedia")
         userDefaults.set(backup.alwaysLandscape, forKey: "alwaysLandscape")
+        PlayerPlaybackLockSettings.setEnabled(backup.playerPlaybackLockEnabled, defaults: userDefaults)
         userDefaults.set(backup.aniSkipEnabled, forKey: "aniSkipEnabled")
         userDefaults.set(backup.introDBEnabled, forKey: "introDBEnabled")
         userDefaults.set(backup.introDBAppEnabled, forKey: "introDBAppEnabled")
@@ -3442,6 +3632,7 @@ class BackupManager {
         userDefaults.set(backup.skip85sAlwaysVisible, forKey: "skip85sAlwaysVisible")
         userDefaults.set(backup.showNextEpisodeButton, forKey: "showNextEpisodeButton")
         userDefaults.set(backup.showEpisodeBrowserButton, forKey: "showEpisodeBrowserButton")
+        userDefaults.set(backup.showPlayerServicesButton, forKey: PlayerServicesButtonSettings.key)
         userDefaults.set(backup.showNextEpisodePosterButton, forKey: "showNextEpisodePosterButton")
         userDefaults.set(backup.nextEpisodeThreshold, forKey: "nextEpisodeThreshold")
         userDefaults.set(backup.nextEpisodeSkipFillerEnabled, forKey: NextEpisodeFillerSettings.enabledKey)
@@ -3470,6 +3661,8 @@ class BackupManager {
             userDefaults.removeObject(forKey: MPVPlayerSkinSettings.customSecondaryColorKey)
         }
         userDefaults.set(backup.mpvPlayerSkinAnimationsEnabled, forKey: MPVPlayerSkinSettings.animationsEnabledKey)
+        userDefaults.set(backup.mpvPlayerSkinTintControlsOnly, forKey: MPVPlayerSkinSettings.tintControlsOnlyKey)
+        userDefaults.set(backup.mpvPictureInPictureEnabled, forKey: "mpvPictureInPictureEnabled")
         userDefaults.set(backup.mpvAppExitPictureInPictureEnabled, forKey: "mpvAppExitPictureInPictureEnabled")
         userDefaults.set(MPVHDRMode(rawValue: backup.mpvHDRMode)?.rawValue ?? MPVHDRMode.defaultMode.rawValue, forKey: "mpvHDRMode")
         userDefaults.set(backup.mpvSurroundSoundEnabled, forKey: "mpvSurroundSoundEnabled")
@@ -3524,6 +3717,8 @@ class BackupManager {
             userDefaults.set(homeAnimatedBackgroundEnabled, forKey: HomeAnimatedBackgroundSettings.enabledKey)
         }
         userDefaults.set(BackupData.sanitizedHomeAnimatedBackgroundQuality(backup.homeAnimatedBackgroundQuality), forKey: HomeAnimatedBackgroundQuality.storageKey)
+        userDefaults.set(BackupData.sanitizedHomeAnimatedBackgroundFrameRate(backup.homeAnimatedBackgroundFrameRate), forKey: HomeAnimatedBackgroundFrameRate.storageKey)
+        userDefaults.set(backup.appPerformanceOverlayEnabled, forKey: AppPerformanceOverlaySettings.enabledKey)
         userDefaults.set(BackupData.sanitizedExperimentalMediaDesignPreset(backup.experimentalMediaDesignPreset), forKey: ExperimentalMediaDesignPreset.storageKey)
         userDefaults.set(BackupData.sanitizedExperimentalHeroBleedLevel(backup.experimentalHeroBleedLevel), forKey: ExperimentalHeroBleedLevel.storageKey)
         userDefaults.set(BackupData.sanitizedExperimentalHomeCardShape(backup.experimentalHomeCardShape), forKey: ExperimentalHomeCardShape.storageKey)
@@ -3632,10 +3827,14 @@ class BackupManager {
         userDefaults.set(restoredAutoModeSourceIds, forKey: "servicesAutoModeSourceIds")
         userDefaults.set(restoredAutoModeSourceOrderIds, forKey: "servicesAutoModeSourceOrderIds")
         userDefaults.set(AutoModeQualityPreference.sanitizedRawValue(backup.servicesAutoModeQualityPreference), forKey: AutoModeQualityPreference.storageKey)
+        ServicesResultRankingSettings.setMinimumSimilarity(backup.servicesResultMinimumSimilarity, defaults: userDefaults)
+        ServicesResultRankingSettings.setDropsMismatchedResults(backup.servicesDropMismatchedResults, defaults: userDefaults)
         userDefaults.set(backup.servicesStremioStyleSheetEnabled, forKey: ServicesSheetPresentationSettings.stremioStyleEnabledKey)
         StreamLanguageFilter.setIncludedLanguages(backup.servicesIncludedStreamLanguages, defaults: userDefaults)
         StreamLanguageFilter.setHiddenLanguages(backup.servicesHiddenStreamLanguages, defaults: userDefaults)
         StreamLanguageFilter.setHidesStreamsWithoutLanguageData(backup.servicesHideStreamsWithoutLanguageData, defaults: userDefaults)
+        StreamLanguageFilter.setAssumesOriginalAudio(backup.servicesAssumeOriginalAudio, defaults: userDefaults)
+        StreamLanguageFilter.setTreatsDubbedAnimeAsEnglish(backup.servicesTreatDubbedAnimeAsEnglish, defaults: userDefaults)
         StreamLanguageFilter.setHiddenQualityHeights(backup.servicesHiddenStreamQualities, defaults: userDefaults)
         StreamLanguageFilter.setHidesStreamsWithoutDetectedQuality(backup.servicesHideStreamsWithoutDetectedQuality, defaults: userDefaults)
         StreamLanguageFilter.setExtraRulesSourceIds(backup.servicesExtraRulesSourceIds, defaults: userDefaults)
@@ -3930,6 +4129,12 @@ class BackupManager {
                 notes: backup.userRatingNotes
             )
         }
+
+#if os(iOS)
+        Task { @MainActor in
+            await LocalNotificationManager.shared.reloadPersistedSelectionsAfterRestore()
+        }
+#endif
         
         Logger.shared.log("Backup restored successfully", type: "Info")
         return true

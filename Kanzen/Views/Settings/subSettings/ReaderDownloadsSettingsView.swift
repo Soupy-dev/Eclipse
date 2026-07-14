@@ -46,7 +46,7 @@ struct ReaderDownloadsSettingsView: View {
         .background(GlobalGradientBackground().ignoresSafeArea())
         .navigationTitle("Downloads")
         .navigationBarTitleDisplayMode(.inline)
-        .confirmationDialog("Delete All Reader Downloads", isPresented: $showingDeleteAll, titleVisibility: .visible) {
+        .adaptiveConfirmationDialog("Delete All Reader Downloads", isPresented: $showingDeleteAll, titleVisibility: .visible) {
             Button("Delete All", role: .destructive) {
                 downloadManager.deleteAll()
             }
@@ -54,11 +54,13 @@ struct ReaderDownloadsSettingsView: View {
         } message: {
             Text("This removes downloaded Reader files and cancels active Reader downloads.")
         }
-        .confirmationDialog("Clear Failed Reader Downloads", isPresented: $showingDeleteFailed, titleVisibility: .visible) {
+        .adaptiveConfirmationDialog("Clear Failed Reader Downloads", isPresented: $showingDeleteFailed, titleVisibility: .visible) {
             Button("Clear Failed", role: .destructive) {
                 downloadManager.deleteFailed()
             }
             Button("Cancel", role: .cancel) { }
+        } message: {
+            EmptyView()
         }
     }
 
@@ -447,11 +449,13 @@ struct ReaderDownloadedTitleDetailView: View {
                 }
             }
         }
-        .confirmationDialog("Delete Downloads", isPresented: $showingDelete, titleVisibility: .visible) {
+        .adaptiveConfirmationDialog("Delete Downloads", isPresented: $showingDelete, titleVisibility: .visible) {
             Button("Delete Downloads", role: .destructive) {
                 downloadManager.deleteTitle(route: title.route)
             }
             Button("Cancel", role: .cancel) { }
+        } message: {
+            EmptyView()
         }
         .fullScreenCover(item: $selectedChapter) { chapter in
             readerManagerView(

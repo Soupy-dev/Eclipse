@@ -31,6 +31,7 @@ struct HomeLayoutView: View {
     @AppStorage(ExperimentalVisualTuning.heroHeightScaleKey) private var heroHeightScale = ExperimentalVisualTuning.defaultHeroHeightScale
     @AppStorage(HomeAnimatedBackgroundSettings.enabledKey) private var animatedBackgroundEnabled = HomeAnimatedBackgroundSettings.defaultEnabled
     @AppStorage(HomeAnimatedBackgroundQuality.storageKey) private var animatedBackgroundQuality = HomeAnimatedBackgroundQuality.defaultValue.rawValue
+    @AppStorage(HomeAnimatedBackgroundFrameRate.storageKey) private var animatedBackgroundFrameRate = HomeAnimatedBackgroundFrameRate.defaultValue.rawValue
 #if os(tvOS)
     @AppStorage("tvCardDensity") private var tvCardDensityRaw = TVCardDensity.standard.rawValue
 #endif
@@ -138,9 +139,16 @@ struct HomeLayoutView: View {
 
             pickerRow(
                 title: "Animation Quality",
-                description: "All levels animate at 30 FPS. Low keeps the core eclipse rings and particles. Medium adds a plasma field, starfield, orbiting embers, energy wavefronts, and a corona. High adds denser motion, a kinetic mesh, more orbiting embers, and meteor bursts.",
+                description: "Low keeps the core eclipse rings and particles. Medium and High progressively add richer motion layers.",
                 selection: $animatedBackgroundQuality,
                 values: HomeAnimatedBackgroundQuality.allCases.map { ($0.rawValue, $0.displayName) }
+            )
+
+            pickerRow(
+                title: "Animation Frame Rate",
+                description: "Use the battery-friendly 20 FPS default, or choose smoother 30 FPS motion across Eclipse.",
+                selection: $animatedBackgroundFrameRate,
+                values: HomeAnimatedBackgroundFrameRate.allCases.map { ($0.rawValue, $0.displayName) }
             )
         } header: {
             Text("Global")

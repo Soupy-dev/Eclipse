@@ -27,5 +27,6 @@ struct CreateCollectionView: View {
                     .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
             )
         }
+        .navigationViewStyle(StackNavigationViewStyle())
     }
 }

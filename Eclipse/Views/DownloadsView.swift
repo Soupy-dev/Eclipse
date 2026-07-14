@@ -12,6 +12,9 @@ struct DownloadsView: View {
     @State private var showingDeleteSeriesConfirmation = false
     @State private var seriesToDelete: (tmdbId: Int, title: String)? = nil
     @State private var selectedTab: DownloadsTab = .downloads
+#if os(iOS)
+    @Environment(\.eclipseWindowSceneSessionIdentifier) private var presentationSceneIdentifier
+#endif
     
     private enum DownloadsTab: String, CaseIterable {
         case downloads = "Downloads"
@@ -79,7 +82,7 @@ struct DownloadsView: View {
                 }
             }
         }
-        .confirmationDialog("Delete All Downloads", isPresented: $showingDeleteAllConfirmation, titleVisibility: .visible) {
+        .adaptiveConfirmationDialog("Delete All Downloads", isPresented: $showingDeleteAllConfirmation, titleVisibility: .visible) {
             Button("Delete All", role: .destructive) {
                 downloadManager.deleteAll()
             }
@@ -87,7 +90,7 @@ struct DownloadsView: View {
         } message: {
             Text("This will cancel all active downloads and remove all downloaded files. This action cannot be undone.")
         }
-        .confirmationDialog("Delete Completed", isPresented: $showingDeleteCompletedConfirmation, titleVisibility: .visible) {
+        .adaptiveConfirmationDialog("Delete Completed", isPresented: $showingDeleteCompletedConfirmation, titleVisibility: .visible) {
             Button("Delete Completed", role: .destructive) {
                 downloadManager.deleteAllCompleted()
             }
@@ -95,7 +98,7 @@ struct DownloadsView: View {
         } message: {
             Text("This will remove all completed download files. This action cannot be undone.")
         }
-        .confirmationDialog(
+        .adaptiveConfirmationDialog(
             "Delete \(seriesToDelete?.title ?? "Series")",
             isPresented: $showingDeleteSeriesConfirmation,
             titleVisibility: .visible
@@ -805,91 +808,101 @@ struct DownloadsView: View {
 #if os(iOS)
         guard let fileURL = downloadManager.localFileURL(for: item) else { return }
         let activityVC = UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
-        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-           let rootVC = windowScene.windows.first?.rootViewController,
-           let topmostVC = rootVC.topmostViewController() as UIViewController? {
-            activityVC.popoverPresentationController?.sourceView = topmostVC.view
+        if let topmostVC = downloadPresentationController() {
+            if let popover = activityVC.popoverPresentationController {
+                popover.sourceView = topmostVC.view
+                popover.sourceRect = CGRect(
+                    x: topmostVC.view.bounds.midX,
+                    y: topmostVC.view.bounds.midY,
+                    width: 1,
+                    height: 1
+                )
+                popover.permittedArrowDirections = []
+            }
             topmostVC.present(activityVC, animated: true)
         }
 #endif
     }
     
-    private func playDownloadedItem(_ item: DownloadItem) {
+    private func playDownloadedItem(_ item: DownloadItem, from presenter: UIViewController? = nil) {
         guard let fileURL = downloadManager.localFileURL(for: item) else {
             Logger.shared.log("Downloaded file not found for: \(item.id)", type: "Download")
             return
         }
         
-        let inAppRaw = Settings.normalizedInAppPlayer(UserDefaults.standard.string(forKey: "inAppPlayer"))
-        let subtitleArray: [String]? = downloadManager.localSubtitleURL(for: item).map { [$0.absoluteString] }
-        
-        if inAppRaw == "mpv" {
-            let preset = PlayerPreset.presets.first
-            let pvc = PlayerViewController(
-                url: fileURL,
-                preset: preset ?? PlayerPreset(id: .sdrRec709, title: "Default", summary: "", stream: nil, commands: []),
-                headers: [:],
-                subtitles: subtitleArray,
-                mediaInfo: item.mediaInfo
-            )
-            pvc.isAnimeHint = item.isAnime
-            pvc.episodePlaybackContext = item.episodePlaybackContext
-            pvc.originalTMDBSeasonNumber = item.episodePlaybackContext?.resolvedTMDBSeasonNumber
-            pvc.originalTMDBEpisodeNumber = item.episodePlaybackContext?.resolvedTMDBEpisodeNumber
-            pvc.modalPresentationStyle = .fullScreen
-            if !item.isMovie {
-                pvc.onRequestNextEpisode = { seasonNumber, episodeNumber in
-                    guard let nextItem = nextDownloadedEpisode(
-                        for: item.tmdbId,
-                        requestedSeasonNumber: seasonNumber,
-                        requestedEpisodeNumber: episodeNumber,
-                        currentItemId: item.id
-                    ) else {
-                        Logger.shared.log("NextEpisode: No downloaded next episode found for tmdbId=\(item.tmdbId) after \(item.id)", type: "Player")
-                        return
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                        playDownloadedItem(nextItem)
-                    }
-                }
+        guard let originatingPresenter = downloadPresentationController(explicit: presenter) else {
+            Logger.shared.log("Downloaded playback has no presenter", type: "Player")
+            return
+        }
+        let subtitles = downloadManager.localSubtitleURL(for: item).map { [$0.absoluteString] } ?? []
+        let nextEpisodeRequest: ((_ seasonNumber: Int, _ episodeNumber: Int) -> Void)? = item.isMovie ? nil : { [weak originatingPresenter] seasonNumber, episodeNumber in
+            guard let originatingPresenter else { return }
+            guard let nextItem = nextDownloadedEpisode(
+                for: item.tmdbId,
+                requestedSeasonNumber: seasonNumber,
+                requestedEpisodeNumber: episodeNumber,
+                currentItemId: item.id,
+                allowNextAvailableFallback: false
+            ) else {
+                Logger.shared.log("NextEpisode: No downloaded next episode found for tmdbId=\(item.tmdbId) after \(item.id)", type: "Player")
+                return
             }
-            
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let rootVC = windowScene.windows.first?.rootViewController,
-               let topmostVC = rootVC.topmostViewController() as UIViewController? {
-                topmostVC.present(pvc, animated: true, completion: nil)
-            }
-        } else {
-            // Normal player (AVPlayer)
-            let playerVC = NormalPlayer()
-            let item2 = AVPlayerItem(url: fileURL)
-            playerVC.player = AVPlayer(playerItem: item2)
-            playerVC.mediaInfo = item.mediaInfo
-            playerVC.episodePlaybackContext = item.episodePlaybackContext
-            playerVC.modalPresentationStyle = .fullScreen
-            
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let rootVC = windowScene.windows.first?.rootViewController,
-               let topmostVC = rootVC.topmostViewController() as UIViewController? {
-                topmostVC.present(playerVC, animated: true) {
-                    playerVC.playAtDefaultSpeed()
-                }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                self.playDownloadedItem(nextItem, from: originatingPresenter)
             }
         }
+        let localNextEpisode: DownloadItem? = item.isMovie ? nil : nextDownloadedEpisode(
+            for: item.tmdbId,
+            requestedSeasonNumber: item.seasonNumber ?? 0,
+            requestedEpisodeNumber: (item.episodeNumber ?? 0) + 1,
+            currentItemId: item.id
+        )
+        let request = PlaybackRequest(
+            url: fileURL,
+            subtitles: subtitles,
+            mediaInfo: item.mediaInfo,
+            episodePlaybackContext: item.episodePlaybackContext,
+            title: item.playerTitleBase,
+            subtitle: item.displayTitle,
+            artworkURL: item.posterURL.flatMap(URL.init(string:)),
+            isAnime: item.isAnime,
+            originalTMDBSeasonNumber: item.episodePlaybackContext?.resolvedTMDBSeasonNumber,
+            originalTMDBEpisodeNumber: item.episodePlaybackContext?.resolvedTMDBEpisodeNumber,
+            onRequestNextEpisode: nextEpisodeRequest,
+            localNextEpisodeFallback: PlaybackEpisodeCoordinate(
+                seasonNumber: localNextEpisode?.seasonNumber,
+                episodeNumber: localNextEpisode?.episodeNumber
+            )
+        )
+        PlaybackCoordinator.shared.present(request, from: originatingPresenter)
+    }
+
+    @MainActor
+    private func downloadPresentationController(explicit: UIViewController? = nil) -> UIViewController? {
+        if let explicit { return explicit }
+#if os(iOS)
+        return UIApplication.shared.eclipseTopmostViewController(
+            forSceneSessionIdentifier: presentationSceneIdentifier
+        )
+#else
+        return UIApplication.shared.eclipseTopmostViewController()
+#endif
     }
 
     private func nextDownloadedEpisode(
         for tmdbId: Int,
         requestedSeasonNumber: Int,
         requestedEpisodeNumber: Int,
-        currentItemId: String
+        currentItemId: String,
+        allowNextAvailableFallback: Bool = true
     ) -> DownloadItem? {
         let episodes = downloadManager.completedDownloads
             .filter {
                 !$0.isMovie &&
                 $0.tmdbId == tmdbId &&
                 $0.seasonNumber != nil &&
-                $0.episodeNumber != nil
+                $0.episodeNumber != nil &&
+                downloadManager.localFileURL(for: $0) != nil
             }
             .sorted {
                 if $0.seasonNumber == $1.seasonNumber {
@@ -903,6 +916,8 @@ struct DownloadsView: View {
         }) {
             return requested
         }
+
+        guard allowNextAvailableFallback else { return nil }
 
         guard let currentIndex = episodes.firstIndex(where: { $0.id == currentItemId }) else { return nil }
         let nextIndex = episodes.index(after: currentIndex)

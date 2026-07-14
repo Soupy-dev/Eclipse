@@ -6,6 +6,44 @@ import Photos
 import UIKit
 #endif
 
+struct MediaDetailInitialNotificationSelection: Equatable {
+    enum Kind: Equatable {
+        case episode
+        case batch
+        case season
+    }
+
+    let id: String
+    let kind: Kind
+    let sourceMediaID: Int?
+    let seasonNumber: Int?
+    let episodeNumber: Int?
+    let isAnimeSpecial: Bool
+    let seasonLabel: String?
+
+#if !os(tvOS)
+    init(_ target: LocalNotificationNavigationTarget) {
+        id = target.id
+        switch target.kind {
+        case .episode, .scheduleFallback: kind = .episode
+        case .batch: kind = .batch
+        case .season: kind = .season
+        }
+        sourceMediaID = target.sourceMediaID
+        seasonNumber = target.seasonNumber
+        episodeNumber = target.episodeNumber
+        isAnimeSpecial = target.isAnimeSpecial
+        seasonLabel = target.seasonLabel
+    }
+#endif
+}
+
+enum MediaDetailEpisodeAnchor {
+    static func id(for episode: TMDBEpisode) -> String {
+        "episode-\(episode.seasonNumber)-\(episode.episodeNumber)-\(episode.id)"
+    }
+}
+
 #if os(iOS)
 private struct StillPhotoSaveNotice: Identifiable {
     let id = UUID()
@@ -117,6 +155,8 @@ enum MediaDetailTitleArtworkSettings {
 
 struct MediaDetailView: View {
     let searchResult: TMDBSearchResult
+    private let watchTogetherAutoPlay: WatchTogetherMediaDescriptor?
+    private let initialNotificationSelection: MediaDetailInitialNotificationSelection?
     
     @StateObject private var tmdbService = TMDBService.shared
     @StateObject private var trackerManager = TrackerManager.shared
@@ -129,11 +169,19 @@ struct MediaDetailView: View {
     @State private var ambientColor: Color = Color.black
     @State private var scrollOffset: CGFloat = 0
     @State private var showFullSynopsis: Bool = false
+    @State private var showFullMetadata: Bool = true
     @State private var synopsis: String = ""
     @State private var isBookmarked: Bool = false
     @State private var showingSearchResults = false
+    @State private var didStartWatchTogetherAutoPlay = false
+    @State private var watchTogetherNextEpisodeAutoPlay = false
+    @State private var watchTogetherPlaybackContextOverride: EpisodePlaybackContext?
+    @State private var nextEpisodePlaybackContextOverride: EpisodePlaybackContext?
+    @State private var nextEpisodeResolvedTargetOverride: ResolvedNextEpisodeTarget?
+    @State private var nextEpisodeNotificationRoute = UUID()
 #if !os(tvOS)
     @State private var showingDownloadSheet = false
+    @State private var showingNotificationOptions = false
 #endif
     @State private var showingAddToCollection = false
     @State private var selectedEpisodeForSearch: TMDBEpisode?
@@ -152,6 +200,7 @@ struct MediaDetailView: View {
     @State private var specialSearchRequest: AnimeSpecialSearchRequest?
     @State private var nextEpisodePresentationToken = 0
     @State private var playSheetRequestId = UUID()
+    @StateObject private var autoModeRetrySession = AutoModeRetrySession()
     
     @State private var castMembers: [TMDBCastMember] = []
     @State private var detailStills: [TMDBImage] = []
@@ -175,31 +224,47 @@ struct MediaDetailView: View {
     @State private var similarTitlesLoadTask: Task<Void, Never>?
     @State private var specialsLoadGeneration = 0
     @State private var detailContentRefreshTick = 0
+    @State private var handledNotificationSelectionID: String?
+    @State private var notificationEpisodeScrollGeneration = 0
+    @State private var notificationRouteNotice: String?
     
     @StateObject private var serviceManager = ServiceManager.shared
     @StateObject private var stremioManager = StremioAddonManager.shared
 #if !os(tvOS)
     private let downloadManager = DownloadManager.shared
+    @ObservedObject private var localNotificationManager = LocalNotificationManager.shared
 #endif
     @ObservedObject private var libraryManager = LibraryManager.shared
     @ObservedObject private var theme = EclipseTheme.shared
     @StateObject private var accentManager = AccentColorManager.shared
     private let progressManager = ProgressManager.shared
+    private static let notificationEpisodesAnchor = "media-detail-notification-episodes"
     
     @Environment(\.presentationMode) var presentationMode
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage("tmdbLanguage") private var selectedLanguage = "en-US"
     @AppStorage("mediaDetailElementOrder") private var mediaDetailElementOrder = MediaDetailElement.defaultOrderRawValue
     @AppStorage("mediaDetailHiddenElements") private var mediaDetailHiddenElements = ""
     @AppStorage("showCastSection") private var legacyShowCastSection = true
-    @AppStorage("seasonMenu") private var useSeasonMenu = false
+    @AppStorage(MediaDetailPlatformDefaults.seasonMenuKey) private var useSeasonMenu = MediaDetailPlatformDefaults.prefersCompactSeasonMenu
     @AppStorage(MediaDetailTitleArtworkSettings.enabledKey) private var mediaDetailTitleArtworkEnabled = MediaDetailTitleArtworkSettings.defaultEnabled
     @AppStorage(MediaDetailSimilarTitlesSettings.enabledKey) private var mediaDetailSimilarTitlesEnabled = MediaDetailSimilarTitlesSettings.defaultEnabled
     @AppStorage(ExperimentalMediaDesignPreset.storageKey) private var experimentalDesignPreset = ExperimentalMediaDesignPreset.defaultValue.rawValue
     @AppStorage(ExperimentalHeroBleedLevel.storageKey) private var experimentalHeroBleedLevel = ExperimentalHeroBleedLevel.defaultValue.rawValue
     @AppStorage(ExperimentalHomeCardShape.storageKey) private var experimentalHomeCardShape = ExperimentalHomeCardShape.defaultValue.rawValue
     private let nextEpisodeSheetPresentationDelay: TimeInterval = 1.2
+
+    init(
+        searchResult: TMDBSearchResult,
+        watchTogetherAutoPlay: WatchTogetherMediaDescriptor? = nil,
+        initialNotificationSelection: MediaDetailInitialNotificationSelection? = nil
+    ) {
+        self.searchResult = searchResult
+        self.watchTogetherAutoPlay = watchTogetherAutoPlay
+        self.initialNotificationSelection = initialNotificationSelection
+    }
 
     private var atmosphereColor: Color {
         theme.atmosphereColor(dominant: ambientColor)
@@ -213,6 +278,21 @@ struct MediaDetailView: View {
     /// near-black/absent backdrop so the app gradient stays clean.
     private var heroBleedColor: Color? {
         EclipseTheme.usableDominant(ambientColor)
+    }
+
+    private var mediaDetailHeroBleedColor: Color? {
+        isIPad ? heroBlendColor : heroBleedColor
+    }
+
+    private var mediaDetailHeroBleedTail: CGFloat {
+        guard isIPad else { return headerHeight * 0.62 }
+        return min(max(UIScreen.main.bounds.height * 0.78, 680), 900)
+    }
+
+    private var mediaDetailHeroBleedStrength: Double {
+        let configuredStrength = theme.scopedBleedStrength()
+        guard isIPad, configuredStrength > 0.001 else { return configuredStrength }
+        return min(max(configuredStrength * 1.18, 0.92), 1.25)
     }
 
     private var designMetrics: ExperimentalMediaDesignMetrics {
@@ -247,6 +327,33 @@ struct MediaDetailView: View {
         UserDefaults.standard.bool(forKey: "preferDownloadedMedia")
 #endif
     }
+
+#if !os(tvOS)
+    private var notificationTitleAliases: [String] {
+        var values = [
+            searchResult.displayTitle,
+            searchResult.title ?? "",
+            searchResult.name ?? "",
+            tvShowDetail?.name ?? "",
+            tvShowDetail?.originalName ?? "",
+            romajiTitle ?? ""
+        ]
+        if let animeSeasonTitles {
+            values.append(contentsOf: animeSeasonTitles.values)
+        }
+        values.append(contentsOf: animeSeasonRomajiTitles.values)
+        return values.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    private var isFollowingLocalNotifications: Bool {
+        guard !searchResult.isMovie else { return false }
+        let source: LocalNotificationMediaSource = isAnimeShow ? .anime : .western
+        guard let subscription = localNotificationManager.subscription(source: source, tmdbID: searchResult.id) else {
+            return false
+        }
+        return subscription.episodeNotifications || subscription.futureSeasonNotifications
+    }
+#endif
 
     private var visibleMediaDetailElements: [MediaDetailElement] {
         MediaDetailElement.orderedElements(from: mediaDetailElementOrder).filter { element in
@@ -317,9 +424,13 @@ struct MediaDetailView: View {
         UIScreen.main.bounds.height * 0.8
 #else
         if ExperimentalFeatureState.isEnabledAtLaunch {
-            return designMetrics.detailHeroHeight(screenHeight: UIScreen.main.bounds.height, isIPad: isIPad)
+            let measuredHeight = designMetrics.detailHeroHeight(
+                screenHeight: UIScreen.main.bounds.height,
+                isIPad: isIPad
+            )
+            return isIPad ? min(measuredHeight, 640) : measuredHeight
         }
-        return isIPad ? 720 : min(max(UIScreen.main.bounds.height * 0.76, 620), 780)
+        return isIPad ? 640 : min(max(UIScreen.main.bounds.height * 0.76, 620), 780)
 #endif
     }
 
@@ -389,6 +500,36 @@ struct MediaDetailView: View {
 #endif
         }
         .navigationBarHidden(true)
+        .overlay(alignment: .top) {
+            if let notificationRouteNotice {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "bell.badge")
+                        .foregroundColor(.orange)
+                    Text(notificationRouteNotice)
+                        .font(.footnote.weight(.medium))
+                        .foregroundColor(.white)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.2)) {
+                            self.notificationRouteNotice = nil
+                        }
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.caption.weight(.bold))
+                            .foregroundColor(.white.opacity(0.65))
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Dismiss notification navigation message")
+                }
+                .padding(12)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .padding(.horizontal, 54)
+                .padding(.top, 68)
+                .transition(.move(edge: .top).combined(with: .opacity))
+            }
+        }
 #if !os(tvOS)
         .simultaneousGesture(edgeBackSwipeGesture)
 #else
@@ -405,6 +546,10 @@ struct MediaDetailView: View {
                 startSimilarTitlesLoadIfNeeded()
             }
             updateBookmarkStatus()
+            startWatchTogetherPlaybackIfReady()
+            if hasLoadedContent {
+                Task { await applyInitialNotificationSelectionIfNeeded() }
+            }
         }
         .onDisappear {
             if let detailLoadTask {
@@ -447,11 +592,125 @@ struct MediaDetailView: View {
             handleMediaDetailLayoutPreferenceChange()
         }
         .onReceive(NotificationCenter.default.publisher(for: .requestNextEpisode)) { notification in
-            guard let userInfo = notification.userInfo,
+            guard notification.object as? UUID == nextEpisodeNotificationRoute,
+                  let userInfo = notification.userInfo,
                   let tmdbId = userInfo["tmdbId"] as? Int,
                   tmdbId == searchResult.id,
                   let seasonNumber = userInfo["seasonNumber"] as? Int,
                   let episodeNumber = userInfo["episodeNumber"] as? Int else {
+                return
+            }
+            watchTogetherNextEpisodeAutoPlay = userInfo["watchTogether"] as? Bool == true
+            let incomingResolvedTarget = userInfo["resolvedTarget"] as? ResolvedNextEpisodeTarget
+            let incomingPlaybackContext = incomingResolvedTarget?.playbackContext
+                ?? userInfo["playbackContext"] as? EpisodePlaybackContext
+            let incomingIsAnime = incomingResolvedTarget?.isAnime
+                ?? (userInfo["isAnime"] as? Bool == true)
+            let incomingIsExactTarget = userInfo["exactTarget"] as? Bool == true
+            nextEpisodePlaybackContextOverride = incomingPlaybackContext
+            nextEpisodeResolvedTargetOverride = incomingResolvedTarget
+
+            if watchTogetherNextEpisodeAutoPlay, incomingIsAnime {
+                let incomingMedia = WatchTogetherMediaDescriptor(
+                    tmdbID: tmdbId,
+                    mediaType: "tv",
+                    seasonNumber: seasonNumber,
+                    episodeNumber: episodeNumber,
+                    playbackContext: incomingPlaybackContext,
+                    isAnime: true
+                )
+                if let failure = incomingMedia.animeContextFailureReason {
+                    failWatchTogetherPlayback(failure)
+                    return
+                }
+                guard let incomingPlaybackContext else {
+                    failWatchTogetherPlayback("Watch Together could not read the anime episode context, so it stopped instead of guessing a TMDB episode.")
+                    return
+                }
+                if incomingPlaybackContext.isSpecial {
+                    guard let anilistID = incomingPlaybackContext.anilistMediaId,
+                          let entry = animeSpecialEntries.first(where: { $0.id == anilistID }),
+                          let specialContext = SpecialEpisodeListContext(entry: entry, tmdbShowId: searchResult.id),
+                          let episode = specialContext.episodes.first(where: {
+                              $0.seasonNumber == incomingPlaybackContext.localSeasonNumber
+                                  && $0.episodeNumber == incomingPlaybackContext.localEpisodeNumber
+                          }) else {
+                        failWatchTogetherPlayback("Watch Together could not resolve the exact anime special on this device. It stopped instead of falling back to TMDB.")
+                        return
+                    }
+                    watchTogetherPlaybackContextOverride = incomingPlaybackContext
+                    selectedSpecialEpisodeContext = specialContext
+                    selectedEpisodeForSearch = episode
+                    scheduleNextEpisodePresentation {
+                        beginSpecialSearch(context: specialContext, episode: episode)
+                    }
+                    return
+                }
+
+                guard let episode = watchTogetherAnimeEpisode(from: incomingPlaybackContext) else {
+                    watchTogetherPlaybackContextOverride = nil
+                    failWatchTogetherPlayback(watchTogetherAnimeEpisodeFailureMessage(for: incomingPlaybackContext))
+                    return
+                }
+                watchTogetherPlaybackContextOverride = incomingPlaybackContext
+                selectedSpecialEpisodeContext = nil
+                selectedEpisodeForSearch = episode
+                showingSearchResults = false
+                scheduleNextEpisodePresentation {
+                    beginNewMainPlaybackSearchSession()
+                    showingSearchResults = true
+                }
+                return
+            }
+
+            if incomingIsExactTarget, let incomingResolvedTarget {
+                selectedSpecialEpisodeContext = nil
+                selectedEpisodeForSearch = incomingResolvedTarget.episode
+                showingSearchResults = false
+                scheduleNextEpisodePresentation {
+                    beginNewMainPlaybackSearchSession()
+                    showingSearchResults = true
+                }
+                return
+            }
+
+            if incomingIsAnime, let incomingPlaybackContext {
+                if incomingPlaybackContext.isSpecial {
+                    guard let anilistID = incomingPlaybackContext.anilistMediaId,
+                          let entry = animeSpecialEntries.first(where: { $0.id == anilistID }),
+                          let specialContext = SpecialEpisodeListContext(entry: entry, tmdbShowId: searchResult.id),
+                          let episode = specialContext.episodes.first(where: {
+                              $0.seasonNumber == incomingPlaybackContext.localSeasonNumber
+                                  && $0.episodeNumber == incomingPlaybackContext.localEpisodeNumber
+                          }) else {
+                        Logger.shared.log("NextEpisode: Could not resolve the exact anime special context", type: "Player")
+                        return
+                    }
+                    selectedSpecialEpisodeContext = specialContext
+                    selectedEpisodeForSearch = episode
+                    scheduleNextEpisodePresentation {
+                        beginSpecialSearch(context: specialContext, episode: episode)
+                    }
+                    return
+                }
+
+                guard let episode = watchTogetherAnimeEpisode(from: incomingPlaybackContext) else {
+                    Logger.shared.log(
+                        "NextEpisode: \(watchTogetherAnimeEpisodeFailureMessage(for: incomingPlaybackContext))",
+                        type: "Player"
+                    )
+                    return
+                }
+                selectedSpecialEpisodeContext = nil
+                selectedEpisodeForSearch = episode
+                showingSearchResults = false
+                scheduleNextEpisodePresentation {
+                    beginNewMainPlaybackSearchSession()
+                    showingSearchResults = true
+                }
+                return
+            } else if incomingIsAnime, incomingIsExactTarget {
+                Logger.shared.log("NextEpisode: Exact anime target arrived without its mapping context", type: "Player")
                 return
             }
 
@@ -470,11 +729,32 @@ struct MediaDetailView: View {
                 selectedEpisodeForSearch = nextEp
                 showingSearchResults = false
                 scheduleNextEpisodePresentation {
-                    playSheetRequestId = UUID()
+                    beginNewMainPlaybackSearchSession()
                     showingSearchResults = true
                 }
             } else {
                 Task { @MainActor in
+                    if incomingIsExactTarget {
+                        if let exactEpisode = await episodeForPlayback(
+                            seasonNumber: seasonNumber,
+                            episodeNumber: episodeNumber
+                        ) {
+                            selectedSpecialEpisodeContext = nil
+                            selectedEpisodeForSearch = exactEpisode
+                            showingSearchResults = false
+                            scheduleNextEpisodePresentation {
+                                beginNewMainPlaybackSearchSession()
+                                showingSearchResults = true
+                            }
+                        } else {
+                            Logger.shared.log(
+                                "NextEpisode: Exact target S\(seasonNumber)E\(episodeNumber) could not be loaded for tmdbId=\(tmdbId)",
+                                type: "Player"
+                            )
+                        }
+                        return
+                    }
+
                     if let specialContext = selectedSpecialEpisodeContext,
                        let currentIndex = specialContext.episodes.firstIndex(where: {
                            $0.seasonNumber == seasonNumber && $0.episodeNumber == episodeNumber - 1
@@ -498,7 +778,7 @@ struct MediaDetailView: View {
                         selectedEpisodeForSearch = next
                         showingSearchResults = false
                         scheduleNextEpisodePresentation {
-                            playSheetRequestId = UUID()
+                            beginNewMainPlaybackSearchSession()
                             showingSearchResults = true
                         }
                         return
@@ -512,7 +792,7 @@ struct MediaDetailView: View {
                         selectedEpisodeForSearch = next
                         showingSearchResults = false
                         scheduleNextEpisodePresentation {
-                            playSheetRequestId = UUID()
+                            beginNewMainPlaybackSearchSession()
                             showingSearchResults = true
                         }
                         return
@@ -528,6 +808,18 @@ struct MediaDetailView: View {
         .onChangeComp(of: showingSearchResults) { _, newValue in
             if !newValue {
                 refreshDetailContentLayout(reason: "play sheet dismissed")
+            }
+        }
+        .onChangeComp(of: hasLoadedContent) { _, loaded in
+            if loaded {
+                startWatchTogetherPlaybackIfReady()
+                Task { await applyInitialNotificationSelectionIfNeeded() }
+            }
+        }
+        .onChange(of: isLoadingAnimeSpecials) { loading in
+            if !loading {
+                startWatchTogetherPlaybackIfReady()
+                Task { await applyInitialNotificationSelectionIfNeeded() }
             }
         }
 #if !os(tvOS)
@@ -554,10 +846,42 @@ struct MediaDetailView: View {
         .onDisappear {
             invalidatePendingNextEpisodePresentation()
         }
-        .sheet(isPresented: $showingSearchResults) {
-            let playbackContext = playbackContextForSearchSheet(selectedEpisodeForSearch)
+        .sheet(isPresented: $showingSearchResults, onDismiss: {
+            watchTogetherNextEpisodeAutoPlay = false
+            nextEpisodePlaybackContextOverride = nil
+            nextEpisodeResolvedTargetOverride = nil
+        }) {
+            let exactWatchTogetherContext = exactWatchTogetherPlaybackContext(for: selectedEpisodeForSearch)
+            let isWatchTogetherPlayback = watchTogetherAutoPlay != nil || watchTogetherNextEpisodeAutoPlay
+            let isForcedWatchTogetherAnime = isWatchTogetherPlayback && !searchResult.isMovie && (
+                watchTogetherAutoPlay?.isAnime == true
+                    || watchTogetherAutoPlay?.playbackContext?.hasAnimeMediaId == true
+                    || watchTogetherPlaybackContextOverride?.hasAnimeMediaId == true
+                    || isAnimeShow
+            )
+            // A forced Watch Together anime handoff may only use the exact context carried by
+            // the session. Falling back to the receiver's ordinary detail-sheet context can
+            // silently translate a different cour/season into S1E1.
+            let playbackContext = isForcedWatchTogetherAnime
+                ? exactWatchTogetherContext
+                : (exactWatchTogetherContext ?? playbackContextForSearchSheet(selectedEpisodeForSearch))
+            let playbackIsAnime = nextEpisodeResolvedTargetOverride?.isAnime
+                ?? (watchTogetherAutoPlay?.isAnime == true || playbackContext?.hasAnimeMediaId == true || isAnimeShow)
+            let recoveryTargetToken = AutoModeMediaTargetToken.make(
+                tmdbID: searchResult.id,
+                isMovie: searchResult.isMovie,
+                episode: selectedEpisodeForSearch,
+                playbackContext: playbackContext
+            )
+            let recoveryIdentity = autoModeRetrySession.recoveryIdentity(for: recoveryTargetToken)
+            let recoveryEpisode = selectedEpisodeForSearch
+            let recoveryResolvedTarget = nextEpisodeResolvedTargetOverride
+            let recoveryWasWatchTogetherNext = watchTogetherNextEpisodeAutoPlay
             ModulesSearchResultsSheet(
                 mediaTitle: {
+                    if let target = nextEpisodeResolvedTargetOverride {
+                        return target.seasonTitleOverride ?? target.mediaTitle
+                    }
                     if isAnimeShow, let episode = selectedEpisodeForSearch,
                        let seasonTitle = animeSeasonTitles?[episode.seasonNumber] {
                         return seasonTitle
@@ -565,25 +889,50 @@ struct MediaDetailView: View {
                     return searchResult.displayTitle
                 }(),
                 seasonTitleOverride: {
+                    if let target = nextEpisodeResolvedTargetOverride {
+                        return target.seasonTitleOverride
+                    }
                     if isAnimeShow, let episode = selectedEpisodeForSearch,
                        let seasonTitle = animeSeasonTitles?[episode.seasonNumber] {
                         return seasonTitle
                     }
                     return nil
                 }(),
-                originalTitle: originalTitleForSearchSheet(selectedEpisodeForSearch),
+                originalTitle: nextEpisodeResolvedTargetOverride?.originalTitle
+                    ?? originalTitleForSearchSheet(selectedEpisodeForSearch),
                 isMovie: searchResult.isMovie,
-                isAnimeContent: isAnimeShow,
+                isAnimeContent: playbackIsAnime,
                 selectedEpisode: selectedEpisodeForSearch,
                 tmdbId: searchResult.id,
-                animeSeasonTitle: isAnimeShow ? "anime" : nil,
-                posterPath: searchResult.isMovie ? movieDetail?.posterPath : tvShowDetail?.posterPath,
-                imdbId: searchResult.isMovie ? movieDetail?.imdbId : tvShowDetail?.externalIds?.imdbId,
+                animeSeasonTitle: playbackIsAnime ? "anime" : nil,
+                posterPath: nextEpisodeResolvedTargetOverride?.posterURL
+                    ?? (searchResult.isMovie ? movieDetail?.posterPath : tvShowDetail?.posterPath),
+                originalAudioLanguage: searchResult.originalLanguage ?? (searchResult.isMovie ? movieDetail?.originalLanguage : tvShowDetail?.originalLanguage),
+                imdbId: nextEpisodeResolvedTargetOverride?.imdbID
+                    ?? (searchResult.isMovie ? movieDetail?.imdbId : tvShowDetail?.externalIds?.imdbId),
                 originalTMDBSeasonNumber: playbackContext?.resolvedTMDBSeasonNumber,
                 originalTMDBEpisodeNumber: playbackContext?.resolvedTMDBEpisodeNumber,
+                specialTitleOnlySearch: playbackContext?.titleOnlySearch ?? false,
                 episodePlaybackContext: playbackContext,
-                autoModeOnly: UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"),
-                isAnimationGenre16: detailGenres.contains { $0.id == 16 }
+                autoModeOnly: watchTogetherAutoPlay != nil || watchTogetherNextEpisodeAutoPlay || UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"),
+                forceAutomaticPlayback: watchTogetherAutoPlay != nil || watchTogetherNextEpisodeAutoPlay,
+                autoModeRetrySession: autoModeRetrySession,
+                autoModeRecoveryIdentity: recoveryIdentity,
+                onAutoModePlaybackFailure: { report, identity in
+                    Task { @MainActor in
+                        handleMainAutoModePlaybackFailure(
+                            report,
+                            identity: identity,
+                            episode: recoveryEpisode,
+                            playbackContext: playbackContext,
+                            resolvedTarget: recoveryResolvedTarget,
+                            wasWatchTogetherNext: recoveryWasWatchTogetherNext
+                        )
+                    }
+                },
+                nextEpisodeNotificationRoute: nextEpisodeNotificationRoute,
+                isAnimationGenre16: nextEpisodeResolvedTargetOverride?.isAnimation
+                    ?? detailGenres.contains { $0.id == 16 }
             )
             .id(playSheetRequestId)
         }
@@ -612,6 +961,7 @@ struct MediaDetailView: View {
                 tmdbId: searchResult.id,
                 animeSeasonTitle: isAnimeShow ? "anime" : nil,
                 posterPath: searchResult.isMovie ? movieDetail?.posterPath : tvShowDetail?.posterPath,
+                originalAudioLanguage: searchResult.originalLanguage ?? (searchResult.isMovie ? movieDetail?.originalLanguage : tvShowDetail?.originalLanguage),
                 imdbId: searchResult.isMovie ? movieDetail?.imdbId : tvShowDetail?.externalIds?.imdbId,
                 originalTMDBSeasonNumber: playbackContext?.resolvedTMDBSeasonNumber,
                 originalTMDBEpisodeNumber: playbackContext?.resolvedTMDBEpisodeNumber,
@@ -622,7 +972,20 @@ struct MediaDetailView: View {
             )
         }
 #endif
-        .sheet(item: $specialSearchRequest) { request in
+        .sheet(item: $specialSearchRequest, onDismiss: {
+            watchTogetherNextEpisodeAutoPlay = false
+            nextEpisodePlaybackContextOverride = nil
+            nextEpisodeResolvedTargetOverride = nil
+        }) { request in
+            let recoveryTargetToken = AutoModeMediaTargetToken.make(
+                tmdbID: searchResult.id,
+                isMovie: false,
+                episode: request.episode,
+                playbackContext: request.playbackContext
+            )
+            let recoveryIdentity = autoModeRetrySession.recoveryIdentity(for: recoveryTargetToken)
+            let recoveryResolvedTarget = nextEpisodeResolvedTargetOverride
+            let recoveryWasWatchTogetherNext = watchTogetherNextEpisodeAutoPlay
             ModulesSearchResultsSheet(
                 mediaTitle: request.title,
                 seasonTitleOverride: request.title,
@@ -633,18 +996,46 @@ struct MediaDetailView: View {
                 tmdbId: searchResult.id,
                 animeSeasonTitle: request.title,
                 posterPath: request.posterUrl ?? tvShowDetail?.posterPath,
+                originalAudioLanguage: searchResult.originalLanguage ?? tvShowDetail?.originalLanguage,
                 imdbId: request.imdbId ?? tvShowDetail?.externalIds?.imdbId,
                 originalTMDBSeasonNumber: request.originalSeasonNumber,
                 originalTMDBEpisodeNumber: request.originalEpisodeNumber,
                 specialTitleOnlySearch: request.titleOnly,
                 episodePlaybackContext: request.playbackContext,
-                autoModeOnly: UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"),
+                autoModeOnly: watchTogetherAutoPlay != nil || watchTogetherNextEpisodeAutoPlay || UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"),
+                forceAutomaticPlayback: watchTogetherAutoPlay != nil || watchTogetherNextEpisodeAutoPlay,
+                autoModeRetrySession: autoModeRetrySession,
+                autoModeRecoveryIdentity: recoveryIdentity,
+                onAutoModePlaybackFailure: { report, identity in
+                    Task { @MainActor in
+                        handleSpecialAutoModePlaybackFailure(
+                            report,
+                            identity: identity,
+                            request: request,
+                            resolvedTarget: recoveryResolvedTarget,
+                            wasWatchTogetherNext: recoveryWasWatchTogetherNext
+                        )
+                    }
+                },
+                nextEpisodeNotificationRoute: nextEpisodeNotificationRoute,
                 isAnimationGenre16: detailGenres.contains { $0.id == 16 }
             )
         }
         .sheet(isPresented: $showingAddToCollection) {
             AddToCollectionView(searchResult: searchResult)
         }
+#if !os(tvOS)
+        .sheet(isPresented: $showingNotificationOptions) {
+            MediaNotificationOptionsView(
+                source: isAnimeShow ? .anime : .western,
+                tmdbID: searchResult.id,
+                title: tvShowDetail?.name ?? searchResult.displayTitle,
+                titleAliases: notificationTitleAliases,
+                animeMediaIDs: Set(animeSeasonAniListIds.values),
+                westernSeasonIDs: Set((tvShowDetail?.seasons ?? []).filter { $0.seasonNumber > 0 }.map(\.id))
+            )
+        }
+#endif
 #if os(iOS)
         .alert(item: $stillPhotoSaveNotice) { notice in
             if notice.offersSettings {
@@ -714,7 +1105,7 @@ struct MediaDetailView: View {
             Image(systemName: "exclamationmark.triangle")
                 .font(.system(size: 60))
                 .foregroundColor(.orange)
-            
+
             Text("Error")
                 .font(.title2)
                 .padding(.top)
@@ -785,31 +1176,340 @@ struct MediaDetailView: View {
     @ViewBuilder
     private var mainScrollView: some View {
         let _ = detailContentRefreshTick
-        ScrollView(showsIndicators: false) {
-            VStack(spacing: 0) {
-                heroImageSection
-                contentContainer
-            }
-            .background(
-                GeometryReader { geo in
-                    Color.clear.preference(
-                        key: ScrollOffsetPreferenceKey.self,
-                        value: -geo.frame(in: .named("mediaDetailScroll")).origin.y
+        if isIPad && horizontalSizeClass == .regular {
+            iPadImmersiveDetailLayout
+        } else {
+            ScrollViewReader { proxy in
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 0) {
+                        heroImageSection
+                        contentContainer
+                    }
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear.preference(
+                                key: ScrollOffsetPreferenceKey.self,
+                                value: -geo.frame(in: .named("mediaDetailScroll")).origin.y
+                            )
+                        }
+                    )
+                    .heroBannerBleed(
+                        color: ExperimentalFeatureState.isEnabledAtLaunch ? mediaDetailHeroBleedColor : nil,
+                        heroHeight: headerHeight,
+                        tail: mediaDetailHeroBleedTail,
+                        strength: mediaDetailHeroBleedStrength
                     )
                 }
-            )
-            .heroBannerBleed(
-                color: ExperimentalFeatureState.isEnabledAtLaunch ? heroBleedColor : nil,
-                heroHeight: headerHeight,
-                tail: headerHeight * 0.62,
-                strength: theme.scopedBleedStrength()
-            )
+                .coordinateSpace(name: "mediaDetailScroll")
+                .onPreferenceChange(ScrollOffsetPreferenceKey.self) { newOffset in
+                    guard abs(scrollOffset - newOffset) >= scrollOffsetUpdateThreshold else { return }
+                    scrollOffset = newOffset
+                }
+                .onChange(of: notificationEpisodeScrollGeneration) { _ in
+                    withAnimation(.easeInOut(duration: 0.38)) {
+                        if let selectedEpisodeForSearch {
+                            proxy.scrollTo(
+                                MediaDetailEpisodeAnchor.id(for: selectedEpisodeForSearch),
+                                anchor: .center
+                            )
+                        } else {
+                            proxy.scrollTo(Self.notificationEpisodesAnchor, anchor: .top)
+                        }
+                    }
+                }
+            }
         }
-        .coordinateSpace(name: "mediaDetailScroll")
-        .onPreferenceChange(ScrollOffsetPreferenceKey.self) { newOffset in
-            guard abs(scrollOffset - newOffset) >= scrollOffsetUpdateThreshold else { return }
-            scrollOffset = newOffset
+    }
+
+    private var iPadImmersiveSecondaryElements: [MediaDetailElement] {
+        visibleMediaDetailElements.filter {
+            $0 != .actions && $0 != .overview && $0 != .details && $0 != .episodes
         }
+    }
+
+    private var showsIPadImmersiveEpisodes: Bool {
+        !searchResult.isMovie && visibleMediaDetailElements.contains(.episodes)
+    }
+
+    @ViewBuilder
+    private var iPadImmersiveDetailLayout: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .topLeading) {
+                iPadImmersiveBackdrop(proxy: proxy)
+
+                ScrollViewReader { scrollProxy in
+                    ScrollView(showsIndicators: false) {
+                        VStack(alignment: .leading, spacing: 24) {
+                            Color.clear
+                                .frame(height: max(150, proxy.size.height * 0.16))
+
+                            iPadImmersiveHeroCard
+
+                            if showsIPadImmersiveEpisodes {
+                                episodesSection
+                                    .id(Self.notificationEpisodesAnchor)
+                            }
+
+                            if !iPadImmersiveSecondaryElements.isEmpty {
+                                VStack(alignment: .leading, spacing: max(20, designMetrics.sectionSpacing * 0.68)) {
+                                    ForEach(iPadImmersiveSecondaryElements) { element in
+                                        mediaDetailElementView(element)
+                                    }
+                                }
+                                .frame(maxWidth: 900, alignment: .leading)
+                            }
+
+                            Spacer(minLength: max(48, proxy.safeAreaInsets.bottom + 24))
+                        }
+                        .padding(.leading, max(32, proxy.safeAreaInsets.leading + 28))
+                        .padding(.trailing, max(28, proxy.safeAreaInsets.trailing + 28))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .onChange(of: notificationEpisodeScrollGeneration) { _ in
+                        withAnimation(.easeInOut(duration: 0.38)) {
+                            if let selectedEpisodeForSearch {
+                                scrollProxy.scrollTo(
+                                    MediaDetailEpisodeAnchor.id(for: selectedEpisodeForSearch),
+                                    anchor: .center
+                                )
+                            } else {
+                                scrollProxy.scrollTo(Self.notificationEpisodesAnchor, anchor: .top)
+                            }
+                        }
+                    }
+                }
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height)
+        }
+        .ignoresSafeArea()
+    }
+
+    @ViewBuilder
+    private func iPadImmersiveBackdrop(proxy: GeometryProxy) -> some View {
+        EclipseTheme.shared.backgroundBase
+            .ignoresSafeArea()
+
+        KFImage(URL(string: detailHeroImageURL ?? ""))
+            .placeholder {
+                Rectangle()
+                    .fill(EclipseTheme.shared.backgroundBase)
+            }
+            .onSuccess { result in
+                ambientColor = Color.ambientColor(from: result.image)
+            }
+            .resizable()
+            .aspectRatio(contentMode: .fill)
+            .frame(width: proxy.size.width, height: proxy.size.height)
+            .clipped()
+            .ignoresSafeArea()
+
+        LinearGradient(
+            stops: [
+                .init(color: Color.black.opacity(0.08), location: 0.00),
+                .init(color: Color.black.opacity(0.14), location: 0.24),
+                .init(color: heroBlendColor.opacity(0.42), location: 0.56),
+                .init(color: heroBlendColor.opacity(0.80), location: 0.76),
+                .init(color: EclipseTheme.shared.backgroundBase.opacity(0.96), location: 1.00)
+            ],
+            startPoint: .top,
+            endPoint: .bottom
+        )
+        .ignoresSafeArea()
+
+        LinearGradient(
+            stops: [
+                .init(color: Color.black.opacity(0.72), location: 0.00),
+                .init(color: Color.black.opacity(0.42), location: 0.34),
+                .init(color: Color.black.opacity(0.12), location: 0.66),
+                .init(color: .clear, location: 1.00)
+            ],
+            startPoint: .leading,
+            endPoint: .trailing
+        )
+        .frame(width: min(proxy.size.width * 0.72, 900))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+        .ignoresSafeArea()
+    }
+
+    @ViewBuilder
+    private var iPadImmersiveHeroCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            iPadImmersiveTitle
+
+            if shouldShowHeroDetails {
+                iPadImmersiveMetadata
+            }
+
+            if shouldShowHeroOverview, let overviewText = currentOverviewText {
+                Text(overviewText)
+                    .font(.system(size: 17, weight: .regular))
+                    .foregroundColor(.white.opacity(0.88))
+                    .lineLimit(showFullSynopsis ? nil : 3)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        guard overviewText.count > 180 else { return }
+                        withAnimation(.easeInOut(duration: 0.28)) {
+                            showFullSynopsis.toggle()
+                        }
+                    }
+            }
+
+            if shouldShowHeroActions {
+                iPadImmersiveActions
+            }
+
+            if shouldShowHeroDetails {
+                detailRatingChips
+                    .padding(.horizontal, -36)
+            }
+        }
+        .padding(22)
+        .frame(maxWidth: 620, alignment: .leading)
+        .applyLiquidGlassBackground(
+            cornerRadius: 28,
+            fallbackFill: Color.black.opacity(0.22),
+            fallbackMaterial: .ultraThinMaterial,
+            glassTint: Color.white.opacity(0.025)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .stroke(Color.white.opacity(0.11), lineWidth: 1)
+        }
+    }
+
+    @ViewBuilder
+    private var iPadImmersiveTitle: some View {
+        if mediaDetailTitleArtworkEnabled, let logoURL {
+            KFImage(URL(string: logoURL))
+                .placeholder {
+                    iPadImmersiveTitleText
+                }
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(maxWidth: 380, maxHeight: 118, alignment: .leading)
+                .shadow(color: .black.opacity(0.48), radius: 8, x: 0, y: 4)
+        } else {
+            iPadImmersiveTitleText
+        }
+    }
+
+    private var iPadImmersiveTitleText: some View {
+        Text(searchResult.displayTitle)
+            .font(.system(size: 44, weight: .heavy))
+            .foregroundColor(.white)
+            .lineLimit(3)
+            .multilineTextAlignment(.leading)
+            .shadow(color: .black.opacity(0.55), radius: 7, x: 0, y: 3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private var iPadImmersiveMetadata: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 9) {
+                ForEach(Array(detailMetadataValues.enumerated()), id: \.offset) { _, value in
+                    iPadImmersiveMetadataChip(value)
+                }
+            }
+            .padding(.horizontal, 1)
+        }
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func iPadImmersiveMetadataChip(_ text: String) -> some View {
+        Text(text)
+            .font(.caption.weight(.semibold))
+            .foregroundColor(.white.opacity(0.90))
+            .padding(.horizontal, 11)
+            .frame(height: 30)
+            .background(Color.white.opacity(0.09), in: Capsule())
+            .overlay {
+                Capsule()
+                    .stroke(Color.white.opacity(0.10), lineWidth: 1)
+            }
+    }
+
+    @ViewBuilder
+    private var iPadImmersiveActions: some View {
+        HStack(spacing: 10) {
+            Button(action: searchInServices) {
+                Label(
+                    canUseMainPlayButton ? playButtonText : "No Services",
+                    systemImage: canUseMainPlayButton ? "play.fill" : "exclamationmark.triangle"
+                )
+                .font(.headline)
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 48)
+            }
+            .buttonStyle(.plain)
+            .disabled(!canUseMainPlayButton)
+            .applyLiquidGlassBackground(
+                cornerRadius: 14,
+                fallbackFill: canUseMainPlayButton ? Color.white.opacity(0.11) : Color.white.opacity(0.05),
+                fallbackMaterial: .thinMaterial,
+                glassTint: canUseMainPlayButton ? Color.white.opacity(0.025) : nil
+            )
+
+            iPadImmersiveActionButton(
+                systemName: isBookmarked ? "heart.fill" : "heart",
+                accessibilityTitle: "Bookmark",
+                tint: isBookmarked ? accentManager.currentAccentColor : .white,
+                action: toggleBookmark
+            )
+
+            iPadImmersiveActionButton(
+                systemName: "rectangle.stack.badge.plus",
+                accessibilityTitle: "Add to Collection"
+            ) {
+                showingAddToCollection = true
+            }
+
+#if !os(tvOS)
+            if !searchResult.isMovie {
+                iPadImmersiveActionButton(
+                    systemName: isFollowingLocalNotifications ? "bell.fill" : "bell",
+                    accessibilityTitle: "Notifications",
+                    tint: isFollowingLocalNotifications ? accentManager.currentAccentColor : .white
+                ) {
+                    showingNotificationOptions = true
+                }
+            }
+
+            if searchResult.isMovie {
+                iPadImmersiveActionButton(
+                    systemName: downloadButtonIcon,
+                    accessibilityTitle: "Download",
+                    tint: downloadButtonColor,
+                    action: downloadInServices
+                )
+                .disabled(!hasActiveSources || isCurrentlyDownloading)
+            }
+#endif
+        }
+    }
+
+    private func iPadImmersiveActionButton(
+        systemName: String,
+        accessibilityTitle: String,
+        tint: Color = .white,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 19, weight: .semibold))
+                .foregroundColor(tint)
+                .frame(width: 48, height: 48)
+        }
+        .buttonStyle(.plain)
+        .applyLiquidGlassBackground(
+            cornerRadius: 14,
+            fallbackFill: Color.white.opacity(0.08),
+            fallbackMaterial: .thinMaterial,
+            glassTint: Color.white.opacity(0.02)
+        )
+        .accessibilityLabel(accessibilityTitle)
     }
 
     private func refreshDetailContentLayout(reason: String) {
@@ -847,8 +1547,10 @@ struct MediaDetailView: View {
 
                 VStack(spacing: 0) {
                     Spacer(minLength: 0)
-                        .frame(height: headerHeight * 0.40)
+                        .frame(height: headerHeight * (isIPad ? 0.12 : 0.40))
                     headerSection
+                        .frame(maxWidth: .infinity, alignment: isIPad ? .trailing : .center)
+                        .padding(.horizontal, isIPad ? 48 : 0)
                 }
                 .frame(maxWidth: .infinity, alignment: .top)
             }
@@ -889,6 +1591,7 @@ struct MediaDetailView: View {
                 
                 Spacer(minLength: 50)
             }
+            .frame(maxWidth: isIPad ? 900 : .infinity)
             .background(
                 detailContentBackground
             )
@@ -996,12 +1699,24 @@ struct MediaDetailView: View {
 
             if shouldShowHeroDetails, let metadata = detailMetadataLine {
                 Text(metadata)
-                    .font(.system(size: isIPad ? 20 : 17, weight: .semibold))
+                    .font(.system(
+                        size: isIPad ? 20 : (showFullMetadata ? 17 * 0.72 : 17),
+                        weight: .semibold
+                    ))
                     .foregroundColor(.white.opacity(0.92))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.72)
-                    .padding(.horizontal, isIPad ? 82 : 20)
+                    .lineLimit(showFullMetadata ? nil : 1)
+                    .minimumScaleFactor(showFullMetadata ? 1 : 0.72)
+                    .fixedSize(horizontal: false, vertical: showFullMetadata)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, isIPad ? 36 : 20)
                     .shadow(color: .black.opacity(0.70), radius: 8, x: 0, y: 3)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        withAnimation(.easeInOut(duration: 0.22)) {
+                            showFullMetadata.toggle()
+                        }
+                    }
+                    .accessibilityHint("Tap to expand or collapse media details")
             }
 
             if shouldShowHeroActions {
@@ -1019,8 +1734,19 @@ struct MediaDetailView: View {
                     .padding(.top, isIPad ? 2 : 0)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .center)
-        .padding(.bottom, isIPad ? 52 : 34)
+        .frame(maxWidth: isIPad ? 520 : .infinity, alignment: .center)
+        .padding(.top, isIPad ? 24 : 0)
+        .padding(.bottom, isIPad ? 24 : 34)
+        .background {
+            if isIPad {
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 28, style: .continuous)
+                            .stroke(Color.white.opacity(0.18), lineWidth: 1)
+                    )
+            }
+        }
     }
 
     @ViewBuilder
@@ -1035,21 +1761,21 @@ struct MediaDetailView: View {
                 .resizable()
                 .aspectRatio(contentMode: .fit)
                 .frame(
-                    maxWidth: ExperimentalFeatureState.isEnabledAtLaunch ? (isIPad ? 520 : 334) : (isIPad ? 400 : 280),
-                    maxHeight: ExperimentalFeatureState.isEnabledAtLaunch ? (isIPad ? 178 : 132) : (isIPad ? 140 : 100)
+                    maxWidth: ExperimentalFeatureState.isEnabledAtLaunch ? (isIPad ? 420 : 334) : (isIPad ? 400 : 280),
+                    maxHeight: ExperimentalFeatureState.isEnabledAtLaunch ? 132 : (isIPad ? 140 : 100)
                 )
                 .shadow(color: .black.opacity(0.52), radius: 6, x: 0, y: 3)
-                .padding(.horizontal, ExperimentalFeatureState.isEnabledAtLaunch ? (isIPad ? 82 : 26) : 0)
+                .padding(.horizontal, ExperimentalFeatureState.isEnabledAtLaunch ? (isIPad ? 36 : 26) : 0)
         } else {
             titleText
-                .padding(.horizontal, ExperimentalFeatureState.isEnabledAtLaunch ? (isIPad ? 82 : 26) : 0)
+                .padding(.horizontal, ExperimentalFeatureState.isEnabledAtLaunch ? (isIPad ? 36 : 26) : 0)
         }
     }
     
     @ViewBuilder
     private var titleText: some View {
         Text(searchResult.displayTitle)
-            .font(ExperimentalFeatureState.isEnabledAtLaunch ? .system(size: isIPad ? 54 : 40, weight: .heavy) : .largeTitle)
+            .font(ExperimentalFeatureState.isEnabledAtLaunch ? .system(size: isIPad ? 44 : 40, weight: .heavy) : .largeTitle)
             .fontWeight(.bold)
             .foregroundColor(.white)
             .lineLimit(3)
@@ -1059,13 +1785,36 @@ struct MediaDetailView: View {
     }
 
     private var detailMetadataLine: String? {
-        let date = detailDate
-        let genreText = detailGenres.prefix(2).map(\.name).joined(separator: ", ")
-        let parts = [date, genreText].compactMap { value -> String? in
-            guard let value, !value.isEmpty else { return nil }
-            return value
+        detailMetadataValues.isEmpty ? nil : detailMetadataValues.joined(separator: " \u{00B7} ")
+    }
+
+    private var detailMetadataValues: [String] {
+        var values: [String] = []
+
+        if let detailDate, !detailDate.isEmpty {
+            values.append(detailDate)
         }
-        return parts.isEmpty ? nil : parts.joined(separator: " \u{00B7} ")
+
+        if searchResult.isMovie {
+            if let runtime = movieDetail?.runtime, runtime > 0,
+               let runtimeText = movieDetail?.runtimeFormatted,
+               !runtimeText.isEmpty {
+                values.append(runtimeText)
+            }
+            if let status = movieDetail?.status, !status.isEmpty {
+                values.append(status)
+            }
+        } else if let tvShowDetail {
+            if let episodes = tvShowDetail.numberOfEpisodes, episodes > 0 {
+                values.append("\(episodes) EPS")
+            }
+            if let status = tvShowDetail.status, !status.isEmpty {
+                values.append(status)
+            }
+        }
+
+        values.append(contentsOf: detailGenres.prefix(5).map(\.name))
+        return values
     }
 
     private var detailDate: String? {
@@ -1078,6 +1827,50 @@ struct MediaDetailView: View {
 
     private var detailGenres: [TMDBGenre] {
         searchResult.isMovie ? (movieDetail?.genres ?? []) : (tvShowDetail?.genres ?? [])
+    }
+
+    private static func mergedAnimeDetailGenres(
+        tmdbGenres: [TMDBGenre],
+        animeGenres: [String]
+    ) -> [TMDBGenre] {
+        func normalized(_ value: String) -> String {
+            value.lowercased()
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .joined()
+        }
+
+        let tmdbKeys = Set(tmdbGenres.map { normalized($0.name) })
+        func isAlreadyRepresented(_ key: String) -> Bool {
+            if tmdbKeys.contains(key) { return true }
+            if ["action", "adventure"].contains(key), tmdbKeys.contains("actionadventure") {
+                return true
+            }
+            if ["scifi", "fantasy"].contains(key), tmdbKeys.contains("scififantasy") {
+                return true
+            }
+            if ["war", "politics"].contains(key), tmdbKeys.contains("warpolitics") {
+                return true
+            }
+            return false
+        }
+
+        var seen = tmdbKeys
+        let additions = animeGenres.compactMap { rawValue -> String? in
+            let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = normalized(value)
+            guard !value.isEmpty,
+                  !key.isEmpty,
+                  !isAlreadyRepresented(key),
+                  seen.insert(key).inserted else { return nil }
+            return value
+        }
+
+        // Put the genuinely anime-specific additions first so the compact hero
+        // metadata surfaces them instead of hiding them behind TMDB's broad genres.
+        let additionalGenres = additions.enumerated().map { index, name in
+            TMDBGenre(id: -2_000_000 - index, name: name)
+        }
+        return additionalGenres + tmdbGenres
     }
 
     private var detailVoteAverage: Double? {
@@ -1103,7 +1896,7 @@ struct MediaDetailView: View {
             }
             .lineLimit(1)
             .minimumScaleFactor(0.74)
-            .padding(.horizontal, isIPad ? 82 : 24)
+            .padding(.horizontal, isIPad ? 36 : 24)
         }
     }
 
@@ -1214,12 +2007,12 @@ struct MediaDetailView: View {
             }
 #else
             Text(overviewText)
-                .font(.system(size: isIPad ? 21 : 18, weight: .regular))
+                .font(.system(size: isIPad ? 18 : 18, weight: .regular))
                 .foregroundColor(.white.opacity(0.92))
                 .lineLimit(showFullSynopsis ? nil : 4)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.horizontal, isIPad ? 98 : 28)
+                .padding(.horizontal, isIPad ? 40 : 28)
                 .shadow(color: .black.opacity(0.60), radius: 7, x: 0, y: 3)
                 .contentShape(Rectangle())
                 .onTapGesture {
@@ -1308,6 +2101,21 @@ struct MediaDetailView: View {
             }
             
 #if !os(tvOS)
+            if !searchResult.isMovie {
+                Button {
+                    showingNotificationOptions = true
+                } label: {
+                    Image(systemName: isFollowingLocalNotifications ? "bell.fill" : "bell")
+                        .font(.title2)
+                        .frame(width: 42, height: 42)
+                        .applyLiquidGlassBackground(cornerRadius: 12)
+                        .foregroundColor(isFollowingLocalNotifications ? accentManager.currentAccentColor : .white)
+                        .cornerRadius(8)
+                }
+                .accessibilityLabel("Notifications")
+                .accessibilityValue(isFollowingLocalNotifications ? "Following" : "Not following")
+            }
+
             if searchResult.isMovie {
                 Button(action: {
                     downloadInServices()
@@ -1397,6 +2205,18 @@ struct MediaDetailView: View {
                 }
 
 #if !os(tvOS)
+                if !searchResult.isMovie {
+                    experimentalActionButton(
+                        systemName: isFollowingLocalNotifications ? "bell.fill" : "bell",
+                        foregroundColor: isFollowingLocalNotifications ? accentManager.currentAccentColor : .white,
+                        title: "Notifications",
+                        hint: "Choose episode and future-season alerts.",
+                        selectionState: isFollowingLocalNotifications
+                    ) {
+                        showingNotificationOptions = true
+                    }
+                }
+
                 if searchResult.isMovie {
                     experimentalActionButton(
                         systemName: downloadButtonIcon,
@@ -1411,7 +2231,7 @@ struct MediaDetailView: View {
 #endif
             }
         }
-        .padding(.horizontal, isIPad ? 90 : 28)
+        .padding(.horizontal, isIPad ? 36 : 28)
     }
 
     private func experimentalActionButton(
@@ -1458,8 +2278,12 @@ struct MediaDetailView: View {
                 animeSeasonRomajiTitles: animeSeasonRomajiTitles,
                 animeSeasonAniListIds: animeSeasonAniListIds,
                 animeSeasonKitsuIds: animeSeasonKitsuIds,
+                nextEpisodeNotificationRoute: nextEpisodeNotificationRoute,
                 showsMetadataDetails: false,
                 showsInsertedContent: false,
+                defersInitialSeasonLoad: initialNotificationSelection.map {
+                    handledNotificationSelectionID != $0.id
+                } ?? false,
                 tmdbService: tmdbService
             ) {
                 EmptyView()
@@ -1494,11 +2318,16 @@ struct MediaDetailView: View {
         case .similarTitles:
             similarTitlesSection
         case .ratingNotes:
-            StarRatingView(mediaId: searchResult.id, isAnime: isAnimeShow)
+            StarRatingView(
+                mediaId: searchResult.id,
+                isAnime: isAnimeShow,
+                usesIPadAtmosphereStyle: ExperimentalFeatureState.isEnabledAtLaunch && isIPad
+            )
         case .traktComments:
             traktCommentsSection
         case .episodes:
             episodesSection
+                .id(Self.notificationEpisodesAnchor)
         case .stills:
             experimentalStillsSection
         case .trailers:
@@ -1563,6 +2392,18 @@ struct MediaDetailView: View {
             isSpecial: false,
             titleOnlySearch: false
         )
+    }
+
+    private func exactWatchTogetherPlaybackContext(
+        for episode: TMDBEpisode?
+    ) -> EpisodePlaybackContext? {
+        guard let context = nextEpisodePlaybackContextOverride ?? watchTogetherPlaybackContextOverride,
+              let episode,
+              context.localSeasonNumber == episode.seasonNumber,
+              context.localEpisodeNumber == episode.episodeNumber else {
+            return nil
+        }
+        return context
     }
 
     private func animeAbsoluteEpisodeNumber(for episode: TMDBEpisode) -> Int? {
@@ -2338,11 +3179,39 @@ struct MediaDetailView: View {
         )
     }
 
+    private func currentMainPlaybackContextForRecovery() -> EpisodePlaybackContext? {
+        let exactWatchTogetherContext = exactWatchTogetherPlaybackContext(for: selectedEpisodeForSearch)
+        let isWatchTogetherPlayback = watchTogetherAutoPlay != nil || watchTogetherNextEpisodeAutoPlay
+        let isForcedWatchTogetherAnime = isWatchTogetherPlayback && !searchResult.isMovie && (
+            watchTogetherAutoPlay?.isAnime == true
+                || watchTogetherAutoPlay?.playbackContext?.hasAnimeMediaId == true
+                || watchTogetherPlaybackContextOverride?.hasAnimeMediaId == true
+                || isAnimeShow
+        )
+        return isForcedWatchTogetherAnime
+            ? exactWatchTogetherContext
+            : (exactWatchTogetherContext ?? playbackContextForSearchSheet(selectedEpisodeForSearch))
+    }
+
+    private func mainAutoModeTargetToken() -> String {
+        AutoModeMediaTargetToken.make(
+            tmdbID: searchResult.id,
+            isMovie: searchResult.isMovie,
+            episode: selectedEpisodeForSearch,
+            playbackContext: currentMainPlaybackContextForRecovery()
+        )
+    }
+
+    private func beginNewMainPlaybackSearchSession() {
+        autoModeRetrySession.reset(targetToken: mainAutoModeTargetToken())
+        playSheetRequestId = UUID()
+    }
+
     private func beginSpecialSearch(context: SpecialEpisodeListContext, episode: TMDBEpisode?) {
         guard hasActiveSources else { return }
 
         let playbackContext = episode.map { context.playbackContext(for: $0) }
-        specialSearchRequest = AnimeSpecialSearchRequest(
+        let request = AnimeSpecialSearchRequest(
             title: context.title,
             originalTitle: context.alternateTitle,
             episode: episode,
@@ -2353,9 +3222,77 @@ struct MediaDetailView: View {
             titleOnly: playbackContext?.titleOnlySearch ?? true,
             playbackContext: playbackContext
         )
+        let targetToken = AutoModeMediaTargetToken.make(
+            tmdbID: searchResult.id,
+            isMovie: false,
+            episode: episode,
+            playbackContext: playbackContext
+        )
+        autoModeRetrySession.reset(targetToken: targetToken)
+        specialSearchRequest = request
+    }
+
+    @MainActor
+    private func handleMainAutoModePlaybackFailure(
+        _ report: PlaybackFailureReport,
+        identity: AutoModePlaybackRecoveryIdentity,
+        episode: TMDBEpisode?,
+        playbackContext: EpisodePlaybackContext?,
+        resolvedTarget: ResolvedNextEpisodeTarget?,
+        wasWatchTogetherNext: Bool
+    ) {
+        guard report.context.autoMode,
+              autoModeRetrySession.matches(identity),
+              selectedEpisodeForSearch?.seasonNumber == episode?.seasonNumber,
+              selectedEpisodeForSearch?.episodeNumber == episode?.episodeNumber else {
+            return
+        }
+        autoModeRetrySession.recordPlaybackFailure(report)
+        nextEpisodePlaybackContextOverride = playbackContext
+        nextEpisodeResolvedTargetOverride = resolvedTarget
+        if wasWatchTogetherNext {
+            watchTogetherNextEpisodeAutoPlay = true
+        }
+        playSheetRequestId = UUID()
+        showingSearchResults = true
+        Logger.shared.log(
+            "MediaDetailView: Auto Mode playback failed source=\(report.context.sourceName) retry=\(autoModeRetrySession.retryCount); reopening remaining sources",
+            type: "Player"
+        )
+    }
+
+    @MainActor
+    private func handleSpecialAutoModePlaybackFailure(
+        _ report: PlaybackFailureReport,
+        identity: AutoModePlaybackRecoveryIdentity,
+        request: AnimeSpecialSearchRequest,
+        resolvedTarget: ResolvedNextEpisodeTarget?,
+        wasWatchTogetherNext: Bool
+    ) {
+        guard report.context.autoMode,
+              autoModeRetrySession.matches(identity),
+              selectedEpisodeForSearch?.seasonNumber == request.episode?.seasonNumber,
+              selectedEpisodeForSearch?.episodeNumber == request.episode?.episodeNumber else {
+            return
+        }
+        autoModeRetrySession.recordPlaybackFailure(report)
+        nextEpisodePlaybackContextOverride = request.playbackContext
+        nextEpisodeResolvedTargetOverride = resolvedTarget
+        if wasWatchTogetherNext {
+            watchTogetherNextEpisodeAutoPlay = true
+        }
+        specialSearchRequest = request
+        Logger.shared.log(
+            "MediaDetailView: special Auto Mode playback failed source=\(report.context.sourceName) retry=\(autoModeRetrySession.retryCount); reopening remaining sources",
+            type: "Player"
+        )
     }
 
     private func scheduleNextEpisodePresentation(action: @escaping () -> Void) {
+        // Invalidate the currently playing target immediately. The delayed sheet presentation
+        // may not run for a few tenths of a second, and a late failure from the old player must
+        // not reopen that old target during the gap.
+        autoModeRetrySession.reset(targetToken: mainAutoModeTargetToken())
         nextEpisodePresentationToken += 1
         let token = nextEpisodePresentationToken
 
@@ -2518,6 +3455,192 @@ struct MediaDetailView: View {
     private func hasResumeProgress(_ entry: EpisodeProgressEntry) -> Bool {
         !isWatchedForMainPlay(entry) && (entry.currentTime > 0 || entry.progress > 0)
     }
+
+    @MainActor
+    private func startWatchTogetherPlaybackIfReady() {
+        guard let target = watchTogetherAutoPlay,
+              hasLoadedContent,
+              !isLoading,
+              !didStartWatchTogetherAutoPlay else {
+            return
+        }
+
+        if target.playbackContext?.isSpecial == true, isLoadingAnimeSpecials {
+            return
+        }
+
+        didStartWatchTogetherAutoPlay = true
+        Task { @MainActor in
+            if searchResult.isMovie {
+                selectedEpisodeForSearch = nil
+                beginNewMainPlaybackSearchSession()
+                showingSearchResults = true
+                return
+            }
+
+            if target.isAnime || target.playbackContext?.hasAnimeMediaId == true {
+                if let failure = target.animeContextFailureReason {
+                    failWatchTogetherPlayback(failure)
+                    return
+                }
+                guard let context = target.playbackContext else {
+                    failWatchTogetherPlayback("Watch Together could not read the anime episode context, so it stopped instead of guessing a TMDB episode.")
+                    return
+                }
+                if context.isSpecial {
+                    guard let anilistID = context.anilistMediaId,
+                          let entry = animeSpecialEntries.first(where: { $0.id == anilistID }),
+                          let specialContext = SpecialEpisodeListContext(entry: entry, tmdbShowId: searchResult.id),
+                          let episode = specialContext.episodes.first(where: {
+                              $0.seasonNumber == context.localSeasonNumber
+                                  && $0.episodeNumber == context.localEpisodeNumber
+                          }) else {
+                        failWatchTogetherPlayback("Watch Together could not resolve the exact anime special on this device. It stopped instead of falling back to TMDB.")
+                        return
+                    }
+                    watchTogetherPlaybackContextOverride = context
+                    selectedSpecialEpisodeContext = specialContext
+                    selectedEpisodeForSearch = episode
+                    beginSpecialSearch(context: specialContext, episode: episode)
+                    return
+                }
+
+                guard let episode = watchTogetherAnimeEpisode(from: context) else {
+                    watchTogetherPlaybackContextOverride = nil
+                    failWatchTogetherPlayback(watchTogetherAnimeEpisodeFailureMessage(for: context))
+                    return
+                }
+                watchTogetherPlaybackContextOverride = context
+                selectedSpecialEpisodeContext = nil
+                selectedEpisodeForSearch = episode
+                beginNewMainPlaybackSearchSession()
+                showingSearchResults = true
+                return
+            }
+
+            guard let seasonNumber = target.seasonNumber,
+                  let episodeNumber = target.episodeNumber else {
+                Logger.shared.log(
+                    "WatchTogether: incoming non-anime episode has no usable season/episode tmdbId=\(searchResult.id)",
+                    type: "Player"
+                )
+                failWatchTogetherPlayback("Watch Together could not identify the exact episode, so playback was not started.")
+                return
+            }
+
+            let episode = await exactEpisodeForWatchTogether(
+                seasonNumber: seasonNumber,
+                episodeNumber: episodeNumber
+            )
+
+            guard let episode else {
+                Logger.shared.log(
+                    "WatchTogether: could not resolve incoming episode tmdbId=\(searchResult.id) S\(seasonNumber)E\(episodeNumber)",
+                    type: "Player"
+                )
+                failWatchTogetherPlayback("Watch Together could not load the exact S\(seasonNumber)E\(episodeNumber), so playback was not started.")
+                return
+            }
+
+            selectedEpisodeForSearch = episode
+            beginNewMainPlaybackSearchSession()
+            showingSearchResults = true
+        }
+    }
+
+    @MainActor
+    private func exactEpisodeForWatchTogether(seasonNumber: Int, episodeNumber: Int) async -> TMDBEpisode? {
+        if let loaded = seasonDetail,
+           loaded.seasonNumber == seasonNumber {
+            return loaded.episodes.first(where: { $0.episodeNumber == episodeNumber })
+        }
+
+        guard let show = tvShowDetail,
+              let season = show.seasons.first(where: { $0.seasonNumber == seasonNumber }) else {
+            return nil
+        }
+        do {
+            let detail = try await tmdbService.getSeasonDetails(tvShowId: searchResult.id, seasonNumber: seasonNumber)
+            guard let episode = detail.episodes.first(where: { $0.episodeNumber == episodeNumber }) else {
+                return nil
+            }
+            selectedSeason = season
+            seasonDetail = detail
+            return episode
+        } catch {
+            Logger.shared.log(
+                "WatchTogether: exact episode load failed tmdbId=\(searchResult.id) S\(seasonNumber)E\(episodeNumber): \(error.localizedDescription)",
+                type: "Player"
+            )
+            return nil
+        }
+    }
+
+    private func watchTogetherAnimeEpisode(from context: EpisodePlaybackContext) -> TMDBEpisode? {
+        guard watchTogetherAnimeSeasonIdentityFailureReason(for: context) == nil else {
+            return nil
+        }
+
+        if let exact = anilistEpisodes?.first(where: {
+            $0.seasonNumber == context.localSeasonNumber && $0.number == context.localEpisodeNumber
+        }) {
+            return tmdbEpisode(from: exact)
+        }
+
+        let receiverHasTargetSeasonMapping = animeSeasonAniListIds[context.localSeasonNumber] != nil
+            || animeSeasonKitsuIds[context.localSeasonNumber] != nil
+            || anilistEpisodes?.contains(where: { $0.seasonNumber == context.localSeasonNumber }) == true
+        guard !receiverHasTargetSeasonMapping else {
+            // The receiver knows this season but cannot resolve the carried episode exactly.
+            // Do not fabricate a local episode and risk launching the wrong cour or S1E1.
+            return nil
+        }
+
+        // Performance/detail traversal can intentionally leave the receiver without anime
+        // mappings. In that case the carried local coordinates remain the only exact identity,
+        // so a synthetic display episode is safe as long as the carried context stays attached.
+        return TMDBEpisode(
+            id: searchResult.id * 10_000 + context.localSeasonNumber * 1_000 + context.localEpisodeNumber,
+            name: "Episode \(context.localEpisodeNumber)",
+            overview: nil,
+            stillPath: nil,
+            episodeNumber: context.localEpisodeNumber,
+            seasonNumber: context.localSeasonNumber,
+            airDate: nil,
+            runtime: nil,
+            voteAverage: 0,
+            voteCount: 0
+        )
+    }
+
+    private func watchTogetherAnimeSeasonIdentityFailureReason(
+        for context: EpisodePlaybackContext
+    ) -> String? {
+        let seasonNumber = context.localSeasonNumber
+        if let carriedAniListID = context.anilistMediaId,
+           let receiverAniListID = animeSeasonAniListIds[seasonNumber],
+           receiverAniListID != carriedAniListID {
+            return "Watch Together found a different AniList season mapping on this device. It stopped instead of guessing the episode."
+        }
+        if let carriedKitsuID = context.kitsuMediaId,
+           let receiverKitsuID = animeSeasonKitsuIds[seasonNumber],
+           receiverKitsuID != carriedKitsuID {
+            return "Watch Together found a different Kitsu season mapping on this device. It stopped instead of guessing the episode."
+        }
+        return nil
+    }
+
+    private func watchTogetherAnimeEpisodeFailureMessage(
+        for context: EpisodePlaybackContext
+    ) -> String {
+        watchTogetherAnimeSeasonIdentityFailureReason(for: context)
+            ?? "Watch Together could not resolve the exact anime episode from this device's season mapping. It stopped instead of falling back to S1E1."
+    }
+
+    private func failWatchTogetherPlayback(_ message: String) {
+        Logger.shared.log("WatchTogether: \(message)", type: "Player")
+        errorMessage = message
+    }
     
     private func searchInServices() {
         if searchResult.isMovie {
@@ -2531,7 +3654,7 @@ struct MediaDetailView: View {
 #endif
 
             guard hasActiveSources else { return }
-            playSheetRequestId = UUID()
+            beginNewMainPlaybackSearchSession()
             showingSearchResults = true
             return
         }
@@ -2580,7 +3703,7 @@ struct MediaDetailView: View {
 #endif
 
         guard hasActiveSources else { return }
-        playSheetRequestId = UUID()
+        beginNewMainPlaybackSearchSession()
         showingSearchResults = true
     }
 
@@ -2633,6 +3756,150 @@ struct MediaDetailView: View {
     }
 
     @MainActor
+    private func applyInitialNotificationSelectionIfNeeded() async {
+        guard hasLoadedContent,
+              let selection = initialNotificationSelection,
+              handledNotificationSelectionID != selection.id,
+              !searchResult.isMovie else { return }
+
+        let mappedAnimeSeasonNumber = selection.sourceMediaID.flatMap { sourceMediaID in
+            animeSeasonAniListIds.first(where: { $0.value == sourceMediaID })?.key
+        }
+
+        if selection.isAnimeSpecial, mappedAnimeSeasonNumber == nil {
+            guard !isLoadingAnimeSpecials else { return }
+            if let sourceMediaID = selection.sourceMediaID,
+               let entry = animeSpecialEntries.first(where: { $0.id == sourceMediaID }),
+               let context = SpecialEpisodeListContext(entry: entry, tmdbShowId: searchResult.id) {
+                selectedSpecialEpisodeContext = context
+                selectedSeason = nil
+                seasonDetail = nil
+                if let episodeNumber = selection.episodeNumber {
+                    if let episode = context.episodes.first(where: {
+                        $0.episodeNumber == episodeNumber
+                    }) {
+                        selectedEpisodeForSearch = episode
+                    } else {
+                        selectedEpisodeForSearch = context.episodes.first
+                        notificationRouteNotice = "Eclipse opened the correct special, but Episode \(episodeNumber) is not listed yet."
+                    }
+                } else {
+                    selectedEpisodeForSearch = context.episodes.first
+                }
+                handledNotificationSelectionID = selection.id
+                requestNotificationEpisodeScrollIfVisible()
+                return
+            }
+
+            handledNotificationSelectionID = selection.id
+            notificationRouteNotice = "Eclipse opened the show, but this special could not be matched safely on this device."
+            return
+        }
+
+        var targetSeasonNumber = mappedAnimeSeasonNumber ?? selection.seasonNumber
+        if isAnimeShow, let sourceMediaID = selection.sourceMediaID,
+           mappedAnimeSeasonNumber == nil {
+            // AniList sequel/cour identities are authoritative. A label such as
+            // "Season 2" is not safe to reinterpret as the detail screen's
+            // local season 2 when that AniList node is not part of this show.
+            targetSeasonNumber = animeSeasonAniListIds.first(where: {
+                $0.value == sourceMediaID
+            })?.key
+        }
+
+        guard let targetSeasonNumber,
+              let detail = await notificationSeasonDetail(seasonNumber: targetSeasonNumber) else {
+            handledNotificationSelectionID = selection.id
+            if selection.kind == .season {
+                let label = selection.seasonLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
+                notificationRouteNotice = "\((label?.isEmpty == false ? label : nil) ?? "This season") is upcoming. Episode details are not available yet."
+            } else {
+                notificationRouteNotice = "Eclipse opened the show, but this episode could not be matched safely."
+            }
+            return
+        }
+
+        selectedSpecialEpisodeContext = nil
+        if let episodeNumber = selection.episodeNumber {
+            if let episode = detail.episodes.first(where: { $0.episodeNumber == episodeNumber }) {
+                selectedEpisodeForSearch = episode
+            } else {
+                notificationRouteNotice = "Eclipse opened the correct season, but Episode \(episodeNumber) is not listed yet."
+            }
+        } else {
+            selectedEpisodeForSearch = detail.episodes.first
+        }
+        handledNotificationSelectionID = selection.id
+        requestNotificationEpisodeScrollIfVisible()
+    }
+
+    @MainActor
+    private func notificationSeasonDetail(seasonNumber: Int) async -> TMDBSeasonDetail? {
+        if let loaded = seasonDetail, loaded.seasonNumber == seasonNumber {
+            if let season = tvShowDetail?.seasons.first(where: { $0.seasonNumber == seasonNumber }) {
+                selectedSeason = season
+            }
+            return loaded
+        }
+
+        guard let show = tvShowDetail,
+              let season = show.seasons.first(where: { $0.seasonNumber == seasonNumber }) else {
+            return nil
+        }
+
+        if isAnimeShow, anilistEpisodes != nil {
+            let episodes = (anilistEpisodes ?? [])
+                .filter { $0.seasonNumber == seasonNumber }
+                .sorted(by: episodeSort)
+                .map(tmdbEpisode)
+            let detail = TMDBSeasonDetail(
+                id: season.id,
+                name: season.name,
+                overview: season.overview ?? "",
+                posterPath: season.posterPath,
+                seasonNumber: season.seasonNumber,
+                airDate: season.airDate,
+                episodes: episodes
+            )
+            selectedSeason = season
+            seasonDetail = detail
+            return detail
+        }
+
+        do {
+            let detail = try await tmdbService.getSeasonDetails(
+                tvShowId: searchResult.id,
+                seasonNumber: seasonNumber
+            )
+            selectedSeason = season
+            seasonDetail = detail
+            return detail
+        } catch {
+            Logger.shared.log(
+                "Notification route could not load tmdbId=\(searchResult.id) season=\(seasonNumber): \(error.localizedDescription)",
+                type: "Error"
+            )
+            return nil
+        }
+    }
+
+    @MainActor
+    private func requestNotificationEpisodeScrollIfVisible() {
+        guard visibleMediaDetailElements.contains(.episodes) else {
+            if let episode = selectedEpisodeForSearch {
+                let label = isAnimeShow
+                    ? "Episode \(episode.episodeNumber)"
+                    : "S\(episode.seasonNumber)E\(episode.episodeNumber)"
+                notificationRouteNotice = "Opened \(label), but Episodes is hidden in Appearance settings."
+            }
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            notificationEpisodeScrollGeneration &+= 1
+        }
+    }
+
+    @MainActor
     private func episodeForPlayback(seasonNumber: Int, episodeNumber: Int) async -> TMDBEpisode? {
         if let loaded = seasonDetail,
            loaded.seasonNumber == seasonNumber,
@@ -2651,13 +3918,13 @@ struct MediaDetailView: View {
                 let detail = try await tmdbService.getSeasonDetails(tvShowId: searchResult.id, seasonNumber: seasonNumber)
                 selectedSeason = season
                 seasonDetail = detail
-                return detail.episodes.first(where: { $0.episodeNumber == episodeNumber }) ?? detail.episodes.first
+                return detail.episodes.first(where: { $0.episodeNumber == episodeNumber })
             } catch {
                 Logger.shared.log("MediaDetailView failed loading last watched season S\(seasonNumber): \(error.localizedDescription)", type: "Progress")
             }
         }
 
-        return seasonDetail?.episodes.first
+        return nil
     }
 
     private func tmdbEpisode(from aniEpisode: AniListEpisode) -> TMDBEpisode {
@@ -2703,75 +3970,66 @@ struct MediaDetailView: View {
             .first
     }
 
-    private func playDownloadedItem(_ item: DownloadItem) {
+    private func playDownloadedItem(_ item: DownloadItem, from presenter: UIViewController? = nil) {
         guard let fileURL = downloadManager.localFileURL(for: item) else {
             Logger.shared.log("Downloaded file not found for: \(item.id)", type: "Download")
             return
         }
 
-        let inAppRaw = Settings.normalizedInAppPlayer(UserDefaults.standard.string(forKey: "inAppPlayer"))
-        let subtitleArray: [String]? = downloadManager.localSubtitleURL(for: item).map { [$0.absoluteString] }
-
-        if inAppRaw == "mpv" {
-            let preset = PlayerPreset.presets.first
-            let pvc = PlayerViewController(
-                url: fileURL,
-                preset: preset ?? PlayerPreset(id: .sdrRec709, title: "Default", summary: "", stream: nil, commands: []),
-                headers: [:],
-                subtitles: subtitleArray,
-                mediaInfo: item.mediaInfo
+        guard let originatingPresenter = presenter ?? UIApplication.shared.eclipseTopmostViewController() else {
+            Logger.shared.log("Downloaded playback has no presenter", type: "Player")
+            return
+        }
+        let subtitles = downloadManager.localSubtitleURL(for: item).map { [$0.absoluteString] } ?? []
+        let nextEpisodeRequest: ((_ seasonNumber: Int, _ episodeNumber: Int) -> Void)? = item.isMovie ? nil : { [weak originatingPresenter] seasonNumber, episodeNumber in
+            guard let originatingPresenter else { return }
+            guard let nextItem = nextDownloadedEpisode(
+                for: item.tmdbId,
+                requestedSeasonNumber: seasonNumber,
+                requestedEpisodeNumber: episodeNumber,
+                currentItemId: item.id,
+                allowNextAvailableFallback: false
+            ) else {
+                Logger.shared.log("NextEpisode: No downloaded next episode found for tmdbId=\(item.tmdbId) after \(item.id)", type: "Player")
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                self.playDownloadedItem(nextItem, from: originatingPresenter)
+            }
+        }
+        let localNextEpisode: DownloadItem? = item.isMovie ? nil : nextDownloadedEpisode(
+            for: item.tmdbId,
+            requestedSeasonNumber: item.seasonNumber ?? 0,
+            requestedEpisodeNumber: (item.episodeNumber ?? 0) + 1,
+            currentItemId: item.id
+        )
+        let request = PlaybackRequest(
+            url: fileURL,
+            subtitles: subtitles,
+            mediaInfo: item.mediaInfo,
+            episodePlaybackContext: item.episodePlaybackContext,
+            title: item.playerTitleBase,
+            subtitle: item.displayTitle,
+            artworkURL: item.posterURL.flatMap(URL.init(string:)),
+            isAnime: item.isAnime || item.episodePlaybackContext?.hasAnimeMediaId == true,
+            isAnimation: detailGenres.contains { $0.id == 16 },
+            originalTMDBSeasonNumber: item.episodePlaybackContext?.resolvedTMDBSeasonNumber,
+            originalTMDBEpisodeNumber: item.episodePlaybackContext?.resolvedTMDBEpisodeNumber,
+            onRequestNextEpisode: nextEpisodeRequest,
+            localNextEpisodeFallback: PlaybackEpisodeCoordinate(
+                seasonNumber: localNextEpisode?.seasonNumber,
+                episodeNumber: localNextEpisode?.episodeNumber
             )
-            pvc.isAnimeHint = item.isAnime || item.episodePlaybackContext?.hasAnimeMediaId == true
-            pvc.episodePlaybackContext = item.episodePlaybackContext
-            pvc.originalTMDBSeasonNumber = item.episodePlaybackContext?.resolvedTMDBSeasonNumber
-            pvc.originalTMDBEpisodeNumber = item.episodePlaybackContext?.resolvedTMDBEpisodeNumber
-            pvc.modalPresentationStyle = .fullScreen
-
-            if !item.isMovie {
-                pvc.onRequestNextEpisode = { seasonNumber, episodeNumber in
-                    guard let nextItem = nextDownloadedEpisode(
-                        for: item.tmdbId,
-                        requestedSeasonNumber: seasonNumber,
-                        requestedEpisodeNumber: episodeNumber,
-                        currentItemId: item.id
-                    ) else {
-                        Logger.shared.log("NextEpisode: No downloaded next episode found for tmdbId=\(item.tmdbId) after \(item.id)", type: "Player")
-                        return
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    playDownloadedItem(nextItem)
-                }
-            }
-        }
-
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let rootVC = windowScene.windows.first?.rootViewController,
-               let topmostVC = rootVC.topmostViewController() as UIViewController? {
-                topmostVC.present(pvc, animated: true, completion: nil)
-            }
-        } else {
-            let playerVC = NormalPlayer()
-            let item2 = AVPlayerItem(url: fileURL)
-            playerVC.player = AVPlayer(playerItem: item2)
-            playerVC.mediaInfo = item.mediaInfo
-            playerVC.episodePlaybackContext = item.episodePlaybackContext
-            playerVC.modalPresentationStyle = .fullScreen
-
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let rootVC = windowScene.windows.first?.rootViewController,
-               let topmostVC = rootVC.topmostViewController() as UIViewController? {
-                topmostVC.present(playerVC, animated: true) {
-                    playerVC.playAtDefaultSpeed()
-                }
-            }
-        }
+        )
+        PlaybackCoordinator.shared.present(request, from: originatingPresenter)
     }
 
     private func nextDownloadedEpisode(
         for tmdbId: Int,
         requestedSeasonNumber: Int,
         requestedEpisodeNumber: Int,
-        currentItemId: String
+        currentItemId: String,
+        allowNextAvailableFallback: Bool = true
     ) -> DownloadItem? {
         let episodes = downloadManager.completedDownloads
             .filter {
@@ -2793,6 +4051,8 @@ struct MediaDetailView: View {
         }) {
             return requested
         }
+
+        guard allowNextAvailableFallback else { return nil }
 
         guard let currentIndex = episodes.firstIndex(where: { $0.id == currentItemId }) else { return nil }
         let nextIndex = episodes.index(after: currentIndex)
@@ -3354,7 +4614,10 @@ struct MediaDetailView: View {
                                 lastAirDate: detail.lastAirDate,
                                 voteAverage: detail.voteAverage,
                                 popularity: detail.popularity,
-                                genres: detail.genres,
+                                genres: Self.mergedAnimeDetailGenres(
+                                    tmdbGenres: detail.genres,
+                                    animeGenres: animeData.genres ?? []
+                                ),
                                 tagline: detail.tagline,
                                 status: detail.status,
                                 originalLanguage: detail.originalLanguage,
@@ -3473,6 +4736,171 @@ struct MediaDetailView: View {
     }
 
 }
+
+#if !os(tvOS)
+private struct MediaNotificationOptionsView: View {
+    let source: LocalNotificationMediaSource
+    let tmdbID: Int
+    let title: String
+    let titleAliases: [String]
+    let animeMediaIDs: Set<Int>
+    let westernSeasonIDs: Set<Int>
+
+    @StateObject private var manager = LocalNotificationManager.shared
+    @AppStorage(ScheduleWindow.storageKey)
+    private var scheduleWindowDays = ScheduleWindow.defaultValue.rawValue
+    @Environment(\.presentationMode) private var presentationMode
+    @State private var notice: LocalNotificationNotice?
+    @State private var isUpdating = false
+
+    private var subscription: LocalMediaNotificationSubscription? {
+        manager.subscription(source: source, tmdbID: tmdbID)
+    }
+
+    var body: some View {
+        NavigationView {
+            ScrollView {
+                VStack(spacing: 20) {
+                    VStack(spacing: 9) {
+                        Image(systemName: subscription == nil ? "bell.badge" : "bell.badge.fill")
+                            .font(.system(size: 42, weight: .semibold))
+                            .foregroundColor(.orange)
+                        Text(title)
+                            .font(.title3.bold())
+                            .foregroundColor(.white)
+                            .multilineTextAlignment(.center)
+                        Text("Choose what Eclipse should check for on this device.")
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.58))
+                            .multilineTextAlignment(.center)
+                    }
+                    .padding(.top, 12)
+
+                    GlassSection(header: "Notify Me") {
+                        VStack(spacing: 0) {
+                            notificationOptionRow(
+                                icon: "calendar",
+                                title: "Upcoming Episodes",
+                                detail: "Alerts for episodes in your rolling \(ScheduleWindow.sanitizedDays(scheduleWindowDays))-day Schedule range.",
+                                isOn: subscription?.episodeNotifications == true
+                            ) {
+                                update(
+                                    episodes: !(subscription?.episodeNotifications ?? false),
+                                    seasons: subscription?.futureSeasonNotifications ?? false
+                                )
+                            }
+
+                            GlassDivider(leadingInset: 16)
+
+                            notificationOptionRow(
+                                icon: "sparkles",
+                                title: "Future Seasons",
+                                detail: "Checks for newly announced seasons and known premiere dates when Eclipse refreshes.",
+                                isOn: subscription?.futureSeasonNotifications == true
+                            ) {
+                                update(
+                                    episodes: subscription?.episodeNotifications ?? false,
+                                    seasons: !(subscription?.futureSeasonNotifications ?? false)
+                                )
+                            }
+                        }
+                    }
+
+                    GlassSectionFooter("These are local reminders. Eclipse must be opened periodically to learn new or changed dates. “Aired” reflects the schedule, not guaranteed streaming availability.")
+
+                    if source == .anime, !animeMediaIDs.contains(where: { $0 > 0 }) {
+                        GlassSectionFooter("AniList identity is not available while Eclipse is using MyAnimeList fallback. Existing confirmed reminders are kept, but estimated schedule rows cannot create alerts and Future Seasons stays unavailable until AniList is restored.")
+                    }
+                }
+                .padding(.top, 12)
+                .padding(.bottom, 32)
+            }
+            .navigationTitle("Notifications")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") { presentationMode.wrappedValue.dismiss() }
+                }
+            }
+            .background(SettingsGradientBackground().ignoresSafeArea())
+            .eclipseDarkToolbar()
+        }
+        .preferredColorScheme(.dark)
+        .alert(item: $notice) { notice in
+            if notice.offersSettings {
+                return Alert(
+                    title: Text(notice.title),
+                    message: Text(notice.message),
+                    primaryButton: .default(Text("Open Settings")) {
+                        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+                        UIApplication.shared.open(url)
+                    },
+                    secondaryButton: .cancel()
+                )
+            }
+            return Alert(
+                title: Text(notice.title),
+                message: Text(notice.message),
+                dismissButton: .default(Text("OK"))
+            )
+        }
+    }
+
+    private func notificationOptionRow(
+        icon: String,
+        title: String,
+        detail: String,
+        isOn: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: icon)
+                    .font(.title3)
+                    .foregroundColor(.orange)
+                    .frame(width: 30)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(.white)
+                    Text(detail)
+                        .font(.footnote)
+                        .foregroundColor(.white.opacity(0.55))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: isOn ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundColor(isOn ? .orange : .white.opacity(0.28))
+            }
+            .padding(14)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(isUpdating)
+        .opacity(isUpdating ? 0.72 : 1)
+        .accessibilityValue(isOn ? "On" : "Off")
+    }
+
+    private func update(episodes: Bool, seasons: Bool) {
+        guard !isUpdating else { return }
+        isUpdating = true
+        Task {
+            let result = await manager.updateMediaSubscription(
+                source: source,
+                tmdbID: tmdbID,
+                title: title,
+                titleAliases: titleAliases,
+                animeMediaIDs: animeMediaIDs,
+                westernSeasonIDs: westernSeasonIDs,
+                episodeNotifications: episodes,
+                futureSeasonNotifications: seasons
+            )
+            notice = LocalNotificationNotice.from(result)
+            isUpdating = false
+        }
+    }
+}
+#endif
 
 struct SpecialEpisodeListContext: Identifiable {
     let id: Int

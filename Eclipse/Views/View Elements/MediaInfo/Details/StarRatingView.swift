@@ -6,6 +6,7 @@ import SwiftUI
 struct StarRatingView: View {
     let mediaId: Int
     let isAnime: Bool
+    let usesIPadAtmosphereStyle: Bool
 
     @StateObject private var trackerManager = TrackerManager.shared
     @State private var isExpanded = false
@@ -13,9 +14,10 @@ struct StarRatingView: View {
     @State private var noteText = ""
     @State private var syncMessage: String?
 
-    init(mediaId: Int, isAnime: Bool = false) {
+    init(mediaId: Int, isAnime: Bool = false, usesIPadAtmosphereStyle: Bool = false) {
         self.mediaId = mediaId
         self.isAnime = isAnime
+        self.usesIPadAtmosphereStyle = usesIPadAtmosphereStyle
     }
 
     var body: some View {
@@ -53,8 +55,7 @@ struct StarRatingView: View {
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
-                .background(Color.black.opacity(0.18))
-                .cornerRadius(8)
+                .background(ratingControlBackground)
             }
             .buttonStyle(.plain)
 
@@ -71,8 +72,7 @@ struct StarRatingView: View {
                     }
                 }
                 .padding(12)
-                .background(Color.black.opacity(0.14))
-                .cornerRadius(8)
+                .background(expandedRatingBackground)
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
@@ -84,6 +84,36 @@ struct StarRatingView: View {
         }
         .onChangeComp(of: noteText) { _, value in
             UserRatingManager.shared.setNote(value, for: mediaId)
+        }
+    }
+
+    @ViewBuilder
+    private var ratingControlBackground: some View {
+        if usesIPadAtmosphereStyle {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.white.opacity(0.07))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white.opacity(0.13), lineWidth: 1)
+                }
+        } else {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.black.opacity(0.18))
+        }
+    }
+
+    @ViewBuilder
+    private var expandedRatingBackground: some View {
+        if usesIPadAtmosphereStyle {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.white.opacity(0.055))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .stroke(Color.white.opacity(0.11), lineWidth: 1)
+                }
+        } else {
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.black.opacity(0.14))
         }
     }
 

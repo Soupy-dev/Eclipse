@@ -38,7 +38,7 @@ class Logger: @unchecked Sendable {
     }()
     private let maxLogEntries = 1000
     private let maxLogFileBytes = 1_000_000
-    private let noisyTypes: Set<String> = ["AniList", "Tracker", "Progress", "Stream", "General", "Info", "TMDB", "MPV", "Matching"]
+    private let noisyTypes: Set<String> = ["AniList", "Tracker", "Progress", "Stream", "General", "Info", "TMDB", "MPV", "Matching", "Performance"]
     private let noisyWindowDuration: TimeInterval = 20
     private let noisyTypeBurstLimit = 30
     private let repeatDedupWindow: TimeInterval = 2

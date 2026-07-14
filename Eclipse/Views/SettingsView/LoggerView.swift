@@ -20,6 +20,8 @@ struct LogEntry: Identifiable {
             return .teal
         case "mpv":
             return .indigo
+        case "performance":
+            return .cyan
         case "debug":
             return .gray
         default:
@@ -41,6 +43,8 @@ struct LogEntry: Identifiable {
             return "point.3.connected.trianglepath.dotted"
         case "mpv":
             return "play.tv"
+        case "performance":
+            return "gauge.with.dots.needle.67percent"
         case "debug":
             return "ladybug"
         default:
@@ -119,7 +123,7 @@ struct LoggerView: View {
                     .padding(.top, 32)
                 } else {
                     GlassSection {
-                        VStack(spacing: 0) {
+                        LazyVStack(spacing: 0) {
                             ForEach(Array(filteredLogs.enumerated()), id: \.element.id) { index, log in
                                 LogEntryRow(log: log)
                                     .id(log.id)
@@ -276,6 +280,8 @@ class LoggerManager: ObservableObject {
     
     @Published var logs: [LogEntry] = []
     private let maxLogs = 1000
+    private var pendingLogEntries: [LogEntry] = []
+    private var logFlushScheduled = false
     
     private init() {
         NotificationCenter.default.addObserver(
@@ -339,9 +345,24 @@ class LoggerManager: ObservableObject {
         guard let userInfo = notification.userInfo,
               let message = userInfo["message"] as? String,
               let type = userInfo["type"] as? String else { return }
-        
-        DispatchQueue.main.async {
-            self.addLog(message: message, type: type)
+
+        let timestamp = userInfo["timestamp"] as? Date ?? Date()
+        let entry = LogEntry(
+            timestamp: timestamp,
+            message: message,
+            type: Logger.displayCategory(for: type)
+        )
+
+        let enqueue = { [weak self] in
+            guard let self else { return }
+            self.pendingLogEntries.append(entry)
+            self.schedulePendingLogFlush()
+        }
+
+        if Thread.isMainThread {
+            enqueue()
+        } else {
+            DispatchQueue.main.async(execute: enqueue)
         }
     }
     
@@ -353,8 +374,28 @@ class LoggerManager: ObservableObject {
             logs = Array(logs.prefix(maxLogs))
         }
     }
+
+    private func schedulePendingLogFlush() {
+        guard !logFlushScheduled else { return }
+        logFlushScheduled = true
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.logFlushScheduled = false
+            guard !self.pendingLogEntries.isEmpty else { return }
+
+            let entries = self.pendingLogEntries
+            self.pendingLogEntries.removeAll(keepingCapacity: true)
+            self.logs.insert(contentsOf: entries.reversed(), at: 0)
+
+            if self.logs.count > self.maxLogs {
+                self.logs = Array(self.logs.prefix(self.maxLogs))
+            }
+        }
+    }
     
     func clearLogs() {
+        pendingLogEntries.removeAll(keepingCapacity: true)
         logs.removeAll()
         Task {
             await Logger.shared.clearLogsAsync()

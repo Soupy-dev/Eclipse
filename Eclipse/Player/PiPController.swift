@@ -168,7 +168,14 @@ final class PiPController: NSObject {
         let rawCurrentTime = delegate?.pipControllerCurrentTime(self) ?? 0
         let rawDuration = delegate?.pipControllerDuration(self) ?? 0
         let currentTime = rawCurrentTime.isFinite ? max(0, rawCurrentTime) : 0
-        let durationIsUsable = rawDuration.isFinite && rawDuration > max(5, currentTime + 1.0)
+        // A finite duration remains valid through the end of playback. Requiring it to be more
+        // than one second *ahead* of the current time made an ordinary VOD look indefinite during
+        // its final second, so the PiP timeline suddenly gained a synthesized ten minutes. Allow a
+        // small amount of clock skew past the reported end while still rejecting a stale duration
+        // that is materially behind the renderer position.
+        let durationIsUsable = rawDuration.isFinite
+            && rawDuration > 0
+            && currentTime <= rawDuration + 1.0
         let duration = durationIsUsable ? rawDuration : max(600, currentTime + 600)
         return (min(currentTime, max(0, duration - 0.5)), duration, rawDuration, !durationIsUsable)
     }

@@ -11,6 +11,152 @@ import CryptoKit
 import Network
 #endif
 
+enum MediaDetailPlatformDefaults {
+    static let seasonMenuKey = "seasonMenu"
+    static let horizontalEpisodeListKey = "horizontalEpisodeList"
+
+    static var prefersCompactSeasonMenu: Bool {
+#if os(iOS)
+        UIDevice.current.userInterfaceIdiom == .pad
+#else
+        false
+#endif
+    }
+
+    static var prefersHorizontalEpisodes: Bool {
+#if os(iOS)
+        UIDevice.current.userInterfaceIdiom == .pad
+#else
+        false
+#endif
+    }
+
+    static func usesCompactSeasonMenu(defaults: UserDefaults = .standard) -> Bool {
+        guard defaults.object(forKey: seasonMenuKey) != nil else {
+            return prefersCompactSeasonMenu
+        }
+        return defaults.bool(forKey: seasonMenuKey)
+    }
+
+    static func usesHorizontalEpisodes(defaults: UserDefaults = .standard) -> Bool {
+        guard defaults.object(forKey: horizontalEpisodeListKey) != nil else {
+            return prefersHorizontalEpisodes
+        }
+        return defaults.bool(forKey: horizontalEpisodeListKey)
+    }
+}
+
+enum AppPerformanceOverlaySettings {
+    static let enabledKey = "appPerformanceOverlayEnabled"
+    static let defaultEnabled = false
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        guard defaults.object(forKey: enabledKey) != nil else { return defaultEnabled }
+        return defaults.bool(forKey: enabledKey)
+    }
+}
+
+/// Shared state for the optional lock button used by both in-app video players.
+/// The active lock deliberately lives in UserDefaults so a verified next-episode
+/// transition or automatic engine handoff cannot silently unlock the new player.
+enum PlayerPlaybackLockSettings {
+    static let enabledKey = "playerPlaybackLockEnabled"
+    static let lockedKey = "playerPlaybackLocked"
+    static let orientationKey = "playerPlaybackLockedOrientation"
+    static let defaultEnabled = false
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        guard defaults.object(forKey: enabledKey) != nil else { return defaultEnabled }
+        return defaults.bool(forKey: enabledKey)
+    }
+
+    static func isLocked(defaults: UserDefaults = .standard) -> Bool {
+        isEnabled(defaults: defaults) && defaults.bool(forKey: lockedKey)
+    }
+
+    static func setEnabled(_ enabled: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(enabled, forKey: enabledKey)
+        if !enabled {
+            defaults.set(false, forKey: lockedKey)
+            defaults.removeObject(forKey: orientationKey)
+        }
+    }
+
+#if os(iOS)
+    static func setLocked(
+        _ locked: Bool,
+        interfaceOrientation: UIInterfaceOrientation?,
+        defaults: UserDefaults = .standard
+    ) {
+        guard locked, isEnabled(defaults: defaults) else {
+            defaults.set(false, forKey: lockedKey)
+            defaults.removeObject(forKey: orientationKey)
+            return
+        }
+
+        defaults.set(true, forKey: lockedKey)
+        if let rawValue = storedOrientationValue(for: interfaceOrientation) {
+            defaults.set(rawValue, forKey: orientationKey)
+        }
+    }
+
+    static func lockedOrientationMask(defaults: UserDefaults = .standard) -> UIInterfaceOrientationMask? {
+        guard isLocked(defaults: defaults),
+              let rawValue = defaults.string(forKey: orientationKey) else { return nil }
+        switch rawValue {
+        case "portrait":
+            return .portrait
+        case "portraitUpsideDown":
+            return .portraitUpsideDown
+        case "landscapeLeft":
+            return .landscapeLeft
+        case "landscapeRight":
+            return .landscapeRight
+        default:
+            return nil
+        }
+    }
+
+    static func capturedInterfaceOrientation(
+        scene: UIWindowScene?,
+        viewBounds: CGRect
+    ) -> UIInterfaceOrientation? {
+        if let orientation = scene?.interfaceOrientation, orientation != .unknown {
+            return orientation
+        }
+
+        switch UIDevice.current.orientation {
+        case .portrait:
+            return .portrait
+        case .portraitUpsideDown:
+            return .portraitUpsideDown
+        case .landscapeLeft:
+            return .landscapeRight
+        case .landscapeRight:
+            return .landscapeLeft
+        default:
+            guard !viewBounds.isEmpty else { return nil }
+            return viewBounds.width >= viewBounds.height ? .landscapeRight : .portrait
+        }
+    }
+
+    private static func storedOrientationValue(for orientation: UIInterfaceOrientation?) -> String? {
+        switch orientation {
+        case .portrait:
+            return "portrait"
+        case .portraitUpsideDown:
+            return "portraitUpsideDown"
+        case .landscapeLeft:
+            return "landscapeLeft"
+        case .landscapeRight:
+            return "landscapeRight"
+        default:
+            return nil
+        }
+    }
+#endif
+}
+
 /// Platform-neutral preference shared by Settings and the iOS SharePlay
 /// coordinator. Keeping the key/default here lets tvOS compile the shared
 /// settings model without adding GroupActivities code to the tvOS target.
@@ -343,6 +489,41 @@ enum ServicesSheetPresentationSettings {
     }
 }
 
+enum ServicesResultRankingSettings {
+    static let minimumSimilarityKey = "servicesResultMinimumSimilarity"
+    static let dropMismatchedResultsKey = "servicesDropMismatchedResults"
+    static let defaultMinimumSimilarity = 0.85
+    static let defaultDropMismatchedResults = true
+    static let minimumSimilarityRange = 0.50...1.00
+
+    static func minimumSimilarity(defaults: UserDefaults = .standard) -> Double {
+        guard let value = defaults.object(forKey: minimumSimilarityKey) as? NSNumber else {
+            return defaultMinimumSimilarity
+        }
+        return clampedMinimumSimilarity(value.doubleValue)
+    }
+
+    static func setMinimumSimilarity(_ value: Double, defaults: UserDefaults = .standard) {
+        defaults.set(clampedMinimumSimilarity(value), forKey: minimumSimilarityKey)
+    }
+
+    static func dropsMismatchedResults(defaults: UserDefaults = .standard) -> Bool {
+        guard defaults.object(forKey: dropMismatchedResultsKey) != nil else {
+            return defaultDropMismatchedResults
+        }
+        return defaults.bool(forKey: dropMismatchedResultsKey)
+    }
+
+    static func setDropsMismatchedResults(_ enabled: Bool, defaults: UserDefaults = .standard) {
+        defaults.set(enabled, forKey: dropMismatchedResultsKey)
+    }
+
+    static func clampedMinimumSimilarity(_ value: Double) -> Double {
+        guard value.isFinite else { return defaultMinimumSimilarity }
+        return max(minimumSimilarityRange.lowerBound, min(value, minimumSimilarityRange.upperBound))
+    }
+}
+
 enum NextEpisodeFillerSettings {
     static let enabledKey = "nextEpisodeSkipFillerEnabled"
     static let defaultEnabled = false
@@ -667,7 +848,7 @@ struct MPVRenderBackendSupport {
     // Diagnostic only. MPVKit is branch-tracked.
     // (eclipse-mpv-metal), so the resolved revision changes every kit Build-and-Release. Bump this
     // to the kit tip whenever you cut a new kit build, or it will under-report which binary is live.
-    static let bundledMPVKitRevision = "e5198064b2629c868c1345113accadc18ebc4938"
+    static let bundledMPVKitRevision = "e3481d325caacf1a77c9262b64757c98605cdc47"
     static let bundledMPVKitSupportsMoltenVKInlineRendering = true
     static let metalRendererEnabled = true
 
@@ -833,10 +1014,13 @@ enum ExperimentalFeatureState {
     }
 
     static var isMPVPlaybackDefault: Bool {
-        let inApp = Settings.normalizedInAppPlayer(UserDefaults.standard.string(forKey: "inAppPlayer"))
         let external = UserDefaults.standard.string(forKey: "externalPlayer") ?? ""
         let usesInternalPlayer = external.isEmpty || external == "none" || external == "Default"
-        return inApp == "mpv" && usesInternalPlayer
+        let primary = PlaybackLaunchPlan.make(
+            selection: .selected,
+            deviceFamily: .current
+        ).primary
+        return primary == .mpv && usesInternalPlayer
     }
 
     static var isMetalMPVPlaybackDefault: Bool {
@@ -844,8 +1028,11 @@ enum ExperimentalFeatureState {
     }
 
     static var mpvAdvancedPlaybackUnavailableReason: String? {
-        let inApp = Settings.normalizedInAppPlayer(UserDefaults.standard.string(forKey: "inAppPlayer"))
-        guard inApp == "mpv" else { return "mpv-not-default" }
+        let primary = PlaybackLaunchPlan.make(
+            selection: .selected,
+            deviceFamily: .current
+        ).primary
+        guard primary == .mpv else { return "mpv-not-default" }
 
         let external = UserDefaults.standard.string(forKey: "externalPlayer") ?? ""
         let usesInternalPlayer = external.isEmpty || external == "none" || external == "Default"
@@ -972,6 +1159,9 @@ final class ExperimentalCloudSyncManager: ObservableObject {
     @Published private(set) var connectionStateVersion = 0
 
     private static let snapshotFileName = "EclipseExperimentalSync.json"
+    private static let maximumCloudControlResponseBytes = 2_000_000
+    private static let maximumCloudSnapshotBytes = 50_000_000
+    private static let maximumCloudErrorPreviewBytes = 32_768
     private static let googleClientID = "871649357486-168i49j7ouc70r4t879112h65kmdilit.apps.googleusercontent.com"
     private static let googleURLScheme = "com.googleusercontent.apps.871649357486-168i49j7ouc70r4t879112h65kmdilit"
     private static let microsoftClientID = "a4361dcd-07d3-46b7-9509-1f8ed0ee03ba"
@@ -1421,7 +1611,20 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw SyncError.noSnapshot(.iCloud)
         }
-        return RemoteSnapshot(data: try Data(contentsOf: url), modifiedAt: remoteModificationDate(at: url))
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var data = Data()
+        while data.count <= maximumCloudSnapshotBytes {
+            let remaining = maximumCloudSnapshotBytes + 1 - data.count
+            guard remaining > 0 else { break }
+            let chunk = try handle.read(upToCount: min(1_048_576, remaining)) ?? Data()
+            guard !chunk.isEmpty else { break }
+            data.append(chunk)
+        }
+        guard data.count <= maximumCloudSnapshotBytes else {
+            throw BoundedURLSessionError.responseTooLarge(maximumBytes: maximumCloudSnapshotBytes)
+        }
+        return RemoteSnapshot(data: data, modifiedAt: remoteModificationDate(at: url))
     }
 
     private static func remoteModificationDate(at url: URL) -> Date? {
@@ -1509,7 +1712,11 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
         return RemoteSnapshot(
-            data: try await validatedData(for: request, provider: .googleDrive),
+            data: try await validatedData(
+                for: request,
+                provider: .googleDrive,
+                maximumResponseBytes: maximumCloudSnapshotBytes
+            ),
             modifiedAt: metadata.modifiedAt
         )
     }
@@ -1519,7 +1726,12 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         var request = URLRequest(url: oneDriveSnapshotMetadataURL())
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
-        guard let data = try await validatedData(for: request, provider: .oneDrive, allowNotFound: true) else {
+        guard let data = try await validatedData(
+            for: request,
+            provider: .oneDrive,
+            allowNotFound: true,
+            maximumResponseBytes: maximumCloudControlResponseBytes
+        ) else {
             return nil
         }
 
@@ -1551,7 +1763,11 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
         return RemoteSnapshot(
-            data: try await validatedData(for: request, provider: .oneDrive),
+            data: try await validatedData(
+                for: request,
+                provider: .oneDrive,
+                maximumResponseBytes: maximumCloudSnapshotBytes
+            ),
             modifiedAt: metadata?.modifiedAt
         )
     }
@@ -1718,9 +1934,13 @@ final class ExperimentalCloudSyncManager: ObservableObject {
     private static func validatedData(
         for request: URLRequest,
         provider: CloudSyncProvider,
-        allowNotFound: Bool = false
+        allowNotFound: Bool,
+        maximumResponseBytes: Int
     ) async throws -> Data? {
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await URLSession.custom.boundedData(
+            for: request,
+            maximumResponseBytes: maximumResponseBytes
+        )
         guard let httpResponse = response as? HTTPURLResponse else {
             throw SyncError.invalidResponse(provider)
         }
@@ -1730,15 +1950,37 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         }
 
         guard (200..<300).contains(httpResponse.statusCode) else {
-            let body = String(data: data, encoding: .utf8) ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
+            let previewData = data.prefix(maximumCloudErrorPreviewBytes)
+            let body = String(data: previewData, encoding: .utf8)
+                ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
             throw SyncError.remoteRequestFailed(provider, httpResponse.statusCode, body)
         }
 
         return data
     }
 
-    private static func validatedData(for request: URLRequest, provider: CloudSyncProvider) async throws -> Data {
-        guard let data = try await validatedData(for: request, provider: provider, allowNotFound: false) else {
+    private static func validatedData(
+        for request: URLRequest,
+        provider: CloudSyncProvider
+    ) async throws -> Data {
+        try await validatedData(
+            for: request,
+            provider: provider,
+            maximumResponseBytes: maximumCloudControlResponseBytes
+        )
+    }
+
+    private static func validatedData(
+        for request: URLRequest,
+        provider: CloudSyncProvider,
+        maximumResponseBytes: Int
+    ) async throws -> Data {
+        guard let data = try await validatedData(
+            for: request,
+            provider: provider,
+            allowNotFound: false,
+            maximumResponseBytes: maximumResponseBytes
+        ) else {
             throw SyncError.invalidResponse(provider)
         }
         return data
@@ -1948,12 +2190,24 @@ private enum CloudSyncTokenStore {
 
     static func save(_ token: ExperimentalCloudSyncManager.CloudSyncToken, for provider: CloudSyncProvider) throws {
         let data = try JSONEncoder().encode(token)
-        var query = baseQuery(for: provider)
-        query[kSecValueData as String] = data
-        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let lookup = baseQuery(for: provider)
+        let updatedValues: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+        let updateStatus = SecItemUpdate(lookup as CFDictionary, updatedValues as CFDictionary)
+        if updateStatus == errSecSuccess {
+            return
+        }
 
-        SecItemDelete(baseQuery(for: provider) as CFDictionary)
-        let status = SecItemAdd(query as CFDictionary, nil)
+        let status: OSStatus
+        if updateStatus == errSecItemNotFound {
+            var attributes = lookup
+            attributes.merge(updatedValues) { _, new in new }
+            status = SecItemAdd(attributes as CFDictionary, nil)
+        } else {
+            status = updateStatus
+        }
         guard status == errSecSuccess else {
             throw NSError(
                 domain: NSOSStatusErrorDomain,
@@ -2695,7 +2949,18 @@ class Settings: ObservableObject {
     }
 
     static func normalizedInAppPlayer(_ rawValue: String?) -> String {
-        rawValue == "VLC" ? "mpv" : (rawValue ?? "mpv")
+        guard let raw = rawValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+              !raw.isEmpty else {
+            return PlaybackEngine.automatic.rawValue
+        }
+        switch raw {
+        case "mpv", "vlc": return PlaybackEngine.mpv.rawValue
+        case "normal", "avplayer", "av player": return PlaybackEngine.avPlayer.rawValue
+        case "automatic", "auto": return PlaybackEngine.automatic.rawValue
+        default: return PlaybackEngine.automatic.rawValue
+        }
     }
 
     var enableSubtitlesByDefault: Bool {
@@ -2825,7 +3090,7 @@ class Settings: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: "mpvPerformanceOverlayEnabled") }
     }
 
-    /// The GPU gpu-next renderer (MoltenVK, zero-copy decode) is the default MoltenVK renderer.
+    /// The GPU gpu-next renderer (MoltenVK with direct VideoToolbox decode preferred) is the default MoltenVK renderer.
     var mpvUseLegacyCPURenderer: Bool {
         get { UserDefaults.standard.bool(forKey: "mpvUseLegacyCPURenderer") }
         set { UserDefaults.standard.set(newValue, forKey: "mpvUseLegacyCPURenderer") }
@@ -2999,14 +3264,22 @@ class Settings: ObservableObject {
 #endif
 
     func updateAppearance() {
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene else { return }
+        let windows = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .flatMap(\.windows)
+        guard !windows.isEmpty else { return }
+
+        let style: UIUserInterfaceStyle
         switch effectiveAppearance {
         case .system:
-            windowScene.windows.first?.overrideUserInterfaceStyle = .unspecified
+            style = .unspecified
         case .light:
-            windowScene.windows.first?.overrideUserInterfaceStyle = .light
+            style = .light
         case .dark:
-            windowScene.windows.first?.overrideUserInterfaceStyle = .dark
+            style = .dark
+        }
+        for window in windows {
+            window.overrideUserInterfaceStyle = style
         }
     }
 }

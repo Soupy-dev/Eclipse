@@ -5,8 +5,14 @@ import Kingfisher
 struct ScheduleView: View {
     @AppStorage("showLocalScheduleTime") private var showLocalScheduleTime = true
     @AppStorage("defaultScheduleMode") private var defaultScheduleModeRaw = ScheduleMode.anime.rawValue
+    @AppStorage(ScheduleWindow.storageKey) private var scheduleWindowDays = ScheduleWindow.defaultValue.rawValue
     @StateObject private var viewModel: ScheduleViewModel
     @StateObject private var accentColorManager = AccentColorManager.shared
+#if !os(tvOS)
+    @StateObject private var notificationManager = LocalNotificationManager.shared
+    @Environment(\.eclipseWindowSceneSessionIdentifier) private var windowSceneSessionIdentifier
+    @Environment(\.scenePhase) private var scenePhase
+#endif
     
     @State private var selectedTMDBResult: TMDBSearchResult?
     @State private var showingMediaDetail = false
@@ -15,11 +21,20 @@ struct ScheduleView: View {
     @State private var loadingItemId: String?
     @State private var selectedScheduleDate: Date?
     @State private var selectedScheduleMode: ScheduleMode
+#if !os(tvOS)
+    @State private var notificationNotice: LocalNotificationNotice?
+    @State private var updatingNotificationEntryIDs = Set<String>()
+    @State private var mediaDetailNotificationTarget: LocalNotificationNavigationTarget?
+    @State private var isApplyingNotificationNavigation = false
+#endif
     
     private let isActive: Bool
     private let dayChangeTimer = Timer.publish(every: 300, on: .main, in: .common).autoconnect()
+    private var scheduleWindow: ScheduleWindow {
+        ScheduleWindow.sanitized(scheduleWindowDays)
+    }
     private var scheduleLoadTaskID: String {
-        "\(isActive ? "active" : "inactive")-\(selectedScheduleMode.rawValue)"
+        "\(isActive ? "active" : "inactive")-\(selectedScheduleMode.rawValue)-\(scheduleWindow.rawValue)"
     }
 
     init(isActive: Bool = true) {
@@ -56,17 +71,39 @@ struct ScheduleView: View {
         .navigationTitle("Schedule")
         .task(id: scheduleLoadTaskID) {
             guard isActive else { return }
-            guard viewModel.scheduleEntries.isEmpty || viewModel.loadedScheduleMode != selectedScheduleMode else { return }
+            guard viewModel.scheduleEntries.isEmpty
+                    || viewModel.loadedScheduleMode != selectedScheduleMode
+                    || viewModel.loadedScheduleDayCount != scheduleWindow.rawValue
+                    || viewModel.errorMessage != nil else { return }
             await viewModel.loadSchedule(mode: selectedScheduleMode, localTimeZone: showLocalScheduleTime)
         }
         .refreshable {
             await viewModel.loadSchedule(mode: selectedScheduleMode, localTimeZone: showLocalScheduleTime, forceRefresh: true)
         }
         .onChange(of: selectedScheduleMode) { _ in
+#if !os(tvOS)
+            guard !isApplyingNotificationNavigation else { return }
+#endif
+            selectedScheduleDate = nil
+        }
+        .onChange(of: scheduleWindowDays) { newValue in
+            let sanitized = ScheduleWindow.sanitizedDays(newValue)
+            if sanitized != newValue {
+                scheduleWindowDays = sanitized
+            }
             selectedScheduleDate = nil
         }
         .onChange(of: isActive) { active in
             guard active else { return }
+#if !os(tvOS)
+            if scenePhase == .active,
+               notificationManager.shouldHandlePendingNavigation(
+                inSceneSessionIdentifier: windowSceneSessionIdentifier
+            ) {
+                Task { await applyPendingNotificationNavigationIfNeeded() }
+                return
+            }
+#endif
             let defaultMode = ScheduleMode.sanitized(defaultScheduleModeRaw)
             if selectedScheduleMode != defaultMode {
                 selectedScheduleMode = defaultMode
@@ -76,17 +113,46 @@ struct ScheduleView: View {
             viewModel.regroupBuckets(localTimeZone: newValue)
         }
         .onReceive(dayChangeTimer) { _ in
+            guard isActive else { return }
             Task {
                 await viewModel.handleDayChangeIfNeeded(mode: selectedScheduleMode, localTimeZone: showLocalScheduleTime)
             }
         }
+#if !os(tvOS)
+        .onAppear {
+            guard isActive, scenePhase == .active else { return }
+            Task { await applyPendingNotificationNavigationIfNeeded() }
+        }
+        .onChange(of: windowSceneSessionIdentifier) { _ in
+            guard isActive, scenePhase == .active else { return }
+            Task { await applyPendingNotificationNavigationIfNeeded() }
+        }
+        .onChange(of: scenePhase) { phase in
+            guard isActive, phase == .active else { return }
+            Task { await applyPendingNotificationNavigationIfNeeded() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openScheduleFromLocalNotification)) { _ in
+            guard isActive, scenePhase == .active else { return }
+            Task { await applyPendingNotificationNavigationIfNeeded() }
+        }
+#endif
         .background(
             Group {
                 if #available(iOS 16.0, *) {
                     Color.clear
                         .navigationDestination(isPresented: $showingMediaDetail) {
                             if let result = selectedTMDBResult {
+#if os(tvOS)
                                 MediaDetailView(searchResult: result)
+#else
+                                MediaDetailView(
+                                    searchResult: result,
+                                    initialNotificationSelection: mediaDetailNotificationTarget.map(
+                                        MediaDetailInitialNotificationSelection.init
+                                    )
+                                )
+                                .id(mediaDetailNotificationTarget?.id ?? "schedule-detail-\(result.id)")
+#endif
                             }
                         }
                 } else {
@@ -94,7 +160,17 @@ struct ScheduleView: View {
                         isActive: $showingMediaDetail,
                         destination: {
                             if let result = selectedTMDBResult {
+#if os(tvOS)
                                 MediaDetailView(searchResult: result)
+#else
+                                MediaDetailView(
+                                    searchResult: result,
+                                    initialNotificationSelection: mediaDetailNotificationTarget.map(
+                                        MediaDetailInitialNotificationSelection.init
+                                    )
+                                )
+                                .id(mediaDetailNotificationTarget?.id ?? "schedule-detail-\(result.id)")
+#endif
                             }
                         },
                         label: { EmptyView() }
@@ -109,7 +185,168 @@ struct ScheduleView: View {
                 dismissButton: .default(Text("OK"))
             )
         }
+#if !os(tvOS)
+        .alert(item: $notificationNotice) { notice in
+            if notice.offersSettings {
+                return Alert(
+                    title: Text(notice.title),
+                    message: Text(notice.message),
+                    primaryButton: .default(Text("Open Settings")) {
+                        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+                        UIApplication.shared.open(url)
+                    },
+                    secondaryButton: .cancel()
+                )
+            }
+            return Alert(
+                title: Text(notice.title),
+                message: Text(notice.message),
+                dismissButton: .default(Text("OK"))
+            )
+        }
+#endif
     }
+
+#if !os(tvOS)
+    @MainActor
+    private func applyPendingNotificationNavigationIfNeeded() async {
+        guard isActive, scenePhase == .active, !isApplyingNotificationNavigation,
+              let target = notificationManager.takePendingNavigationTarget(
+                forSceneSessionIdentifier: windowSceneSessionIdentifier
+              ) else { return }
+
+        isApplyingNotificationNavigation = true
+        defer {
+            isApplyingNotificationNavigation = false
+            if scenePhase == .active,
+               notificationManager.shouldHandlePendingNavigation(
+                inSceneSessionIdentifier: windowSceneSessionIdentifier
+            ) {
+                Task { await applyPendingNotificationNavigationIfNeeded() }
+            }
+        }
+
+        let targetMode: ScheduleMode?
+        switch target.source {
+        case .anime?: targetMode = .anime
+        case .western?: targetMode = .western
+        case nil: targetMode = nil
+        }
+
+        if let targetMode, selectedScheduleMode != targetMode {
+            selectedScheduleMode = targetMode
+            await Task.yield()
+        }
+        if let airingAt = target.airingAt {
+            selectedScheduleDate = scheduleCalendar.startOfDay(for: airingAt)
+        }
+
+        if let tmdbID = target.tmdbID,
+           tmdbID > 0,
+           target.tmdbMediaType != nil || target.source != .anime {
+            presentNotificationMediaDetail(
+                result: notificationSearchResult(
+                    tmdbID: tmdbID,
+                    mediaType: target.tmdbMediaType ?? .tv,
+                    title: target.mediaTitle
+                ),
+                target: target
+            )
+            return
+        }
+
+        guard let targetMode else { return }
+        await viewModel.loadSchedule(mode: targetMode, localTimeZone: showLocalScheduleTime)
+        let targetSource: ScheduleSource = targetMode == .anime ? .anime : .western
+        let snapshot = await viewModel.notificationScheduleSnapshot(
+            dayCount: scheduleWindow.rawValue,
+            requiredSources: [targetSource]
+        )
+        guard let entry = bestScheduleEntry(for: target, entries: snapshot.entries) else { return }
+
+        if let result = await viewModel.lookupTMDBResult(for: entry) {
+            presentNotificationMediaDetail(result: result, target: target)
+        }
+    }
+
+    @MainActor
+    private func presentNotificationMediaDetail(
+        result: TMDBSearchResult,
+        target: LocalNotificationNavigationTarget
+    ) {
+        selectedTMDBResult = result
+        mediaDetailNotificationTarget = target
+        if !showingMediaDetail {
+            showingMediaDetail = true
+        }
+    }
+
+    private func notificationSearchResult(
+        tmdbID: Int,
+        mediaType: LocalNotificationTMDBMediaType,
+        title: String
+    ) -> TMDBSearchResult {
+        TMDBSearchResult(
+            id: tmdbID,
+            mediaType: mediaType.rawValue,
+            title: mediaType == .movie && !title.isEmpty ? title : nil,
+            name: mediaType == .tv && !title.isEmpty ? title : nil,
+            overview: nil,
+            posterPath: nil,
+            backdropPath: nil,
+            releaseDate: nil,
+            firstAirDate: nil,
+            voteAverage: nil,
+            popularity: 0,
+            adult: nil,
+            genreIds: nil
+        )
+    }
+
+    private func bestScheduleEntry(
+        for target: LocalNotificationNavigationTarget,
+        entries: [ScheduleEntry]
+    ) -> ScheduleEntry? {
+        let expectedSource: ScheduleSource?
+        switch target.source {
+        case .anime?: expectedSource = .anime
+        case .western?: expectedSource = .western
+        case nil: expectedSource = nil
+        }
+
+        let normalizedTargetTitle = normalizedNotificationTitle(target.mediaTitle)
+        let candidates = entries.filter { entry in
+            if let expectedSource, entry.source != expectedSource { return false }
+            if let sourceMediaID = target.sourceMediaID,
+               sourceMediaID != entry.sourceMediaId { return false }
+            if let episodeNumber = target.episodeNumber,
+               episodeNumber != entry.episode { return false }
+            if let seasonNumber = target.seasonNumber,
+               let entrySeason = entry.season,
+               seasonNumber != entrySeason { return false }
+            if target.sourceMediaID == nil, !normalizedTargetTitle.isEmpty {
+                let entryTitles = [entry.title, entry.englishTitle, entry.romajiTitle]
+                    .compactMap { $0 }
+                    .map(normalizedNotificationTitle)
+                if !entryTitles.contains(normalizedTargetTitle) { return false }
+            }
+            return true
+        }
+
+        return candidates.min { lhs, rhs in
+            guard let targetDate = target.airingAt else { return lhs.airingAt < rhs.airingAt }
+            return abs(lhs.airingAt.timeIntervalSince(targetDate))
+                < abs(rhs.airingAt.timeIntervalSince(targetDate))
+        }
+    }
+
+    private func normalizedNotificationTitle(_ value: String) -> String {
+        value
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+            .replacingOccurrences(of: "[^a-z0-9]+", with: "", options: .regularExpression)
+    }
+#endif
     
     private var loadingView: some View {
         VStack(spacing: 16) {
@@ -141,7 +378,7 @@ struct ScheduleView: View {
         EclipseEmptyState(
             icon: "calendar",
             title: "No Upcoming Episodes",
-            message: "No \(selectedScheduleMode.displayName.lowercased()) episodes scheduled in the next week."
+            message: "No \(selectedScheduleMode.displayName.lowercased()) episodes scheduled in the next \(scheduleWindow.rawValue) days."
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -317,39 +554,50 @@ struct ScheduleView: View {
     }
     
     private func scheduleItemCard(item: ScheduleEntry) -> some View {
-        Button {
-            guard loadingItemId == nil else { return }
-            loadingItemId = item.id
-            Task {
-                let result = await viewModel.lookupTMDBResult(for: item)
-                await MainActor.run {
-                    loadingItemId = nil
-                    if let result = result {
-                        selectedTMDBResult = result
-                        showingMediaDetail = true
-                    } else {
-                        noTMDBAlertTitle = item.title
-                        showNoTMDBAlert = true
+        HStack(spacing: 4) {
+            Button {
+                guard loadingItemId == nil else { return }
+#if !os(tvOS)
+                mediaDetailNotificationTarget = nil
+#endif
+                loadingItemId = item.id
+                Task {
+                    let result = await viewModel.lookupTMDBResult(for: item)
+                    await MainActor.run {
+                        loadingItemId = nil
+                        if let result = result {
+                            selectedTMDBResult = result
+                            showingMediaDetail = true
+                        } else {
+                            noTMDBAlertTitle = item.title
+                            showNoTMDBAlert = true
+                        }
                     }
                 }
+            } label: {
+                compactScheduleItemContent(item: item)
             }
-        } label: {
-            compactScheduleItemContent(item: item)
-        }
 #if os(tvOS)
-        .buttonStyle(.card)
+            .buttonStyle(.card)
 #else
-        .buttonStyle(.plain)
+            .buttonStyle(.plain)
 #endif
-        .opacity(loadingItemId == item.id ? 0.6 : 1.0)
-        .overlay {
-            if loadingItemId == item.id {
-                EclipseLoadingIndicator()
-                    .tint(.white)
+            .opacity(loadingItemId == item.id ? 0.6 : 1.0)
+            .overlay {
+                if loadingItemId == item.id {
+                    EclipseLoadingIndicator()
+                        .tint(.white)
+                }
             }
+            .disabled(loadingItemId != nil)
+
+#if !os(tvOS)
+            scheduleNotificationButton(for: item)
+#endif
         }
+        .padding(12)
+        .glassCard(cornerRadius: EclipseRadius.card)
         .animation(.easeInOut(duration: 0.2), value: loadingItemId)
-        .disabled(loadingItemId != nil)
     }
     
     private func compactScheduleItemContent(item: ScheduleEntry) -> some View {
@@ -379,11 +627,13 @@ struct ScheduleView: View {
                         .font(.system(size: 11, weight: .semibold))
                     Text(formattedTime(for: item))
                         .font(.caption.weight(.semibold))
+                        .lineLimit(1)
                 }
                 .foregroundColor(.white)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 5)
                 .background(Capsule().fill(Color.white.opacity(0.12)))
+                .fixedSize(horizontal: true, vertical: false)
 
                 if let countdown = countdownLabel(for: item) {
                     Text(countdown)
@@ -392,9 +642,83 @@ struct ScheduleView: View {
                 }
             }
         }
-        .padding(12)
-        .glassCard(cornerRadius: EclipseRadius.card)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
+
+#if !os(tvOS)
+    @ViewBuilder
+    private func scheduleNotificationButton(for item: ScheduleEntry) -> some View {
+        let state = notificationManager.episodeState(for: item)
+        if state != .unavailable {
+            Button {
+                guard updatingNotificationEntryIDs.insert(item.id).inserted else { return }
+                Task {
+                    let result = await notificationManager.toggleEpisodeReminder(for: item)
+                    notificationNotice = LocalNotificationNotice.from(result)
+                    updatingNotificationEntryIDs.remove(item.id)
+                    if result == .enabled,
+                       notificationManager.episodeState(for: item) == .explicit,
+                       item.tmdbId == nil {
+                        Task(priority: .utility) {
+                            guard let resolved = await viewModel.lookupTMDBResult(for: item) else { return }
+                            await notificationManager.enrichEpisodeReminderTMDBIdentity(
+                                for: item,
+                                result: resolved
+                            )
+                        }
+                    }
+                }
+            } label: {
+                ZStack {
+                    if updatingNotificationEntryIDs.contains(item.id) {
+                        ProgressView()
+                            .tint(notificationColor(for: state))
+                    } else {
+                        Image(systemName: notificationIcon(for: state))
+                            .font(.system(size: 17, weight: .semibold))
+                            .foregroundColor(notificationColor(for: state))
+                    }
+                }
+                .frame(width: 44, height: 44)
+                .background(Color.white.opacity(0.07), in: Circle())
+                .contentShape(Circle())
+            }
+            .buttonStyle(.plain)
+            .disabled(updatingNotificationEntryIDs.contains(item.id))
+            .accessibilityLabel(notificationAccessibilityLabel(for: item, state: state))
+            .accessibilityHint(state == .followed ? "Mutes this episode without unfollowing the show." : "Updates the local reminder for this episode.")
+        }
+    }
+
+    private func notificationIcon(for state: LocalEpisodeNotificationState) -> String {
+        switch state {
+        case .explicit, .followed: return "bell.fill"
+        case .muted: return "bell.slash"
+        case .off, .unavailable: return "bell"
+        }
+    }
+
+    private func notificationColor(for state: LocalEpisodeNotificationState) -> Color {
+        switch state {
+        case .explicit, .followed: return accentColorManager.currentAccentColor
+        case .muted: return .white.opacity(0.38)
+        case .off, .unavailable: return .white.opacity(0.70)
+        }
+    }
+
+    private func notificationAccessibilityLabel(
+        for item: ScheduleEntry,
+        state: LocalEpisodeNotificationState
+    ) -> String {
+        let episode = item.episode > 0 ? "episode \(item.episode)" : "this episode"
+        switch state {
+        case .explicit: return "Remove reminder for \(episode) of \(item.title)"
+        case .followed: return "Mute \(episode) of \(item.title)"
+        case .muted: return "Restore reminder for \(episode) of \(item.title)"
+        case .off, .unavailable: return "Notify when \(episode) of \(item.title) airs"
+        }
+    }
+#endif
 
     @ViewBuilder
     private func schedulePoster(urlString: String?) -> some View {

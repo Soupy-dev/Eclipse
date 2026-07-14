@@ -762,6 +762,7 @@ private struct TrackerSyncToolsSheet: View {
                 Text("This writes progress to the selected destination but never deletes entries or downgrades progress.")
             }
         }
+        .navigationViewStyle(StackNavigationViewStyle())
     }
 
     @ViewBuilder

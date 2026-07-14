@@ -69,6 +69,17 @@ struct SearchView: View {
         }
 #endif
     }
+
+    private var searchGridColumns: [GridItem] {
+#if os(tvOS)
+        Array(repeating: GridItem(.flexible(), spacing: 16), count: columnsCount)
+#else
+        if isIPad {
+            return [GridItem(.adaptive(minimum: 154, maximum: 190), spacing: 24)]
+        }
+        return Array(repeating: GridItem(.flexible(), spacing: 16), count: columnsCount)
+#endif
+    }
     
     var body: some View {
 #if os(tvOS)
@@ -290,7 +301,10 @@ struct SearchView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ZStack(alignment: .topTrailing) {
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 16), count: columnsCount), spacing: 16) {
+                    LazyVGrid(
+                        columns: searchGridColumns,
+                        spacing: isIPad ? 24 : 16
+                    ) {
                         ForEach(filteredResults, id: \.stableIdentity) { result in
                             SearchResultCard(result: result)
 #if os(tvOS)
@@ -663,16 +677,21 @@ struct SearchView: View {
 private enum BrowseMediaType: String, CaseIterable, Identifiable {
     case movie = "Movies"
     case tv = "TV Shows"
+    case anime = "Anime"
 
-    var id: String { tmdbValue }
+    var id: String { rawValue }
 
     var tmdbValue: String {
         switch self {
         case .movie:
             return "movie"
-        case .tv:
+        case .tv, .anime:
             return "tv"
         }
+    }
+
+    var isAnime: Bool {
+        self == .anime
     }
 
     var genres: [BrowseGenre] {
@@ -681,13 +700,79 @@ private enum BrowseMediaType: String, CaseIterable, Identifiable {
             return BrowseGenre.movieGenres
         case .tv:
             return BrowseGenre.tvGenres
+        case .anime:
+            return BrowseGenre.animeGenres
         }
+    }
+
+    var countries: [BrowseCountry] {
+        isAnime ? BrowseCountry.animeCountries : BrowseCountry.all
+    }
+}
+
+private enum BrowseSort: String, CaseIterable, Identifiable {
+    case popularity = "popularity.desc"
+    case newest = "newest"
+    case oldest = "oldest"
+    case rank = "vote_average.desc"
+    case title = "title.asc"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .popularity:
+            return "Most Popular"
+        case .newest:
+            return "Newest"
+        case .oldest:
+            return "Oldest"
+        case .rank:
+            return "Rank"
+        case .title:
+            return "Title A-Z"
+        }
+    }
+
+    func tmdbValue(for mediaType: BrowseMediaType) -> String {
+        switch self {
+        case .popularity:
+            return "popularity.desc"
+        case .newest:
+            return mediaType.tmdbValue == "tv" ? "first_air_date.desc" : "primary_release_date.desc"
+        case .oldest:
+            return mediaType.tmdbValue == "tv" ? "first_air_date.asc" : "primary_release_date.asc"
+        case .rank:
+            return "vote_average.desc"
+        case .title:
+            return mediaType.tmdbValue == "tv" ? "name.asc" : "original_title.asc"
+        }
+    }
+
+    var minimumVoteCount: Int? {
+        self == .rank ? 100 : nil
     }
 }
 
 private struct BrowseGenre: Identifiable, Hashable {
-    let id: Int
+    let id: String
     let name: String
+    let tmdbGenreID: Int?
+    let keyword: String?
+
+    init(id: Int, name: String) {
+        self.id = "tmdb-\(id)"
+        self.name = name
+        self.tmdbGenreID = id
+        self.keyword = nil
+    }
+
+    init(keyword: String, name: String) {
+        self.id = "keyword-\(keyword)"
+        self.name = name
+        self.tmdbGenreID = nil
+        self.keyword = keyword
+    }
 
     static let movieGenres: [BrowseGenre] = [
         BrowseGenre(id: 28, name: "Action"),
@@ -729,6 +814,38 @@ private struct BrowseGenre: Identifiable, Hashable {
         BrowseGenre(id: 10768, name: "War & Politics"),
         BrowseGenre(id: 37, name: "Western")
     ]
+
+    // TMDB's standard TV genres are broad, so Anime mode also exposes common
+    // anime tags as TMDB keywords. The keyword IDs are resolved at request time
+    // because TMDB does not provide stable genre IDs for these tags.
+    static let animeGenres: [BrowseGenre] = [
+        BrowseGenre(id: 10759, name: "Action & Adventure"),
+        BrowseGenre(id: 35, name: "Comedy"),
+        BrowseGenre(id: 18, name: "Drama"),
+        BrowseGenre(id: 10751, name: "Family"),
+        BrowseGenre(id: 10762, name: "Kids"),
+        BrowseGenre(id: 9648, name: "Mystery"),
+        BrowseGenre(id: 10765, name: "Sci-Fi & Fantasy"),
+        BrowseGenre(keyword: "isekai", name: "Isekai"),
+        BrowseGenre(keyword: "reincarnation", name: "Reincarnation"),
+        BrowseGenre(keyword: "slice of life", name: "Slice of Life"),
+        BrowseGenre(keyword: "romance", name: "Romance"),
+        BrowseGenre(keyword: "fantasy", name: "Fantasy"),
+        BrowseGenre(keyword: "supernatural", name: "Supernatural"),
+        BrowseGenre(keyword: "psychological", name: "Psychological"),
+        BrowseGenre(keyword: "mecha", name: "Mecha"),
+        BrowseGenre(keyword: "sports", name: "Sports"),
+        BrowseGenre(keyword: "school", name: "School"),
+        BrowseGenre(keyword: "historical", name: "Historical"),
+        BrowseGenre(keyword: "harem", name: "Harem"),
+        BrowseGenre(keyword: "magical girl", name: "Magical Girl"),
+        BrowseGenre(keyword: "music", name: "Music"),
+        BrowseGenre(keyword: "horror", name: "Horror"),
+        BrowseGenre(keyword: "samurai", name: "Samurai"),
+        BrowseGenre(keyword: "super power", name: "Super Power"),
+        BrowseGenre(keyword: "time travel", name: "Time Travel"),
+        BrowseGenre(keyword: "video game", name: "Video Game")
+    ]
 }
 
 private struct BrowseCountry: Identifiable, Hashable {
@@ -753,6 +870,13 @@ private struct BrowseCountry: Identifiable, Hashable {
         BrowseCountry(code: "AU", name: "Australia"),
         BrowseCountry(code: "TH", name: "Thailand")
     ]
+
+    static let animeCountries: [BrowseCountry] = [
+        BrowseCountry(code: "JP", name: "Japan"),
+        BrowseCountry(code: "CN", name: "China"),
+        BrowseCountry(code: "KR", name: "South Korea"),
+        BrowseCountry(code: "TW", name: "Taiwan")
+    ]
 }
 
 private struct BrowseMediaView: View {
@@ -764,9 +888,12 @@ private struct BrowseMediaView: View {
     @AppStorage("tmdbLanguage") private var selectedLanguage = "en-US"
 
     @State private var mediaType: BrowseMediaType = .movie
-    @State private var selectedGenreIds: Set<Int> = []
+    @State private var selectedGenreKeys: Set<String> = []
+    @State private var excludedGenreKeys: Set<String> = []
     @State private var selectedYears: Set<Int> = []
+    @State private var excludedYears: Set<Int> = []
     @State private var selectedCountryCode = ""
+    @State private var sort: BrowseSort = .popularity
     @State private var results: [TMDBSearchResult] = []
     @State private var currentPage = 1
     @State private var hasMorePages = true
@@ -800,7 +927,14 @@ private struct BrowseMediaView: View {
     }
 
     private var gridColumns: [GridItem] {
+#if os(tvOS)
         Array(repeating: GridItem(.flexible(), spacing: 16), count: columnsCount)
+#else
+        if isIPad {
+            return [GridItem(.adaptive(minimum: 154, maximum: 190), spacing: 24)]
+        }
+        return Array(repeating: GridItem(.flexible(), spacing: 16), count: columnsCount)
+#endif
     }
 
     private var availableYears: [Int] {
@@ -810,9 +944,16 @@ private struct BrowseMediaView: View {
 
     private var selectedGenreName: String {
         let selectedNames = mediaType.genres
-            .filter { selectedGenreIds.contains($0.id) }
+            .filter { selectedGenreKeys.contains($0.id) }
             .map(\.name)
-        return selectionSummary(values: selectedNames, emptyTitle: "Any Genre")
+        return selectionSummary(values: selectedNames, emptyTitle: mediaType.isAnime ? "Any Anime Genre" : "Any Genre")
+    }
+
+    private var excludedGenreName: String {
+        let excludedNames = mediaType.genres
+            .filter { excludedGenreKeys.contains($0.id) }
+            .map(\.name)
+        return selectionSummary(values: excludedNames, emptyTitle: "None")
     }
 
     private var selectedYearName: String {
@@ -822,12 +963,24 @@ private struct BrowseMediaView: View {
         return selectionSummary(values: years, emptyTitle: "Any Year")
     }
 
+    private var excludedYearName: String {
+        let years = excludedYears
+            .sorted(by: >)
+            .map(String.init)
+        return selectionSummary(values: years, emptyTitle: "None")
+    }
+
     private var selectedCountryName: String {
-        BrowseCountry.all.first { $0.code == selectedCountryCode }?.name ?? "Any Country"
+        mediaType.countries.first { $0.code == selectedCountryCode }?.name ?? "Any Country"
     }
 
     private var hasActiveFilters: Bool {
-        !selectedGenreIds.isEmpty || !selectedYears.isEmpty || !selectedCountryCode.isEmpty
+        !selectedGenreKeys.isEmpty
+            || !excludedGenreKeys.isEmpty
+            || !selectedYears.isEmpty
+            || !excludedYears.isEmpty
+            || !selectedCountryCode.isEmpty
+            || sort != .popularity
     }
 
     var body: some View {
@@ -860,13 +1013,22 @@ private struct BrowseMediaView: View {
         .onChangeComp(of: mediaType) { _, _ in
             handleMediaTypeChange()
         }
-        .onChangeComp(of: selectedGenreIds) { _, _ in
+        .onChangeComp(of: selectedGenreKeys) { _, _ in
+            reloadResults()
+        }
+        .onChangeComp(of: excludedGenreKeys) { _, _ in
             reloadResults()
         }
         .onChangeComp(of: selectedYears) { _, _ in
             reloadResults()
         }
+        .onChangeComp(of: excludedYears) { _, _ in
+            reloadResults()
+        }
         .onChangeComp(of: selectedCountryCode) { _, _ in
+            reloadResults()
+        }
+        .onChangeComp(of: sort) { _, _ in
             reloadResults()
         }
         .onChangeComp(of: selectedLanguage) { _, _ in
@@ -892,8 +1054,11 @@ private struct BrowseMediaView: View {
                 spacing: 10
             ) {
                 genreMenu
+                excludedGenreMenu
                 yearMenu
+                excludedYearMenu
                 countryMenu
+                sortMenu
 
                 if hasActiveFilters {
                     resetFiltersButton
@@ -904,17 +1069,37 @@ private struct BrowseMediaView: View {
 
     private var genreMenu: some View {
         Menu {
-            Button(action: { selectedGenreIds.removeAll() }) {
-                menuRow("Any Genre", isSelected: selectedGenreIds.isEmpty)
+            Button(action: { selectedGenreKeys.removeAll() }) {
+                menuRow("Any Genre", isSelected: selectedGenreKeys.isEmpty)
             }
 
             ForEach(mediaType.genres) { genre in
-                Button(action: { toggleGenre(genre.id) }) {
-                    menuRow(genre.name, isSelected: selectedGenreIds.contains(genre.id))
+                Button(action: { toggleGenre(genre) }) {
+                    menuRow(genre.name, isSelected: selectedGenreKeys.contains(genre.id))
                 }
             }
         } label: {
-            filterChip(title: "Genre", value: selectedGenreName, systemImage: "theatermasks.fill")
+            filterChip(
+                title: mediaType.isAnime ? "Anime Genres" : "Genres",
+                value: selectedGenreName,
+                systemImage: "theatermasks.fill"
+            )
+        }
+    }
+
+    private var excludedGenreMenu: some View {
+        Menu {
+            Button(action: { excludedGenreKeys.removeAll() }) {
+                menuRow("Exclude None", isSelected: excludedGenreKeys.isEmpty)
+            }
+
+            ForEach(mediaType.genres) { genre in
+                Button(action: { toggleGenre(genre, excluded: true) }) {
+                    menuRow(genre.name, isSelected: excludedGenreKeys.contains(genre.id))
+                }
+            }
+        } label: {
+            filterChip(title: "Exclude Genres", value: excludedGenreName, systemImage: "theatermasks")
         }
     }
 
@@ -934,19 +1119,47 @@ private struct BrowseMediaView: View {
         }
     }
 
+    private var excludedYearMenu: some View {
+        Menu {
+            Button(action: { excludedYears.removeAll() }) {
+                menuRow("Exclude None", isSelected: excludedYears.isEmpty)
+            }
+
+            ForEach(availableYears, id: \.self) { year in
+                Button(action: { toggleYear(year, excluded: true) }) {
+                    menuRow("\(year)", isSelected: excludedYears.contains(year))
+                }
+            }
+        } label: {
+            filterChip(title: "Exclude Years", value: excludedYearName, systemImage: "calendar.badge.minus")
+        }
+    }
+
     private var countryMenu: some View {
         Menu {
             Button(action: { selectedCountryCode = "" }) {
                 menuRow("Any Country", isSelected: selectedCountryCode.isEmpty)
             }
 
-            ForEach(BrowseCountry.all) { country in
+            ForEach(mediaType.countries) { country in
                 Button(action: { selectedCountryCode = country.code }) {
                     menuRow(country.name, isSelected: selectedCountryCode == country.code)
                 }
             }
         } label: {
             filterChip(title: "Country", value: selectedCountryName, systemImage: "globe")
+        }
+    }
+
+    private var sortMenu: some View {
+        Menu {
+            ForEach(BrowseSort.allCases) { option in
+                Button(action: { sort = option }) {
+                    menuRow(option.title, isSelected: sort == option)
+                }
+            }
+        } label: {
+            filterChip(title: "Order", value: sort.title, systemImage: "arrow.up.arrow.down")
         }
     }
 
@@ -1019,7 +1232,7 @@ private struct BrowseMediaView: View {
     }
 
     private var resultsGrid: some View {
-        LazyVGrid(columns: gridColumns, spacing: 16) {
+        LazyVGrid(columns: gridColumns, spacing: isIPad ? 24 : 16) {
             ForEach(results, id: \.stableIdentity) { result in
                 SearchResultCard(result: result)
                     .onAppear {
@@ -1075,19 +1288,40 @@ private struct BrowseMediaView: View {
     }
 
     private func handleMediaTypeChange() {
-        let validGenreIds = Set(mediaType.genres.map(\.id))
-        let filteredGenreIds = selectedGenreIds.intersection(validGenreIds)
-        if filteredGenreIds != selectedGenreIds {
-            selectedGenreIds = filteredGenreIds
-        } else {
+        let validGenreKeys = Set(mediaType.genres.map(\.id))
+        let filteredGenreKeys = selectedGenreKeys.intersection(validGenreKeys)
+        let filteredExcludedGenreKeys = excludedGenreKeys.intersection(validGenreKeys)
+        let validCountryCodes = Set(mediaType.countries.map(\.code))
+        var nextCountryCode = selectedCountryCode
+        if mediaType.isAnime, nextCountryCode.isEmpty {
+            nextCountryCode = "JP"
+        } else if !nextCountryCode.isEmpty, !validCountryCodes.contains(nextCountryCode) {
+            nextCountryCode = ""
+        }
+
+        if filteredGenreKeys != selectedGenreKeys {
+            selectedGenreKeys = filteredGenreKeys
+        }
+        if filteredExcludedGenreKeys != excludedGenreKeys {
+            excludedGenreKeys = filteredExcludedGenreKeys
+        }
+        if nextCountryCode != selectedCountryCode {
+            selectedCountryCode = nextCountryCode
+        }
+        if filteredGenreKeys == selectedGenreKeys,
+           filteredExcludedGenreKeys == excludedGenreKeys,
+           nextCountryCode == selectedCountryCode {
             reloadResults()
         }
     }
 
     private func resetFilters() {
-        selectedGenreIds.removeAll()
+        selectedGenreKeys.removeAll()
+        excludedGenreKeys.removeAll()
         selectedYears.removeAll()
-        selectedCountryCode = ""
+        excludedYears.removeAll()
+        selectedCountryCode = mediaType.isAnime ? "JP" : ""
+        sort = .popularity
     }
 
     private func reloadResults() {
@@ -1107,9 +1341,13 @@ private struct BrowseMediaView: View {
         requestSerial += 1
         let serial = requestSerial
         let mediaType = self.mediaType.tmdbValue
-        let genreIds = selectedGenreIds.sorted()
+        let isAnime = self.mediaType.isAnime
+        let selectedGenres = self.mediaType.genres.filter { selectedGenreKeys.contains($0.id) }
+        let excludedGenres = self.mediaType.genres.filter { excludedGenreKeys.contains($0.id) }
         let years = selectedYears.sorted(by: >)
+        let excludedYears = self.excludedYears
         let country = selectedCountryCode.isEmpty ? nil : selectedCountryCode
+        let sort = self.sort
 
         isLoading = true
         errorMessage = nil
@@ -1118,22 +1356,28 @@ private struct BrowseMediaView: View {
             do {
                 let pageResult = try await fetchDiscoverPage(
                     mediaType: mediaType,
-                    genreIds: genreIds,
+                    isAnime: isAnime,
+                    genres: selectedGenres,
+                    excludedGenres: excludedGenres,
                     years: years,
+                    excludedYears: excludedYears,
                     originCountry: country,
+                    sort: sort,
                     page: page
                 )
-                let filtered = contentFilter.filterSearchResults(pageResult.results)
+                let filtered = contentFilter.filterSearchResults(
+                    filterExcludedResults(
+                        pageResult.results,
+                        excludedGenreIds: excludedGenres.compactMap(\.tmdbGenreID),
+                        excludedYears: excludedYears
+                    )
+                )
 
                 await MainActor.run {
                     guard serial == requestSerial else { return }
 
-                    if replacing {
-                        results = filtered
-                    } else {
-                        let existingIds = Set(results.map(\.stableIdentity))
-                        results.append(contentsOf: filtered.filter { !existingIds.contains($0.stableIdentity) })
-                    }
+                    let combinedResults = replacing ? filtered : results + filtered
+                    results = sortedDeduplicatedResults(combinedResults, by: sort)
 
                     currentPage = page
                     hasMorePages = pageResult.hasMore
@@ -1165,19 +1409,50 @@ private struct BrowseMediaView: View {
         return "\(firstValue) +\(values.count - 1)"
     }
 
-    private func toggleGenre(_ genreId: Int) {
-        if selectedGenreIds.contains(genreId) {
-            selectedGenreIds.remove(genreId)
+    private func toggleGenre(_ genre: BrowseGenre) {
+        toggleGenre(genre, excluded: false)
+    }
+
+    private func toggleGenre(_ genre: BrowseGenre, excluded: Bool) {
+        let genreKey = genre.id
+        if excluded {
+            if excludedGenreKeys.contains(genreKey) {
+                excludedGenreKeys.remove(genreKey)
+            } else {
+                excludedGenreKeys.insert(genreKey)
+                selectedGenreKeys.remove(genreKey)
+            }
+            return
+        }
+
+        if selectedGenreKeys.contains(genreKey) {
+            selectedGenreKeys.remove(genreKey)
         } else {
-            selectedGenreIds.insert(genreId)
+            selectedGenreKeys.insert(genreKey)
+            excludedGenreKeys.remove(genreKey)
         }
     }
 
     private func toggleYear(_ year: Int) {
+        toggleYear(year, excluded: false)
+    }
+
+    private func toggleYear(_ year: Int, excluded: Bool) {
+        if excluded {
+            if excludedYears.contains(year) {
+                excludedYears.remove(year)
+            } else {
+                excludedYears.insert(year)
+                selectedYears.remove(year)
+            }
+            return
+        }
+
         if selectedYears.contains(year) {
             selectedYears.remove(year)
         } else {
             selectedYears.insert(year)
+            excludedYears.remove(year)
         }
     }
 
@@ -1188,29 +1463,61 @@ private struct BrowseMediaView: View {
 
     private func fetchDiscoverPage(
         mediaType: String,
-        genreIds: [Int],
+        isAnime: Bool,
+        genres: [BrowseGenre],
+        excludedGenres: [BrowseGenre],
         years: [Int],
+        excludedYears: Set<Int>,
         originCountry: String?,
+        sort: BrowseSort,
         page: Int
     ) async throws -> BrowsePageResult {
-        guard !years.isEmpty else {
+        let selectedKeywordNames = genres.compactMap(\.keyword)
+        let excludedKeywordNames = excludedGenres.compactMap(\.keyword)
+        let keywordNames = Array(Set(selectedKeywordNames + excludedKeywordNames)).sorted()
+        let keywordIDsByName = await tmdbService.keywordIDs(for: keywordNames)
+        let selectedKeywordIDs = selectedKeywordNames.compactMap { keywordIDsByName[$0] }
+        let excludedKeywordIDs = excludedKeywordNames.compactMap { keywordIDsByName[$0] }
+        let effectiveGenreIds = Array(Set(genres.compactMap(\.tmdbGenreID) + (isAnime ? [16] : []))).sorted()
+        let excludedGenreIds = Array(Set(excludedGenres.compactMap(\.tmdbGenreID))).sorted()
+        let effectiveCountry = originCountry
+        let effectiveLanguage = isAnime ? animeLanguage(for: effectiveCountry) : nil
+        let requestedYears = years.filter { !excludedYears.contains($0) }
+
+        guard !requestedYears.isEmpty || years.isEmpty else {
+            return BrowsePageResult(results: [], hasMore: false)
+        }
+
+        guard !requestedYears.isEmpty else {
             let fetched = try await tmdbService.discoverMedia(
                 mediaType: mediaType,
-                genreIds: genreIds,
-                originCountry: originCountry,
+                genreIds: effectiveGenreIds,
+                excludedGenreIds: excludedGenreIds,
+                keywordIds: selectedKeywordIDs,
+                excludedKeywordIds: excludedKeywordIDs,
+                originCountry: effectiveCountry,
+                originalLanguage: effectiveLanguage,
+                sortBy: sort.tmdbValue(for: self.mediaType),
+                minimumVoteCount: sort.minimumVoteCount,
                 page: page
             )
             return BrowsePageResult(results: fetched, hasMore: fetched.count >= 20)
         }
 
         return try await withThrowingTaskGroup(of: BrowsePageResult.self) { group in
-            for year in years {
+            for year in requestedYears {
                 group.addTask {
                     let fetched = try await tmdbService.discoverMedia(
                         mediaType: mediaType,
-                        genreIds: genreIds,
+                        genreIds: effectiveGenreIds,
+                        excludedGenreIds: excludedGenreIds,
+                        keywordIds: selectedKeywordIDs,
+                        excludedKeywordIds: excludedKeywordIDs,
                         year: year,
-                        originCountry: originCountry,
+                        originCountry: effectiveCountry,
+                        originalLanguage: effectiveLanguage,
+                        sortBy: sort.tmdbValue(for: self.mediaType),
+                        minimumVoteCount: sort.minimumVoteCount,
                         page: page
                     )
                     return BrowsePageResult(results: fetched, hasMore: fetched.count >= 20)
@@ -1226,19 +1533,69 @@ private struct BrowseMediaView: View {
             }
 
             return BrowsePageResult(
-                results: sortedDeduplicatedResults(combined),
+                results: sortedDeduplicatedResults(combined, by: sort),
                 hasMore: hasMore
             )
         }
     }
 
-    private func sortedDeduplicatedResults(_ fetched: [TMDBSearchResult]) -> [TMDBSearchResult] {
+    private func filterExcludedResults(
+        _ fetched: [TMDBSearchResult],
+        excludedGenreIds: [Int],
+        excludedYears: Set<Int>
+    ) -> [TMDBSearchResult] {
+        fetched.filter { result in
+            if let year = Int(result.displayDate.prefix(4)), excludedYears.contains(year) {
+                return false
+            }
+
+            if let genreIds = result.genreIds,
+               genreIds.contains(where: excludedGenreIds.contains) {
+                return false
+            }
+
+            return true
+        }
+    }
+
+    private func animeLanguage(for country: String?) -> String? {
+        switch country {
+        case "JP": return "ja"
+        case "CN", "TW": return "zh"
+        case "KR": return "ko"
+        default: return nil
+        }
+    }
+
+    private func sortedDeduplicatedResults(_ fetched: [TMDBSearchResult], by sort: BrowseSort) -> [TMDBSearchResult] {
         var seen = Set<String>()
         let uniqueResults = fetched.filter { result in
             seen.insert(result.stableIdentity).inserted
         }
 
         return uniqueResults.sorted { lhs, rhs in
+            switch sort {
+            case .newest, .oldest:
+                if lhs.displayDate != rhs.displayDate {
+                    if lhs.displayDate.isEmpty { return false }
+                    if rhs.displayDate.isEmpty { return true }
+                    return sort == .newest
+                        ? lhs.displayDate > rhs.displayDate
+                        : lhs.displayDate < rhs.displayDate
+                }
+            case .rank:
+                if lhs.voteAverage != rhs.voteAverage {
+                    return (lhs.voteAverage ?? 0) > (rhs.voteAverage ?? 0)
+                }
+            case .title:
+                let comparison = lhs.displayTitle.localizedCaseInsensitiveCompare(rhs.displayTitle)
+                if comparison != .orderedSame {
+                    return comparison == .orderedAscending
+                }
+            case .popularity:
+                break
+            }
+
             if lhs.popularity != rhs.popularity {
                 return lhs.popularity > rhs.popularity
             }

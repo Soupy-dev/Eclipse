@@ -1,6 +1,6 @@
 import Foundation
 
-enum ScheduleMode: String, CaseIterable, Identifiable {
+enum ScheduleMode: String, CaseIterable, Identifiable, Sendable {
     case anime
     case western
     case combined
@@ -38,7 +38,46 @@ enum ScheduleMode: String, CaseIterable, Identifiable {
     }
 }
 
-enum ScheduleSource {
+enum ScheduleWindow: Int, CaseIterable, Identifiable, Sendable {
+    case sevenDays = 7
+    case fourteenDays = 14
+    case twentyOneDays = 21
+    case thirtyDays = 30
+
+    static let storageKey = "scheduleWindowDays"
+    static let defaultValue = ScheduleWindow.sevenDays
+
+    var id: Int { rawValue }
+
+    var displayName: String { "\(rawValue) Days" }
+
+    var description: String {
+        switch self {
+        case .sevenDays:
+            return "Default · Fastest loading"
+        case .fourteenDays:
+            return "Two weeks of upcoming episodes"
+        case .twentyOneDays:
+            return "Three weeks · More schedule data"
+        case .thirtyDays:
+            return "Longest range · Heaviest loading"
+        }
+    }
+
+    static func sanitized(_ rawValue: Int?) -> ScheduleWindow {
+        ScheduleWindow(rawValue: rawValue ?? 0) ?? defaultValue
+    }
+
+    static func sanitizedDays(_ rawValue: Int?) -> Int {
+        sanitized(rawValue).rawValue
+    }
+
+    static var current: ScheduleWindow {
+        sanitized(UserDefaults.standard.object(forKey: storageKey) as? Int)
+    }
+}
+
+enum ScheduleSource: Hashable, Sendable {
     case anime
     case western
 
@@ -52,7 +91,36 @@ enum ScheduleSource {
     }
 }
 
-struct ScheduleEntry: Identifiable {
+struct NotificationScheduleSnapshot {
+    let entries: [ScheduleEntry]
+    let dayCount: Int
+    let successfulSources: Set<ScheduleSource>
+    let authoritativeSources: Set<ScheduleSource>
+}
+
+private struct ScheduleLoadResult {
+    let entries: [ScheduleEntry]
+    let successfulSources: Set<ScheduleSource>
+    let authoritativeSources: Set<ScheduleSource>
+}
+
+private struct AnimeScheduleLoadResult {
+    let entries: [ScheduleEntry]
+    let isAuthoritativeForNotifications: Bool
+}
+
+private enum ScheduleSourceLoadError: LocalizedError {
+    case retryDeferred(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .retryDeferred(let sourceName):
+            return "\(sourceName) schedule refresh is waiting briefly after a provider failure."
+        }
+    }
+}
+
+struct ScheduleEntry: Identifiable, Sendable {
     let id: String
     let source: ScheduleSource
     let sourceMediaId: Int
@@ -82,7 +150,7 @@ struct ScheduleEntry: Identifiable {
         romajiTitle = animeEntry.romajiTitle
         nativeTitle = animeEntry.nativeTitle
         format = animeEntry.format
-        hasKnownAiringTime = true
+        hasKnownAiringTime = animeEntry.hasKnownAiringTime
         isStreamingRelease = false
         tmdbId = nil
     }
@@ -137,12 +205,28 @@ final class ScheduleViewModel: ObservableObject {
     @Published var dayBuckets: [DayBucket] = []
     @Published var currentDayAnchor = Date()
     private(set) var loadedScheduleMode: ScheduleMode?
+    private(set) var loadedScheduleDayCount: Int?
 
-    private let scheduleDayCount = 7
-    private var animeScheduleEntries: [ScheduleEntry]?
+    private let scheduleCacheMaxAge: TimeInterval = 6 * 60 * 60
+    private let animeAuthoritativeRetryInterval: TimeInterval = 15 * 60
+    private let failedSourceRetryInterval: TimeInterval = 60
+    private var animeScheduleResult: AnimeScheduleLoadResult?
+    private var animeScheduleFetchedAt: Date?
+    private var animeScheduleDayCount = 0
+    private var animeScheduleLastAttemptAt: Date?
+    private var animeScheduleLastFailureAt: Date?
+    private var animeScheduleLoadTask: Task<AnimeScheduleLoadResult, Error>?
+    private var animeScheduleLoadID: UUID?
     private var westernScheduleEntries: [ScheduleEntry]?
+    private var westernScheduleFetchedAt: Date?
+    private var westernScheduleDayCount = 0
+    private var westernScheduleLastAttemptAt: Date?
+    private var westernScheduleLastFailureAt: Date?
+    private var westernScheduleLoadTask: Task<[ScheduleEntry], Error>?
+    private var westernScheduleLoadID: UUID?
     private var activeLoadID: UUID?
     private var activeLoadMode: ScheduleMode?
+    private var activeLoadDayCount: Int?
     private var activePosterHydrationID: UUID?
     private var posterHydrationTask: Task<Void, Never>?
     private var posterHydrationAttemptedTMDBIDs = Set<Int>()
@@ -150,10 +234,18 @@ final class ScheduleViewModel: ObservableObject {
 
     init() {}
 
-    func loadSchedule(mode: ScheduleMode, localTimeZone: Bool, forceRefresh: Bool = false) async {
+    func loadSchedule(
+        mode: ScheduleMode,
+        localTimeZone: Bool,
+        forceRefresh: Bool = false
+    ) async {
+        let requestedDayCount = ScheduleWindow.current.rawValue
         let loadID = UUID()
         let shouldStart = await MainActor.run { () -> Bool in
-            if !forceRefresh, activeLoadID != nil, activeLoadMode == mode {
+            if !forceRefresh,
+               activeLoadID != nil,
+               activeLoadMode == mode,
+               activeLoadDayCount == requestedDayCount {
                 return false
             }
             posterHydrationTask?.cancel()
@@ -161,6 +253,7 @@ final class ScheduleViewModel: ObservableObject {
             activePosterHydrationID = nil
             activeLoadID = loadID
             activeLoadMode = mode
+            activeLoadDayCount = requestedDayCount
             currentLocalTimeZone = localTimeZone
             if forceRefresh {
                 posterHydrationAttemptedTMDBIDs.removeAll(keepingCapacity: true)
@@ -172,24 +265,46 @@ final class ScheduleViewModel: ObservableObject {
         guard shouldStart else { return }
 
         do {
-            let entries = try await entries(for: mode, forceRefresh: forceRefresh)
-            await MainActor.run {
-                guard activeLoadID == loadID else { return }
+            let loadResult = try await entries(
+                for: mode,
+                dayCount: requestedDayCount,
+                forceRefresh: forceRefresh
+            )
+            let entries = loadResult.entries
+            let didPublish = await MainActor.run { () -> Bool in
+                guard activeLoadID == loadID else { return false }
                 activeLoadID = nil
                 activeLoadMode = nil
+                activeLoadDayCount = nil
                 isLoading = false
                 scheduleEntries = entries
                 loadedScheduleMode = mode
+                loadedScheduleDayCount = requestedDayCount
                 currentDayAnchor = Date()
-                updateBuckets(with: entries, localTimeZone: localTimeZone)
+                updateBuckets(
+                    with: entries,
+                    localTimeZone: localTimeZone,
+                    dayCount: requestedDayCount
+                )
                 startPosterHydrationIfNeeded(for: entries, loadID: loadID)
+                return true
             }
+            guard didPublish else { return }
+#if os(iOS)
+            await LocalNotificationManager.shared.reconcileScheduleEntries(
+                entries,
+                successfulSources: loadResult.successfulSources,
+                authoritativeSources: loadResult.authoritativeSources,
+                coveredDayCount: requestedDayCount
+            )
+#endif
         } catch {
             if Self.isIntentionalCancellation(error) {
                 await MainActor.run {
                     guard activeLoadID == loadID else { return }
                     activeLoadID = nil
                     activeLoadMode = nil
+                    activeLoadDayCount = nil
                     isLoading = false
                 }
                 return
@@ -198,35 +313,145 @@ final class ScheduleViewModel: ObservableObject {
                 guard activeLoadID == loadID else { return }
                 activeLoadID = nil
                 activeLoadMode = nil
+                activeLoadDayCount = nil
                 isLoading = false
                 errorMessage = error.localizedDescription
             }
         }
     }
 
-    private func entries(for mode: ScheduleMode, forceRefresh: Bool) async throws -> [ScheduleEntry] {
+    /// Fetches both schedule sources without replacing the schedule mode or rows
+    /// currently visible to the user. Notification subscriptions must refresh
+    /// independently from whichever Schedule tab the user last selected.
+    @MainActor
+    func notificationScheduleSnapshot(
+        dayCount: Int,
+        requiredSources: Set<ScheduleSource> = [.anime, .western],
+        forceRefreshSources: Set<ScheduleSource> = [],
+        requireAuthoritativeSources: Set<ScheduleSource> = []
+    ) async -> NotificationScheduleSnapshot {
+        // The user's selected Schedule range is also the automatic episode
+        // notification window. Callers pass it explicitly so a future path
+        // cannot silently fall back to seven days.
+        let requestedDayCount = ScheduleWindow.sanitizedDays(dayCount)
+        let needsAuthoritativeAnime = requireAuthoritativeSources.contains(.anime)
+            && animeScheduleResult?.isAuthoritativeForNotifications != true
+        let now = Date()
+        let authoritativeRetryIsDue: Bool
+        if animeScheduleResult == nil {
+            authoritativeRetryIsDue = animeScheduleLastFailureAt.map {
+                let elapsed = now.timeIntervalSince($0)
+                return elapsed < 0 || elapsed >= failedSourceRetryInterval
+            } ?? true
+        } else {
+            authoritativeRetryIsDue = animeScheduleLastAttemptAt.map {
+                let elapsed = now.timeIntervalSince($0)
+                return elapsed < 0 || elapsed >= animeAuthoritativeRetryInterval
+            } ?? true
+        }
+        let forceAnime = forceRefreshSources.contains(.anime)
+            || (needsAuthoritativeAnime && authoritativeRetryIsDue)
+
+        async let animeLoad: Void = loadAnimeSnapshotSource(
+            required: requiredSources.contains(.anime),
+            dayCount: requestedDayCount,
+            forceRefresh: forceAnime
+        )
+        async let westernLoad: Void = loadWesternSnapshotSource(
+            required: requiredSources.contains(.western),
+            dayCount: requestedDayCount,
+            forceRefresh: forceRefreshSources.contains(.western)
+        )
+        _ = await (animeLoad, westernLoad)
+
+        var entries: [ScheduleEntry] = []
+        var successfulSources = Set<ScheduleSource>()
+        var authoritativeSources = Set<ScheduleSource>()
+
+        if scheduleCacheIsFresh(
+            animeScheduleFetchedAt,
+            cachedDayCount: animeScheduleDayCount,
+            requiredDayCount: requestedDayCount
+        ), let animeResult = cachedAnimeResult(for: requestedDayCount) {
+            entries.append(contentsOf: animeResult.entries)
+            successfulSources.insert(.anime)
+            if animeResult.isAuthoritativeForNotifications {
+                authoritativeSources.insert(.anime)
+            }
+        }
+        if scheduleCacheIsFresh(
+            westernScheduleFetchedAt,
+            cachedDayCount: westernScheduleDayCount,
+            requiredDayCount: requestedDayCount
+        ), let westernEntries = cachedWesternEntries(for: requestedDayCount) {
+            entries.append(contentsOf: westernEntries)
+            successfulSources.insert(.western)
+            authoritativeSources.insert(.western)
+        }
+
+        return NotificationScheduleSnapshot(
+            entries: entries.sorted { $0.airingAt < $1.airingAt },
+            dayCount: requestedDayCount,
+            successfulSources: successfulSources,
+            authoritativeSources: authoritativeSources
+        )
+    }
+
+    @MainActor
+    private func loadAnimeSnapshotSource(required: Bool, dayCount: Int, forceRefresh: Bool) async {
+        guard required else { return }
+        _ = try? await animeEntries(dayCount: dayCount, forceRefresh: forceRefresh)
+    }
+
+    @MainActor
+    private func loadWesternSnapshotSource(required: Bool, dayCount: Int, forceRefresh: Bool) async {
+        guard required else { return }
+        _ = try? await westernEntries(dayCount: dayCount, forceRefresh: forceRefresh)
+    }
+
+    @MainActor
+    private func entries(
+        for mode: ScheduleMode,
+        dayCount: Int,
+        forceRefresh: Bool
+    ) async throws -> ScheduleLoadResult {
         switch mode {
         case .anime:
-            return try await animeEntries(forceRefresh: forceRefresh)
+            let result = try await animeEntries(dayCount: dayCount, forceRefresh: forceRefresh)
+            return ScheduleLoadResult(
+                entries: result.entries,
+                successfulSources: [.anime],
+                authoritativeSources: result.isAuthoritativeForNotifications ? [.anime] : []
+            )
         case .western:
-            return try await westernEntries(forceRefresh: forceRefresh)
+            return ScheduleLoadResult(
+                entries: try await westernEntries(dayCount: dayCount, forceRefresh: forceRefresh),
+                successfulSources: [.western],
+                authoritativeSources: [.western]
+            )
         case .combined:
             async let animeResult = scheduleSourceResult {
-                try await self.animeEntries(forceRefresh: forceRefresh)
+                try await self.animeEntries(dayCount: dayCount, forceRefresh: forceRefresh)
             }
             async let westernResult = scheduleSourceResult {
-                try await self.westernEntries(forceRefresh: forceRefresh)
+                try await self.westernEntries(dayCount: dayCount, forceRefresh: forceRefresh)
             }
 
             let sourceResults = await (animeResult, westernResult)
             var combinedEntries: [ScheduleEntry] = []
             var firstError: Error?
-            var loadedSource = false
+            var successfulSources = Set<ScheduleSource>()
+            var authoritativeSources = Set<ScheduleSource>()
+            var loadedAnySource = false
 
             switch sourceResults.0 {
-            case .success(let entries):
-                combinedEntries += entries
-                loadedSource = true
+            case .success(let result):
+                combinedEntries += result.entries
+                loadedAnySource = true
+                successfulSources.insert(.anime)
+                if result.isAuthoritativeForNotifications {
+                    authoritativeSources.insert(.anime)
+                }
             case .failure(let error):
                 if Self.isIntentionalCancellation(error) {
                     throw CancellationError()
@@ -237,7 +462,9 @@ final class ScheduleViewModel: ObservableObject {
             switch sourceResults.1 {
             case .success(let entries):
                 combinedEntries += entries
-                loadedSource = true
+                loadedAnySource = true
+                successfulSources.insert(.western)
+                authoritativeSources.insert(.western)
             case .failure(let error):
                 if Self.isIntentionalCancellation(error) {
                     throw CancellationError()
@@ -245,16 +472,21 @@ final class ScheduleViewModel: ObservableObject {
                 firstError = firstError ?? error
             }
 
-            if !loadedSource, let firstError {
+            if !loadedAnySource, let firstError {
                 throw firstError
             }
-            return combinedEntries
+            return ScheduleLoadResult(
+                entries: combinedEntries,
+                successfulSources: successfulSources,
+                authoritativeSources: authoritativeSources
+            )
         }
     }
 
-    private func scheduleSourceResult(
-        operation: () async throws -> [ScheduleEntry]
-    ) async -> Result<[ScheduleEntry], Error> {
+    @MainActor
+    private func scheduleSourceResult<Value>(
+        operation: () async throws -> Value
+    ) async -> Result<Value, Error> {
         do {
             return .success(try await operation())
         } catch {
@@ -262,38 +494,202 @@ final class ScheduleViewModel: ObservableObject {
         }
     }
 
-    private func animeEntries(forceRefresh: Bool) async throws -> [ScheduleEntry] {
-        if !forceRefresh, let animeScheduleEntries {
-            return animeScheduleEntries
+    @MainActor
+    private func animeEntries(dayCount: Int, forceRefresh: Bool) async throws -> AnimeScheduleLoadResult {
+        if !forceRefresh,
+           scheduleCacheIsFresh(
+                animeScheduleFetchedAt,
+                cachedDayCount: animeScheduleDayCount,
+                requiredDayCount: dayCount
+           ),
+           let cached = cachedAnimeResult(for: dayCount) {
+            return cached
         }
-        let schedule = try await retryOnceAfterTransientCancellation(operationName: "AniList schedule") {
-            try await AniListService.shared.fetchAiringSchedule(daysAhead: scheduleDayCount)
+        if let animeScheduleLoadTask {
+            _ = try await animeScheduleLoadTask.value
+            if let cached = cachedAnimeResult(for: dayCount),
+               scheduleCacheIsFresh(
+                    animeScheduleFetchedAt,
+                    cachedDayCount: animeScheduleDayCount,
+                    requiredDayCount: dayCount
+               ) {
+                return cached
+            }
+            // The in-flight request may have covered a shorter range or
+            // crossed midnight. Extend/refetch rather than publishing it.
+            return try await animeEntries(dayCount: dayCount, forceRefresh: forceRefresh)
         }
-        let entries = schedule.map(ScheduleEntry.init(animeEntry:))
-        try Task.checkCancellation()
-        animeScheduleEntries = entries
-        return entries
+
+        if !forceRefresh, retryIsCoolingDown(since: animeScheduleLastFailureAt) {
+            throw ScheduleSourceLoadError.retryDeferred(ScheduleSource.anime.displayName)
+        }
+
+        let loadID = UUID()
+        let fetchStartedAt = Date()
+        animeScheduleLastAttemptAt = fetchStartedAt
+        let loadTask = Task { @MainActor [weak self] () throws -> AnimeScheduleLoadResult in
+            guard let self else { throw CancellationError() }
+            do {
+                let result = try await self.retryOnceAfterTransientCancellation(operationName: "AniList schedule") {
+                    try await AniListService.shared.fetchAiringScheduleResult(daysAhead: dayCount)
+                }
+                let entries = result.entries.map(ScheduleEntry.init(animeEntry:))
+                try Task.checkCancellation()
+                let loadResult = AnimeScheduleLoadResult(
+                    entries: entries,
+                    isAuthoritativeForNotifications: result.isAuthoritativeForNotifications
+                )
+                if self.animeScheduleLoadID == loadID {
+                    self.animeScheduleResult = loadResult
+                    self.animeScheduleDayCount = dayCount
+                    // A request that straddles midnight must not make the
+                    // previous day's window look fresh for the new day.
+                    self.animeScheduleFetchedAt = fetchStartedAt
+                    self.animeScheduleLastFailureAt = nil
+                    self.animeScheduleLoadTask = nil
+                    self.animeScheduleLoadID = nil
+                }
+                return loadResult
+            } catch {
+                if self.animeScheduleLoadID == loadID {
+                    self.animeScheduleLastFailureAt = Date()
+                    self.animeScheduleLoadTask = nil
+                    self.animeScheduleLoadID = nil
+                }
+                throw error
+            }
+        }
+        animeScheduleLoadID = loadID
+        animeScheduleLoadTask = loadTask
+        _ = try await loadTask.value
+        if let cached = cachedAnimeResult(for: dayCount),
+           scheduleCacheIsFresh(
+                animeScheduleFetchedAt,
+                cachedDayCount: animeScheduleDayCount,
+                requiredDayCount: dayCount
+           ) {
+            return cached
+        }
+        return try await animeEntries(dayCount: dayCount, forceRefresh: forceRefresh)
     }
 
-    private func westernEntries(forceRefresh: Bool) async throws -> [ScheduleEntry] {
-        if !forceRefresh, let westernScheduleEntries {
-            return westernScheduleEntries
+    @MainActor
+    private func westernEntries(dayCount: Int, forceRefresh: Bool) async throws -> [ScheduleEntry] {
+        if !forceRefresh,
+           scheduleCacheIsFresh(
+                westernScheduleFetchedAt,
+                cachedDayCount: westernScheduleDayCount,
+                requiredDayCount: dayCount
+           ),
+           let cached = cachedWesternEntries(for: dayCount) {
+            return cached
         }
-        let entries: [ScheduleEntry]
-        do {
-            entries = try await retryOnceAfterTransientCancellation(operationName: "Trakt schedule") {
-                try await TraktScheduleService.shared.fetchSchedule(dayCount: scheduleDayCount)
+        if let westernScheduleLoadTask {
+            _ = try await westernScheduleLoadTask.value
+            if let cached = cachedWesternEntries(for: dayCount),
+               scheduleCacheIsFresh(
+                    westernScheduleFetchedAt,
+                    cachedDayCount: westernScheduleDayCount,
+                    requiredDayCount: dayCount
+               ) {
+                return cached
             }
-        } catch {
-            if Self.isIntentionalCancellation(error) {
-                throw CancellationError()
-            }
-            Logger.shared.log("TraktScheduleService: falling back to TVMaze: \(error.localizedDescription)", type: "TMDB")
-            entries = try await TVMazeService.shared.fetchSchedule(dayCount: scheduleDayCount)
+            return try await westernEntries(dayCount: dayCount, forceRefresh: forceRefresh)
         }
-        try Task.checkCancellation()
-        westernScheduleEntries = entries
-        return entries
+
+        if !forceRefresh, retryIsCoolingDown(since: westernScheduleLastFailureAt) {
+            throw ScheduleSourceLoadError.retryDeferred(ScheduleSource.western.displayName)
+        }
+
+        let loadID = UUID()
+        let fetchStartedAt = Date()
+        westernScheduleLastAttemptAt = fetchStartedAt
+        let loadTask = Task { @MainActor [weak self] () throws -> [ScheduleEntry] in
+            guard let self else { throw CancellationError() }
+            do {
+                let entries: [ScheduleEntry]
+                do {
+                    entries = try await self.retryOnceAfterTransientCancellation(operationName: "Trakt schedule") {
+                        try await TraktScheduleService.shared.fetchSchedule(dayCount: dayCount)
+                    }
+                } catch {
+                    if Self.isIntentionalCancellation(error) {
+                        throw CancellationError()
+                    }
+                    Logger.shared.log("TraktScheduleService: falling back to TVMaze: \(error.localizedDescription)", type: "TMDB")
+                    entries = try await TVMazeService.shared.fetchSchedule(dayCount: dayCount)
+                }
+                try Task.checkCancellation()
+                if self.westernScheduleLoadID == loadID {
+                    self.westernScheduleEntries = entries
+                    self.westernScheduleDayCount = dayCount
+                    self.westernScheduleFetchedAt = fetchStartedAt
+                    self.westernScheduleLastFailureAt = nil
+                    self.westernScheduleLoadTask = nil
+                    self.westernScheduleLoadID = nil
+                }
+                return entries
+            } catch {
+                if self.westernScheduleLoadID == loadID {
+                    self.westernScheduleLastFailureAt = Date()
+                    self.westernScheduleLoadTask = nil
+                    self.westernScheduleLoadID = nil
+                }
+                throw error
+            }
+        }
+        westernScheduleLoadID = loadID
+        westernScheduleLoadTask = loadTask
+        _ = try await loadTask.value
+        if let cached = cachedWesternEntries(for: dayCount),
+           scheduleCacheIsFresh(
+                westernScheduleFetchedAt,
+                cachedDayCount: westernScheduleDayCount,
+                requiredDayCount: dayCount
+           ) {
+            return cached
+        }
+        return try await westernEntries(dayCount: dayCount, forceRefresh: forceRefresh)
+    }
+
+    private func scheduleCacheIsFresh(
+        _ fetchedAt: Date?,
+        cachedDayCount: Int,
+        requiredDayCount: Int
+    ) -> Bool {
+        guard let fetchedAt,
+              cachedDayCount >= requiredDayCount,
+              Calendar.current.isDate(fetchedAt, inSameDayAs: Date()) else {
+            return false
+        }
+        let age = Date().timeIntervalSince(fetchedAt)
+        return age >= 0 && age < scheduleCacheMaxAge
+    }
+
+    private func cachedAnimeResult(for dayCount: Int) -> AnimeScheduleLoadResult? {
+        guard let animeScheduleResult else { return nil }
+        return AnimeScheduleLoadResult(
+            entries: entries(animeScheduleResult.entries, within: dayCount),
+            isAuthoritativeForNotifications: animeScheduleResult.isAuthoritativeForNotifications
+        )
+    }
+
+    private func cachedWesternEntries(for dayCount: Int) -> [ScheduleEntry]? {
+        guard let westernScheduleEntries else { return nil }
+        return entries(westernScheduleEntries, within: dayCount)
+    }
+
+    private func entries(_ entries: [ScheduleEntry], within dayCount: Int) -> [ScheduleEntry] {
+        let calendar = Calendar.current
+        let start = calendar.startOfDay(for: Date())
+        let end = calendar.date(byAdding: .day, value: max(dayCount, 1), to: start) ?? .distantFuture
+        return entries.filter { $0.airingAt >= start && $0.airingAt < end }
+    }
+
+    private func retryIsCoolingDown(since failureDate: Date?) -> Bool {
+        guard let failureDate else { return false }
+        let elapsed = Date().timeIntervalSince(failureDate)
+        return elapsed >= 0 && elapsed < failedSourceRetryInterval
     }
 
     private func retryOnceAfterTransientCancellation<T>(
@@ -337,12 +733,12 @@ final class ScheduleViewModel: ObservableObject {
         return nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorCancelled
     }
 
-    func updateBuckets(with entries: [ScheduleEntry], localTimeZone: Bool) {
+    func updateBuckets(with entries: [ScheduleEntry], localTimeZone: Bool, dayCount: Int) {
         let calendar = makeCalendar(localTimeZone: localTimeZone)
         let startOfToday = calendar.startOfDay(for: Date())
 
         var buckets: [DayBucket] = []
-        for offset in 0..<scheduleDayCount {
+        for offset in 0..<dayCount {
             guard let day = calendar.date(byAdding: .day, value: offset, to: startOfToday),
                   let nextDay = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: day)) else {
                 continue
@@ -362,7 +758,11 @@ final class ScheduleViewModel: ObservableObject {
 
     func regroupBuckets(localTimeZone: Bool) {
         currentLocalTimeZone = localTimeZone
-        updateBuckets(with: scheduleEntries, localTimeZone: localTimeZone)
+        updateBuckets(
+            with: scheduleEntries,
+            localTimeZone: localTimeZone,
+            dayCount: loadedScheduleDayCount ?? ScheduleWindow.current.rawValue
+        )
     }
 
     func handleDayChangeIfNeeded(mode: ScheduleMode, localTimeZone: Bool) async {
@@ -376,7 +776,11 @@ final class ScheduleViewModel: ObservableObject {
             await MainActor.run {
                 currentLocalTimeZone = localTimeZone
                 currentDayAnchor = Date()
-                updateBuckets(with: scheduleEntries, localTimeZone: localTimeZone)
+                updateBuckets(
+                    with: scheduleEntries,
+                    localTimeZone: localTimeZone,
+                    dayCount: loadedScheduleDayCount ?? ScheduleWindow.current.rawValue
+                )
             }
         }
     }
@@ -411,10 +815,20 @@ final class ScheduleViewModel: ObservableObject {
                 }
 
                 scheduleEntries = hydratedEntries
-                westernScheduleEntries = hydratedEntries.filter { $0.source == .western }
+                if var cachedWesternEntries = westernScheduleEntries {
+                    for index in cachedWesternEntries.indices {
+                        guard let tmdbId = cachedWesternEntries[index].tmdbId,
+                              let detail = details[tmdbId] else {
+                            continue
+                        }
+                        cachedWesternEntries[index].coverImage = detail.fullPosterURL
+                    }
+                    westernScheduleEntries = cachedWesternEntries
+                }
                 updateBuckets(
                     with: hydratedEntries,
-                    localTimeZone: currentLocalTimeZone
+                    localTimeZone: currentLocalTimeZone,
+                    dayCount: loadedScheduleDayCount ?? ScheduleWindow.current.rawValue
                 )
             }
             activePosterHydrationID = nil
@@ -614,6 +1028,33 @@ struct DayBucket: Identifiable {
     let items: [ScheduleEntry]
 }
 
+/// Detects truly high-frequency shows without treating four weekly episodes in
+/// a 30-day request as a daily show. Four distinct air dates must occur inside
+/// the same rolling seven-day window.
+private func hasDailyScheduleDensity(_ dates: [Date]) -> Bool {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .current
+    let days = Set(dates.map { calendar.startOfDay(for: $0) }).sorted()
+    guard days.count >= 4 else { return false }
+
+    var lowerBound = 0
+    for upperBound in days.indices {
+        while lowerBound < upperBound,
+              let windowEnd = calendar.date(
+                  byAdding: .day,
+                  value: 7,
+                  to: days[lowerBound]
+              ),
+              days[upperBound] >= windowEnd {
+            lowerBound += 1
+        }
+        if upperBound - lowerBound + 1 >= 4 {
+            return true
+        }
+    }
+    return false
+}
+
 // MARK: - Trakt Western Schedule
 
 private final class TraktScheduleService {
@@ -684,12 +1125,6 @@ private final class TraktScheduleService {
     }
 
     private func scheduleCandidates(from items: [TraktCalendarItem]) -> [TraktScheduleCandidate] {
-        let dayFormatter = DateFormatter()
-        dayFormatter.calendar = Calendar(identifier: .gregorian)
-        dayFormatter.locale = Locale(identifier: "en_US_POSIX")
-        dayFormatter.timeZone = TimeZone(secondsFromGMT: 0)
-        dayFormatter.dateFormat = "yyyy-MM-dd"
-
         var seenEpisodeIds = Set<String>()
         return items.compactMap { item in
             guard item.isWesternScheduleCandidate,
@@ -707,7 +1142,6 @@ private final class TraktScheduleService {
             return TraktScheduleCandidate(
                 item: item,
                 airingAt: airingAt,
-                airdate: dayFormatter.string(from: airingAt),
                 showKey: item.showKey
             )
         }
@@ -717,7 +1151,7 @@ private final class TraktScheduleService {
         let dailyShowIds = Set(
             Dictionary(grouping: candidates, by: \.showKey)
                 .compactMap { entry in
-                    Set(entry.value.map(\.airdate)).count >= 4 ? entry.key : nil
+                    hasDailyScheduleDensity(entry.value.map(\.airingAt)) ? entry.key : nil
                 }
         )
         return candidates.filter { !dailyShowIds.contains($0.showKey) }
@@ -759,7 +1193,6 @@ private final class TraktScheduleService {
 private struct TraktScheduleCandidate {
     let item: TraktCalendarItem
     let airingAt: Date
-    let airdate: String
     let showKey: String
 }
 
@@ -849,14 +1282,20 @@ private enum TraktScheduleError: LocalizedError {
 
 // MARK: - TVMaze Western Schedule
 
-private final class TVMazeService {
+private actor TVMazeService {
     static let shared = TVMazeService()
 
     private let baseURL = URL(string: "https://api.tvmaze.com")!
+    private let extendedCacheMaxAge: TimeInterval = 6 * 60 * 60
+    private var extendedScheduleCache: (fetchedAt: Date, entries: [ScheduleEntry])?
 
     private init() {}
 
     func fetchSchedule(dayCount: Int) async throws -> [ScheduleEntry] {
+        if dayCount > ScheduleWindow.sevenDays.rawValue {
+            return try await fetchExtendedSchedule(dayCount: dayCount)
+        }
+
         let calendar = Calendar.current
         let startOfToday = calendar.startOfDay(for: Date())
         let formatter = DateFormatter()
@@ -914,10 +1353,58 @@ private final class TVMazeService {
             }
         }
 
+        return scheduleEntries(from: episodesById)
+    }
+
+    /// TVMaze's per-date fallback costs two requests per day. Extended ranges
+    /// instead use its one-call full feed, filter locally, and retain only the
+    /// lightweight 30-day result rather than the multi-megabyte decoded feed.
+    private func fetchExtendedSchedule(dayCount: Int) async throws -> [ScheduleEntry] {
+        if let cached = extendedScheduleCache,
+           Calendar.current.isDate(cached.fetchedAt, inSameDayAs: Date()) {
+            let age = Date().timeIntervalSince(cached.fetchedAt)
+            if age >= 0, age < extendedCacheMaxAge {
+                return entries(cached.entries, within: dayCount)
+            }
+        }
+
+        let episodes = try await fetchEpisodes(path: "schedule/full", queryItems: [])
+        let calendar = Calendar.current
+        let start = calendar.startOfDay(for: Date())
+        let end = calendar.date(
+            byAdding: .day,
+            value: ScheduleWindow.thirtyDays.rawValue,
+            to: start
+        ) ?? .distantFuture
+        let regionCode = Locale.current.regionCode?.uppercased() ?? "US"
+        var episodesById: [Int: TVMazeScheduleEpisode] = [:]
+
+        for episode in episodes {
+            guard episode.show.isWesternScheduleCandidate,
+                  episode.show.isIncludedInFullSchedule(regionCode: regionCode),
+                  let airing = episode.airing,
+                  airing.date >= start,
+                  airing.date < end else {
+                continue
+            }
+            episodesById[episode.id] = episode
+        }
+
+        let extendedEntries = scheduleEntries(from: episodesById)
+            .sorted { $0.airingAt < $1.airingAt }
+        extendedScheduleCache = (Date(), extendedEntries)
+        return entries(extendedEntries, within: dayCount)
+    }
+
+    private func scheduleEntries(
+        from episodesById: [Int: TVMazeScheduleEpisode]
+    ) -> [ScheduleEntry] {
         let dailyShowIds = Set(
             Dictionary(grouping: episodesById.values, by: { $0.show.id })
                 .compactMap { entry in
-                    Set(entry.value.map(\.airdate)).count >= 4 ? entry.key : nil
+                    hasDailyScheduleDensity(entry.value.compactMap { $0.airing?.date })
+                        ? entry.key
+                        : nil
                 }
         )
 
@@ -930,6 +1417,13 @@ private final class TVMazeService {
             }
             return ScheduleEntry(westernEpisode: episode, airing: airing)
         }
+    }
+
+    private func entries(_ entries: [ScheduleEntry], within dayCount: Int) -> [ScheduleEntry] {
+        let calendar = Calendar.current
+        let start = calendar.startOfDay(for: Date())
+        let end = calendar.date(byAdding: .day, value: max(dayCount, 1), to: start) ?? .distantFuture
+        return entries.filter { $0.airingAt >= start && $0.airingAt < end }
     }
 
     private func fetchEpisodes(path: String, queryItems: [URLQueryItem], retryAfterRateLimit: Bool = true) async throws -> [TVMazeScheduleEpisode] {
@@ -1087,6 +1581,19 @@ fileprivate struct TVMazeShow: Decodable {
     var isEnglishLanguage: Bool {
         language?.lowercased() == "english"
     }
+
+    func isIncludedInFullSchedule(regionCode: String) -> Bool {
+        let normalizedRegion = regionCode.uppercased()
+        if network?.country?.code?.uppercased() == normalizedRegion {
+            return true
+        }
+        if let webCountry = webChannel?.country {
+            return webCountry.code?.uppercased() == normalizedRegion
+        }
+        // A nil web-channel country represents a global streaming service;
+        // match the existing English-only global web feed behavior.
+        return webChannel != nil && isEnglishLanguage
+    }
 }
 
 fileprivate struct TVMazeShowSchedule: Decodable {
@@ -1103,5 +1610,6 @@ fileprivate struct TVMazeChannel: Decodable {
 }
 
 fileprivate struct TVMazeCountry: Decodable {
+    let code: String?
     let timezone: String?
 }

@@ -1,12 +1,9 @@
 import Foundation
 import Combine
 import AuthenticationServices
-#if os(tvOS)
 import Security
-#endif
 import UIKit
 
-#if os(tvOS)
 private enum TrackerCredentialVault {
     private struct Credentials: Codable {
         let accessToken: String
@@ -25,10 +22,19 @@ private enum TrackerCredentialVault {
         guard !credentials.accessToken.isEmpty,
               let data = try? JSONEncoder().encode(credentials) else { return false }
 
-        var attributes = query(for: account.service)
-        SecItemDelete(attributes as CFDictionary)
-        attributes[kSecValueData as String] = data
-        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        let lookup = query(for: account.service)
+        let updatedValues: [String: Any] = [
+            kSecValueData as String: data,
+            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        ]
+        let updateStatus = SecItemUpdate(lookup as CFDictionary, updatedValues as CFDictionary)
+        if updateStatus == errSecSuccess {
+            return true
+        }
+        guard updateStatus == errSecItemNotFound else { return false }
+
+        var attributes = lookup
+        attributes.merge(updatedValues) { _, new in new }
         return SecItemAdd(attributes as CFDictionary, nil) == errSecSuccess
     }
 
@@ -64,7 +70,6 @@ private enum TrackerCredentialVault {
         ]
     }
 }
-#endif
 
 private enum TrackerRequestProvider: Hashable {
     case anilist
@@ -197,6 +202,10 @@ final class TrackerManager: NSObject, ObservableObject {
     private var syncToolTask: Task<Void, Never>?
 
     private let trackerStateURL: URL
+    private let trackerStatePersistenceQueue = DispatchQueue(
+        label: "app.eclipse.soupy.tracker-state-persistence",
+        qos: .utility
+    )
     private var webAuthSession: ASWebAuthenticationSession?
 #if os(tvOS)
     private var traktDeviceAuthTask: Task<Void, Never>?
@@ -314,24 +323,33 @@ final class TrackerManager: NSObject, ObservableObject {
     private func loadTrackerState() {
         if let data = try? Data(contentsOf: trackerStateURL),
            var state = try? JSONDecoder().decode(TrackerState.self, from: data) {
-#if os(tvOS)
+            var migratedPlaintextCredentials = false
             state.accounts = state.accounts.compactMap { account in
                 if !account.accessToken.isEmpty {
-                    _ = TrackerCredentialVault.store(account)
+                    guard TrackerCredentialVault.store(account) else {
+                        // Do not silently sign the user out if the Keychain is temporarily
+                        // unavailable (for example, before first unlock after a reboot).
+                        return account
+                    }
+                    migratedPlaintextCredentials = true
                 }
                 return TrackerCredentialVault.hydrate(account)
             }
-#endif
             self.trackerState = state
+            if migratedPlaintextCredentials {
+                saveTrackerState()
+            }
         }
     }
 
     func saveTrackerState() {
         var stateToPersist = trackerState
-#if os(tvOS)
         stateToPersist.accounts = stateToPersist.accounts.map { account in
             if account.isConnected {
-                _ = TrackerCredentialVault.store(account)
+                // Only redact credentials after they have reached the Keychain. Keeping
+                // the in-memory snapshot on a failed Keychain write avoids destructive
+                // sign-out on the next launch.
+                guard TrackerCredentialVault.store(account) else { return account }
             } else {
                 TrackerCredentialVault.remove(account.service)
             }
@@ -341,10 +359,9 @@ final class TrackerManager: NSObject, ObservableObject {
             redacted.expiresAt = nil
             return redacted
         }
-#endif
-        DispatchQueue.global(qos: .background).async {
+        trackerStatePersistenceQueue.async {
             if let encoded = try? JSONEncoder().encode(stateToPersist) {
-                try? encoded.write(to: self.trackerStateURL)
+                try? encoded.write(to: self.trackerStateURL, options: .atomic)
             }
         }
     }
@@ -6717,13 +6734,13 @@ final class TrackerManager: NSObject, ObservableObject {
             isAuthenticating = false
             webAuthSession = nil
         }
+#endif
         if let index = trackerState.accounts.firstIndex(where: { $0.service == service }) {
             trackerState.accounts[index].accessToken = ""
             trackerState.accounts[index].refreshToken = nil
             trackerState.accounts[index].expiresAt = nil
         }
         TrackerCredentialVault.remove(service)
-#endif
         saveTrackerState()
     }
 

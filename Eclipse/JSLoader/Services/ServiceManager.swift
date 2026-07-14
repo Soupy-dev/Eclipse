@@ -662,6 +662,7 @@ final class SourceHealthStore: ObservableObject {
     static let shared = SourceHealthStore()
 
     @Published private(set) var version = 0
+    private var versionUpdateScheduled = false
 
     private let storageKey = "sourceHealthRecordsV1"
     private let queue = DispatchQueue(label: "eclipse.source.health.store")
@@ -774,7 +775,12 @@ final class SourceHealthStore: ObservableObject {
             self.records[sourceId] = record
             self.saveLocked()
             DispatchQueue.main.async {
-                self.version += 1
+                guard !self.versionUpdateScheduled else { return }
+                self.versionUpdateScheduled = true
+                DispatchQueue.main.async {
+                    self.versionUpdateScheduled = false
+                    self.version += 1
+                }
             }
         }
     }

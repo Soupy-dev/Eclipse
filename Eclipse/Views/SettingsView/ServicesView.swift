@@ -1,23 +1,62 @@
 import SwiftUI
 import Kingfisher
 
-enum ServicesSettingsSearchTarget: String, Hashable {
+enum ServicesSettingsSearchTarget: Hashable {
     case autoUpdateServices
     case autoMode
+    case autoSelectEpisodes
+    case autoQuality
+    case autoQualityPreference
     case stremioStyleSheet
+    case rankingSimilarity
+    case dropMismatchedResults
     case languagesToInclude
     case languagesToExclude
+    case assumeOriginalAudio
+    case treatDubbedAnimeAsEnglish
     case missingLanguageData
+    case qualitiesToHide
+    case hideStreamsWithoutDetectedQuality
+    case applyExtraRulesTo
+    case installedSource(String)
 
     var anchorID: String {
-        "services-settings-search-\(rawValue)"
+        switch self {
+        case .autoUpdateServices: return "services-settings-search-autoUpdateServices"
+        case .autoMode: return "services-settings-search-autoMode"
+        case .autoSelectEpisodes: return "services-settings-search-autoSelectEpisodes"
+        case .autoQuality: return "services-settings-search-autoQuality"
+        case .autoQualityPreference: return "services-settings-search-autoQualityPreference"
+        case .stremioStyleSheet: return "services-settings-search-stremioStyleSheet"
+        case .rankingSimilarity: return "services-settings-search-rankingSimilarity"
+        case .dropMismatchedResults: return "services-settings-search-dropMismatchedResults"
+        case .languagesToInclude: return "services-settings-search-languagesToInclude"
+        case .languagesToExclude: return "services-settings-search-languagesToExclude"
+        case .assumeOriginalAudio: return "services-settings-search-assumeOriginalAudio"
+        case .treatDubbedAnimeAsEnglish: return "services-settings-search-treatDubbedAnimeAsEnglish"
+        case .missingLanguageData: return "services-settings-search-missingLanguageData"
+        case .qualitiesToHide: return "services-settings-search-qualitiesToHide"
+        case .hideStreamsWithoutDetectedQuality: return "services-settings-search-hideStreamsWithoutDetectedQuality"
+        case .applyExtraRulesTo: return "services-settings-search-applyExtraRulesTo"
+        case .installedSource(let sourceID): return "services-settings-source-\(sourceID)"
+        }
     }
 
     var opensExtraServiceSettings: Bool {
         switch self {
-        case .stremioStyleSheet, .languagesToInclude, .languagesToExclude, .missingLanguageData:
+        case .stremioStyleSheet,
+             .languagesToInclude,
+             .languagesToExclude,
+             .assumeOriginalAudio,
+             .treatDubbedAnimeAsEnglish,
+             .missingLanguageData,
+             .rankingSimilarity,
+             .dropMismatchedResults,
+             .qualitiesToHide,
+             .hideStreamsWithoutDetectedQuality,
+             .applyExtraRulesTo:
             true
-        case .autoUpdateServices, .autoMode:
+        case .autoUpdateServices, .autoMode, .autoSelectEpisodes, .autoQuality, .autoQualityPreference, .installedSource:
             false
         }
     }
@@ -44,6 +83,10 @@ struct ServicesView: View {
     @AppStorage("servicesAutoSelectEpisodesEnabled") private var servicesAutoSelectEpisodesEnabled = false
     @AppStorage("servicesAutoModeQualityPreference") private var autoModeQualityPreferenceRaw = AutoModeQualityPreference.defaultPreference.rawValue
     @AppStorage(ServicesSheetPresentationSettings.stremioStyleEnabledKey) private var stremioStyleSheetEnabled = ServicesSheetPresentationSettings.defaultStremioStyleEnabled
+    @AppStorage(ServicesResultRankingSettings.minimumSimilarityKey) private var serviceResultMinimumSimilarity = ServicesResultRankingSettings.defaultMinimumSimilarity
+    @AppStorage(ServicesResultRankingSettings.dropMismatchedResultsKey) private var dropMismatchedServiceResults = ServicesResultRankingSettings.defaultDropMismatchedResults
+    @AppStorage(StreamLanguageFilter.assumeOriginalAudioKey) private var assumeOriginalAudio = false
+    @AppStorage(StreamLanguageFilter.treatDubbedAnimeAsEnglishKey) private var treatDubbedAnimeAsEnglish = false
     @AppStorage(StreamLanguageFilter.hideUnknownLanguageStreamsKey) private var hideStreamsWithoutLanguageData = false
     @AppStorage(StreamLanguageFilter.hideUnknownQualityStreamsKey) private var hideStreamsWithoutDetectedQuality = false
     @State private var selectedAutoModeSourceIds: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "servicesAutoModeSourceIds") ?? [])
@@ -55,6 +98,7 @@ struct ServicesView: View {
     @State private var hiddenStreamQualities = Set(StreamLanguageFilter.hiddenQualityHeights())
     @State private var extraRulesSourceIds: Set<String>? = StreamLanguageFilter.extraRulesSourceIds().map { Set($0) }
     @State private var didFocusInitialSearchTarget = false
+    @State private var didScheduleInitialExtraSettingsNavigation = false
     @State private var showExtraServiceSettings = false
 
     init(initialSearchTarget: ServicesSettingsSearchTarget? = nil) {
@@ -149,8 +193,12 @@ struct ServicesView: View {
                 reloadAutoModeSelectionFromDefaults()
                 reloadHiddenStreamLanguagesFromDefaults()
                 reloadExtraRulesSettingsFromDefaults()
-                if initialSearchTarget?.opensExtraServiceSettings == true {
-                    showExtraServiceSettings = true
+                if initialSearchTarget?.opensExtraServiceSettings == true,
+                   !didScheduleInitialExtraSettingsNavigation {
+                    didScheduleInitialExtraSettingsNavigation = true
+                    DispatchQueue.main.async {
+                        showExtraServiceSettings = true
+                    }
                 }
             }
         }
@@ -252,6 +300,10 @@ struct ServicesView: View {
             case .service(let s): return "service:\(s.id.uuidString)"
             case .stremio(let a): return "stremio:\(a.id.uuidString)"
             }
+        }
+
+        var settingsSearchAnchorID: String {
+            "services-settings-source-\(id)"
         }
     }
 
@@ -455,10 +507,12 @@ struct ServicesView: View {
                     .id(ServicesSettingsSearchTarget.autoMode.anchorID)
 
                 Toggle("Auto-Select Episodes", isOn: $servicesAutoSelectEpisodesEnabled)
+                    .id(ServicesSettingsSearchTarget.autoSelectEpisodes.anchorID)
 
                 if servicesAutoModeEnabled {
                     let autoModeItems = orderedAutoModeListItems
                     Toggle("Auto Quality", isOn: autoModeQualityEnabledBinding)
+                        .id(ServicesSettingsSearchTarget.autoQuality.anchorID)
 
                     if autoModeQualityPreference.usesAutomaticSelection {
                         Picker("Quality", selection: autoModeQualityPreferenceBinding) {
@@ -466,6 +520,7 @@ struct ServicesView: View {
                                 Text(preference.title).tag(preference)
                             }
                         }
+                        .id(ServicesSettingsSearchTarget.autoQualityPreference.anchorID)
                     }
 
                     Text(autoModeQualityPreference.settingsDescription)
@@ -556,6 +611,7 @@ struct ServicesView: View {
                             }
 #else
                             ServiceRow(service: service, serviceManager: serviceManager, healthStore: healthStore)
+                                .id(item.settingsSearchAnchorID)
 #endif
                         case .stremio(let addon):
 #if os(tvOS)
@@ -577,6 +633,7 @@ struct ServicesView: View {
                             }
 #else
                             StremioAddonRow(addon: addon, manager: stremioManager, healthStore: healthStore)
+                                .id(item.settingsSearchAnchorID)
 #endif
                         }
                     }
@@ -603,6 +660,31 @@ struct ServicesView: View {
                         .id(ServicesSettingsSearchTarget.stremioStyleSheet.anchorID)
                 } footer: {
                     Text("Shows one compact, filterable list of results and streams instead of grouping them into separate source sections.")
+                }
+                .eclipseExperimentalSettingsRows()
+
+                Section {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("Ranking Similarity")
+                            Spacer()
+                            Text("\(Int(serviceResultMinimumSimilarity * 100))%")
+                                .foregroundColor(.secondary)
+                        }
+                        .id(ServicesSettingsSearchTarget.rankingSimilarity.anchorID)
+
+                        Slider(
+                            value: $serviceResultMinimumSimilarity,
+                            in: ServicesResultRankingSettings.minimumSimilarityRange,
+                            step: 0.01
+                        )
+                        .accessibilityValue("\(Int(serviceResultMinimumSimilarity * 100)) percent")
+                    }
+
+                    Toggle("Drop Unmatched Service Results", isOn: $dropMismatchedServiceResults)
+                        .id(ServicesSettingsSearchTarget.dropMismatchedResults.anchorID)
+                } footer: {
+                    Text("Results at or above this percentage are prioritized by similarity. When dropping is enabled, service results below this percentage are hidden and Auto Mode skips them instead of using a weaker match.")
                 }
                 .eclipseExperimentalSettingsRows()
 
@@ -686,6 +768,12 @@ struct ServicesView: View {
                     Toggle("Hide Streams Without Language Data", isOn: $hideStreamsWithoutLanguageData)
                         .id(ServicesSettingsSearchTarget.missingLanguageData.anchorID)
 
+                    Toggle("Assume Original Language for Untagged Streams", isOn: $assumeOriginalAudio)
+                        .id(ServicesSettingsSearchTarget.assumeOriginalAudio.anchorID)
+
+                    Toggle("Treat Dubbed Anime Streams as English", isOn: $treatDubbedAnimeAsEnglish)
+                        .id(ServicesSettingsSearchTarget.treatDubbedAnimeAsEnglish.anchorID)
+
                     if !hiddenStreamLanguages.isEmpty {
                         Button(role: .destructive) {
                             clearHiddenStreamLanguages()
@@ -729,9 +817,11 @@ struct ServicesView: View {
                             }
                         }
                     }
+                    .id(ServicesSettingsSearchTarget.qualitiesToHide.anchorID)
 #endif
 
                     Toggle("Hide Streams Without Detected Quality", isOn: $hideStreamsWithoutDetectedQuality)
+                        .id(ServicesSettingsSearchTarget.hideStreamsWithoutDetectedQuality.anchorID)
 
 #if os(tvOS)
                     VStack(alignment: .leading, spacing: 14) {
@@ -754,15 +844,18 @@ struct ServicesView: View {
                                 .foregroundColor(.secondary)
                         }
                     }
+                    .id(ServicesSettingsSearchTarget.applyExtraRulesTo.anchorID)
 #endif
                 } footer: {
-                    Text("Best-effort stream rules for the selected Services and Stremio addons. An Include list only keeps streams with a matching detected language; Exclude takes priority when the same language appears in both lists. Quality and language detection use stream tags, filenames, URLs, and labels.")
+                    Text("Best-effort stream rules for the selected Services and Stremio addons. An Include list only keeps streams with a matching detected language; Exclude takes priority when the same language appears in both lists. When Assume Original Language for Untagged Streams is enabled, a stream with no language data is evaluated using the media's TMDB original language before Include and Exclude rules run. When Treat Dubbed Anime Streams as English is enabled, anime streams labeled dubbed or dub match English filters and count as having language data. Quality and language detection use stream tags, filenames, URLs, and labels.")
                 }
                 .eclipseExperimentalSettingsRows()
             }
             .navigationTitle("Extra Service Settings")
             .eclipseSettingsStyle()
             .onAppear {
+                serviceResultMinimumSimilarity = ServicesResultRankingSettings.minimumSimilarity()
+                dropMismatchedServiceResults = ServicesResultRankingSettings.dropsMismatchedResults()
                 reloadHiddenStreamLanguagesFromDefaults()
                 reloadExtraRulesSettingsFromDefaults()
                 focusExtraServiceSettingsTarget(using: scrollProxy)
@@ -1474,6 +1567,7 @@ private struct AddServiceInputModifier: ViewModifier {
                         }
                         #endif
                     }
+                    .navigationViewStyle(StackNavigationViewStyle())
                 }
         }
     }
@@ -1803,6 +1897,7 @@ private struct AddStremioAddonInputModifier: ViewModifier {
                         }
                         #endif
                     }
+                    .navigationViewStyle(StackNavigationViewStyle())
                 }
         }
     }
@@ -1863,6 +1958,7 @@ private struct ReconfigureStremioAddonModifier: ViewModifier {
                         }
                         #endif
                     }
+                    .navigationViewStyle(StackNavigationViewStyle())
                 }
         }
     }

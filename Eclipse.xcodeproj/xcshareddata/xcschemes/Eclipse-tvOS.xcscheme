@@ -70,8 +70,7 @@
             </BuildableReference>
          </TestableReference>
          <TestableReference
-            skipped = "NO"
-            parallelizable = "NO">
+            skipped = "NO">
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "TVUITG0100000000000000001"
@@ -94,7 +93,8 @@
       enableGPUFrameCaptureMode = "3"
       enableGPUValidationMode = "1"
       allowLocationSimulation = "NO">
-      <BuildableProductRunnable runnableDebuggingMode = "0">
+      <BuildableProductRunnable
+         runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "TVTG00010000000000000001"
@@ -110,7 +110,8 @@
       savedToolIdentifier = ""
       useCustomWorkingDirectory = "NO"
       debugDocumentVersioning = "YES">
-      <BuildableProductRunnable runnableDebuggingMode = "0">
+      <BuildableProductRunnable
+         runnableDebuggingMode = "0">
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "TVTG00010000000000000001"
@@ -120,7 +121,8 @@
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>
-   <AnalyzeAction buildConfiguration = "Debug">
+   <AnalyzeAction
+      buildConfiguration = "Debug">
    </AnalyzeAction>
    <ArchiveAction
       buildConfiguration = "Release"

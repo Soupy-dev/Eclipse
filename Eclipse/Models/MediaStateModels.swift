@@ -444,6 +444,7 @@ enum MediaStateSettingRegistry {
         "introDBAppEnabled",
         "aniSkipAutoSkip",
         "showNextEpisodeButton",
+        "showPlayerServicesButton",
         "nextEpisodeThreshold",
         "servicesAutoModeEnabled",
         "servicesAutoSelectEpisodesEnabled",
@@ -468,6 +469,8 @@ enum MediaStateSettingRegistry {
         "atmosphereStyle",
         "homeAnimatedBackgroundEnabled",
         "homeAnimatedBackgroundQuality",
+        "homeAnimatedBackgroundFrameRate",
+        "mpvPlayerSkinTintControlsOnly",
         "experimentalMediaDesignPreset",
         "experimentalHomeCardShape",
         "experimentalHeroHeightScale",
@@ -495,7 +498,12 @@ enum MediaStateSettingRegistry {
         "tvOSServiceSourceActivationOverrides"
     ]
 
-    private static let iOSKeys: Set<String> = []
+    private static let iOSKeys: Set<String> = [
+        // The followed-show list is user intent and should move between the
+        // user's iPhone/iPad devices. Authorization and UNNotificationRequest
+        // instances remain device-local inside LocalNotificationManager.
+        "localNotificationSubscriptions"
+    ]
 
     static var allKeys: Set<String> { sharedKeys.union(tvOSKeys).union(iOSKeys) }
 

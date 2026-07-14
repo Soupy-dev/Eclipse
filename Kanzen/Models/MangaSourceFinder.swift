@@ -24,23 +24,28 @@ final class MangaSourceFinder: ObservableObject {
     @Published var matches: [SourceMatch] = []
     @Published var isSearching = false
     @Published var hasFinished = false
+    private var searchGeneration = UUID()
 
     /// Search all installed modules for the given AniList manga.
     /// Uses all title variants (English, Romaji, Native) for each module.
     /// Filters modules by type: novel modules for NOVEL format, non-novel for everything else.
     func searchAllModules(for manga: AniListManga) {
+        let generation = UUID()
+        searchGeneration = generation
+        matches = []
+        isSearching = true
+        hasFinished = false
+
         let isNovel = manga.format == "NOVEL"
         let modules = ModuleManager.shared.modules.filter { module in
             let moduleIsNovel = module.moduleData.novel == true
             return moduleIsNovel == isNovel
         }
         guard !modules.isEmpty else {
+            isSearching = false
             hasFinished = true
             return
         }
-
-        isSearching = true
-        matches = []
 
         let titleCandidates = manga.allTitleCandidates
         guard !titleCandidates.isEmpty else {
@@ -65,7 +70,7 @@ final class MangaSourceFinder: ObservableObject {
         }
 
         group.notify(queue: .main) { [weak self] in
-            guard let self else { return }
+            guard let self, self.searchGeneration == generation else { return }
 
             // Sort: highest confidence first, then highest chapter count, then highest title score
             let sorted = allMatches.sorted { a, b in
@@ -163,6 +168,7 @@ final class MangaSourceFinder: ObservableObject {
 
     /// For the top N candidates, fetch chapter counts to improve manual ranking.
     func refineTopMatchesWithChapterCounts(for manga: AniListManga, topN: Int = 3) {
+        let generation = searchGeneration
         let candidates = Array(matches.prefix(topN))
         guard !candidates.isEmpty else { return }
 
@@ -233,7 +239,7 @@ final class MangaSourceFinder: ObservableObject {
         }
 
         group.notify(queue: .main) { [weak self] in
-            guard let self else { return }
+            guard let self, self.searchGeneration == generation else { return }
 
             // Re-sort refined matches: confidence to chapter count to title score
             let sorted = refined.sorted { a, b in

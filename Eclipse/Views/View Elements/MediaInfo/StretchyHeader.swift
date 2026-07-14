@@ -1,5 +1,10 @@
 import SwiftUI
 import Kingfisher
+import UIKit
+
+private enum StretchyHeaderAmbientColorCache {
+    static let values = NSCache<NSString, UIColor>()
+}
 
 struct StretchyHeaderView: View {
     let backdropURL: String?
@@ -7,9 +12,16 @@ struct StretchyHeaderView: View {
     let headerHeight: CGFloat
     let minHeaderHeight: CGFloat
     let onAmbientColorExtracted: ((Color) -> Void)?
+    var imageDecodeSize: CGSize? = nil
     
     @State private var localAmbientColor: Color = Color.black
-    @State private var backdropImage: UIImage?
+
+    private var resolvedImageDecodeSize: CGSize {
+        imageDecodeSize ?? CGSize(
+            width: max(UIScreen.main.bounds.width * UIScreen.main.scale, 1),
+            height: max(headerHeight * UIScreen.main.scale, 1)
+        )
+    }
     
     var body: some View {
         GeometryReader { geometry in
@@ -22,15 +34,13 @@ struct StretchyHeaderView: View {
                 Color.clear
                     .overlay(
                         KFImage(URL(string: backdropURL ?? ""))
+                            .setProcessor(DownsamplingImageProcessor(size: resolvedImageDecodeSize))
                             .placeholder {
                                 Rectangle()
                                     .fill(Color.gray.opacity(0.3))
                             }
                             .onSuccess { result in
-                                backdropImage = result.image
-                                let extractedColor = Color.ambientColor(from: result.image)
-                                localAmbientColor = extractedColor
-                                onAmbientColorExtracted?(extractedColor)
+                                updateAmbientColor(from: result.image)
                             }
                             .resizable()
                             .aspectRatio(contentMode: .fill),
@@ -55,22 +65,31 @@ struct StretchyHeaderView: View {
             }
         }
         .frame(height: headerHeight)
-        .onAppear {
-            if let backdropURL = backdropURL, let url = URL(string: backdropURL) {
-                KingfisherManager.shared.retrieveImage(with: url) { result in
-                    switch result {
-                    case .success(let value):
-                        Task { @MainActor in
-                            backdropImage = value.image
-                            let extractedColor = Color.ambientColor(from: value.image)
-                            localAmbientColor = extractedColor
-                            onAmbientColorExtracted?(extractedColor)
-                        }
-                    case .failure:
-                        break
-                    }
-                }
+    }
+
+    private func updateAmbientColor(from image: UIImage) {
+        let cacheKey = backdropURL as NSString?
+        if let cacheKey,
+           let cachedColor = StretchyHeaderAmbientColorCache.values.object(forKey: cacheKey) {
+            applyAmbientColor(Color(cachedColor))
+            return
+        }
+
+        // Dominant-color analysis walks thousands of pixels. Keep it off the main
+        // thread so a cached image becoming visible does not stall the hero animation.
+        DispatchQueue.global(qos: .utility).async {
+            let extractedColor = Color.ambientColor(from: image)
+            if let cacheKey {
+                StretchyHeaderAmbientColorCache.values.setObject(UIColor(extractedColor), forKey: cacheKey)
+            }
+            DispatchQueue.main.async {
+                applyAmbientColor(extractedColor)
             }
         }
+    }
+
+    private func applyAmbientColor(_ color: Color) {
+        localAmbientColor = color
+        onAmbientColorExtracted?(color)
     }
 }

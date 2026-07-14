@@ -967,12 +967,22 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     }
 
     private func applySettingRecords() {
+#if os(iOS)
+        let previousNotificationSubscriptions = UserDefaults.standard.string(
+            forKey: LocalNotificationManager.subscriptionsStorageKey
+        )
+#endif
         MediaStateSettingRestorePolicy.apply(
             records: Array(archive.records.values),
             to: UserDefaults.standard
         )
         HomeCatalogLayoutStore.shared.reloadFromStorage()
         EclipseTheme.shared.reloadMediaAppearanceFromDefaults()
+#if os(iOS)
+        reloadLocalNotificationSelectionsIfNeeded(
+            previousSubscriptions: previousNotificationSubscriptions
+        )
+#endif
     }
 
     private func applyCatalogRecord() {
@@ -1218,6 +1228,11 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         UserRatingManager.shared.restoreRatingsAndNotes(ratings: [:], notes: [:])
 
         let defaults = UserDefaults.standard
+#if os(iOS)
+        let previousNotificationSubscriptions = defaults.string(
+            forKey: LocalNotificationManager.subscriptionsStorageKey
+        )
+#endif
         for key in MediaStateSettingRegistry.allKeys {
             guard let scope = MediaStateSettingRegistry.scope(for: key),
                   scope.appliesToCurrentPlatform else {
@@ -1228,8 +1243,28 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         HomeCatalogLayoutStore.shared.reloadFromStorage()
         EclipseTheme.shared.reloadMediaAppearanceFromDefaults()
         CatalogManager.shared.resetCatalogsForMediaStateAccountChange()
+#if os(iOS)
+        reloadLocalNotificationSelectionsIfNeeded(
+            previousSubscriptions: previousNotificationSubscriptions
+        )
+#endif
         NotificationCenter.default.post(name: .mediaStateDidRestore, object: self)
     }
+
+#if os(iOS)
+    private func reloadLocalNotificationSelectionsIfNeeded(previousSubscriptions: String?) {
+        guard previousSubscriptions != UserDefaults.standard.string(
+            forKey: LocalNotificationManager.subscriptionsStorageKey
+        ) else { return }
+
+        // The manager owns device authorization and pending requests. Let it
+        // install the restored intent and rebuild locally after this synchronous
+        // CloudKit apply finishes, without ever prompting on the destination.
+        Task { @MainActor in
+            await LocalNotificationManager.shared.reloadPersistedSelectionsAfterRestore()
+        }
+    }
+#endif
 
     private func record(for recordID: CKRecord.ID) -> CKRecord? {
         guard let envelope = archive.records[recordID.recordName] else { return nil }

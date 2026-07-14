@@ -44,6 +44,7 @@ struct ServiceSettingsView: View {
                 }
             }
         }
+        .navigationViewStyle(StackNavigationViewStyle())
         .task {
             loadSettings()
         }

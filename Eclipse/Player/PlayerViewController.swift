@@ -277,6 +277,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return v
     }()
     private var loadingIndicatorHostingController: UIHostingController<AnyView>?
+    private var loadingIndicatorShouldBeVisible = false
 
     private let playerSkinDecorationLayer: CAGradientLayer = {
         let layer = CAGradientLayer()
@@ -476,6 +477,19 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }()
 
 #if os(iOS)
+    private let playbackLockButton: UIButton = {
+        let button = UIButton(type: .system)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        let configuration = UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
+        button.setImage(UIImage(systemName: "lock.open", withConfiguration: configuration), for: .normal)
+        button.tintColor = .white
+        button.alpha = 0.0
+        button.isHidden = true
+        button.accessibilityLabel = "Lock player"
+        button.accessibilityHint = "Locks the current orientation and prevents closing the video"
+        return button
+    }()
+
     private let watchTogetherButton: UIButton = {
         let button = UIButton(type: .system)
         button.translatesAutoresizingMaskIntoConstraints = false
@@ -562,6 +576,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         b.alpha = 0.0
         b.isHidden = true
         return b
+    }()
+
+    private let servicesButton: UIButton = {
+        let button = UIButton(type: .system)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        let configuration = UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
+        button.setImage(UIImage(systemName: "rectangle.stack.fill", withConfiguration: configuration), for: .normal)
+        button.tintColor = .white
+        button.alpha = 0.0
+        button.isHidden = true
+        button.accessibilityLabel = "Choose another source"
+        button.accessibilityHint = "Opens Services for the current media"
+        button.accessibilityIdentifier = "Player.Services"
+        return button
     }()
 
     private let vlcSubtitleOverlayLabel: UILabel = {
@@ -739,7 +767,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return r
         }
         let qualityProfile = metalSampleBufferQualityProfile()
-        let legacyReason = Settings.shared.mpvUseLegacyCPURenderer ? "user opt-out" : "gpu-next unavailable"
+        let legacyReason = Settings.shared.mpvUseLegacyCPURenderer
+            ? "user opt-out"
+            : (MPVGPUPlayerBridge.unavailableReason ?? "gpu-next unavailable")
         Logger.shared.log("[PlayerVC.MPV] using single-instance MoltenVK sample-buffer renderer (inline + PiP, one mpv handle) reason=\(legacyReason) \(qualityProfile.logDescription) \(MPVRenderBackendSupport.diagnosticsSummary)", type: "MPV")
         let r = MPVSampleBufferPiPBridge(displayLayer: displayLayer, qualityProfile: qualityProfile)
         r.delegate = self
@@ -1071,16 +1101,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     var originalTMDBSeasonNumber: Int?
     var originalTMDBEpisodeNumber: Int?
     var episodePlaybackContext: EpisodePlaybackContext?
+    var servicesSelectionContext: PlayerServicesSelectionContext?
 
     // MARK: - Skip Segments & Next Episode
     /// Called when the user taps "Next Episode" - passes (seasonNumber, nextEpisodeNumber).
     var onRequestNextEpisode: ((_ seasonNumber: Int, _ nextEpisodeNumber: Int) -> Void)?
+    var onRequestResolvedNextEpisode: ((ResolvedNextEpisodeTarget) -> Void)?
+    var localNextEpisodeFallback: PlaybackEpisodeCoordinate?
 
     private var skipSegments: [SkipSegment] = []
     private var skipDataFetched = false
     private var autoSkippedSegments: Set<String> = []
     private var currentActiveSkipSegment: SkipSegment?
     private var pendingNextEpisodeRequest: (seasonNumber: Int, episodeNumber: Int)?
+    private var pendingResolvedNextEpisodeRequest: ResolvedNextEpisodeTarget?
     private var didDispatchNextEpisodeRequest = false
     private var nextEpisodeButtonShown = false
 #if !os(tvOS)
@@ -1178,6 +1212,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var playbackReplacementGeneration = 0
     private var isReplacingVLCPlaybackInPlace = false
     private var pipController: PiPController?
+    /// The scene that owns this playback presentation. UIScene notifications are process-wide;
+    /// keeping the owner prevents another iPad Stage Manager window from driving this player's
+    /// PiP and foreground-renderer lifecycle.
+    private weak var playbackWindowScene: UIWindowScene?
+    private let playerInterfaceCoverageIdentifier = UUID().uuidString
     private var mpvPiPStartAttemptID = 0
     private var mpvAppExitPiPStartRequested = false
     private var mpvPiPStartedAt: Date?
@@ -1189,13 +1228,39 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var initialSubtitles: [String]?
     private var initialSubtitleNames: [String]?
     private var initialSubtitleHeadersByURL: [String: [String: String]]?
+    /// Renderer-neutral audio/subtitle selection captured by PlaybackRequest. Coordinator-driven
+    /// engine handoffs set this so Molten applies the AV session's latest language/visibility
+    /// choices instead of re-reading global defaults. Legacy/direct construction leaves it nil.
+    private var playbackMediaSelectionIntent: PlaybackMediaSelectionIntent?
     var playbackLaunchContext: PlaybackLaunchContext?
     var onPlaybackStartupFailure: ((PlaybackFailureReport) -> Void)?
+    var onAutomaticPlaybackFallback: ((PlaybackFailureReport) -> Void)?
+    var isCoordinatorEngineFallback = false
+    var forceHeaderProxyForStartup = false
+    private(set) var playbackHandoffHasAppeared = false
     private var playbackStartupWorkItem: DispatchWorkItem?
     private var playbackDidStart = false
     private var playbackFailureHandled = false
+    private var cloudflareStartupRecoveryInProgress = false
+    /// Prevents a provider that keeps returning the same rejected source from causing an
+    /// unbounded stop/re-resolve/reload loop. A later expiry gets a fresh budget.
+    private var mediaSourceRefreshAttemptCount = 0
+    private var lastMediaSourceRefreshAttemptAt: Date?
+    /// Exact position captured before replacing an expired media URL. Progress persistence is
+    /// intentionally throttled, so relying on the stored value can rewind a live stream refresh.
+    private var pendingSourceRefreshResumePosition: Double?
     private var playbackSlowProbeCount = 0
     private var playbackLoadGeneration = 0
+    private struct DeferredIPadGPUPlaybackLoad {
+        let url: URL
+        let preset: PlayerPreset
+        let headers: [String: String]?
+        let generation: Int
+        let queuedAt: CFTimeInterval
+    }
+    private var deferredIPadGPUPlaybackLoad: DeferredIPadGPUPlaybackLoad?
+    private var ipadGPUPlaybackLoadGateGeneration = 0
+    private var ipadGPUPlaybackLoadGateRetryGeneration: Int?
     private var playbackTraceLoadStartedAt = Date()
     private var playbackTraceLastStageAt = Date()
     private var playbackTraceLastProgressPosition: Double?
@@ -1203,6 +1268,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var playbackTraceLastLoadingValue: Bool?
     private var playbackTraceLastPauseValue: Bool?
     private var mpvSilentStartupRetryKey: String?
+    private var pendingRendererRestartRetryGeneration: Int?
+    private var pendingPlaybackFailureAlert: UIAlertController?
     private var userSelectedAudioTrack = false
     private var userSelectedSubtitleTrack = false
     private var attemptedAudioAutoSelectSignature: String?
@@ -1253,6 +1320,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var vlcSubtitleOverlayBottomConstraint: NSLayoutConstraint?
     private var subtitleTrailingToProgressConstraint: NSLayoutConstraint?
     private var subtitleTrailingToEpisodeBrowserConstraint: NSLayoutConstraint?
+    private var subtitleTrailingToServicesConstraint: NSLayoutConstraint?
+    private var episodeBrowserTrailingToProgressConstraint: NSLayoutConstraint?
+    private var episodeBrowserTrailingToServicesConstraint: NSLayoutConstraint?
     private var episodeBrowserHostingController: UIHostingController<AnyView>?
     private var isEpisodeBrowserVisible = false
     private var nextEpisodePreview: PlayerEpisodeBrowserItem?
@@ -1267,7 +1337,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var stagedNextEpisodeRequest: PlayerResolvedPlaybackRequest?
     private var stagedNextEpisodeRequestKey: String?
     private var nextEpisodePreviewTask: Task<Void, Never>?
+    private var nextEpisodePreviewGeneration: UUID?
     private var nextEpisodePreviewUnavailableKeys: Set<String> = []
+    private var pendingWatchTogetherNextEpisodeTarget: NextEpisodePlaybackTarget?
+    private var pendingWatchTogetherNextEpisodeTransitionID: UUID?
     private var nextEpisodeArtworkTask: URLSessionDataTask?
     private var nextEpisodeArtworkKey: String?
     private var nextEpisodeArtworkImage: UIImage?
@@ -1276,6 +1349,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var volumeTopConstraint: NSLayoutConstraint?
     private var volumeWidthConstraint: NSLayoutConstraint?
     private var volumeHeightConstraint: NSLayoutConstraint?
+    private var playerTitleCenterConstraint: NSLayoutConstraint?
     private var nextEpisodeButtonMaxWidthConstraint: NSLayoutConstraint?
     private var nextEpisodeButtonBottomConstraint: NSLayoutConstraint?
 #endif
@@ -1420,10 +1494,30 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func playbackContextForTraktScrobble(_ info: MediaInfo) -> EpisodePlaybackContext? {
-        guard case .episode(_, _, let episodeNumber, _, _, _) = info else {
+        guard case .episode(_, let seasonNumber, let episodeNumber, _, _, _) = info else {
             return nil
         }
-        return episodePlaybackContext?.forEpisodeNumber(episodeNumber)
+        return playbackContextForCurrentEpisode(
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber
+        )
+    }
+
+    /// Anime contexts carry the exact cour/episode identity selected by the metadata resolver.
+    /// Rebuilding one from a fallback MediaInfo episode can silently turn that identity into E1.
+    private func playbackContextForCurrentEpisode(
+        seasonNumber: Int,
+        episodeNumber: Int
+    ) -> EpisodePlaybackContext? {
+        guard let context = episodePlaybackContext else { return nil }
+        if context.hasAnimeMediaId {
+            return context
+        }
+        guard context.localSeasonNumber == seasonNumber else { return nil }
+        if context.localEpisodeNumber == episodeNumber {
+            return context
+        }
+        return context.forEpisodeNumber(episodeNumber)
     }
 
     private func sendTraktScrobble(_ action: TraktScrobbleAction, reason: String, force: Bool = false) {
@@ -1566,7 +1660,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         renderer.seek(by: seconds)
     }
     
-    private func rendererSetSpeed(_ speed: Double) {
+    private func rendererSetSpeed(_ speed: Double, notifyWatchTogether: Bool = true) {
         let previousSpeed = rendererGetSpeed()
         if vlcRenderer != nil {
             logVLCUI("rendererSetSpeed \(String(format: "%.2f", speed))", type: "Player")
@@ -1575,6 +1669,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
         renderer.setSpeed(speed)
         sendPlaybackSpeedTraktScrobbleIfNeeded(previousSpeed: previousSpeed, newSpeed: rendererGetSpeed())
+#if os(iOS)
+        if notifyWatchTogether {
+            WatchTogetherCoordinator.shared.sendUserPlaybackRate(speed, from: self)
+        }
+#endif
     }
     
     private func rendererGetSpeed() -> Double {
@@ -2293,6 +2392,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         guard isMPVRenderer, !isVLCPlayer else { return false }
         guard Settings.shared.mpvPictureInPictureEnabled else { return false }
         guard isMetalMPVRenderer else { return false }
+        guard !usesLazyIPadGPUPictureInPicturePreparation else { return false }
         guard UIApplication.shared.applicationState == .active else { return false }
         let now = CACurrentMediaTime()
         guard force || now - lastMPVPictureInPictureWarmAt >= minInterval else { return false }
@@ -2303,6 +2403,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func scheduleMPVPictureInPictureForegroundWarmup(source: String, delays: [TimeInterval], forceFirst: Bool = false) {
         guard isMPVRenderer, !isVLCPlayer else { return }
         guard Settings.shared.mpvPictureInPictureEnabled else { return }
+        guard !usesLazyIPadGPUPictureInPicturePreparation else {
+            logPictureInPicture("MPV foreground PiP warmup deferred until PiP request source=\(source) device=iPad renderer=\(mpvRendererName)")
+            return
+        }
         guard isMetalMPVRenderer else {
             logPictureInPicture("MPV foreground PiP warmup skipped source=\(source): renderer=\(mpvRendererName) has no separate foreground prewarm path")
             return
@@ -2330,6 +2434,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: warm)
             }
         }
+    }
+
+    /// On iPad gpu-next, creating and feeding the second sample-buffer mpv instance during inline
+    /// startup can contend with MoltenVK. Manual PiP and app-exit PiP still prepare it on demand.
+    private var usesLazyIPadGPUPictureInPicturePreparation: Bool {
+#if os(iOS) && ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE
+        UIDevice.current.userInterfaceIdiom == .pad && gpuMPVRenderer != nil
+#else
+        false
+#endif
     }
 
     private func updatePlayerTitle() {
@@ -2577,6 +2691,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         
         @Published var isVisible: Bool = false {
             didSet {
+                guard isVisible != oldValue else { return }
                 if !isLoading && shouldPersistChanges { saveSubtitleSettings() }
             }
         }
@@ -2786,6 +2901,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #if os(iOS)
     private var watchTogetherConnectionState: WatchTogetherConnectionState = .ready
     private var watchTogetherMediaIdentifier: String?
+    private var pendingWatchTogetherPlaybackState: (state: WatchTogetherSharedState, shouldSeek: Bool)?
+    private var lastWatchTogetherSharedState: WatchTogetherSharedState?
+    private var watchTogetherRendererReady = false
+    private weak var episodeSourceSheetController: UIViewController?
+    private var episodeSourceSheetTransitionID: UUID?
 #endif
     private var lastCPUProcessTime: TimeInterval?
     private var lastCPUWallTime: CFTimeInterval?
@@ -2808,6 +2928,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         updatePlayerTitle()
         
         setupActions()
+#if os(iOS)
+        applyPlaybackLockState(capturingOrientationIfNeeded: false)
+#endif
         setupHoldGesture()
         setupDoubleTapSkipGestures()
     #if !os(tvOS)
@@ -2828,8 +2951,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             speedButton.showsMenuAsPrimaryAction = true
             audioButton.showsMenuAsPrimaryAction = true
             updateSubtitleTracksMenu()
-            updateEpisodeBrowserButtonVisibility()
         }
+        updateEpisodeBrowserButtonVisibility()
 
         NotificationCenter.default.addObserver(self, selector: #selector(handleLoggerNotification(_:)), name: NSNotification.Name("LoggerNotification"), object: nil)
         NotificationCenter.default.addObserver(
@@ -2887,19 +3010,55 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #if os(iOS) && ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE && ECLIPSE_MPVKIT_METAL_LIVE_QUALITY_RECONFIGURE
         NotificationCenter.default.addObserver(self, selector: #selector(metalThermalStateDidChange), name: ProcessInfo.thermalStateDidChangeNotification, object: nil)
 #endif
-        NotificationCenter.default.addObserver(self, selector: #selector(sceneWillDeactivate), name: UIScene.willDeactivateNotification, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(sceneDidEnterBackground), name: UIScene.didEnterBackgroundNotification, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(sceneWillEnterForeground), name: UIScene.willEnterForegroundNotification, object: nil)
-        NotificationCenter.default.addObserver(self, selector: #selector(sceneDidActivate), name: UIScene.didActivateNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(sceneWillDeactivate(_:)), name: UIScene.willDeactivateNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(sceneDidEnterBackground(_:)), name: UIScene.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(sceneWillEnterForeground(_:)), name: UIScene.willEnterForegroundNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(sceneDidActivate(_:)), name: UIScene.didActivateNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appScenePhaseDidChange(_:)), name: .eclipseScenePhaseDidChange, object: nil)
     }
     
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        playbackWindowScene = view.window?.windowScene ?? playbackWindowScene
+#if os(iOS)
+        presentationController?.delegate = self
+        applyPlaybackLockState(capturingOrientationIfNeeded: true)
+#endif
+        submitDeferredIPadGPUPlaybackLoadIfReady(source: "view-did-appear")
+        playbackHandoffHasAppeared = true
+        postPlayerInterfaceCoverage(covered: true)
         view.bringSubviewToFront(errorBanner)
         view.bringSubviewToFront(playerNoticeBanner)
         refreshPlayerSkinDecorationAnimations()
         logVLCUIViewSnapshot("viewDidAppear")
+        if let pendingPlaybackFailureAlert {
+            self.pendingPlaybackFailureAlert = nil
+            presentPlaybackFailureAlert(pendingPlaybackFailureAlert)
+        }
+    }
+
+    override func viewDidDisappear(_ animated: Bool) {
+        super.viewDidDisappear(animated)
+        postPlayerInterfaceCoverage(covered: false)
+#if os(iOS)
+        if let scene = view.window?.windowScene ?? playbackWindowScene {
+            AppDelegate.setOrientationLock(.all, for: scene)
+        }
+#endif
+    }
+
+    private func postPlayerInterfaceCoverage(covered: Bool) {
+        let sceneSessionIdentifier = (viewIfLoaded?.window?.windowScene ?? playbackWindowScene)?
+            .session.persistentIdentifier
+        NotificationCenter.default.post(
+            name: .playerInterfaceCoverageDidChange,
+            object: self,
+            userInfo: PlayerInterfaceCoverageNotification.userInfo(
+                covered: covered,
+                playerIdentifier: playerInterfaceCoverageIdentifier,
+                sceneSessionIdentifier: sceneSessionIdentifier
+            )
+        )
     }
     
 #if !os(tvOS)
@@ -2907,15 +3066,23 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation { .fade }
     
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
+        if let lockedMask = PlayerPlaybackLockSettings.lockedOrientationMask() {
+            return lockedMask
+        }
         if UserDefaults.standard.bool(forKey: "alwaysLandscape") {
             return .landscape
         } else {
             return .all
         }
     }
+
+    override var shouldAutorotate: Bool {
+        !PlayerPlaybackLockSettings.isLocked()
+    }
     
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
+        playbackWindowScene = view.window?.windowScene ?? playbackWindowScene
         setNeedsStatusBarAppearanceUpdate()
         if supportsSharedPlayerControls {
             refreshGestureControlLevels(animated: false)
@@ -2933,6 +3100,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
         super.viewWillTransition(to: size, with: coordinator)
+        updatePlayerTitleLayout(forWidth: size.width)
         coordinator.animate(alongsideTransition: { [weak self] _ in
             guard let self else { return }
             self.view.layoutIfNeeded()
@@ -2945,6 +3113,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         })
     }
 #endif
+
+    override func viewWillLayoutSubviews() {
+        super.viewWillLayoutSubviews()
+#if !os(tvOS)
+        updatePlayerTitleLayout(forWidth: view.bounds.width)
+#endif
+    }
     
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
@@ -2968,6 +3143,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         playerSkinDecorationLayer.frame = controlsOverlayView.bounds
         
         CATransaction.commit()
+
+        if deferredIPadGPUPlaybackLoad != nil {
+            DispatchQueue.main.async { [weak self] in
+                self?.submitDeferredIPadGPUPlaybackLoadIfReady(source: "layout")
+            }
+        }
     }
 
 #if !os(tvOS)
@@ -2982,10 +3163,21 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let landscapeLimit = min(520, max(360, availableWidth * 0.48))
         nextEpisodeButtonMaxWidthConstraint?.constant = isPortrait ? min(420, compactLimit) : landscapeLimit
     }
+
+    private func updatePlayerTitleLayout(forWidth width: CGFloat) {
+        guard let playerTitleCenterConstraint else { return }
+        let usesNarrowIPadWindow = UIDevice.current.userInterfaceIdiom == .pad
+            && width > 0
+            && width < 520
+        let priority: UILayoutPriority = usesNarrowIPadWindow ? .defaultHigh : .required
+        guard playerTitleCenterConstraint.priority != priority else { return }
+        playerTitleCenterConstraint.priority = priority
+    }
 #endif
     
     deinit {
         isClosing = true
+        invalidateIPadGPUPlaybackLoadGate()
         setIdleTimerDisabledForPlayback(false, reason: "deinit")
         audioMenuDebounceTimer?.invalidate()
         subtitleMenuDebounceTimer?.invalidate()
@@ -3038,7 +3230,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         NotificationCenter.default.removeObserver(self)
     }
     
-    convenience init(url: URL, preset: PlayerPreset, headers: [String: String]? = nil, subtitles: [String]? = nil, subtitleNames: [String]? = nil, subtitleHeadersByURL: [String: [String: String]]? = nil, mediaInfo: MediaInfo? = nil, imdbId: String? = nil) {
+    convenience init(url: URL, preset: PlayerPreset, headers: [String: String]? = nil, subtitles: [String]? = nil, subtitleNames: [String]? = nil, subtitleHeadersByURL: [String: [String: String]]? = nil, mediaSelectionIntent: PlaybackMediaSelectionIntent? = nil, mediaInfo: MediaInfo? = nil, imdbId: String? = nil) {
         self.init(nibName: nil, bundle: nil)
         self.initialURL = url
         self.initialPreset = preset
@@ -3046,12 +3238,220 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         self.initialSubtitles = subtitles
         self.initialSubtitleNames = subtitleNames
         self.initialSubtitleHeadersByURL = subtitleHeadersByURL
+        self.playbackMediaSelectionIntent = mediaSelectionIntent
+        if let mediaSelectionIntent {
+            self.subtitleModel.setVisible(mediaSelectionIntent.subtitlesEnabled, persist: false)
+        }
         self.mediaInfo = mediaInfo
         self.imdbId = imdbId
         Logger.shared.log("[PlayerViewController.init] URL=\(url.absoluteString) preset=\(preset.id.rawValue) headers=\(headers?.count ?? 0) subtitles=\(subtitles?.count ?? 0) mediaInfo=\(mediaInfo != nil)", type: "Stream")
     }
-    
+
+    private var automaticAudioSelectionLanguage: String {
+        if let playbackMediaSelectionIntent {
+            return playbackMediaSelectionIntent.preferredAudioLanguage ?? ""
+        }
+        return (isAnimeContent()
+            ? Settings.shared.preferredAnimeAudioLanguage
+            : Settings.shared.preferredAutoAudioLanguage).lowercased()
+    }
+
+    private var automaticSubtitleSelectionLanguage: String {
+        if let playbackMediaSelectionIntent {
+            return playbackMediaSelectionIntent.preferredSubtitleLanguage ?? ""
+        }
+        return Settings.shared.defaultSubtitleLanguage
+    }
+
+    private var automaticSubtitlesEnabled: Bool {
+        playbackMediaSelectionIntent?.subtitlesEnabled
+            ?? Settings.shared.enableSubtitlesByDefault
+    }
+
+    /// Keeps renderer-neutral choices current for later in-place source/episode loads without
+    /// writing the per-session selection back to the user's global defaults.
+    private func recordUserMediaSelection(
+        audioLanguage: String? = nil,
+        subtitleLanguage: String? = nil,
+        subtitlesEnabled: Bool? = nil
+    ) {
+        // A nil intent is the legacy/direct construction contract: those players continue using
+        // and persisting their global defaults. Only coordinator-owned request sessions keep a
+        // separate renderer-neutral selection snapshot.
+        guard let current = playbackMediaSelectionIntent else { return }
+        playbackMediaSelectionIntent = current.overridingRendererSelection(
+            audioLanguage: audioLanguage,
+            subtitleLanguage: subtitleLanguage,
+            hasSelectedSubtitle: subtitlesEnabled
+        )
+    }
+
+    private func rendererNeutralLanguage(
+        languageTag: String? = nil,
+        displayName: String? = nil
+    ) -> String? {
+        if let normalizedTag = PlaybackMediaSelectionIntent.normalizedLanguage(languageTag) {
+            return canonicalKnownLanguage(in: normalizedTag) ?? normalizedTag
+        }
+        guard let displayName else { return nil }
+        return canonicalKnownLanguage(in: displayName)
+    }
+
+    private func canonicalKnownLanguage(in rawValue: String) -> String? {
+        let normalized = rawValue
+            .folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+            .lowercased()
+        let tokens = Set(
+            normalized.components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { !$0.isEmpty }
+        )
+        let knownLanguages: [(code: String, aliases: Set<String>)] = [
+            ("eng", ["eng", "en", "english", "us", "uk"]),
+            ("jpn", ["jpn", "ja", "jp", "japanese"]),
+            ("zho", ["zho", "chi", "zh", "chinese", "mandarin", "cantonese"]),
+            ("kor", ["kor", "ko", "korean"]),
+            ("spa", ["spa", "es", "esp", "spanish", "lat", "latino"]),
+            ("fra", ["fra", "fre", "fr", "french"]),
+            ("deu", ["deu", "ger", "de", "german"]),
+            ("ita", ["ita", "it", "italian"]),
+            ("por", ["por", "pt", "br", "portuguese"]),
+            ("rus", ["rus", "ru", "russian"])
+        ]
+        return knownLanguages.first(where: { !$0.aliases.isDisjoint(with: tokens) })?.code
+    }
+
+    private func recordUserAudioSelection(name: String, languageTag: String?) {
+        recordUserMediaSelection(
+            audioLanguage: rendererNeutralLanguage(languageTag: languageTag, displayName: name)
+        )
+    }
+
+    private func recordUserSubtitleSelection(
+        enabled: Bool,
+        languageTag: String? = nil,
+        displayName: String? = nil
+    ) {
+        recordUserMediaSelection(
+            subtitleLanguage: rendererNeutralLanguage(
+                languageTag: languageTag,
+                displayName: displayName
+            ),
+            subtitlesEnabled: enabled
+        )
+    }
+
+    private func setSessionAwareSubtitleVisible(_ visible: Bool) {
+        setSubtitleVisible(visible, persist: playbackMediaSelectionIntent == nil)
+    }
+
+    private var shouldUseIPadGPUPlaybackLoadGate: Bool {
+#if os(iOS) && ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE
+        UIDevice.current.userInterfaceIdiom == .pad && gpuMPVRenderer != nil
+#else
+        false
+#endif
+    }
+
+    private func isIPadGPUPlaybackViewportReady(_ request: DeferredIPadGPUPlaybackLoad) -> Bool {
+        guard isViewLoaded,
+              view.window != nil,
+              let renderingView = mpvRenderingView,
+              renderingView.window != nil,
+              view.bounds.width > 1,
+              view.bounds.height > 1,
+              videoContainer.bounds.width > 1,
+              videoContainer.bounds.height > 1,
+              renderingView.bounds.width > 1,
+              renderingView.bounds.height > 1 else {
+            return false
+        }
+
+        // Landscape geometry is stable enough immediately. Portrait gets one short settling
+        // window because an always-landscape iPad presentation commonly attaches before its
+        // rotation transaction has updated the MoltenVK drawable.
+        let isLandscape = videoContainer.bounds.width > videoContainer.bounds.height
+        return isLandscape || CACurrentMediaTime() - request.queuedAt >= 0.9
+    }
+
+    private func deferIPadGPUPlaybackLoadIfNeeded(
+        url: URL,
+        preset: PlayerPreset,
+        headers: [String: String]?
+    ) -> Bool {
+        guard shouldUseIPadGPUPlaybackLoadGate else { return false }
+
+        ipadGPUPlaybackLoadGateGeneration += 1
+        let generation = ipadGPUPlaybackLoadGateGeneration
+        let request = DeferredIPadGPUPlaybackLoad(
+            url: url,
+            preset: preset,
+            headers: headers,
+            generation: generation,
+            queuedAt: CACurrentMediaTime()
+        )
+        deferredIPadGPUPlaybackLoad = request
+
+        view.layoutIfNeeded()
+        rendererRenderingLayoutDidChange()
+        if isIPadGPUPlaybackViewportReady(request) {
+            deferredIPadGPUPlaybackLoad = nil
+            return false
+        }
+
+        logMPV("iPad gpu-next load deferred until attached viewport generation=\(generation) view=\(view.bounds.size) video=\(videoContainer.bounds.size) render=\(mpvRenderingView?.bounds.size ?? .zero) attached=\(view.window != nil && mpvRenderingView?.window != nil)")
+        scheduleIPadGPUPlaybackLoadGateRetry(generation: generation)
+        return true
+    }
+
+    private func scheduleIPadGPUPlaybackLoadGateRetry(generation: Int) {
+        guard ipadGPUPlaybackLoadGateRetryGeneration != generation else { return }
+        ipadGPUPlaybackLoadGateRetryGeneration = generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self else { return }
+            if self.ipadGPUPlaybackLoadGateRetryGeneration == generation {
+                self.ipadGPUPlaybackLoadGateRetryGeneration = nil
+            }
+            guard generation == self.ipadGPUPlaybackLoadGateGeneration else { return }
+            self.submitDeferredIPadGPUPlaybackLoadIfReady(source: "retry")
+        }
+    }
+
+    private func submitDeferredIPadGPUPlaybackLoadIfReady(source: String) {
+        guard !isClosing,
+              let request = deferredIPadGPUPlaybackLoad,
+              request.generation == ipadGPUPlaybackLoadGateGeneration else {
+            return
+        }
+
+        view.layoutIfNeeded()
+        rendererRenderingLayoutDidChange()
+        guard isIPadGPUPlaybackViewportReady(request) else {
+            scheduleIPadGPUPlaybackLoadGateRetry(generation: request.generation)
+            return
+        }
+
+        deferredIPadGPUPlaybackLoad = nil
+        ipadGPUPlaybackLoadGateRetryGeneration = nil
+        let age = CACurrentMediaTime() - request.queuedAt
+        logMPV("iPad gpu-next load submitted source=\(source) generation=\(request.generation) age=\(String(format: "%.2f", age))s video=\(videoContainer.bounds.size) render=\(mpvRenderingView?.bounds.size ?? .zero)")
+        performLoad(url: request.url, preset: request.preset, headers: request.headers)
+    }
+
+    private func invalidateIPadGPUPlaybackLoadGate() {
+        ipadGPUPlaybackLoadGateGeneration += 1
+        deferredIPadGPUPlaybackLoad = nil
+        ipadGPUPlaybackLoadGateRetryGeneration = nil
+    }
+
     func load(url: URL, preset: PlayerPreset, headers: [String: String]? = nil) {
+        if deferIPadGPUPlaybackLoadIfNeeded(url: url, preset: preset, headers: headers) {
+            return
+        }
+        performLoad(url: url, preset: preset, headers: headers)
+    }
+
+    private func performLoad(url: URL, preset: PlayerPreset, headers: [String: String]?) {
+        pendingRendererRestartRetryGeneration = nil
         playbackLoadGeneration += 1
         playbackTraceLoadStartedAt = Date()
         playbackTraceLastStageAt = playbackTraceLoadStartedAt
@@ -3127,7 +3527,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             do {
                 try rendererStart()
             } catch {
+                let message = "The MPV renderer failed to start: \(error.localizedDescription)"
                 logPlaybackStage("renderer-start-failed", "error=\(error.localizedDescription)")
+                handlePlaybackStartupFailure(message, isSourceFailure: false)
                 return
             }
         }
@@ -3154,10 +3556,28 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         pendingInitialResumeDeadline = nil
         pendingInitialResumeRetryCount = 0
         pendingInitialResumeLastRetryAt = nil
+#if os(iOS)
+        watchTogetherRendererReady = false
+        pendingWatchTogetherPlaybackState = nil
+#endif
         releaseBackgroundRecoveryProgressGate(reason: "new-load")
         setVLCSubtitleStyleReloadProgressGate(active: false, reason: "new-load")
         if let info = mediaInfo {
             prepareSeekToLastPosition(for: info)
+        }
+        if let refreshPosition = pendingSourceRefreshResumePosition,
+           refreshPosition.isFinite,
+           refreshPosition > 0 {
+            pendingSeekTime = refreshPosition
+            pendingInitialResumeTarget = refreshPosition
+            pendingInitialResumeDeadline = Date().addingTimeInterval(20)
+            pendingInitialResumeRetryCount = 0
+            pendingInitialResumeLastRetryAt = nil
+            pendingSourceRefreshResumePosition = nil
+            Logger.shared.log(
+                "Prepared source-refresh resume seek to \(Int(refreshPosition))s",
+                type: "Progress"
+            )
         }
         logPlaybackStage("resume-prepared", "target=\(secondsText(pendingSeekTime))")
         logVLCUI("load resume prepared pendingSeek=\(secondsText(pendingSeekTime)) progressCached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) launchContext=\(String(describing: playbackLaunchContext))", type: "Progress")
@@ -3214,13 +3634,24 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
         Logger.shared.log("[PlayerVC.PlaybackStart] startup monitor armed renderer=\(isVLCPlayer ? "VLC" : "MPV") url=\(url.absoluteString) headerKeys=[\(headers.keys.sorted().joined(separator: ","))]", type: isVLCPlayer ? "Stream" : "MPV")
         logPlaybackStage("monitor-armed", "deadline=18.00s target={\(playbackURLSummary(url))}")
-        schedulePlaybackStartupCheck(url: url, headers: headers, delay: 18)
+        schedulePlaybackStartupCheck(
+            url: url,
+            headers: headers,
+            generation: playbackLoadGeneration,
+            delay: 18
+        )
     }
 
-    private func schedulePlaybackStartupCheck(url: URL, headers: [String: String], delay: TimeInterval) {
+    private func schedulePlaybackStartupCheck(
+        url: URL,
+        headers: [String: String],
+        generation: Int,
+        delay: TimeInterval
+    ) {
         playbackStartupWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self,
+                  self.playbackLoadGeneration == generation,
                   !self.playbackDidStart,
                   !self.playbackFailureHandled,
                   !self.isClosing else {
@@ -3230,7 +3661,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 "watchdog-fired",
                 "probe=\(self.playbackSlowProbeCount + 1) loading=\(self.isRendererLoading) paused=\(self.rendererIsPausedState()) cached=\(self.secondsText(self.cachedPosition))/\(self.secondsText(self.cachedDuration)) renderer={\(self.rendererPictureInPictureDebugSnapshot())}"
             )
-            self.runPlaybackStartupProbe(url: url, headers: headers)
+            self.runPlaybackStartupProbe(url: url, headers: headers, generation: generation)
         }
         playbackStartupWorkItem = workItem
         DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
@@ -3262,12 +3693,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         )
     }
 
-    private func runPlaybackStartupProbe(url: URL, headers: [String: String]) {
+    private func runPlaybackStartupProbe(url: URL, headers: [String: String], generation: Int) {
         logPlaybackStage("probe-begin", "attempt=\(playbackSlowProbeCount + 1)")
         Task { [weak self] in
             let result = await SourceHealthMonitor.shared.probeStream(url: url, headers: headers)
             await MainActor.run {
                 guard let self,
+                      self.playbackLoadGeneration == generation,
                       !self.playbackDidStart,
                       !self.playbackFailureHandled,
                       !self.isClosing else {
@@ -3278,8 +3710,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 case .reachable:
                     self.playbackSlowProbeCount += 1
                     self.logPlaybackStage("probe-result", "result=reachable attempt=\(self.playbackSlowProbeCount)")
-                    self.showErrorBanner("Stream is reachable but still starting. Waiting a little longer...")
-                    self.schedulePlaybackStartupCheck(url: url, headers: headers, delay: 20)
+                    if self.playbackSlowProbeCount >= 3 {
+                        self.handlePlaybackStartupFailure(
+                            "The stream is reachable, but the renderer remained idle.",
+                            isSourceFailure: false
+                        )
+                    } else {
+                        self.showErrorBanner("Stream is reachable but still starting. Waiting a little longer...")
+                        self.schedulePlaybackStartupCheck(
+                            url: url,
+                            headers: headers,
+                            generation: generation,
+                            delay: 20
+                        )
+                    }
                 case .slowOrIndeterminate(let reason):
                     self.playbackSlowProbeCount += 1
                     self.logPlaybackStage("probe-result", "result=slow attempt=\(self.playbackSlowProbeCount) reason=\(reason)")
@@ -3287,7 +3731,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                         self.handlePlaybackStartupFailure("Playback is taking too long: \(reason)", isSourceFailure: false)
                     } else {
                         self.showErrorBanner("Connection looks slow. Still waiting for playback...")
-                        self.schedulePlaybackStartupCheck(url: url, headers: headers, delay: 20)
+                        self.schedulePlaybackStartupCheck(
+                            url: url,
+                            headers: headers,
+                            generation: generation,
+                            delay: 20
+                        )
                     }
                 case .networkUnavailable:
                     self.logPlaybackStage("probe-result", "result=network-unavailable")
@@ -3310,14 +3759,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return
         }
         if !isVLCPlayer,
-           playbackLaunchContext?.autoMode != true,
+           (playbackLaunchContext?.autoMode != true || isCoordinatorEngineFallback),
            shouldSilentlyRetryMPVStartup(after: message) {
             let retryKey = playbackLaunchContext?.streamURL ?? initialURL?.absoluteString ?? message
             if mpvSilentStartupRetryKey != retryKey {
                 mpvSilentStartupRetryKey = retryKey
+                playbackFailureHandled = true
                 playbackStartupWorkItem?.cancel()
                 Logger.shared.log("[PlayerVC.PlaybackStart] MPV silently retrying startup after first failure: \(message)", type: "MPV")
-                retryPlaybackAfterFailure()
+                restartRendererAndRetryPlayback(afterLoadGeneration: playbackLoadGeneration)
                 return
             }
         }
@@ -3332,6 +3782,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return
         }
 
+        let report = PlaybackFailureReport(context: context, message: message, isSourceFailure: isSourceFailure)
+        if let onAutomaticPlaybackFallback,
+           PlaybackEngineRetryPolicy.shouldTryAlternateEngine(message: message) {
+            self.onAutomaticPlaybackFallback = nil
+            onAutomaticPlaybackFallback(report)
+            return
+        }
+
         SourceHealthStore.shared.recordPlaybackFailure(
             sourceId: context.sourceId,
             sourceName: context.sourceName,
@@ -3339,8 +3797,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             isSourceFailure: isSourceFailure
         )
 
-        let report = PlaybackFailureReport(context: context, message: message, isSourceFailure: isSourceFailure)
-        if context.autoMode {
+        if context.autoMode, isCoordinatorEngineFallback {
+            showCoordinatorFallbackFailureAlert(report)
+        } else if context.autoMode, onPlaybackStartupFailure != nil {
             if isVLCPlayer {
                 showErrorBanner("\(context.sourceName) failed. Retrying another stream...")
             } else {
@@ -3357,6 +3816,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return lower.contains("stayed idle")
             || lower.contains("taking too long")
             || lower.contains("failed to open")
+            || lower.contains("loading failed")
             || lower.contains("unexpected tls packet")
             || lower.contains("tls")
     }
@@ -3373,7 +3833,70 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         alert.addAction(UIAlertAction(title: "Close", style: .cancel) { [weak self] _ in
             self?.closeTapped()
         })
+        presentPlaybackFailureAlert(alert)
+    }
+
+    private func showCoordinatorFallbackFailureAlert(_ report: PlaybackFailureReport) {
+        let alert = UIAlertController(
+            title: "Playback Failed in Both Players",
+            message: "Molten could not start this stream after AVPlayer failed. \(report.message)",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "Retry Molten", style: .default) { [weak self] _ in
+            self?.retryPlaybackAfterFailure()
+        })
+        if onPlaybackStartupFailure != nil {
+            alert.addAction(UIAlertAction(title: "Try Another Source", style: .default) { [weak self] _ in
+                self?.dismissAfterPlaybackFailure(report)
+            })
+        }
+        alert.addAction(UIAlertAction(title: "Close", style: .cancel) { [weak self] _ in
+            self?.closeTapped()
+        })
+        presentPlaybackFailureAlert(alert)
+    }
+
+    private func presentPlaybackFailureAlert(_ alert: UIAlertController) {
+        guard !isClosing,
+              !isBeingDismissed else { return }
+        guard viewIfLoaded?.window != nil else {
+            // Renderer startup can fail synchronously from viewDidLoad, before UIKit attaches the
+            // full-screen player to a window. Keep the terminal state visible once presentation
+            // finishes rather than losing the only recovery controls.
+            pendingPlaybackFailureAlert = alert
+            return
+        }
+        if isBeingPresented, let transitionCoordinator {
+            transitionCoordinator.animate(alongsideTransition: nil) { [weak self] _ in
+                self?.presentPlaybackFailureAlert(alert)
+            }
+            return
+        }
+        if let presentedViewController {
+            presentedViewController.dismiss(animated: true) { [weak self] in
+                self?.presentPlaybackFailureAlert(alert)
+            }
+            return
+        }
         present(alert, animated: true)
+    }
+
+    /// A stop drains the renderer's event queue and clears its callbacks. Re-entering on the next
+    /// main-queue turn is therefore a deterministic boundary: queued failures from load N run while
+    /// `playbackFailureHandled` is still true, and only the generation-matched load N+1 can reset it.
+    private func restartRendererAndRetryPlayback(afterLoadGeneration failedGeneration: Int) {
+        pendingRendererRestartRetryGeneration = failedGeneration
+        rendererStop()
+        DispatchQueue.main.async { [weak self] in
+            guard let self,
+                  !self.isClosing,
+                  !self.isBeingDismissed,
+                  self.viewIfLoaded?.window != nil,
+                  self.pendingRendererRestartRetryGeneration == failedGeneration,
+                  self.playbackLoadGeneration == failedGeneration else { return }
+            self.pendingRendererRestartRetryGeneration = nil
+            self.retryPlaybackAfterFailure()
+        }
     }
 
     private func retryPlaybackAfterFailure() {
@@ -3393,6 +3916,19 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         initialSubtitleNames = context.subtitleNames
         initialSubtitleHeadersByURL = context.subtitleHeadersByURL
         load(url: url, preset: preset, headers: context.headers)
+    }
+
+    /// Restores a primary player when its coordinator handoff loses the presenter race instead of
+    /// leaving the failed controller frozen with no fallback or error UI.
+    func playbackEngineHandoffDidFail(_ report: PlaybackFailureReport) {
+        guard !isClosing, !isBeingDismissed, viewIfLoaded?.window != nil else { return }
+        onAutomaticPlaybackFallback = nil
+        playbackFailureHandled = true
+        if report.context.autoMode, onPlaybackStartupFailure != nil {
+            dismissAfterPlaybackFailure(report)
+        } else {
+            showManualPlaybackFailureAlert(report)
+        }
     }
 
     private func dismissAfterPlaybackFailure(_ report: PlaybackFailureReport) {
@@ -3462,20 +3998,48 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         loadingIndicatorHostingController = host
     }
 
+    private func teardownPlayerLoadingIndicator() {
+        guard let host = loadingIndicatorHostingController else { return }
+        host.willMove(toParent: nil)
+        host.view.removeFromSuperview()
+        host.removeFromParent()
+        loadingIndicatorHostingController = nil
+    }
+
     private func setPlayerLoadingIndicatorVisible(_ visible: Bool, animated: Bool = true) {
-        guard loadingIndicator.alpha != (visible ? 1.0 : 0.0) else {
-            if visible { videoContainer.bringSubviewToFront(loadingIndicator) }
-            return
-        }
+        loadingIndicatorShouldBeVisible = visible
+        let targetAlpha: CGFloat = visible ? 1.0 : 0.0
+
         if visible {
             setupPlayerLoadingIndicator()
             videoContainer.bringSubviewToFront(loadingIndicator)
         }
-        let changes = { self.loadingIndicator.alpha = visible ? 1.0 : 0.0 }
+
+        guard loadingIndicator.alpha != targetAlpha else {
+            if !visible {
+                teardownPlayerLoadingIndicator()
+            }
+            return
+        }
+
+        let changes = { self.loadingIndicator.alpha = targetAlpha }
+        let completion: (Bool) -> Void = { [weak self] _ in
+            guard let self,
+                  !self.loadingIndicatorShouldBeVisible,
+                  self.loadingIndicator.alpha == 0 else { return }
+            self.teardownPlayerLoadingIndicator()
+        }
         if animated {
-            UIView.animate(withDuration: visible ? 0.18 : 0.12, delay: 0, options: [.beginFromCurrentState, .curveEaseInOut], animations: changes)
+            UIView.animate(
+                withDuration: visible ? 0.18 : 0.12,
+                delay: 0,
+                options: [.beginFromCurrentState, .curveEaseInOut],
+                animations: changes,
+                completion: completion
+            )
         } else {
             changes()
+            completion(true)
         }
     }
 
@@ -3570,10 +4134,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         centerPlayPauseButton.layer.shadowRadius = selectedSkin == .defaultSkin ? 0 : 10
         centerPlayPauseButton.layer.shadowOffset = .zero
 
-        let themedButtons = [
+        var themedButtons = [
             closeButton, pipButton, skipBackwardButton, skipForwardButton,
-            subtitleButton, episodeBrowserButton, speedButton, audioButton
+            subtitleButton, servicesButton, episodeBrowserButton, speedButton, audioButton
         ]
+#if os(iOS)
+        themedButtons.append(playbackLockButton)
+#endif
         for button in themedButtons {
             button.tintColor = appearance.primary
             if var configuration = button.configuration {
@@ -3827,7 +4394,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         videoContainer.addSubview(controlsOverlayView)
         controlsOverlayView.layer.insertSublayer(playerSkinDecorationLayer, at: 0)
         videoContainer.addSubview(loadingIndicator)
-        setupPlayerLoadingIndicator()
         view.addSubview(errorBanner)
         view.addSubview(playerNoticeBanner)
         videoContainer.addSubview(centerPlayPauseButton)
@@ -3838,6 +4404,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         overlayMenuPanelView.addSubview(overlayMenuScrollView)
         overlayMenuScrollView.addSubview(overlayMenuStackView)
         videoContainer.addSubview(closeButton)
+#if os(iOS)
+        videoContainer.addSubview(playbackLockButton)
+#endif
         videoContainer.addSubview(pipButton)
 #if os(iOS)
         videoContainer.addSubview(watchTogetherButton)
@@ -3850,6 +4419,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         videoContainer.addSubview(vlcSubtitleOverlayLabel)
         videoContainer.addSubview(subtitleButton)
         if supportsSharedPlayerControls {
+            videoContainer.addSubview(servicesButton)
             videoContainer.addSubview(episodeBrowserButton)
             videoContainer.addSubview(speedButton)
             videoContainer.addSubview(audioButton)
@@ -3918,6 +4488,38 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             overlayMenuStackView.widthAnchor.constraint(equalTo: overlayMenuScrollView.frameLayoutGuide.widthAnchor)
         ])
         
+        let playerTitleCenterConstraint = playerTitleLabel.centerXAnchor.constraint(
+            equalTo: videoContainer.centerXAnchor
+        )
+#if os(tvOS)
+        playerTitleCenterConstraint.priority = .required
+#else
+        // Start non-required so the first narrow iPad split-view layout cannot break constraints
+        // before viewWillLayoutSubviews applies the current window-width policy.
+        playerTitleCenterConstraint.priority = .defaultHigh
+        self.playerTitleCenterConstraint = playerTitleCenterConstraint
+#endif
+
+#if os(iOS)
+        NSLayoutConstraint.activate([
+            playbackLockButton.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
+            playbackLockButton.leadingAnchor.constraint(equalTo: closeButton.trailingAnchor, constant: 16),
+            playbackLockButton.widthAnchor.constraint(
+                equalToConstant: PlayerPlaybackLockSettings.isEnabled() ? 36 : 0
+            ),
+            playbackLockButton.heightAnchor.constraint(equalToConstant: 36)
+        ])
+        let pipLeadingConstraint = pipButton.leadingAnchor.constraint(
+            equalTo: playbackLockButton.trailingAnchor,
+            constant: PlayerPlaybackLockSettings.isEnabled() ? 16 : 0
+        )
+#else
+        let pipLeadingConstraint = pipButton.leadingAnchor.constraint(
+            equalTo: closeButton.trailingAnchor,
+            constant: 16
+        )
+#endif
+
         NSLayoutConstraint.activate([
             errorBanner.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
             errorBanner.centerXAnchor.constraint(equalTo: view.centerXAnchor),
@@ -3945,12 +4547,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             closeButton.heightAnchor.constraint(equalToConstant: 36),
             
             pipButton.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
-            pipButton.leadingAnchor.constraint(equalTo: closeButton.trailingAnchor, constant: 16),
+            pipLeadingConstraint,
             pipButton.widthAnchor.constraint(equalToConstant: 36),
             pipButton.heightAnchor.constraint(equalToConstant: 36),
 
             playerTitleLabel.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
-            playerTitleLabel.centerXAnchor.constraint(equalTo: videoContainer.centerXAnchor),
+            playerTitleCenterConstraint,
             playerTitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -20),
             
             skipBackwardButton.centerYAnchor.constraint(equalTo: centerPlayPauseButton.centerYAnchor),
@@ -3980,6 +4582,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             subtitleButton.heightAnchor.constraint(equalToConstant: 32)
         ])
 
+        // Keep the title out of the PiP control even when the optional SharePlay control is
+        // hidden. The additional iOS constraint below reserves SharePlay's space when present.
+        playerTitleLabel.leadingAnchor.constraint(
+            greaterThanOrEqualTo: pipButton.trailingAnchor,
+            constant: 12
+        ).isActive = true
+
 #if os(iOS)
         NSLayoutConstraint.activate([
             watchTogetherButton.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
@@ -3988,8 +4597,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             watchTogetherButton.heightAnchor.constraint(equalToConstant: 36),
             playerTitleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: watchTogetherButton.trailingAnchor, constant: 10)
         ])
-#else
-        playerTitleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: pipButton.trailingAnchor, constant: 12).isActive = true
 #endif
 
         subtitleTrailingToProgressConstraint = subtitleButton.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor, constant: 0)
@@ -3999,8 +4606,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         vlcSubtitleOverlayBottomConstraint?.isActive = true
         if supportsSharedPlayerControls {
             subtitleTrailingToEpisodeBrowserConstraint = subtitleButton.trailingAnchor.constraint(equalTo: episodeBrowserButton.leadingAnchor, constant: -8)
+            subtitleTrailingToServicesConstraint = subtitleButton.trailingAnchor.constraint(equalTo: servicesButton.leadingAnchor, constant: -8)
+            episodeBrowserTrailingToProgressConstraint = episodeBrowserButton.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor)
+            episodeBrowserTrailingToServicesConstraint = episodeBrowserButton.trailingAnchor.constraint(equalTo: servicesButton.leadingAnchor, constant: -8)
             NSLayoutConstraint.activate([
-                episodeBrowserButton.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor, constant: 0),
+                servicesButton.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor, constant: 0),
+                servicesButton.centerYAnchor.constraint(equalTo: subtitleButton.centerYAnchor),
+                servicesButton.widthAnchor.constraint(equalToConstant: 32),
+                servicesButton.heightAnchor.constraint(equalToConstant: 32),
+
                 episodeBrowserButton.centerYAnchor.constraint(equalTo: subtitleButton.centerYAnchor),
                 episodeBrowserButton.widthAnchor.constraint(equalToConstant: 32),
                 episodeBrowserButton.heightAnchor.constraint(equalToConstant: 32),
@@ -4207,6 +4821,27 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             if diag.highBitDepthActive { videoValue += "  16-bit" }
             text.append(NSAttributedString(string: "\n"))
             text.append(metalPerformanceOverlayRow(label: "Video", value: videoValue, valueColor: diag.isHDR ? .systemOrange : .white))
+
+            if let rawDecoder = diag.hardwareDecoder {
+                let decoder = rawDecoder.trimmingCharacters(in: .whitespacesAndNewlines)
+                let decoderValue: String
+                let decoderColor: UIColor
+                if decoder.isEmpty {
+                    decoderValue = "Reconfiguring"
+                    decoderColor = .systemYellow
+                } else if decoder.caseInsensitiveCompare("no") == .orderedSame {
+                    decoderValue = "Software"
+                    decoderColor = .systemOrange
+                } else if decoder.lowercased().contains("videotoolbox") {
+                    decoderValue = "VideoToolbox"
+                    decoderColor = .systemGreen
+                } else {
+                    decoderValue = decoder
+                    decoderColor = .systemGreen
+                }
+                text.append(NSAttributedString(string: "\n"))
+                text.append(metalPerformanceOverlayRow(label: "Decode", value: decoderValue, valueColor: decoderColor))
+            }
 
             // Active subtitle codec settles the "are these plain subs?" question: "ass" is styled
             // (costlier to rasterize), "subrip" is plain text, "off" means hard-subbed/none.
@@ -4461,6 +5096,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         centerPlayPauseButton.addTarget(self, action: #selector(centerPlayPauseTapped), for: .touchUpInside)
         closeButton.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
+#if os(iOS)
+        playbackLockButton.addTarget(self, action: #selector(playbackLockTapped), for: .touchUpInside)
+#endif
         pipButton.addTarget(self, action: #selector(pipTouchDown), for: .touchDown)
         pipButton.addTarget(self, action: #selector(pipTapped), for: .touchUpInside)
 #if os(iOS)
@@ -4478,6 +5116,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if supportsSharedPlayerControls {
             subtitleButton.addTarget(self, action: #selector(subtitleButtonTapped), for: .touchUpInside)
             subtitleButton.addTarget(self, action: #selector(playerMenuButtonTouchDown(_:)), for: .touchDown)
+            servicesButton.addTarget(self, action: #selector(servicesButtonTapped), for: .touchUpInside)
             episodeBrowserButton.addTarget(self, action: #selector(episodeBrowserButtonTapped), for: .touchUpInside)
             speedButton.addTarget(self, action: #selector(speedButtonTapped), for: .touchUpInside)
             speedButton.addTarget(self, action: #selector(playerMenuButtonTouchDown(_:)), for: .touchDown)
@@ -4493,10 +5132,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         // Ensure shared player buttons stay interactive above renderer views.
         if supportsSharedPlayerControls {
             [centerPlayPauseButton, closeButton, pipButton, skipBackwardButton,
-             skipForwardButton, subtitleButton, episodeBrowserButton, speedButton, audioButton].forEach {
+             skipForwardButton, subtitleButton, servicesButton, episodeBrowserButton, speedButton, audioButton].forEach {
                 $0.isUserInteractionEnabled = true
             }
 #if os(iOS)
+            playbackLockButton.isUserInteractionEnabled = true
             watchTogetherButton.isUserInteractionEnabled = true
 #endif
         }
@@ -4878,7 +5518,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func applyDefaultPlaybackSpeed() {
         guard !defaultPlaybackSpeedApplied else { return }
         let speed = defaultPlaybackSpeed
-        rendererSetSpeed(speed)
+        rendererSetSpeed(speed, notifyWatchTogether: false)
         defaultPlaybackSpeedApplied = true
         updateSpeedMenu()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
@@ -4937,12 +5577,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             image: UIImage(systemName: "xmark"),
             state: subtitleModel.isVisible ? .off : .on
         ) { [weak self] _ in
-            self?.subtitleModel.isVisible = false
-            self?.rendererDisableSubtitles()
-            self?.subtitleEntries.removeAll()
-            self?.vlcSubtitleSelection = .none
-            self?.updateSubtitleButtonAppearance()
-            self?.updateSubtitleMenu()
+            guard let self else { return }
+            self.setSessionAwareSubtitleVisible(false)
+            self.userSelectedSubtitleTrack = true
+            self.recordUserSubtitleSelection(enabled: false)
+            self.rendererDisableSubtitles()
+            self.subtitleEntries.removeAll()
+            self.vlcSubtitleSelection = .none
+            self.updateSubtitleButtonAppearance()
+            self.updateSubtitleMenu()
         }
         trackActions.append(disableAction)
         
@@ -4956,7 +5599,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             ) { [weak self] _ in
                 guard let self else { return }
                 self.currentSubtitleIndex = index
-                self.subtitleModel.isVisible = true
+                self.setSessionAwareSubtitleVisible(true)
+                self.userSelectedSubtitleTrack = true
+                self.recordUserSubtitleSelection(enabled: true, displayName: title)
                 self.vlcSubtitleSelection = .external(index: index)
                 self.loadCurrentSubtitle()
                 self.rendererApplySubtitleStyle(self.currentSubtitleStyle(visible: true))
@@ -5188,17 +5833,22 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func updateEpisodeBrowserButtonVisibility() {
-        let shouldShow: Bool
+        let shouldShowEpisodeBrowser: Bool
         if supportsSharedPlayerControls,
            isVLCEpisodeBrowserButtonSettingEnabled,
            case .episode = mediaInfo {
-            shouldShow = true
+            shouldShowEpisodeBrowser = true
         } else {
-            shouldShow = false
+            shouldShowEpisodeBrowser = false
         }
 
-        episodeBrowserButton.isHidden = !shouldShow
-        if !shouldShow {
+        let shouldShowServices = supportsSharedPlayerControls
+            && PlayerServicesButtonSettings.isEnabled()
+            && servicesSelectionContext != nil
+
+        episodeBrowserButton.isHidden = !shouldShowEpisodeBrowser
+        servicesButton.isHidden = !shouldShowServices
+        if !shouldShowEpisodeBrowser {
             episodeBrowserButton.alpha = 0.0
             if isEpisodeBrowserVisible {
                 dismissEpisodeBrowser(animated: true, reason: "button-visibility-hidden")
@@ -5206,13 +5856,68 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         } else if controlsVisible {
             episodeBrowserButton.alpha = 1.0
         }
+        servicesButton.alpha = shouldShowServices && controlsVisible ? 1.0 : 0.0
 
-        if shouldShow {
-            subtitleTrailingToProgressConstraint?.isActive = false
+        subtitleTrailingToProgressConstraint?.isActive = false
+        subtitleTrailingToEpisodeBrowserConstraint?.isActive = false
+        subtitleTrailingToServicesConstraint?.isActive = false
+        episodeBrowserTrailingToProgressConstraint?.isActive = false
+        episodeBrowserTrailingToServicesConstraint?.isActive = false
+        if shouldShowEpisodeBrowser {
+            if shouldShowServices {
+                episodeBrowserTrailingToServicesConstraint?.isActive = true
+            } else {
+                episodeBrowserTrailingToProgressConstraint?.isActive = true
+            }
             subtitleTrailingToEpisodeBrowserConstraint?.isActive = true
+        } else if shouldShowServices {
+            subtitleTrailingToServicesConstraint?.isActive = true
         } else {
-            subtitleTrailingToEpisodeBrowserConstraint?.isActive = false
             subtitleTrailingToProgressConstraint?.isActive = true
+        }
+    }
+
+    @objc private func servicesButtonTapped() {
+        guard PlayerServicesButtonSettings.isEnabled(),
+              let context = servicesSelectionContext,
+              presentedViewController == nil,
+              !isClosing else {
+            showControlsTemporarily()
+            return
+        }
+
+        controlsHideWorkItem?.cancel()
+        let sheet = ModulesSearchResultsSheet(
+            mediaTitle: context.mediaTitle,
+            seasonTitleOverride: context.seasonTitleOverride,
+            originalTitle: context.originalTitle,
+            isMovie: context.isMovie,
+            isAnimeContent: context.isAnime,
+            selectedEpisode: context.selectedEpisode,
+            tmdbId: context.tmdbID,
+            animeSeasonTitle: context.animeSeasonTitle,
+            posterPath: context.posterPath,
+            originalAudioLanguage: context.originalAudioLanguage,
+            imdbId: context.imdbID,
+            originalTMDBSeasonNumber: context.originalTMDBSeasonNumber,
+            originalTMDBEpisodeNumber: context.originalTMDBEpisodeNumber,
+            specialTitleOnlySearch: context.specialTitleOnlySearch,
+            episodePlaybackContext: context.episodePlaybackContext,
+            // This is an explicit manual request. Auto-Select Episodes remains independently
+            // active inside ServicesResultsSheet, but global Auto Mode must not take over.
+            autoModeOnly: false,
+            ignoresAutoMode: true,
+            onResolvedPlaybackRequest: { [weak self] request in
+                self?.replacePlayback(with: request, reason: "player-services")
+            },
+            isAnimationGenre16: context.isAnimation
+        )
+        let host = UIHostingController(rootView: sheet)
+        episodeSourceSheetController = host
+        episodeSourceSheetTransitionID = nil
+        present(host, animated: true) { [weak self, weak host] in
+            guard let self, let host else { return }
+            host.presentationController?.delegate = self
         }
     }
 
@@ -5310,7 +6015,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         episodeBrowserHostingController = nil
     }
 
-    private func handleEpisodeBrowserSelection(_ item: PlayerEpisodeBrowserItem, reason: String = "episode-browser") {
+    private func handleEpisodeBrowserSelection(
+        _ item: PlayerEpisodeBrowserItem,
+        reason: String = "episode-browser",
+        watchTogetherTransitionID: UUID? = nil
+    ) {
         guard !item.isCurrent else {
             return
         }
@@ -5318,13 +6027,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         #if !os(tvOS)
         if UserDefaults.standard.bool(forKey: "preferDownloadedMedia"),
            let request = downloadedPlaybackRequest(for: item) {
+            guard commitPendingWatchTogetherNextEpisodeIfNeeded(
+                transitionID: watchTogetherTransitionID
+            ) else { return }
             dismissEpisodeBrowser(animated: true, reason: "\(reason)-downloaded-selection")
             replacePlayback(with: request, reason: "\(reason)-downloaded")
             return
         }
         #endif
 
-        presentEpisodeSourceSheet(for: item, reason: reason)
+        presentEpisodeSourceSheet(
+            for: item,
+            reason: reason,
+            watchTogetherTransitionID: watchTogetherTransitionID
+        )
     }
 
     #if !os(tvOS)
@@ -5353,8 +6069,17 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
     #endif
 
-    private func presentEpisodeSourceSheet(for item: PlayerEpisodeBrowserItem, reason: String = "episode-browser") {
-        guard presentedViewController == nil else { return }
+    private func presentEpisodeSourceSheet(
+        for item: PlayerEpisodeBrowserItem,
+        reason: String = "episode-browser",
+        watchTogetherTransitionID: UUID? = nil
+    ) {
+        guard presentedViewController == nil else {
+            clearPendingWatchTogetherNextEpisodeTarget(
+                transitionID: watchTogetherTransitionID
+            )
+            return
+        }
         let sheet = ModulesSearchResultsSheet(
             mediaTitle: item.mediaTitle,
             seasonTitleOverride: item.seasonTitleOverride,
@@ -5365,26 +6090,53 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             tmdbId: item.showId,
             animeSeasonTitle: item.animeSeasonTitle,
             posterPath: item.posterURL ?? item.showPosterURL,
+            originalAudioLanguage: item.originalAudioLanguage,
             imdbId: item.imdbId,
             originalTMDBSeasonNumber: item.originalTMDBSeasonNumber,
             originalTMDBEpisodeNumber: item.originalTMDBEpisodeNumber,
             specialTitleOnlySearch: item.playbackContext?.titleOnlySearch ?? false,
             episodePlaybackContext: item.playbackContext,
-            autoModeOnly: UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"),
+            autoModeOnly: watchTogetherTransitionID != nil
+                || UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"),
+            watchTogetherExactHandoff: watchTogetherTransitionID != nil,
             onResolvedPlaybackRequest: { [weak self] request in
-                self?.replacePlayback(with: request, reason: "\(reason)-resolved-source")
+                guard let self,
+                      self.commitPendingWatchTogetherNextEpisodeIfNeeded(
+                        transitionID: watchTogetherTransitionID
+                      ) else { return }
+                self.replacePlayback(with: request, reason: "\(reason)-resolved-source")
             },
             // Same show as the one playing - propagate its animation classification.
             // (Must follow onResolvedPlaybackRequest: it is declared after it on the view.)
             isAnimationGenre16: isAnimationContentHint ?? false
         )
-        let host = UIHostingController(rootView: sheet)
-        present(host, animated: true, completion: nil)
+        let host = UIHostingController(rootView: sheet.onDisappear { [weak self] in
+            self?.schedulePendingWatchTogetherNextEpisodeCleanup(
+                transitionID: watchTogetherTransitionID
+            )
+        })
+#if os(iOS)
+        episodeSourceSheetController = host
+        episodeSourceSheetTransitionID = watchTogetherTransitionID
+        host.presentationController?.delegate = self
+#endif
+        present(host, animated: true) { [weak self, weak host] in
+#if os(iOS)
+            guard let self, let host else { return }
+            host.presentationController?.delegate = self
+#endif
+        }
     }
 
     private func replacePlayback(with request: PlayerResolvedPlaybackRequest, reason: String = "episode-browser") {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            // The coordinator's Automatic fallback closure captures the original immutable
+            // PlaybackRequest. Reusing it after an in-place episode replacement could reopen the
+            // prior episode, so later in-place loads deliberately keep their normal source retry.
+            self.onAutomaticPlaybackFallback = nil
+            self.isCoordinatorEngineFallback = false
+            self.pendingRendererRestartRetryGeneration = nil
             self.playbackReplacementGeneration += 1
             let replacementGeneration = self.playbackReplacementGeneration
             let wasVLC = self.isVLCPlayer
@@ -5401,6 +6153,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self.vlcProxyFallbackTried = false
             self.didDispatchNextEpisodeRequest = false
             self.pendingNextEpisodeRequest = nil
+            self.pendingResolvedNextEpisodeRequest = nil
+            self.localNextEpisodeFallback = nil
+            self.pendingWatchTogetherNextEpisodeTarget = nil
+            self.pendingWatchTogetherNextEpisodeTransitionID = nil
+#if os(iOS)
+            self.episodeSourceSheetController = nil
+            self.episodeSourceSheetTransitionID = nil
+#endif
 #if !os(tvOS)
             self.nextEpisodeButton.isEnabled = true
 #endif
@@ -5418,6 +6178,48 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self.originalTMDBEpisodeNumber = request.originalTMDBEpisodeNumber
             self.episodePlaybackContext = request.episodePlaybackContext
             self.playbackLaunchContext = request.launchContext
+            let replacementTitle: String = {
+                switch request.mediaInfo {
+                case .movie(_, let title, _, _): return title
+                case .episode(_, _, _, let showTitle, _, _): return showTitle ?? self.playerTitleOverride ?? "Show"
+                case .none: return self.playerTitleOverride ?? ""
+                }
+            }()
+            let selectionRequest = PlaybackRequest(
+                url: request.url,
+                preset: request.preset,
+                headers: request.headers ?? [:],
+                subtitles: request.subtitles ?? [],
+                subtitleNames: request.subtitleNames,
+                subtitleHeadersByURL: request.subtitleHeadersByURL,
+                mediaSelectionIntent: self.playbackMediaSelectionIntent,
+                mediaInfo: request.mediaInfo,
+                imdbID: request.imdbId,
+                episodePlaybackContext: request.episodePlaybackContext,
+                launchContext: request.launchContext,
+                title: replacementTitle,
+                isAnime: request.isAnimeHint,
+                isAnimation: request.isAnimationContentHint ?? self.isAnimationContentHint ?? false,
+                originalTMDBSeasonNumber: request.originalTMDBSeasonNumber,
+                originalTMDBEpisodeNumber: request.originalTMDBEpisodeNumber
+            )
+            let existingSelectionStillMatches: Bool = {
+                guard let existing = self.servicesSelectionContext else { return false }
+                switch request.mediaInfo {
+                case .movie(let id, _, _, _):
+                    return existing.isMovie && existing.tmdbID == id
+                case .episode(let showID, let seasonNumber, let episodeNumber, _, _, _):
+                    return !existing.isMovie
+                        && existing.tmdbID == showID
+                        && existing.selectedEpisode?.seasonNumber == seasonNumber
+                        && existing.selectedEpisode?.episodeNumber == episodeNumber
+                case .none:
+                    return false
+                }
+            }()
+            if !existingSelectionStillMatches {
+                self.servicesSelectionContext = PlayerServicesSelectionContext(request: selectionRequest)
+            }
 
             self.updatePlayerTitle()
             self.updateEpisodeBrowserButtonVisibility()
@@ -5475,8 +6277,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         stagedNextEpisodeRequest = nil
         stagedNextEpisodeRequestKey = nil
         nextEpisodePreviewUnavailableKeys.removeAll()
+        pendingWatchTogetherNextEpisodeTarget = nil
+        pendingWatchTogetherNextEpisodeTransitionID = nil
         nextEpisodePreviewTask?.cancel()
         nextEpisodePreviewTask = nil
+        nextEpisodePreviewGeneration = nil
         nextEpisodeArtworkTask?.cancel()
         nextEpisodeArtworkTask = nil
         nextEpisodeArtworkKey = nil
@@ -5778,10 +6583,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if detailedTracks.isEmpty {
             actions = [makeOverlayAction(title: "No audio tracks available", isEnabled: false) {}]
         } else {
-            actions = detailedTracks.map { id, name, _ in
+            actions = detailedTracks.map { id, name, language in
                 makeOverlayAction(title: name, imageName: "speaker.wave.2", isSelected: id == currentAudioTrackId) { [weak self] in
                     guard let self else { return }
                     self.userSelectedAudioTrack = true
+                    self.recordUserAudioSelection(name: name, languageTag: language)
                     self.rendererSetAudioTrack(id: id)
                     self.updateAudioTracksMenu()
                     self.hideOverlayMenu()
@@ -5924,9 +6730,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         let shouldAutoSelectAudio = !tracks.isEmpty && !userSelectedAudioTrack
         if shouldAutoSelectAudio {
-            let preferredLang = (isAnime
-                                 ? Settings.shared.preferredAnimeAudioLanguage
-                                 : Settings.shared.preferredAutoAudioLanguage).lowercased()
+            let preferredLang = automaticAudioSelectionLanguage
             let autoSelectSignature = "\(preferredLang)|\(trackSignature)"
             let shouldAttemptAutoSelect = attemptedAudioAutoSelectSignature != autoSelectSignature
 
@@ -5990,16 +6794,18 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return
         }
 
-        let trackActions = tracks.map { (id, name) in
+        let trackActions = detailedTracks.map { (id, name, language) in
             UIAction(
                 title: name,
                 state: id == currentAudioTrackId ? .on : .off
             ) { [weak self] _ in
-                self?.userSelectedAudioTrack = true
-                self?.rendererSetAudioTrack(id: id)
+                guard let self else { return }
+                self.userSelectedAudioTrack = true
+                self.recordUserAudioSelection(name: name, languageTag: language)
+                self.rendererSetAudioTrack(id: id)
                 // Debounce menu update to avoid lag - only update after 0.3s of no selection changes
-                self?.audioMenuDebounceTimer?.invalidate()
-                self?.audioMenuDebounceTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { _ in
+                self.audioMenuDebounceTimer?.invalidate()
+                self.audioMenuDebounceTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { _ in
                     DispatchQueue.main.async { [weak self] in
                         self?.updateAudioTracksMenu()
                     }
@@ -6475,12 +7281,22 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 
         let skippingKnownFillers = shouldSkipFillerForNextEpisode
+        let generation = UUID()
+        nextEpisodePreviewGeneration = generation
         nextEpisodePreviewTask = Task { @MainActor [weak self] in
             let model = PlayerEpisodeBrowserViewModel(seed: seed)
             let item = await model.itemAfterCurrent(skippingKnownFillers: skippingKnownFillers)
-            guard let self else { return }
+            guard !Task.isCancelled,
+                  let self,
+                  self.nextEpisodePreviewGeneration == generation else { return }
             self.nextEpisodePreviewTask = nil
-            guard self.nextEpisodeKey(seasonNumber: seasonNumber, episodeNumber: episodeNumber) == key else { return }
+            self.nextEpisodePreviewGeneration = nil
+            guard case .episode(_, let activeSeason, let activeEpisode, _, _, _) = self.mediaInfo,
+                  activeSeason == seasonNumber,
+                  activeEpisode == episodeNumber,
+                  self.nextEpisodeKey(seasonNumber: activeSeason, episodeNumber: activeEpisode) == key else {
+                return
+            }
             if let item {
                 self.nextEpisodePreview = item
                 self.nextEpisodePreviewKey = key
@@ -6704,34 +7520,148 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let seasonNumber: Int
         let episodeNumber: Int
         let playbackContext: EpisodePlaybackContext?
+        let title: String?
     }
 
     private func nextEpisodePlaybackTarget(
         currentSeasonNumber: Int,
         currentEpisodeNumber: Int
     ) -> NextEpisodePlaybackTarget? {
-        guard shouldSkipFillerForNextEpisode else {
-            let episodeNumber = currentEpisodeNumber + 1
-            return NextEpisodePlaybackTarget(
-                seasonNumber: currentSeasonNumber,
-                episodeNumber: episodeNumber,
-                playbackContext: episodePlaybackContext?.forEpisodeNumber(episodeNumber)
-            )
-        }
-
         let key = nextEpisodeKey(
             seasonNumber: currentSeasonNumber,
             episodeNumber: currentEpisodeNumber
         )
-        guard nextEpisodePreviewKey == key,
-              let preview = nextEpisodePreview else {
+
+        if initialURL?.isFileURL == true,
+           let localNextEpisodeFallback {
+            let currentTitle: String?
+            if case .episode(_, _, _, let showTitle, _, _) = mediaInfo {
+                currentTitle = showTitle
+            } else {
+                currentTitle = nil
+            }
+            return NextEpisodePlaybackTarget(
+                seasonNumber: localNextEpisodeFallback.seasonNumber,
+                episodeNumber: localNextEpisodeFallback.episodeNumber,
+                playbackContext: localNextEpisodeFallback.seasonNumber == currentSeasonNumber
+                    ? episodePlaybackContext?.forEpisodeNumber(localNextEpisodeFallback.episodeNumber)
+                    : nil,
+                title: currentTitle
+            )
+        }
+
+        if nextEpisodePreviewKey == key,
+           let preview = nextEpisodePreview {
+            return NextEpisodePlaybackTarget(
+                seasonNumber: preview.episode.seasonNumber,
+                episodeNumber: preview.episode.episodeNumber,
+                playbackContext: preview.playbackContext,
+                title: preview.seasonTitleOverride ?? preview.mediaTitle
+            )
+        }
+
+        // Callers that can consume a rich target need the metadata-backed resolver result. A
+        // same-season +1 guess is wrong at finales and across anime cour/special boundaries.
+        guard onRequestResolvedNextEpisode == nil else { return nil }
+
+        let requiresVerifiedAnimeTarget = isAnimeContent()
+        guard !shouldSkipFillerForNextEpisode, !requiresVerifiedAnimeTarget else {
             return nil
         }
+
+        let episodeNumber = currentEpisodeNumber + 1
+        let currentTitle: String?
+        if case .episode(_, _, _, let showTitle, _, _) = mediaInfo {
+            currentTitle = showTitle
+        } else {
+            currentTitle = nil
+        }
         return NextEpisodePlaybackTarget(
-            seasonNumber: preview.episode.seasonNumber,
-            episodeNumber: preview.episode.episodeNumber,
-            playbackContext: preview.playbackContext
+            seasonNumber: currentSeasonNumber,
+            episodeNumber: episodeNumber,
+            playbackContext: episodePlaybackContext?.forEpisodeNumber(episodeNumber),
+            title: currentTitle
         )
+    }
+
+    private func commitWatchTogetherNextEpisode(
+        seasonNumber: Int,
+        episodeNumber: Int,
+        playbackContext: EpisodePlaybackContext?,
+        title: String?
+    ) -> (proceed: Bool, didBroadcast: Bool) {
+#if os(iOS)
+        let result = WatchTogetherCoordinator.shared.sendNextEpisode(
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber,
+            title: title,
+            playbackContext: playbackContext,
+            from: self
+        )
+        if result == .rejected {
+            nextEpisodeButton.isEnabled = true
+        } else if result == .notActive {
+            switch watchTogetherConnectionState {
+            case .ready:
+                break
+            case .activating, .active:
+                nextEpisodeButton.isEnabled = true
+                showPlayerNotice("Watch Together changed before the next episode was ready. Sync the session and try again.")
+                return (false, false)
+            }
+        }
+        return (result != .rejected, result == .sent)
+#else
+        return (true, false)
+#endif
+    }
+
+    private func commitPendingWatchTogetherNextEpisodeIfNeeded(
+        transitionID: UUID?
+    ) -> Bool {
+        guard let transitionID else { return pendingWatchTogetherNextEpisodeTarget == nil }
+        guard pendingWatchTogetherNextEpisodeTransitionID == transitionID,
+              let target = pendingWatchTogetherNextEpisodeTarget else {
+            // A delayed callback from a dismissed source sheet must not consume a newer target
+            // or advance local playback without its matching shared transition.
+            return false
+        }
+        pendingWatchTogetherNextEpisodeTarget = nil
+        pendingWatchTogetherNextEpisodeTransitionID = nil
+        return commitWatchTogetherNextEpisode(
+            seasonNumber: target.seasonNumber,
+            episodeNumber: target.episodeNumber,
+            playbackContext: target.playbackContext,
+            title: target.title
+        ).proceed
+    }
+
+    private func clearPendingWatchTogetherNextEpisodeTarget(
+        transitionID: UUID? = nil
+    ) {
+        if let transitionID,
+           pendingWatchTogetherNextEpisodeTransitionID != transitionID {
+            return
+        }
+        guard pendingWatchTogetherNextEpisodeTarget != nil
+                || pendingWatchTogetherNextEpisodeTransitionID != nil else { return }
+        pendingWatchTogetherNextEpisodeTarget = nil
+        pendingWatchTogetherNextEpisodeTransitionID = nil
+#if !os(tvOS)
+        nextEpisodeButton.isEnabled = true
+#endif
+    }
+
+    private func schedulePendingWatchTogetherNextEpisodeCleanup(
+        transitionID: UUID?
+    ) {
+        guard let transitionID else { return }
+        // ServicesResultsSheet dismisses before delivering its resolved request. Give that
+        // intentional callback time to consume the exact target; user-dismissed sheets have no
+        // callback and are safely released after this short grace period.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
+            self?.clearPendingWatchTogetherNextEpisodeTarget(transitionID: transitionID)
+        }
     }
 
     private func updateNextEpisodeState(position: Double, duration: Double) {
@@ -6755,6 +7685,17 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         let progress = position / duration
         let previewKey = nextEpisodeKey(seasonNumber: seasonNumber, episodeNumber: episodeNumber)
+        let hasVerifiedLocalNextEpisode = initialURL?.isFileURL == true
+            && localNextEpisodeFallback != nil
+        if hasVerifiedLocalNextEpisode {
+            if progress >= threshold {
+                applyTextNextEpisodeButton()
+                showNextEpisodeButton()
+            } else if nextEpisodeButtonShown {
+                hideNextEpisodeButton()
+            }
+            return
+        }
         stageExperimentalNextEpisodeIfNeeded(
             showId: showId,
             seasonNumber: seasonNumber,
@@ -6762,14 +7703,28 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             progress: progress,
             threshold: threshold
         )
+
+        if initialURL?.isFileURL == true,
+           onRequestNextEpisode != nil,
+           localNextEpisodeFallback == nil {
+            if nextEpisodeButtonShown { hideNextEpisodeButton() }
+            return
+        }
+
         if progress >= threshold, !nextEpisodeButtonShown {
             resolveNextEpisodePreviewIfNeeded(seasonNumber: seasonNumber, episodeNumber: episodeNumber)
+            if onRequestResolvedNextEpisode != nil,
+               nextEpisodePreviewKey != previewKey {
+                hideNextEpisodeButton()
+                return
+            }
             if shouldSkipFillerForNextEpisode,
                nextEpisodePreviewKey != previewKey {
                 hideNextEpisodeButton()
                 return
             }
-            if nextEpisodePreviewUnavailableKeys.contains(previewKey),
+            if !hasVerifiedLocalNextEpisode,
+               nextEpisodePreviewUnavailableKeys.contains(previewKey),
                !hasStagedNextEpisodeRequest(for: previewKey) {
                 hideNextEpisodeButton()
                 return
@@ -6780,12 +7735,18 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             hideNextEpisodeButton()
         } else if progress >= threshold, nextEpisodeButtonShown {
             resolveNextEpisodePreviewIfNeeded(seasonNumber: seasonNumber, episodeNumber: episodeNumber)
+            if onRequestResolvedNextEpisode != nil,
+               nextEpisodePreviewKey != previewKey {
+                hideNextEpisodeButton()
+                return
+            }
             if shouldSkipFillerForNextEpisode,
                nextEpisodePreviewKey != previewKey {
                 hideNextEpisodeButton()
                 return
             }
-            if nextEpisodePreviewUnavailableKeys.contains(previewKey),
+            if !hasVerifiedLocalNextEpisode,
+               nextEpisodePreviewUnavailableKeys.contains(previewKey),
                !hasStagedNextEpisodeRequest(for: previewKey) {
                 hideNextEpisodeButton()
             } else {
@@ -6814,36 +7775,86 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     @objc private func nextEpisodeButtonTapped() {
-        guard case .episode(_, let seasonNumber, let episodeNumber, _, _, _) = mediaInfo else { return }
-        guard pendingNextEpisodeRequest == nil else { return }
+        guard case .episode(let showID, let seasonNumber, let episodeNumber, _, _, _) = mediaInfo else { return }
+        guard pendingNextEpisodeRequest == nil,
+              pendingWatchTogetherNextEpisodeTarget == nil else { return }
 
         let target = nextEpisodePlaybackTarget(
             currentSeasonNumber: seasonNumber,
             currentEpisodeNumber: episodeNumber
         )
-        if shouldSkipFillerForNextEpisode, target == nil {
+        let currentNextEpisodeKey = nextEpisodeKey(
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber
+        )
+        let matchingPreview = nextEpisodePreviewKey == currentNextEpisodeKey
+            ? nextEpisodePreview
+            : nil
+        let currentEpisodeIsAnime = isAnimeContent()
+        let requiresExactTarget = onRequestResolvedNextEpisode != nil || initialURL?.isFileURL == true
+        if (shouldSkipFillerForNextEpisode || currentEpisodeIsAnime || requiresExactTarget), target == nil {
+            Logger.shared.log(
+                "NextEpisode: exact target was not ready; refusing to guess from S\(seasonNumber)E\(episodeNumber)",
+                type: "Player"
+            )
             hideNextEpisodeButton()
             return
         }
         let nextSeasonNumber = target?.seasonNumber ?? seasonNumber
         let nextEpisodeNumber = target?.episodeNumber ?? (episodeNumber + 1)
+        let nextPlaybackContext = target?.playbackContext
+            ?? (!currentEpisodeIsAnime && nextSeasonNumber == seasonNumber
+                ? episodePlaybackContext?.forEpisodeNumber(nextEpisodeNumber)
+                : nil)
+        let nextTitle = target?.title
         Logger.shared.log("NextEpisode: User requested S\(nextSeasonNumber)E\(nextEpisodeNumber)", type: "Player")
 
-        // A warm streaming request must not override the user's explicit downloaded-media
-        // preference. The browser item uses the anime-aware download matcher.
-        if UserDefaults.standard.bool(forKey: "preferDownloadedMedia"),
-           let preview = nextEpisodePreview,
-           preview.isDownloaded {
+        if initialURL?.isFileURL != true,
+           nextEpisodePreviewUnavailableKeys.contains(currentNextEpisodeKey) {
             hideNextEpisodeButton()
-            handleEpisodeBrowserSelection(preview, reason: "next-episode-button-downloaded")
             return
         }
+
+#if os(iOS)
+        let requiresResolvedWatchTogetherTarget: Bool
+        switch watchTogetherConnectionState {
+        case .ready:
+            requiresResolvedWatchTogetherTarget = false
+        case .activating, .active:
+            requiresResolvedWatchTogetherTarget = true
+        }
+        if requiresResolvedWatchTogetherTarget,
+           !(stagedNextEpisodeRequest != nil
+                && stagedNextEpisodeRequestKey == currentNextEpisodeKey),
+           matchingPreview == nil {
+            // The legacy notification fallback has no resolved-request acknowledgement and may
+            // not have an owner under Downloads/reader routes. Keep the current shared revision
+            // until an exact preview or staged request is available.
+            nextEpisodeButton.isEnabled = true
+            resolveNextEpisodePreviewIfNeeded(
+                seasonNumber: seasonNumber,
+                episodeNumber: episodeNumber
+            )
+            showPlayerNotice("The next episode is still resolving. Try again in a moment so everyone moves together.")
+            return
+        }
+#endif
+
+        // Fence duplicate taps before any validated transition path begins. A rejected exact
+        // Watch Together transition re-enables the control in commitWatchTogetherNextEpisode.
+        nextEpisodeButton.isEnabled = false
 
         // Fast path: if staging already resolved this exact next episode, replay that request
         // directly instead of re-opening the source sheet and re-resolving the stream over the
         // network. The warmed starter cache then makes the load start almost immediately.
         if let staged = stagedNextEpisodeRequest,
-           stagedNextEpisodeRequestKey == nextEpisodeKey(seasonNumber: seasonNumber, episodeNumber: episodeNumber) {
+           stagedNextEpisodeRequestKey == currentNextEpisodeKey {
+            guard commitWatchTogetherNextEpisode(
+                seasonNumber: nextSeasonNumber,
+                episodeNumber: nextEpisodeNumber,
+                playbackContext: nextPlaybackContext,
+                title: nextTitle
+            ).proceed else { return }
             Logger.shared.log("[PlayerVC.MPV] next-episode using staged request (skipping source re-resolve)", type: "MPV")
             hideNextEpisodeButton()
             stagedNextEpisodeRequest = nil
@@ -6851,21 +7862,85 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             replacePlayback(with: staged, reason: "next-episode-staged-request")
             return
         }
-        if let preview = nextEpisodePreview {
+        if let preview = matchingPreview {
+            // Source selection is not an authoritative media transition yet. Carry the exact
+            // target through the sheet, then broadcast only after a stream request resolves.
+            let transitionID = UUID()
+            pendingWatchTogetherNextEpisodeTransitionID = transitionID
+            pendingWatchTogetherNextEpisodeTarget = target ?? NextEpisodePlaybackTarget(
+                seasonNumber: nextSeasonNumber,
+                episodeNumber: nextEpisodeNumber,
+                playbackContext: nextPlaybackContext,
+                title: preview.seasonTitleOverride ?? preview.mediaTitle
+            )
             hideNextEpisodeButton()
-            handleEpisodeBrowserSelection(preview, reason: "next-episode-button-preview")
+            handleEpisodeBrowserSelection(
+                preview,
+                reason: "next-episode-button-preview",
+                watchTogetherTransitionID: transitionID
+            )
             return
         }
 
-        if nextEpisodePreviewUnavailableKeys.contains(nextEpisodeKey(seasonNumber: seasonNumber, episodeNumber: episodeNumber)) {
-            hideNextEpisodeButton()
-            return
-        }
+        let watchTogetherCommit = commitWatchTogetherNextEpisode(
+            seasonNumber: nextSeasonNumber,
+            episodeNumber: nextEpisodeNumber,
+            playbackContext: nextPlaybackContext,
+            title: nextTitle
+        )
+        guard watchTogetherCommit.proceed else { return }
+        let didBroadcastWatchTogether = watchTogetherCommit.didBroadcast
 
-        pendingNextEpisodeRequest = (nextSeasonNumber, nextEpisodeNumber)
-        nextEpisodeButton.isEnabled = false
+        if didBroadcastWatchTogether {
+            if onRequestResolvedNextEpisode != nil {
+                pendingResolvedNextEpisodeRequest = resolvedNextEpisodeTarget(
+                    showID: showID,
+                    seasonNumber: nextSeasonNumber,
+                    episodeNumber: nextEpisodeNumber,
+                    playbackContext: nextPlaybackContext,
+                    title: nextTitle
+                )
+            } else if onRequestNextEpisode != nil {
+                pendingNextEpisodeRequest = (nextSeasonNumber, nextEpisodeNumber)
+            } else {
+                let isAnimeEpisode: Bool
+                if case .episode(_, _, _, _, _, let isAnime) = mediaInfo {
+                    isAnimeEpisode = isAnime || nextPlaybackContext?.hasAnimeMediaId == true
+                } else {
+                    isAnimeEpisode = nextPlaybackContext?.hasAnimeMediaId == true
+                }
+                didDispatchNextEpisodeRequest = true
+                var userInfo: [String: Any] = [
+                    "tmdbId": showID,
+                    "seasonNumber": nextSeasonNumber,
+                    "episodeNumber": nextEpisodeNumber,
+                    "isAnime": isAnimeEpisode,
+                    "watchTogether": true
+                ]
+                if let nextPlaybackContext {
+                    userInfo["playbackContext"] = nextPlaybackContext
+                }
+                NotificationCenter.default.post(
+                    name: .requestNextEpisode,
+                    object: nil,
+                    userInfo: userInfo
+                )
+            }
+        } else {
+            if onRequestResolvedNextEpisode != nil {
+                pendingResolvedNextEpisodeRequest = resolvedNextEpisodeTarget(
+                    showID: showID,
+                    seasonNumber: nextSeasonNumber,
+                    episodeNumber: nextEpisodeNumber,
+                    playbackContext: nextPlaybackContext,
+                    title: nextTitle
+                )
+            } else {
+                pendingNextEpisodeRequest = (nextSeasonNumber, nextEpisodeNumber)
+            }
+        }
         hideNextEpisodeButton()
-        closeTapped()
+        closePlayer(allowWhilePlaybackLocked: true)
     }
 
     private func showSkipButton() {
@@ -6920,6 +7995,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func showNextEpisodeButton() {
         guard !nextEpisodeButtonShown else { return }
         nextEpisodeButtonShown = true
+        nextEpisodeButton.isEnabled = true
         nextEpisodeButton.isHidden = false
         videoContainer.bringSubviewToFront(nextEpisodeButton)
         bringTimedActionButtonsToFront()
@@ -7050,15 +8126,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         nextEpisodeNumber: Int,
         nextEpisodeContext: EpisodePlaybackContext?
     ) -> (season: Int?, episode: Int?, context: EpisodePlaybackContext?)? {
-        let isAnime: Bool = {
-            if case .episode(_, _, _, _, _, let value)? = mediaInfo { return value }
-            return false
-        }()
+        let isAnime = isAnimeContent()
 
-        // Project the current episode's context onto the next local episode number. This carries
-        // the anime absolute-number and TMDB-offset remapping (see EpisodePlaybackContext).
+        // Anime next-episode contexts must come from the verified preview. Projecting the current
+        // cour context can fabricate a plausible-looking but incorrect episode identity.
         let nextContext = nextEpisodeContext ?? (
-            nextSeasonNumber == currentSeasonNumber
+            !isAnime && nextSeasonNumber == currentSeasonNumber
                 ? episodePlaybackContext?.forEpisodeNumber(nextEpisodeNumber)
                 : nil
         )
@@ -7082,6 +8155,22 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return (season, episode, nextContext)
     }
 
+    private func nextEpisodeChangesAnimeIdentity(
+        nextSeasonNumber: Int,
+        nextContext: EpisodePlaybackContext?
+    ) -> Bool {
+        guard isAnimeContent() else { return false }
+        guard let nextContext else { return true }
+        guard let currentContext = episodePlaybackContext else {
+            return nextContext.localSeasonNumber != nextSeasonNumber
+                || nextContext.hasAnimeMediaId
+        }
+        return currentContext.localSeasonNumber != nextContext.localSeasonNumber
+            || currentContext.anilistMediaId != nextContext.anilistMediaId
+            || currentContext.kitsuMediaId != nextContext.kitsuMediaId
+            || currentContext.isSpecial != nextContext.isSpecial
+    }
+
     /// Captures a fully-resolved playback request for the next episode from a staging-time resolution, so
     /// `nextEpisodeButtonTapped`.
     private func stashStagedNextEpisodeRequest(
@@ -7092,16 +8181,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         tmdbEpisode: Int?,
         context: EpisodePlaybackContext?
     ) {
-        guard case .episode(let showId, let currentSeason, let currentEpisode, let showTitle, let posterURL, let isAnime) = mediaInfo else { return }
+        guard case .episode(let showId, let currentSeason, let currentEpisode, let showTitle, let posterURL, let mediaInfoIsAnime) = mediaInfo else { return }
+        let isAnime = mediaInfoIsAnime || isAnimeHint == true || context?.hasAnimeMediaId == true
         let key = nextEpisodeKey(seasonNumber: currentSeason, episodeNumber: currentEpisode)
         guard experimentalStagedNextEpisodeKey == key else { return }
         nextEpisodeStagingRetryAfterByKey[key] = nil
         let preset = initialPreset ?? PlayerPreset.presets.first ?? PlayerPreset(id: .sdrRec709, title: "Default", summary: "", stream: nil, commands: [])
+        let nextShowTitle = nextEpisodePreview?.seasonTitleOverride
+            ?? nextEpisodePreview?.mediaTitle
+            ?? showTitle
         let nextMediaInfo = MediaInfo.episode(
             showId: showId,
             seasonNumber: localSeasonNumber,
             episodeNumber: localEpisodeNumber,
-            showTitle: showTitle,
+            showTitle: nextShowTitle,
             showPosterURL: posterURL,
             isAnime: isAnime
         )
@@ -7238,11 +8331,29 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         nextEpisodeContext: EpisodePlaybackContext?,
         attemptKey: String
     ) {
-        let candidates = orderedNextEpisodePrestageCandidates(
+        let changesAnimeIdentity = nextEpisodeChangesAnimeIdentity(
+            nextSeasonNumber: nextSeasonNumber,
+            nextContext: nextEpisodeContext
+        )
+        var candidates = orderedNextEpisodePrestageCandidates(
             showId: showId,
             currentSeasonNumber: currentSeasonNumber,
             currentEpisodeNumber: currentEpisodeNumber
         )
+        if changesAnimeIdentity {
+            // A service content href belongs to the currently-playing cour. Its single-season
+            // E1 is not evidence for the destination AniList/Kitsu identity. Only exact-ID
+            // Stremio lookups are safe to pre-stage across that boundary; normal Services
+            // resolution will run after the user taps Next.
+            candidates.removeAll { candidate in
+                if case .service = candidate { return true }
+                return false
+            }
+            Logger.shared.log(
+                "[PlayerVC.MPV] cross-cour prewarm excluded service href reuse target=S\(nextSeasonNumber)E\(nextEpisodeNumber)",
+                type: "MPV"
+            )
+        }
         guard !candidates.isEmpty else {
             Logger.shared.log("[PlayerVC.MPV] next-episode prewarm skipped reason=no-selected-candidates show=\(showId)", type: "MPV")
             markNextEpisodeStagingAttemptSkipped(key: attemptKey)
@@ -7258,7 +8369,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let nextContext = lookup?.context ?? nextEpisodeContext
         let lookupSeason = lookup?.season ?? nextContext?.resolvedTMDBSeasonNumber ?? nextSeasonNumber
         let lookupEpisode = lookup?.episode ?? nextContext?.resolvedTMDBEpisodeNumber ?? nextEpisodeNumber
-        let titleCandidates = nextEpisodePrestageTitleCandidates()
+        let titleCandidates = nextEpisodePrestageTitleCandidates(
+            changesAnimeIdentity: changesAnimeIdentity
+        )
         let isAnime = isAnimeContent()
         let currentIMDbId = imdbId
 
@@ -7296,6 +8409,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                         lookupSeason: lookupSeason,
                         lookupEpisode: lookupEpisode,
                         nextContext: nextContext,
+                        isAnime: isAnime,
                         titleCandidates: titleCandidates
                     )
                 }
@@ -7340,7 +8454,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         lookupSeason: Int,
         lookupEpisode: Int,
         isAnime: Bool,
-        titleCandidates: [String]
+        titleCandidates: [String],
+        preferredStreamName: String? = nil
     ) async -> NextEpisodePrestageResolution? {
         let knownContentHref = Self.normalizedNonemptyString(knownContentHref)
         if let knownContentHref,
@@ -7353,7 +8468,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 lookupSeason: lookupSeason,
                 lookupEpisode: lookupEpisode,
                 isAnime: isAnime,
-                titleCandidates: titleCandidates
+                titleCandidates: titleCandidates,
+                preferredStreamName: preferredStreamName
            ) {
             return resolved
         }
@@ -7375,7 +8491,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             lookupSeason: lookupSeason,
             lookupEpisode: lookupEpisode,
             isAnime: isAnime,
-            titleCandidates: titleCandidates
+            titleCandidates: titleCandidates,
+            preferredStreamName: preferredStreamName
         )
     }
 
@@ -7388,7 +8505,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         lookupSeason: Int,
         lookupEpisode: Int,
         isAnime: Bool,
-        titleCandidates: [String]
+        titleCandidates: [String],
+        preferredStreamName: String? = nil
     ) async -> NextEpisodePrestageResolution? {
         let jsController = JSController()
         jsController.loadScript(service.jsScript, service: service)
@@ -7411,7 +8529,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
               let selected = Self.selectPrewarmStream(
                 streams: result.streams,
                 sources: result.sources,
-                sourceId: SourceHealth.serviceId(service)
+                sourceId: SourceHealth.serviceId(service),
+                isAnime: isAnime,
+                preferredLabel: preferredStreamName
               ),
               let streamURL = Self.httpURL(selected.url) else {
             return nil
@@ -7445,6 +8565,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         lookupSeason: Int,
         lookupEpisode: Int,
         nextContext: EpisodePlaybackContext?,
+        isAnime: Bool,
         titleCandidates: [String]
     ) async -> NextEpisodePrestageResolution? {
         let sourceId = SourceHealth.stremioId(addon)
@@ -7461,9 +8582,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         )
         guard !Task.isCancelled else { return nil }
         let direct = streams.filter {
-            $0.isDirectHTTP && !StreamLanguageFilter.shouldHide(stremio: $0, sourceId: sourceId)
+            $0.isDirectHTTP && !StreamLanguageFilter.shouldHide(stremio: $0, sourceId: sourceId, isAnime: isAnime)
         }
-        guard let stream = AutoModeStreamSelection.bestStremioStream(from: direct, sourceId: sourceId),
+        guard let stream = AutoModeStreamSelection.bestStremioStream(
+            from: direct,
+            sourceId: sourceId,
+            isAnime: isAnime
+        ),
               let streamURL = Self.httpURL(stream.url) else {
             return nil
         }
@@ -7548,16 +8673,25 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
     }
 
-    private func nextEpisodePrestageTitleCandidates() -> [String] {
-        var values = playbackLaunchContext?.titleCandidates ?? []
+    private func nextEpisodePrestageTitleCandidates(
+        changesAnimeIdentity: Bool
+    ) -> [String] {
+        var values: [String] = []
         if let preview = nextEpisodePreview {
-            values.append(preview.mediaTitle)
-            values.append(contentsOf: [preview.animeSeasonTitle, preview.originalTitle].compactMap { $0 })
+            values.append(contentsOf: [
+                preview.seasonTitleOverride,
+                preview.animeSeasonTitle,
+                Optional(preview.mediaTitle),
+                preview.originalTitle
+            ].compactMap { $0 })
         }
-        if case .episode(_, _, _, let showTitle?, _, _) = mediaInfo {
-            values.append(showTitle)
+        if !changesAnimeIdentity {
+            values.append(contentsOf: playbackLaunchContext?.titleCandidates ?? [])
+            if case .episode(_, _, _, let showTitle?, _, _) = mediaInfo {
+                values.append(showTitle)
+            }
+            values.append(playerDisplayTitle())
         }
-        values.append(playerDisplayTitle())
 
         var seen = Set<String>()
         return values.compactMap(Self.normalizedNonemptyString)
@@ -7710,12 +8844,21 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private static func selectPrewarmStream(
         streams: [String]?,
         sources: [[String: Any]]?,
-        sourceId: String
+        sourceId: String,
+        isAnime: Bool = false,
+        preferredLabel: String? = nil
     ) -> (url: String, headers: [String: String]?, label: String, subtitleEntries: [String]?, subtitleHeadersByURL: [String: [String: String]]?)? {
         var candidates: [(url: String, headers: [String: String]?, label: String, scoreLabel: String, subtitleEntries: [String]?, subtitleHeadersByURL: [String: [String: String]]?)] = []
         if let sources = sources, !sources.isEmpty {
-            for source in sources {
-                guard let raw = (source["streamUrl"] as? String) ?? (source["url"] as? String), !raw.isEmpty else { continue }
+            for (index, source) in sources.enumerated() {
+                guard let raw = ["streamUrl", "url", "file", "src", "link", "stream"]
+                    .lazy
+                    .compactMap({ source[$0] as? String })
+                    .first(where: { !$0.isEmpty }) else { continue }
+                let displayLabel = stringValues(
+                    in: source,
+                    keys: ["title", "name", "label", "quality"]
+                ).first ?? "Stream \(index + 1)"
                 let metadata = stringValues(
                     in: source,
                     keys: ["title", "name", "label", "quality", "provider", "type", "filename", "file", "streamName", "server"]
@@ -7727,29 +8870,64 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 guard !StreamLanguageFilter.shouldHide(
                     languageHints: languageHints,
                     metadata: metadata + [raw],
-                    sourceId: sourceId
+                    sourceId: sourceId,
+                    isAnime: isAnime
                 ) else { continue }
                 candidates.append((
                     raw,
                     headersFromAny(source["headers"]),
-                    metadata.first ?? "Stream",
+                    displayLabel,
                     (metadata + [raw]).joined(separator: " "),
                     serviceSubtitleEntries(in: source),
                     serviceSubtitleHeaders(in: source)
                 ))
             }
         } else if let streams = streams {
-            for stream in streams where stream.hasPrefix("http") {
+            var index = 0
+            var unnamedCount = 1
+            while index < streams.count {
+                let entry = streams[index]
+                let raw: String
+                let label: String
+                if httpURL(entry) != nil {
+                    raw = entry
+                    label = "Stream \(unnamedCount)"
+                    unnamedCount += 1
+                    index += 1
+                } else if index + 1 < streams.count,
+                          httpURL(streams[index + 1]) != nil {
+                    raw = streams[index + 1]
+                    label = normalizedNonemptyString(entry) ?? "Stream"
+                    index += 2
+                } else {
+                    index += 1
+                    continue
+                }
                 guard !StreamLanguageFilter.shouldHide(
                     languageHints: [],
-                    metadata: [stream],
-                    sourceId: sourceId
+                    metadata: [label, raw],
+                    sourceId: sourceId,
+                    isAnime: isAnime
                 ) else { continue }
-                candidates.append((stream, nil, "Stream", stream, nil, nil))
+                candidates.append((raw, nil, label, "\(label) \(raw)", nil, nil))
             }
         }
 
         guard !candidates.isEmpty else { return nil }
+        if let preferredLabel = normalizedNonemptyString(preferredLabel) {
+            let preferredKey = normalizedTitleKey(preferredLabel)
+            if let matched = candidates.first(where: {
+                normalizedTitleKey($0.label) == preferredKey
+            }) {
+                return (
+                    matched.url,
+                    matched.headers,
+                    matched.label,
+                    matched.subtitleEntries,
+                    matched.subtitleHeadersByURL
+                )
+            }
+        }
         if candidates.count == 1 {
             let candidate = candidates[0]
             return (candidate.url, candidate.headers, candidate.label, candidate.subtitleEntries, candidate.subtitleHeadersByURL)
@@ -7954,12 +9132,69 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
 
     private func dispatchPendingNextEpisodeRequestIfNeeded() {
-        guard !didDispatchNextEpisodeRequest,
-              let request = pendingNextEpisodeRequest else { return }
+        guard !didDispatchNextEpisodeRequest else { return }
+
+        if let target = pendingResolvedNextEpisodeRequest,
+           let onRequestResolvedNextEpisode {
+            didDispatchNextEpisodeRequest = true
+            pendingResolvedNextEpisodeRequest = nil
+            pendingNextEpisodeRequest = nil
+            onRequestResolvedNextEpisode(target)
+            return
+        }
+
+        guard let request = pendingNextEpisodeRequest else { return }
 
         didDispatchNextEpisodeRequest = true
         pendingNextEpisodeRequest = nil
         onRequestNextEpisode?(request.seasonNumber, request.episodeNumber)
+    }
+
+    private func resolvedNextEpisodeTarget(
+        showID: Int,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        playbackContext: EpisodePlaybackContext?,
+        title: String?
+    ) -> ResolvedNextEpisodeTarget {
+        let showTitle: String
+        let showPosterURL: String?
+        let mediaIsAnime: Bool
+        if case .episode(_, _, _, let currentTitle, let posterURL, let isAnime) = mediaInfo {
+            showTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                ? title!
+                : (currentTitle ?? "")
+            showPosterURL = posterURL
+            mediaIsAnime = isAnime || isAnimeHint == true || playbackContext?.hasAnimeMediaId == true
+        } else {
+            showTitle = title ?? ""
+            showPosterURL = nil
+            mediaIsAnime = isAnimeHint == true || playbackContext?.hasAnimeMediaId == true
+        }
+        let episode = TMDBEpisode(
+            id: Int("\(showID)\(seasonNumber)\(episodeNumber)") ?? showID,
+            name: "",
+            overview: nil,
+            stillPath: nil,
+            episodeNumber: episodeNumber,
+            seasonNumber: seasonNumber,
+            airDate: nil,
+            runtime: nil,
+            voteAverage: 0,
+            voteCount: 0
+        )
+        return ResolvedNextEpisodeTarget(
+            showID: showID,
+            episode: episode,
+            playbackContext: playbackContext,
+            mediaTitle: showTitle,
+            seasonTitleOverride: mediaIsAnime ? showTitle : nil,
+            originalTitle: nil,
+            posterURL: showPosterURL,
+            imdbID: imdbId,
+            isAnime: mediaIsAnime,
+            isAnimation: isAnimationContentHint ?? false
+        )
     }
 
     private func isLocalFile() -> Bool {
@@ -8051,15 +9286,21 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         guard isRemoteHTTPURL(originalURL), !isLocalProxyURL(originalURL) else { return (originalURL, headers) }
 
         let proxyHeaders = buildProxyHeaders(for: originalURL, baseHeaders: headers ?? [:])
-        if isMetalMPVRenderer,
-           ExperimentalMPVPreloadManager.shared.shouldUsePlaybackProxy(for: originalURL) {
-            guard let proxyURL = MPVHeaderProxy.shared.makeProxyURL(for: originalURL, headers: proxyHeaders, logType: "MPV", traceID: playbackTraceID) else {
+        if forceHeaderProxyForStartup || (
+            isMetalMPVRenderer
+                && ExperimentalMPVPreloadManager.shared.shouldUsePlaybackProxy(for: originalURL)
+        ) {
+            guard let proxyURL = makeMPVHeaderProxyURL(
+                for: originalURL,
+                headers: proxyHeaders
+            ) else {
                 Logger.shared.log("[PlayerVC.PlaybackStart] MPV warmup proxy URL creation failed; using direct HTTP target=\(originalURL.absoluteString) headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "MPV")
                 return (originalURL, proxyHeaders.isEmpty ? headers : proxyHeaders)
             }
 
             registerMPVHeaderProxyURL(proxyURL)
-            Logger.shared.log("[PlayerVC.PlaybackStart] MPV warmup proxy activated target=\(originalURL.absoluteString) headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "MPV")
+            let reason = forceHeaderProxyForStartup ? "coordinator-engine-fallback" : "warmup"
+            Logger.shared.log("[PlayerVC.PlaybackStart] MPV header proxy activated reason=\(reason) target=\(originalURL.absoluteString) headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "MPV")
             return (proxyURL, nil)
         }
 
@@ -8068,6 +9309,329 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             : "renderer-not-moltenvk-active"
         Logger.shared.log("[PlayerVC.PlaybackStart] MPV direct HTTP playback target=\(originalURL.absoluteString) warmupProxySkipped=\(proxySkipReason) renderer=\(mpvRendererName) headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "MPV")
         return (originalURL, proxyHeaders.isEmpty ? headers : proxyHeaders)
+    }
+
+    private func makeMPVHeaderProxyURL(
+        for originalURL: URL,
+        headers: [String: String],
+        expectedLoadGeneration: Int? = nil
+    ) -> URL? {
+        let recoveryLoadGeneration = expectedLoadGeneration ?? playbackLoadGeneration
+        return MPVHeaderProxy.shared.makeProxyURL(
+            for: originalURL,
+            headers: headers,
+            logType: "MPV",
+            traceID: playbackTraceID,
+            onConfirmedCloudflareChallenge: { [weak self] challengeURL, rejectedCookieHeader, isInteractiveChallenge, statusCode in
+                DispatchQueue.main.async { [weak self] in
+                    self?.handleMPVHeaderProxyCloudflareChallenge(
+                        challengeURL: challengeURL,
+                        rejectedCookieHeader: rejectedCookieHeader,
+                        isInteractiveChallenge: isInteractiveChallenge,
+                        statusCode: statusCode,
+                        originalURL: originalURL,
+                        originalHeaders: headers,
+                        expectedLoadGeneration: recoveryLoadGeneration
+                    )
+                }
+            }
+        )
+    }
+
+    /// Replaces an expired media source instead of trying to verify a generic CDN error page.
+    /// Stopping and loading the freshly resolved URL creates a clean byte/range boundary for both
+    /// startup and mid-playback recovery; the captured time is restored after the new load starts.
+    private func handleMPVHeaderProxyCloudflareChallenge(
+        challengeURL: URL,
+        rejectedCookieHeader: String?,
+        isInteractiveChallenge: Bool,
+        statusCode: Int,
+        originalURL: URL,
+        originalHeaders: [String: String],
+        expectedLoadGeneration: Int
+    ) {
+        guard playbackLoadGeneration == expectedLoadGeneration,
+              !playbackFailureHandled,
+              !cloudflareStartupRecoveryInProgress,
+              !isClosing,
+              let preset = initialPreset else { return }
+
+        if playbackLaunchContext?.sourceKind == .service,
+           playbackLaunchContext?.serviceContentHref?.isEmpty == false {
+            guard beginMediaSourceRefreshAttempt() else {
+                handleUnrecoverableMediaSourceRejection(
+                    "The media source could not be refreshed after repeated HTTP \(statusCode) responses."
+                )
+                return
+            }
+            refreshCurrentServicePlaybackSource(
+                challengeURL: challengeURL,
+                rejectedCookieHeader: rejectedCookieHeader,
+                isInteractiveChallenge: isInteractiveChallenge,
+                statusCode: statusCode,
+                originalURL: originalURL,
+                expectedLoadGeneration: expectedLoadGeneration,
+                preset: preset
+            )
+            return
+        }
+
+        // Sources without provider re-resolution metadata can only retry an explicit challenge.
+        // A generic CDN rejection has no human widget and retrying its identical URL would loop.
+        guard isInteractiveChallenge else {
+            handleUnrecoverableMediaSourceRejection(
+                "The media host rejected this URL (HTTP \(statusCode)) and the source could not be refreshed."
+            )
+            return
+        }
+
+        cloudflareStartupRecoveryInProgress = true
+        playbackFailureHandled = true
+        playbackStartupWorkItem?.cancel()
+        releaseMPVHeaderProxySessions()
+        rendererStop()
+        showErrorBanner("Cloudflare verification is required. Retrying this source after verification...")
+        Logger.shared.log(
+            "[PlayerVC.PlaybackStart] explicit Cloudflare challenge; refreshing session before same-source retry host=\(challengeURL.host ?? "unknown")",
+            type: "MPV"
+        )
+
+        Task { @MainActor [weak self] in
+            let solved = await CloudflareBypassManager.shared.refreshSessionAfterChallenge(
+                for: challengeURL,
+                rejectedCookieHeader: rejectedCookieHeader
+            )
+            guard let self else { return }
+
+            cloudflareStartupRecoveryInProgress = false
+            guard playbackLoadGeneration == expectedLoadGeneration,
+                  !isClosing,
+                  !isBeingDismissed else { return }
+
+            playbackFailureHandled = false
+            if solved {
+                let refreshedHeaders = CloudflareBypassManager.shared.headersByApplyingCachedBypass(
+                    originalHeaders,
+                    for: originalURL
+                )
+                Logger.shared.log(
+                    "[PlayerVC.PlaybackStart] Cloudflare session refreshed; retrying identical source",
+                    type: "MPV"
+                )
+                load(url: originalURL, preset: preset, headers: refreshedHeaders)
+            } else {
+                handlePlaybackStartupFailure(
+                    "Cloudflare verification was not completed.",
+                    isSourceFailure: false
+                )
+            }
+        }
+    }
+
+    private func beginMediaSourceRefreshAttempt() -> Bool {
+        let now = Date()
+        if let lastAttempt = lastMediaSourceRefreshAttemptAt,
+           now.timeIntervalSince(lastAttempt) > 30 {
+            mediaSourceRefreshAttemptCount = 0
+        }
+        lastMediaSourceRefreshAttemptAt = now
+        guard mediaSourceRefreshAttemptCount < 2 else { return false }
+        mediaSourceRefreshAttemptCount += 1
+        return true
+    }
+
+    private func refreshCurrentServicePlaybackSource(
+        challengeURL: URL,
+        rejectedCookieHeader: String?,
+        isInteractiveChallenge: Bool,
+        statusCode: Int,
+        originalURL: URL,
+        expectedLoadGeneration: Int,
+        preset: PlayerPreset
+    ) {
+        guard let context = playbackLaunchContext else { return }
+
+        let resumePosition = playbackDidStart && cachedPosition.isFinite && cachedPosition > 0
+            ? cachedPosition
+            : nil
+        cloudflareStartupRecoveryInProgress = true
+        playbackFailureHandled = true
+        playbackStartupWorkItem?.cancel()
+        releaseMPVHeaderProxySessions()
+        rendererStop()
+        showErrorBanner("The media URL expired. Refreshing this source...")
+        Logger.shared.log(
+            "[PlayerVC.SourceRefresh] begin source=\(context.sourceName) status=\(statusCode) interactiveChallenge=\(isInteractiveChallenge) challengedHost=\(challengeURL.host ?? "unknown") started=\(playbackDidStart)",
+            type: "MPV"
+        )
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            var resolution = await resolveCurrentServicePlaybackSource(context: context)
+            var solvedMediaChallenge = false
+
+            // An explicit challenge on the media host may still be the only gate. Prefer provider
+            // re-resolution first (signed URLs commonly rotate). If extraction returns the same
+            // challenged URL, it still needs a fresh media-host session before it can be retried.
+            if isInteractiveChallenge,
+               resolution == nil || resolution?.streamURL == originalURL {
+                solvedMediaChallenge = await CloudflareBypassManager.shared.refreshSessionAfterChallenge(
+                    for: challengeURL,
+                    rejectedCookieHeader: rejectedCookieHeader
+                )
+                if solvedMediaChallenge {
+                    resolution = await resolveCurrentServicePlaybackSource(context: context) ?? resolution
+                }
+            }
+
+            cloudflareStartupRecoveryInProgress = false
+            guard playbackLoadGeneration == expectedLoadGeneration,
+                  !isClosing,
+                  !isBeingDismissed else { return }
+
+            guard let resolution else {
+                playbackFailureHandled = false
+                handleUnrecoverableMediaSourceRejection(
+                    "\(context.sourceName) could not refresh the expired media URL (HTTP \(statusCode))."
+                )
+                return
+            }
+
+            let refreshedContext = PlaybackLaunchContext(
+                traceID: context.traceID,
+                traceCreatedAt: context.traceCreatedAt,
+                sourceId: resolution.sourceId,
+                sourceName: resolution.sourceName,
+                sourceKind: resolution.sourceKind,
+                autoMode: context.autoMode,
+                streamURL: resolution.streamURL.absoluteString,
+                streamName: resolution.streamName,
+                headers: resolution.headers,
+                subtitles: resolution.subtitles,
+                subtitleNames: resolution.subtitleNames,
+                subtitleHeadersByURL: resolution.subtitleHeadersByURL,
+                retryCount: context.retryCount,
+                titleCandidates: resolution.titleCandidates,
+                serviceContentHref: resolution.serviceContentHref
+            )
+            playbackLaunchContext = refreshedContext
+            initialSubtitles = resolution.subtitles
+            initialSubtitleNames = resolution.subtitleNames
+            initialSubtitleHeadersByURL = resolution.subtitleHeadersByURL
+            pendingSourceRefreshResumePosition = resumePosition
+            playbackFailureHandled = false
+
+            Logger.shared.log(
+                "[PlayerVC.SourceRefresh] resolved source=\(resolution.sourceName) oldHost=\(originalURL.host ?? "unknown") newHost=\(resolution.streamURL.host ?? "unknown") sameURL=\(resolution.streamURL == originalURL) resume=\(secondsText(resumePosition))",
+                type: "MPV"
+            )
+            load(url: resolution.streamURL, preset: preset, headers: resolution.headers)
+        }
+    }
+
+    private func resolveCurrentServicePlaybackSource(
+        context: PlaybackLaunchContext
+    ) async -> NextEpisodePrestageResolution? {
+        guard context.sourceKind == .service,
+              let service = ServiceManager.shared.activeServices.first(where: {
+                  SourceHealth.serviceId($0) == context.sourceId
+              }),
+              let contentHref = Self.normalizedNonemptyString(context.serviceContentHref) else {
+            return nil
+        }
+
+        let isAnime = isAnimeContent()
+        switch mediaInfo {
+        case .episode(_, let seasonNumber, let episodeNumber, _, _, _):
+            return await resolveServicePrestageCandidate(
+                service: service,
+                knownContentHref: contentHref,
+                nextSeasonNumber: seasonNumber,
+                nextEpisodeNumber: episodeNumber,
+                nextContext: episodePlaybackContext,
+                lookupSeason: episodePlaybackContext?.resolvedTMDBSeasonNumber ?? seasonNumber,
+                lookupEpisode: episodePlaybackContext?.resolvedTMDBEpisodeNumber ?? episodeNumber,
+                isAnime: isAnime,
+                titleCandidates: context.titleCandidates,
+                preferredStreamName: context.streamName
+            )
+
+        case .movie:
+            let jsController = JSController()
+            jsController.loadScript(service.jsScript, service: service)
+            let episodes = await fetchServiceEpisodes(
+                jsController: jsController,
+                service: service,
+                contentHref: contentHref
+            )
+            guard !Task.isCancelled else { return nil }
+            let streamHref = episodes.first?.href ?? contentHref
+            let result = await fetchServiceStreams(
+                jsController: jsController,
+                service: service,
+                episodeHref: streamHref
+            )
+            guard !Task.isCancelled,
+                  let selected = Self.selectPrewarmStream(
+                      streams: result.streams,
+                      sources: result.sources,
+                      sourceId: context.sourceId,
+                      isAnime: isAnime,
+                      preferredLabel: context.streamName
+                  ),
+                  let streamURL = Self.httpURL(selected.url) else {
+                return nil
+            }
+            let subtitles = Self.serviceSubtitleSelection(
+                entries: (selected.subtitleEntries ?? []) + (result.subtitles ?? [])
+            )
+            let subtitleHeaders = selected.subtitleHeadersByURL?.filter {
+                subtitles.urls.contains($0.key)
+            }
+            return NextEpisodePrestageResolution(
+                streamURL: streamURL,
+                headers: Self.mergedPlaybackHeaders(
+                    baseURL: service.metadata.baseUrl,
+                    custom: selected.headers
+                ),
+                subtitles: subtitles.urls,
+                subtitleNames: subtitles.names,
+                subtitleHeadersByURL: subtitleHeaders?.isEmpty == false ? subtitleHeaders : nil,
+                streamName: selected.label,
+                sourceId: context.sourceId,
+                sourceName: service.metadata.sourceName,
+                sourceKind: .service,
+                titleCandidates: context.titleCandidates,
+                serviceContentHref: contentHref
+            )
+
+        case nil:
+            return nil
+        }
+    }
+
+    private func handleUnrecoverableMediaSourceRejection(_ message: String) {
+        guard let context = playbackLaunchContext else {
+            showErrorBanner(message)
+            return
+        }
+        playbackFailureHandled = true
+        let report = PlaybackFailureReport(
+            context: context,
+            message: message,
+            isSourceFailure: true
+        )
+        SourceHealthStore.shared.recordPlaybackFailure(
+            sourceId: context.sourceId,
+            sourceName: context.sourceName,
+            reason: message,
+            isSourceFailure: true
+        )
+        if context.autoMode, onPlaybackStartupFailure != nil {
+            dismissAfterPlaybackFailure(report)
+        } else {
+            showManualPlaybackFailureAlert(report)
+        }
     }
 
     private func isMPVTransportBridgeCandidate(_ message: String) -> Bool {
@@ -8088,7 +9652,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 
         let proxyHeaders = buildProxyHeaders(for: originalURL, baseHeaders: initialHeaders ?? [:])
-        guard let proxyURL = MPVHeaderProxy.shared.makeProxyURL(for: originalURL, headers: proxyHeaders, logType: "MPV", traceID: playbackTraceID) else {
+        guard let proxyURL = makeMPVHeaderProxyURL(
+            for: originalURL,
+            headers: proxyHeaders,
+            expectedLoadGeneration: playbackLoadGeneration + 1
+        ) else {
             Logger.shared.log("[PlayerVC.PlaybackStart] MPV transport bridge URL creation failed; keeping direct failure", type: "MPV")
             return false
         }
@@ -8205,8 +9773,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         var trackActions: [PlayerOverlayMenuAction] = [
             makeOverlayAction(title: "Disable Subtitles", imageName: "xmark", isSelected: !subtitleModel.isVisible) { [weak self] in
                 guard let self else { return }
-                self.subtitleModel.isVisible = false
+                self.setSessionAwareSubtitleVisible(false)
                 self.userSelectedSubtitleTrack = true
+                self.recordUserSubtitleSelection(enabled: false)
                 self.rendererDisableSubtitles()
                 self.subtitleEntries.removeAll()
                 self.vlcSubtitleSelection = .none
@@ -8228,8 +9797,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 }()
                 return makeOverlayAction(title: name, imageName: "captions.bubble", isSelected: selected) { [weak self] in
                     guard let self else { return }
-                    self.subtitleModel.isVisible = true
+                    self.setSessionAwareSubtitleVisible(true)
                     self.userSelectedSubtitleTrack = true
+                    self.recordUserSubtitleSelection(enabled: true, displayName: name)
                     self.currentSubtitleIndex = id
                     self.vlcSubtitleSelection = .external(index: id)
                     self.loadCurrentSubtitle()
@@ -8256,8 +9826,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     isEnabled: !blocksMPVDefault
                 ) { [weak self] in
                     guard let self else { return }
-                    self.subtitleModel.isVisible = true
+                    self.setSessionAwareSubtitleVisible(true)
                     self.userSelectedSubtitleTrack = true
+                    self.recordUserSubtitleSelection(enabled: true, displayName: track.name)
                     self.vlcSubtitleSelection = .embedded(trackId: track.id)
                     self.subtitleEntries.removeAll()
                     self.updateVLCSubtitleOverlay(for: self.cachedPosition)
@@ -8467,9 +10038,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         // Apply subtitle defaults while the user has not manually selected a track.
         if !userSelectedSubtitleTrack {
-            let settings = Settings.shared
-            if settings.enableSubtitlesByDefault {
-                let preferredLang = settings.defaultSubtitleLanguage
+            if automaticSubtitlesEnabled {
+                let preferredLang = automaticSubtitleSelectionLanguage
                 if let selectedEmbeddedTrack = preferredDefaultSubtitleTrack(from: autoSelectableEmbeddedTracks, preferredLang: preferredLang) {
                     if rendererGetCurrentSubtitleTrackId() != selectedEmbeddedTrack.0 {
                         rendererSetSubtitleTrack(id: selectedEmbeddedTrack.0)
@@ -8575,14 +10145,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             image: UIImage(systemName: "xmark"),
             state: subtitleModel.isVisible ? .off : .on
         ) { [weak self] _ in
-            self?.subtitleModel.isVisible = false
-            self?.userSelectedSubtitleTrack = true
-            self?.rendererDisableSubtitles()
-            self?.subtitleEntries.removeAll()
-            self?.vlcSubtitleSelection = .none
-            self?.updateVLCSubtitleOverlay(for: self?.cachedPosition ?? 0)
-            self?.updateSubtitleButtonAppearance()
-            self?.updateSubtitleTracksMenu()
+            guard let self else { return }
+            self.setSessionAwareSubtitleVisible(false)
+            self.userSelectedSubtitleTrack = true
+            self.recordUserSubtitleSelection(enabled: false)
+            self.rendererDisableSubtitles()
+            self.subtitleEntries.removeAll()
+            self.vlcSubtitleSelection = .none
+            self.updateVLCSubtitleOverlay(for: self.cachedPosition)
+            self.updateSubtitleButtonAppearance()
+            self.updateSubtitleTracksMenu()
             Logger.shared.log("[PlayerVC.Subtitles] user disabled subtitles from menu", type: "Player")
         }
         trackActions.append(disableAction)
@@ -8604,8 +10176,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     }() ? .on : .off
                 ) { [weak self] _ in
                     guard let self else { return }
-                    self.subtitleModel.isVisible = true
+                    self.setSessionAwareSubtitleVisible(true)
                     self.userSelectedSubtitleTrack = true
+                    self.recordUserSubtitleSelection(enabled: true, displayName: name)
                     self.currentSubtitleIndex = id
                     self.vlcSubtitleSelection = .external(index: id)
                     Logger.shared.log("[PlayerVC.Subtitles] user selected external subtitle index=\(id) name=\(name)", type: "Player")
@@ -8639,8 +10212,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     }() ? .on : .off
                 ) { [weak self] _ in
                     guard let self else { return }
-                    self.subtitleModel.isVisible = true
+                    self.setSessionAwareSubtitleVisible(true)
                     self.userSelectedSubtitleTrack = true
+                    self.recordUserSubtitleSelection(enabled: true, displayName: name)
                     self.vlcSubtitleSelection = .embedded(trackId: id)
                     Logger.shared.log("[PlayerVC.Subtitles] user selected embedded subtitle id=\(id) name=\(name)", type: "Player")
                     self.subtitleEntries.removeAll()
@@ -8958,7 +10532,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
         return isVLCOpenSubtitlesEnabled
             && Settings.shared.playerOpenSubtitlesAutoFallbackEnabled
-            && Settings.shared.enableSubtitlesByDefault
+            && automaticSubtitlesEnabled
             && !userSelectedSubtitleTrack
     }
 
@@ -8968,7 +10542,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
         return hasStremioSubtitleAddons
             && Settings.shared.playerOpenSubtitlesAutoFallbackEnabled
-            && Settings.shared.enableSubtitlesByDefault
+            && automaticSubtitlesEnabled
             && !userSelectedSubtitleTrack
     }
 
@@ -8978,7 +10552,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if !forceRefresh, !stremioSubtitleResults.isEmpty {
             if autoSelect,
                canAutoApplyStremioSubtitleFallback(),
-               let result = preferredStremioSubtitle(from: stremioSubtitleResults, preferredLang: Settings.shared.defaultSubtitleLanguage) {
+               let result = preferredStremioSubtitle(from: stremioSubtitleResults, preferredLang: automaticSubtitleSelectionLanguage) {
                 stremioSubtitleFallbackAttempted = true
                 loadStremioSubtitle(result, userSelected: false)
             }
@@ -9001,7 +10575,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 Logger.shared.log("[PlayerVC.StremioSubtitles] fetch complete reason=\(reason) count=\(results.count)", type: "Player")
                 if autoSelect,
                    self.canAutoApplyStremioSubtitleFallback(),
-                   let result = self.preferredStremioSubtitle(from: self.stremioSubtitleResults, preferredLang: Settings.shared.defaultSubtitleLanguage) {
+                   let result = self.preferredStremioSubtitle(from: self.stremioSubtitleResults, preferredLang: self.automaticSubtitleSelectionLanguage) {
                     self.stremioSubtitleFallbackAttempted = true
                     self.loadStremioSubtitle(result, userSelected: false)
                 } else {
@@ -9018,7 +10592,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if !forceRefresh, !openSubtitlesResults.isEmpty {
             if autoSelect,
                canAutoApplyOpenSubtitlesFallback(),
-               let subtitle = preferredOpenSubtitle(from: openSubtitlesResults, preferredLang: Settings.shared.defaultSubtitleLanguage) {
+               let subtitle = preferredOpenSubtitle(from: openSubtitlesResults, preferredLang: automaticSubtitleSelectionLanguage) {
                 openSubtitlesFallbackAttempted = true
                 loadOpenSubtitle(subtitle, userSelected: false)
             }
@@ -9041,7 +10615,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 Logger.shared.log("[PlayerVC.OpenSubtitles] fetch complete reason=\(reason) count=\(results.count)", type: "Player")
                 if autoSelect,
                    self.canAutoApplyOpenSubtitlesFallback(),
-                   let subtitle = self.preferredOpenSubtitle(from: results, preferredLang: Settings.shared.defaultSubtitleLanguage) {
+                   let subtitle = self.preferredOpenSubtitle(from: results, preferredLang: self.automaticSubtitleSelectionLanguage) {
                     self.openSubtitlesFallbackAttempted = true
                     self.loadOpenSubtitle(subtitle, userSelected: false)
                 } else {
@@ -9178,7 +10752,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 result.append(subtitle)
             }
         }
-        let preferredLang = Settings.shared.defaultSubtitleLanguage
+        let preferredLang = automaticSubtitleSelectionLanguage
         return result.sorted { lhs, rhs in
             let lhsMatch = openSubtitleMatchesPreferredLanguage(lhs, preferredLang: preferredLang)
             let rhsMatch = openSubtitleMatchesPreferredLanguage(rhs, preferredLang: preferredLang)
@@ -9188,7 +10762,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func sortedStremioSubtitleResults(_ results: [StremioAddonManager.AddonSubtitleResult]) -> [StremioAddonManager.AddonSubtitleResult] {
-        let preferredLang = Settings.shared.defaultSubtitleLanguage
+        let preferredLang = automaticSubtitleSelectionLanguage
         return results.sorted { lhs, rhs in
             let lhsMatch = openSubtitleMatchesPreferredLanguage(lhs.subtitle, preferredLang: preferredLang)
             let rhsMatch = openSubtitleMatchesPreferredLanguage(rhs.subtitle, preferredLang: preferredLang)
@@ -9240,6 +10814,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         guard openSubtitlesLoadedURLs.insert(urlKey).inserted || userSelected else { return }
 
         let displayName = "OpenSubtitles - \(openSubtitleDisplayName(subtitle))"
+        if userSelected {
+            recordUserSubtitleSelection(
+                enabled: true,
+                languageTag: subtitle.lang,
+                displayName: displayName
+            )
+        }
         loadOnlineSubtitle(
             urlString: urlString,
             displayName: displayName,
@@ -9253,9 +10834,17 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let urlKey = normalizedSubtitleURLKey(urlString)
         guard stremioSubtitleLoadedURLs.insert(urlKey).inserted || userSelected else { return }
 
+        let displayName = stremioSubtitleDisplayName(result)
+        if userSelected {
+            recordUserSubtitleSelection(
+                enabled: true,
+                languageTag: result.subtitle.lang,
+                displayName: displayName
+            )
+        }
         loadOnlineSubtitle(
             urlString: urlString,
-            displayName: stremioSubtitleDisplayName(result),
+            displayName: displayName,
             sourceLogLabel: "StremioSubtitles",
             userSelected: userSelected
         )
@@ -9278,9 +10867,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             onlineSubtitleLoadedTrackNames.insert($0)
         }
 
-        setSubtitleVisible(true, persist: userSelected)
         if userSelected {
+            setSessionAwareSubtitleVisible(true)
             userSelectedSubtitleTrack = true
+        } else {
+            setSubtitleVisible(true, persist: false)
         }
 
         currentSubtitleIndex = subtitleIndex
@@ -9432,7 +11023,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             Logger.shared.log("PlayerViewController: loadSubtitles count=\(urls.count) renderer=\(vlcRenderer != nil ? "VLC" : "MPV")", type: "Stream")
             subtitleButton.isHidden = false
             currentSubtitleIndex = 0
-            let enableByDefault = Settings.shared.enableSubtitlesByDefault
+            let enableByDefault = automaticSubtitlesEnabled
             setSubtitleVisible(enableByDefault, persist: false)
             
             // VLC and native MPV both hand external subtitles to the renderer.
@@ -9685,13 +11276,18 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if !subtitleURLs.isEmpty {
             if subtitleURLs.count == 1 {
                 let shouldShow = !subtitleModel.isVisible
-                subtitleModel.isVisible = shouldShow
+                setSessionAwareSubtitleVisible(shouldShow)
                 userSelectedSubtitleTrack = true
                 if shouldShow {
+                    let displayName = currentSubtitleIndex < subtitleNames.count
+                        ? subtitleNames[currentSubtitleIndex]
+                        : nil
+                    recordUserSubtitleSelection(enabled: true, displayName: displayName)
                     vlcSubtitleSelection = .external(index: currentSubtitleIndex)
                     loadCurrentSubtitle()
                     rendererApplySubtitleStyle(currentSubtitleStyle(visible: true))
                 } else {
+                    recordUserSubtitleSelection(enabled: false)
                     rendererDisableSubtitles()
                     subtitleEntries.removeAll()
                     vlcSubtitleSelection = .none
@@ -9714,13 +11310,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         let disable = UIAlertAction(title: "Disable Subtitles", style: .destructive) { [weak self] _ in
             Logger.shared.log("Embedded subtitles disabled via action sheet", type: "Info")
-            self?.userSelectedSubtitleTrack = true
-            self?.subtitleModel.isVisible = false
-            self?.rendererDisableSubtitles()
-            self?.subtitleEntries.removeAll()
-            self?.vlcSubtitleSelection = .none
-            self?.updateSubtitleButtonAppearance()
-            self?.updateSubtitleTracksMenu()
+            guard let self else { return }
+            self.userSelectedSubtitleTrack = true
+            self.setSessionAwareSubtitleVisible(false)
+            self.recordUserSubtitleSelection(enabled: false)
+            self.rendererDisableSubtitles()
+            self.subtitleEntries.removeAll()
+            self.vlcSubtitleSelection = .none
+            self.updateSubtitleButtonAppearance()
+            self.updateSubtitleTracksMenu()
         }
         alert.addAction(disable)
 
@@ -9732,7 +11330,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     guard let self else { return }
                     Logger.shared.log("Embedded subtitle selected via action sheet: id=\(id) name=\(name)", type: "Info")
                     self.userSelectedSubtitleTrack = true
-                    self.subtitleModel.isVisible = true
+                    self.setSessionAwareSubtitleVisible(true)
+                    self.recordUserSubtitleSelection(enabled: true, displayName: name)
                     self.vlcSubtitleSelection = .embedded(trackId: id)
                     self.rendererSetSubtitleTrack(id: id)
                     self.rendererApplySubtitleStyle(self.currentSubtitleStyle(visible: true))
@@ -9759,13 +11358,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let alert = UIAlertController(title: "Select Subtitle", message: nil, preferredStyle: .actionSheet)
         
         let disableAction = UIAlertAction(title: "Disable Subtitles", style: .default) { [weak self] _ in
-            self?.subtitleModel.isVisible = false
-            self?.userSelectedSubtitleTrack = true
-            self?.rendererDisableSubtitles()
-            self?.subtitleEntries.removeAll()
-            self?.vlcSubtitleSelection = .none
-            self?.updateSubtitleButtonAppearance()
-            self?.updateSubtitleTracksMenu()
+            guard let self else { return }
+            self.setSessionAwareSubtitleVisible(false)
+            self.userSelectedSubtitleTrack = true
+            self.recordUserSubtitleSelection(enabled: false)
+            self.rendererDisableSubtitles()
+            self.subtitleEntries.removeAll()
+            self.vlcSubtitleSelection = .none
+            self.updateSubtitleButtonAppearance()
+            self.updateSubtitleTracksMenu()
         }
         alert.addAction(disableAction)
         
@@ -9774,8 +11375,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             let action = UIAlertAction(title: title, style: .default) { [weak self] _ in
                 guard let self else { return }
                 self.currentSubtitleIndex = index
-                self.subtitleModel.isVisible = true
+                self.setSessionAwareSubtitleVisible(true)
                 self.userSelectedSubtitleTrack = true
+                self.recordUserSubtitleSelection(enabled: true, displayName: title)
                 self.vlcSubtitleSelection = .external(index: index)
                 self.loadCurrentSubtitle()
                 self.rendererApplySubtitleStyle(self.currentSubtitleStyle(visible: true))
@@ -10143,6 +11745,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         videoContainer.bringSubviewToFront(centerPlayPauseButton)
         videoContainer.bringSubviewToFront(progressContainer)
         videoContainer.bringSubviewToFront(closeButton)
+#if os(iOS)
+        videoContainer.bringSubviewToFront(playbackLockButton)
+#endif
         videoContainer.bringSubviewToFront(pipButton)
 #if os(iOS)
         videoContainer.bringSubviewToFront(watchTogetherButton)
@@ -10154,6 +11759,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         videoContainer.bringSubviewToFront(metalPerformanceOverlayLabel)
         videoContainer.bringSubviewToFront(subtitleButton)
         if supportsSharedPlayerControls {
+            videoContainer.bringSubviewToFront(servicesButton)
             videoContainer.bringSubviewToFront(episodeBrowserButton)
             videoContainer.bringSubviewToFront(speedButton)
             videoContainer.bringSubviewToFront(audioButton)
@@ -10175,7 +11781,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 self.centerPlayPauseButton.alpha = 1.0
                 self.controlsOverlayView.alpha = 1.0
                 self.progressContainer.alpha = 1.0
+#if os(iOS)
+                self.closeButton.alpha = PlayerPlaybackLockSettings.isLocked() ? 0.35 : 1.0
+                self.playbackLockButton.alpha = self.playbackLockButton.isHidden ? 0.0 : 1.0
+#else
                 self.closeButton.alpha = 1.0
+#endif
                 self.pipButton.alpha = self.pipButton.isHidden ? 0.0 : 1.0
 #if os(iOS)
                 self.watchTogetherButton.alpha = self.watchTogetherButton.isHidden ? 0.0 : 1.0
@@ -10187,6 +11798,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     self.subtitleButton.alpha = 1.0
                 }
                 if self.supportsSharedPlayerControls {
+                    if !self.servicesButton.isHidden {
+                        self.servicesButton.alpha = 1.0
+                    }
                     if !self.episodeBrowserButton.isHidden {
                         self.episodeBrowserButton.alpha = 1.0
                     }
@@ -10233,6 +11847,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 self.controlsOverlayView.alpha = 0.0
                 self.progressContainer.alpha = 0.0
                 self.closeButton.alpha = 0.0
+#if os(iOS)
+                self.playbackLockButton.alpha = 0.0
+#endif
                 self.pipButton.alpha = 0.0
 #if os(iOS)
                 self.watchTogetherButton.alpha = 0.0
@@ -10242,6 +11859,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 self.skipForwardButton.alpha = 0.0
                 self.subtitleButton.alpha = 0.0
                 if self.supportsSharedPlayerControls {
+                    self.servicesButton.alpha = 0.0
                     self.episodeBrowserButton.alpha = 0.0
                     self.speedButton.alpha = 0.0
                     self.audioButton.alpha = 0.0
@@ -10366,8 +11984,22 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
     
     @objc private func closeTapped() {
+        closePlayer(allowWhilePlaybackLocked: false)
+    }
+
+    private func closePlayer(allowWhilePlaybackLocked: Bool) {
+#if os(iOS)
+        guard allowWhilePlaybackLocked || !PlayerPlaybackLockSettings.isLocked() else {
+            showControlsTemporarily()
+            showPlayerNotice("Unlock the player before closing.")
+            return
+        }
+#endif
         if isClosing { return }
         isClosing = true
+        invalidateIPadGPUPlaybackLoadGate()
+        pendingRendererRestartRetryGeneration = nil
+        pendingPlaybackFailureAlert = nil
 #if os(iOS)
         WatchTogetherCoordinator.shared.detach(self)
 #endif
@@ -10429,6 +12061,65 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
     }
 
+#if os(iOS)
+    @objc private func playbackLockTapped() {
+        let shouldLock = !PlayerPlaybackLockSettings.isLocked()
+        PlayerPlaybackLockSettings.setLocked(
+            shouldLock,
+            interfaceOrientation: PlayerPlaybackLockSettings.capturedInterfaceOrientation(
+                scene: view.window?.windowScene,
+                viewBounds: view.bounds
+            )
+        )
+        applyPlaybackLockState(capturingOrientationIfNeeded: true)
+        showControlsTemporarily()
+        showPlayerNotice(shouldLock ? "Playback locked. Next Episode stays available." : "Playback unlocked.")
+    }
+
+    private func applyPlaybackLockState(capturingOrientationIfNeeded: Bool) {
+        if capturingOrientationIfNeeded,
+           PlayerPlaybackLockSettings.isLocked(),
+           PlayerPlaybackLockSettings.lockedOrientationMask() == nil {
+            PlayerPlaybackLockSettings.setLocked(
+                true,
+                interfaceOrientation: view.window?.windowScene?.interfaceOrientation
+            )
+        }
+
+        let available = PlayerPlaybackLockSettings.isEnabled()
+        let locked = PlayerPlaybackLockSettings.isLocked()
+        playbackLockButton.isHidden = !available
+        playbackLockButton.isEnabled = available
+        let configuration = UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
+        playbackLockButton.setImage(
+            UIImage(systemName: locked ? "lock.fill" : "lock.open", withConfiguration: configuration),
+            for: .normal
+        )
+        playbackLockButton.accessibilityLabel = locked ? "Unlock player" : "Lock player"
+        playbackLockButton.accessibilityHint = locked
+            ? "Allows orientation changes and closing the video"
+            : "Locks the current orientation and prevents closing the video"
+        playbackLockButton.accessibilityValue = locked ? "Locked" : "Unlocked"
+        playbackLockButton.alpha = available && controlsVisible ? 1.0 : 0.0
+        closeButton.isEnabled = !locked
+        closeButton.alpha = controlsVisible ? (locked ? 0.35 : 1.0) : 0.0
+        closeButton.accessibilityHint = locked ? "Unlock the player before closing" : nil
+        isModalInPresentation = locked
+        if let scene = view.window?.windowScene ?? playbackWindowScene {
+            AppDelegate.setOrientationLock(
+                locked ? (PlayerPlaybackLockSettings.lockedOrientationMask() ?? supportedInterfaceOrientations) : .all,
+                for: scene
+            )
+        }
+
+        if #available(iOS 16.0, *) {
+            setNeedsUpdateOfSupportedInterfaceOrientations()
+        } else {
+            UIViewController.attemptRotationToDeviceOrientation()
+        }
+    }
+#endif
+
     private func postPlayerDidCloseNotification() {
         guard !hasFinalizedMediaStatePlayback else { return }
         hasFinalizedMediaStatePlayback = true
@@ -10486,7 +12177,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 totalDuration: cachedDuration,
                 showTitle: showTitle,
                 showPosterURL: showPosterURL,
-                playbackContext: episodePlaybackContext?.forEpisodeNumber(episodeNumber),
+                playbackContext: playbackContextForCurrentEpisode(
+                    seasonNumber: seasonNumber,
+                    episodeNumber: episodeNumber
+                ),
                 isAnime: isAnime || episodePlaybackContext?.hasAnimeMediaId == true
             )
         }
@@ -10851,7 +12545,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 totalDuration: effectiveDuration,
                 showTitle: showTitle,
                 showPosterURL: showPosterURL,
-                playbackContext: episodePlaybackContext?.forEpisodeNumber(episodeNumber),
+                playbackContext: playbackContextForCurrentEpisode(
+                    seasonNumber: seasonNumber,
+                    episodeNumber: episodeNumber
+                ),
                 isAnime: isAnime || episodePlaybackContext?.hasAnimeMediaId == true
             )
         }
@@ -10947,6 +12644,7 @@ struct PlayerEpisodeBrowserItem: Identifiable {
     let animeSeasonTitle: String?
     let originalTitle: String?
     let posterURL: String?
+    let originalAudioLanguage: String?
     let imdbId: String?
     let episode: TMDBEpisode
     let isAnime: Bool
@@ -11194,7 +12892,8 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
                     context: currentSpecial,
                     showTitle: showTitle,
                     showPosterURL: showPosterURL,
-                    fallbackImdbId: resolvedImdbId
+                    fallbackImdbId: resolvedImdbId,
+                    originalAudioLanguage: tvShow.originalLanguage
                 ))
                 seasons = loaded
             } else if seed.isAnime,
@@ -11204,7 +12903,8 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
                     absoluteEpisodeOffset: animeAbsoluteEpisodeOffsets[animeSeason.seasonNumber] ?? 0,
                     showTitle: showTitle,
                     showPosterURL: showPosterURL,
-                    imdbId: resolvedImdbId
+                    imdbId: resolvedImdbId,
+                    originalAudioLanguage: tvShow.originalLanguage
                 ))
                 seasons = loaded
             } else if let currentTMDBSeason = tvShow.seasons.first(where: { $0.seasonNumber == seed.currentSeasonNumber }),
@@ -11215,7 +12915,8 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
                     showTitle: showTitle,
                     showPosterURL: showPosterURL,
                     imdbId: resolvedImdbId,
-                    isSpecial: currentTMDBSeason.seasonNumber == 0
+                    isSpecial: currentTMDBSeason.seasonNumber == 0,
+                    originalAudioLanguage: tvShow.originalLanguage
                 ))
                 seasons = loaded
             }
@@ -11227,7 +12928,8 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
                         absoluteEpisodeOffset: animeAbsoluteEpisodeOffsets[season.seasonNumber] ?? 0,
                         showTitle: showTitle,
                         showPosterURL: showPosterURL,
-                        imdbId: resolvedImdbId
+                        imdbId: resolvedImdbId,
+                        originalAudioLanguage: tvShow.originalLanguage
                     ))
                     seasons = loaded
                 }
@@ -11249,7 +12951,8 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
                         showTitle: showTitle,
                         showPosterURL: showPosterURL,
                         imdbId: resolvedImdbId,
-                        isSpecial: season.seasonNumber == 0
+                        isSpecial: season.seasonNumber == 0,
+                        originalAudioLanguage: tvShow.originalLanguage
                     ))
                     seasons = loaded
                 }
@@ -11260,7 +12963,8 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
                     context: context,
                     showTitle: showTitle,
                     showPosterURL: showPosterURL,
-                    fallbackImdbId: resolvedImdbId
+                    fallbackImdbId: resolvedImdbId,
+                    originalAudioLanguage: tvShow.originalLanguage
                 ))
                 seasons = loaded
             }
@@ -11332,7 +13036,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
         return offsets
     }
 
-    private func buildAnimeSeason(_ season: AniListSeasonWithPoster, absoluteEpisodeOffset: Int, showTitle: String, showPosterURL: String?, imdbId: String?) -> PlayerEpisodeBrowserSeason {
+    private func buildAnimeSeason(_ season: AniListSeasonWithPoster, absoluteEpisodeOffset: Int, showTitle: String, showPosterURL: String?, imdbId: String?, originalAudioLanguage: String?) -> PlayerEpisodeBrowserSeason {
         let title = season.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "Season \(season.seasonNumber)" : season.title
         let items = season.episodes
             .sorted { $0.number < $1.number }
@@ -11370,6 +13074,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
                     seasonTitleOverride: title,
                     animeSeasonTitle: title,
                     originalTitle: nil,
+                    originalAudioLanguage: originalAudioLanguage,
                     posterURL: season.posterUrl ?? showPosterURL,
                     imdbId: imdbId,
                     isAnime: true,
@@ -11388,7 +13093,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
         )
     }
 
-    private func buildTMDBSeason(summary: TMDBSeason, detail: TMDBSeasonDetail, showTitle: String, showPosterURL: String?, imdbId: String?, isSpecial: Bool) -> PlayerEpisodeBrowserSeason {
+    private func buildTMDBSeason(summary: TMDBSeason, detail: TMDBSeasonDetail, showTitle: String, showPosterURL: String?, imdbId: String?, isSpecial: Bool, originalAudioLanguage: String?) -> PlayerEpisodeBrowserSeason {
         let title = isSpecial ? "Specials" : (summary.name.isEmpty ? "Season \(summary.seasonNumber)" : summary.name)
         let posterURL = detail.fullPosterURL ?? summary.fullPosterURL ?? showPosterURL
         let items = detail.episodes
@@ -11402,6 +13107,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
                     seasonTitleOverride: nil,
                     animeSeasonTitle: nil,
                     originalTitle: nil,
+                    originalAudioLanguage: originalAudioLanguage,
                     posterURL: posterURL,
                     imdbId: imdbId,
                     isAnime: false,
@@ -11420,7 +13126,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
         )
     }
 
-    private func buildSpecialSeason(context: SpecialEpisodeListContext, showTitle: String, showPosterURL: String?, fallbackImdbId: String?) -> PlayerEpisodeBrowserSeason {
+    private func buildSpecialSeason(context: SpecialEpisodeListContext, showTitle: String, showPosterURL: String?, fallbackImdbId: String?, originalAudioLanguage: String?) -> PlayerEpisodeBrowserSeason {
         let posterURL = context.posterUrl ?? showPosterURL
         let items = context.episodes.map { episode -> PlayerEpisodeBrowserItem in
             let playbackContext = context.playbackContext(for: episode)
@@ -11432,6 +13138,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
                 seasonTitleOverride: context.title,
                 animeSeasonTitle: context.title,
                 originalTitle: context.alternateTitle,
+                originalAudioLanguage: originalAudioLanguage,
                 posterURL: posterURL,
                 imdbId: context.imdbId ?? fallbackImdbId,
                 isAnime: true,
@@ -11458,6 +13165,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
         seasonTitleOverride: String?,
         animeSeasonTitle: String?,
         originalTitle: String?,
+        originalAudioLanguage: String?,
         posterURL: String?,
         imdbId: String?,
         isAnime: Bool,
@@ -11503,6 +13211,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
             animeSeasonTitle: animeSeasonTitle,
             originalTitle: originalTitle,
             posterURL: posterURL,
+            originalAudioLanguage: originalAudioLanguage,
             imdbId: imdbId,
             episode: episode,
             isAnime: isAnime,
@@ -11525,6 +13234,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
             animeSeasonTitle: animeSeasonTitle,
             originalTitle: originalTitle,
             posterURL: posterURL,
+            originalAudioLanguage: originalAudioLanguage,
             imdbId: imdbId,
             episode: episode,
             isAnime: isAnime,
@@ -12011,21 +13721,16 @@ private extension PlayerViewController {
     }
 
     func watchTogetherMediaContext() -> (stableKey: String, title: String)? {
-        guard let mediaInfo else { return nil }
-        switch mediaInfo {
-        case .movie(let id, let title, _, _):
-            let displayTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-            return ("movie:\(id)", displayTitle.isEmpty ? playerDisplayTitle() : displayTitle)
-        case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, _, _):
-            let canonicalSeason = originalTMDBSeasonNumber ?? seasonNumber
-            let canonicalEpisode = originalTMDBEpisodeNumber ?? episodeNumber
-            let baseTitle = showTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let resolvedTitle = (baseTitle?.isEmpty == false ? baseTitle! : playerDisplayTitle())
-            return (
-                "episode:\(showId):\(canonicalSeason):\(canonicalEpisode)",
-                "\(resolvedTitle) S\(seasonNumber)E\(episodeNumber)"
-            )
+        guard let descriptor = watchTogetherMediaDescriptor,
+              let stableKey = descriptor.stableKey else { return nil }
+        let baseTitle = descriptor.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedTitle = baseTitle?.isEmpty == false ? baseTitle! : playerDisplayTitle()
+        guard descriptor.mediaType == "tv" else {
+            return (stableKey, resolvedTitle)
         }
+        let season = descriptor.localSeasonNumber ?? descriptor.seasonNumber ?? 1
+        let episode = descriptor.localEpisodeNumber ?? descriptor.episodeNumber ?? 1
+        return (stableKey, "\(resolvedTitle) S\(season)E\(episode)")
     }
 
     func watchTogetherClampedPosition(_ position: Double) -> Double {
@@ -12069,7 +13774,7 @@ private extension PlayerViewController {
             case .started:
                 self.showPlayerNotice("Starting secure Watch Together with SharePlay...")
             case .needsGroupSession:
-                self.presentWatchTogetherSharingControllerIfAvailable()
+                self.presentWatchTogetherSharingSheetIfAvailable()
             case .cancelled:
                 break
             case .unavailable(let message):
@@ -12078,7 +13783,7 @@ private extension PlayerViewController {
         }
     }
 
-    func presentWatchTogetherSharingControllerIfAvailable() {
+    func presentWatchTogetherSharingSheetIfAvailable() {
         guard #available(iOS 15.4, *),
               let activity = WatchTogetherCoordinator.shared.activityForSharing() else {
             presentWatchTogetherAlert(
@@ -12092,25 +13797,25 @@ private extension PlayerViewController {
             return
         }
 
-        do {
-            let controller = try GroupActivitySharingController(activity)
-            present(controller, animated: true)
-            Task { @MainActor [weak self] in
-                switch await controller.result {
-                case .success:
-                    self?.showPlayerNotice("Watch Together invitation shared.")
-                case .cancelled:
-                    break
-                @unknown default:
-                    break
-                }
+        let itemProvider = NSItemProvider()
+        itemProvider.registerGroupActivity(activity)
+
+        let controller = UIActivityViewController(
+            activityItems: [itemProvider],
+            applicationActivities: nil
+        )
+        controller.allowsProminentActivity = true
+        controller.completionWithItemsHandler = { [weak self] _, completed, _, error in
+            guard let self else { return }
+            if let error {
+                self.showPlayerNotice("Watch Together invitation failed: \(error.localizedDescription)")
+            } else if completed {
+                self.showPlayerNotice("Watch Together invitation shared.")
             }
-        } catch {
-            presentWatchTogetherAlert(
-                title: "Watch Together Unavailable",
-                message: "SharePlay could not create an invitation: \(error.localizedDescription)"
-            )
         }
+        controller.popoverPresentationController?.sourceView = watchTogetherButton
+        controller.popoverPresentationController?.sourceRect = watchTogetherButton.bounds
+        present(controller, animated: true)
     }
 
     func presentWatchTogetherSessionMenu(participantCount: Int) {
@@ -12201,20 +13906,137 @@ private extension PlayerViewController {
 }
 
 extension PlayerViewController: WatchTogetherPlaybackDelegate {
+    var watchTogetherMediaDescriptor: WatchTogetherMediaDescriptor? {
+        guard let mediaInfo else { return nil }
+        switch mediaInfo {
+        case .movie(let id, let title, _, let isAnime):
+            return WatchTogetherMediaDescriptor(
+                tmdbID: id,
+                mediaType: "movie",
+                seasonNumber: nil,
+                episodeNumber: nil,
+                isAnime: isAnime,
+                title: title
+            )
+        case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, _, let mediaIsAnime):
+            // EpisodePlaybackContext is already exact for the playing episode. Retargeting it
+            // with a fallback MediaInfo episode can silently rewrite a valid anime context to E1.
+            let playbackContext = episodePlaybackContext
+            return WatchTogetherMediaDescriptor(
+                tmdbID: showId,
+                mediaType: "tv",
+                seasonNumber: playbackContext?.resolvedTMDBSeasonNumber ?? originalTMDBSeasonNumber ?? seasonNumber,
+                episodeNumber: playbackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBEpisodeNumber ?? episodeNumber,
+                playbackContext: playbackContext,
+                isAnime: mediaIsAnime || isAnimeHint == true || playbackContext?.hasAnimeMediaId == true,
+                title: showTitle
+            )
+        }
+    }
+
     var watchTogetherPosition: Double {
-        watchTogetherClampedPosition(cachedPosition)
+        if !watchTogetherRendererReady {
+            let preparedPosition = pendingInitialResumeTarget ?? pendingSeekTime
+            if let preparedPosition,
+               preparedPosition.isFinite,
+               preparedPosition >= 0 {
+                return watchTogetherClampedPosition(preparedPosition)
+            }
+        }
+        return watchTogetherClampedPosition(cachedPosition)
+    }
+
+    var watchTogetherDuration: Double {
+        cachedDuration.isFinite && cachedDuration > 0 ? cachedDuration : 0
+    }
+
+    var watchTogetherIsReady: Bool {
+        watchTogetherRendererReady && !isRendererLoading && !isClosing
     }
 
     var watchTogetherIsPlaying: Bool {
         !rendererIsPausedState()
     }
 
-    func watchTogetherApply(position: Double?, isPlaying: Bool) {
-        guard !isClosing, isWatchTogetherAvailable else { return }
-        if let position {
-            rendererSeek(to: watchTogetherClampedPosition(position))
+    var watchTogetherPlaybackRate: Double {
+        let playbackRate = rendererGetSpeed()
+        return playbackRate.isFinite && (0.25...3.0).contains(playbackRate) ? playbackRate : 1.0
+    }
+
+    func watchTogetherAdopt(media: WatchTogetherMediaDescriptor) {
+        guard let mediaInfo else { return }
+        switch mediaInfo {
+        case .movie(let id, _, _, _):
+            guard media.mediaType == "movie", media.tmdbID == id else { return }
+        case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, let showPosterURL, let mediaIsAnime):
+            guard media.mediaType == "tv", media.tmdbID == showId else { return }
+            episodePlaybackContext = media.playbackContext
+            originalTMDBSeasonNumber = media.playbackContext?.resolvedTMDBSeasonNumber ?? media.seasonNumber
+            originalTMDBEpisodeNumber = media.playbackContext?.resolvedTMDBEpisodeNumber ?? media.episodeNumber
+            if let context = media.playbackContext {
+                self.mediaInfo = .episode(
+                    showId: showId,
+                    seasonNumber: context.localSeasonNumber,
+                    episodeNumber: context.localEpisodeNumber,
+                    showTitle: showTitle ?? media.title,
+                    showPosterURL: showPosterURL,
+                    isAnime: mediaIsAnime || media.isAnime || context.hasAnimeMediaId
+                )
+            } else if seasonNumber != media.seasonNumber || episodeNumber != media.episodeNumber {
+                // A different non-anime episode must be resolved as a new player, not relabeled in place.
+                return
+            }
         }
-        if isPlaying {
+    }
+
+    func watchTogetherApply(state: WatchTogetherSharedState, shouldSeek: Bool) {
+        guard !isClosing, isWatchTogetherAvailable else { return }
+        watchTogetherAdopt(media: state.media)
+        lastWatchTogetherSharedState = state
+        let synchronizedPosition = watchTogetherTargetPosition(for: state)
+        let requiresAuthoritativeSeek = shouldSeek
+            || !watchTogetherRendererReady
+            || isRendererLoading
+            || pendingSeekTime != nil
+            || pendingInitialResumeTarget != nil
+            || abs(watchTogetherPosition - synchronizedPosition) >= 0.35
+
+        if !watchTogetherRendererReady || isRendererLoading {
+            let retainedSeek = pendingWatchTogetherPlaybackState?.shouldSeek == true
+                || requiresAuthoritativeSeek
+            pendingWatchTogetherPlaybackState = (state, retainedSeek)
+            persistWatchTogetherProgress(at: synchronizedPosition)
+            return
+        }
+
+        applyWatchTogetherStateNow(state, shouldSeek: requiresAuthoritativeSeek)
+    }
+
+    private func applyWatchTogetherStateNow(
+        _ state: WatchTogetherSharedState,
+        shouldSeek: Bool
+    ) {
+        guard !isClosing, isWatchTogetherAvailable else { return }
+        let synchronizedPosition = watchTogetherTargetPosition(for: state)
+        pendingSeekTime = nil
+        pendingInitialResumeTarget = nil
+        pendingInitialResumeDeadline = nil
+        pendingInitialResumeRetryCount = 0
+        pendingInitialResumeLastRetryAt = nil
+
+        if abs(rendererGetSpeed() - state.playbackRate) >= 0.01 {
+            rendererSetSpeed(state.playbackRate, notifyWatchTogether: false)
+            updateSpeedMenu()
+        }
+
+        if shouldSeek {
+            cachedPosition = synchronizedPosition
+            progressModel.position = synchronizedPosition
+            rendererSeek(to: synchronizedPosition)
+        }
+        persistWatchTogetherProgress(at: synchronizedPosition)
+
+        if state.isPlaying {
             if rendererIsPausedState() {
                 markBackgroundRecoveryForegrounded(source: "watch-together")
                 rendererPlay()
@@ -12224,6 +14046,89 @@ extension PlayerViewController: WatchTogetherPlaybackDelegate {
             rendererPausePlayback()
             updatePlayPauseButton(isPaused: true, shouldShowControls: false)
         }
+    }
+
+    private func watchTogetherTargetPosition(for state: WatchTogetherSharedState) -> Double {
+        if cachedDuration.isFinite,
+           cachedDuration > 0 {
+            let normalizedProgress: Double?
+            if let sharedDuration = state.duration,
+               sharedDuration.isFinite,
+               sharedDuration > 0 {
+                normalizedProgress = min(max(0, state.projectedPosition() / sharedDuration), 1)
+            } else if let sharedProgress = state.normalizedProgress,
+                      sharedProgress.isFinite,
+                      (0...1).contains(sharedProgress) {
+                normalizedProgress = sharedProgress
+            } else {
+                normalizedProgress = nil
+            }
+            if let normalizedProgress {
+                return watchTogetherClampedPosition(normalizedProgress * cachedDuration)
+            }
+        }
+        return watchTogetherClampedPosition(state.projectedPosition())
+    }
+
+    private func drainPendingWatchTogetherStateIfReady() {
+        guard watchTogetherRendererReady,
+              !isRendererLoading else { return }
+        if let pending = pendingWatchTogetherPlaybackState {
+            pendingWatchTogetherPlaybackState = nil
+            applyWatchTogetherStateNow(pending.state, shouldSeek: pending.shouldSeek)
+        }
+        notifyWatchTogetherPlaybackReadyIfNeeded()
+    }
+
+    private func notifyWatchTogetherPlaybackReadyIfNeeded() {
+        guard watchTogetherIsReady,
+              WatchTogetherCoordinator.shared.playbackDidBecomeReady(self) else { return }
+        markBackgroundRecoveryForegrounded(source: "watch-together-transition-ready")
+        rendererPlay()
+        updatePlayPauseButton(isPaused: false, shouldShowControls: false)
+    }
+
+    private func persistWatchTogetherProgress(at position: Double) {
+        guard cachedDuration.isFinite, cachedDuration > 0 else { return }
+        let resolvedDuration = cachedDuration
+        guard position.isFinite,
+              let mediaInfo else {
+            return
+        }
+
+        let safePosition = min(max(0, position), resolvedDuration)
+        switch mediaInfo {
+        case .movie(let id, let title, let posterURL, _):
+            ProgressManager.shared.updateMovieProgress(
+                movieId: id,
+                title: title,
+                currentTime: safePosition,
+                totalDuration: resolvedDuration,
+                posterURL: posterURL
+            )
+        case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, let showPosterURL, let isAnime):
+            ProgressManager.shared.updateEpisodeProgress(
+                showId: showId,
+                seasonNumber: seasonNumber,
+                episodeNumber: episodeNumber,
+                currentTime: safePosition,
+                totalDuration: resolvedDuration,
+                showTitle: showTitle,
+                showPosterURL: showPosterURL,
+                playbackContext: episodePlaybackContext,
+                isAnime: isAnime || episodePlaybackContext?.hasAnimeMediaId == true
+            )
+        }
+    }
+
+    func watchTogetherPrepareForMediaTransition(to media: WatchTogetherMediaDescriptor) {
+        guard !isClosing else { return }
+        persistWatchTogetherProgress(at: watchTogetherClampedPosition(cachedPosition))
+        pendingWatchTogetherPlaybackState = nil
+        let season = media.localSeasonNumber.map(String.init) ?? "?"
+        let episode = media.localEpisodeNumber.map(String.init) ?? "?"
+        showPlayerNotice("Watch Together is moving everyone to S\(season)E\(episode)...")
+        closePlayer(allowWhilePlaybackLocked: true)
     }
 
     func watchTogetherConnectionDidChange(_ state: WatchTogetherConnectionState) {
@@ -12252,6 +14157,35 @@ extension PlayerViewController: WatchTogetherPlaybackDelegate {
 }
 #endif
 
+#if os(iOS)
+extension PlayerViewController: UIAdaptivePresentationControllerDelegate {
+    func presentationControllerShouldDismiss(_ presentationController: UIPresentationController) -> Bool {
+        guard isPlayerPresentation(presentationController) else { return true }
+        return !PlayerPlaybackLockSettings.isLocked()
+    }
+
+    func presentationControllerDidAttemptToDismiss(_ presentationController: UIPresentationController) {
+        guard isPlayerPresentation(presentationController),
+              PlayerPlaybackLockSettings.isLocked() else { return }
+        showControlsTemporarily()
+        showPlayerNotice("Unlock the player before closing.")
+    }
+
+    func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+        guard episodeSourceSheetController === presentationController.presentedViewController else { return }
+        let transitionID = episodeSourceSheetTransitionID
+        episodeSourceSheetController = nil
+        episodeSourceSheetTransitionID = nil
+        schedulePendingWatchTogetherNextEpisodeCleanup(transitionID: transitionID)
+    }
+
+    private func isPlayerPresentation(_ presentationController: UIPresentationController) -> Bool {
+        let presented = presentationController.presentedViewController
+        return presented === self || presented.children.contains(where: { $0 === self })
+    }
+}
+#endif
+
 // MARK: - MPVNativeRendererDelegate
 extension PlayerViewController: MPVNativeRendererDelegate {
     func renderer(_ renderer: PlayerRenderer, didUpdatePosition position: Double, duration: Double) {
@@ -12269,7 +14203,6 @@ extension PlayerViewController: MPVNativeRendererDelegate {
             )
         }
         if !isPaused {
-            markPlaybackStarted(reason: "playing")
             rendererResumeForegroundRendering(reason: "mpv-unpause")
             sendRendererPauseTraktScrobble(.start, reason: "mpv-unpause")
         } else {
@@ -12309,6 +14242,9 @@ extension PlayerViewController: MPVNativeRendererDelegate {
                     isPaused: self.rendererIsPausedState(),
                     shouldShowControls: !self.suppressNextPlayPauseControlReveal
                 )
+#if os(iOS)
+                self.drainPendingWatchTogetherStateIfReady()
+#endif
             }
         }
     }
@@ -12321,7 +14257,6 @@ extension PlayerViewController: MPVNativeRendererDelegate {
                 "renderer-ready",
                 "pendingSeek=\(self.secondsText(self.pendingSeekTime)) loading=\(self.isRendererLoading) renderer={\(self.rendererPictureInPictureDebugSnapshot())}"
             )
-            self.markPlaybackStarted(reason: "ready")
             self.updateAudioTracksMenuWhenReady()
             self.updateSubtitleTracksMenuWhenReady()
             self.prefetchOpenSubtitlesIfEnabled(reason: "ready")
@@ -12339,6 +14274,10 @@ extension PlayerViewController: MPVNativeRendererDelegate {
                 self.pendingSeekTime = nil
             }
             self.applyDefaultPlaybackSpeed()
+#if os(iOS)
+            self.watchTogetherRendererReady = true
+            self.drainPendingWatchTogetherStateIfReady()
+#endif
             self.applyAudioComfortFilterIfNeeded(reason: "ready")
 
             // Fetch skip data once MPV is ready
@@ -12376,7 +14315,10 @@ extension PlayerViewController: MPVNativeRendererDelegate {
         if isClosing { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.subtitleModel.isVisible = trackId >= 0
+            let shouldShowSubtitles = trackId >= 0
+            if self.subtitleModel.isVisible != shouldShowSubtitles {
+                self.setSessionAwareSubtitleVisible(shouldShowSubtitles)
+            }
             if trackId >= 0 {
                 self.vlcSubtitleSelection = .embedded(trackId: trackId)
             } else {
@@ -12561,6 +14503,16 @@ extension PlayerViewController: PiPControllerDelegate {
     @objc private func appScenePhaseDidChange(_ notification: Notification) {
         let phase = notification.userInfo?["phase"] as? String ?? "unknown"
         logPictureInPicture("scenePhase notification received phase=\(phase)")
+#if os(iOS)
+        // ContentView publishes this notification without a scene object. Once the owning scene is
+        // known on iPad, the scoped UIScene notifications below are authoritative; consuming an
+        // unscoped phase from another Stage Manager window can otherwise start PiP or tear down the
+        // foreground renderer in this window.
+        if UIDevice.current.userInterfaceIdiom == .pad, playbackWindowScene != nil {
+            logPictureInPicture("scenePhase notification ignored on iPad after owning scene attached phase=\(phase)")
+            return
+        }
+#endif
         if phase == "inactive" || phase == "background" {
             armBackgroundRecoveryProgressGateIfNeeded(source: "scene-phase-\(phase)")
         } else if phase == "active" {
@@ -12744,9 +14696,48 @@ extension PlayerViewController: PiPControllerDelegate {
         startMPVPictureInPictureWhenPossible(source: source)
     }
 
-    @objc private func sceneWillDeactivate() {
+    private func shouldHandleSceneLifecycleNotification(
+        _ notification: Notification,
+        source: String
+    ) -> Bool {
+        guard let notificationScene = notification.object as? UIWindowScene,
+              let owningScene = playbackWindowScene ?? viewIfLoaded?.window?.windowScene else {
+            // Preserve early lifecycle safety while UIKit is still attaching the presentation.
+            return true
+        }
+        guard notificationScene === owningScene else {
+            logPictureInPicture("ignored \(source) for another window scene")
+            return false
+        }
+        return true
+    }
+
+    private func shouldHandleIPadSceneDeactivationForAppExitPiP(source: String) -> Bool {
+#if os(iOS)
+        if UIDevice.current.userInterfaceIdiom == .pad,
+           UIApplication.shared.applicationState == .active {
+            let owningScene = playbackWindowScene ?? viewIfLoaded?.window?.windowScene
+            let anotherEclipseSceneIsActive = UIApplication.shared.connectedScenes
+                .compactMap { $0 as? UIWindowScene }
+                .contains { scene in
+                    scene.activationState == .foregroundActive
+                        && (owningScene == nil || scene !== owningScene)
+                }
+            guard anotherEclipseSceneIsActive else { return true }
+            // The owning Stage Manager scene can resign focus while another Eclipse scene keeps
+            // the process active. That is not an app exit and must not create a surprise PiP window.
+            logPictureInPicture("ignored \(source) app-exit PiP while another iPad scene keeps the app active")
+            return false
+        }
+#endif
+        return true
+    }
+
+    @objc private func sceneWillDeactivate(_ notification: Notification) {
+        guard shouldHandleSceneLifecycleNotification(notification, source: "scene-will-deactivate") else { return }
         logPictureInPicture("lifecycle notification received source=scene-will-deactivate")
         armBackgroundRecoveryProgressGateIfNeeded(source: "scene-will-deactivate")
+        guard shouldHandleIPadSceneDeactivationForAppExitPiP(source: "scene-will-deactivate") else { return }
         if isVLCPlayer {
             logPictureInPicture("VLC app-exit PiP skipped source=scene-will-deactivate: disabled")
             return
@@ -12770,7 +14761,8 @@ extension PlayerViewController: PiPControllerDelegate {
         }
     }
 
-    @objc private func sceneDidEnterBackground() {
+    @objc private func sceneDidEnterBackground(_ notification: Notification) {
+        guard shouldHandleSceneLifecycleNotification(notification, source: "scene-did-enter-background") else { return }
         logPictureInPicture("lifecycle notification received source=scene-did-enter-background")
         armBackgroundRecoveryProgressGateIfNeeded(source: "scene-did-enter-background")
         if isVLCPlayer {
@@ -12915,7 +14907,8 @@ extension PlayerViewController: PiPControllerDelegate {
         }
     }
 
-    @objc private func sceneWillEnterForeground() {
+    @objc private func sceneWillEnterForeground(_ notification: Notification) {
+        guard shouldHandleSceneLifecycleNotification(notification, source: "scene-will-enter-foreground") else { return }
         markBackgroundRecoveryForegrounded(source: "scene-will-enter-foreground")
         cancelPendingMPVAppExitPictureInPictureStart(reason: "scene-will-enter-foreground")
         clearMPVAppExitPictureInPictureSuppression(reason: "scene-will-enter-foreground")
@@ -12950,7 +14943,8 @@ extension PlayerViewController: PiPControllerDelegate {
         }
     }
 
-    @objc private func sceneDidActivate() {
+    @objc private func sceneDidActivate(_ notification: Notification) {
+        guard shouldHandleSceneLifecycleNotification(notification, source: "scene-did-activate") else { return }
         markBackgroundRecoveryForegrounded(source: "scene-did-activate")
         cancelPendingMPVAppExitPictureInPictureStart(reason: "scene-did-activate")
         clearMPVAppExitPictureInPictureSuppression(reason: "scene-did-activate")

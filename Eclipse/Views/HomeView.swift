@@ -1,6 +1,9 @@
 import SwiftUI
 import Kingfisher
 import AVKit
+#if canImport(Darwin)
+import Darwin
+#endif
 
 func homeImageDecodeSize(width: CGFloat, height: CGFloat) -> CGSize {
 #if os(iOS) || os(tvOS)
@@ -51,6 +54,326 @@ private enum HeroCarouselDirection {
     case backward
 }
 
+struct AppPerformanceSnapshot {
+    var cpuPercent: Double? = nil
+    var gpuPercent: Double? = nil
+    var cpuText = "Measuring…"
+    var gpuText = "Measuring…"
+    var thermalState = ProcessInfo.processInfo.thermalState
+    var lowPowerModeEnabled = ProcessInfo.processInfo.isLowPowerModeEnabled
+}
+
+struct AppPerformanceLogContext: Equatable {
+    let surface: String
+    let appMode: String
+    let startupPhase: String
+    let homeHydrationComplete: Bool
+    let splashVisible: Bool
+    let motion: String
+    let reduceMotion: Bool
+    let modeSwitchActive: Bool
+
+    var fields: String {
+        "surface=\(surface) mode=\(appMode) startup=\(startupPhase) hydration=\(homeHydrationComplete ? "complete" : "running") splash=\(splashVisible ? 1 : 0) motion=\(motion) reduceMotion=\(reduceMotion ? 1 : 0) modeSwitch=\(modeSwitchActive ? 1 : 0)"
+    }
+}
+
+@MainActor
+final class AppPerformanceRuntimeContext {
+    static let shared = AppPerformanceRuntimeContext()
+
+    let launchUptime = ProcessInfo.processInfo.systemUptime
+    private(set) var surface = "startup"
+
+    var launchElapsedMilliseconds: Int {
+        max(Int((ProcessInfo.processInfo.systemUptime - launchUptime) * 1_000), 0)
+    }
+
+    func setSurface(_ surface: String) {
+        let normalized = surface.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.surface = normalized.isEmpty ? "unknown" : normalized
+    }
+}
+
+@MainActor
+final class AppPerformanceMonitor: ObservableObject {
+    @Published private(set) var snapshot = AppPerformanceSnapshot()
+
+    private var lastCPUProcessTime: TimeInterval?
+    private var lastCPUWallTime: TimeInterval?
+#if os(iOS)
+    private var gpuSampler: PlayerViewController.GPUUsageSampler?
+#endif
+    private var diagnosticSessionID = ""
+    private var diagnosticSequence = 0
+    private var diagnosticSessionActive = false
+    private var recentCPUValues: [Double] = []
+    private var consecutiveRecoverySamples = 0
+    private var spikeActive = false
+    private var lastSpikeLogUptime: TimeInterval = 0
+    private var lastLogContext: AppPerformanceLogContext?
+
+    @discardableResult
+    func beginSampling(context: AppPerformanceLogContext) -> String {
+        if diagnosticSessionActive {
+            stop(context: lastLogContext, reason: "context-restart")
+        }
+        resetBaselines(prepareGPU: true)
+        diagnosticSessionID = String(UUID().uuidString.prefix(8))
+        diagnosticSequence = 0
+        diagnosticSessionActive = true
+        recentCPUValues.removeAll(keepingCapacity: true)
+        consecutiveRecoverySamples = 0
+        spikeActive = false
+        lastSpikeLogUptime = 0
+        lastLogContext = context
+        Logger.shared.log(
+            "perf event=begin sid=\(diagnosticSessionID) up=\(uptimeText) launchMs=\(launchElapsedMilliseconds) overlay=visible \(context.fields)",
+            type: "Performance"
+        )
+        _ = sample()
+        return diagnosticSessionID
+    }
+
+    func stop(
+        sessionID: String? = nil,
+        context: AppPerformanceLogContext? = nil,
+        reason: String = "stopped"
+    ) {
+        if let sessionID, sessionID != diagnosticSessionID { return }
+        if diagnosticSessionActive {
+            let fields = (context ?? lastLogContext)?.fields ?? "surface=unknown"
+            Logger.shared.log(
+                "perf event=end sid=\(diagnosticSessionID) seq=\(diagnosticSequence) up=\(uptimeText) reason=\(reason) \(fields)",
+                type: "Performance"
+            )
+        }
+        diagnosticSessionActive = false
+        resetBaselines(prepareGPU: false)
+    }
+
+    func sampleNow(context: AppPerformanceLogContext, sessionID: String) {
+        guard diagnosticSessionActive, sessionID == diagnosticSessionID else { return }
+        let sampled = sample()
+        diagnosticSequence += 1
+
+        if lastLogContext != context {
+            Logger.shared.log(
+                "perf event=context sid=\(diagnosticSessionID) seq=\(diagnosticSequence) up=\(uptimeText) \(context.fields)",
+                type: "Performance"
+            )
+            lastLogContext = context
+            recentCPUValues.removeAll(keepingCapacity: true)
+            spikeActive = false
+            consecutiveRecoverySamples = 0
+        }
+
+        guard let cpu = sampled.cpuPercent else { return }
+        let baseline = median(recentCPUValues)
+        let relativeSpike = baseline.map { cpu >= 20 && cpu - $0 >= 15 } ?? false
+        let thresholdSpike = cpu >= 30 || relativeSpike
+        let now = ProcessInfo.processInfo.systemUptime
+
+        if thresholdSpike, !spikeActive || now - lastSpikeLogUptime >= 10 {
+            Logger.shared.log(
+                "perf event=spike sid=\(diagnosticSessionID) seq=\(diagnosticSequence) up=\(uptimeText) \(metricFields(sampled, baseline: baseline)) \(context.fields)",
+                type: "Performance"
+            )
+            spikeActive = true
+            consecutiveRecoverySamples = 0
+            lastSpikeLogUptime = now
+        } else if spikeActive {
+            let recoveryCeiling = (baseline ?? 10) + 5
+            consecutiveRecoverySamples = cpu <= recoveryCeiling ? consecutiveRecoverySamples + 1 : 0
+            if consecutiveRecoverySamples >= 3 {
+                Logger.shared.log(
+                    "perf event=recovery sid=\(diagnosticSessionID) seq=\(diagnosticSequence) up=\(uptimeText) \(metricFields(sampled, baseline: baseline)) \(context.fields)",
+                    type: "Performance"
+                )
+                spikeActive = false
+                consecutiveRecoverySamples = 0
+            }
+        }
+
+        if diagnosticSequence.isMultiple(of: 5) {
+            Logger.shared.log(
+                "perf event=sample sid=\(diagnosticSessionID) seq=\(diagnosticSequence) up=\(uptimeText) \(metricFields(sampled, baseline: baseline)) \(context.fields)",
+                type: "Performance"
+            )
+        }
+
+        recentCPUValues.append(cpu)
+        if recentCPUValues.count > 10 {
+            recentCPUValues.removeFirst(recentCPUValues.count - 10)
+        }
+    }
+
+    private func resetBaselines(prepareGPU: Bool) {
+        lastCPUProcessTime = nil
+        lastCPUWallTime = nil
+#if os(iOS)
+        gpuSampler = prepareGPU ? PlayerViewController.GPUUsageSampler() : nil
+#endif
+        snapshot = AppPerformanceSnapshot()
+    }
+
+    @discardableResult
+    private func sample() -> AppPerformanceSnapshot {
+        let cpuPercent = processCPUUsagePercent()
+        let cpuText = cpuPercent.map { String(format: "%.0f%%", $0) } ?? "Measuring…"
+        let gpuPercent: Double?
+        let gpuText: String
+#if os(iOS)
+        if let gpuSampler {
+            gpuPercent = gpuSampler.sample()
+            gpuText = gpuPercent.map { String(format: "%.0f%%", $0) } ?? "Measuring…"
+        } else {
+            gpuPercent = nil
+            gpuText = "n/a"
+        }
+#else
+        gpuPercent = nil
+        gpuText = "n/a"
+#endif
+        let sampled = AppPerformanceSnapshot(
+            cpuPercent: cpuPercent,
+            gpuPercent: gpuPercent,
+            cpuText: cpuText,
+            gpuText: gpuText,
+            thermalState: ProcessInfo.processInfo.thermalState,
+            lowPowerModeEnabled: ProcessInfo.processInfo.isLowPowerModeEnabled
+        )
+        snapshot = sampled
+        return sampled
+    }
+
+    private var uptimeText: String {
+        String(format: "%.2f", ProcessInfo.processInfo.systemUptime)
+    }
+
+    private var launchElapsedMilliseconds: Int {
+        AppPerformanceRuntimeContext.shared.launchElapsedMilliseconds
+    }
+
+    private func metricFields(_ snapshot: AppPerformanceSnapshot, baseline: Double?) -> String {
+        let cpu = snapshot.cpuPercent.map { String(format: "%.1f", $0) } ?? "na"
+        let gpu = snapshot.gpuPercent.map { String(format: "%.1f", $0) } ?? "na"
+        let median = baseline.map { String(format: "%.1f", $0) } ?? "na"
+        return "cpuCore=\(cpu) cpuMedian=\(median) gpu=\(gpu) thermal=\(thermalName(snapshot.thermalState)) power=\(snapshot.lowPowerModeEnabled ? "low" : "normal")"
+    }
+
+    private func median(_ values: [Double]) -> Double? {
+        guard !values.isEmpty else { return nil }
+        let sorted = values.sorted()
+        let middle = sorted.count / 2
+        if sorted.count.isMultiple(of: 2) {
+            return (sorted[middle - 1] + sorted[middle]) / 2
+        }
+        return sorted[middle]
+    }
+
+    private func thermalName(_ state: ProcessInfo.ThermalState) -> String {
+        switch state {
+        case .nominal: return "nominal"
+        case .fair: return "fair"
+        case .serious: return "serious"
+        case .critical: return "critical"
+        @unknown default: return "unknown"
+        }
+    }
+
+    private func processCPUUsagePercent() -> Double? {
+#if canImport(Darwin)
+        var usage = rusage()
+        guard getrusage(RUSAGE_SELF, &usage) == 0 else { return nil }
+
+        let userTime = TimeInterval(usage.ru_utime.tv_sec) + TimeInterval(usage.ru_utime.tv_usec) / 1_000_000.0
+        let systemTime = TimeInterval(usage.ru_stime.tv_sec) + TimeInterval(usage.ru_stime.tv_usec) / 1_000_000.0
+        let processTime = userTime + systemTime
+        let wallTime = ProcessInfo.processInfo.systemUptime
+
+        guard let previousProcessTime = lastCPUProcessTime,
+              let previousWallTime = lastCPUWallTime else {
+            lastCPUProcessTime = processTime
+            lastCPUWallTime = wallTime
+            return nil
+        }
+
+        let wallDelta = wallTime - previousWallTime
+        let processDelta = processTime - previousProcessTime
+        lastCPUProcessTime = processTime
+        lastCPUWallTime = wallTime
+        guard wallDelta > 0.05, processDelta >= 0 else { return nil }
+        return min(max((processDelta / wallDelta) * 100.0, 0), 999)
+#else
+        return nil
+#endif
+    }
+}
+
+struct AppPerformanceOverlay: View {
+    let snapshot: AppPerformanceSnapshot
+    let backgroundQuality: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            row("CPU", snapshot.cpuText)
+            row("GPU", snapshot.gpuText)
+            row("Thermal", thermalName)
+            row("Power", snapshot.lowPowerModeEnabled ? "Low Power" : "Normal")
+            row("Motion", backgroundQuality)
+        }
+        .frame(width: 150, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(Color.white.opacity(0.14), lineWidth: 0.5)
+        }
+        .shadow(color: .black.opacity(0.25), radius: 8, y: 3)
+        .accessibilityHidden(true)
+        .allowsHitTesting(false)
+    }
+
+    private func row(_ label: String, _ value: String) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .foregroundStyle(.white.opacity(0.55))
+            Spacer(minLength: 8)
+            Text(value)
+                .foregroundStyle(valueColor(label: label, value: value))
+        }
+        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+        .lineLimit(1)
+    }
+
+    private var thermalName: String {
+        switch snapshot.thermalState {
+        case .nominal: return "Nominal"
+        case .fair: return "Fair"
+        case .serious: return "Serious"
+        case .critical: return "Critical"
+        @unknown default: return "Unknown"
+        }
+    }
+
+    private func valueColor(label: String, value: String) -> Color {
+        if label == "Thermal" {
+            switch snapshot.thermalState {
+            case .nominal: return .green
+            case .fair: return .yellow
+            case .serious: return .orange
+            case .critical: return .red
+            @unknown default: return .white
+            }
+        }
+        if label == "Power", snapshot.lowPowerModeEnabled { return .yellow }
+        if value == "n/a" || value == "Measuring…" { return .white.opacity(0.7) }
+        return .white
+    }
+}
+
 #if os(tvOS)
 private enum TVHeroFocusTarget: Hashable {
     case hero
@@ -59,11 +382,26 @@ private enum TVHeroFocusTarget: Hashable {
 }
 #endif
 
+private struct EclipseStartupOverlayVisibleKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var eclipseStartupOverlayVisible: Bool {
+        get { self[EclipseStartupOverlayVisibleKey.self] }
+        set { self[EclipseStartupOverlayVisibleKey.self] = newValue }
+    }
+}
+
 struct HomeView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.eclipseStartupOverlayVisible) private var startupOverlayVisible
 
+    private let isActive: Bool
     private let onStartupReady: () -> Void
     @State private var showingSettings = false
+    @State private var isViewVisible = false
     @State private var isHoveringWatchNow = false
     @State private var isHoveringWatchlist = false
     @State private var continueWatchingItems: [ContinueWatchingItem] = []
@@ -72,10 +410,12 @@ struct HomeView: View {
     @State private var continueWatchingRefreshID = UUID()
     @State private var pendingContinueWatchingProgressRefreshTask: Task<Void, Never>?
     @State private var didReportStartupReady = false
+    @State private var didReportInitialHydration = false
     @State private var observedPerformanceMode = PerformanceModeSettings.isEnabled
     @State private var observedHomeCatalogSignature = ""
     @State private var pendingHomeCatalogReloadTask: Task<Void, Never>?
-    @State private var heroCarouselDirection: HeroCarouselDirection = .forward
+    @State private var heroCarouselTimerResetID = UUID()
+    @State private var lastManualHeroAdvanceUptime: TimeInterval = 0
     @State private var selectedHeroForDetail: TMDBSearchResult?
     @State private var showingHeroDetail = false
     @State private var heroLogoURL: String?
@@ -104,10 +444,13 @@ struct HomeView: View {
     @AppStorage(ExperimentalVisualTuning.mediaCardScaleKey) private var experimentalMediaCardScale = ExperimentalVisualTuning.defaultMediaCardScale
     @StateObject private var layoutStore = HomeCatalogLayoutStore.shared
 
-    private let heroCarouselTimer = Timer.publish(every: 7, on: .main, in: .common).autoconnect()
-
-    init(onStartupReady: @escaping () -> Void = {}) {
+    init(isActive: Bool = true, onStartupReady: @escaping () -> Void = {}) {
+        self.isActive = isActive
         self.onStartupReady = onStartupReady
+    }
+
+    private var effectiveIsActive: Bool {
+        isActive && isViewVisible && scenePhase == .active && !startupOverlayVisible
     }
     
     private var enabledCatalogs: [Catalog] {
@@ -146,6 +489,9 @@ struct HomeView: View {
     }
     private var heroLogoDecodeSize: CGSize {
         homeImageDecodeSize(width: heroLogoMaxWidth, height: heroLogoMaxHeight)
+    }
+    private var heroImageDecodeSize: CGSize {
+        homeImageDecodeSize(width: UIScreen.main.bounds.width, height: heroHeight)
     }
     private var designMetrics: ExperimentalMediaDesignMetrics {
         // Reading experimentalMediaCardScale here (not just relying on .current) keeps the
@@ -249,12 +595,12 @@ struct HomeView: View {
                     topClearance: animatedBackgroundTopClearance,
                     ambientColor: heroBleedColor,
                     accentColor: theme.scopedGradientColor(),
-                    motionEnabled: !reduceMotion
+                    motionEnabled: !reduceMotion && effectiveIsActive
                 )
                 .ignoresSafeArea(.all)
             }
 
-            if homeViewModel.isLoading {
+            if homeViewModel.isLoading && !homeViewModel.hasRenderableStartupContent {
                 loadingView
             } else if let errorMessage = homeViewModel.errorMessage {
                 errorView(errorMessage)
@@ -264,6 +610,7 @@ struct HomeView: View {
         }
         .navigationBarHidden(true)
         .onAppear {
+            isViewVisible = true
             refreshContinueWatchingItems()
             let catalogSignature = currentHomeCatalogSignature()
             if observedHomeCatalogSignature.isEmpty ||
@@ -273,17 +620,27 @@ struct HomeView: View {
             } else if observedHomeCatalogSignature != catalogSignature {
                 scheduleHomeCatalogReloadIfNeeded()
             }
-            if homeViewModel.hasCompletedInitialLoad {
+            if homeViewModel.hasRenderableStartupContent || homeViewModel.hasCompletedInitialLoad {
                 reportStartupReadyIfNeeded()
+            }
+            if homeViewModel.hasCompletedInitialLoad {
+                reportInitialHydrationIfNeeded()
             }
             if !homeViewModel.hasLoadedContent {
                 homeViewModel.loadContent(tmdbService: tmdbService, catalogManager: catalogManager, contentFilter: contentFilter)
             }
         }
-        .task(id: heroLogoLoadKey) {
+        .task(id: "\(heroLogoLoadKey)|\(effectiveIsActive)") {
+            guard effectiveIsActive else { return }
             await loadHeroLogo(for: homeViewModel.heroContent, language: selectedLanguage)
         }
+        .task(id: "hero-prefetch|\(heroLogoLoadKey)|\(effectiveIsActive)") {
+            guard effectiveIsActive,
+                  heroBannerBehavior == HeroBannerBehavior.carousel.rawValue else { return }
+            prefetchUpcomingHeroImages()
+        }
         .onDisappear {
+            isViewVisible = false
             pendingHomeCatalogReloadTask?.cancel()
             pendingHomeCatalogReloadTask = nil
             pendingContinueWatchingProgressRefreshTask?.cancel()
@@ -292,23 +649,35 @@ struct HomeView: View {
         .onChange(of: homeViewModel.hasCompletedInitialLoad) { hasCompletedInitialLoad in
             if hasCompletedInitialLoad {
                 reportStartupReadyIfNeeded()
+                reportInitialHydrationIfNeeded()
+            }
+        }
+        .onChange(of: homeViewModel.hasRenderableStartupContent) { hasRenderableContent in
+            if hasRenderableContent {
+                reportStartupReadyIfNeeded()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willEnterForegroundNotification)) { _ in
+            guard effectiveIsActive else { return }
             refreshContinueWatchingItems()
         }
         .onReceive(NotificationCenter.default.publisher(for: .playerDidClose)) { _ in
+            guard isActive else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                guard effectiveIsActive else { return }
                 refreshContinueWatchingItems()
             }
         }
         .onReceive(NotificationCenter.default.publisher(for: .progressDataDidChange)) { _ in
+            guard effectiveIsActive else { return }
             scheduleContinueWatchingProgressRefresh()
         }
         .onChangeComp(of: trackerManager.trackerState.mergeTraktContinueWatching) { _, _ in
+            guard effectiveIsActive else { return }
             refreshContinueWatchingItems()
         }
         .onReceive(trackerManager.$trackerState) { _ in
+            guard effectiveIsActive else { return }
             refreshContinueWatchingItems()
             scheduleHomeCatalogReloadIfNeeded()
         }
@@ -329,6 +698,7 @@ struct HomeView: View {
             }
         }
         .onReceive(catalogManager.$catalogs) { _ in
+            guard effectiveIsActive else { return }
             refreshContinueWatchingItems()
             scheduleHomeCatalogReloadIfNeeded()
         }
@@ -337,12 +707,37 @@ struct HomeView: View {
             observedPerformanceMode = enabled
             scheduleHomeCatalogReloadIfNeeded()
         }
-        .onReceive(heroCarouselTimer) { _ in
-            guard !showingHeroDetail else { return }
+        .onChange(of: effectiveIsActive) { active in
+            guard active else {
+                pendingContinueWatchingProgressRefreshTask?.cancel()
+                pendingContinueWatchingProgressRefreshTask = nil
+                return
+            }
+            refreshContinueWatchingItems()
+            if observedHomeCatalogSignature != currentHomeCatalogSignature() {
+                scheduleHomeCatalogReloadIfNeeded()
+            }
+        }
+        .task(id: "\(effectiveIsActive)|\(heroCarouselTimerResetID.uuidString)") {
+            guard effectiveIsActive else { return }
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: 7_000_000_000)
+                } catch {
+                    return
+                }
+                guard effectiveIsActive, !showingHeroDetail else { continue }
 #if os(tvOS)
-            guard tvHeroFocus == nil else { return }
+                guard tvHeroFocus == nil else { continue }
 #endif
-            advanceHeroCarousel(.forward)
+                // The task-id change normally cancels the old sleep immediately.
+                // This time check also prevents a double turn if a swipe lands on
+                // the same run-loop boundary as the automatic deadline.
+                guard ProcessInfo.processInfo.systemUptime - lastManualHeroAdvanceUptime >= 7.0 else {
+                    continue
+                }
+                advanceHeroCarousel(.forward)
+            }
         }
         .background(heroDetailNavigationHost)
         .sheet(isPresented: $showingSettings) {
@@ -353,8 +748,10 @@ struct HomeView: View {
     @ViewBuilder
     private var loadingView: some View {
         VStack(spacing: 16) {
-            EclipseLoadingIndicator()
-                .scaleEffect(1.5)
+            if effectiveIsActive {
+                EclipseLoadingIndicator()
+                    .scaleEffect(1.5)
+            }
             Text("Loading amazing content...")
                 .font(.caption)
                 .foregroundColor(.secondary)
@@ -523,18 +920,23 @@ struct HomeView: View {
                 headerHeight: heroHeight,
                 minHeaderHeight: ExperimentalFeatureState.isEnabledAtLaunch ? max(380, heroHeight * 0.58) : 300,
                 onAmbientColorExtracted: { color in
+                    guard homeViewModel.heroContent?.stableIdentity == heroIdentity else { return }
                     homeViewModel.ambientColor = color
-                }
+                },
+                imageDecodeSize: heroImageDecodeSize
             )
             .id("hero-image-\(heroIdentity)")
-            .transition(heroBannerTransition)
+            // Moving two full-screen decoded images across the display made every
+            // automatic carousel turn CPU-heavy. A unified crossfade keeps the
+            // transition polished without running a full-screen layout animation.
+            .transition(.opacity)
 
             heroGradientOverlay
                 .allowsHitTesting(false)
 
             heroContentInfo
                 .id("hero-content-\(heroIdentity)")
-                .transition(heroBannerTransition)
+                .transition(.opacity)
         }
         .contentShape(Rectangle())
 #if !os(tvOS)
@@ -544,24 +946,7 @@ struct HomeView: View {
     }
 
     private var heroCarouselAnimation: Animation {
-        reduceMotion ? .easeInOut(duration: 0.18) : .easeInOut(duration: 0.42)
-    }
-
-    private var heroBannerTransition: AnyTransition {
-        guard !reduceMotion else { return .opacity }
-
-        switch heroCarouselDirection {
-        case .forward:
-            return .asymmetric(
-                insertion: .move(edge: .trailing).combined(with: .opacity),
-                removal: .move(edge: .leading).combined(with: .opacity)
-            )
-        case .backward:
-            return .asymmetric(
-                insertion: .move(edge: .leading).combined(with: .opacity),
-                removal: .move(edge: .trailing).combined(with: .opacity)
-            )
-        }
+        reduceMotion ? .easeInOut(duration: 0.12) : .easeInOut(duration: 0.32)
     }
 
 #if !os(tvOS)
@@ -579,16 +964,17 @@ struct HomeView: View {
                     return
                 }
 
+                lastManualHeroAdvanceUptime = ProcessInfo.processInfo.systemUptime
+                heroCarouselTimerResetID = UUID()
                 advanceHeroCarousel(horizontal < 0 ? .forward : .backward)
             }
     }
 #endif
 
     private func advanceHeroCarousel(_ direction: HeroCarouselDirection) {
-        heroCarouselDirection = direction
-        withAnimation(heroCarouselAnimation) {
-            homeViewModel.advanceHeroCarouselIfNeeded(by: direction == .forward ? 1 : -1)
-        }
+        // The hero owns its keyed animation. A global `withAnimation` transaction
+        // also animated every Home view that depends on hero-derived state.
+        homeViewModel.advanceHeroCarouselIfNeeded(by: direction == .forward ? 1 : -1)
     }
 
     private var heroBlendColor: Color {
@@ -838,9 +1224,24 @@ struct HomeView: View {
 
     private func heroImageURL(for hero: TMDBSearchResult) -> String? {
         if ExperimentalFeatureState.isEnabledAtLaunch {
+            if isIPad {
+                return hero.fullBackdropURL ?? hero.fullPosterURL
+            }
             return hero.fullPosterURL ?? hero.fullBackdropURL
         }
         return hero.fullBackdropURL ?? hero.fullPosterURL
+    }
+
+    private func isAnimeHero(_ hero: TMDBSearchResult) -> Bool {
+        guard hero.genreIds?.contains(16) == true else { return false }
+
+        let animeOriginCountries: Set<String> = ["JP", "CN", "KR", "TW"]
+        if hero.originCountry?.contains(where: { animeOriginCountries.contains($0) }) == true {
+            return true
+        }
+
+        guard let originalLanguage = hero.originalLanguage?.lowercased() else { return false }
+        return ["ja", "zh", "ko"].contains(originalLanguage)
     }
 
     private func experimentalHeroShouldShowTitle(_ hero: TMDBSearchResult) -> Bool {
@@ -1181,6 +1582,22 @@ struct HomeView: View {
                 heroLogoIdentity = identity
                 heroLogoURL = nil
             }
+        }
+    }
+
+    private func prefetchUpcomingHeroImages() {
+        let processor = DownsamplingImageProcessor(size: heroImageDecodeSize)
+        for hero in homeViewModel.upcomingHeroCarouselItems(limit: 2) {
+            guard let imageURL = heroImageURL(for: hero),
+                  let url = URL(string: imageURL) else { continue }
+            KingfisherManager.shared.retrieveImage(
+                with: url,
+                options: [
+                    .processor(processor),
+                    .scaleFactor(UIScreen.main.scale),
+                    .backgroundDecode
+                ]
+            ) { _ in }
         }
     }
 
@@ -1615,6 +2032,12 @@ struct HomeView: View {
         guard !didReportStartupReady else { return }
         didReportStartupReady = true
         onStartupReady()
+    }
+
+    private func reportInitialHydrationIfNeeded() {
+        guard !didReportInitialHydration else { return }
+        didReportInitialHydration = true
+        NotificationCenter.default.post(name: .homeInitialHydrationDidComplete, object: nil)
     }
 
 }
@@ -2187,12 +2610,18 @@ struct ContinueWatchingCard: View {
     @State private var isLoaded = false
     @State private var showingSearchResults = false
     @State private var showingDetails = false
+    @State private var nextEpisodeSearchTarget: ResolvedNextEpisodeTarget?
+    @StateObject private var autoModeRetrySession = AutoModeRetrySession()
+#if os(iOS)
+    @State private var presentationSceneIdentifier: String?
+#endif
 
     // Anime metadata resolved from TMDB + AniList (mirrors MediaDetailView logic)
     @State private var isAnimeContent = false
     @State private var animeSeasonTitle: String? = nil
     @State private var animeSeasonRomajiTitle: String? = nil
     @State private var originalTitle: String? = nil
+    @State private var originalAudioLanguage: String? = nil
     @State private var isMetadataReady = false
     @State private var pendingOpenSheet = false
     @State private var imdbId: String? = nil
@@ -2242,6 +2671,9 @@ struct ContinueWatchingCard: View {
     }
 
     private var searchSheetIsAnime: Bool {
+        if let nextEpisodeSearchTarget {
+            return nextEpisodeSearchTarget.isAnime
+        }
         let playbackContext = enrichedPlaybackContext ?? item.playbackContext
         return isAnimeContent ||
             item.isAnime ||
@@ -2250,6 +2682,9 @@ struct ContinueWatchingCard: View {
 
     /// Title to pass to the search sheet - uses the AniList season title for anime, matching MediaDetailView's logic
     private var searchSheetTitle: String {
+        if let nextEpisodeSearchTarget {
+            return nextEpisodeSearchTarget.mediaTitle
+        }
         if searchSheetIsAnime, !item.isMovie,
            let seasonTitle = animeSeasonTitle {
             return seasonTitle
@@ -2258,6 +2693,9 @@ struct ContinueWatchingCard: View {
     }
 
     private var selectedEpisodeForSearch: TMDBEpisode? {
+        if let nextEpisodeSearchTarget {
+            return nextEpisodeSearchTarget.episode
+        }
         guard !item.isMovie,
               let seasonNumber = item.seasonNumber,
               let episodeNumber = item.episodeNumber else {
@@ -2279,6 +2717,9 @@ struct ContinueWatchingCard: View {
     }
 
     private var selectedEpisodePlaybackContext: EpisodePlaybackContext? {
+        if let nextEpisodeSearchTarget {
+            return nextEpisodeSearchTarget.playbackContext
+        }
         let baseContext = enrichedPlaybackContext ?? item.playbackContext
         guard let episode = selectedEpisodeForSearch else { return baseContext }
         if PerformanceModeSettings.skipsAniListTraversalForAnimeDetails, searchSheetIsAnime {
@@ -2297,6 +2738,21 @@ struct ContinueWatchingCard: View {
             )
         }
         return baseContext?.forEpisodeNumber(episode.episodeNumber)
+    }
+
+    private var autoModeTargetToken: String {
+        AutoModeMediaTargetToken.make(
+            tmdbID: item.tmdbId,
+            isMovie: item.isMovie,
+            episode: selectedEpisodeForSearch,
+            playbackContext: selectedEpisodePlaybackContext
+        )
+    }
+
+    @MainActor
+    private func openSearchResultsForNewSession() {
+        autoModeRetrySession.reset(targetToken: autoModeTargetToken)
+        showingSearchResults = true
     }
 
     private var detailSearchResult: TMDBSearchResult {
@@ -2326,8 +2782,9 @@ struct ContinueWatchingCard: View {
                 return
             }
 #endif
+            nextEpisodeSearchTarget = nil
             if isMetadataReady {
-                showingSearchResults = true
+                openSearchResultsForNewSession()
             } else {
                 pendingOpenSheet = true
             }
@@ -2422,31 +2879,49 @@ struct ContinueWatchingCard: View {
 #endif
             }
         }
+#if os(iOS)
+        .background(
+            ContinueWatchingWindowSceneReader { scene in
+                let identifier = scene.session.persistentIdentifier
+                if presentationSceneIdentifier != identifier {
+                    presentationSceneIdentifier = identifier
+                }
+            }
+            .frame(width: 0, height: 0)
+        )
+#endif
         .task {
             await loadMediaDetails()
         }
         .sheet(isPresented: $showingSearchResults) {
             ModulesSearchResultsSheet(
                 mediaTitle: searchSheetTitle,
-                seasonTitleOverride: searchSheetIsAnime ? animeSeasonTitle : nil,
-                originalTitle: searchSheetIsAnime ? (animeSeasonRomajiTitle ?? originalTitle) : originalTitle,
+                seasonTitleOverride: nextEpisodeSearchTarget?.seasonTitleOverride
+                    ?? (searchSheetIsAnime ? animeSeasonTitle : nil),
+                originalTitle: nextEpisodeSearchTarget?.originalTitle
+                    ?? (searchSheetIsAnime ? (animeSeasonRomajiTitle ?? originalTitle) : originalTitle),
                 isMovie: item.isMovie,
                 isAnimeContent: searchSheetIsAnime,
                 selectedEpisode: selectedEpisodeForSearch,
                 tmdbId: item.tmdbId,
                 animeSeasonTitle: searchSheetIsAnime ? "anime" : nil,
-                posterPath: item.posterURL,
-                imdbId: imdbId,
+                posterPath: nextEpisodeSearchTarget?.posterURL ?? item.posterURL,
+                originalAudioLanguage: originalAudioLanguage,
+                imdbId: nextEpisodeSearchTarget?.imdbID ?? imdbId,
                 originalTMDBSeasonNumber: selectedEpisodePlaybackContext?.resolvedTMDBSeasonNumber,
                 originalTMDBEpisodeNumber: selectedEpisodePlaybackContext?.resolvedTMDBEpisodeNumber,
+                specialTitleOnlySearch: selectedEpisodePlaybackContext?.titleOnlySearch ?? false,
                 episodePlaybackContext: selectedEpisodePlaybackContext,
                 autoModeOnly: UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"),
+                autoModeRetrySession: autoModeRetrySession,
+                autoModeRecoveryIdentity: autoModeRetrySession.recoveryIdentity(for: autoModeTargetToken),
                 onResolvedPlaybackRequest: { request in
                     Task { @MainActor in
                         self.presentResolvedPlayback(request)
                     }
                 },
-                isAnimationGenre16: detailGenres.contains { $0.id == 16 }
+                isAnimationGenre16: nextEpisodeSearchTarget?.isAnimation
+                    ?? detailGenres.contains { $0.id == 16 }
             )
         }
 #if !os(tvOS)
@@ -2567,6 +3042,7 @@ struct ContinueWatchingCard: View {
                         self.logoURL = logo.fullURL
                     }
                     self.originalTitle = romaji
+                    self.originalAudioLanguage = details.originalLanguage
                     self.animeSeasonRomajiTitle = nil
                     self.enrichedPlaybackContext = nil
                     self.imdbId = details.imdbId
@@ -2575,7 +3051,7 @@ struct ContinueWatchingCard: View {
                     self.isMetadataReady = true
                     if self.pendingOpenSheet {
                         self.pendingOpenSheet = false
-                        self.showingSearchResults = true
+                        self.openSearchResultsForNewSession()
                     }
                 }
             } else {
@@ -2607,6 +3083,7 @@ struct ContinueWatchingCard: View {
                         self.logoURL = logo.fullURL
                     }
                     self.originalTitle = romaji
+                    self.originalAudioLanguage = details.originalLanguage
                     self.imdbId = details.externalIds?.imdbId
                     self.detailGenres = details.genres
                     self.isLoaded = true
@@ -2686,7 +3163,7 @@ struct ContinueWatchingCard: View {
                             self.isMetadataReady = true
                             if self.pendingOpenSheet {
                                 self.pendingOpenSheet = false
-                                self.showingSearchResults = true
+                                self.openSearchResultsForNewSession()
                             }
                         }
 
@@ -2701,7 +3178,7 @@ struct ContinueWatchingCard: View {
                                 self.isMetadataReady = true
                                 if self.pendingOpenSheet {
                                     self.pendingOpenSheet = false
-                                    self.showingSearchResults = true
+                                    self.openSearchResultsForNewSession()
                                 }
                             }
                         }
@@ -2715,7 +3192,7 @@ struct ContinueWatchingCard: View {
                         self.isMetadataReady = true
                         if self.pendingOpenSheet {
                             self.pendingOpenSheet = false
-                            self.showingSearchResults = true
+                            self.openSearchResultsForNewSession()
                         }
                     }
                 } else {
@@ -2727,7 +3204,7 @@ struct ContinueWatchingCard: View {
                         self.isMetadataReady = true
                         if self.pendingOpenSheet {
                             self.pendingOpenSheet = false
-                            self.showingSearchResults = true
+                            self.openSearchResultsForNewSession()
                         }
                     }
                 }
@@ -2744,7 +3221,7 @@ struct ContinueWatchingCard: View {
                 self.isMetadataReady = true
                 if self.pendingOpenSheet {
                     self.pendingOpenSheet = false
-                    self.showingSearchResults = true
+                    self.openSearchResultsForNewSession()
                 }
             }
         }
@@ -2799,7 +3276,7 @@ struct ContinueWatchingCard: View {
         isMetadataReady = true
         if pendingOpenSheet {
             pendingOpenSheet = false
-            showingSearchResults = true
+            openSearchResultsForNewSession()
         }
     }
 
@@ -2876,12 +3353,10 @@ struct ContinueWatchingCard: View {
         }
 
         guard let downloadedItem,
-              let fileURL = downloadManager.localFileURL(for: downloadedItem),
               let presenter = rootPresentationController() else {
             return false
         }
 
-        let subtitles = downloadManager.localSubtitleURL(for: downloadedItem).map { [$0.absoluteString] } ?? []
         let resumePosition: Double? = {
             guard case .localProgress = item.removalTarget,
                   item.currentTime.isFinite,
@@ -2890,16 +3365,37 @@ struct ContinueWatchingCard: View {
             }
             return item.currentTime
         }()
-        let nextEpisodeRequest: ((_ seasonNumber: Int, _ episodeNumber: Int) -> Void)? = item.isMovie ? nil : { seasonNumber, episodeNumber in
-            NotificationCenter.default.post(
-                name: .requestNextEpisode,
-                object: nil,
-                userInfo: [
-                    "tmdbId": item.tmdbId,
-                    "seasonNumber": seasonNumber,
-                    "episodeNumber": episodeNumber
-                ]
-            )
+        return presentPreferredDownloadedItem(
+            downloadedItem,
+            resumePosition: resumePosition,
+            from: presenter
+        )
+    }
+
+    @MainActor
+    private func presentPreferredDownloadedItem(
+        _ downloadedItem: DownloadItem,
+        resumePosition: Double?,
+        from presenter: UIViewController
+    ) -> Bool {
+        let downloadManager = DownloadManager.shared
+        guard let fileURL = downloadManager.localFileURL(for: downloadedItem) else { return false }
+        let subtitles = downloadManager.localSubtitleURL(for: downloadedItem).map { [$0.absoluteString] } ?? []
+        let localNextEpisode = nextCompletedDownloadedEpisode(after: downloadedItem)
+        let nextEpisodeRequest: ((_ seasonNumber: Int, _ episodeNumber: Int) -> Void)? = downloadedItem.isMovie ? nil : { [weak presenter] seasonNumber, episodeNumber in
+            guard let presenter,
+                  let localNextEpisode,
+                  localNextEpisode.seasonNumber == seasonNumber,
+                  localNextEpisode.episodeNumber == episodeNumber else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                Task { @MainActor in
+                    _ = self.presentPreferredDownloadedItem(
+                        localNextEpisode,
+                        resumePosition: nil,
+                        from: presenter
+                    )
+                }
+            }
         }
         let playbackRequest = PlaybackRequest(
             url: fileURL,
@@ -2915,7 +3411,11 @@ struct ContinueWatchingCard: View {
             isAnimation: detailGenres.contains { $0.id == 16 },
             originalTMDBSeasonNumber: downloadedItem.episodePlaybackContext?.resolvedTMDBSeasonNumber,
             originalTMDBEpisodeNumber: downloadedItem.episodePlaybackContext?.resolvedTMDBEpisodeNumber,
-            onRequestNextEpisode: nextEpisodeRequest
+            onRequestNextEpisode: nextEpisodeRequest,
+            localNextEpisodeFallback: PlaybackEpisodeCoordinate(
+                seasonNumber: localNextEpisode?.seasonNumber,
+                episodeNumber: localNextEpisode?.episodeNumber
+            )
         )
 
         Logger.shared.log(
@@ -2925,17 +3425,53 @@ struct ContinueWatchingCard: View {
         PlaybackCoordinator.shared.present(playbackRequest, from: presenter)
         return true
     }
+
+    private func nextCompletedDownloadedEpisode(after currentItem: DownloadItem) -> DownloadItem? {
+        let downloadManager = DownloadManager.shared
+        let episodes = downloadManager.completedDownloads
+            .filter {
+                !$0.isMovie
+                    && $0.tmdbId == currentItem.tmdbId
+                    && $0.seasonNumber != nil
+                    && $0.episodeNumber != nil
+                    && downloadManager.localFileURL(for: $0) != nil
+            }
+            .sorted {
+                if $0.seasonNumber == $1.seasonNumber {
+                    return ($0.episodeNumber ?? 0) < ($1.episodeNumber ?? 0)
+                }
+                return ($0.seasonNumber ?? 0) < ($1.seasonNumber ?? 0)
+            }
+        guard let currentIndex = episodes.firstIndex(where: { $0.id == currentItem.id }) else { return nil }
+        let nextIndex = episodes.index(after: currentIndex)
+        return nextIndex < episodes.endIndex ? episodes[nextIndex] : nil
+    }
 #endif
 
     @MainActor
     private func presentResolvedPlayback(_ request: PlayerResolvedPlaybackRequest) {
+        guard recoveryIdentityIsCurrent(request.autoModeRecoveryIdentity) else {
+            Logger.shared.log("ContinueWatchingCard: discarded stale resolved playback before sheet dismissal", type: "Player")
+            return
+        }
         showingSearchResults = false
 
-        dismissContinueWatchingSheetAndPresent(request)
+        dismissContinueWatchingSheetAndPresent(
+            request,
+            recoveryIdentity: request.autoModeRecoveryIdentity
+        )
     }
 
     @MainActor
-    private func dismissContinueWatchingSheetAndPresent(_ request: PlayerResolvedPlaybackRequest, attempt: Int = 0) {
+    private func dismissContinueWatchingSheetAndPresent(
+        _ request: PlayerResolvedPlaybackRequest,
+        recoveryIdentity: AutoModePlaybackRecoveryIdentity?,
+        attempt: Int = 0
+    ) {
+        guard recoveryIdentityIsCurrent(recoveryIdentity) else {
+            Logger.shared.log("ContinueWatchingCard: stopped stale resolved playback during dismissal", type: "Player")
+            return
+        }
         guard let presenter = rootPresentationController() else {
             Logger.shared.log("ContinueWatchingCard: unable to present resolved playback; no presenter", type: "Player")
             return
@@ -2946,35 +3482,58 @@ struct ContinueWatchingCard: View {
             presenter.dismiss(animated: true) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
                     Task { @MainActor in
-                        self.dismissContinueWatchingSheetAndPresent(request, attempt: attempt + 1)
+                        guard self.recoveryIdentityIsCurrent(recoveryIdentity) else { return }
+                        self.dismissContinueWatchingSheetAndPresent(
+                            request,
+                            recoveryIdentity: recoveryIdentity,
+                            attempt: attempt + 1
+                        )
                     }
                 }
             }
             return
         }
 
-        presentResolvedPlaybackAfterSheetDismissal(request, presenter: presenter)
+        presentResolvedPlaybackAfterSheetDismissal(
+            request,
+            presenter: presenter,
+            recoveryIdentity: recoveryIdentity
+        )
     }
 
     @MainActor
-    private func presentResolvedPlaybackAfterSheetDismissal(_ request: PlayerResolvedPlaybackRequest, presenter: UIViewController) {
-#if os(tvOS)
+    private func presentResolvedPlaybackAfterSheetDismissal(
+        _ request: PlayerResolvedPlaybackRequest,
+        presenter: UIViewController,
+        recoveryIdentity: AutoModePlaybackRecoveryIdentity?
+    ) {
+        guard recoveryIdentityIsCurrent(recoveryIdentity) else {
+            Logger.shared.log("ContinueWatchingCard: discarded stale resolved playback before presentation", type: "Player")
+            return
+        }
+#if !os(tvOS)
+        let externalRaw = UserDefaults.standard.string(forKey: "externalPlayer") ?? ExternalPlayer.none.rawValue
+        let external = ExternalPlayer(rawValue: externalRaw) ?? .none
+        if let scheme = external.schemeURL(for: request.url.absoluteString),
+           UIApplication.shared.canOpenURL(scheme) {
+            UIApplication.shared.open(scheme, options: [:], completionHandler: nil)
+            Logger.shared.log("ContinueWatchingCard: opening resolved playback in external player", type: "Player")
+            return
+        }
+#endif
         let episodeSubtitle: String? = {
-            guard !item.isMovie,
-                  let season = item.seasonNumber,
-                  let episode = item.episodeNumber else { return nil }
+            guard case .episode(_, let season, let episode, _, _, _) = request.mediaInfo else { return nil }
             return "Season \(season), Episode \(episode)"
         }()
         let nextEpisodeRequest: ((_ seasonNumber: Int, _ episodeNumber: Int) -> Void)? = item.isMovie ? nil : { seasonNumber, nextEpisodeNumber in
-            NotificationCenter.default.post(
-                name: .requestNextEpisode,
-                object: nil,
-                userInfo: [
-                    "tmdbId": item.tmdbId,
-                    "seasonNumber": seasonNumber,
-                    "episodeNumber": nextEpisodeNumber
-                ]
-            )
+            Task { @MainActor in
+                handleNumericNextEpisodeRequest(seasonNumber: seasonNumber, episodeNumber: nextEpisodeNumber)
+            }
+        }
+        let resolvedNextEpisodeRequest: ((ResolvedNextEpisodeTarget) -> Void)? = item.isMovie ? nil : { target in
+            Task { @MainActor in
+                handleResolvedNextEpisodeRequest(target)
+            }
         }
         let playbackRequest = PlaybackRequest(
             url: request.url,
@@ -2994,84 +3553,106 @@ struct ContinueWatchingCard: View {
             isAnimation: request.isAnimationContentHint ?? false,
             originalTMDBSeasonNumber: request.originalTMDBSeasonNumber,
             originalTMDBEpisodeNumber: request.originalTMDBEpisodeNumber,
-            onRequestNextEpisode: nextEpisodeRequest
-        )
-        Logger.shared.log("ContinueWatchingCard: presenting resolved playback through tvOS coordinator", type: "Player")
-        PlaybackCoordinator.shared.present(playbackRequest, from: presenter)
-#else
-        let externalRaw = UserDefaults.standard.string(forKey: "externalPlayer") ?? ExternalPlayer.none.rawValue
-        let external = ExternalPlayer(rawValue: externalRaw) ?? .none
-        if let scheme = external.schemeURL(for: request.url.absoluteString),
-           UIApplication.shared.canOpenURL(scheme) {
-            UIApplication.shared.open(scheme, options: [:], completionHandler: nil)
-            Logger.shared.log("ContinueWatchingCard: opening resolved playback in external player", type: "Player")
-            return
-        }
-
-        let inAppRaw = Settings.normalizedInAppPlayer(UserDefaults.standard.string(forKey: "inAppPlayer"))
-        if inAppRaw == "mpv" {
-            let pvc = PlayerViewController(
-                url: request.url,
-                preset: request.preset,
-                headers: request.headers,
-                subtitles: request.subtitles,
-                subtitleNames: request.subtitleNames,
-                subtitleHeadersByURL: request.subtitleHeadersByURL,
-                mediaInfo: request.mediaInfo,
-                imdbId: request.imdbId
-            )
-            pvc.isAnimeHint = request.isAnimeHint
-            pvc.isAnimationContentHint = request.isAnimationContentHint
-            pvc.originalTMDBSeasonNumber = request.originalTMDBSeasonNumber
-            pvc.originalTMDBEpisodeNumber = request.originalTMDBEpisodeNumber
-            pvc.episodePlaybackContext = request.episodePlaybackContext
-            pvc.playbackLaunchContext = request.launchContext
-            pvc.modalPresentationStyle = .fullScreen
-            if !item.isMovie {
-                pvc.onRequestNextEpisode = { seasonNumber, nextEpisodeNumber in
-                    NotificationCenter.default.post(
-                        name: .requestNextEpisode,
-                        object: nil,
-                        userInfo: [
-                            "tmdbId": item.tmdbId,
-                            "seasonNumber": seasonNumber,
-                            "episodeNumber": nextEpisodeNumber
-                        ]
+            onRequestNextEpisode: nextEpisodeRequest,
+            onRequestResolvedNextEpisode: resolvedNextEpisodeRequest,
+            onPlaybackStartupFailure: { report in
+                Task { @MainActor in
+                    self.handleAutoModePlaybackFailure(
+                        report,
+                        recoveryIdentity: recoveryIdentity
                     )
                 }
             }
+        )
+        Logger.shared.log("ContinueWatchingCard: presenting resolved playback through coordinator", type: "Player")
+        PlaybackCoordinator.shared.present(playbackRequest, from: presenter)
+    }
 
-            Logger.shared.log("ContinueWatchingCard: presenting resolved \(inAppRaw) playback from stable presenter", type: "Player")
-            presenter.present(pvc, animated: true, completion: nil)
-            return
-        }
+    @MainActor
+    private func handleResolvedNextEpisodeRequest(_ target: ResolvedNextEpisodeTarget) {
+        guard target.showID == item.tmdbId else { return }
+        nextEpisodeSearchTarget = target
+        autoModeRetrySession.reset(targetToken: autoModeTargetToken)
+        showingSearchResults = true
+    }
 
-        let assetOptions: [String: Any]? = {
-            guard let headers = request.headers, !headers.isEmpty else { return nil }
-            return ["AVURLAssetHTTPHeaderFieldsKey": headers]
-        }()
-        let asset = AVURLAsset(url: request.url, options: assetOptions)
-        let playerVC = NormalPlayer()
-        playerVC.player = AVPlayer(playerItem: AVPlayerItem(asset: asset))
-        playerVC.mediaInfo = request.mediaInfo
-        playerVC.episodePlaybackContext = request.episodePlaybackContext
-        playerVC.playbackLaunchContext = request.launchContext
-        playerVC.modalPresentationStyle = .fullScreen
+    @MainActor
+    private func handleAutoModePlaybackFailure(
+        _ report: PlaybackFailureReport,
+        recoveryIdentity: AutoModePlaybackRecoveryIdentity?
+    ) {
+        guard report.context.autoMode,
+              let recoveryIdentity,
+              recoveryIdentityIsCurrent(recoveryIdentity) else { return }
+        autoModeRetrySession.recordPlaybackFailure(report)
+        Logger.shared.log(
+            "ContinueWatchingCard: Auto Mode playback failed source=\(report.context.sourceName) retry=\(autoModeRetrySession.retryCount); reopening remaining sources",
+            type: "Player"
+        )
+        showingSearchResults = true
+    }
 
-        Logger.shared.log("ContinueWatchingCard: presenting resolved AVPlayer playback from stable presenter", type: "Player")
-        presenter.present(playerVC, animated: true) {
-            playerVC.playAtDefaultSpeed()
-        }
-#endif
+    @MainActor
+    private func recoveryIdentityIsCurrent(_ identity: AutoModePlaybackRecoveryIdentity?) -> Bool {
+        guard let identity else { return true }
+        return identity.targetToken == autoModeTargetToken
+            && autoModeRetrySession.matches(identity)
+    }
+
+    @MainActor
+    private func handleNumericNextEpisodeRequest(seasonNumber: Int, episodeNumber: Int) {
+        guard !item.isMovie, seasonNumber >= 0, episodeNumber > 0 else { return }
+        let baseContext = enrichedPlaybackContext ?? item.playbackContext
+        let nextContext = baseContext?.localSeasonNumber == seasonNumber
+            ? baseContext?.forEpisodeNumber(episodeNumber)
+            : nil
+        let episode = TMDBEpisode(
+            id: Int("\(item.tmdbId)\(seasonNumber)\(episodeNumber)") ?? item.tmdbId,
+            name: "",
+            overview: nil,
+            stillPath: nil,
+            episodeNumber: episodeNumber,
+            seasonNumber: seasonNumber,
+            airDate: nil,
+            runtime: nil,
+            voteAverage: 0,
+            voteCount: 0
+        )
+        handleResolvedNextEpisodeRequest(ResolvedNextEpisodeTarget(
+            showID: item.tmdbId,
+            episode: episode,
+            playbackContext: nextContext,
+            mediaTitle: searchSheetTitle,
+            seasonTitleOverride: searchSheetIsAnime ? animeSeasonTitle : nil,
+            originalTitle: searchSheetIsAnime ? (animeSeasonRomajiTitle ?? originalTitle) : originalTitle,
+            posterURL: item.posterURL,
+            imdbID: imdbId,
+            isAnime: searchSheetIsAnime,
+            isAnimation: detailGenres.contains { $0.id == 16 }
+        ))
     }
 
     @MainActor
     private func rootPresentationController() -> UIViewController? {
-        let windowScene = UIApplication.shared.connectedScenes
+        let activeScenes = UIApplication.shared.connectedScenes
             .compactMap { $0 as? UIWindowScene }
-            .first { $0.activationState == .foregroundActive }
-            ?? UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
-        let window = windowScene?.windows.first { $0.isKeyWindow } ?? windowScene?.windows.first
+            .filter { $0.activationState == .foregroundActive }
+#if os(iOS)
+        let windowScene: UIWindowScene?
+        if let presentationSceneIdentifier {
+            windowScene = activeScenes.first(where: {
+                $0.session.persistentIdentifier == presentationSceneIdentifier
+            })
+        } else {
+            windowScene = activeScenes.count == 1 ? activeScenes.first : nil
+        }
+#else
+        let windowScene = activeScenes.first
+#endif
+        let window = windowScene?.windows.first(where: { $0.isKeyWindow && $0.rootViewController != nil })
+            ?? windowScene?.windows.first(where: {
+                !$0.isHidden && $0.alpha > 0 && $0.windowLevel == .normal && $0.rootViewController != nil
+            })
         return window?.rootViewController
     }
 
@@ -3111,6 +3692,39 @@ struct ContinueWatchingCard: View {
         }
     }
 }
+
+#if os(iOS)
+private struct ContinueWatchingWindowSceneReader: UIViewRepresentable {
+    let onResolve: (UIWindowScene) -> Void
+
+    func makeUIView(context: Context) -> ProbeView {
+        let view = ProbeView()
+        view.onResolve = onResolve
+        return view
+    }
+
+    func updateUIView(_ uiView: ProbeView, context: Context) {
+        uiView.onResolve = onResolve
+        uiView.resolveIfAttached()
+    }
+
+    final class ProbeView: UIView {
+        var onResolve: ((UIWindowScene) -> Void)?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            resolveIfAttached()
+        }
+
+        func resolveIfAttached() {
+            guard let scene = window?.windowScene else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.onResolve?(scene)
+            }
+        }
+    }
+}
+#endif
 
 struct ContinuousHoverModifier: ViewModifier {
     @Binding var isHovering: Bool

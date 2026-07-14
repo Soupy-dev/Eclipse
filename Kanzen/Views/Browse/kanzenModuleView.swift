@@ -356,24 +356,33 @@ struct KanzenModuleView: View {
 
     }
     
-    func getTopViewController(base: UIViewController? = UIApplication.shared.connectedScenes
-                                .compactMap { $0 as? UIWindowScene }
-                                .first?.windows
-                                .first(where: { $0.isKeyWindow })?.rootViewController) -> UIViewController? {
-        
-        if let nav = base as? UINavigationController {
-            return getTopViewController(base: nav.visibleViewController)
-        }
-        
-        if let tab = base as? UITabBarController, let selected = tab.selectedViewController {
-            return getTopViewController(base: selected)
-        }
-        
-        if let presented = base?.presentedViewController {
+    func getTopViewController(base: UIViewController? = nil) -> UIViewController? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let resolvedBase = base
+            ?? scenes.flatMap(\.windows).first(where: \.isKeyWindow)?.rootViewController
+            ?? scenes.first(where: { $0.activationState == .foregroundActive })?
+                .windows.first(where: { !$0.isHidden && $0.windowLevel == .normal })?
+                .rootViewController
+
+        if let presented = resolvedBase?.presentedViewController {
             return getTopViewController(base: presented)
         }
         
-        return base
+        if let nav = resolvedBase as? UINavigationController,
+           let visible = nav.visibleViewController {
+            return getTopViewController(base: visible)
+        }
+        
+        if let tab = resolvedBase as? UITabBarController, let selected = tab.selectedViewController {
+            return getTopViewController(base: selected)
+        }
+
+        if let split = resolvedBase as? UISplitViewController,
+           let visible = split.viewControllers.last {
+            return getTopViewController(base: visible)
+        }
+        
+        return resolvedBase
     }
 
 }

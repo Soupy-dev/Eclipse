@@ -1219,6 +1219,13 @@ final class AniListService {
 
     /// Fetch upcoming airing episodes for the next `daysAhead` days (default 7).
     func fetchAiringSchedule(daysAhead: Int = 7, perPage: Int = 50) async throws -> [AniListAiringScheduleEntry] {
+        try await fetchAiringScheduleResult(daysAhead: daysAhead, perPage: perPage).entries
+    }
+
+    func fetchAiringScheduleResult(
+        daysAhead: Int = 7,
+        perPage: Int = 50
+    ) async throws -> AnimeAiringScheduleResult {
         do {
             let result = try await fetchAiringScheduleFromAniList(daysAhead: daysAhead, perPage: perPage)
             AnimeProviderHealthCenter.shared.recordAniListSuccess()
@@ -1231,7 +1238,8 @@ final class AniListService {
             guard AnimeProviderHealthCenter.shared.shouldUseMALFallback(for: reason) else { throw error }
             AnimeProviderHealthCenter.shared.notifyMALFallbackIfNeeded(reason: "schedule-\(reason.rawValue)")
             do {
-                return try await MALMetadataService.shared.fetchAiringSchedule(daysAhead: daysAhead, perPage: perPage)
+                let fallback = try await MALMetadataService.shared.fetchAiringSchedule(daysAhead: daysAhead, perPage: perPage)
+                return AnimeAiringScheduleResult(entries: fallback, isAuthoritativeForNotifications: false)
             } catch {
                 AnimeProviderHealthCenter.shared.recordMALFailure(error)
                 throw error
@@ -1239,12 +1247,17 @@ final class AniListService {
         }
     }
 
-    private func fetchAiringScheduleFromAniList(daysAhead: Int = 7, perPage: Int = 50) async throws -> [AniListAiringScheduleEntry] {
+    private func fetchAiringScheduleFromAniList(
+        daysAhead: Int = 7,
+        perPage: Int = 50
+    ) async throws -> AnimeAiringScheduleResult {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current
 
         let today = calendar.startOfDay(for: Date())
-        let upperDay = calendar.date(byAdding: .day, value: max(daysAhead, 1) + 1, to: today) ?? today
+        // `daysAhead` is a count including today, matching ScheduleViewModel's
+        // configured visible buckets and the Western Trakt/TVMaze requests.
+        let upperDay = calendar.date(byAdding: .day, value: max(daysAhead, 1), to: today) ?? today
 
         let lowerBound = Int(today.timeIntervalSince1970)
         let upperBound = Int(upperDay.timeIntervalSince1970)
@@ -1272,7 +1285,9 @@ final class AniListService {
         var allSchedules: [Response.AiringSchedule] = []
         var currentPage = 1
         var hasNextPage = true
-        let maxPages = 10
+        // Thirty days can exceed 500 airing rows during a busy season. Keep a
+        // hard safety cap, but do not silently mark a capped result authoritative.
+        let maxPages = 20
 
         while hasNextPage && currentPage <= maxPages {
             let query = """
@@ -1311,7 +1326,7 @@ final class AniListService {
         let start = today
         let end = upperDay
 
-        return allSchedules
+        let entries = allSchedules
             .filter { $0.media.isAdult != true }
             .map { schedule in
                 let title = AniListTitlePicker.title(from: schedule.media.title, preferredLanguageCode: preferredLanguageCode)
@@ -1326,12 +1341,17 @@ final class AniListService {
                     englishTitle: schedule.media.title.english,
                     romajiTitle: schedule.media.title.romaji,
                     nativeTitle: schedule.media.title.native,
-                    format: schedule.media.format
+                    format: schedule.media.format,
+                    hasKnownAiringTime: true
                 )
             }
             .filter { entry in
                 entry.airingAt >= start && entry.airingAt < end
             }
+        return AnimeAiringScheduleResult(
+            entries: entries,
+            isAuthoritativeForNotifications: !hasNextPage
+        )
     }
 
     /// Resolves one already-known AniList season without traversing its relation
@@ -1870,6 +1890,8 @@ final class AniListService {
                     idMal
                     externalLinks { site siteId url }
                     averageScore
+                    genres
+                    tags { name rank isMediaSpoiler }
                     title {
                         romaji
                         english
@@ -1896,6 +1918,8 @@ final class AniListService {
                                 idMal
                                 externalLinks { site siteId url }
                                 averageScore
+                                genres
+                                tags { name rank isMediaSpoiler }
                                 title {
                                     romaji
                                     english
@@ -2354,6 +2378,7 @@ final class AniListService {
             id: anime.id,
             malId: anime.idMal,
             title: title,
+            genres: anime.detailGenreLabels,
             seasons: seasons,
             totalEpisodes: totalEpisodes,
             status: anime.status ?? "UNKNOWN",
@@ -3654,9 +3679,14 @@ final class AniListService {
             id
             idMal
             externalLinks { site siteId url }
+            averageScore
+            isAdult
+            genres
+            tags { name rank isMediaSpoiler }
             title { romaji english native }
             episodes
             status
+            startDate { year month day }
             seasonYear
             season
             format
@@ -3670,6 +3700,9 @@ final class AniListService {
                         idMal
                         externalLinks { site siteId url }
                         averageScore
+                        isAdult
+                        genres
+                        tags { name rank isMediaSpoiler }
                         title { romaji english native }
                         episodes
                         status
@@ -3687,6 +3720,7 @@ final class AniListService {
                                     idMal
                                     externalLinks { site siteId url }
                                     averageScore
+                                    isAdult
                                     title { romaji english native }
                                     episodes
                                     status
@@ -3789,6 +3823,117 @@ final class AniListService {
         let data = try await executeGraphQLQuery(query, token: nil)
         let decoded = try JSONDecoder().decode(Response.self, from: data)
         return decoded.data.Media
+    }
+
+    /// Returns the bounded normal-season relation graph used by local
+    /// notification follows. Unlike detail traversal, this intentionally keeps
+    /// NOT_YET_RELEASED sequels so Eclipse can baseline and later discover them.
+    func fetchNotificationSeasons(
+        startingMediaIDs: [Int],
+        limit: Int = 32
+    ) async -> AniListNotificationSeasonGraph {
+        var visited = Set<Int>()
+        var pending = startingMediaIDs.filter { $0 > 0 }
+        var results: [Int: AniListNotificationSeason] = [:]
+        var isComplete = true
+        let relationTypes: Set<String> = ["SEQUEL", "PREQUEL", "SEASON"]
+
+        while !pending.isEmpty, visited.count < limit, !Task.isCancelled {
+            let takeCount = min(12, limit - visited.count, pending.count)
+            let batch = Array(pending.prefix(takeCount))
+                .filter { visited.insert($0).inserted }
+            pending.removeFirst(takeCount)
+            guard !batch.isEmpty else { continue }
+
+            let nodeResult = await batchFetchAniListNodesResult(ids: batch)
+            isComplete = isComplete && nodeResult.isComplete
+            for node in nodeResult.nodes.values {
+                if isNotificationSeasonCandidate(node) {
+                    let title = AniListTitlePicker.title(
+                        from: node.title,
+                        preferredLanguageCode: preferredLanguageCode
+                    )
+                    results[node.id] = AniListNotificationSeason(
+                        id: node.id,
+                        title: title,
+                        status: node.status,
+                        season: node.season,
+                        seasonYear: node.seasonYear,
+                        premiereDate: notificationPremiereDate(node.startDate)
+                    )
+                }
+
+                for edge in node.relations?.edges ?? [] {
+                    guard relationTypes.contains(edge.relationType),
+                          edge.node.type == "ANIME",
+                          edge.node.isAdult != true else {
+                        continue
+                    }
+                    let related = edge.node.asAnime()
+                    guard isNotificationSeasonCandidate(related) else { continue }
+                    if results[related.id] == nil {
+                        let title = AniListTitlePicker.title(
+                            from: related.title,
+                            preferredLanguageCode: preferredLanguageCode
+                        )
+                        results[related.id] = AniListNotificationSeason(
+                            id: related.id,
+                            title: title,
+                            status: related.status,
+                            season: related.season,
+                            seasonYear: related.seasonYear,
+                            premiereDate: notificationPremiereDate(related.startDate)
+                        )
+                    }
+                    if !visited.contains(related.id), !pending.contains(related.id) {
+                        if visited.count + pending.count < limit {
+                            pending.append(related.id)
+                        } else {
+                            isComplete = false
+                        }
+                    }
+                }
+            }
+        }
+
+        isComplete = isComplete && pending.isEmpty && !Task.isCancelled
+        let seasons = results.values.sorted {
+            switch ($0.premiereDate, $1.premiereDate) {
+            case let (lhs?, rhs?) where lhs != rhs: return lhs < rhs
+            case (_?, nil): return true
+            case (nil, _?): return false
+            default: return $0.id < $1.id
+            }
+        }
+        return AniListNotificationSeasonGraph(seasons: seasons, isComplete: isComplete)
+    }
+
+    private func isNotificationSeasonCandidate(_ anime: AniListAnime) -> Bool {
+        guard anime.isAdult != true else { return false }
+        if let format = anime.format, !["TV", "TV_SHORT", "ONA"].contains(format) {
+            return false
+        }
+        let title = AniListTitlePicker.title(
+            from: anime.title,
+            preferredLanguageCode: preferredLanguageCode
+        ).lowercased()
+        return !["recap", "summary", "music", "trailer", " pv", " cm"].contains {
+            title.contains($0)
+        }
+    }
+
+    private func notificationPremiereDate(_ date: AniListDate?) -> Date? {
+        guard let year = date?.year, let month = date?.month, let day = date?.day else {
+            return nil
+        }
+        var components = DateComponents()
+        components.calendar = Calendar(identifier: .gregorian)
+        components.timeZone = .current
+        components.year = year
+        components.month = month
+        components.day = day
+        components.hour = 9
+        return components.date
     }
 
 }
@@ -3933,6 +4078,12 @@ struct AniListAiringScheduleEntry: Identifiable, Codable {
     let romajiTitle: String?
     let nativeTitle: String?
     let format: String?
+    let hasKnownAiringTime: Bool
+}
+
+struct AnimeAiringScheduleResult {
+    let entries: [AniListAiringScheduleEntry]
+    let isAuthoritativeForNotifications: Bool
 }
 
 struct AniListSeasonWithPoster: Codable {
@@ -4053,10 +4204,39 @@ struct AniListAnimeWithSeasons: Codable {
     let id: Int
     let malId: Int?
     let title: String
+    let genres: [String]?
     let seasons: [AniListSeasonWithPoster]
     let totalEpisodes: Int
     let status: String
     let rating: AnimeMetadataRating?
+}
+
+struct AniListNotificationSeason: Identifiable, Sendable {
+    let id: Int
+    let title: String
+    let status: String?
+    let season: String?
+    let seasonYear: Int?
+    let premiereDate: Date?
+
+    var isUpcoming: Bool {
+        status == "NOT_YET_RELEASED" || (premiereDate.map { $0 > Date() } ?? false)
+    }
+
+    var seasonLabel: String {
+        if let season, let seasonYear {
+            return "\(season.capitalized) \(seasonYear)"
+        }
+        if let seasonYear {
+            return "\(seasonYear) season"
+        }
+        return "Upcoming season"
+    }
+}
+
+struct AniListNotificationSeasonGraph: Sendable {
+    let seasons: [AniListNotificationSeason]
+    let isComplete: Bool
 }
 
 // MARK: - AniList Codable Models
@@ -4101,6 +4281,8 @@ struct AniListAnime: Codable {
     let externalLinks: [AniListExternalLink]?
     let averageScore: Int?
     let isAdult: Bool?
+    let genres: [String]?
+    let tags: [AniListTag]?
     let title: AniListTitle
     let episodes: Int?
     let status: String?
@@ -4117,6 +4299,49 @@ struct AniListAnime: Codable {
         Self.kitsuId(from: externalLinks)
     }
 
+    /// AniList's `genres` are supplemented with a small set of high-confidence,
+    /// genre-like tags. AniList models Isekai as a tag rather than a genre, so
+    /// ignoring tags would omit the anime-specific metadata this surface needs.
+    var detailGenreLabels: [String] {
+        var values: [String] = []
+        var seen = Set<String>()
+
+        func append(_ rawValue: String) {
+            let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = Self.normalizedGenreLabel(value)
+            guard !value.isEmpty, !key.isEmpty, seen.insert(key).inserted else { return }
+            values.append(value)
+        }
+
+        for genre in genres ?? [] {
+            append(genre)
+        }
+
+        let allowedTagKeys = Set([
+            "isekai", "reincarnation", "sliceoflife", "supernatural", "psychological",
+            "mecha", "sports", "school", "historical", "harem", "mahou shoujo",
+            "magicalgirl", "samurai", "superpower", "timetravel", "videogame",
+            "shounen", "shoujo", "seinen", "josei"
+        ].map(Self.normalizedGenreLabel))
+
+        let genreLikeTags = (tags ?? [])
+            .filter { $0.isMediaSpoiler != true && ($0.rank ?? 0) >= 50 }
+            .filter { allowedTagKeys.contains(Self.normalizedGenreLabel($0.name)) }
+            .sorted { ($0.rank ?? 0) > ($1.rank ?? 0) }
+            .prefix(6)
+        for tag in genreLikeTags {
+            append(tag.name)
+        }
+
+        return values
+    }
+
+    private static func normalizedGenreLabel(_ value: String) -> String {
+        value.lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .joined()
+    }
+
     struct AniListTitle: Codable {
         let romaji: String?
         let english: String?
@@ -4126,6 +4351,12 @@ struct AniListAnime: Codable {
     struct AniListCoverImage: Codable {
         let large: String?
         let medium: String?
+    }
+
+    struct AniListTag: Codable {
+        let name: String
+        let rank: Int?
+        let isMediaSpoiler: Bool?
     }
 
     struct AniListNextAiringEpisode: Codable {
@@ -4148,6 +4379,8 @@ struct AniListAnime: Codable {
         let externalLinks: [AniListExternalLink]?
         let averageScore: Int?
         let isAdult: Bool?
+        let genres: [String]?
+        let tags: [AniListTag]?
         let title: AniListTitle
         let episodes: Int?
         let status: String?
@@ -4166,6 +4399,8 @@ struct AniListAnime: Codable {
                 externalLinks: externalLinks,
                 averageScore: averageScore,
                 isAdult: isAdult,
+                genres: genres,
+                tags: tags,
                 title: title,
                 episodes: episodes,
                 status: status,
@@ -4373,7 +4608,7 @@ private final class MALMetadataService {
     func fetchAiringSchedule(daysAhead: Int, perPage: Int) async throws -> [AniListAiringScheduleEntry] {
         let current = malSeason(for: Date())
         let next = nextSeason(after: current)
-        let currentAnime = (try? await fetchSeasonAnime(year: current.year, season: current.season, limit: perPage)) ?? []
+        let currentAnime = try await fetchSeasonAnime(year: current.year, season: current.season, limit: perPage)
         let nextAnime = (try? await fetchSeasonAnime(year: next.year, season: next.season, limit: perPage)) ?? []
         let all = Array((currentAnime + nextAnime)
             .filter { !isAdultScheduleAnime($0) }
@@ -4381,7 +4616,7 @@ private final class MALMetadataService {
 
         let calendar = Calendar.current
         let start = calendar.startOfDay(for: Date())
-        let end = calendar.date(byAdding: .day, value: max(daysAhead, 1) + 1, to: start) ?? start
+        let end = calendar.date(byAdding: .day, value: max(daysAhead, 1), to: start) ?? start
 
         return all.compactMap { detail in
             guard let airingAt = estimatedNextAiringDate(for: detail, start: start, end: end) else { return nil }
@@ -4396,7 +4631,8 @@ private final class MALMetadataService {
                 englishTitle: detail.alternativeTitles?.en,
                 romajiTitle: detail.title,
                 nativeTitle: detail.alternativeTitles?.ja,
-                format: aniListFormat(from: detail.mediaType)
+                format: aniListFormat(from: detail.mediaType),
+                hasKnownAiringTime: false
             )
         }
         .sorted { $0.airingAt < $1.airingAt }
@@ -4517,6 +4753,7 @@ private final class MALMetadataService {
             id: malProviderId(root.id),
             malId: root.id,
             title: displayTitle(for: root),
+            genres: root.genres?.compactMap(\.name),
             seasons: seasons,
             totalEpisodes: totalEpisodes,
             status: root.status?.uppercased() ?? "UNKNOWN",

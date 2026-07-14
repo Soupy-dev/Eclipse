@@ -7,6 +7,7 @@ struct AddToCollectionView: View {
     @StateObject private var accentColorManager = AccentColorManager.shared
     @ObservedObject private var libraryManager = LibraryManager.shared
     @State private var showingCreateSheet = false
+    @State private var selectedCollectionIDs: Set<UUID> = []
 #if os(tvOS)
     private enum TVFocus: Hashable {
         case collection(UUID)
@@ -39,11 +40,13 @@ struct AddToCollectionView: View {
                                     }
                                 }
                                 Spacer()
-                                if libraryManager.isItemInCollection(collection.id, item: item) {
+                                if selectedCollectionIDs.contains(collection.id) {
                                     Image(systemName: "checkmark")
                                         .foregroundColor(accentColorManager.currentAccentColor)
                                 }
                             }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
                         }
 #if os(tvOS)
                         .buttonStyle(.card)
@@ -53,7 +56,7 @@ struct AddToCollectionView: View {
 #endif
                         .accessibilityLabel(collection.name)
                         .accessibilityValue(
-                            libraryManager.isItemInCollection(collection.id, item: item)
+                            selectedCollectionIDs.contains(collection.id)
                                 ? "Included"
                                 : "Not included"
                         )
@@ -76,8 +79,12 @@ struct AddToCollectionView: View {
                 trailing: Button("Done") { dismiss() }
             )
         }
+        .navigationViewStyle(StackNavigationViewStyle())
         .sheet(isPresented: $showingCreateSheet) {
             CreateCollectionView()
+        }
+        .onAppear {
+            syncSelectedCollections()
         }
 #if os(tvOS)
         .onAppear {
@@ -92,10 +99,21 @@ struct AddToCollectionView: View {
     }
 
     private func toggleMembership(in collection: LibraryCollection) {
-        if libraryManager.isItemInCollection(collection.id, item: item) {
+        let isSelected = selectedCollectionIDs.contains(collection.id)
+        if isSelected {
+            selectedCollectionIDs.remove(collection.id)
             libraryManager.removeItem(from: collection.id, item: item)
         } else {
+            selectedCollectionIDs.insert(collection.id)
             libraryManager.addItem(to: collection.id, item: item)
         }
+    }
+
+    private func syncSelectedCollections() {
+        selectedCollectionIDs = Set(
+            libraryManager.collections
+                .filter { libraryManager.isItemInCollection($0.id, item: item) }
+                .map(\.id)
+        )
     }
 }

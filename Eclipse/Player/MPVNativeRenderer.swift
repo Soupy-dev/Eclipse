@@ -246,7 +246,7 @@ private final class MPVMoltenVKLayer: CAMetalLayer {
             if Thread.isMainThread {
                 super.wantsExtendedDynamicRangeContent = newValue
             } else {
-                DispatchQueue.main.sync {
+                DispatchQueue.main.async {
                     super.wantsExtendedDynamicRangeContent = newValue
                 }
             }
@@ -2725,6 +2725,10 @@ struct MetalPlaybackDiagnostics {
     /// Active subtitle track codec ("ass" / "subrip" / "hdmv_pgs_subtitle"); nil when subtitles
     /// are off or the stream is hard-subbed (no subtitle track at all).
     let subtitleCodec: String?
+    /// Raw hwdec-current value from the inline renderer. An empty string means
+    /// mpv did not expose the property at this instant (commonly while reconfiguring),
+    /// while a literal "no" is the authoritative software-decoder state.
+    let hardwareDecoder: String?
 }
 
 #if ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE
@@ -2739,8 +2743,11 @@ final class MPVGPUInlineHostView: UIView {
         guard hostedLayer !== metalLayer else { return }
         hostedLayer?.removeFromSuperlayer()
         hostedLayer = metalLayer
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         metalLayer.frame = bounds
         layer.addSublayer(metalLayer)
+        CATransaction.commit()
     }
 
     override func layoutSubviews() {
@@ -2755,9 +2762,10 @@ final class MPVGPUInlineHostView: UIView {
     }
 }
 
-/// PlayerRenderer that renders inline playback on the GPU, mpv `vo=gpu-next` via MoltenVK into a `CAMetalLayer`
-/// with zero-copy.
+/// PlayerRenderer that renders inline playback on the GPU, mpv `vo=gpu-next` via MoltenVK into a `CAMetalLayer`,
+/// preferring direct VideoToolbox hardware decode with its copy path available as a fallback.
 final class MPVGPUPlayerBridge: PlayerRenderer {
+    static var unavailableReason: String? { MPVGPUPlayerRenderer.inlineGPUUnavailableReason }
     static var isAvailable: Bool { MPVGPUPlayerRenderer.isSupported }
 
     weak var delegate: MPVNativeRendererDelegate?
@@ -2774,6 +2782,16 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     private var isReadyToSeek = false
     private var isLoading = false
     private var isAwaitingReadyForCurrentLoad = true
+    /// MPVKit's gpu-next wrapper reports `.playing` immediately when `play()` clears mpv's pause
+    /// property, before the new file has emitted FILE_LOADED / VIDEO_RECONFIG. On slower iPads a
+    /// fresh 0:00 load can otherwise be treated as fully started early enough to kick off PiP
+    /// warmup while the inline renderer is still opening the file, which can starve the player UI.
+    private var didLogFreshIPadStartupFence = false
+    private var hasDeferredFreshIPadPlaybackState = false
+    /// Caller-owned token mirrored into MPVKit so a late FILE_LOADED/VIDEO_RECONFIG from a
+    /// replaced item cannot release the fresh-iPad startup fence for the current load.
+    private var gpuLoadGeneration: UInt64 = 0
+    private var hasObservedVideoReconfigureForCurrentLoad = false
     private var isPictureInPictureActive = false
     private var positionUpdateTimer: Timer?
     private var lastPositionUpdateAt: CFTimeInterval = 0
@@ -2886,7 +2904,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             maximumPiPFrameSize: CGSize(width: 1280, height: 720),
             preferredPiPFramesPerSecond: 24,
             inlineProfile: "fast",
-            hardwareDecoding: "videotoolbox",
+            hardwareDecoding: "videotoolbox,videotoolbox-copy",
             // HDR/EDR starts off; applyHDRConfiguration() enables passthrough per-content and per the
             // user's HDR Output setting once the colorspace is known (matches the reference path),
             // so SDR content and non-EDR displays are never affected.
@@ -2900,7 +2918,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     private static func makeAdditionalMPVOptions() -> [String: String] {
         [
             "audio-channels": Settings.shared.mpvSurroundSoundEnabled ? "auto" : "stereo",
-            "vd-lavc-software-fallback": "yes",
+            "hwdec-software-fallback": "3",
             "demuxer-thread": "yes",
             "cache": "yes",
             "cache-pause-wait": "5",
@@ -3033,8 +3051,8 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         }
         // Re-evaluate HDR/colorspace whenever the decoded video parameters resolve or change
         // (file loaded / VIDEO_RECONFIG). Fired on the main thread by the kit.
-        gpuRenderer.onVideoReconfigure = { [weak self] in
-            guard let self else { return }
+        gpuRenderer.onVideoReconfigure = { [weak self] generation in
+            guard let self, generation == self.gpuLoadGeneration else { return }
             // Source dimensions are now known/updated - refresh the cached size and re-apply
             // scalers so the upscaling modes pick the right scaler for the real resolution.
             self.refreshSourceVideoDimensions()
@@ -3047,6 +3065,15 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             // fallback for this file - the decisive signal for the steady-state CPU question.
             self.logDecodeEngagement()
             self.notifyTrackChangesIfNeeded(reason: "video-reconfigure")
+            // A paused fresh item can legitimately remain at 0:00 forever. A generation-matched
+            // reconfigure is current-item proof even without clock movement, so release the
+            // physical-iPad startup fence without accepting stale state from the replaced item.
+            self.hasObservedVideoReconfigureForCurrentLoad = true
+            self.hasConfirmedFreshPositionForCurrentLoad = true
+            self.completeFreshIPadStartupFenceIfNeeded(
+                reason: "video-reconfigure",
+                currentLoadConfirmed: true
+            )
         }
         // Activate the playback audio session (category/mode + preferred multichannel output);
         // the kit renderer doesn't own this.
@@ -3062,6 +3089,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     }
 
     func stop() {
+        gpuLoadGeneration &+= 1
         gpuRenderer.stop()
         stopPositionUpdateTimer()
         gpuRenderer.onStateChange = nil
@@ -3072,6 +3100,9 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         isReadyToSeek = false
         isLoading = false
         isAwaitingReadyForCurrentLoad = true
+        didLogFreshIPadStartupFence = false
+        hasDeferredFreshIPadPlaybackState = false
+        hasObservedVideoReconfigureForCurrentLoad = false
         isPictureInPictureActive = false
         setInlineVideoHidden(false)
         lastPositionUpdateAt = 0
@@ -3081,12 +3112,17 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     }
 
     func load(url: URL, with preset: PlayerPreset, headers: [String: String]?) {
+        gpuLoadGeneration &+= 1
+        let generation = gpuLoadGeneration
         currentURL = url
         currentPreset = preset
         currentHeaders = headers
         isReadyToSeek = false
         isLoading = true
         isAwaitingReadyForCurrentLoad = true
+        didLogFreshIPadStartupFence = false
+        hasDeferredFreshIPadPlaybackState = false
+        hasObservedVideoReconfigureForCurrentLoad = false
         // Arm the fresh-load fence: snapshot the kit's (still-stale) cached position so emits stay suppressed until the
         // kit reports a.
         hasConfirmedFreshPositionForCurrentLoad = false
@@ -3101,7 +3137,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         lastNotifiedSubtitleTrackId = nil
         applyPreset(preset)
         delegate?.renderer(self, didChangeLoading: true)
-        gpuRenderer.load(url, headers: headers)
+        gpuRenderer.load(url, headers: headers, generation: generation)
         gpuRenderer.play()
         applySubtitleStyle(lastAppliedSubtitleStyle)
     }
@@ -3127,24 +3163,32 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
 
     func performanceOverlaySnapshot() -> String {
         let d = gpuRenderer.diagnosticsSnapshot()
-        // decode=videotoolbox means HW decode on the ASIC; decode=SW means mpv silently fell back to
-        // libavcodec software decode (CPU-bound) - the key signal for steady-state CPU.
-        let decode = (d.hardwareDecoder.isEmpty || d.hardwareDecoder == "no") ? "SW" : d.hardwareDecoder
+        // Preserve an unavailable/reconfigure instant instead of misreporting it as software.
+        let decode: String
+        if d.hardwareDecoder.isEmpty {
+            decode = "reconfiguring"
+        } else if d.hardwareDecoder == "no" {
+            decode = "SW"
+        } else {
+            decode = d.hardwareDecoder
+        }
         return "MPV gpu-next \(isPaused ? "paused" : "playing")\(isLoading ? " loading" : "")\npos \(String(format: "%.1f", d.currentTime))/\(String(format: "%.1f", d.duration))\nmode \(d.presentationMode.rawValue) vo=\(d.inlineVideoOutput) api=\(d.inlineGPUAPI) ctx=\(d.inlineGPUContext)\ndecode=\(decode) pixfmt=\(d.videoPixelFormat.isEmpty ? "?" : d.videoPixelFormat)"
     }
 
-    /// Logs whether videotoolbox hardware decode actually attached for the current file. With
-    /// `vd-lavc-software-fallback=yes`, a failed VT attach silently drops to libavcodec software
-    /// decode (CPU-bound, scene-dependent) with no error - this surfaces it. Read-only diagnostic;
+    /// Logs whether either ordered VideoToolbox path actually attached for the current file. If
+    /// both paths fail, mpv can still drop to libavcodec software decode (CPU-bound and
+    /// scene-dependent); this surfaces the resulting state. Read-only diagnostic;
     /// deduped so it logs once per (decoder, pixfmt) change.
     private func logDecodeEngagement() {
         let d = gpuRenderer.diagnosticsSnapshot()
-        let hwdec = (d.hardwareDecoder.isEmpty || d.hardwareDecoder == "no") ? "no" : d.hardwareDecoder
-        let signature = "\(hwdec)|\(d.videoPixelFormat)"
+        let hwdec = d.hardwareDecoder.trimmingCharacters(in: .whitespacesAndNewlines)
+        let signature = "\(hwdec.isEmpty ? "unavailable" : hwdec)|\(d.videoPixelFormat)"
         guard signature != lastLoggedDecode else { return }
         lastLoggedDecode = signature
-        if hwdec == "no" {
-            Logger.shared.log("[MPVGPUPlayerBridge] software decode - hwdec-current=no pixfmt=\(d.videoPixelFormat) src=\(lastKnownSourceWidth)x\(lastKnownSourceHeight) (videotoolbox did not attach; CPU-bound, scene-dependent)", type: "MPV")
+        if hwdec.isEmpty {
+            Logger.shared.log("[MPVGPUPlayerBridge] decode state unavailable during video reconfigure pixfmt=\(d.videoPixelFormat) src=\(lastKnownSourceWidth)x\(lastKnownSourceHeight) (hwdec-current was not exposed at this instant; this does not prove software decoding)", type: "MPV")
+        } else if hwdec == "no" {
+            Logger.shared.log("[MPVGPUPlayerBridge] software decode - hwdec-current=no pixfmt=\(d.videoPixelFormat) src=\(lastKnownSourceWidth)x\(lastKnownSourceHeight) (neither VideoToolbox path remained attached; CPU-bound, scene-dependent)", type: "MPV")
         } else {
             Logger.shared.log("[MPVGPUPlayerBridge] hardware decode hwdec-current=\(hwdec) pixfmt=\(d.videoPixelFormat) src=\(lastKnownSourceWidth)x\(lastKnownSourceHeight)", type: "MPV")
         }
@@ -3296,7 +3340,8 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             isHDR: isHDR,
             dynamicRangeText: rangeText,
             highBitDepthActive: highBitDepth,
-            subtitleCodec: subtitleCodec
+            subtitleCodec: subtitleCodec,
+            hardwareDecoder: d.hardwareDecoder
         )
     }
 
@@ -3479,7 +3524,20 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             DispatchQueue.main.async { [weak self] in self?.emitPositionUpdate(force: force) }
             return
         }
-        guard isRunning, !isAwaitingReadyForCurrentLoad else { return }
+        guard isRunning else { return }
+        if shouldFenceFreshIPadStartup {
+            let freshPosition = gpuRenderer.currentTime
+            if freshPosition.isFinite,
+               freshPosition > 0.01,
+               abs(freshPosition - positionAtLoadStart) > 0.01 {
+                hasConfirmedFreshPositionForCurrentLoad = true
+                completeFreshIPadStartupFenceIfNeeded(
+                    reason: "fresh-position",
+                    currentLoadConfirmed: true
+                )
+            }
+        }
+        guard !isAwaitingReadyForCurrentLoad else { return }
         // Apply a resume seek that was deferred until the demuxer published a real duration; a
         // seek against an unknown (0) duration is clamped and dropped, restarting at 0:00.
         if pendingInitialSeek != nil, gpuRenderer.duration > 0 {
@@ -3522,6 +3580,70 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         notifyTrackChangesIfNeeded(reason: "ready-\(reason)")
     }
 
+    /// A nil prepared seek is Eclipse's fresh-playback (0:00) signal. Keep the workaround scoped to
+    /// physical iPad behavior and the MoltenVK gpu-next bridge; iPhone, AVPlayer, and resumed
+    /// playback keep their existing startup timing. The sample-buffer bridge applies its own
+    /// first-frame version of the same fence below.
+    private var isPhysicalIPad: Bool {
+#if targetEnvironment(simulator)
+        return false
+#else
+        return UIDevice.current.userInterfaceIdiom == .pad
+#endif
+    }
+
+    private var shouldFenceFreshIPadStartup: Bool {
+        isPhysicalIPad
+            && currentURL != nil
+            && pendingInitialSeek == nil
+            && isAwaitingReadyForCurrentLoad
+    }
+
+    private func deferFreshIPadStartupIfNeeded(state: String) -> Bool {
+        guard shouldFenceFreshIPadStartup else { return false }
+        isLoading = true
+        hasDeferredFreshIPadPlaybackState = true
+        delegate?.renderer(self, didChangeLoading: true)
+        if !didLogFreshIPadStartupFence {
+            didLogFreshIPadStartupFence = true
+            Logger.shared.log(
+                "[MPVGPUPlayerBridge] deferring fresh iPad 0:00 startup state=\(state) until current-load video reconfigure or clock movement",
+                type: "MPV"
+            )
+        }
+        // FILE_LOADED invokes the kit's state callback before its reconfigure callback, but the
+        // bridge intentionally hops state handling to the next main-queue turn. Remembering the
+        // token-validated reconfigure closes that ordering window without trusting an old item.
+        if hasObservedVideoReconfigureForCurrentLoad {
+            completeFreshIPadStartupFenceIfNeeded(
+                reason: "video-reconfigure-observed",
+                currentLoadConfirmed: true
+            )
+        }
+        return true
+    }
+
+    private func completeFreshIPadStartupFenceIfNeeded(
+        reason: String,
+        currentLoadConfirmed: Bool
+    ) {
+        guard isPhysicalIPad,
+              currentURL != nil,
+              pendingInitialSeek == nil,
+              hasDeferredFreshIPadPlaybackState,
+              currentLoadConfirmed,
+              isAwaitingReadyForCurrentLoad else { return }
+        Logger.shared.log(
+            "[MPVGPUPlayerBridge] completing fresh iPad 0:00 startup fence reason=\(reason)",
+            type: "MPV"
+        )
+        isLoading = false
+        hasDeferredFreshIPadPlaybackState = false
+        delegate?.renderer(self, didChangeLoading: false)
+        delegate?.renderer(self, didChangePause: isPaused)
+        markReadyIfNeeded(reason: reason)
+    }
+
     private func notifyTrackChangesIfNeeded(reason: String) {
         let audioTracks = gpuRenderer.audioTracks()
         let subtitleTracks = gpuRenderer.subtitleTracks()
@@ -3562,14 +3684,18 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             isLoading = true
             delegate?.renderer(self, didChangeLoading: true)
         case .playing:
-            isLoading = false
             isPaused = false
+            if deferFreshIPadStartupIfNeeded(state: "playing") { return }
+            isLoading = false
             delegate?.renderer(self, didChangeLoading: false)
             delegate?.renderer(self, didChangePause: false)
             markReadyIfNeeded(reason: "playing")
         case .paused:
-            isLoading = false
             isPaused = true
+            if deferFreshIPadStartupIfNeeded(state: "paused") {
+                return
+            }
+            isLoading = false
             delegate?.renderer(self, didChangeLoading: false)
             delegate?.renderer(self, didChangePause: true)
             // A load can settle straight into .paused (e.g. PiP entered while paused) without
@@ -3683,6 +3809,9 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
     private var isReadyToSeek = false
     private var isLoading = false
     private var isAwaitingReadyForCurrentLoad = true
+    private var sampleBufferLoadGeneration = 0
+    private var didLogFreshIPadStartupFence = false
+    private var hasDeferredFreshIPadPlaybackState = false
     private var positionUpdateTimer: Timer?
     private var lastPositionUpdateAt: CFTimeInterval = 0
     private let positionUpdateInterval: CFTimeInterval = 0.5
@@ -3768,8 +3897,16 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
             }
         }
         sampleRenderer.onDiagnostics = { [weak self] diagnostics in
+            guard let self else { return }
+            let generation = self.sampleBufferLoadGeneration
             DispatchQueue.main.async {
-                self?.logDiagnosticsIfNeeded(diagnostics)
+                guard self.sampleBufferLoadGeneration == generation else { return }
+                self.logDiagnosticsIfNeeded(diagnostics)
+                let liveDiagnostics = self.sampleRenderer.diagnosticsSnapshot()
+                self.completeFreshIPadStartupFenceIfNeeded(
+                    reason: "first-frame",
+                    currentLoadConfirmed: liveDiagnostics.frameCount > 0
+                )
             }
         }
         try sampleRenderer.start()
@@ -3787,6 +3924,9 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
         isReadyToSeek = false
         isLoading = false
         isAwaitingReadyForCurrentLoad = true
+        sampleBufferLoadGeneration += 1
+        didLogFreshIPadStartupFence = false
+        hasDeferredFreshIPadPlaybackState = false
         lastPositionUpdateAt = 0
         lastLoggedSampleBufferState = ""
         lastLoggedDiagnosticsFrameCount = 0
@@ -3797,10 +3937,13 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
         currentURL = url
         currentPreset = preset
         currentHeaders = headers
+        sampleBufferLoadGeneration += 1
         applyPreset(preset)
         isReadyToSeek = false
         isLoading = true
         isAwaitingReadyForCurrentLoad = true
+        didLogFreshIPadStartupFence = false
+        hasDeferredFreshIPadPlaybackState = false
         delegate?.renderer(self, didChangeLoading: true)
         sampleRenderer.load(url, headers: headers)
         sampleRenderer.play()
@@ -3991,7 +4134,8 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
             isHDR: isHDR,
             dynamicRangeText: rangeText,
             highBitDepthActive: diag.highBitDepthRenderingActive,
-            subtitleCodec: subtitleCodec
+            subtitleCodec: subtitleCodec,
+            hardwareDecoder: nil
         )
     }
 
@@ -4126,7 +4270,15 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
             }
             return
         }
-        guard isRunning, !isAwaitingReadyForCurrentLoad else { return }
+        guard isRunning else { return }
+        if shouldFenceFreshIPadStartup {
+            let freshPosition = sampleRenderer.currentTime
+            completeFreshIPadStartupFenceIfNeeded(
+                reason: "fresh-position",
+                currentLoadConfirmed: freshPosition.isFinite && freshPosition > 0.01
+            )
+        }
+        guard !isAwaitingReadyForCurrentLoad else { return }
         // Apply a resume seek that was deferred because the duration wasn't known yet
         // (see applyPendingInitialSeekIfNeeded). Once the demuxer reports a real
         // duration the seek lands correctly instead of being dropped against 0.
@@ -4154,6 +4306,57 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
         emitPositionUpdate(force: true)
     }
 
+    private var isPhysicalIPad: Bool {
+#if targetEnvironment(simulator)
+        return false
+#else
+        return UIDevice.current.userInterfaceIdiom == .pad
+#endif
+    }
+
+    private var shouldFenceFreshIPadStartup: Bool {
+        isPhysicalIPad
+            && currentURL != nil
+            && pendingInitialSeek == nil
+            && isAwaitingReadyForCurrentLoad
+    }
+
+    private func deferFreshIPadStartupIfNeeded(state: String) -> Bool {
+        guard shouldFenceFreshIPadStartup else { return false }
+        isLoading = true
+        hasDeferredFreshIPadPlaybackState = true
+        delegate?.renderer(self, didChangeLoading: true)
+        if !didLogFreshIPadStartupFence {
+            didLogFreshIPadStartupFence = true
+            Logger.shared.log(
+                "[MPVSampleBufferPiPBridge] deferring fresh iPad 0:00 startup state=\(state) until first current-load frame or clock movement",
+                type: "MPV"
+            )
+        }
+        return true
+    }
+
+    private func completeFreshIPadStartupFenceIfNeeded(
+        reason: String,
+        currentLoadConfirmed: Bool
+    ) {
+        guard shouldFenceFreshIPadStartup,
+              hasDeferredFreshIPadPlaybackState,
+              currentLoadConfirmed else { return }
+        Logger.shared.log(
+            "[MPVSampleBufferPiPBridge] completing fresh iPad 0:00 startup fence reason=\(reason)",
+            type: "MPV"
+        )
+        isLoading = false
+        hasDeferredFreshIPadPlaybackState = false
+        delegate?.renderer(self, didChangeLoading: false)
+        delegate?.renderer(self, didChangePause: isPaused)
+        isReadyToSeek = true
+        isAwaitingReadyForCurrentLoad = false
+        applyPendingInitialSeekIfNeeded(reason: reason)
+        delegate?.renderer(self, didBecomeReadyToSeek: true)
+    }
+
     private func handleSampleBufferState(_ state: MPVMetalSampleBufferRendererState) {
         logStateIfNeeded(state)
         switch state {
@@ -4161,8 +4364,9 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
             isLoading = true
             delegate?.renderer(self, didChangeLoading: true)
         case .playing:
-            isLoading = false
             isPaused = false
+            if deferFreshIPadStartupIfNeeded(state: "playing") { return }
+            isLoading = false
             delegate?.renderer(self, didChangeLoading: false)
             delegate?.renderer(self, didChangePause: false)
             if !isReadyToSeek {
@@ -4172,8 +4376,9 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
                 delegate?.renderer(self, didBecomeReadyToSeek: true)
             }
         case .paused:
-            isLoading = false
             isPaused = true
+            if deferFreshIPadStartupIfNeeded(state: "paused") { return }
+            isLoading = false
             delegate?.renderer(self, didChangeLoading: false)
             delegate?.renderer(self, didChangePause: true)
             // A load can settle straight into .paused (e.g. entering PiP while
@@ -4187,6 +4392,7 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
                 delegate?.renderer(self, didBecomeReadyToSeek: true)
             }
         case .ready:
+            if deferFreshIPadStartupIfNeeded(state: "ready") { return }
             isLoading = false
             delegate?.renderer(self, didChangeLoading: false)
             if currentURL != nil, !isReadyToSeek {

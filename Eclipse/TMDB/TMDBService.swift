@@ -1082,24 +1082,68 @@ class TMDBService: ObservableObject {
         }
     }
 
+    func keywordIDs(for keywordNames: [String]) async -> [String: Int] {
+        let uniqueNames = Array(Set(keywordNames.filter { !$0.isEmpty })).sorted()
+        guard !uniqueNames.isEmpty else { return [:] }
+
+        return await withTaskGroup(of: (String, Int?).self) { group in
+            for keywordName in uniqueNames {
+                group.addTask { [weak self] in
+                    guard let self else { return (keywordName, nil) }
+                    let lookup = await self.fetchExactKeywordID(named: keywordName)
+                    return (keywordName, lookup.id)
+                }
+            }
+
+            var resolved: [String: Int] = [:]
+            for await (keywordName, id) in group {
+                if let id {
+                    resolved[keywordName] = id
+                }
+            }
+            return resolved
+        }
+    }
+
     // MARK: - Discover Media
     func discoverMedia(
         mediaType: String,
         genreIds: [Int] = [],
+        excludedGenreIds: [Int] = [],
+        keywordIds: [Int] = [],
+        excludedKeywordIds: [Int] = [],
         year: Int? = nil,
         originCountry: String? = nil,
+        originalLanguage: String? = nil,
+        sortBy: String = "popularity.desc",
+        minimumVoteCount: Int? = nil,
         page: Int = 1
     ) async throws -> [TMDBSearchResult] {
         let normalizedMediaType = mediaType == "tv" ? "tv" : "movie"
         var queryItems = [
             URLQueryItem(name: "page", value: "\(page)"),
-            URLQueryItem(name: "sort_by", value: "popularity.desc"),
+            URLQueryItem(name: "sort_by", value: sortBy),
             URLQueryItem(name: "include_adult", value: "false")
         ]
 
         if !genreIds.isEmpty {
             let genreValue = genreIds.map(String.init).joined(separator: ",")
             queryItems.append(URLQueryItem(name: "with_genres", value: genreValue))
+        }
+
+        if !excludedGenreIds.isEmpty {
+            let genreValue = excludedGenreIds.map(String.init).joined(separator: ",")
+            queryItems.append(URLQueryItem(name: "without_genres", value: genreValue))
+        }
+
+        if !keywordIds.isEmpty {
+            let keywordValue = keywordIds.map(String.init).joined(separator: ",")
+            queryItems.append(URLQueryItem(name: "with_keywords", value: keywordValue))
+        }
+
+        if !excludedKeywordIds.isEmpty {
+            let keywordValue = excludedKeywordIds.map(String.init).joined(separator: ",")
+            queryItems.append(URLQueryItem(name: "without_keywords", value: keywordValue))
         }
 
         if let year {
@@ -1109,6 +1153,14 @@ class TMDBService: ObservableObject {
 
         if let originCountry, !originCountry.isEmpty {
             queryItems.append(URLQueryItem(name: "with_origin_country", value: originCountry))
+        }
+
+        if let originalLanguage, !originalLanguage.isEmpty {
+            queryItems.append(URLQueryItem(name: "with_original_language", value: originalLanguage))
+        }
+
+        if let minimumVoteCount {
+            queryItems.append(URLQueryItem(name: "vote_count.gte", value: "\(minimumVoteCount)"))
         }
 
         let url = try tmdbURL(path: "/discover/\(normalizedMediaType)", queryItems: queryItems)

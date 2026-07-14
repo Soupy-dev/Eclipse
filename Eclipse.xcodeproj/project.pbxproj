@@ -20,6 +20,7 @@
 		TVBF00400000000000000040 /* PlaybackLaunchContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00400000000000000040 /* PlaybackLaunchContext.swift */; };
 		TVBF00410000000000000041 /* PlaybackLaunchContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00400000000000000040 /* PlaybackLaunchContext.swift */; };
 		TVBF00420000000000000042 /* AVPlayerResourceLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00410000000000000041 /* AVPlayerResourceLoader.swift */; };
+		TVBF00450000000000000045 /* AVPlayerResourceLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00410000000000000041 /* AVPlayerResourceLoader.swift */; };
 		TVBF00430000000000000043 /* NextEpisodeResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00420000000000000042 /* NextEpisodeResolver.swift */; };
 		TVBF00440000000000000044 /* NextEpisodeResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00420000000000000042 /* NextEpisodeResolver.swift */; };
 		TVBF00300000000000000030 /* PlaybackEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00300000000000000030 /* PlaybackEngine.swift */; };
@@ -206,6 +207,7 @@
 		DD2222012FD0000000DD2201 /* UserRatingManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD2222002FD0000000DD2200 /* UserRatingManager.swift */; };
 		DD2222032FD0000000DD2203 /* StarRatingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD2222022FD0000000DD2202 /* StarRatingView.swift */; };
 		AA8888812F10000000AA8881 /* ScheduleViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA8888802F10000000AA8880 /* ScheduleViewModel.swift */; };
+		A9F100022FF1000000A9F102 /* LocalNotificationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A9F100002FF1000000A9F100 /* LocalNotificationManager.swift */; };
 		FF1111112F30000000FF1111 /* AniListMangaService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF1111102F30000000FF1110 /* AniListMangaService.swift */; };
 		FF2222222F30000000FF2222 /* MangaCatalogManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF2222202F30000000FF2220 /* MangaCatalogManager.swift */; };
 		FF3333332F30000000FF3333 /* MangaHomeViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF3333302F30000000FF3330 /* MangaHomeViewModel.swift */; };
@@ -421,6 +423,7 @@
 		AA5555502F10000000AA5550 /* CatalogManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = CatalogManager.swift; sourceTree = "<group>"; };
 		AA7777702F10000000AA7770 /* HomeViewModel.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = HomeViewModel.swift; sourceTree = "<group>"; };
 		AA8888802F10000000AA8880 /* ScheduleViewModel.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ScheduleViewModel.swift; sourceTree = "<group>"; };
+		A9F100002FF1000000A9F100 /* LocalNotificationManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = LocalNotificationManager.swift; sourceTree = "<group>"; };
 		BB9999902F50000000BB9990 /* RecommendationEngine.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = RecommendationEngine.swift; sourceTree = "<group>"; };
 		DD2222002FD0000000DD2200 /* UserRatingManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = UserRatingManager.swift; sourceTree = "<group>"; };
 		AA6666602F10000000AA6660 /* CatalogsSettingsView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = CatalogsSettingsView.swift; sourceTree = "<group>"; };
@@ -1118,6 +1121,7 @@
 				AA5555502F10000000AA5550 /* CatalogManager.swift */,
 				AA7777702F10000000AA7770 /* HomeViewModel.swift */,
 				AA8888802F10000000AA8880 /* ScheduleViewModel.swift */,
+				A9F100002FF1000000A9F100 /* LocalNotificationManager.swift */,
 				BB9999902F50000000BB9990 /* RecommendationEngine.swift */,
 				DD2222002FD0000000DD2200 /* UserRatingManager.swift */,
 				CC1111002FC0000000CC1100 /* WidgetMetadata.swift */,
@@ -1268,7 +1272,7 @@
 				13A46CFB2EF5943400423BC6 /* XCRemoteSwiftPackageReference "FakeWebKit" */,
 				13A46CFE2EF5944C00423BC6 /* XCRemoteSwiftPackageReference "Kingfisher" */,
 				13A46D012EF5945700423BC6 /* XCRemoteSwiftPackageReference "SoraCore" */,
-				136C25C42EFE950300E37A6E /* XCRemoteSwiftPackageReference "MPVKit" */,
+				136C25C42EFE950300E37A6E /* XCLocalSwiftPackageReference "MPVKit" */,
 				C0A5A0032FD1000000C0A503 /* XCRemoteSwiftPackageReference "plcrashreporter" */,
 				AD0000202FD9000000AD0020 /* XCRemoteSwiftPackageReference "AidokuRunner" */,
 				AD0000212FD9000000AD0021 /* XCRemoteSwiftPackageReference "ZIPFoundation" */,
@@ -1470,6 +1474,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				TVBF00450000000000000045 /* AVPlayerResourceLoader.swift in Sources */,
 				TVBF00400000000000000040 /* PlaybackLaunchContext.swift in Sources */,
 				TVBF00430000000000000043 /* NextEpisodeResolver.swift in Sources */,
 				TVBF00300000000000000030 /* PlaybackEngine.swift in Sources */,
@@ -1588,6 +1593,7 @@
 				AA6666662F10000000AA6666 /* CatalogsSettingsView.swift in Sources */,
 				AA7777712F10000000AA7771 /* HomeViewModel.swift in Sources */,
 				AA8888812F10000000AA8881 /* ScheduleViewModel.swift in Sources */,
+				A9F100022FF1000000A9F102 /* LocalNotificationManager.swift in Sources */,
 				BB9999912F50000000BB9991 /* RecommendationEngine.swift in Sources */,
 				DD2222012FD0000000DD2201 /* UserRatingManager.swift in Sources */,
 				DD2222032FD0000000DD2203 /* StarRatingView.swift in Sources */,
@@ -2091,15 +2097,14 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		136C25C42EFE950300E37A6E /* XCRemoteSwiftPackageReference "MPVKit" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/Soupy-dev/MPVKit";
-			requirement = {
-				branch = eclipse-mpv-metal;
-				kind = branch;
-			};
+/* Begin XCLocalSwiftPackageReference section */
+		136C25C42EFE950300E37A6E /* XCLocalSwiftPackageReference "MPVKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../MPVKit-ipad-stability;
 		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCRemoteSwiftPackageReference section */
 		13A46CFB2EF5943400423BC6 /* XCRemoteSwiftPackageReference "FakeWebKit" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/undeaDD/FakeWebKit";
@@ -2173,7 +2178,7 @@
 		};
 		136C25C52EFE950300E37A6E /* MPVKit-GPL */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 136C25C42EFE950300E37A6E /* XCRemoteSwiftPackageReference "MPVKit" */;
+			package = 136C25C42EFE950300E37A6E /* XCLocalSwiftPackageReference "MPVKit" */;
 			productName = "MPVKit-GPL";
 		};
 		13A46CFC2EF5943400423BC6 /* FakeWebKit */ = {

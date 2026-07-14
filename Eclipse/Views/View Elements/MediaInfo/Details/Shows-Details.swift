@@ -81,6 +81,39 @@ struct TVShowDetailsSection: View {
     }
 }
 
+#if os(iOS)
+private struct ShowDetailsWindowSceneReader: UIViewRepresentable {
+    let onResolve: (UIWindowScene) -> Void
+
+    func makeUIView(context: Context) -> ProbeView {
+        let view = ProbeView()
+        view.onResolve = onResolve
+        return view
+    }
+
+    func updateUIView(_ uiView: ProbeView, context: Context) {
+        uiView.onResolve = onResolve
+        uiView.resolveIfAttached()
+    }
+
+    final class ProbeView: UIView {
+        var onResolve: ((UIWindowScene) -> Void)?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            resolveIfAttached()
+        }
+
+        func resolveIfAttached() {
+            guard let scene = window?.windowScene else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.onResolve?(scene)
+            }
+        }
+    }
+}
+#endif
+
 struct AnimeEpisodeContextIndex {
     struct Key: Hashable {
         let seasonNumber: Int
@@ -154,16 +187,20 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     var animeSeasonRomajiTitles: [Int: String] = [:]
     var animeSeasonAniListIds: [Int: Int] = [:]
     var animeSeasonKitsuIds: [Int: Int] = [:]
+    let nextEpisodeNotificationRoute: UUID
     var showsMetadataDetails: Bool = true
     var showsInsertedContent: Bool = true
+    var defersInitialSeasonLoad = false
     let tmdbService: TMDBService
     @ViewBuilder let insertedContent: () -> InsertedContent
     
     @State private var isLoadingSeason = false
     @State private var showingSearchResults = false
     @State private var selectedEpisodePlaybackContext: EpisodePlaybackContext?
+    @StateObject private var autoModeRetrySession = AutoModeRetrySession()
 #if !os(tvOS)
     @State private var showingDownloadSheet = false
+    @State private var presentationSceneIdentifier: String?
     @State private var downloadEpisode: TMDBEpisode? = nil
     @State private var downloadEpisodePlaybackContext: EpisodePlaybackContext?
     @State private var downloadAllQueue: [TMDBEpisode] = []
@@ -188,7 +225,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
 #if !os(tvOS)
     private let downloadManager = DownloadManager.shared
 #endif
-    @AppStorage("horizontalEpisodeList") private var horizontalEpisodeList: Bool = false
+    @AppStorage(MediaDetailPlatformDefaults.horizontalEpisodeListKey) private var horizontalEpisodeList = MediaDetailPlatformDefaults.prefersHorizontalEpisodes
 #if !os(tvOS)
     @AppStorage("preferDownloadedMedia") private var preferDownloadedMedia: Bool = false
 #endif
@@ -197,7 +234,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     }
     
     private var useSeasonMenu: Bool {
-        return UserDefaults.standard.bool(forKey: "seasonMenu")
+        MediaDetailPlatformDefaults.usesCompactSeasonMenu()
     }
 
     private func shouldShowSeasonSwitcher(for seasons: [TMDBSeason]) -> Bool {
@@ -215,6 +252,15 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
 
     private var activeSeasonTitle: String? {
         specialEpisodeContext?.title ?? currentSeasonTitle
+    }
+
+    private var autoModeTargetToken: String {
+        AutoModeMediaTargetToken.make(
+            tmdbID: tvShow?.id ?? 0,
+            isMovie: false,
+            episode: selectedEpisodeForSearch,
+            playbackContext: selectedEpisodePlaybackContext
+        )
     }
 
     private struct EpisodeRenderItem: Identifiable {
@@ -398,9 +444,22 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 EmptyView()
             }
         }
+#if os(iOS)
+        .background(
+            ShowDetailsWindowSceneReader { scene in
+                let identifier = scene.session.persistentIdentifier
+                if presentationSceneIdentifier != identifier {
+                    presentationSceneIdentifier = identifier
+                }
+            }
+            .frame(width: 0, height: 0)
+        )
+#endif
         .onAppear {
             if let tvShow = tvShow, let selectedSeason = selectedSeason {
-                ensureSeasonDetailsLoaded(tvShowId: tvShow.id, season: selectedSeason, reason: "appear")
+                if !defersInitialSeasonLoad {
+                    ensureSeasonDetailsLoaded(tvShowId: tvShow.id, season: selectedSeason, reason: "appear")
+                }
                 Task {
                     let romaji = await tmdbService.getRomajiTitle(for: "tv", id: tvShow.id)
                     await MainActor.run {
@@ -408,6 +467,27 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                     }
                 }
             }
+        }
+        .onChangeComp(of: defersInitialSeasonLoad) { _, isDeferred in
+            guard !isDeferred,
+                  let tvShow,
+                  let selectedSeason else { return }
+            ensureSeasonDetailsLoaded(
+                tvShowId: tvShow.id,
+                season: selectedSeason,
+                reason: "notification-route-finished"
+            )
+        }
+        .onChangeComp(of: autoModeTargetToken) { _, newToken in
+            if autoModeRetrySession.targetToken != newToken {
+                autoModeRetrySession.reset(targetToken: newToken)
+            }
+        }
+        .onChangeComp(of: selectedEpisodeForSearch?.id) { _, _ in
+            revealSelectedEpisodePageIfNeeded()
+        }
+        .onChangeComp(of: activeSeasonDetail?.id) { _, _ in
+            revealSelectedEpisodePageIfNeeded()
         }
         .onDisappear {
             seasonLoadGeneration += 1
@@ -420,6 +500,15 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         }
 #endif
         .sheet(isPresented: $showingSearchResults) {
+            let recoveryTargetToken = AutoModeMediaTargetToken.make(
+                tmdbID: tvShow?.id ?? 0,
+                isMovie: false,
+                episode: selectedEpisodeForSearch,
+                playbackContext: selectedEpisodePlaybackContext
+            )
+            let recoveryIdentity = autoModeRetrySession.recoveryIdentity(for: recoveryTargetToken)
+            let recoveryEpisode = selectedEpisodeForSearch
+            let recoveryPlaybackContext = selectedEpisodePlaybackContext
             ModulesSearchResultsSheet(
                 mediaTitle: getSearchTitle(),
                 seasonTitleOverride: activeSeasonTitle,
@@ -430,12 +519,26 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 tmdbId: tvShow?.id ?? 0,
                 animeSeasonTitle: isAnime ? activeSeasonTitle : nil,
                 posterPath: specialEpisodeContext?.posterUrl ?? tvShow?.posterPath,
+                originalAudioLanguage: tvShow?.originalLanguage,
                 imdbId: tvShow?.externalIds?.imdbId,
                 originalTMDBSeasonNumber: selectedEpisodePlaybackContext?.resolvedTMDBSeasonNumber ?? originalTMDBNumbers?.season,
                 originalTMDBEpisodeNumber: selectedEpisodePlaybackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBNumbers?.episode,
                 specialTitleOnlySearch: selectedEpisodePlaybackContext?.titleOnlySearch ?? false,
                 episodePlaybackContext: selectedEpisodePlaybackContext,
                 autoModeOnly: UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"),
+                autoModeRetrySession: autoModeRetrySession,
+                autoModeRecoveryIdentity: recoveryIdentity,
+                onAutoModePlaybackFailure: { report, identity in
+                    Task { @MainActor in
+                        handleAutoModePlaybackFailure(
+                            report,
+                            identity: identity,
+                            episode: recoveryEpisode,
+                            playbackContext: recoveryPlaybackContext
+                        )
+                    }
+                },
+                nextEpisodeNotificationRoute: nextEpisodeNotificationRoute,
                 isAnimationGenre16: tvShow?.genres.contains { $0.id == 16 } ?? false
             )
         }
@@ -474,6 +577,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 tmdbId: tvShow?.id ?? 0,
                 animeSeasonTitle: isAnime ? activeSeasonTitle : nil,
                 posterPath: downloadAllSpecialContext?.posterUrl ?? specialEpisodeContext?.posterUrl ?? tvShow?.posterPath,
+                originalAudioLanguage: tvShow?.originalLanguage,
                 imdbId: tvShow?.externalIds?.imdbId,
                 originalTMDBSeasonNumber: downloadEpisodePlaybackContext?.resolvedTMDBSeasonNumber ?? selectedEpisodePlaybackContext?.resolvedTMDBSeasonNumber ?? originalTMDBNumbers?.season,
                 originalTMDBEpisodeNumber: downloadEpisodePlaybackContext?.resolvedTMDBEpisodeNumber ?? selectedEpisodePlaybackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBNumbers?.episode,
@@ -722,18 +826,53 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             if let detail = activeSeasonDetail {
                 let episodeItems = visibleEpisodeRenderItems(for: detail)
                 if horizontalEpisodeList {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        LazyHStack(alignment: .top, spacing: 15) {
-                            ForEach(episodeItems) { item in
-                                createEpisodeCell(episode: item.episode, index: item.index, playbackContext: playbackContext(for: item.episode))
+                    ScrollViewReader { proxy in
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            LazyHStack(alignment: .top, spacing: 15) {
+                                ForEach(episodeItems) { item in
+                                    createEpisodeCell(episode: item.episode, index: item.index, playbackContext: playbackContext(for: item.episode))
+                                        .id(episodeAnchor(item.episode))
+                                }
+                            }
+                        }
+                        .onChangeComp(of: selectedEpisodeForSearch?.id) { _, _ in
+                            revealSelectedEpisodePageIfNeeded()
+                            guard let selectedEpisodeForSearch else { return }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                                withAnimation(.easeInOut(duration: 0.32)) {
+                                    proxy.scrollTo(episodeAnchor(selectedEpisodeForSearch), anchor: .center)
+                                }
                             }
                         }
                     }
                     .padding(.horizontal)
+                } else if isIPad {
+                    LazyVGrid(
+                        columns: [
+                            GridItem(
+                                .adaptive(minimum: 300, maximum: 420),
+                                spacing: 22,
+                                alignment: .top
+                            )
+                        ],
+                        alignment: .leading,
+                        spacing: 28
+                    ) {
+                        ForEach(episodeItems) { item in
+                            createEpisodeCell(
+                                episode: item.episode,
+                                index: item.index,
+                                playbackContext: playbackContext(for: item.episode)
+                            )
+                            .id(episodeAnchor(item.episode))
+                        }
+                    }
+                    .padding(.horizontal, 24)
                 } else {
                     LazyVStack(spacing: 15) {
                         ForEach(episodeItems) { item in
                             createEpisodeCell(episode: item.episode, index: item.index, playbackContext: playbackContext(for: item.episode))
+                                .id(episodeAnchor(item.episode))
                         }
                     }
                     .padding(.horizontal)
@@ -893,67 +1032,78 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         )
     }
 
-    private func playDownloadedItem(_ item: DownloadItem) {
+    private func playDownloadedItem(_ item: DownloadItem, from presenter: UIViewController? = nil) {
         guard let fileURL = downloadManager.localFileURL(for: item) else {
             Logger.shared.log("Downloaded file not found for: \(item.id)", type: "Download")
             return
         }
+        guard let originatingPresenter = presenter ?? downloadedPlaybackPresenter() else {
+            Logger.shared.log("Downloaded playback has no presenter in its originating scene", type: "Player")
+            return
+        }
 
-        let inAppRaw = Settings.normalizedInAppPlayer(UserDefaults.standard.string(forKey: "inAppPlayer"))
-        let subtitleArray: [String]? = downloadManager.localSubtitleURL(for: item).map { [$0.absoluteString] }
-
-        if inAppRaw == "mpv" {
-            let preset = PlayerPreset.presets.first
-            let pvc = PlayerViewController(
-                url: fileURL,
-                preset: preset ?? PlayerPreset(id: .sdrRec709, title: "Default", summary: "", stream: nil, commands: []),
-                headers: [:],
-                subtitles: subtitleArray,
-                mediaInfo: item.mediaInfo
-            )
-            pvc.isAnimeHint = item.isAnime || item.episodePlaybackContext?.hasAnimeMediaId == true
-            pvc.isAnimationContentHint = tvShow?.genres.contains { $0.id == 16 }
-            pvc.episodePlaybackContext = item.episodePlaybackContext
-            pvc.originalTMDBSeasonNumber = item.episodePlaybackContext?.resolvedTMDBSeasonNumber
-            pvc.originalTMDBEpisodeNumber = item.episodePlaybackContext?.resolvedTMDBEpisodeNumber
-            pvc.modalPresentationStyle = .fullScreen
-
-            pvc.onRequestNextEpisode = { seasonNumber, episodeNumber in
-                guard let nextItem = nextDownloadedEpisode(
-                    for: item.tmdbId,
-                    requestedSeasonNumber: seasonNumber,
-                    requestedEpisodeNumber: episodeNumber,
-                    currentItemId: item.id
-                ) else {
-                    Logger.shared.log("NextEpisode: No downloaded next episode found for tmdbId=\(item.tmdbId) after \(item.id)", type: "Player")
-                    return
-                }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    playDownloadedItem(nextItem)
-                }
+        let subtitles = downloadManager.localSubtitleURL(for: item).map { [$0.absoluteString] } ?? []
+        let nextEpisodeRequest: (_ seasonNumber: Int, _ episodeNumber: Int) -> Void = { [weak originatingPresenter] seasonNumber, episodeNumber in
+            guard let originatingPresenter else { return }
+            guard let nextItem = nextDownloadedEpisode(
+                for: item.tmdbId,
+                requestedSeasonNumber: seasonNumber,
+                requestedEpisodeNumber: episodeNumber,
+                currentItemId: item.id,
+                allowNextAvailableFallback: false
+            ) else {
+                Logger.shared.log("NextEpisode: No downloaded next episode found for tmdbId=\(item.tmdbId) after \(item.id)", type: "Player")
+                return
             }
-
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let rootVC = windowScene.windows.first?.rootViewController,
-               let topmostVC = rootVC.topmostViewController() as UIViewController? {
-                topmostVC.present(pvc, animated: true, completion: nil)
-            }
-        } else {
-            let playerVC = NormalPlayer()
-            let item2 = AVPlayerItem(url: fileURL)
-            playerVC.player = AVPlayer(playerItem: item2)
-            playerVC.mediaInfo = item.mediaInfo
-            playerVC.episodePlaybackContext = item.episodePlaybackContext
-            playerVC.modalPresentationStyle = .fullScreen
-
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let rootVC = windowScene.windows.first?.rootViewController,
-               let topmostVC = rootVC.topmostViewController() as UIViewController? {
-                topmostVC.present(playerVC, animated: true) {
-                    playerVC.playAtDefaultSpeed()
-                }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                self.playDownloadedItem(nextItem, from: originatingPresenter)
             }
         }
+        let localNextEpisode = nextDownloadedEpisode(
+            for: item.tmdbId,
+            requestedSeasonNumber: item.seasonNumber ?? 0,
+            requestedEpisodeNumber: (item.episodeNumber ?? 0) + 1,
+            currentItemId: item.id
+        )
+        let request = PlaybackRequest(
+            url: fileURL,
+            subtitles: subtitles,
+            mediaInfo: item.mediaInfo,
+            episodePlaybackContext: item.episodePlaybackContext,
+            title: item.playerTitleBase,
+            subtitle: item.displayTitle,
+            artworkURL: item.posterURL.flatMap(URL.init(string:)),
+            isAnime: item.isAnime || item.episodePlaybackContext?.hasAnimeMediaId == true,
+            isAnimation: tvShow?.genres.contains { $0.id == 16 } ?? false,
+            originalTMDBSeasonNumber: item.episodePlaybackContext?.resolvedTMDBSeasonNumber,
+            originalTMDBEpisodeNumber: item.episodePlaybackContext?.resolvedTMDBEpisodeNumber,
+            onRequestNextEpisode: nextEpisodeRequest,
+            localNextEpisodeFallback: PlaybackEpisodeCoordinate(
+                seasonNumber: localNextEpisode?.seasonNumber,
+                episodeNumber: localNextEpisode?.episodeNumber
+            )
+        )
+        PlaybackCoordinator.shared.present(request, from: originatingPresenter)
+    }
+
+    @MainActor
+    private func downloadedPlaybackPresenter() -> UIViewController? {
+        let activeScenes = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .filter { $0.activationState == .foregroundActive }
+        let scene: UIWindowScene?
+        if let presentationSceneIdentifier {
+            scene = activeScenes.first(where: {
+                $0.session.persistentIdentifier == presentationSceneIdentifier
+            })
+        } else {
+            scene = activeScenes.count == 1 ? activeScenes.first : nil
+        }
+        let window = scene?.windows.first(where: { $0.isKeyWindow && $0.rootViewController != nil })
+            ?? scene?.windows.first(where: {
+                !$0.isHidden && $0.alpha > 0 && $0.windowLevel == .normal && $0.rootViewController != nil
+            })
+        return window?.rootViewController?.topmostViewController()
     }
 #endif
 
@@ -987,12 +1137,31 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         return Array(items[page.startIndex..<page.endIndex])
     }
 
+    private func revealSelectedEpisodePageIfNeeded() {
+        guard let detail = activeSeasonDetail,
+              let selectedEpisodeForSearch,
+              let index = detail.episodes.firstIndex(where: {
+                  $0.seasonNumber == selectedEpisodeForSearch.seasonNumber
+                      && $0.episodeNumber == selectedEpisodeForSearch.episodeNumber
+              }) else { return }
+        let pageStart = (index / episodePageSize) * episodePageSize
+        let key = episodePageKey(for: detail)
+        if selectedEpisodePageStartByKey[key] != pageStart {
+            selectedEpisodePageStartByKey[key] = pageStart
+        }
+    }
+
+    private func episodeAnchor(_ episode: TMDBEpisode) -> String {
+        MediaDetailEpisodeAnchor.id(for: episode)
+    }
+
 #if !os(tvOS)
     private func nextDownloadedEpisode(
         for tmdbId: Int,
         requestedSeasonNumber: Int,
         requestedEpisodeNumber: Int,
-        currentItemId: String
+        currentItemId: String,
+        allowNextAvailableFallback: Bool = true
     ) -> DownloadItem? {
         let episodes = downloadManager.completedDownloads
             .filter {
@@ -1014,6 +1183,8 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         }) {
             return requested
         }
+
+        guard allowNextAvailableFallback else { return nil }
 
         guard let currentIndex = episodes.firstIndex(where: { $0.id == currentItemId }) else { return nil }
         let nextIndex = episodes.index(after: currentIndex)
@@ -1046,9 +1217,38 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             showingNoServicesAlert = true
             return
         }
-        
+
+        selectedEpisodePlaybackContext = playbackContext
+        let targetToken = AutoModeMediaTargetToken.make(
+            tmdbID: tvShow?.id ?? 0,
+            isMovie: false,
+            episode: episode,
+            playbackContext: playbackContext
+        )
+        autoModeRetrySession.reset(targetToken: targetToken)
+        showingSearchResults = true
+    }
+
+    @MainActor
+    private func handleAutoModePlaybackFailure(
+        _ report: PlaybackFailureReport,
+        identity: AutoModePlaybackRecoveryIdentity,
+        episode: TMDBEpisode?,
+        playbackContext: EpisodePlaybackContext?
+    ) {
+        guard report.context.autoMode,
+              autoModeRetrySession.matches(identity),
+              selectedEpisodeForSearch?.seasonNumber == episode?.seasonNumber,
+              selectedEpisodeForSearch?.episodeNumber == episode?.episodeNumber else {
+            return
+        }
+        autoModeRetrySession.recordPlaybackFailure(report)
         selectedEpisodePlaybackContext = playbackContext
         showingSearchResults = true
+        Logger.shared.log(
+            "TVShowSeasonsSection: Auto Mode playback failed source=\(report.context.sourceName) retry=\(autoModeRetrySession.retryCount); reopening remaining sources",
+            type: "Player"
+        )
     }
     
     private func markAsWatched(episode: TMDBEpisode, playbackContext: EpisodePlaybackContext? = nil) {
@@ -1095,8 +1295,8 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
         guard seasonDetail?.seasonNumber != season.seasonNumber || seasonDetail?.id != season.id else {
             currentSeasonTitle = isAnime ? (animeSeasonTitles?[season.seasonNumber] ?? season.name) : nil
             isLoadingSeason = false
-            if specialEpisodeContext == nil, let firstEpisode = seasonDetail?.episodes.first {
-                selectedEpisodeForSearch = firstEpisode
+            if specialEpisodeContext == nil, let detail = seasonDetail {
+                selectedEpisodeForSearch = preferredEpisodeAfterSeasonLoad(detail)
             }
             return
         }
@@ -1150,8 +1350,8 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                         self.seasonDetail = detail
                         self.isLoadingSeason = false
                         self.seasonLoadTask = nil
-                        if self.specialEpisodeContext == nil, let firstEpisode = detail.episodes.first {
-                            self.selectedEpisodeForSearch = firstEpisode
+                        if self.specialEpisodeContext == nil {
+                            self.selectedEpisodeForSearch = self.preferredEpisodeAfterSeasonLoad(detail)
                         }
                     }
                 } else {
@@ -1164,8 +1364,8 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                         self.seasonDetail = detail
                         self.isLoadingSeason = false
                         self.seasonLoadTask = nil
-                        if self.specialEpisodeContext == nil, let firstEpisode = detail.episodes.first {
-                            self.selectedEpisodeForSearch = firstEpisode
+                        if self.specialEpisodeContext == nil {
+                            self.selectedEpisodeForSearch = self.preferredEpisodeAfterSeasonLoad(detail)
                         }
                     }
                 }
@@ -1183,6 +1383,17 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 }
             }
         }
+    }
+
+    private func preferredEpisodeAfterSeasonLoad(_ detail: TMDBSeasonDetail) -> TMDBEpisode? {
+        if let selectedEpisodeForSearch,
+           selectedEpisodeForSearch.seasonNumber == detail.seasonNumber,
+           let matching = detail.episodes.first(where: {
+               $0.episodeNumber == selectedEpisodeForSearch.episodeNumber
+           }) {
+            return matching
+        }
+        return detail.episodes.first
     }
 
     private func ensureSeasonDetailsLoaded(tvShowId: Int, season: TMDBSeason, reason: String) {

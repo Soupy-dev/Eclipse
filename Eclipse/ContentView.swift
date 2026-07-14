@@ -14,15 +14,21 @@ struct ContentView: View {
     @State private var showingSettings = false
     @State private var showingReleaseAlert = false
     @State private var showingAniListFallbackAlert = false
+    @State private var playerInterfaceCoverage = PlayerInterfaceCoverageState()
 
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openURL) private var openURL
+    @Environment(\.eclipseWindowSceneSessionIdentifier) private var windowSceneSessionIdentifier
     @Namespace private var heroNamespace
     private let onStartupReady: () -> Void
     
     init(onStartupReady: @escaping () -> Void = {}) {
         self.onStartupReady = onStartupReady
         configureTabBarAppearance()
+    }
+
+    private var playerCoversInterface: Bool {
+        playerInterfaceCoverage.isCovered(in: windowSceneSessionIdentifier)
     }
     
     private func configureTabBarAppearance() {
@@ -113,20 +119,46 @@ struct ContentView: View {
         .onChange(of: scenePhase) { newPhase in
             publishScenePhase(newPhase)
             if newPhase == .active {
+#if !os(tvOS)
+                openPendingNotificationRouteIfNeeded()
+#endif
                 Task { await runBackgroundAutoChecks() }
             }
         }
         .onAppear {
+            updatePerformanceSurface()
             publishScenePhase(scenePhase)
             presentUpdateAlertIfNeeded()
+#if !os(tvOS)
+            openPendingNotificationRouteIfNeeded()
+#endif
         }
+#if !os(tvOS)
+        .onChange(of: windowSceneSessionIdentifier) { _ in
+            openPendingNotificationRouteIfNeeded()
+        }
+#endif
         .onChange(of: githubReleaseShowAlertPending) { pending in
             if pending {
                 presentUpdateAlertIfNeeded()
             }
         }
+        .onChange(of: selectedTab) { _ in
+            updatePerformanceSurface()
+        }
+        .onChange(of: showingSettings) { _ in
+            updatePerformanceSurface()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .playerInterfaceCoverageDidChange)) { notification in
+            playerInterfaceCoverage.consume(notification)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .animeMetadataDidSwitchToMALFallback)) { _ in
             showingAniListFallbackAlert = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openScheduleFromLocalNotification)) { _ in
+#if !os(tvOS)
+            openPendingNotificationRouteIfNeeded()
+#endif
         }
         .alert("Update Available", isPresented: $showingReleaseAlert) {
             Button("Later", role: .cancel) {
@@ -154,11 +186,10 @@ struct ContentView: View {
     }
 
     private func runBackgroundAutoChecks() async {
-        // Give Home's first user-visible catalog request priority over hourly
-        // service maintenance and daily source probes. These checks retain
-        // their existing eligibility intervals and still run on foreground.
+        // Let first render and the splash transition settle before hourly service
+        // maintenance and daily source probes compete for CPU/network slots.
         do {
-            try await Task.sleep(nanoseconds: 2_000_000_000)
+            try await Task.sleep(nanoseconds: 6_000_000_000)
         } catch {
             return
         }
@@ -186,13 +217,16 @@ struct ContentView: View {
         githubReleaseShowAlertPending = false
         showingReleaseAlert = false
     }
-    
+
 #if compiler(>=6.0)
     @available(iOS 26.0, tvOS 26.0, *)
     private var modernTabView: some View {
         TabView(selection: $selectedTab) {
             Tab("Home", systemImage: "house.fill", value: AppTab.home) {
-                HomeView(onStartupReady: onStartupReady)
+                HomeView(
+                    isActive: selectedTab == .home && !showingSettings && !playerCoversInterface,
+                    onStartupReady: onStartupReady
+                )
             }
             
             Tab("Schedule", systemImage: "calendar", value: AppTab.schedule) {
@@ -224,7 +258,8 @@ struct ContentView: View {
         ZStack {
             EclipseTheme.shared.backgroundBase
                 .ignoresSafeArea()
-            
+
+#if os(tvOS)
             if #available(iOS 16.0, *) {
                 NavigationStack {
                     SettingsView(onRootDismiss: dismissSettings)
@@ -255,6 +290,9 @@ struct ContentView: View {
                 }
                 .navigationViewStyle(StackNavigationViewStyle())
             }
+#else
+            SettingsView(onRootDismiss: dismissSettings)
+#endif
         }
         .preferredColorScheme(.dark)
     }
@@ -264,6 +302,17 @@ struct ContentView: View {
             showingSettings = false
         }
     }
+
+#if !os(tvOS)
+    private func openPendingNotificationRouteIfNeeded() {
+        guard scenePhase == .active,
+              LocalNotificationManager.shared.shouldHandlePendingNavigation(
+                inSceneSessionIdentifier: windowSceneSessionIdentifier
+              ) else { return }
+        showingSettings = false
+        selectedTab = .schedule
+    }
+#endif
 
     private func publishScenePhase(_ phase: ScenePhase) {
         let phaseName: String
@@ -284,9 +333,26 @@ struct ContentView: View {
         )
     }
 
+    private func updatePerformanceSurface() {
+        if showingSettings {
+            AppPerformanceRuntimeContext.shared.setSurface("settings")
+            return
+        }
+        switch selectedTab {
+        case .home: AppPerformanceRuntimeContext.shared.setSurface("home")
+        case .schedule: AppPerformanceRuntimeContext.shared.setSurface("schedule")
+        case .downloads: AppPerformanceRuntimeContext.shared.setSurface("downloads")
+        case .library: AppPerformanceRuntimeContext.shared.setSurface("library")
+        case .search: AppPerformanceRuntimeContext.shared.setSurface("search")
+        }
+    }
+
     private var olderTabView: some View {
         TabView(selection: $selectedTab) {
-            HomeView(onStartupReady: onStartupReady)
+            HomeView(
+                isActive: selectedTab == .home && !showingSettings && !playerCoversInterface,
+                onStartupReady: onStartupReady
+            )
                 .tabItem {
                     Image(systemName: "house.fill")
                     Text("Home")
@@ -327,6 +393,176 @@ struct ContentView: View {
     }
 }
 
+struct AppPerformanceOverlayPresentation: ViewModifier {
+    let startupReady: Bool
+    let homeHydrationComplete: Bool
+    let splashVisible: Bool
+    let appMode: String
+    let modeSwitchActive: Bool
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.eclipseWindowSceneSessionIdentifier) private var windowSceneSessionIdentifier
+    @AppStorage(AppPerformanceOverlaySettings.enabledKey) private var overlayEnabled = AppPerformanceOverlaySettings.defaultEnabled
+    @AppStorage(HomeAnimatedBackgroundSettings.enabledKey) private var animatedBackgroundEnabled = HomeAnimatedBackgroundSettings.defaultEnabled
+    @AppStorage(HomeAnimatedBackgroundQuality.storageKey) private var animatedBackgroundQuality = HomeAnimatedBackgroundQuality.defaultValue.rawValue
+    @AppStorage(HomeAnimatedBackgroundFrameRate.storageKey) private var animatedBackgroundFrameRate = HomeAnimatedBackgroundFrameRate.defaultValue.rawValue
+    @StateObject private var monitor = AppPerformanceMonitor()
+    @State private var playerInterfaceCoverage = PlayerInterfaceCoverageState()
+
+    private var playerCoversInterface: Bool {
+        playerInterfaceCoverage.isCovered(in: windowSceneSessionIdentifier)
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .topTrailing) {
+                if overlayEnabled && !playerCoversInterface {
+                    AppPerformanceOverlay(
+                        snapshot: monitor.snapshot,
+                        backgroundQuality: motionText
+                    )
+                    .padding(.top, 56)
+                    .padding(.trailing, 12)
+                    .allowsHitTesting(false)
+                    .zIndex(10_000)
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .playerInterfaceCoverageDidChange)) { notification in
+                playerInterfaceCoverage.consume(notification)
+            }
+            .task(id: monitoringStateID) {
+                guard shouldSample else {
+                    monitor.stop(context: performanceLogContext, reason: stopReason)
+                    return
+                }
+                let sessionID = monitor.beginSampling(context: performanceLogContext)
+                while !Task.isCancelled {
+                    do {
+                        try await Task.sleep(nanoseconds: 1_000_000_000)
+                    } catch {
+                        break
+                    }
+                    guard !Task.isCancelled else { break }
+                    monitor.sampleNow(context: performanceLogContext, sessionID: sessionID)
+                }
+                monitor.stop(
+                    sessionID: sessionID,
+                    context: performanceLogContext,
+                    reason: "task-cancelled"
+                )
+            }
+    }
+
+    private var motionText: String {
+        guard animatedBackgroundEnabled else { return "Off" }
+        guard !reduceMotion else { return "Reduced" }
+        let quality = HomeAnimatedBackgroundQuality.resolved(animatedBackgroundQuality).displayName
+        let frameRate = HomeAnimatedBackgroundFrameRate.resolved(animatedBackgroundFrameRate).displayName
+        return "\(quality) · \(frameRate)"
+    }
+
+    private var shouldSample: Bool {
+        overlayEnabled && scenePhase == .active && !playerCoversInterface
+    }
+
+    private var performanceLogContext: AppPerformanceLogContext {
+        AppPerformanceLogContext(
+            surface: AppPerformanceRuntimeContext.shared.surface,
+            appMode: appMode,
+            startupPhase: startupReady ? "ready" : "hydrating",
+            homeHydrationComplete: homeHydrationComplete,
+            splashVisible: splashVisible,
+            motion: motionText.lowercased(),
+            reduceMotion: reduceMotion,
+            modeSwitchActive: modeSwitchActive
+        )
+    }
+
+    private var stopReason: String {
+        if !overlayEnabled { return "disabled" }
+        if scenePhase != .active { return "scene-inactive" }
+        if playerCoversInterface { return "player-covered" }
+        return "stopped"
+    }
+
+    private var monitoringStateID: String {
+        [
+            String(overlayEnabled),
+            String(scenePhase == .active),
+            String(playerCoversInterface),
+            String(startupReady),
+            String(homeHydrationComplete),
+            String(splashVisible),
+            appMode,
+            String(modeSwitchActive),
+            motionText,
+            String(reduceMotion)
+        ].joined(separator: "-")
+    }
+}
+
+#if os(iOS)
+struct WatchTogetherJoinPresentation: ViewModifier {
+    @State private var request: WatchTogetherJoinRequest?
+    @State private var playerInterfaceCoverage = PlayerInterfaceCoverageState()
+    @State private var dismissAfterPlayerCloses = false
+    @Environment(\.eclipseWindowSceneSessionIdentifier) private var windowSceneSessionIdentifier
+
+    private var playerCoversInterface: Bool {
+        playerInterfaceCoverage.isCovered(in: windowSceneSessionIdentifier)
+    }
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear {
+                consumePendingRequestIfNeeded()
+            }
+            .onChange(of: windowSceneSessionIdentifier) { _ in
+                consumePendingRequestIfNeeded()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .watchTogetherJoinRequested)) { _ in
+                consumePendingRequestIfNeeded()
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .watchTogetherSessionCleared)) { _ in
+                guard request != nil else { return }
+                if playerCoversInterface {
+                    // Keep an already-playing video alive when SharePlay ends, then discard the
+                    // session-owned detail route once the user closes the player.
+                    dismissAfterPlayerCloses = true
+                } else {
+                    request = nil
+                    dismissAfterPlayerCloses = false
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .playerInterfaceCoverageDidChange)) { notification in
+                playerInterfaceCoverage.consume(notification)
+                if !playerCoversInterface, dismissAfterPlayerCloses {
+                    request = nil
+                    dismissAfterPlayerCloses = false
+                }
+            }
+            .fullScreenCover(item: $request) { request in
+                MediaDetailView(
+                    searchResult: request.searchResult,
+                    watchTogetherAutoPlay: request.media
+                )
+                .id(request.id)
+            }
+    }
+
+    private func consumePendingRequestIfNeeded() {
+        guard request == nil else { return }
+        if let pendingRequest = WatchTogetherCoordinator.shared.takePendingJoinRequest(
+            forSceneSessionIdentifier: windowSceneSessionIdentifier
+        ) {
+            dismissAfterPlayerCloses = false
+            request = pendingRequest
+        }
+    }
+}
+#endif
+
 #if !os(tvOS)
 private enum ExperimentalMediaTab: Hashable {
     case home
@@ -346,8 +582,10 @@ struct ExperimentalContentView: View {
     @State private var showingSettings = false
     @State private var showingReleaseAlert = false
     @State private var showingAniListFallbackAlert = false
+    @State private var playerInterfaceCoverage = PlayerInterfaceCoverageState()
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.openURL) private var openURL
+    @Environment(\.eclipseWindowSceneSessionIdentifier) private var windowSceneSessionIdentifier
     @Namespace private var heroNamespace
 
     private let onStartupReady: () -> Void
@@ -355,6 +593,10 @@ struct ExperimentalContentView: View {
     init(onStartupReady: @escaping () -> Void = {}) {
         self.onStartupReady = onStartupReady
         configureTabBarAppearance()
+    }
+
+    private var playerCoversInterface: Bool {
+        playerInterfaceCoverage.isCovered(in: windowSceneSessionIdentifier)
     }
 
     private func configureTabBarAppearance() {
@@ -405,20 +647,38 @@ struct ExperimentalContentView: View {
         .onChange(of: scenePhase) { newPhase in
             publishScenePhase(newPhase)
             if newPhase == .active {
+                openPendingNotificationRouteIfNeeded()
                 Task { await runBackgroundAutoChecks() }
             }
         }
         .onAppear {
+            updatePerformanceSurface()
             publishScenePhase(scenePhase)
             presentUpdateAlertIfNeeded()
+            openPendingNotificationRouteIfNeeded()
+        }
+        .onChange(of: windowSceneSessionIdentifier) { _ in
+            openPendingNotificationRouteIfNeeded()
         }
         .onChange(of: githubReleaseShowAlertPending) { pending in
             if pending {
                 presentUpdateAlertIfNeeded()
             }
         }
+        .onChange(of: selectedTab) { _ in
+            updatePerformanceSurface()
+        }
+        .onChange(of: showingSettings) { _ in
+            updatePerformanceSurface()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .playerInterfaceCoverageDidChange)) { notification in
+            playerInterfaceCoverage.consume(notification)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .animeMetadataDidSwitchToMALFallback)) { _ in
             showingAniListFallbackAlert = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .openScheduleFromLocalNotification)) { _ in
+            openPendingNotificationRouteIfNeeded()
         }
         .alert("Update Available", isPresented: $showingReleaseAlert) {
             Button("Later", role: .cancel) { consumeUpdateAlert() }
@@ -444,7 +704,10 @@ struct ExperimentalContentView: View {
 
     private var experimentalTabView: some View {
         TabView(selection: $selectedTab) {
-            HomeView(onStartupReady: onStartupReady)
+            HomeView(
+                isActive: selectedTab == .home && !showingSettings && !playerCoversInterface,
+                onStartupReady: onStartupReady
+            )
                 .tabItem {
                     Image(systemName: "house.fill")
                     Text("Home")
@@ -487,35 +750,7 @@ struct ExperimentalContentView: View {
             GlobalGradientBackground(allowsAnimatedBackground: false)
                 .ignoresSafeArea()
 
-            if #available(iOS 16.0, *) {
-                NavigationStack {
-                    SettingsView(onRootDismiss: dismissSettings)
-                        .toolbar {
-                            ToolbarItem(placement: .navigationBarLeading) {
-                                closeSettingsButton
-                            }
-                        }
-                }
-            } else {
-                NavigationView {
-                    SettingsView(onRootDismiss: dismissSettings)
-                        .toolbar {
-                            ToolbarItem(placement: .navigationBarLeading) {
-                                closeSettingsButton
-                            }
-                        }
-                }
-                .navigationViewStyle(StackNavigationViewStyle())
-            }
-        }
-    }
-
-    private var closeSettingsButton: some View {
-        Button(action: dismissSettings) {
-            HStack(spacing: 4) {
-                Image(systemName: "chevron.left")
-                Text("Back")
-            }
+            SettingsView(onRootDismiss: dismissSettings)
         }
     }
 
@@ -525,10 +760,19 @@ struct ExperimentalContentView: View {
         }
     }
 
+    private func openPendingNotificationRouteIfNeeded() {
+        guard scenePhase == .active,
+              LocalNotificationManager.shared.shouldHandlePendingNavigation(
+                inSceneSessionIdentifier: windowSceneSessionIdentifier
+              ) else { return }
+        showingSettings = false
+        selectedTab = .schedule
+    }
+
     private func runBackgroundAutoChecks() async {
-        // Keep launch maintenance from contending with Home's first paint.
+        // Keep launch maintenance outside first render and the splash transition.
         do {
-            try await Task.sleep(nanoseconds: 2_000_000_000)
+            try await Task.sleep(nanoseconds: 6_000_000_000)
         } catch {
             return
         }
@@ -562,6 +806,20 @@ struct ExperimentalContentView: View {
         )
     }
 
+    private func updatePerformanceSurface() {
+        if showingSettings {
+            AppPerformanceRuntimeContext.shared.setSurface("settings")
+            return
+        }
+        switch selectedTab {
+        case .home: AppPerformanceRuntimeContext.shared.setSurface("home")
+        case .schedule: AppPerformanceRuntimeContext.shared.setSurface("schedule")
+        case .downloads: AppPerformanceRuntimeContext.shared.setSurface("downloads")
+        case .library: AppPerformanceRuntimeContext.shared.setSurface("library")
+        case .search: AppPerformanceRuntimeContext.shared.setSurface("search")
+        }
+    }
+
     private func presentUpdateAlertIfNeeded() {
         guard GitHubReleaseChecker.shouldShowPendingUpdatePrompt else {
             githubReleaseShowAlertPending = false
@@ -576,7 +834,12 @@ struct ExperimentalContentView: View {
         showingReleaseAlert = false
     }
 }
+
 #endif
+
+extension Notification.Name {
+    static let openScheduleFromLocalNotification = Notification.Name("openScheduleFromLocalNotification")
+}
 
 #Preview {
     ContentView()

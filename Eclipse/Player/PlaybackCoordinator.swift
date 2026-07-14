@@ -10,6 +10,15 @@ import UIKit
 final class PlaybackCoordinator {
     static let shared = PlaybackCoordinator()
 
+    private var activeHandoffs: [ObjectIdentifier: UUID] = [:]
+    // Retain the host while its player is alive. SwiftUI can otherwise release a transient
+    // presentation controller before an in-player Services/episode selection finishes resolving.
+    // The weak key removes the entry (and releases the host) as soon as the player is dismissed.
+    private let presentationHosts = NSMapTable<UIViewController, UIViewController>(
+        keyOptions: .weakMemory,
+        valueOptions: .strongMemory
+    )
+
     private init() {}
 
     func makeViewController(
@@ -19,11 +28,28 @@ final class PlaybackCoordinator {
 #if os(tvOS)
         return TVPlaybackViewController(request: request, requestedEngine: engine)
 #else
-        switch engine {
-        case .avPlayer:
-            return makeIOSAVPlayer(for: request)
-        case .automatic, .mpv:
+        let deviceFamily = PlaybackDeviceFamily.current
+        let plan = PlaybackLaunchPlan.make(
+            selection: engine,
+            deviceFamily: deviceFamily
+        )
+        if deviceFamily == .pad,
+           plan.primary == .avPlayer,
+           plan.preStartFallback == .mpv,
+           Self.isKnownAVPlayerIncompatibleContainer(request.url) {
+            Logger.shared.log(
+                "PlaybackCoordinator: iPad Automatic bypassing AVPlayer for .\(request.url.pathExtension.lowercased()) and starting Molten directly",
+                type: "Player"
+            )
             return makeIOSMPVPlayer(for: request)
+        }
+        switch plan.primary {
+        case .avPlayer:
+            return makeIOSAVPlayer(for: request, preStartFallback: plan.preStartFallback)
+        case .mpv:
+            return makeIOSMPVPlayer(for: request, preStartFallback: plan.preStartFallback)
+        case .automatic:
+            preconditionFailure("Automatic must resolve to a concrete playback engine")
         }
 #endif
     }
@@ -36,6 +62,7 @@ final class PlaybackCoordinator {
     ) {
         let controller = makeViewController(for: request, engine: engine)
         controller.modalPresentationStyle = .fullScreen
+        presentationHosts.setObject(presenter, forKey: controller)
         presenter.present(controller, animated: animated) {
 #if !os(tvOS)
             (controller as? NormalPlayer)?.playAtDefaultSpeed()
@@ -44,7 +71,11 @@ final class PlaybackCoordinator {
     }
 
 #if !os(tvOS)
-    private func makeIOSMPVPlayer(for request: PlaybackRequest) -> UIViewController {
+    private func makeIOSMPVPlayer(
+        for request: PlaybackRequest,
+        preStartFallback: PlaybackEngine? = nil,
+        isEngineFallback: Bool = false
+    ) -> UIViewController {
         let controller = PlayerViewController(
             url: request.url,
             preset: request.preset,
@@ -52,48 +83,371 @@ final class PlaybackCoordinator {
             subtitles: request.subtitles.isEmpty ? nil : request.subtitles,
             subtitleNames: request.subtitleNames,
             subtitleHeadersByURL: request.subtitleHeadersByURL,
+            mediaSelectionIntent: request.mediaSelectionIntent,
             mediaInfo: request.mediaInfo,
             imdbId: request.imdbID
         )
         controller.isAnimeHint = request.isAnime
         controller.isAnimationContentHint = request.isAnimation
+        controller.playerTitleOverride = request.title
+        controller.servicesSelectionContext = PlayerServicesSelectionContext(request: request)
         controller.originalTMDBSeasonNumber = request.originalTMDBSeasonNumber
         controller.originalTMDBEpisodeNumber = request.originalTMDBEpisodeNumber
         controller.episodePlaybackContext = request.episodePlaybackContext
-        controller.playbackLaunchContext = request.launchContext
+        controller.playbackLaunchContext = request.launchContext ?? Self.syntheticLaunchContext(for: request)
         controller.onRequestNextEpisode = request.onRequestNextEpisode
-        controller.modalPresentationStyle = .fullScreen
-        return controller
-    }
-
-    private func makeIOSAVPlayer(for request: PlaybackRequest) -> UIViewController {
-        let controller = NormalPlayer()
-        controller.player = AVPlayer(playerItem: Self.makeAVPlayerItem(for: request))
-        controller.mediaInfo = request.mediaInfo
-        controller.episodePlaybackContext = request.episodePlaybackContext
-        controller.playbackLaunchContext = request.launchContext
-        controller.modalPresentationStyle = .fullScreen
-        if let position = request.resumePosition {
-            controller.player?.seek(to: CMTime(seconds: position, preferredTimescale: 600))
+        controller.onRequestResolvedNextEpisode = request.onRequestResolvedNextEpisode
+        controller.localNextEpisodeFallback = request.localNextEpisodeFallback
+        controller.onPlaybackStartupFailure = request.onPlaybackStartupFailure
+        controller.isCoordinatorEngineFallback = isEngineFallback
+        controller.forceHeaderProxyForStartup = isEngineFallback
+        if preStartFallback == .avPlayer {
+            controller.onAutomaticPlaybackFallback = { [weak controller] report in
+                guard let controller else {
+                    request.onPlaybackStartupFailure?(report)
+                    return
+                }
+                self.replace(
+                    controller,
+                    after: report,
+                    with: .avPlayer,
+                    request: request
+                )
+            }
         }
+        controller.modalPresentationStyle = .fullScreen
         return controller
     }
-#endif
 
-#if !os(tvOS)
-    fileprivate static func makeAVPlayerItem(for request: PlaybackRequest) -> AVPlayerItem {
-        let asset: AVURLAsset
-        if request.headers.isEmpty {
-            asset = AVURLAsset(url: request.url)
-        } else {
-            // This is the same header-preserving AVURLAsset path already used by Eclipse's
-            // Services player. Keeping it here ensures MPV fallback receives the original request.
-            asset = AVURLAsset(
-                url: request.url,
-                options: ["AVURLAssetHTTPHeaderFieldsKey": request.headers]
+    private func makeIOSAVPlayer(
+        for request: PlaybackRequest,
+        preStartFallback: PlaybackEngine? = nil,
+        isEngineFallback: Bool = false
+    ) -> UIViewController {
+        let controller = NormalPlayer()
+        controller.configure(with: request)
+        controller.isCoordinatorEngineFallback = isEngineFallback
+        if preStartFallback == .mpv {
+            armMoltenFallback(for: controller, request: request)
+        }
+        controller.modalPresentationStyle = .fullScreen
+        return controller
+    }
+
+    /// Rebinds AVPlayer's one-shot fallback to the exact request currently loaded in the
+    /// controller. In-place source and episode changes must call this; retaining the closure made
+    /// during initial presentation would reopen the original URL or episode in Molten.
+    func armMoltenFallback(for controller: NormalPlayer, request: PlaybackRequest) {
+        controller.automaticallyFallsBackToMolten = true
+        controller.onAutomaticPlaybackFallback = { [weak controller] report in
+            guard let controller else {
+                request.onPlaybackStartupFailure?(report)
+                return
+            }
+            self.replace(
+                controller,
+                after: report,
+                with: .mpv,
+                request: request
             )
         }
-        return AVPlayerItem(asset: asset)
+    }
+
+    func shouldHandOffAVPlayerDirectly(for request: PlaybackRequest) -> Bool {
+        Self.isKnownAVPlayerIncompatibleContainer(request.url)
+    }
+
+    /// Uses the normal coordinator handoff without first installing a container AVFoundation is
+    /// known not to support. The request is passed through unchanged, including headers, subtitle
+    /// metadata, episode identity, and playback context.
+    func handOffAVPlayerToMolten(
+        _ controller: NormalPlayer,
+        request: PlaybackRequest,
+        reason: String
+    ) {
+        controller.beginPlaybackEngineHandoff()
+        let report = PlaybackFailureReport(
+            context: request.launchContext ?? Self.syntheticLaunchContext(for: request),
+            message: reason,
+            isSourceFailure: false
+        )
+        replace(
+            controller,
+            after: report,
+            with: .mpv,
+            request: request
+        )
+    }
+
+    private func replace(
+        _ controller: UIViewController,
+        after report: PlaybackFailureReport,
+        with fallbackEngine: PlaybackEngine,
+        request: PlaybackRequest,
+        presentationRetryCount: Int = 0,
+        handoffID suppliedHandoffID: UUID? = nil,
+        handoffWasEverVisible: Bool = false
+    ) {
+        let controllerID = ObjectIdentifier(controller)
+        let wasEverVisible = handoffWasEverVisible || Self.hasBeenVisible(controller)
+        let handoffID: UUID
+        if let suppliedHandoffID {
+            guard activeHandoffs[controllerID] == suppliedHandoffID else { return }
+            handoffID = suppliedHandoffID
+        } else {
+            handoffID = UUID()
+            activeHandoffs[controllerID] = handoffID
+        }
+
+        guard !controller.isBeingDismissed else {
+            activeHandoffs.removeValue(forKey: controllerID)
+            return
+        }
+
+        if controller.isBeingPresented {
+            if let transitionCoordinator = controller.transitionCoordinator {
+                let registered = transitionCoordinator.animate(alongsideTransition: nil) { _ in
+                    // UIKit can still report `isBeingPresented` during the transition-completion
+                    // callback itself. Cross one run-loop boundary before evaluating final state.
+                    DispatchQueue.main.async {
+                        self.replace(
+                            controller,
+                            after: report,
+                            with: fallbackEngine,
+                            request: request,
+                            presentationRetryCount: presentationRetryCount + 1,
+                            handoffID: handoffID,
+                            handoffWasEverVisible: wasEverVisible
+                        )
+                    }
+                }
+                if registered { return }
+            }
+            guard presentationRetryCount < 40 else {
+                failHandoff(
+                    controller,
+                    controllerID: controllerID,
+                    handoffID: handoffID,
+                    report: report,
+                    request: request,
+                    wasEverVisible: wasEverVisible
+                )
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                self.replace(
+                    controller,
+                    after: report,
+                    with: fallbackEngine,
+                    request: request,
+                    presentationRetryCount: presentationRetryCount + 1,
+                    handoffID: handoffID,
+                    handoffWasEverVisible: wasEverVisible
+                )
+            }
+            return
+        }
+
+        // A runtime failure can be reported while a source picker or failure alert is still
+        // attached to the player. Dismissing the player at that moment only dismisses its child,
+        // so drain the child first and retry the same, generation-guarded handoff.
+        if let child = controller.presentedViewController {
+            if !child.isBeingDismissed {
+                child.dismiss(animated: false)
+            }
+            guard presentationRetryCount < 120 else {
+                failHandoff(
+                    controller,
+                    controllerID: controllerID,
+                    handoffID: handoffID,
+                    report: report,
+                    request: request,
+                    wasEverVisible: wasEverVisible
+                )
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                self.replace(
+                    controller,
+                    after: report,
+                    with: fallbackEngine,
+                    request: request,
+                    presentationRetryCount: presentationRetryCount + 1,
+                    handoffID: handoffID,
+                    handoffWasEverVisible: wasEverVisible
+                )
+            }
+            return
+        }
+
+        guard let presenter = controller.presentingViewController else {
+            if presentationRetryCount < 40 {
+                // An item's initial KVO failure can arrive while UIKit is still connecting the
+                // full-screen presentation relationship. Give that relationship one run-loop
+                // turn before deciding there is no safe presenter.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    self.replace(
+                        controller,
+                        after: report,
+                        with: fallbackEngine,
+                        request: request,
+                        presentationRetryCount: presentationRetryCount + 1,
+                        handoffID: handoffID,
+                        handoffWasEverVisible: wasEverVisible
+                    )
+                }
+                return
+            }
+            if let presentationHost = presentationHosts.object(forKey: controller),
+               !presentationHost.isBeingDismissed,
+               presentationHost.viewIfLoaded?.window != nil,
+               presentationHost.presentedViewController == nil,
+               let replacement = makeReplacementController(
+                    for: fallbackEngine,
+                    request: request
+               ) {
+                activeHandoffs.removeValue(forKey: controllerID)
+                presentationHosts.removeObject(forKey: controller)
+                replacement.modalPresentationStyle = .fullScreen
+                presentationHosts.setObject(presentationHost, forKey: replacement)
+                Logger.shared.log(
+                    "PlaybackCoordinator: primary player never attached; presenting the same request with \(fallbackEngine.displayName)",
+                    type: "Player"
+                )
+                presentationHost.present(replacement, animated: false) {
+                    (replacement as? NormalPlayer)?.playAtDefaultSpeed()
+                }
+                return
+            }
+            failHandoff(
+                controller,
+                controllerID: controllerID,
+                handoffID: handoffID,
+                report: report,
+                request: request,
+                wasEverVisible: wasEverVisible
+            )
+            return
+        }
+        guard !presenter.isBeingDismissed,
+              presenter.viewIfLoaded?.window != nil,
+              presenter.presentedViewController === controller else {
+            failHandoff(
+                controller,
+                controllerID: controllerID,
+                handoffID: handoffID,
+                report: report,
+                request: request,
+                wasEverVisible: wasEverVisible
+            )
+            return
+        }
+        guard let replacement = makeReplacementController(
+            for: fallbackEngine,
+            request: request
+        ) else {
+            activeHandoffs.removeValue(forKey: controllerID)
+            request.onPlaybackStartupFailure?(report)
+            return
+        }
+        replacement.modalPresentationStyle = .fullScreen
+        presentationHosts.setObject(presenter, forKey: replacement)
+        Logger.shared.log(
+            "PlaybackCoordinator: \(type(of: controller)) failed before playback; retrying the same request with \(fallbackEngine.displayName)",
+            type: "Player"
+        )
+        controller.dismiss(animated: false) {
+            guard self.activeHandoffs[controllerID] == handoffID else { return }
+            self.activeHandoffs.removeValue(forKey: controllerID)
+            self.presentationHosts.removeObject(forKey: controller)
+            guard !presenter.isBeingDismissed,
+                  presenter.viewIfLoaded?.window != nil,
+                  presenter.presentedViewController == nil else {
+                // A newer presentation owns this presenter now. Do not let a stale fallback cover
+                // it, and do not feed its failure into the newer playback request.
+                return
+            }
+            presenter.present(replacement, animated: false) {
+                (replacement as? NormalPlayer)?.playAtDefaultSpeed()
+            }
+        }
+    }
+
+    private func makeReplacementController(
+        for fallbackEngine: PlaybackEngine,
+        request: PlaybackRequest
+    ) -> UIViewController? {
+        switch fallbackEngine {
+        case .mpv:
+            return makeIOSMPVPlayer(for: request, isEngineFallback: true)
+        case .avPlayer:
+            return makeIOSAVPlayer(for: request, isEngineFallback: true)
+        case .automatic:
+            return nil
+        }
+    }
+
+    private func failHandoff(
+        _ controller: UIViewController,
+        controllerID: ObjectIdentifier,
+        handoffID: UUID,
+        report: PlaybackFailureReport,
+        request: PlaybackRequest,
+        wasEverVisible: Bool
+    ) {
+        guard activeHandoffs[controllerID] == handoffID else { return }
+        activeHandoffs.removeValue(forKey: controllerID)
+        presentationHosts.removeObject(forKey: controller)
+        guard !controller.isBeingDismissed else { return }
+        guard controller.viewIfLoaded?.window != nil else {
+            // A completed user/system dismissal is no longer `isBeingDismissed`. Only return
+            // control to source selection when this controller genuinely never reached a window;
+            // otherwise a deliberate Close could reopen playback behind the user's back.
+            if !wasEverVisible, !Self.hasBeenVisible(controller) {
+                request.onPlaybackStartupFailure?(report)
+            }
+            return
+        }
+        if let player = controller as? PlayerViewController {
+            player.playbackEngineHandoffDidFail(report)
+        } else if let player = controller as? NormalPlayer {
+            player.playbackEngineHandoffDidFail(report)
+        } else {
+            request.onPlaybackStartupFailure?(report)
+        }
+    }
+
+    private static func hasBeenVisible(_ controller: UIViewController) -> Bool {
+        if controller.viewIfLoaded?.window != nil { return true }
+        if let player = controller as? PlayerViewController {
+            return player.playbackHandoffHasAppeared
+        }
+        if let player = controller as? NormalPlayer {
+            return player.playbackHandoffHasAppeared
+        }
+        return false
+    }
+
+    private static func syntheticLaunchContext(for request: PlaybackRequest) -> PlaybackLaunchContext {
+        PlaybackLaunchContext(
+            sourceId: request.url.isFileURL ? "local-playback" : "direct-playback",
+            sourceName: request.url.isFileURL ? "Downloaded Media" : "Direct Stream",
+            sourceKind: .service,
+            autoMode: false,
+            streamURL: request.url.absoluteString,
+            headers: request.headers,
+            subtitles: request.subtitles,
+            subtitleNames: request.subtitleNames,
+            subtitleHeadersByURL: request.subtitleHeadersByURL,
+            retryCount: 0
+        )
+    }
+
+    /// AVFoundation does not support these container families. Avoid briefly showing Apple's
+    /// terminal error UI when iPad Automatic can choose Molten deterministically before launch.
+    /// Unknown extensions still try AVPlayer and retain the normal one-shot fallback.
+    private static func isKnownAVPlayerIncompatibleContainer(_ url: URL) -> Bool {
+        ["avi", "flv", "mkv", "mpd", "webm", "wmv"].contains(url.pathExtension.lowercased())
     }
 #endif
 }
@@ -1076,35 +1430,40 @@ final class TVPlaybackViewController: UIViewController {
         finishPlaybackLeaseIfNeeded()
     }
 }
+#endif
 
 /// Applies only the media-selection intent that AVFoundation exposes publicly. AVFoundation can
 /// select embedded audio/legible options by language, but its old tvOS external-subtitle option
 /// API is unavailable to Swift and deprecated as unsupported. External SRT/WebVTT files are
 /// therefore represented by the public transport-bar menu and content-overlay adapter below.
 @MainActor
-private enum AVPlayerMediaSelectionAdapter {
+enum AVPlayerMediaSelectionAdapter {
     static func apply(
         _ intent: PlaybackMediaSelectionIntent,
         to item: AVPlayerItem,
-        externalSubtitleSelected: Bool
+        externalSubtitleSelected: Bool,
+        isStillCurrent: () -> Bool = { true }
     ) async {
-        await applyAudioIntent(intent, to: item)
-        guard !Task.isCancelled else { return }
+        await applyAudioIntent(intent, to: item, isStillCurrent: isStillCurrent)
+        guard !Task.isCancelled, isStillCurrent() else { return }
         await applySubtitleIntent(
             intent,
             to: item,
-            externalSubtitleSelected: externalSubtitleSelected
+            externalSubtitleSelected: externalSubtitleSelected,
+            isStillCurrent: isStillCurrent
         )
     }
 
     static func applySubtitleIntent(
         _ intent: PlaybackMediaSelectionIntent,
         to item: AVPlayerItem,
-        externalSubtitleSelected: Bool
+        externalSubtitleSelected: Bool,
+        isStillCurrent: () -> Bool = { true }
     ) async {
         guard let group = try? await item.asset.loadMediaSelectionGroup(for: .legible) else {
             return
         }
+        guard !Task.isCancelled, isStillCurrent() else { return }
         guard intent.subtitlesEnabled, !externalSubtitleSelected else {
             if group.allowsEmptySelection {
                 item.select(nil, in: group)
@@ -1124,10 +1483,13 @@ private enum AVPlayerMediaSelectionAdapter {
 
     private static func applyAudioIntent(
         _ intent: PlaybackMediaSelectionIntent,
-        to item: AVPlayerItem
+        to item: AVPlayerItem,
+        isStillCurrent: () -> Bool
     ) async {
         guard let preferredLanguage = intent.preferredAudioLanguage,
               let group = try? await item.asset.loadMediaSelectionGroup(for: .audible),
+              !Task.isCancelled,
+              isStillCurrent(),
               let option = preferredOption(in: group, preferredLanguage: preferredLanguage) else {
             return
         }
@@ -1167,8 +1529,12 @@ enum TVExternalSubtitleParser {
     static func parse(_ data: Data) -> [TVExternalSubtitleCue] {
         guard let source = decodeText(data) else { return [] }
         let normalized = source
+            .replacingOccurrences(of: "\u{feff}", with: "")
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
+        if normalized.range(of: "[Events]", options: .caseInsensitive) != nil {
+            return parseASS(normalized)
+        }
         let blocks = normalized.components(separatedBy: "\n\n")
         var cues: [TVExternalSubtitleCue] = []
         cues.reserveCapacity(min(blocks.count, maximumCueCount))
@@ -1194,6 +1560,65 @@ enum TVExternalSubtitleParser {
             }
             let rawText = lines.dropFirst(timingIndex + 1).joined(separator: "\n")
             let text = sanitizedCueText(rawText)
+            guard !text.isEmpty else { continue }
+            cues.append(TVExternalSubtitleCue(start: max(0, start), end: end, text: text))
+        }
+        return cues.sorted {
+            $0.start == $1.start ? $0.end < $1.end : $0.start < $1.start
+        }
+    }
+
+    private static func parseASS(_ source: String) -> [TVExternalSubtitleCue] {
+        var inEvents = false
+        var format = ["layer", "start", "end", "style", "name", "marginl", "marginr", "marginv", "effect", "text"]
+        var cues: [TVExternalSubtitleCue] = []
+        for rawLine in source.split(separator: "\n", omittingEmptySubsequences: false) {
+            guard cues.count < maximumCueCount else { break }
+            let line = String(rawLine).trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("[") {
+                inEvents = line.caseInsensitiveCompare("[Events]") == .orderedSame
+                continue
+            }
+            guard inEvents else { continue }
+            if line.lowercased().hasPrefix("format:") {
+                format = line.dropFirst("format:".count)
+                    .split(separator: ",")
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                continue
+            }
+            guard line.lowercased().hasPrefix("dialogue:"),
+                  let startIndex = format.firstIndex(of: "start"),
+                  let endIndex = format.firstIndex(of: "end"),
+                  let textIndex = format.firstIndex(of: "text"),
+                  format.count >= 3 else { continue }
+            let payload = line.dropFirst("dialogue:".count)
+            let fields = payload.split(
+                separator: ",",
+                maxSplits: max(0, format.count - 1),
+                omittingEmptySubsequences: false
+            ).map(String.init)
+            guard fields.indices.contains(startIndex),
+                  fields.indices.contains(endIndex),
+                  fields.indices.contains(textIndex),
+                  let start = parseTimestamp(fields[startIndex]),
+                  let end = parseTimestamp(fields[endIndex]),
+                  start.isFinite,
+                  end.isFinite,
+                  end > start else { continue }
+            let assText = fields[textIndex]
+                .replacingOccurrences(of: "\\N", with: "\n")
+                .replacingOccurrences(of: "\\n", with: "\n")
+            let withoutOverrides: String
+            if let expression = try? NSRegularExpression(pattern: "\\{[^}]{0,1024}\\}") {
+                withoutOverrides = expression.stringByReplacingMatches(
+                    in: assText,
+                    range: NSRange(assText.startIndex..<assText.endIndex, in: assText),
+                    withTemplate: ""
+                )
+            } else {
+                withoutOverrides = assText
+            }
+            let text = sanitizedCueText(withoutOverrides)
             guard !text.isEmpty else { continue }
             cues.append(TVExternalSubtitleCue(start: max(0, start), end: end, text: text))
         }
@@ -1249,6 +1674,7 @@ enum TVExternalSubtitleParser {
     }
 }
 
+#if os(tvOS)
 @MainActor
 private final class TVAVPlayerExternalSubtitleController {
     private struct Candidate {
@@ -1504,6 +1930,7 @@ private final class TVAVPlayerExternalSubtitleController {
         return min(-54, max(-210, -92 - CGFloat(offset + 6) * 2.5))
     }
 }
+#endif
 
 final class TVBoundedSubtitleDownload: NSObject, URLSessionDataDelegate, URLSessionTaskDelegate, @unchecked Sendable {
     private static let maximumBytes = 4 * 1_024 * 1_024
@@ -1626,4 +2053,3 @@ final class TVBoundedSubtitleDownload: NSObject, URLSessionDataDelegate, URLSess
         completion(result)
     }
 }
-#endif

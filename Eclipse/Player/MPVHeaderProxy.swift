@@ -10,6 +10,35 @@ private enum MPVHeaderProxyPlaylistMode {
 }
 
 private final class MPVHeaderProxyCore {
+    /// Reports a blocked media response once per proxy session. The response may be a real
+    /// browser-solvable challenge, or a generic CDN rejection whose signed source URL must be
+    /// re-resolved through the provider instead.
+    private final class CloudflareChallengeReporter {
+        private let lock = NSLock()
+        private var didReport = false
+        private let handler: (URL, String?, Bool, Int) -> Void
+
+        init(handler: @escaping (URL, String?, Bool, Int) -> Void) {
+            self.handler = handler
+        }
+
+        func report(
+            url: URL,
+            rejectedCookieHeader: String?,
+            isInteractiveChallenge: Bool,
+            statusCode: Int
+        ) {
+            lock.lock()
+            guard !didReport else {
+                lock.unlock()
+                return
+            }
+            didReport = true
+            lock.unlock()
+            handler(url, rejectedCookieHeader, isInteractiveChallenge, statusCode)
+        }
+    }
+
     private struct Session {
         let headers: [String: String]
         let credentialOriginURL: URL
@@ -19,12 +48,16 @@ private final class MPVHeaderProxyCore {
         let traceID: String
         let requestCount: Int
         let upstreamTransport: UpstreamTransport
+        let cloudflareChallengeReporter: CloudflareChallengeReporter?
     }
 
     private enum UpstreamBodyMode {
         case stream
         case playlist
         case probe
+        /// A bounded 403/429/503 body probe. It is never forwarded as media and only reports
+        /// recovery when the shared detector confirms Cloudflare/DDoS-Guard markers.
+        case rejectedResponseProbe
     }
 
     private struct CachedPrefixContinuation {
@@ -50,6 +83,7 @@ private final class MPVHeaderProxyCore {
     private let sessionTTL: TimeInterval = 6 * 60 * 60
     private let maxHeaderBytes = 64 * 1024
     private let maxPlaylistBytes = 5 * 1024 * 1024
+    private let maxRejectedResponseProbeBytes = 1 * 1024 * 1024
     private let playlistProbeBytes = 4 * 1024
     private let maxPendingStreamBytes = 8 * 1024 * 1024
     private let maxPendingStreamSends = 8
@@ -207,14 +241,21 @@ private final class MPVHeaderProxyCore {
                 logType: session.logType,
                 traceID: session.traceID,
                 requestCount: session.requestCount + 1,
-                upstreamTransport: session.upstreamTransport
+                upstreamTransport: session.upstreamTransport,
+                cloudflareChallengeReporter: session.cloudflareChallengeReporter
             )
             sessions[id] = updated
             return updated
         }
     }
 
-    func makeProxyURL(for targetURL: URL, headers: [String: String], logType: String = "Stream", traceID: String? = nil) -> URL? {
+    func makeProxyURL(
+        for targetURL: URL,
+        headers: [String: String],
+        logType: String = "Stream",
+        traceID: String? = nil,
+        onConfirmedCloudflareChallenge: ((URL, String?, Bool, Int) -> Void)? = nil
+    ) -> URL? {
         guard ensureStarted() else { return nil }
 
         var activePort = port
@@ -238,6 +279,12 @@ private final class MPVHeaderProxyCore {
         let sessionId = UUID().uuidString
         let now = Date()
         let resolvedTraceID = traceID ?? String(sessionId.prefix(8))
+        // MPV can fill a large demuxer cache far faster than playback consumes it. Some HLS CDNs
+        // rate-limit that burst even though the stream itself is healthy. Pace only MPV HLS proxy
+        // sessions; direct files and AVPlayer keep their existing transport behavior.
+        let minimumRequestStartInterval: TimeInterval = logType == "MPV" && isLikelyPlaylistURL(targetURL)
+            ? 0.15
+            : 0
         setSession(
             Session(
                 headers: headers,
@@ -247,11 +294,17 @@ private final class MPVHeaderProxyCore {
                 logType: logType,
                 traceID: resolvedTraceID,
                 requestCount: 0,
-                upstreamTransport: UpstreamTransport()
+                upstreamTransport: UpstreamTransport(
+                    minimumRequestStartInterval: minimumRequestStartInterval
+                ),
+                cloudflareChallengeReporter: onConfirmedCloudflareChallenge.map {
+                    CloudflareChallengeReporter(handler: $0)
+                }
             ),
             for: sessionId
         )
-        Logger.shared.log("[MPVProxyTrace \(resolvedTraceID)] stage=session-created session=\(String(sessionId.prefix(8))) target=\(logURLSummary(targetURL)) headerKeys=[\(headers.keys.sorted().joined(separator: ","))] activeSessions=\(sessionCount())", type: "PlaybackTrace")
+        let requestPaceMilliseconds = Int((minimumRequestStartInterval * 1_000).rounded())
+        Logger.shared.log("[MPVProxyTrace \(resolvedTraceID)] stage=session-created session=\(String(sessionId.prefix(8))) target=\(logURLSummary(targetURL)) headerKeys=[\(headers.keys.sorted().joined(separator: ","))] requestPaceMs=\(requestPaceMilliseconds) activeSessions=\(sessionCount())", type: "PlaybackTrace")
 
         return buildProxyURL(port: activePort, sessionId: sessionId, targetURL: targetURL)
     }
@@ -467,6 +520,10 @@ private final class MPVHeaderProxyCore {
         for (key, value) in scopedSessionHeaders {
             request.setValue(value, forHTTPHeaderField: key)
         }
+        // HLS playlists can resolve onto a different CDN host than the original source. Apply
+        // that host's current solved session at request time so a same-source player retry uses
+        // the replacement clearance on the exact playlist/segment host that rejected it.
+        CloudflareBypassManager.shared.applyCachedBypass(to: &request, for: targetURL)
 
         if playlistMode == .normalizeRewrittenPlaylist {
             let normalizedRange = request.value(forHTTPHeaderField: "Range")?
@@ -515,6 +572,7 @@ private final class MPVHeaderProxyCore {
             credentialHeaders: session.headers,
             credentialOriginURL: session.credentialOriginURL,
             upstreamTransport: session.upstreamTransport,
+            cloudflareChallengeReporter: session.cloudflareChallengeReporter,
             connection: connection,
             cachedPrefix: cachedPrefix
         )
@@ -1108,11 +1166,17 @@ private final class MPVHeaderProxyCore {
     private final class UpstreamTransport: NSObject, URLSessionDataDelegate {
         private let lock = NSLock()
         private let delegateQueue: OperationQueue
+        private let requestStartQueue = DispatchQueue(label: "mpv.header.proxy.request-start")
+        private let minimumRequestStartInterval: TimeInterval
         private var urlSession: URLSession!
         private var bridges: [Int: UpstreamBridge] = [:]
+        private var nextRequestStartByHost: [String: TimeInterval] = [:]
+        private var rateLimitedUntilByHost: [String: TimeInterval] = [:]
+        private var rateLimitCountByHost: [String: Int] = [:]
         private var isInvalidated = false
 
-        override init() {
+        init(minimumRequestStartInterval: TimeInterval) {
+            self.minimumRequestStartInterval = max(0, minimumRequestStartInterval)
             let delegateQueue = OperationQueue()
             delegateQueue.maxConcurrentOperationCount = 1
             delegateQueue.qualityOfService = .userInitiated
@@ -1128,6 +1192,9 @@ private final class MPVHeaderProxyCore {
             configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
             configuration.timeoutIntervalForRequest = 120
             configuration.timeoutIntervalForResource = 6 * 60 * 60
+            if minimumRequestStartInterval > 0 {
+                configuration.httpMaximumConnectionsPerHost = 4
+            }
             urlSession = URLSession(configuration: configuration, delegate: self, delegateQueue: delegateQueue)
         }
 
@@ -1139,9 +1206,81 @@ private final class MPVHeaderProxyCore {
             }
             let task = urlSession.dataTask(with: request)
             bridges[task.taskIdentifier] = bridge
+            let hostKey = request.url?.host?.lowercased() ?? "unknown"
+            let now = ProcessInfo.processInfo.systemUptime
+            let scheduledStart = max(
+                now,
+                max(
+                    nextRequestStartByHost[hostKey] ?? now,
+                    rateLimitedUntilByHost[hostKey] ?? now
+                )
+            )
+            let pacingInterval = rateLimitCountByHost[hostKey] == nil
+                ? minimumRequestStartInterval
+                : max(minimumRequestStartInterval, 0.15)
+            nextRequestStartByHost[hostKey] = scheduledStart + pacingInterval
             lock.unlock()
-            task.resume()
+            resume(task, forHost: hostKey, noEarlierThan: scheduledStart)
             return true
+        }
+
+        /// Records a server-directed rate limit and prevents MPV's immediate segment retry loop
+        /// from hammering the same CDN. The first backoff is short; repeated 429s in one playback
+        /// session rise to an eight-second ceiling. A numeric Retry-After value can extend it.
+        func recordRateLimit(for url: URL, retryAfter: TimeInterval?) -> TimeInterval {
+            let hostKey = url.host?.lowercased() ?? "unknown"
+            lock.lock()
+            let count = min((rateLimitCountByHost[hostKey] ?? 0) + 1, 4)
+            rateLimitCountByHost[hostKey] = count
+            let exponentialDelay = pow(2.0, Double(count - 1))
+            let serverDelay = retryAfter.map { min(max($0, 0), 30) } ?? 0
+            let delay = max(exponentialDelay, serverDelay)
+            let until = ProcessInfo.processInfo.systemUptime + delay
+            rateLimitedUntilByHost[hostKey] = max(rateLimitedUntilByHost[hostKey] ?? 0, until)
+            lock.unlock()
+            return delay
+        }
+
+        private func resume(
+            _ task: URLSessionDataTask,
+            forHost hostKey: String,
+            noEarlierThan scheduledStart: TimeInterval
+        ) {
+            let delay = max(0, scheduledStart - ProcessInfo.processInfo.systemUptime)
+            requestStartQueue.asyncAfter(deadline: .now() + delay) { [weak self, task] in
+                guard let self else {
+                    task.cancel()
+                    return
+                }
+
+                self.lock.lock()
+                if self.isInvalidated {
+                    self.lock.unlock()
+                    task.cancel()
+                    return
+                }
+
+                let now = ProcessInfo.processInfo.systemUptime
+                let rateLimitedUntil = self.rateLimitedUntilByHost[hostKey] ?? 0
+                if rateLimitedUntil > now {
+                    // A 429 arrived after this task was originally scheduled. Allocate a fresh,
+                    // paced slot after the backoff so queued segments do not all resume together.
+                    let rescheduledStart = max(
+                        rateLimitedUntil,
+                        self.nextRequestStartByHost[hostKey] ?? rateLimitedUntil
+                    )
+                    let pacingInterval = self.rateLimitCountByHost[hostKey] == nil
+                        ? self.minimumRequestStartInterval
+                        : max(self.minimumRequestStartInterval, 0.15)
+                    self.nextRequestStartByHost[hostKey] = rescheduledStart
+                        + pacingInterval
+                    self.lock.unlock()
+                    self.resume(task, forHost: hostKey, noEarlierThan: rescheduledStart)
+                    return
+                }
+                self.lock.unlock()
+                task.resume()
+            }
         }
 
         func invalidateAndCancel() {
@@ -1151,6 +1290,9 @@ private final class MPVHeaderProxyCore {
                 return
             }
             isInvalidated = true
+            nextRequestStartByHost.removeAll()
+            rateLimitedUntilByHost.removeAll()
+            rateLimitCountByHost.removeAll()
             lock.unlock()
             urlSession.invalidateAndCancel()
         }
@@ -1253,6 +1395,7 @@ private final class MPVHeaderProxyCore {
         private let credentialHeaders: [String: String]
         private let credentialOriginURL: URL
         private let upstreamTransport: UpstreamTransport
+        private let cloudflareChallengeReporter: CloudflareChallengeReporter?
         private let connection: NWConnection
         private let cachedPrefix: CachedPrefixContinuation?
         private let callbackQueue: OperationQueue
@@ -1268,6 +1411,9 @@ private final class MPVHeaderProxyCore {
         private var pendingDownstreamSends = 0
         private var pendingDownstreamBytes = 0
         private var pendingStreamCompletionStatusCode: Int?
+        private var rejectedCookieHeader: String?
+        private var rateLimitRetryCount = 0
+        private let maximumRateLimitRetries = 2
 
         init(
             proxy: MPVHeaderProxyCore,
@@ -1283,6 +1429,7 @@ private final class MPVHeaderProxyCore {
             credentialHeaders: [String: String],
             credentialOriginURL: URL,
             upstreamTransport: UpstreamTransport,
+            cloudflareChallengeReporter: CloudflareChallengeReporter?,
             connection: NWConnection,
             cachedPrefix: CachedPrefixContinuation? = nil
         ) {
@@ -1299,8 +1446,10 @@ private final class MPVHeaderProxyCore {
             self.credentialHeaders = credentialHeaders
             self.credentialOriginURL = credentialOriginURL
             self.upstreamTransport = upstreamTransport
+            self.cloudflareChallengeReporter = cloudflareChallengeReporter
             self.connection = connection
             self.cachedPrefix = cachedPrefix
+            self.rejectedCookieHeader = request.value(forHTTPHeaderField: "Cookie")
             let callbackQueue = OperationQueue()
             callbackQueue.maxConcurrentOperationCount = 1
             callbackQueue.qualityOfService = .userInitiated
@@ -1354,10 +1503,31 @@ private final class MPVHeaderProxyCore {
             }
 
             guard (200...299).contains(http.statusCode) else {
+                if [403, 429, 503].contains(http.statusCode), method != "HEAD" {
+                    // Challenge classification needs the small HTML body. Buffer at most 1 MiB;
+                    // ordinary blocked responses still pass through as the original HTTP status
+                    // and never invoke verification.
+                    mode = .rejectedResponseProbe
+                    completionHandler(.allow)
+                    return
+                }
+
                 // Never pass an HTML error document to MPV as a media segment. A 429 response for
                 // an image-named HLS segment used to become a bogus JPEG frame and caused both
                 // visual artifacts and long playback hitches.
-                Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: refusing upstream error body status=\(http.statusCode) target=\(proxy.logURLSummary(targetURL))", type: errorLogType)
+                let backoffDescription: String
+                if http.statusCode == 429 {
+                    let retryAfter = http.value(forHTTPHeaderField: "Retry-After")
+                        .flatMap { TimeInterval($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                    let backoff = upstreamTransport.recordRateLimit(
+                        for: targetURL,
+                        retryAfter: retryAfter
+                    )
+                    backoffDescription = " backoff=\(String(format: "%.1f", backoff))s"
+                } else {
+                    backoffDescription = ""
+                }
+                Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: refusing upstream error body status=\(http.statusCode)\(backoffDescription) target=\(proxy.logURLSummary(targetURL))", type: errorLogType)
                 proxy.sendResponse(connection, statusCode: http.statusCode, headers: proxy.emptyResponseHeaders(from: http), body: Data())
                 completionHandler(.cancel)
                 finish()
@@ -1375,6 +1545,8 @@ private final class MPVHeaderProxyCore {
             mode = proxy.upstreamBodyMode(for: http, targetURL: targetURL)
             switch mode {
             case .playlist, .probe:
+                completionHandler(.allow)
+            case .rejectedResponseProbe:
                 completionHandler(.allow)
             case .stream:
                 if let cachedPrefix, http.statusCode == 206 {
@@ -1435,6 +1607,21 @@ private final class MPVHeaderProxyCore {
                 }
             case .stream:
                 streamChunk(data, dataTask: dataTask)
+            case .rejectedResponseProbe:
+                let remaining = max(proxy.maxRejectedResponseProbeBytes - bufferedData.count, 0)
+                if remaining > 0 {
+                    bufferedData.append(data.prefix(remaining))
+                }
+
+                let confirmedChallenge = confirmedCloudflareChallenge()
+                // Let a generic 429 reach task completion so this bridge can transparently
+                // restart the same upstream request after backoff. Completing early and
+                // cancelling here would race the old task's cancellation against the retry.
+                if confirmedChallenge
+                    || (bufferedData.count >= proxy.maxRejectedResponseProbeBytes
+                        && httpResponse?.statusCode != 429) {
+                    completeRejectedResponse(dataTask: dataTask)
+                }
             }
         }
 
@@ -1465,6 +1652,11 @@ private final class MPVHeaderProxyCore {
             ) {
                 redirected.setValue(value, forHTTPHeaderField: key)
             }
+            CloudflareBypassManager.shared.applyCachedBypass(
+                to: &redirected,
+                for: request.url ?? targetURL
+            )
+            rejectedCookieHeader = redirected.value(forHTTPHeaderField: "Cookie")
             let redirectTarget = redirected.url.flatMap { proxy?.logURLSummary($0) } ?? "nil"
             Logger.shared.log("\(proxy?.logPrefix ?? "MPVHeaderProxy")[\(requestId)]: following redirect status=\(response.statusCode) target=\(redirectTarget)", type: logType)
             completionHandler(redirected)
@@ -1531,11 +1723,90 @@ private final class MPVHeaderProxyCore {
                     Logger.shared.log("[MPVProxyTrace \(traceID)] stage=upstream-complete-waiting req=\(requestSequence) pending=\(pendingDownstreamSends) pendingBytes=\(pendingDownstreamBytes) bytes=\(streamedByteCount) expected=\(expected)", type: "PlaybackTrace")
                 }
                 finishStreamIfReady(expected: expected)
+            case .rejectedResponseProbe:
+                completeRejectedResponse()
+                return
             }
 
             if mode != .stream {
                 finish()
             }
+        }
+
+        private func confirmedCloudflareChallenge() -> Bool {
+            guard let http = httpResponse else { return false }
+            let body = String(data: bufferedData, encoding: .utf8) ?? ""
+            return CloudflareBypassManager.isChallengeResponse(
+                status: http.statusCode,
+                body: body,
+                headers: CloudflareBypassManager.headersDictionary(from: http)
+            )
+        }
+
+        private func completeRejectedResponse(dataTask: URLSessionDataTask? = nil) {
+            guard let proxy, let http = httpResponse, !finished else { return }
+            let confirmedChallenge = confirmedCloudflareChallenge()
+            let backoffDescription: String
+            if http.statusCode == 429, !confirmedChallenge {
+                let retryAfter = http.value(forHTTPHeaderField: "Retry-After")
+                    .flatMap { TimeInterval($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                let backoff = upstreamTransport.recordRateLimit(
+                    for: targetURL,
+                    retryAfter: retryAfter
+                )
+                backoffDescription = " backoff=\(String(format: "%.1f", backoff))s"
+
+                if rateLimitRetryCount < maximumRateLimitRetries {
+                    rateLimitRetryCount += 1
+                    httpResponse = nil
+                    mode = .stream
+                    bufferedData.removeAll(keepingCapacity: true)
+                    Logger.shared.log(
+                        "\(proxy.logPrefix)[\(requestId)]: retrying rate-limited media request attempt=\(rateLimitRetryCount)/\(maximumRateLimitRetries)\(backoffDescription) target=\(proxy.logURLSummary(targetURL))",
+                        type: errorLogType
+                    )
+                    if upstreamTransport.start(self, request: request) {
+                        return
+                    }
+                    // If the transport cannot schedule the retry, surface recovery immediately.
+                    rateLimitRetryCount = maximumRateLimitRetries
+                }
+            } else {
+                backoffDescription = ""
+            }
+
+            // A real challenge can be solved on this exact URL. A generic media-host 403/503
+            // cannot; report it as a source rejection so the player can rerun provider
+            // extraction and obtain a fresh signed CDN URL. Generic 429 responses first get
+            // bounded transparent retries, then enter the same source-refresh path if exhausted.
+            if confirmedChallenge
+                || http.statusCode != 429
+                || rateLimitRetryCount >= maximumRateLimitRetries {
+                let rejectedURL = http.url ?? targetURL
+                Logger.shared.log(
+                    "\(proxy.logPrefix)[\(requestId)]: media access rejected status=\(http.statusCode) interactiveChallenge=\(confirmedChallenge) target=\(proxy.logURLSummary(rejectedURL))",
+                    type: errorLogType
+                )
+                cloudflareChallengeReporter?.report(
+                    url: rejectedURL,
+                    rejectedCookieHeader: rejectedCookieHeader,
+                    isInteractiveChallenge: confirmedChallenge,
+                    statusCode: http.statusCode
+                )
+            }
+
+            Logger.shared.log(
+                "\(proxy.logPrefix)[\(requestId)]: refusing upstream error body status=\(http.statusCode) confirmedCloudflare=\(confirmedChallenge)\(backoffDescription) target=\(proxy.logURLSummary(targetURL))",
+                type: errorLogType
+            )
+            proxy.sendResponse(
+                connection,
+                statusCode: http.statusCode,
+                headers: proxy.emptyResponseHeaders(from: http),
+                body: Data()
+            )
+            dataTask?.cancel()
+            finish()
         }
 
         private func startStreamingBufferedData(dataTask: URLSessionDataTask) {
@@ -1723,8 +1994,20 @@ final class MPVHeaderProxy {
 
     private init() {}
 
-    func makeProxyURL(for targetURL: URL, headers: [String: String], logType: String = "MPV", traceID: String? = nil) -> URL? {
-        proxy.makeProxyURL(for: targetURL, headers: headers, logType: logType, traceID: traceID)
+    func makeProxyURL(
+        for targetURL: URL,
+        headers: [String: String],
+        logType: String = "MPV",
+        traceID: String? = nil,
+        onConfirmedCloudflareChallenge: ((URL, String?, Bool, Int) -> Void)? = nil
+    ) -> URL? {
+        proxy.makeProxyURL(
+            for: targetURL,
+            headers: headers,
+            logType: logType,
+            traceID: traceID,
+            onConfirmedCloudflareChallenge: onConfirmedCloudflareChallenge
+        )
     }
 
     func invalidateSession(for proxyURL: URL) {

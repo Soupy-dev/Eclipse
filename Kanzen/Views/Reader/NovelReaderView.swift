@@ -33,6 +33,8 @@ struct NovelReaderView: View {
     @State private var isSettingsExpanded: Bool = false
     @State private var readingProgress: Double = 0.0
     @State private var autoMarkedReadChapters: Set<String> = []
+    @State private var windowSafeAreaInsets: UIEdgeInsets = .zero
+    @State private var scrollRequest: NovelScrollRequest?
     @AppStorage("readerReadThresholdPercent") private var readerReadThresholdPercent: Double = 80
 
     // Reader settings (persisted)
@@ -161,6 +163,7 @@ struct NovelReaderView: View {
                         autoScrollSpeed: autoScrollSpeed,
                         colorPreset: colorPresets[selectedColorPreset],
                         chapterKey: currentChapter.id.uuidString,
+                        scrollRequest: scrollRequest,
                         onProgressChanged: { progress in
                             self.readingProgress = progress
                             if progress >= readerReadThreshold {
@@ -197,6 +200,15 @@ struct NovelReaderView: View {
         .navigationBarHidden(true)
         .navigationBarBackButtonHidden(true)
         .ignoresSafeArea()
+        .background {
+            NovelReaderWindowMetricsReader { insets in
+                if windowSafeAreaInsets != insets {
+                    windowSafeAreaInsets = insets
+                }
+            }
+            .frame(width: 0, height: 0)
+            .allowsHitTesting(false)
+        }
         .onAppear {
             loadChapterContent()
             DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
@@ -567,51 +579,85 @@ struct NovelReaderView: View {
     // MARK: - Scroll to position
 
     private func scrollToPosition(_ percentage: CGFloat) {
-        readingProgress = Double(percentage)
-        guard let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-              let rootVC = windowScene.windows.first?.rootViewController else { return }
-        let script = """
-        (function() {
-            var h = document.documentElement.scrollHeight - document.documentElement.clientHeight;
-            window.scrollTo({ top: h * \(percentage), behavior: 'auto' });
-        })();
-        """
-        findWebView(in: rootVC.view)?.evaluateJavaScript(script, completionHandler: nil)
-    }
-
-    private func findWebView(in view: UIView) -> WKWebView? {
-        if let wv = view as? WKWebView { return wv }
-        for sub in view.subviews {
-            if let wv = findWebView(in: sub) { return wv }
-        }
-        return nil
+        let clamped = min(max(percentage, 0), 1)
+        readingProgress = Double(clamped)
+        scrollRequest = NovelScrollRequest(percentage: clamped)
     }
 
     // MARK: - Safe area helpers
 
     private var safeAreaTop: CGFloat {
-        activeWindow?.safeAreaInsets.top ?? 0
+        windowSafeAreaInsets.top
     }
 
     private var safeAreaBottom: CGFloat {
-        activeWindow?.safeAreaInsets.bottom ?? 0
+        windowSafeAreaInsets.bottom
+    }
+}
+
+private struct NovelReaderWindowMetricsReader: UIViewRepresentable {
+    let onChange: (UIEdgeInsets) -> Void
+
+    func makeUIView(context: Context) -> NovelReaderWindowMetricsProbeView {
+        NovelReaderWindowMetricsProbeView(onChange: onChange)
     }
 
-    private var activeWindow: UIWindow? {
-        let scenes = UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-        return scenes
-            .first { $0.activationState == .foregroundActive }?
-            .windows
-            .first { $0.isKeyWindow }
-            ?? scenes.first?.windows.first { $0.isKeyWindow }
-            ?? scenes.first?.windows.first
+    func updateUIView(_ uiView: NovelReaderWindowMetricsProbeView, context: Context) {
+        uiView.onChange = onChange
+        uiView.reportInsetsIfNeeded()
+    }
+}
+
+private final class NovelReaderWindowMetricsProbeView: UIView {
+    var onChange: (UIEdgeInsets) -> Void
+    private var lastReportedInsets: UIEdgeInsets?
+
+    init(onChange: @escaping (UIEdgeInsets) -> Void) {
+        self.onChange = onChange
+        super.init(frame: .zero)
+        isUserInteractionEnabled = false
+        isAccessibilityElement = false
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        reportInsetsIfNeeded()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        reportInsetsIfNeeded()
+    }
+
+    override func safeAreaInsetsDidChange() {
+        super.safeAreaInsetsDidChange()
+        reportInsetsIfNeeded()
+    }
+
+    func reportInsetsIfNeeded() {
+        let insets = window?.safeAreaInsets ?? .zero
+        guard insets != lastReportedInsets else { return }
+        lastReportedInsets = insets
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.lastReportedInsets == insets else { return }
+            self.onChange(insets)
+        }
     }
 }
 
 // MARK: - NovelHTMLView (WKWebView wrapper)
 
-struct NovelHTMLView: UIViewRepresentable {
+private struct NovelScrollRequest: Equatable {
+    let id = UUID()
+    let percentage: CGFloat
+}
+
+private struct NovelHTMLView: UIViewRepresentable {
     let htmlContent: String
     let fontSize: CGFloat
     let fontFamily: String
@@ -623,6 +669,7 @@ struct NovelHTMLView: UIViewRepresentable {
     let autoScrollSpeed: Double
     let colorPreset: (name: String, background: String, text: String)
     let chapterKey: String
+    let scrollRequest: NovelScrollRequest?
     var onProgressChanged: ((Double) -> Void)?
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
@@ -646,6 +693,7 @@ struct NovelHTMLView: UIViewRepresentable {
         var lastLineSpacing: CGFloat = 0
         var lastMargin: CGFloat = 0
         var lastPreset: String = ""
+        var lastScrollRequestID: UUID?
 
         init(_ parent: NovelHTMLView) {
             self.parent = parent
@@ -769,6 +817,18 @@ struct NovelHTMLView: UIViewRepresentable {
 
     func updateUIView(_ webView: WKWebView, context: Context) {
         let c = context.coordinator
+
+        if let scrollRequest, scrollRequest.id != c.lastScrollRequestID {
+            c.lastScrollRequestID = scrollRequest.id
+            let percentage = min(max(scrollRequest.percentage, 0), 1)
+            let script = """
+            (function() {
+                var h = document.documentElement.scrollHeight - document.documentElement.clientHeight;
+                window.scrollTo({ top: h * \(percentage), behavior: 'auto' });
+            })();
+            """
+            webView.evaluateJavaScript(script, completionHandler: nil)
+        }
 
         if isAutoScrolling {
             c.startAutoScroll(webView)

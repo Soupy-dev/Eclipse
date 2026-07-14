@@ -54,6 +54,7 @@ struct TVRootView: View {
         }
         .heroNamespace(heroNamespace)
         .task { await refreshBackgroundServices() }
+        .task(priority: .utility) { await warmSchedulesAfterStartup() }
         .onChange(of: scenePhase) { _, newPhase in
             publishScenePhase(newPhase)
             if newPhase == .active {
@@ -111,6 +112,17 @@ struct TVRootView: View {
     private func refreshBackgroundServices() async {
         await ServiceManager.shared.autoUpdateServicesIfNeeded()
         await SourceHealthMonitor.shared.runDailyEnabledSourceChecksIfNeeded()
+    }
+
+    private func warmSchedulesAfterStartup() async {
+        // Keep the user's selected Schedule range outside the first-render
+        // path while still warming both providers after launch.
+        try? await Task.sleep(nanoseconds: 750_000_000)
+        guard !Task.isCancelled else { return }
+        let requestedDayCount = ScheduleWindow.current.rawValue
+        _ = await ScheduleViewModel.shared.notificationScheduleSnapshot(
+            dayCount: requestedDayCount
+        )
     }
 
     private func publishScenePhase(_ phase: ScenePhase) {

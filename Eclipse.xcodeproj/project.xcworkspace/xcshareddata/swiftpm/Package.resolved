@@ -1,5 +1,5 @@
 {
-  "originHash" : "aa66300db926706f596ed95d2239dcbdf0f39cceaf019cbeba612134304be5f3",
+  "originHash" : "5359f9eeffb172a094f60eba262a760cfd1775c57c36cd69dfd425e889ae1a16",
   "pins" : [
     {
       "identity" : "aidokurunner",
@@ -35,15 +35,6 @@
       "state" : {
         "revision" : "cb5b2bd0da83ad29c0bec762d39f41c8ad0eaf3e",
         "version" : "1.2.1"
-      }
-    },
-    {
-      "identity" : "mpvkit",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/Soupy-dev/MPVKit",
-      "state" : {
-        "branch" : "eclipse-mpv-metal",
-          "revision" : "f840f80fc4277ac373932e7c015255521f930b75"
       }
     },
     {

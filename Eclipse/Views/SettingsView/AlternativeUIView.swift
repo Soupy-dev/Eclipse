@@ -2,10 +2,51 @@
 
 import SwiftUI
 
+enum AppearanceSettingsSearchTarget: String, Hashable {
+    case palette
+    case backgroundStyle
+    case solidColorSource
+    case customBackgroundColor
+    case colorBleed
+    case backgroundIntensity
+    case interface
+    case globalAppearance
+    case accentColor
+    case switchModeAnimation
+    case animatedBackground
+    case animationQuality
+    case animationFrameRate
+    case appPerformanceOverlay
+    case hideSplashScreen
+    case alternativeSeasonMenu
+    case horizontalEpisodeList
+    case tmdbTitleArt
+    case similarTitles
+
+    var anchorID: String {
+        "appearance-settings-search-\(rawValue)"
+    }
+
+    var sectionKey: String {
+        switch self {
+        case .palette, .backgroundStyle, .solidColorSource, .customBackgroundColor, .colorBleed, .backgroundIntensity:
+            return "theme"
+        case .interface, .globalAppearance, .accentColor:
+            return "interface"
+        case .switchModeAnimation, .animatedBackground, .animationQuality, .animationFrameRate, .appPerformanceOverlay, .hideSplashScreen:
+            return "motion"
+        case .alternativeSeasonMenu, .horizontalEpisodeList, .tmdbTitleArt, .similarTitles:
+            return "details"
+        }
+    }
+}
+
 struct AlternativeUIView: View {
+    let initialSearchTarget: AppearanceSettingsSearchTarget?
+
     // Retained display options
-    @AppStorage("seasonMenu") private var useSeasonMenu = false
-    @AppStorage("horizontalEpisodeList") private var horizontalEpisodeList = false
+    @AppStorage(MediaDetailPlatformDefaults.seasonMenuKey) private var useSeasonMenu = MediaDetailPlatformDefaults.prefersCompactSeasonMenu
+    @AppStorage(MediaDetailPlatformDefaults.horizontalEpisodeListKey) private var horizontalEpisodeList = MediaDetailPlatformDefaults.prefersHorizontalEpisodes
     @AppStorage(MediaDetailTitleArtworkSettings.enabledKey) private var mediaDetailTitleArtworkEnabled = MediaDetailTitleArtworkSettings.defaultEnabled
     @AppStorage(MediaDetailSimilarTitlesSettings.enabledKey) private var mediaDetailSimilarTitlesEnabled = MediaDetailSimilarTitlesSettings.defaultEnabled
 
@@ -19,6 +60,8 @@ struct AlternativeUIView: View {
     @AppStorage(ExperimentalVisualTuning.heroHeightScaleKey) private var experimentalHeroHeightScale = ExperimentalVisualTuning.defaultHeroHeightScale
     @AppStorage(HomeAnimatedBackgroundSettings.enabledKey) private var homeAnimatedBackgroundEnabled = HomeAnimatedBackgroundSettings.defaultEnabled
     @AppStorage(HomeAnimatedBackgroundQuality.storageKey) private var homeAnimatedBackgroundQuality = HomeAnimatedBackgroundQuality.defaultValue.rawValue
+    @AppStorage(HomeAnimatedBackgroundFrameRate.storageKey) private var homeAnimatedBackgroundFrameRate = HomeAnimatedBackgroundFrameRate.defaultValue.rawValue
+    @AppStorage(AppPerformanceOverlaySettings.enabledKey) private var appPerformanceOverlayEnabled = AppPerformanceOverlaySettings.defaultEnabled
 #if !os(tvOS)
     @AppStorage(ModeSwitchAnimationSettings.enabledKey) private var modeSwitchAnimationEnabled = ModeSwitchAnimationSettings.defaultEnabled
     @AppStorage("hideSplashScreen") private var hideSplashScreen = false
@@ -35,6 +78,10 @@ struct AlternativeUIView: View {
 
     private var accent: Color { accentColorManager.currentAccentColor }
 
+    init(initialSearchTarget: AppearanceSettingsSearchTarget? = nil) {
+        self.initialSearchTarget = initialSearchTarget
+    }
+
     var body: some View {
         List {
             previewSection
@@ -50,7 +97,10 @@ struct AlternativeUIView: View {
         .navigationTitle("Appearance")
         .accessibilityIdentifier("tv.settings.appearance.screen")
         .eclipseSettingsStyle()
-        .onAppear(perform: reloadMediaDetailElements)
+        .onAppear {
+            AppPerformanceRuntimeContext.shared.setSurface("settings.appearance")
+            reloadMediaDetailElements()
+        }
         .alert("Restart Required", isPresented: $showRestartAlert) {
             Button("OK", role: .cancel) { }
         } message: {
@@ -63,7 +113,7 @@ struct AlternativeUIView: View {
     private var customizationSection: some View {
         Section {
             NavigationLink {
-                AppearanceSettingsSubpage(title: "Theme") {
+                AppearanceSettingsSubpage(title: "Theme", sectionKey: "theme", initialSearchTarget: initialSearchTarget) {
                     themeSection
                         .eclipseExperimentalSettingsRows()
                 }
@@ -83,7 +133,7 @@ struct AlternativeUIView: View {
         Section {
 #if !os(tvOS)
             NavigationLink {
-                AppearanceSettingsSubpage(title: "Interface") {
+                AppearanceSettingsSubpage(title: "Interface", sectionKey: "interface", initialSearchTarget: initialSearchTarget) {
                     interfaceSection
                         .eclipseExperimentalSettingsRows()
                 }
@@ -97,7 +147,7 @@ struct AlternativeUIView: View {
 #endif
 
             NavigationLink {
-                AppearanceSettingsSubpage(title: "Motion & Startup") {
+                AppearanceSettingsSubpage(title: "Motion & Startup", sectionKey: "motion", initialSearchTarget: initialSearchTarget) {
                     appExperienceSection
                         .eclipseExperimentalSettingsRows()
                 }
@@ -127,7 +177,7 @@ struct AlternativeUIView: View {
             .accessibilityIdentifier("tv.appearance.homeLayout")
 
             NavigationLink {
-                AppearanceSettingsSubpage(title: "Detail Pages") {
+                AppearanceSettingsSubpage(title: "Detail Pages", sectionKey: "details", initialSearchTarget: initialSearchTarget) {
                     detailPagesSection
                         .eclipseExperimentalSettingsRows()
                 }
@@ -140,7 +190,7 @@ struct AlternativeUIView: View {
             }
 
             NavigationLink {
-                AppearanceSettingsSubpage(title: "Media Detail Layout") {
+                AppearanceSettingsSubpage(title: "Media Detail Layout", sectionKey: "mediaDetailLayout", initialSearchTarget: initialSearchTarget) {
                     mediaDetailSection
                         .eclipseExperimentalSettingsRows()
                 }
@@ -188,6 +238,7 @@ struct AlternativeUIView: View {
                 }
             }
             .padding(.vertical, 4)
+            .id(AppearanceSettingsSearchTarget.palette.anchorID)
 
 #if !os(tvOS)
             if theme.appearancePaletteRaw == AtmospherePaletteID.custom.rawValue {
@@ -200,6 +251,7 @@ struct AlternativeUIView: View {
                     ColorPicker("Color 3", selection: customColorBinding(2))
                 }
                 .padding(.vertical, 2)
+                .id(AppearanceSettingsSearchTarget.customBackgroundColor.anchorID)
             }
 #endif
 
@@ -213,6 +265,7 @@ struct AlternativeUIView: View {
                     Text("Solid Color").tag(AtmosphereStyle.solid)
                 }
                 .pickerStyle(.menu)
+                .id(AppearanceSettingsSearchTarget.backgroundStyle.anchorID)
             }
 
             if theme.atmosphereStyle == .solid {
@@ -225,12 +278,14 @@ struct AlternativeUIView: View {
                         ForEach(AtmosphereSolidColorSource.allCases) { source in
                             Text(source.displayName).tag(source)
                         }
-                    }
-                    .pickerStyle(.menu)
+                }
+                .pickerStyle(.menu)
+                    .id(AppearanceSettingsSearchTarget.solidColorSource.anchorID)
                 }
 
                 if theme.atmosphereSolidColorSource == .custom {
                     ColorPicker("Custom Background Color", selection: $theme.atmosphereSolidColor)
+                        .id(AppearanceSettingsSearchTarget.customBackgroundColor.anchorID)
                 }
 #endif
             }
@@ -243,6 +298,7 @@ struct AlternativeUIView: View {
                     range: AppearanceConfig.bleedRange,
                     step: 0.05
                 )
+                .id(AppearanceSettingsSearchTarget.colorBleed.anchorID)
 
                 sliderRow(
                     title: "Background Intensity",
@@ -251,6 +307,7 @@ struct AlternativeUIView: View {
                     range: AppearanceConfig.intensityRange,
                     step: 0.05
                 )
+                .id(AppearanceSettingsSearchTarget.backgroundIntensity.anchorID)
             }
         } header: {
             Text("Theme")
@@ -271,6 +328,7 @@ struct AlternativeUIView: View {
                     Text("Classic").tag(false)
                 }
                 .pickerStyle(.menu)
+                .id(AppearanceSettingsSearchTarget.interface.anchorID)
             }
 
             if modernInterfaceEnabled != ExperimentalFeatureState.isEnabledAtLaunch {
@@ -284,6 +342,7 @@ struct AlternativeUIView: View {
                 description: "Share appearance changes between media and reader mode.",
                 isOn: $theme.globalAppearanceEnabled
             )
+            .id(AppearanceSettingsSearchTarget.globalAppearance.anchorID)
 
 #if !os(tvOS)
             HStack {
@@ -298,10 +357,11 @@ struct AlternativeUIView: View {
                 }
                 ColorPicker("", selection: $accentColorManager.currentAccentColor)
                     .labelsHidden()
-                    .onChangeComp(of: accentColorManager.currentAccentColor) { _, newColor in
-                        accentColorManager.saveAccentColor(newColor)
-                    }
+                .onChangeComp(of: accentColorManager.currentAccentColor) { _, newColor in
+                    accentColorManager.saveAccentColor(newColor)
+                }
             }
+            .id(AppearanceSettingsSearchTarget.accentColor.anchorID)
 #endif
         } header: {
             Text("Interface & Scope")
@@ -319,6 +379,7 @@ struct AlternativeUIView: View {
                 description: "Animate the top-right Media and Reader mode switch.",
                 isOn: $modeSwitchAnimationEnabled
             )
+            .id(AppearanceSettingsSearchTarget.switchModeAnimation.anchorID)
 #endif
 
             toggleRow(
@@ -326,10 +387,11 @@ struct AlternativeUIView: View {
                 description: "Show ambient motion behind broad app surfaces.",
                 isOn: $homeAnimatedBackgroundEnabled
             )
+            .id(AppearanceSettingsSearchTarget.animatedBackground.anchorID)
 
             settingRow(
                 title: "Animation Quality",
-                description: "All levels animate at 30 FPS. Low keeps the core eclipse rings and particles. Medium adds a plasma field, starfield, orbiting embers, energy wavefronts, and a corona. High adds denser motion, a kinetic mesh, more orbiting embers, and meteor bursts."
+                description: "Low keeps the core eclipse rings and particles. Medium adds a plasma field, starfield, orbiting embers, energy wavefronts, and a corona. High adds denser motion, a kinetic mesh, more orbiting embers, and meteor bursts."
             ) {
                 Picker("", selection: $homeAnimatedBackgroundQuality) {
                     ForEach(HomeAnimatedBackgroundQuality.allCases) { quality in
@@ -337,7 +399,28 @@ struct AlternativeUIView: View {
                     }
                 }
                 .pickerStyle(.menu)
+                .id(AppearanceSettingsSearchTarget.animationQuality.anchorID)
             }
+
+            settingRow(
+                title: "Animation Frame Rate",
+                description: "Use the battery-friendly 20 FPS default, or choose smoother 30 FPS motion across Eclipse."
+            ) {
+                Picker("", selection: $homeAnimatedBackgroundFrameRate) {
+                    ForEach(HomeAnimatedBackgroundFrameRate.allCases) { frameRate in
+                        Text(frameRate.displayName).tag(frameRate.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+                .id(AppearanceSettingsSearchTarget.animationFrameRate.anchorID)
+            }
+
+            toggleRow(
+                title: "App Performance Overlay",
+                description: "Show live CPU, GPU, thermal state, and background quality diagnostics throughout Eclipse. While visible, sparse samples and CPU spikes are added to Performance logs. Sampling and logging pause when the app is inactive or playback covers the interface.",
+                isOn: $appPerformanceOverlayEnabled
+            )
+            .id(AppearanceSettingsSearchTarget.appPerformanceOverlay.anchorID)
 
 #if !os(tvOS)
             toggleRow(
@@ -345,6 +428,7 @@ struct AlternativeUIView: View {
                 description: "Skip the launch splash once Eclipse opens.",
                 isOn: $hideSplashScreen
             )
+            .id(AppearanceSettingsSearchTarget.hideSplashScreen.anchorID)
 #endif
         } header: {
             Text("App Experience")
@@ -360,16 +444,19 @@ struct AlternativeUIView: View {
                 description: "Dropdown menus instead of horizontal scrolls for seasons, specials and OVAs.",
                 isOn: $useSeasonMenu
             )
+            .id(AppearanceSettingsSearchTarget.alternativeSeasonMenu.anchorID)
             toggleRow(
                 title: "Horizontal Episode List",
                 description: "Use a horizontal instead of vertical episode list.",
                 isOn: $horizontalEpisodeList
             )
+            .id(AppearanceSettingsSearchTarget.horizontalEpisodeList.anchorID)
             toggleRow(
                 title: "TMDB Title Art",
                 description: "Use TMDB logo artwork for media titles when available.",
                 isOn: $mediaDetailTitleArtworkEnabled
             )
+            .id(AppearanceSettingsSearchTarget.tmdbTitleArt.anchorID)
         } header: {
             Text("Detail Pages")
         }
@@ -749,6 +836,8 @@ struct AlternativeUIView: View {
         experimentalGlassStrength = ExperimentalVisualTuning.defaultGlassStrength
         homeAnimatedBackgroundEnabled = HomeAnimatedBackgroundSettings.defaultEnabled
         homeAnimatedBackgroundQuality = HomeAnimatedBackgroundQuality.defaultValue.rawValue
+        homeAnimatedBackgroundFrameRate = HomeAnimatedBackgroundFrameRate.defaultValue.rawValue
+        appPerformanceOverlayEnabled = AppPerformanceOverlaySettings.defaultEnabled
 #if !os(tvOS)
         modeSwitchAnimationEnabled = ModeSwitchAnimationSettings.defaultEnabled
         hideSplashScreen = false
@@ -761,16 +850,40 @@ struct AlternativeUIView: View {
 
 private struct AppearanceSettingsSubpage<Content: View>: View {
     let title: String
+    let sectionKey: String
+    let initialSearchTarget: AppearanceSettingsSearchTarget?
     private let content: Content
 
-    init(title: String, @ViewBuilder content: () -> Content) {
+    init(
+        title: String,
+        sectionKey: String,
+        initialSearchTarget: AppearanceSettingsSearchTarget?,
+        @ViewBuilder content: () -> Content
+    ) {
         self.title = title
+        self.sectionKey = sectionKey
+        self.initialSearchTarget = initialSearchTarget
         self.content = content()
     }
 
     var body: some View {
-        List {
-            content
+        ScrollViewReader { scrollProxy in
+            List {
+                content
+            }
+            .onAppear {
+                AppPerformanceRuntimeContext.shared.setSurface("settings.\(sectionKey)")
+                guard let initialSearchTarget,
+                      initialSearchTarget.sectionKey == sectionKey else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+                    withAnimation(.easeInOut(duration: 0.28)) {
+                        scrollProxy.scrollTo(initialSearchTarget.anchorID, anchor: .center)
+                    }
+                }
+            }
+            .onDisappear {
+                AppPerformanceRuntimeContext.shared.setSurface("settings.appearance")
+            }
         }
         .navigationTitle(title)
         .eclipseSettingsStyle()

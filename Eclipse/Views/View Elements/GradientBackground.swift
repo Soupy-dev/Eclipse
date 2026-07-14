@@ -442,6 +442,7 @@ struct ExperimentalMediaDesignMetrics {
 
 struct SettingsGradientBackground: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     @ObservedObject private var theme = EclipseTheme.shared
     @AppStorage(HomeAnimatedBackgroundSettings.enabledKey) private var animatedBackgroundEnabled = HomeAnimatedBackgroundSettings.defaultEnabled
     var allowsAnimatedBackground: Bool = true
@@ -455,7 +456,7 @@ struct SettingsGradientBackground: View {
                         topClearance: 0,
                         ambientColor: nil,
                         accentColor: theme.scopedGradientColor(),
-                        motionEnabled: !reduceMotion
+                        motionEnabled: !reduceMotion && scenePhase == .active
                     )
                 }
             }
@@ -543,14 +544,6 @@ enum HomeAnimatedBackgroundQuality: String, CaseIterable, Identifiable {
         }
     }
 
-    var frameInterval: Double {
-        // Every tier animates at the same conservative 30fps cadence. The richer
-        // tiers add visual layers, not a higher refresh rate — bumping fps while
-        // also drawing more per frame is what actually kills performance. The
-        // motion is all slow and continuous, so 30fps stays perfectly smooth.
-        1.0 / 30.0
-    }
-
     var layerOpacity: Double {
         switch self {
         case .low: return 0.96
@@ -559,7 +552,7 @@ enum HomeAnimatedBackgroundQuality: String, CaseIterable, Identifiable {
         }
     }
 
-    static var defaultValue: HomeAnimatedBackgroundQuality { .high }
+    static var defaultValue: HomeAnimatedBackgroundQuality { .low }
 
     static func resolved(_ rawValue: String?) -> HomeAnimatedBackgroundQuality {
         guard let rawValue,
@@ -571,6 +564,29 @@ enum HomeAnimatedBackgroundQuality: String, CaseIterable, Identifiable {
 
     static func current(defaults: UserDefaults = .standard) -> HomeAnimatedBackgroundQuality {
         resolved(defaults.string(forKey: storageKey))
+    }
+}
+
+enum HomeAnimatedBackgroundFrameRate: String, CaseIterable, Identifiable {
+    static let storageKey = "homeAnimatedBackgroundFrameRate"
+
+    case fps20
+    case fps30
+
+    var id: String { rawValue }
+    var displayName: String { self == .fps20 ? "20 FPS" : "30 FPS" }
+    var frameInterval: Double { self == .fps20 ? 1.0 / 20.0 : 1.0 / 30.0 }
+
+    static var defaultValue: HomeAnimatedBackgroundFrameRate { .fps20 }
+
+    static func resolved(_ rawValue: String?) -> HomeAnimatedBackgroundFrameRate {
+        // Migrate the brief 15 FPS setting without leaving existing installs on
+        // an invalid raw value or unexpectedly opting them into 30 FPS.
+        if rawValue == "fps15" { return .fps20 }
+        guard let rawValue, let value = HomeAnimatedBackgroundFrameRate(rawValue: rawValue) else {
+            return defaultValue
+        }
+        return value
     }
 }
 
@@ -589,6 +605,7 @@ struct EclipseAmbientMotionBackground: View {
     let accentColor: Color
     let motionEnabled: Bool
     @AppStorage(HomeAnimatedBackgroundQuality.storageKey) private var qualityRawValue = HomeAnimatedBackgroundQuality.defaultValue.rawValue
+    @AppStorage(HomeAnimatedBackgroundFrameRate.storageKey) private var frameRateRawValue = HomeAnimatedBackgroundFrameRate.defaultValue.rawValue
 
     private let particles: [(x: CGFloat, y: CGFloat, size: CGFloat, drift: CGFloat, opacity: Double)] = [
         (0.25, 0.24, 2.8, 15, 0.34),
@@ -609,6 +626,10 @@ struct EclipseAmbientMotionBackground: View {
 
     private var quality: HomeAnimatedBackgroundQuality {
         HomeAnimatedBackgroundQuality.resolved(qualityRawValue)
+    }
+
+    private var frameInterval: Double {
+        HomeAnimatedBackgroundFrameRate.resolved(frameRateRawValue).frameInterval
     }
 
     var body: some View {
@@ -654,7 +675,7 @@ struct EclipseAmbientMotionBackground: View {
     }
 
     private func ambientLayer(size: CGSize, motionEnabled: Bool) -> some View {
-        TimelineView(.animation(minimumInterval: quality.frameInterval, paused: !motionEnabled)) { timeline in
+        TimelineView(.animation(minimumInterval: frameInterval, paused: !motionEnabled)) { timeline in
             Canvas(opaque: false, colorMode: .linear) { context, canvasSize in
                 var drawingContext = context
                 drawAmbientLayer(

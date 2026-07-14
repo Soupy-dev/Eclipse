@@ -4,6 +4,8 @@ class ModuleManager: ObservableObject {
     @Published var modules: [ModuleDataContainer] = []
     private let fileManager = FileManager.default
     private let modulesFileName: String = "modules.json"
+    private let maximumModuleMetadataBytes = 1_000_000
+    private let maximumModuleScriptBytes = 10_000_000
 
     // MARK: - Auto-Update
 
@@ -42,7 +44,7 @@ class ModuleManager: ObservableObject {
         DispatchQueue.main.async {
             let url = ModuleManager.shared.getModulesFilePath()
             guard let data = try? JSONEncoder().encode(self.modules) else {return}
-            try? data.write(to: url)
+            try? data.write(to: url, options: .atomic)
         }
     }
     func addModules(_ moduleUrL:String, metaData: ModuleData) async throws -> Void
@@ -131,38 +133,48 @@ class ModuleManager: ObservableObject {
     }
     func validateJSfile(_ url: String)  async throws -> String
     {
-        
-        
-            guard let scriptUrl = URL(string: url) else {
-                throw ModuleLoadingError.invalidScriptFormat("Invalid Script Url")
-               
-            }
-       
-            let (scriptData,_)  = try await URLSession.shared.data(from: scriptUrl)
-            guard let jsContent = String(data:scriptData, encoding: .utf8) else
-            {
-                throw ModuleLoadingError.invalidScriptFormat("Invalid Script Format")
-            }
-            
-            return jsContent
-        
-       
+        guard let scriptUrl = validatedRemoteURL(url) else {
+            throw ModuleLoadingError.invalidScriptFormat("Invalid HTTP(S) script URL")
+        }
+
+        let (scriptData, response) = try await URLSession.custom.boundedData(
+            from: scriptUrl,
+            maximumResponseBytes: maximumModuleScriptBytes
+        )
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            throw ModuleLoadingError.scriptDownloadError("Script request returned an invalid response")
+        }
+        guard let jsContent = String(data:scriptData, encoding: .utf8) else {
+            throw ModuleLoadingError.invalidScriptFormat("Invalid Script Format")
+        }
+
+        return jsContent
     }
     func validateModuleUrl(_ urlString: String) async throws -> ModuleData
     {
-        do{
-            guard let url =  URL(string: urlString) else
-            {
-                throw  ModuleCreationError.invalidScriptUrl("invalid Script URL")
-            }
-            let (rawData,_) = try await URLSession.shared.data(from: url)
-            let metaData = try JSONDecoder().decode(ModuleData.self, from: rawData)
-           return metaData
+        guard let url = validatedRemoteURL(urlString) else {
+            throw ModuleCreationError.invalidScriptUrl("invalid HTTP(S) module URL")
         }
-        catch{
-            throw error
-            
+        let (rawData, response) = try await URLSession.custom.boundedData(
+            from: url,
+            maximumResponseBytes: maximumModuleMetadataBytes
+        )
+        guard let httpResponse = response as? HTTPURLResponse,
+              (200...299).contains(httpResponse.statusCode) else {
+            throw ModuleCreationError.invalidScriptUrl("module request returned an invalid response")
         }
+        return try JSONDecoder().decode(ModuleData.self, from: rawData)
+    }
+
+    private func validatedRemoteURL(_ value: String) -> URL? {
+        guard let url = URL(string: value.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "https" || scheme == "http",
+              url.host?.isEmpty == false else {
+            return nil
+        }
+        return url
     }
     func validateModule(_ module: ModuleDataContainer, completion: @escaping (Bool) -> Void)
     { Task

@@ -105,8 +105,8 @@ var nextControllers: [UIViewController]?
                 didStartCurrentLoad = true
                 loadPages(chapter: selectedChapter, params: currParams, position: .curr)
             }
-            let idx = selectedChapter.idx
-            if readingMode != .WEBTOON {
+            if readingMode != .WEBTOON,
+               let idx = resolvedChapterIndex(for: selectedChapter, in: chapters) {
                 // fetch adjacent pages only for paged readers; webtoon loads adjacent chapters at boundaries.
                 if idx > 0
                 {
@@ -259,8 +259,11 @@ var nextControllers: [UIViewController]?
             }
             return UIHostingController(rootView: AnyView(page.body))
         }
-        if let selectedChapter = selectedChapter, let chapters = chapters, selectedChapter.idx > 0 {
-            let transistionView: any View = chapterView(page: PageData(content: "CHAPTER_END"), index: chapters[selectedChapter.idx-1].chapterNumber)
+        if let selectedChapter = selectedChapter,
+           let chapters = chapters,
+           let selectedIndex = resolvedChapterIndex(for: selectedChapter, in: chapters),
+           selectedIndex > 0 {
+            let transistionView: any View = chapterView(page: PageData(content: "CHAPTER_END"), index: chapters[selectedIndex - 1].chapterNumber)
             prevControllers = prevControllers! + [UIHostingController(rootView: AnyView( transistionView))]
             
         }
@@ -273,8 +276,11 @@ var nextControllers: [UIViewController]?
             }
             return UIHostingController(rootView: AnyView(page.body))
         }
-        if let selectedChapter = selectedChapter, let chapters = chapters, selectedChapter.idx < chapters.count - 1 {
-            let transistionView: any View = chapterView(page: PageData(content: "CHAPTER_END"), index: chapters[selectedChapter.idx + 1].chapterNumber)
+        if let selectedChapter = selectedChapter,
+           let chapters = chapters,
+           let selectedIndex = resolvedChapterIndex(for: selectedChapter, in: chapters),
+           selectedIndex < chapters.count - 1 {
+            let transistionView: any View = chapterView(page: PageData(content: "CHAPTER_END"), index: chapters[selectedIndex + 1].chapterNumber)
             nextControllers = nextControllers! + [UIHostingController(rootView: AnyView( transistionView))]
             
         }
@@ -283,15 +289,25 @@ var nextControllers: [UIViewController]?
         flushPendingPagePosition()
         // Cancel next chapter loading since it's no longer needed
         cancelLoadPagesTask(for: .next)
-        if let currChapter = selectedChapter, currChapter.idx == 0
-        {
+        guard let selectedChapter,
+              let chapters,
+              let selectedIndex = resolvedChapterIndex(for: selectedChapter, in: chapters) else {
+            ReaderLogger.shared.log("Ignored previous chapter shift because the selected chapter is stale", type: "ReaderDebug")
+            return
+        }
+        if selectedIndex == 0 {
             ReaderLogger.shared.log("No previous chapter available", type: "ReaderDebug")
+            return
+        }
+        guard !prevChapter.isEmpty else {
+            ReaderLogger.shared.log("Previous chapter is not loaded yet", type: "ReaderDebug")
+            fetchPrev()
             return
         }
         
         // Mark the chapter we're leaving as read
-        if let chapter = selectedChapter, mangaId != 0 {
-            markChapterRead(chapter)
+        if mangaId != 0 {
+            markChapterRead(selectedChapter)
         }
         
         //shift Controllers
@@ -317,17 +333,25 @@ var nextControllers: [UIViewController]?
         flushPendingPagePosition()
         // Cancel prev chapter loading since it's no longer needed
         cancelLoadPagesTask(for: .prev)
-        if let currChapter = selectedChapter,
-            let chapters = chapters,
-            currChapter.idx == chapters.count - 1
-        {
+        guard let selectedChapter,
+              let chapters,
+              let selectedIndex = resolvedChapterIndex(for: selectedChapter, in: chapters) else {
+            ReaderLogger.shared.log("Ignored next chapter shift because the selected chapter is stale", type: "ReaderDebug")
+            return
+        }
+        if selectedIndex == chapters.count - 1 {
             ReaderLogger.shared.log("No next chapter available", type: "ReaderDebug")
+            return
+        }
+        guard !nextChapter.isEmpty else {
+            ReaderLogger.shared.log("Next chapter is not loaded yet", type: "ReaderDebug")
+            fetchNext()
             return
         }
         
         // Mark the chapter we're leaving as read
-        if let chapter = selectedChapter, mangaId != 0 {
-            markChapterRead(chapter)
+        if mangaId != 0 {
+            markChapterRead(selectedChapter)
         }
         
         prevControllers = currControllers
@@ -554,8 +578,8 @@ var nextControllers: [UIViewController]?
     {
         if let currChapter = selectedChapter, let chapters = chapters
         {
-            let idx = currChapter.idx
-            if idx > 0
+            if let idx = resolvedChapterIndex(for: currChapter, in: chapters),
+               idx > 0
             {
                 selectedChapter = chapters[idx - 1]
                 ReaderLogger.shared.log("Shifted to previous chapter", type: "ReaderProgress")
@@ -566,8 +590,8 @@ var nextControllers: [UIViewController]?
     {
         if let currChapter = selectedChapter, let chapters = chapters
         {
-            let idx = currChapter.idx
-            if idx < chapters.count - 1
+            if let idx = resolvedChapterIndex(for: currChapter, in: chapters),
+               idx < chapters.count - 1
             {
                 selectedChapter = chapters[idx + 1]
                 ReaderLogger.shared.log("Shifted to next chapter", type: "ReaderProgress")
@@ -577,21 +601,27 @@ var nextControllers: [UIViewController]?
 
     func goToPreviousChapter() {
         flushPendingPagePosition()
-        guard let chapter = selectedChapter, chapter.idx > 0 else { return }
+        guard let chapter = selectedChapter,
+              let chapters,
+              let chapterIndex = resolvedChapterIndex(for: chapter, in: chapters),
+              chapterIndex > 0 else { return }
         if mangaId != 0 {
             markChapterRead(chapter)
         }
-        selectedChapter = chapters?[chapter.idx - 1]
+        selectedChapter = chapters[chapterIndex - 1]
         resetState()
     }
 
     func goToNextChapter() {
         flushPendingPagePosition()
-        guard let chapter = selectedChapter, let chapters = chapters, chapter.idx < chapters.count - 1 else { return }
+        guard let chapter = selectedChapter,
+              let chapters,
+              let chapterIndex = resolvedChapterIndex(for: chapter, in: chapters),
+              chapterIndex < chapters.count - 1 else { return }
         if mangaId != 0 {
             markChapterRead(chapter)
         }
-        selectedChapter = chapters[chapter.idx + 1]
+        selectedChapter = chapters[chapterIndex + 1]
         resetState()
     }
 
@@ -599,8 +629,8 @@ var nextControllers: [UIViewController]?
     {
         ReaderLogger.shared.log("Prefetch previous chapter requested", type: "ReaderDebug")
         if let selectedChapter = selectedChapter, let chapters = chapters {
-            let idx = selectedChapter.idx
-            if idx > 0 {
+            if let idx = resolvedChapterIndex(for: selectedChapter, in: chapters),
+               idx > 0 {
                 let prevChapter = chapters[idx - 1]
                 if let prevSources = prevChapter.chapterData, prevSources.count > 0,
                     let prevParams = prevSources[0].params
@@ -614,8 +644,8 @@ var nextControllers: [UIViewController]?
     }
     func fetchNext(completion: @escaping () -> Void = {})
     {        if let selectedChapter = selectedChapter, let chapters = chapters {
-        let idx = selectedChapter.idx
-        if idx < chapters.count - 1 {
+        if let idx = resolvedChapterIndex(for: selectedChapter, in: chapters),
+           idx < chapters.count - 1 {
             let nextChapters = chapters[idx + 1]
             if let nextSources = nextChapters.chapterData, nextSources.count > 0,
                 let nextParams = nextSources[0].params
@@ -674,7 +704,10 @@ var nextControllers: [UIViewController]?
         ReaderLogger.shared.log("Background prefetching \(backgroundPagePrefetchers.count) reader page groups", type: "ReaderProgress")
     }
     func getNextChapterIdx() -> String{
-        if let idx = selectedChapter?.idx, let currChapters = chapters, idx + 1 < currChapters.count  {
+        if let selectedChapter,
+           let currChapters = chapters,
+           let idx = resolvedChapterIndex(for: selectedChapter, in: currChapters),
+           idx + 1 < currChapters.count {
             return currChapters[idx+1].chapterNumber
             
         }
@@ -683,11 +716,28 @@ var nextControllers: [UIViewController]?
     }
     func getPrevChapterIdx() -> String
     {
-        if let idx = selectedChapter?.idx, let currChapters = chapters, idx - 1  >= 0 {
+        if let selectedChapter,
+           let currChapters = chapters,
+           let idx = resolvedChapterIndex(for: selectedChapter, in: currChapters),
+           idx > 0 {
             return currChapters[idx - 1].chapterNumber
             
         }
         return "0"
+    }
+
+    /// Provider refreshes, chapter de-duplication, and restored state can leave `Chapter.idx`
+    /// referring to an older array. Prefer the fast indexed lookup only when its identity still
+    /// matches, then recover by stable chapter identity instead of subscripting stale state.
+    private func resolvedChapterIndex(for chapter: Chapter, in chapters: [Chapter]) -> Int? {
+        let chapterKey = ChapterIdentityNormalizer.key(for: chapter.chapterNumber)
+        if chapters.indices.contains(chapter.idx),
+           ChapterIdentityNormalizer.key(for: chapters[chapter.idx].chapterNumber) == chapterKey {
+            return chapter.idx
+        }
+        return chapters.firstIndex {
+            ChapterIdentityNormalizer.key(for: $0.chapterNumber) == chapterKey
+        }
     }
 }
 

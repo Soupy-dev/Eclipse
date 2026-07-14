@@ -60,6 +60,7 @@ struct StremioConfigureView: View {
             }
 #endif
         }
+        .navigationViewStyle(StackNavigationViewStyle())
     }
 
     @ViewBuilder

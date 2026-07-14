@@ -252,6 +252,7 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
     private var loadTask: Task<Void, Never>?
     private var barsVisible = true
     private var didRequestClose = false
+    private weak var readerWindowScene: UIWindowScene?
 
     private var orientationLockEnabled: Bool {
         get { UserDefaults.standard.bool(forKey: "readerOrientationLockEnabled") }
@@ -295,6 +296,7 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        readerWindowScene = view.window?.windowScene ?? readerWindowScene
         applyPersistedOrientationLockIfNeeded()
     }
 
@@ -302,6 +304,7 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
         super.viewDidDisappear(animated)
         session.saveCurrentProgress(force: true)
         releaseActiveOrientationLock()
+        readerWindowScene = nil
     }
 
     deinit {
@@ -542,7 +545,13 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
             self?.session.selectChapter(chapter)
             self?.loadCurrentChapter()
         }
-        present(UIHostingController(rootView: NavigationView { view }), animated: true)
+        present(
+            UIHostingController(
+                rootView: NavigationView { view }
+                    .navigationViewStyle(StackNavigationViewStyle())
+            ),
+            animated: true
+        )
     }
 
     private func presentSettings() {
@@ -563,7 +572,13 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
                 self?.applyReaderSettings(reloadPages: requiresReload, changedKey: key)
             }
         )
-        present(UIHostingController(rootView: NavigationView { view }), animated: true)
+        present(
+            UIHostingController(
+                rootView: NavigationView { view }
+                    .navigationViewStyle(StackNavigationViewStyle())
+            ),
+            animated: true
+        )
     }
 
     private func applyReaderSettings(reloadPages: Bool, changedKey: String) {
@@ -618,9 +633,10 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
     }
 
     private func releaseActiveOrientationLock() {
-        AppDelegate.orientationLock = .all
+        guard let scene = activeWindowScene else { return }
+        AppDelegate.setOrientationLock(.all, for: scene)
         if #available(iOS 16.0, *) {
-            activeWindowScene?.windows.first { $0.isKeyWindow }?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+            viewIfLoaded?.window?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
         } else {
             UIViewController.attemptRotationToDeviceOrientation()
         }
@@ -638,17 +654,25 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
     }
 
     private func applyOrientationMask(_ mask: UIInterfaceOrientationMask) {
-        AppDelegate.orientationLock = mask
+        // `viewDidLoad` can run before this controller belongs to a window. Defer until
+        // `viewDidAppear` rather than applying the preference to an unrelated Stage Manager scene.
+        guard let scene = activeWindowScene else { return }
+        AppDelegate.setOrientationLock(mask, for: scene)
         if #available(iOS 16.0, *) {
-            activeWindowScene?.windows.first { $0.isKeyWindow }?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+            viewIfLoaded?.window?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask)) { error in
+                ReaderLogger.shared.log(
+                    "Reader orientation request failed mask=\(mask.rawValue): \(error.localizedDescription)",
+                    type: "ReaderSettings"
+                )
+            }
         } else {
             UIViewController.attemptRotationToDeviceOrientation()
         }
     }
 
     private var activeWindowScene: UIWindowScene? {
-        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-        return scenes.first { $0.activationState == .foregroundActive } ?? scenes.first
+        viewIfLoaded?.window?.windowScene ?? readerWindowScene
     }
 
     private func rawValue(for mask: UIInterfaceOrientationMask) -> String {

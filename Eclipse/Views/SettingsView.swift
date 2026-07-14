@@ -28,10 +28,14 @@ struct SettingsView: View {
     @AppStorage("githubReleaseLatestVersion") private var githubReleaseLatestVersion = ""
     @AppStorage("githubReleaseURL") private var githubReleaseURL = ""
     @AppStorage("defaultScheduleMode") private var defaultScheduleModeRaw = ScheduleMode.anime.rawValue
+    @AppStorage(ScheduleWindow.storageKey) private var scheduleWindowDays = ScheduleWindow.defaultValue.rawValue
     @AppStorage(PerformanceModeSettings.skipAniListTraversalForAnimeDetailsKey) private var skipAniListTraversalForAnimeDetails = false
 
     @StateObject private var catalogManager = CatalogManager.shared
 #if !os(tvOS)
+    @StateObject private var serviceManager = ServiceManager.shared
+    @StateObject private var stremioManager = StremioAddonManager.shared
+    @StateObject private var localNotificationManager = LocalNotificationManager.shared
     @AppStorage("showKanzen") private var showKanzen: Bool = false
     @State private var settingsSearchText = ""
 #else
@@ -50,13 +54,21 @@ struct SettingsView: View {
         ScheduleMode.sanitized(defaultScheduleModeRaw)
     }
 
+    private var scheduleWindow: ScheduleWindow {
+        ScheduleWindow.sanitized(scheduleWindowDays)
+    }
+
     private var supportsGitHubReleaseUpdates: Bool {
         PlatformCapabilities.current.supportsGitHubUpdates
     }
 
 #if !os(tvOS)
     private var filteredSettingsSearchEntries: [SettingsSearchEntry] {
-        let query = settingsSearchText
+        filteredSettingsSearchEntries(for: settingsSearchText)
+    }
+
+    private func filteredSettingsSearchEntries(for searchText: String) -> [SettingsSearchEntry] {
+        let query = searchText
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         guard !query.isEmpty else { return [] }
@@ -84,23 +96,97 @@ struct SettingsView: View {
             .init(id: "performance-mode", title: "Performance Mode", location: "Basic", icon: "bolt.fill", color: .yellow, keywords: ["fast", "AniList", "catalog"], action: .destination(.performance)),
             .init(id: "media-player", title: "Media Player", location: "Basic", icon: "play.fill", color: .white, keywords: ["MPV", "VLC", "AVPlayer", "default player"], action: .destination(.player)),
             .init(id: "playback-speed", title: "Default Playback Speed", location: "Media Player > Default Player", icon: "gauge.with.dots.needle.50percent", color: .orange, keywords: ["playback speed", "rate", "speed"], action: .destination(.playerTarget(.defaultPlaybackSpeed))),
-            .init(id: "subtitles", title: "Subtitle Defaults", location: "Media Player > MPV Player", icon: "captions.bubble", color: .cyan, keywords: ["subtitle settings", "captions", "OpenSubtitles", "default subtitle language"], action: .destination(.playerTarget(.subtitleDefaults))),
+            .init(id: "hold-speed", title: "Hold Speed", location: "Media Player > Default Player", icon: "hand.tap", color: .orange, keywords: ["long press", "temporary speed", "hold playback speed"], action: .destination(.playerTarget(.holdSpeed))),
+            .init(id: "force-landscape", title: "Force Landscape", location: "Media Player > Default Player", icon: "rectangle.rotate", color: .orange, keywords: ["orientation", "rotate", "landscape"], action: .destination(.playerTarget(.forceLandscape))),
+            .init(id: "playback-lock", title: "Playback Lock Button", location: "Media Player > Media Player", icon: "lock.rectangle", color: .orange, keywords: ["lock video", "orientation lock", "prevent exit", "child lock"], action: .destination(.playerTarget(.playbackLock))),
+            .init(id: "player-services-button", title: "Services Button", location: "Media Player > Media Player", icon: "rectangle.stack.fill", color: .indigo, keywords: ["change source", "choose stream", "services sheet", "addons", "player source"], action: .destination(.playerTarget(.servicesButton))),
+            .init(id: "external-player", title: "External Media Player", location: "Media Player > Media Player", icon: "arrow.up.right.square", color: .white, keywords: ["external playback", "VLC", "scheme"], action: .destination(.playerTarget(.externalPlayer))),
+            .init(id: "in-app-player", title: "Playback Engine", location: "Media Player > Media Player", icon: "play.rectangle", color: .white, keywords: ["internal player", "automatic", "iPad", "AVPlayer", "MPV", "renderer"], action: .destination(.playerTarget(.inAppPlayer))),
+            .init(id: "prefer-downloaded", title: "Prefer Downloaded Episodes", location: "Media Player > Media Player", icon: "arrow.down.circle", color: .green, keywords: ["downloads", "offline", "local playback"], action: .destination(.playerTarget(.preferDownloadedEpisodes))),
+            .init(id: "mpv-player-settings", title: "MPV Player Settings", location: "Media Player", icon: "play.rectangle", color: .indigo, keywords: ["MPV", "MoltenVK", "rendering", "subtitles", "gestures", "PiP"], action: .destination(.playerTarget(.mpvSettings))),
+            .init(id: "subtitles", title: "Subtitle Defaults", location: "Media Player > Player Controls", icon: "captions.bubble", color: .cyan, keywords: ["subtitle settings", "captions", "OpenSubtitles", "default subtitle language"], action: .destination(.playerTarget(.subtitleDefaults))),
+            .init(id: "enable-subtitles", title: "Enable Subtitles by Default", location: "Media Player > Subtitle Defaults", icon: "captions.bubble.fill", color: .cyan, keywords: ["subtitles on", "captions on", "automatic subtitles"], action: .destination(.playerTarget(.enableSubtitlesByDefault))),
+            .init(id: "default-subtitle-language", title: "Default Subtitle Language", location: "Media Player > Subtitle Defaults", icon: "character.bubble", color: .cyan, keywords: ["caption language", "subtitle language", "preferred subtitles"], action: .destination(.playerTarget(.defaultSubtitleLanguage))),
             .init(id: "anime-audio", title: "Preferred Anime Audio", location: "Media Player > Subtitle Defaults", icon: "waveform", color: .pink, keywords: ["anime audio", "sub", "dub", "Japanese", "English"], action: .destination(.playerTarget(.preferredAnimeAudio))),
             .init(id: "auto-language", title: "Auto Audio Language", location: "Media Player > Subtitle Defaults", icon: "character.bubble", color: .mint, keywords: ["auto language", "audio", "non-anime", "movies", "shows", "preferred language"], action: .destination(.playerTarget(.autoAudioLanguage))),
-            .init(id: "player-gestures", title: "Playback Gestures", location: "Media Player > MPV Player", icon: "hand.tap", color: .purple, keywords: ["player gestures", "double tap", "seek", "brightness", "volume"], action: .destination(.playerTarget(.playbackGestures))),
-            .init(id: "picture-in-picture", title: "Picture in Picture", location: "Media Player > MPV Rendering", icon: "pip", color: .indigo, keywords: ["PiP", "background playback"], action: .destination(.playerTarget(.pictureInPicture))),
+            .init(id: "subtitle-appearance", title: "Subtitle Appearance", location: "Media Player > Subtitle Appearance", icon: "textformat.size", color: .purple, keywords: ["subtitle style", "caption style", "text"], action: .destination(.playerTarget(.subtitleAppearance))),
+            .init(id: "subtitle-edit-menu", title: "Subtitle Edit Menu", location: "Media Player > Subtitle Appearance", icon: "slider.horizontal.3", color: .purple, keywords: ["subtitle controls", "style controls"], action: .destination(.playerTarget(.subtitleEditMenu))),
+            .init(id: "subtitle-text-color", title: "Subtitle Text Color", location: "Media Player > Subtitle Appearance", icon: "textformat", color: .purple, keywords: ["caption color", "font color"], action: .destination(.playerTarget(.subtitleTextColor))),
+            .init(id: "subtitle-stroke", title: "Subtitle Stroke", location: "Media Player > Subtitle Appearance", icon: "textformat.alt", color: .purple, keywords: ["outline", "border", "stroke color", "stroke width"], action: .destination(.playerTarget(.subtitleStrokeColor))),
+            .init(id: "subtitle-font-size", title: "Subtitle Font Size", location: "Media Player > Subtitle Appearance", icon: "textformat.size", color: .purple, keywords: ["caption size", "text size", "font"], action: .destination(.playerTarget(.subtitleFontSize))),
+            .init(id: "subtitle-position", title: "Subtitle Vertical Position", location: "Media Player > Subtitle Appearance", icon: "arrow.up.and.down.text.horizontal", color: .purple, keywords: ["caption position", "subtitle offset", "vertical offset"], action: .destination(.playerTarget(.subtitleVerticalPosition))),
+            .init(id: "caption-background", title: "Caption Background", location: "Media Player > Subtitle Appearance", icon: "rectangle.fill", color: .purple, keywords: ["subtitle background", "caption box", "visibility"], action: .destination(.playerTarget(.captionBackground))),
+            .init(id: "player-gestures", title: "Playback Gestures", location: "Media Player > Player Controls", icon: "hand.tap", color: .purple, keywords: ["player gestures", "double tap", "seek", "brightness", "volume"], action: .destination(.playerTarget(.playbackGestures))),
+            .init(id: "brightness-gesture", title: "Brightness Gesture", location: "Media Player > Playback Gestures", icon: "sun.max", color: .purple, keywords: ["brightness drag", "left side gesture"], action: .destination(.playerTarget(.brightnessGesture))),
+            .init(id: "volume-gesture", title: "Volume Gesture", location: "Media Player > Playback Gestures", icon: "speaker.wave.2", color: .purple, keywords: ["volume drag", "right side gesture"], action: .destination(.playerTarget(.volumeGesture))),
+            .init(id: "two-finger-play-pause", title: "Two-Finger Play/Pause", location: "Media Player > Playback Gestures", icon: "hand.tap", color: .purple, keywords: ["two finger", "pause gesture", "play gesture"], action: .destination(.playerTarget(.twoFingerPlayPause))),
+            .init(id: "center-tap-play-pause", title: "Center-Tap Play/Pause", location: "Media Player > Playback Gestures", icon: "playpause", color: .purple, keywords: ["center tap", "pause gesture", "play gesture"], action: .destination(.playerTarget(.centerTapPlayPause))),
+            .init(id: "double-tap-seek", title: "Double-Tap Seek", location: "Media Player > Playback Gestures", icon: "forward.end", color: .purple, keywords: ["double tap", "skip gesture", "seek gesture"], action: .destination(.playerTarget(.doubleTapSeek))),
+            .init(id: "seek-amount", title: "Seek Amount", location: "Media Player > Playback Gestures", icon: "gobackward.10", color: .purple, keywords: ["skip seconds", "seek seconds", "jump"], action: .destination(.playerTarget(.seekAmount))),
+            .init(id: "picture-in-picture", title: "Picture in Picture", location: "Media Player > Player Controls", icon: "pip", color: .indigo, keywords: ["PiP", "background playback"], action: .destination(.playerTarget(.pictureInPicture))),
+            .init(id: "pip-when-leaving", title: "PiP When Leaving App", location: "Media Player > Player Controls", icon: "pip", color: .indigo, keywords: ["automatic picture in picture", "background playback", "exit app"], action: .destination(.playerTarget(.pipWhenLeavingApp))),
+            .init(id: "moltenvk-quality", title: "MoltenVK Quality", location: "Media Player > MPV Rendering", icon: "sparkles.rectangle.stack", color: .cyan, keywords: ["Metal", "render quality", "heat", "power"], action: .destination(.playerTarget(.moltenVKQuality))),
             .init(id: "upscaling", title: "Upscaling", location: "Media Player > MPV Rendering", icon: "sparkles.rectangle.stack", color: .cyan, keywords: ["upscale", "resolution", "1080p", "4K", "MoltenVK"], action: .destination(.playerTarget(.upscaling))),
+            .init(id: "performance-overlay", title: "Performance Overlay", location: "Media Player > MPV Rendering", icon: "gauge.with.dots.needle.67percent", color: .cyan, keywords: ["fps", "stats", "playback performance", "quality"], action: .destination(.playerTarget(.performanceOverlay))),
+            .init(id: "sample-buffer-renderer", title: "Sample-Buffer Renderer", location: "Media Player > MPV Rendering", icon: "rectangle.3.group", color: .cyan, keywords: ["sample buffer", "gpu-next", "renderer"], action: .destination(.playerTarget(.sampleBufferRenderer))),
+            .init(id: "hdr-output", title: "HDR Output", location: "Media Player > MPV Rendering", icon: "sun.max.fill", color: .cyan, keywords: ["high dynamic range", "Dolby Vision", "video range"], action: .destination(.playerTarget(.hdrOutput))),
+            .init(id: "surround-sound", title: "Surround Sound", location: "Media Player > MPV Rendering", icon: "hifispeaker.2", color: .cyan, keywords: ["audio route", "receiver", "stereo"], action: .destination(.playerTarget(.surroundSound))),
+            .init(id: "comfort-audio", title: "Comfort Audio", location: "Media Player > MPV Rendering", icon: "ear", color: .cyan, keywords: ["dynamic range", "night mode", "audio comfort", "volume"], action: .destination(.playerTarget(.comfortAudio))),
+            .init(id: "inline-frame-rate", title: "Inline Frame Rate", location: "Media Player > MPV Rendering", icon: "film", color: .cyan, keywords: ["60 fps", "30 fps", "frame rate", "fps"], action: .destination(.playerTarget(.inlineFrameRate))),
             .init(id: "player-skin", title: "Player Skin", location: "Media Player > MPV Player", icon: "paintpalette.fill", color: .pink, keywords: ["MPV UI", "theme", "Black and Gold", "Prismatic", "Cyberpunk", "Custom"], action: .destination(.playerTarget(.playerSkin))),
+            .init(id: "open-subtitles", title: "OpenSubtitles", location: "Media Player > OpenSubtitles", icon: "globe", color: .indigo, keywords: ["subtitle search", "Stremio addon", "subtitle provider"], action: .destination(.playerTarget(.openSubtitles))),
+            .init(id: "open-subtitles-fallback", title: "Use OpenSubtitles as Auto Fallback", location: "Media Player > OpenSubtitles", icon: "arrow.triangle.branch", color: .indigo, keywords: ["automatic subtitle fallback", "missing subtitles"], action: .destination(.playerTarget(.openSubtitlesAutoFallback))),
+            .init(id: "skip-segments", title: "Skip Segments", location: "Media Player > Skip Segments", icon: "forward.fill", color: .pink, keywords: ["intro", "outro", "recap", "AniSkip", "IntroDB"], action: .destination(.playerTarget(.skipSegments))),
+            .init(id: "auto-skip", title: "Auto Skip", location: "Media Player > Skip Segments", icon: "forward.fill", color: .pink, keywords: ["skip intro", "skip outro", "automatic skipping"], action: .destination(.playerTarget(.autoSkip))),
+            .init(id: "next-episode", title: "Next Episode", location: "Media Player > Next Episode", icon: "forward.end.fill", color: .yellow, keywords: ["episode button", "episode drawer", "up next"], action: .destination(.playerTarget(.nextEpisode))),
+            .init(id: "episode-browser-button", title: "Episode Browser Button", location: "Media Player > Next Episode", icon: "list.bullet.rectangle", color: .yellow, keywords: ["episode drawer", "episode list"], action: .destination(.playerTarget(.episodeBrowserButton))),
+            .init(id: "show-next-episode", title: "Show Next Episode Button", location: "Media Player > Next Episode", icon: "forward.end.fill", color: .yellow, keywords: ["up next button", "next episode prompt"], action: .destination(.playerTarget(.showNextEpisodeButton))),
+            .init(id: "episode-poster", title: "Use Episode Poster", location: "Media Player > Next Episode", icon: "photo", color: .yellow, keywords: ["next episode image", "poster"], action: .destination(.playerTarget(.useEpisodePoster))),
+            .init(id: "skip-filler", title: "Skip Filler Episodes", location: "Media Player > Next Episode", icon: "forward.end.fill", color: .yellow, keywords: ["anime filler", "filler skip"], action: .destination(.playerTarget(.skipFillerEpisodes))),
+            .init(id: "next-episode-threshold", title: "Next Episode Appearance Threshold", location: "Media Player > Next Episode", icon: "chart.bar.xaxis", color: .yellow, keywords: ["next episode percentage", "90 percent", "button timing"], action: .destination(.playerTarget(.appearanceThreshold))),
             .init(id: "watch-together", title: "Watch Together", location: "Basic", icon: "person.2.wave.2", color: .green, keywords: ["SharePlay", "FaceTime", "sync", "secure", "group", "enable", "disable", "MPV", "MoltenVK"], action: .destination(.watchTogether)),
             .init(id: "appearance", title: "Appearance", location: "Basic", icon: "paintbrush.fill", color: .purple, keywords: ["theme", "layout", "home", "details", "artwork", "UI"], action: .destination(.appearance)),
-            .init(id: "schedule", title: "Schedule", location: "Basic", icon: "calendar", color: .red, keywords: ["calendar", "anime", "western", "default tab"], action: .destination(.schedule)),
+            .init(id: "appearance-background-style", title: "Background Style", location: "Appearance > Theme", icon: "rectangle.fill", color: .purple, keywords: ["gradient", "solid", "background"], action: .destination(.appearanceTarget(.backgroundStyle))),
+            .init(id: "appearance-color-bleed", title: "Color Bleed", location: "Appearance > Theme", icon: "paintbrush.pointed", color: .purple, keywords: ["banner color", "background wash", "intensity"], action: .destination(.appearanceTarget(.colorBleed))),
+            .init(id: "appearance-background-intensity", title: "Background Intensity", location: "Appearance > Theme", icon: "sun.max", color: .purple, keywords: ["lighten", "darken", "background brightness"], action: .destination(.appearanceTarget(.backgroundIntensity))),
+            .init(id: "appearance-interface", title: "Interface", location: "Appearance > Interface", icon: "rectangle.3.group", color: .purple, keywords: ["modern", "classic", "restart", "layout style"], action: .destination(.appearanceTarget(.interface))),
+            .init(id: "appearance-global", title: "Global Appearance", location: "Appearance > Interface", icon: "paintbrush", color: .purple, keywords: ["media mode", "reader mode", "shared theme"], action: .destination(.appearanceTarget(.globalAppearance))),
+            .init(id: "appearance-accent", title: "Accent Color", location: "Appearance > Interface", icon: "paintpalette", color: .purple, keywords: ["tint", "buttons", "links", "interactive color"], action: .destination(.appearanceTarget(.accentColor))),
+            .init(id: "appearance-animated-background", title: "Animated Background", location: "Appearance > Motion & Startup", icon: "sparkles", color: .purple, keywords: ["ambient motion", "background animation", "motion"], action: .destination(.appearanceTarget(.animatedBackground))),
+            .init(id: "appearance-animation-quality", title: "Animation Quality", location: "Appearance > Motion & Startup", icon: "dial.medium", color: .purple, keywords: ["low", "medium", "high", "FPS", "background quality"], action: .destination(.appearanceTarget(.animationQuality))),
+            .init(id: "appearance-animation-frame-rate", title: "Animation Frame Rate", location: "Appearance > Motion & Startup", icon: "speedometer", color: .purple, keywords: ["20 FPS", "30 FPS", "smooth", "battery", "background motion"], action: .destination(.appearanceTarget(.animationFrameRate))),
+            .init(id: "appearance-app-performance-overlay", title: "App Performance Overlay", location: "Appearance > Motion & Startup", icon: "gauge.with.dots.needle.67percent", color: .cyan, keywords: ["CPU", "GPU", "thermal", "stats", "logs", "spikes", "app performance", "home performance"], action: .destination(.appearanceTarget(.appPerformanceOverlay))),
+            .init(id: "appearance-hide-splash", title: "Hide Splash Screen", location: "Appearance > Motion & Startup", icon: "rectangle.slash", color: .purple, keywords: ["launch screen", "startup", "splash"], action: .destination(.appearanceTarget(.hideSplashScreen))),
+            .init(id: "appearance-season-menu", title: "Alternative Season Menu", location: "Appearance > Detail Pages", icon: "list.bullet", color: .purple, keywords: ["season dropdown", "specials", "OVAs"], action: .destination(.appearanceTarget(.alternativeSeasonMenu))),
+            .init(id: "appearance-horizontal-episodes", title: "Horizontal Episode List", location: "Appearance > Detail Pages", icon: "rectangle.split.3x1", color: .purple, keywords: ["episode layout", "vertical episodes"], action: .destination(.appearanceTarget(.horizontalEpisodeList))),
+            .init(id: "appearance-title-art", title: "TMDB Title Art", location: "Appearance > Detail Pages", icon: "text.below.photo", color: .purple, keywords: ["logo artwork", "title logo", "media artwork"], action: .destination(.appearanceTarget(.tmdbTitleArt))),
+            .init(id: "schedule", title: "Schedule", location: "Basic", icon: "calendar", color: .red, keywords: ["calendar", "anime", "western", "default tab", "range", "days"], action: .destination(.schedule)),
+            .init(id: "schedule-range", title: "Schedule Range", location: "Schedule", icon: "calendar.badge.clock", color: .red, keywords: ["7 days", "14 days", "21 days", "30 days", "window", "performance", "upcoming episodes"], action: .destination(.schedule)),
+            .init(id: "notifications", title: "Notifications", location: "Basic", icon: "bell.badge.fill", color: .orange, keywords: ["alerts", "reminders", "episodes", "airing", "seasons", "local"], action: .destination(.notifications)),
+            .init(id: "notification-access", title: "Notification Access", location: "Notifications > Access", icon: "bell.fill", color: .orange, keywords: ["permission", "allowed", "denied", "iOS settings"], action: .destination(.notificationsTarget(.access))),
+            .init(id: "episode-reminder-timing", title: "Episode Reminder Timing", location: "Notifications > Timing", icon: "clock.badge", color: .orange, keywords: ["airtime", "before", "episode alert"], action: .destination(.notificationsTarget(.timing))),
+            .init(id: "notification-center-history", title: "Notification Center", location: "Notifications > Manage", icon: "bell.and.waves.left.and.right.fill", color: .orange, keywords: ["history", "recent alerts", "delivered", "opened"], action: .destination(.notificationHistory)),
+            .init(id: "notification-following", title: "Following", location: "Notifications > Manage", icon: "bell.badge", color: .orange, keywords: ["followed shows", "episodes", "automatic reminders", "subscriptions"], action: .destination(.notificationFollowing)),
+            .init(id: "future-season-alerts", title: "Future Season Alerts", location: "Notifications > Following", icon: "calendar.badge.clock", color: .orange, keywords: ["upcoming season", "sequel", "premiere", "announcement"], action: .destination(.notificationFollowing)),
+            .init(id: "notification-individual-episodes", title: "Individual Episodes", location: "Notifications > Manage", icon: "calendar.badge.plus", color: .orange, keywords: ["one-off reminder", "schedule bell", "upcoming episode"], action: .destination(.notificationEpisodes)),
+            .init(id: "local-notification-limits", title: "Local Notification Limits", location: "Notifications > About", icon: "info.circle.fill", color: .orange, keywords: ["no server", "refresh", "restrictions", "48", "delivery"], action: .destination(.notificationsTarget(.limits))),
             .init(id: "catalogs", title: "Catalogs", location: "Basic", icon: "square.grid.2x2", color: .green, keywords: ["home rows", "discover", "TMDB"], action: .destination(.catalogs)),
             .init(id: "services-auto-update", title: "Auto-Update Services", location: "Services", icon: "arrow.triangle.2.circlepath", color: .mint, keywords: ["service updates", "update sources", "startup"], action: .destination(.servicesTarget(.autoUpdateServices))),
             .init(id: "services-auto-mode", title: "Auto Mode", location: "Services", icon: "wand.and.stars", color: .indigo, keywords: ["automatic source", "source order", "auto download"], action: .destination(.servicesTarget(.autoMode))),
+            .init(id: "services-auto-select-episodes", title: "Auto-Select Episodes", location: "Services > Auto Mode", icon: "forward.end.fill", color: .indigo, keywords: ["automatic episode selection", "next episode", "auto source"], action: .destination(.servicesTarget(.autoSelectEpisodes))),
+            .init(id: "services-auto-quality", title: "Auto Quality", location: "Services > Auto Mode", icon: "dial.medium", color: .indigo, keywords: ["automatic quality", "resolution", "stream quality"], action: .destination(.servicesTarget(.autoQuality))),
+            .init(id: "services-quality-preference", title: "Auto Quality Preference", location: "Services > Auto Mode", icon: "slider.horizontal.3", color: .indigo, keywords: ["preferred quality", "1080p", "720p", "best quality"], action: .destination(.servicesTarget(.autoQualityPreference))),
             .init(id: "services-include-language", title: "Languages to Include", location: "Services > Extra Service Settings", icon: "checkmark.bubble", color: .green, keywords: ["include language", "allow", "whitelist", "streams", "Stremio"], action: .destination(.servicesTarget(.languagesToInclude))),
             .init(id: "services-exclude-language", title: "Languages to Exclude", location: "Services > Extra Service Settings", icon: "xmark.bubble", color: .red, keywords: ["exclude language", "block", "hide", "streams", "Stremio"], action: .destination(.servicesTarget(.languagesToExclude))),
+            .init(id: "services-assume-original-audio", title: "Assume Original Language", location: "Services > Extra Service Settings", icon: "waveform", color: .orange, keywords: ["original language", "untagged streams", "missing language", "TMDB language", "stream language"], action: .destination(.servicesTarget(.assumeOriginalAudio))),
+            .init(id: "services-dubbed-anime-english", title: "Treat Dubbed Anime Streams as English", location: "Services > Extra Service Settings", icon: "waveform.and.mic", color: .orange, keywords: ["dubbed anime", "anime dub", "english audio", "english filter", "stream language"], action: .destination(.servicesTarget(.treatDubbedAnimeAsEnglish))),
             .init(id: "services-stremio-style", title: "Stremio-Style Stream List", location: "Services > Extra Service Settings", icon: "rectangle.grid.1x2", color: .blue, keywords: ["stream list", "layout", "flat", "results", "Stremio"], action: .destination(.servicesTarget(.stremioStyleSheet))),
+            .init(id: "services-ranking-similarity", title: "Ranking Similarity", location: "Services > Extra Service Settings", icon: "chart.bar.xaxis", color: .orange, keywords: ["similarity percentage", "matching threshold", "rank results", "title match"], action: .destination(.servicesTarget(.rankingSimilarity))),
+            .init(id: "services-drop-unmatched", title: "Drop Unmatched Service Results", location: "Services > Extra Service Settings", icon: "line.3.horizontal.decrease.circle", color: .orange, keywords: ["drop streams", "similarity filter", "mismatched results", "auto mode"], action: .destination(.servicesTarget(.dropMismatchedResults))),
             .init(id: "services-missing-language", title: "Hide Streams Without Language Data", location: "Services > Extra Service Settings", icon: "questionmark.bubble", color: .orange, keywords: ["unknown", "missing", "untagged"], action: .destination(.servicesTarget(.missingLanguageData))),
+            .init(id: "services-qualities-to-hide", title: "Qualities to Hide", location: "Services > Extra Service Settings", icon: "eye.slash", color: .orange, keywords: ["hide resolution", "720p", "1080p", "4K", "quality filter"], action: .destination(.servicesTarget(.qualitiesToHide))),
+            .init(id: "services-hide-qualityless", title: "Hide Streams Without Detected Quality", location: "Services > Extra Service Settings", icon: "questionmark.bubble", color: .orange, keywords: ["unknown quality", "missing resolution", "untagged quality"], action: .destination(.servicesTarget(.hideStreamsWithoutDetectedQuality))),
+            .init(id: "services-extra-rules-sources", title: "Apply Extra Rules To", location: "Services > Extra Service Settings", icon: "line.3.horizontal.decrease.circle", color: .orange, keywords: ["service filter scope", "addon filter scope", "source rules"], action: .destination(.servicesTarget(.applyExtraRulesTo))),
             .init(id: "stremio-addons", title: "Stremio Addons", location: "Services", icon: "shippingbox", color: .blue, keywords: ["addon", "configure", "install"], action: .destination(.services)),
             .init(id: "trackers", title: "Trackers", location: "Basic", icon: "chart.bar.fill", color: .pink, keywords: ["Trakt", "MyAnimeList", "MAL", "AniList", "SIMKL"], action: .destination(.trackers)),
             .init(id: "storage", title: "Storage", location: "Data", icon: "internaldrive", color: .gray, keywords: ["downloads", "cache", "files", "clear"], action: .destination(.storage)),
@@ -113,6 +199,17 @@ struct SettingsView: View {
 
         if ExperimentalFeatureState.isEnabledAtLaunch {
             entries.append(.init(id: "cloud-sync", title: "Cloud Sync", location: "Data", icon: "cloud", color: .blue, keywords: ["iCloud", "sync", "library", "progress"], action: .destination(.cloud)))
+            entries.append(contentsOf: [
+                .init(id: "warmup-cache", title: "Stream Warmup Cache", location: "Media Player > MPV Advanced", icon: "bolt.horizontal.circle", color: .purple, keywords: ["preload", "warmup", "buffer", "faster retries"], action: .destination(.playerTarget(.streamWarmupCache))),
+                .init(id: "next-episode-staging", title: "Next Episode Staging", location: "Media Player > MPV Advanced", icon: "forward.end.fill", color: .purple, keywords: ["preload next episode", "prewarm", "smooth transition"], action: .destination(.playerTarget(.nextEpisodeStaging))),
+                .init(id: "cellular-warmup", title: "Allow Cellular Warmup", location: "Media Player > MPV Advanced", icon: "antenna.radiowaves.left.and.right", color: .purple, keywords: ["cellular preload", "mobile data"], action: .destination(.playerTarget(.allowCellularWarmup))),
+                .init(id: "warmup-auto-clear", title: "Auto-Clear Warmup Cache", location: "Media Player > MPV Advanced", icon: "trash", color: .purple, keywords: ["clear preload", "cache cleanup"], action: .destination(.playerTarget(.autoClearWarmupCache))),
+                .init(id: "wifi-cache-limit", title: "Wi-Fi Cache Limit", location: "Media Player > MPV Advanced", icon: "wifi", color: .purple, keywords: ["preload size", "wifi buffer", "MB"], action: .destination(.playerTarget(.wifiCacheLimit))),
+                .init(id: "cellular-cache-limit", title: "Cellular Cache Limit", location: "Media Player > MPV Advanced", icon: "antenna.radiowaves.left.and.right", color: .purple, keywords: ["preload size", "cellular buffer", "MB"], action: .destination(.playerTarget(.cellularCacheLimit))),
+                .init(id: "remaining-time", title: "Show Remaining Time", location: "Media Player > MPV Advanced", icon: "clock", color: .purple, keywords: ["time left", "player controls"], action: .destination(.playerTarget(.showRemainingTime))),
+                .init(id: "precise-progress", title: "Precise Progress Adjustment", location: "Media Player > MPV Advanced", icon: "slider.horizontal.3", color: .purple, keywords: ["fine progress", "scrubbing"], action: .destination(.playerTarget(.preciseProgressAdjustment))),
+                .init(id: "ignore-subtitle-styles", title: "Ignore Special Subtitle Styles", location: "Media Player > MPV Advanced", icon: "textformat", color: .purple, keywords: ["embedded subtitle effects", "subtitle override"], action: .destination(.playerTarget(.ignoreSpecialSubtitleStyles)))
+            ])
         }
         if !WatchTogetherSettings.isAvailableInCurrentBuild {
             entries.removeAll { $0.id == "watch-together" }
@@ -120,34 +217,102 @@ struct SettingsView: View {
         if supportsGitHubReleaseUpdates {
             entries.append(.init(id: "updates", title: "App Updates", location: "Updates", icon: "arrow.triangle.2.circlepath", color: .mint, keywords: ["GitHub releases", "check", "auto check", "latest version"], action: .anchor("settings-updates")))
         }
+
+        entries.append(contentsOf: serviceManager.services.map { service in
+            let sourceID = "service:\(service.id.uuidString)"
+            return SettingsSearchEntry(
+                id: "installed-service-\(service.id.uuidString)",
+                title: service.metadata.sourceName,
+                location: "Services > Installed Services",
+                icon: "shippingbox",
+                color: .green,
+                keywords: [
+                    "service",
+                    "installed",
+                    service.metadata.author.name,
+                    service.metadata.language,
+                    service.metadata.version,
+                    service.url
+                ],
+                action: .destination(.servicesTarget(.installedSource(sourceID)))
+            )
+        })
+
+        entries.append(contentsOf: stremioManager.addons.map { addon in
+            let sourceID = "stremio:\(addon.id.uuidString)"
+            return SettingsSearchEntry(
+                id: "installed-addon-\(addon.id.uuidString)",
+                title: addon.manifest.name,
+                location: "Services > Installed Stremio Addons",
+                icon: "play.circle",
+                color: .blue,
+                keywords: [
+                    "addon",
+                    "Stremio",
+                    "installed",
+                    addon.manifest.id,
+                    addon.manifest.description ?? "",
+                    addon.configuredURL
+                ],
+                action: .destination(.servicesTarget(.installedSource(sourceID)))
+            )
+        })
         return entries
     }
 #endif
 
     var body: some View {
+        Group {
         #if os(tvOS)
             settingsContent
         #else
             if #available(iOS 16.0, *) {
                 NavigationStack {
-                    settingsRootContent
+                    settingsSearchableContent(settingsRootContent, showsResults: false)
                 }
             } else {
                 NavigationView {
-                    settingsRootContent
+                    settingsSearchableContent(settingsRootContent, showsResults: false)
                 }
                 .navigationViewStyle(StackNavigationViewStyle())
             }
         #endif
+        }
+        .onAppear {
+            AppPerformanceRuntimeContext.shared.setSurface("settings")
+        }
     }
 
 #if !os(tvOS)
+    @ViewBuilder
+    private func settingsSearchableContent<Content: View>(
+        _ content: Content,
+        showsResults: Bool = true
+    ) -> some View {
+        SettingsSearchContainer(
+            text: $settingsSearchText,
+            showsResults: showsResults,
+            content: content,
+            results: { query in AnyView(subpageSettingsSearchResults(for: query)) }
+        )
+    }
+
     /// The exit gesture lives on the Settings root rather than its full-screen
     /// host, so scrolling and a pushed settings page keep their native gestures.
     @ViewBuilder
     private var settingsRootContent: some View {
         if let onRootDismiss {
             settingsContent
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarLeading) {
+                        Button(action: onRootDismiss) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "chevron.left")
+                                Text("Back")
+                            }
+                        }
+                    }
+                }
                 .simultaneousGesture(
                     DragGesture(minimumDistance: 10, coordinateSpace: .global)
                         .onEnded { value in
@@ -212,7 +377,7 @@ struct SettingsView: View {
                             GlassDivider()
                         } else {
                             #if canImport(StoreKit)
-                            NavigationLink(destination: StoreKitSupportView()) {
+                            NavigationLink(destination: settingsSearchableContent(StoreKitSupportView())) {
                                 GlassSettingsRow(icon: "heart.fill", iconColor: .pink, title: "Support Eclipse") {
                                     HStack(spacing: 4) {
                                         Text("Tips & subscription")
@@ -245,7 +410,7 @@ struct SettingsView: View {
                 // MARK: - Basic
                 GlassSection(header: "Basic") {
                     VStack(spacing: 0) {
-                        NavigationLink(destination: PerformanceModeSettingsView()) {
+                        NavigationLink(destination: settingsSearchableContent(PerformanceModeSettingsView())) {
                             GlassSettingsRow(icon: "bolt.fill", iconColor: .yellow, title: "Performance Mode") {
                                 HStack(spacing: 4) {
                                     Text(catalogManager.performanceModeEnabled || skipAniListTraversalForAnimeDetails ? "On" : "Off")
@@ -261,7 +426,7 @@ struct SettingsView: View {
 
                         GlassDivider()
 
-                        NavigationLink(destination: PlayerSettingsView()) {
+                        NavigationLink(destination: settingsSearchableContent(PlayerSettingsView())) {
                             GlassSettingsRow(icon: "play.fill", iconColor: .white, title: "Media Player")
                         }
                         .buttonStyle(.plain)
@@ -269,7 +434,7 @@ struct SettingsView: View {
                         GlassDivider()
 
                         if WatchTogetherSettings.isAvailableInCurrentBuild {
-                            NavigationLink(destination: WatchTogetherSettingsView()) {
+                            NavigationLink(destination: settingsSearchableContent(WatchTogetherSettingsView())) {
                                 GlassSettingsRow(icon: "person.2.wave.2", iconColor: .green, title: "Watch Together") {
                                     HStack(spacing: 4) {
                                         Text("SharePlay")
@@ -286,17 +451,17 @@ struct SettingsView: View {
                             GlassDivider()
                         }
 
-                        NavigationLink(destination: AlternativeUIView()) {
+                        NavigationLink(destination: settingsSearchableContent(AlternativeUIView())) {
                             GlassSettingsRow(icon: "paintbrush.fill", iconColor: .purple, title: "Appearance")
                         }
                         .buttonStyle(.plain)
 
                         GlassDivider()
 
-                        NavigationLink(destination: ScheduleSettingsView()) {
+                        NavigationLink(destination: settingsSearchableContent(ScheduleSettingsView())) {
                             GlassSettingsRow(icon: "calendar", iconColor: .red, title: "Schedule") {
                                 HStack(spacing: 4) {
-                                    Text(defaultScheduleMode.displayName)
+                                    Text("\(defaultScheduleMode.displayName) · \(scheduleWindow.rawValue) days")
                                         .font(.subheadline)
                                         .foregroundColor(.white.opacity(0.5))
                                     Image(systemName: "chevron.right")
@@ -309,21 +474,37 @@ struct SettingsView: View {
 
                         GlassDivider()
 
-                        NavigationLink(destination: CatalogsSettingsView()) {
+                        NavigationLink(destination: settingsSearchableContent(NotificationSettingsView())) {
+                            GlassSettingsRow(icon: "bell.badge.fill", iconColor: .orange, title: "Notifications") {
+                                HStack(spacing: 4) {
+                                    Text(localNotificationManager.authorizationDisplayName)
+                                        .font(.subheadline)
+                                        .foregroundColor(.white.opacity(0.5))
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundColor(.white.opacity(0.3))
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+
+                        GlassDivider()
+
+                        NavigationLink(destination: settingsSearchableContent(CatalogsSettingsView())) {
                             GlassSettingsRow(icon: "square.grid.2x2", iconColor: .green, title: "Catalogs")
                         }
                         .buttonStyle(.plain)
 
                         GlassDivider()
 
-                        NavigationLink(destination: ServicesView()) {
+                        NavigationLink(destination: settingsSearchableContent(ServicesView())) {
                             GlassSettingsRow(icon: "server.rack", iconColor: .indigo, title: "Services")
                         }
                         .buttonStyle(.plain)
 
                         GlassDivider()
 
-                        NavigationLink(destination: TrackersSettingsView()) {
+                        NavigationLink(destination: settingsSearchableContent(TrackersSettingsView())) {
                             GlassSettingsRow(icon: "chart.bar.fill", iconColor: .pink, title: "Trackers")
                         }
                         .buttonStyle(.plain)
@@ -333,14 +514,14 @@ struct SettingsView: View {
                 // MARK: - Data
                 GlassSection(header: "Data") {
                     VStack(spacing: 0) {
-                        NavigationLink(destination: StorageView()) {
+                        NavigationLink(destination: settingsSearchableContent(StorageView())) {
                             GlassSettingsRow(icon: "internaldrive", iconColor: .gray, title: "Storage")
                         }
                         .buttonStyle(.plain)
 
                         GlassDivider()
 
-                        NavigationLink(destination: BackupManagementView()) {
+                        NavigationLink(destination: settingsSearchableContent(BackupManagementView())) {
                             GlassSettingsRow(icon: "arrow.triangle.2.circlepath", iconColor: .teal, title: "Backup & Restore")
                         }
                         .buttonStyle(.plain)
@@ -348,7 +529,7 @@ struct SettingsView: View {
                         if ExperimentalFeatureState.isEnabledAtLaunch {
                             GlassDivider()
 
-                            NavigationLink(destination: ExperimentalCloudSyncView()) {
+                            NavigationLink(destination: settingsSearchableContent(ExperimentalCloudSyncView())) {
                                 GlassSettingsRow(icon: "cloud", iconColor: .blue, title: "Cloud Sync") {
                                     Text("Available")
                                         .font(.subheadline)
@@ -360,7 +541,7 @@ struct SettingsView: View {
 
                         GlassDivider()
 
-                        NavigationLink(destination: LoggerView()) {
+                        NavigationLink(destination: settingsSearchableContent(LoggerView())) {
                             GlassSettingsRow(icon: "doc.text", iconColor: .yellow, title: "Logger")
                         }
                         .buttonStyle(.plain)
@@ -379,12 +560,12 @@ struct SettingsView: View {
 
                         GlassDivider()
 
-                        NavigationLink(destination: LegalNoticeView(
+                        NavigationLink(destination: settingsSearchableContent(LegalNoticeView(
                             sourceCodeURL: sourceCodeURL,
                             originalProjectURL: originalProjectURL,
                             licenseURL: licenseURL,
                             privacyPolicyURL: privacyPolicyURL
-                        )) {
+                        ))) {
                             GlassSettingsRow(icon: "scroll.fill", iconColor: .cyan, title: "Legal & Source")
                         }
                         .buttonStyle(.plain)
@@ -459,13 +640,6 @@ struct SettingsView: View {
                 }
                 .padding(.top, ExperimentalFeatureState.isEnabledAtLaunch ? 12 : 16)
             }
-            .searchable(
-                text: $settingsSearchText,
-                placement: .navigationBarDrawer(displayMode: .always),
-                prompt: "Search settings"
-            )
-            .autocorrectionDisabled()
-            .textInputAutocapitalization(.never)
             .navigationTitle("Settings")
             .background(SettingsGradientBackground().ignoresSafeArea())
             .eclipseDarkToolbar()
@@ -504,11 +678,91 @@ struct SettingsView: View {
         }
     }
 
+    private func subpageSettingsSearchEntries(for query: String) -> [SettingsSearchEntry] {
+        filteredSettingsSearchEntries(for: query).filter { entry in
+            if case .anchor = entry.action {
+                return false
+            }
+            return true
+        }
+    }
+
+    @ViewBuilder
+    private func subpageSettingsSearchResults(for query: String) -> some View {
+        let entries = subpageSettingsSearchEntries(for: query)
+
+        ScrollView {
+            VStack(spacing: 22) {
+                if entries.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 32, weight: .semibold))
+                            .foregroundColor(.white.opacity(0.6))
+                        Text("No Settings Found")
+                            .font(.headline)
+                            .foregroundColor(.white)
+                        Text("Try a setting name, feature, or service.")
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.55))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 70)
+                } else {
+                    GlassSection(header: "Search Results") {
+                        VStack(spacing: 0) {
+                            ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
+                                settingsSearchSuggestionLink(for: entry)
+                                if index < entries.count - 1 {
+                                    GlassDivider()
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.top, 12)
+            .padding(.bottom, 30)
+        }
+        .navigationTitle("Search Settings")
+        .background(SettingsGradientBackground().ignoresSafeArea())
+        .eclipseDarkToolbar()
+    }
+
+    @ViewBuilder
+    private func settingsSearchSuggestionLink(for entry: SettingsSearchEntry) -> some View {
+        switch entry.action {
+        case .destination(let destination):
+            NavigationLink(destination: settingsSearchDestination(destination).onAppear {
+                settingsSearchText = ""
+            }) {
+                settingsSearchRow(entry)
+            }
+            .buttonStyle(.plain)
+        case .anchor:
+            Button {
+                settingsSearchText = ""
+            } label: {
+                settingsSearchRow(entry)
+            }
+            .buttonStyle(.plain)
+        case .readerMode:
+            Button {
+                settingsSearchText = ""
+                showKanzen = true
+            } label: {
+                settingsSearchRow(entry)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
     @ViewBuilder
     private func settingsSearchLink(for entry: SettingsSearchEntry, scrollProxy: ScrollViewProxy) -> some View {
         switch entry.action {
         case .destination(let destination):
-            NavigationLink(destination: settingsSearchDestination(destination)) {
+            NavigationLink(destination: settingsSearchDestination(destination).onAppear {
+                settingsSearchText = ""
+            }) {
                 settingsSearchRow(entry)
             }
             .buttonStyle(.plain)
@@ -549,44 +803,55 @@ struct SettingsView: View {
         }
     }
 
-    @ViewBuilder
-    private func settingsSearchDestination(_ destination: SettingsSearchDestination) -> some View {
+    private func settingsSearchDestination(_ destination: SettingsSearchDestination) -> AnyView {
         switch destination {
         case .performance:
-            PerformanceModeSettingsView()
+            return AnyView(settingsSearchableContent(PerformanceModeSettingsView()))
         case .player:
-            PlayerSettingsView()
+            return AnyView(settingsSearchableContent(PlayerSettingsView()))
         case .playerTarget(let target):
-            PlayerSettingsView(initialSearchTarget: target)
+            return AnyView(settingsSearchableContent(PlayerSettingsView(initialSearchTarget: target)))
         case .watchTogether:
-            WatchTogetherSettingsView()
+            return AnyView(settingsSearchableContent(WatchTogetherSettingsView()))
         case .appearance:
-            AlternativeUIView()
+            return AnyView(settingsSearchableContent(AlternativeUIView()))
+        case .appearanceTarget(let target):
+            return AnyView(settingsSearchableContent(AlternativeUIView(initialSearchTarget: target)))
         case .schedule:
-            ScheduleSettingsView()
+            return AnyView(settingsSearchableContent(ScheduleSettingsView()))
+        case .notifications:
+            return AnyView(settingsSearchableContent(NotificationSettingsView()))
+        case .notificationsTarget(let target):
+            return AnyView(settingsSearchableContent(NotificationSettingsView(initialSearchTarget: target)))
+        case .notificationHistory:
+            return AnyView(settingsSearchableContent(NotificationHistorySettingsView()))
+        case .notificationFollowing:
+            return AnyView(settingsSearchableContent(NotificationFollowingSettingsView()))
+        case .notificationEpisodes:
+            return AnyView(settingsSearchableContent(NotificationEpisodeRemindersSettingsView()))
         case .catalogs:
-            CatalogsSettingsView()
+            return AnyView(settingsSearchableContent(CatalogsSettingsView()))
         case .services:
-            ServicesView()
+            return AnyView(settingsSearchableContent(ServicesView()))
         case .servicesTarget(let target):
-            ServicesView(initialSearchTarget: target)
+            return AnyView(settingsSearchableContent(ServicesView(initialSearchTarget: target)))
         case .trackers:
-            TrackersSettingsView()
+            return AnyView(settingsSearchableContent(TrackersSettingsView()))
         case .storage:
-            StorageView()
+            return AnyView(settingsSearchableContent(StorageView()))
         case .backup:
-            BackupManagementView()
+            return AnyView(settingsSearchableContent(BackupManagementView()))
         case .cloud:
-            ExperimentalCloudSyncView()
+            return AnyView(settingsSearchableContent(ExperimentalCloudSyncView()))
         case .logger:
-            LoggerView()
+            return AnyView(settingsSearchableContent(LoggerView()))
         case .legal:
-            LegalNoticeView(
+            return AnyView(settingsSearchableContent(LegalNoticeView(
                 sourceCodeURL: sourceCodeURL,
                 originalProjectURL: originalProjectURL,
                 licenseURL: licenseURL,
                 privacyPolicyURL: privacyPolicyURL
-            )
+            )))
         }
     }
 #endif
@@ -696,13 +961,70 @@ struct SettingsView: View {
 }
 
 #if !os(tvOS)
+struct SettingsSearchPresentation {
+    let text: Binding<String>
+    let results: (String) -> AnyView
+}
+
+private struct SettingsSearchPresentationKey: EnvironmentKey {
+    static let defaultValue: SettingsSearchPresentation? = nil
+}
+
+extension EnvironmentValues {
+    var eclipseSettingsSearchPresentation: SettingsSearchPresentation? {
+        get { self[SettingsSearchPresentationKey.self] }
+        set { self[SettingsSearchPresentationKey.self] = newValue }
+    }
+}
+
+struct SettingsSearchContainer<Content: View>: View {
+    @Binding var text: String
+    let showsResults: Bool
+    let content: Content
+    let results: (String) -> AnyView
+
+    private var hasQuery: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        displayedContent
+            .searchable(
+                text: $text,
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: "Search settings"
+            )
+            .autocorrectionDisabled()
+            .textInputAutocapitalization(.never)
+            .environment(
+                \.eclipseSettingsSearchPresentation,
+                SettingsSearchPresentation(text: $text, results: results)
+            )
+    }
+
+    @ViewBuilder
+    private var displayedContent: some View {
+        if showsResults && hasQuery {
+            results(text)
+        } else {
+            content
+        }
+    }
+}
+
 private enum SettingsSearchDestination: Hashable {
     case performance
     case player
     case playerTarget(PlayerSettingsSearchTarget)
     case watchTogether
     case appearance
+    case appearanceTarget(AppearanceSettingsSearchTarget)
     case schedule
+    case notifications
+    case notificationsTarget(NotificationSettingsSearchTarget)
+    case notificationHistory
+    case notificationFollowing
+    case notificationEpisodes
     case catalogs
     case services
     case servicesTarget(ServicesSettingsSearchTarget)
@@ -712,6 +1034,13 @@ private enum SettingsSearchDestination: Hashable {
     case cloud
     case logger
     case legal
+}
+
+private enum NotificationSettingsSearchTarget: String, Hashable {
+    case access
+    case timing
+    case manage
+    case limits
 }
 
 private enum SettingsSearchAction: Hashable {
@@ -854,6 +1183,1041 @@ private struct WatchTogetherInfoRow: View {
             Spacer(minLength: 0)
         }
         .padding(14)
+    }
+}
+
+private struct NotificationSettingsView: View {
+    let initialSearchTarget: NotificationSettingsSearchTarget?
+
+    @Environment(\.eclipseSettingsSearchPresentation) private var settingsSearchPresentation
+    @StateObject private var manager = LocalNotificationManager.shared
+    @AppStorage(ScheduleWindow.storageKey)
+    private var scheduleWindowDays = ScheduleWindow.defaultValue.rawValue
+    @AppStorage(LocalNotificationManager.episodeLeadTimeKey)
+    private var episodeLeadTimeRaw = EpisodeNotificationLeadTime.atAirtime.rawValue
+    @AppStorage(LocalNotificationManager.seasonLeadTimeKey)
+    private var seasonLeadTimeRaw = SeasonNotificationLeadTime.oneDay.rawValue
+    @AppStorage(LocalNotificationManager.includeAnimeSpecialsKey)
+    private var includeAnimeSpecials = false
+    @State private var notice: LocalNotificationNotice?
+    @State private var didScrollToInitialTarget = false
+    @State private var showingClearConfirmation = false
+
+    init(initialSearchTarget: NotificationSettingsSearchTarget? = nil) {
+        self.initialSearchTarget = initialSearchTarget
+    }
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: 22) {
+                    accessSection
+                        .id(NotificationSettingsSearchTarget.access.rawValue)
+                    timingSection
+                        .id(NotificationSettingsSearchTarget.timing.rawValue)
+                    manageSection
+                        .id(NotificationSettingsSearchTarget.manage.rawValue)
+                    localLimitSection
+                        .id(NotificationSettingsSearchTarget.limits.rawValue)
+                }
+                .padding(.top, 16)
+                .padding(.bottom, 32)
+            }
+            .onAppear {
+                Task {
+                    await manager.refreshAuthorizationStatus()
+                    await manager.syncDeliveredNotificationHistory()
+                }
+                guard let initialSearchTarget, !didScrollToInitialTarget else { return }
+                didScrollToInitialTarget = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) {
+                    withAnimation(.easeInOut(duration: 0.28)) {
+                        proxy.scrollTo(initialSearchTarget.rawValue, anchor: .top)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Notifications")
+        .background(SettingsGradientBackground().ignoresSafeArea())
+        .eclipseDarkToolbar()
+        .alert(item: $notice) { notice in
+            if notice.offersSettings {
+                return Alert(
+                    title: Text(notice.title),
+                    message: Text(notice.message),
+                    primaryButton: .default(Text("Open Settings"), action: openSystemSettings),
+                    secondaryButton: .cancel()
+                )
+            }
+            return Alert(
+                title: Text(notice.title),
+                message: Text(notice.message),
+                dismissButton: .default(Text("OK"))
+            )
+        }
+        .confirmationDialog(
+            "Remove all notification follows and reminders?",
+            isPresented: $showingClearConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Remove All", role: .destructive) {
+                Task { await manager.clearAllSelections() }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    private var accessSection: some View {
+        GlassSection(header: "Access") {
+            VStack(spacing: 0) {
+                GlassSettingsRow(
+                    icon: manager.canScheduleNotifications ? "bell.fill" : "bell.slash.fill",
+                    iconColor: manager.canScheduleNotifications ? .green : .orange,
+                    title: "Notification Access"
+                ) {
+                    Text(manager.authorizationDisplayName)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundColor(manager.authorizationStatus == .denied ? .orange : .white.opacity(0.58))
+                }
+
+                GlassDivider()
+
+                Button {
+                    if manager.authorizationStatus == .denied {
+                        openSystemSettings()
+                    } else {
+                        Task {
+                            let result = await manager.requestAuthorization()
+                            notice = LocalNotificationNotice.from(result)
+                        }
+                    }
+                } label: {
+                    GlassSettingsRow(
+                        icon: manager.authorizationStatus == .denied ? "gear" : "checkmark.circle.fill",
+                        iconColor: .orange,
+                        title: manager.authorizationStatus == .denied ? "Open iOS Settings" : "Enable Notifications"
+                    ) {
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(.white.opacity(0.3))
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(manager.canScheduleNotifications)
+
+                if manager.canScheduleNotifications {
+                    GlassDivider()
+                    Button {
+                        Task { await manager.refreshSchedulesIfNeeded(force: true) }
+                    } label: {
+                        GlassSettingsRow(icon: "arrow.clockwise", iconColor: .cyan, title: "Refresh Reminders") {
+                            if manager.isRefreshing {
+                                ProgressView().tint(.white)
+                            } else {
+                                Text("\(manager.managedPendingRequestCount) scheduled")
+                                    .font(.caption)
+                                    .foregroundColor(.white.opacity(0.5))
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(manager.isRefreshing || !manager.hasNotificationSelections)
+                }
+            }
+        }
+    }
+
+    private var timingSection: some View {
+        GlassSection(header: "Timing") {
+            VStack(spacing: 0) {
+                GlassSettingsRow(icon: "clock.badge", iconColor: .orange, title: "Episode Reminders") {
+                    Picker("Episode Reminders", selection: $episodeLeadTimeRaw) {
+                        ForEach(EpisodeNotificationLeadTime.allCases) { timing in
+                            Text(timing.displayName).tag(timing.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .tint(.white.opacity(0.72))
+                }
+
+                GlassDivider()
+
+                GlassSettingsRow(icon: "calendar.badge.clock", iconColor: .purple, title: "Season Premieres") {
+                    Picker("Season Premieres", selection: $seasonLeadTimeRaw) {
+                        ForEach(SeasonNotificationLeadTime.allCases) { timing in
+                            Text(timing.displayName).tag(timing.rawValue)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .tint(.white.opacity(0.72))
+                }
+
+                GlassDivider()
+
+                GlassSettingsRow(icon: "sparkles.tv", iconColor: .pink, title: "Anime Specials & OVAs") {
+                    Toggle("", isOn: $includeAnimeSpecials)
+                        .labelsHidden()
+                        .tint(.pink)
+                }
+            }
+        }
+        .onChange(of: episodeLeadTimeRaw) { _ in
+            Task { await manager.rescheduleForPreferenceChange() }
+        }
+        .onChange(of: seasonLeadTimeRaw) { _ in
+            Task { await manager.rescheduleForPreferenceChange() }
+        }
+        .onChange(of: includeAnimeSpecials) { _ in
+            Task {
+                await manager.rescheduleForPreferenceChange(
+                    invalidateExcludedAnimeSpecialRequests: true
+                )
+            }
+        }
+    }
+
+    private var manageSection: some View {
+        VStack(spacing: 12) {
+            GlassSection(header: "Manage") {
+                VStack(spacing: 0) {
+                    NavigationLink(destination: searchableDestination(NotificationHistorySettingsView())) {
+                        notificationManagementRow(
+                            icon: "bell.and.waves.left.and.right.fill",
+                            color: .orange,
+                            title: "Notification Center",
+                            summary: notificationHistorySummary
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Notification Center")
+                    .accessibilityValue(notificationHistorySummary)
+
+                    GlassDivider()
+
+                    NavigationLink(destination: searchableDestination(NotificationFollowingSettingsView())) {
+                        notificationManagementRow(
+                            icon: "bell.badge",
+                            color: .purple,
+                            title: "Following",
+                            summary: followingSummary
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Following")
+                    .accessibilityValue(followingSummary)
+
+                    GlassDivider()
+
+                    NavigationLink(destination: searchableDestination(NotificationEpisodeRemindersSettingsView())) {
+                        notificationManagementRow(
+                            icon: "calendar.badge.plus",
+                            color: .cyan,
+                            title: "Individual Episodes",
+                            summary: episodeReminderSummary
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Individual Episodes")
+                    .accessibilityValue(episodeReminderSummary)
+                }
+            }
+
+            if manager.hasNotificationSelections {
+                Button(role: .destructive) {
+                    showingClearConfirmation = true
+                } label: {
+                    Text("Remove All Notification Selections")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(.red)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var notificationHistorySummary: String {
+        countSummary(
+            manager.notificationHistoryCount,
+            empty: "No recent alerts",
+            singular: "recent alert",
+            plural: "recent alerts"
+        )
+    }
+
+    private var followingSummary: String {
+        countSummary(
+            manager.subscriptions.count,
+            empty: "No shows",
+            singular: "show",
+            plural: "shows"
+        )
+    }
+
+    private var episodeReminderSummary: String {
+        countSummary(
+            manager.episodeReminders.count,
+            empty: "No reminders",
+            singular: "reminder",
+            plural: "reminders"
+        )
+    }
+
+    private func countSummary(
+        _ count: Int,
+        empty: String,
+        singular: String,
+        plural: String
+    ) -> String {
+        if count == 0 { return empty }
+        return count == 1 ? "1 \(singular)" : "\(count) \(plural)"
+    }
+
+    private func notificationManagementRow(
+        icon: String,
+        color: Color,
+        title: String,
+        summary: String
+    ) -> some View {
+        GlassSettingsRow(icon: icon, iconColor: color, title: title) {
+            HStack(spacing: 5) {
+                Text(summary)
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.5))
+                    .lineLimit(1)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.3))
+            }
+        }
+    }
+
+    private func searchableDestination<Content: View>(_ content: Content) -> AnyView {
+        guard let presentation = settingsSearchPresentation else {
+            return AnyView(content)
+        }
+        return AnyView(SettingsSearchContainer(
+            text: presentation.text,
+            showsResults: true,
+            content: content,
+            results: presentation.results
+        ))
+    }
+
+    private var localLimitSection: some View {
+        VStack(spacing: 12) {
+            GlassSection(header: "Local-Only Delivery") {
+                VStack(alignment: .leading, spacing: 12) {
+                    notificationInfoLine(
+                        icon: "iphone",
+                        text: "Reminders are stored and scheduled on this device. No Eclipse notification server is used."
+                    )
+                    notificationInfoLine(
+                        icon: "arrow.clockwise.icloud",
+                        text: "Open Eclipse periodically to download new dates, correct schedule changes, and discover newly announced seasons. Background refresh is not guaranteed."
+                    )
+                    notificationInfoLine(
+                        icon: "calendar",
+                        text: "Episode notification checks use your selected rolling \(ScheduleWindow.sanitizedDays(scheduleWindowDays))-day Schedule range. Already scheduled reminders can fire while Eclipse is closed."
+                    )
+                    notificationInfoLine(
+                        icon: "play.slash",
+                        text: "“Aired” means the metadata provider’s scheduled airtime—not that a stream, dub, or subtitles are already available."
+                    )
+                    notificationInfoLine(
+                        icon: "questionmark.circle",
+                        text: "Episodes without a confirmed airtime are not scheduled, so Eclipse does not invent a potentially misleading release time."
+                    )
+                    notificationInfoLine(
+                        icon: "bell.and.waves.left.and.right",
+                        text: "Focus, Notification Summary, device state, and iOS delivery rules can delay alerts. Eclipse schedules at most 48 managed reminders at once and prioritizes the nearest dates."
+                    )
+                }
+                .padding(14)
+            }
+
+            GlassSectionFooter("Future-season checks happen when Eclipse refreshes. If only a year or seasonal window is known, Eclipse records the season but waits for an exact date before scheduling a premiere reminder.")
+        }
+    }
+
+    private func notificationInfoLine(icon: String, text: String) -> some View {
+        HStack(alignment: .top, spacing: 11) {
+            Image(systemName: icon)
+                .foregroundColor(.orange)
+                .frame(width: 24)
+            Text(text)
+                .font(.footnote)
+                .foregroundColor(.white.opacity(0.68))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func openSystemSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
+    }
+}
+
+private struct NotificationHistorySettingsView: View {
+    private static let pageSize = 40
+
+    @StateObject private var manager = LocalNotificationManager.shared
+    @Environment(\.eclipseWindowSceneSessionIdentifier) private var windowSceneSessionIdentifier
+    @State private var entries: [LocalNotificationHistoryEntry] = []
+    @State private var nextCursor: LocalNotificationHistoryCursor?
+    @State private var hasMore = false
+    @State private var didLoad = false
+    @State private var isLoading = false
+    @State private var isApplyingLocalMutation = false
+    @State private var pendingReload = false
+    @State private var showingClearConfirmation = false
+    @State private var showingHistorySaveError = false
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 14) {
+                GlassSection(header: "Recent Alerts") {
+                    if !didLoad && isLoading {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                                .tint(.white)
+                            Text("Loading notification history…")
+                                .font(.subheadline)
+                                .foregroundColor(.white.opacity(0.62))
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(14)
+                    } else if entries.isEmpty {
+                        NotificationSettingsEmptyRow(
+                            icon: "bell.slash",
+                            title: "No observed alerts",
+                            detail: "Notifications Eclipse observes after delivery will appear here."
+                        )
+                    } else {
+                        LazyVStack(spacing: 0) {
+                            ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
+                                NotificationHistorySettingsRow(
+                                    entry: entry,
+                                    isDisabled: isLoading || isApplyingLocalMutation,
+                                    onOpen: {
+                                        manager.openNotificationHistoryEntry(
+                                            entry,
+                                            sceneSessionIdentifier: windowSceneSessionIdentifier
+                                        )
+                                    },
+                                    onDelete: { await delete(entry) }
+                                )
+
+                                if index < entries.count - 1 || hasMore {
+                                    GlassDivider(leadingInset: 16)
+                                }
+                            }
+
+                            if hasMore {
+                                Button {
+                                    Task { await loadMore() }
+                                } label: {
+                                    HStack(spacing: 9) {
+                                        if isLoading {
+                                            ProgressView()
+                                                .tint(.white)
+                                        } else {
+                                            Image(systemName: "arrow.down.circle")
+                                        }
+                                        Text(loadMoreTitle)
+                                            .font(.subheadline.weight(.semibold))
+                                    }
+                                    .foregroundColor(.orange)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(minHeight: 48)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(isLoading)
+                                .accessibilityHint("Loads the next 40 observed alerts.")
+                            }
+                        }
+                    }
+                }
+
+                GlassSectionFooter("Eclipse keeps the latest 1,000 observed alerts on this device. This is not a guaranteed complete log: an alert cleared from iOS Notification Center before Eclipse next opens can be missing.")
+            }
+            .padding(.top, 16)
+            .padding(.bottom, 32)
+        }
+        .navigationTitle("Notification Center")
+        .background(SettingsGradientBackground().ignoresSafeArea())
+        .eclipseDarkToolbar()
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                if manager.notificationHistoryCount > 0 {
+                    Button("Clear All", role: .destructive) {
+                        showingClearConfirmation = true
+                    }
+                    .disabled(isLoading || isApplyingLocalMutation)
+                }
+            }
+        }
+        .task {
+            await reloadHistory(syncDelivered: true, retainingLoadedCount: false)
+        }
+        .refreshable {
+            await reloadHistory(syncDelivered: true, retainingLoadedCount: true)
+        }
+        .onChange(of: manager.notificationHistoryRevision) { _ in
+            guard didLoad else { return }
+            guard !isLoading, !isApplyingLocalMutation else {
+                pendingReload = true
+                return
+            }
+            Task {
+                await reloadHistory(syncDelivered: false, retainingLoadedCount: true)
+            }
+        }
+        .confirmationDialog(
+            "Clear all observed history and remove Eclipse alerts from iOS Notification Center?",
+            isPresented: $showingClearConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Clear All", role: .destructive) {
+                Task { await clearHistory() }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .alert("Couldn’t Update History", isPresented: $showingHistorySaveError) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("Eclipse could not save that change. Your notification history and the matching iOS alert were left intact.")
+        }
+    }
+
+    private var loadMoreTitle: String {
+        let remaining = max(0, manager.notificationHistoryCount - entries.count)
+        return remaining > 0 ? "Load More (\(remaining) remaining)" : "Load More"
+    }
+
+    private func reloadHistory(
+        syncDelivered: Bool,
+        retainingLoadedCount: Bool
+    ) async {
+        guard !isLoading else {
+            pendingReload = true
+            return
+        }
+        let startingRevision = manager.notificationHistoryRevision
+        isLoading = true
+        defer {
+            isLoading = false
+            didLoad = true
+            if manager.notificationHistoryRevision != startingRevision {
+                pendingReload = true
+            }
+            schedulePendingReloadIfNeeded()
+        }
+
+        if syncDelivered {
+            await manager.syncDeliveredNotificationHistory()
+        }
+
+        let targetCount = retainingLoadedCount
+            ? max(Self.pageSize, entries.count)
+            : Self.pageSize
+        var reloaded: [LocalNotificationHistoryEntry] = []
+        var cursor: LocalNotificationHistoryCursor?
+        var lastPage: LocalNotificationHistoryPage?
+
+        repeat {
+            let page = await manager.notificationHistoryPage(
+                after: cursor,
+                limit: Self.pageSize
+            )
+            reloaded.append(contentsOf: page.entries)
+            cursor = page.nextCursor
+            lastPage = page
+            if !page.hasMore || page.entries.isEmpty { break }
+        } while reloaded.count < targetCount
+
+        guard !Task.isCancelled else { return }
+        entries = reloaded
+        nextCursor = lastPage?.nextCursor
+        hasMore = lastPage?.hasMore ?? false
+    }
+
+    private func loadMore() async {
+        guard !isLoading, hasMore, let nextCursor else { return }
+        let startingRevision = manager.notificationHistoryRevision
+        isLoading = true
+        defer {
+            isLoading = false
+            if manager.notificationHistoryRevision != startingRevision {
+                pendingReload = true
+            }
+            schedulePendingReloadIfNeeded()
+        }
+
+        let page = await manager.notificationHistoryPage(
+            after: nextCursor,
+            limit: Self.pageSize
+        )
+        guard !Task.isCancelled else { return }
+        let existingIDs = Set(entries.map(\.id))
+        entries.append(contentsOf: page.entries.filter { !existingIDs.contains($0.id) })
+        self.nextCursor = page.nextCursor
+        hasMore = page.hasMore
+    }
+
+    private func delete(_ entry: LocalNotificationHistoryEntry) async {
+        guard !isApplyingLocalMutation, !isLoading else { return }
+        isApplyingLocalMutation = true
+        let retainedCount = entries.count
+        let succeeded = await manager.deleteNotificationHistoryEntry(entry)
+        guard succeeded else {
+            isApplyingLocalMutation = false
+            showingHistorySaveError = true
+            return
+        }
+        entries.removeAll { $0.id == entry.id }
+        pendingReload = false
+        await reloadHistory(
+            syncDelivered: false,
+            retainingLoadedCount: retainedCount > Self.pageSize
+        )
+        isApplyingLocalMutation = false
+        schedulePendingReloadIfNeeded()
+    }
+
+    private func clearHistory() async {
+        guard !isApplyingLocalMutation, !isLoading else { return }
+        isApplyingLocalMutation = true
+        let succeeded = await manager.clearNotificationHistory()
+        guard succeeded else {
+            isApplyingLocalMutation = false
+            showingHistorySaveError = true
+            return
+        }
+        pendingReload = false
+        await reloadHistory(syncDelivered: false, retainingLoadedCount: false)
+        isApplyingLocalMutation = false
+        schedulePendingReloadIfNeeded()
+    }
+
+    private func schedulePendingReloadIfNeeded() {
+        guard pendingReload, !isLoading, !isApplyingLocalMutation else { return }
+        pendingReload = false
+        Task {
+            await reloadHistory(syncDelivered: false, retainingLoadedCount: true)
+        }
+    }
+}
+
+private struct NotificationFollowingSettingsView: View {
+    @StateObject private var manager = LocalNotificationManager.shared
+    @State private var notice: LocalNotificationNotice?
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 14) {
+                GlassSection(header: "Following") {
+                    if manager.subscriptions.isEmpty {
+                        NotificationSettingsEmptyRow(
+                            icon: "bell.badge",
+                            title: "No followed shows",
+                            detail: "Use the bell on a show’s detail page to follow episodes or future seasons."
+                        )
+                    } else {
+                        LazyVStack(spacing: 0) {
+                            ForEach(Array(manager.subscriptions.enumerated()), id: \.element.id) { index, subscription in
+                                NotificationSubscriptionSettingsRow(
+                                    subscription: subscription,
+                                    onNotice: { notice = $0 }
+                                )
+                                if index < manager.subscriptions.count - 1 {
+                                    GlassDivider(leadingInset: 16)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                GlassSectionFooter("Each followed title can alert for upcoming episodes, future seasons, or both. Turning both options off removes the title from Following.")
+            }
+            .padding(.top, 16)
+            .padding(.bottom, 32)
+        }
+        .navigationTitle("Following")
+        .background(SettingsGradientBackground().ignoresSafeArea())
+        .eclipseDarkToolbar()
+        .alert(item: $notice) { notificationSettingsAlert($0) }
+    }
+}
+
+private struct NotificationEpisodeRemindersSettingsView: View {
+    @StateObject private var manager = LocalNotificationManager.shared
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 14) {
+                GlassSection(header: "Individual Episodes") {
+                    if manager.episodeReminders.isEmpty {
+                        NotificationSettingsEmptyRow(
+                            icon: "calendar.badge.plus",
+                            title: "No episode reminders",
+                            detail: "Use the bell beside an upcoming entry in Schedule to create a one-off reminder."
+                        )
+                    } else {
+                        LazyVStack(spacing: 0) {
+                            ForEach(Array(manager.episodeReminders.enumerated()), id: \.element.id) { index, reminder in
+                                NotificationEpisodeReminderSettingsRow(reminder: reminder)
+                                if index < manager.episodeReminders.count - 1 {
+                                    GlassDivider(leadingInset: 16)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                GlassSectionFooter("These are one-off episode choices. Automatic reminders from followed shows are managed separately under Following.")
+            }
+            .padding(.top, 16)
+            .padding(.bottom, 32)
+        }
+        .navigationTitle("Individual Episodes")
+        .background(SettingsGradientBackground().ignoresSafeArea())
+        .eclipseDarkToolbar()
+    }
+}
+
+private struct NotificationSettingsEmptyRow: View {
+    let icon: String
+    let title: String
+    let detail: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .foregroundColor(.white.opacity(0.45))
+                .frame(width: 28)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.white)
+                Text(detail)
+                    .font(.footnote)
+                    .foregroundColor(.white.opacity(0.52))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct NotificationHistorySettingsRow: View {
+    let entry: LocalNotificationHistoryEntry
+    let isDisabled: Bool
+    let onOpen: () -> Void
+    let onDelete: () async -> Void
+
+    @State private var isDeleting = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Button(action: onOpen) {
+                HStack(alignment: .top, spacing: 11) {
+                    Image(systemName: icon)
+                        .foregroundColor(iconColor)
+                        .frame(width: 28, height: 28)
+                        .accessibilityHidden(true)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(displayTitle)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+
+                        if !entry.subtitle.isEmpty {
+                            Text(entry.subtitle)
+                                .font(.caption)
+                                .foregroundColor(.white.opacity(0.58))
+                                .lineLimit(1)
+                        }
+
+                        if !entry.body.isEmpty {
+                            Text(entry.body)
+                                .font(.footnote)
+                                .foregroundColor(.white.opacity(0.62))
+                                .lineLimit(2)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+
+                        Text("\(kindLabel) · \(Self.dateFormatter.string(from: entry.deliveredAt))")
+                            .font(.caption2)
+                            .foregroundColor(.white.opacity(0.42))
+                    }
+
+                    Spacer(minLength: 8)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(isDisabled)
+            .accessibilityLabel(historyAccessibilityLabel)
+            .accessibilityHint("Opens the related item in Schedule.")
+
+            Button(role: .destructive) {
+                guard !isDeleting else { return }
+                isDeleting = true
+                Task {
+                    await onDelete()
+                    isDeleting = false
+                }
+            } label: {
+                ZStack {
+                    if isDeleting {
+                        ProgressView()
+                            .tint(.red)
+                    } else {
+                        Image(systemName: "trash")
+                            .foregroundColor(.red.opacity(0.9))
+                    }
+                }
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(isDisabled || isDeleting)
+            .accessibilityLabel("Delete \(displayTitle) from notification history")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    private var displayTitle: String {
+        let candidates = [entry.title, entry.mediaTitle]
+        return candidates.first(where: { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
+            ?? "Eclipse Notification"
+    }
+
+    private var icon: String {
+        switch entry.kind {
+        case .episode: return "bell.fill"
+        case .batch: return "bell.badge.fill"
+        case .season: return "calendar.badge.clock"
+        case .scheduleFallback: return "calendar"
+        }
+    }
+
+    private var iconColor: Color {
+        switch entry.kind {
+        case .episode, .batch: return .orange
+        case .season: return .purple
+        case .scheduleFallback: return .cyan
+        }
+    }
+
+    private var kindLabel: String {
+        switch entry.kind {
+        case .episode: return "Episode"
+        case .batch: return "Episode batch"
+        case .season: return "Season"
+        case .scheduleFallback: return "Schedule"
+        }
+    }
+
+    private var historyAccessibilityLabel: String {
+        let body = entry.body.isEmpty ? "" : ", \(entry.body)"
+        return "\(displayTitle)\(body), \(kindLabel), delivered \(Self.dateFormatter.string(from: entry.deliveredAt))"
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+}
+
+private struct NotificationEpisodeReminderSettingsRow: View {
+    @StateObject private var manager = LocalNotificationManager.shared
+    @State private var isDeleting = false
+
+    let reminder: LocalEpisodeNotificationReminder
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "bell.fill")
+                .foregroundColor(.orange)
+                .frame(width: 28)
+                .accessibilityHidden(true)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(reminder.title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                Text(summary)
+                    .font(.caption)
+                    .foregroundColor(.white.opacity(0.52))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 8)
+
+            Button(role: .destructive) {
+                guard !isDeleting else { return }
+                isDeleting = true
+                Task {
+                    await manager.removeEpisodeReminder(id: reminder.id)
+                    isDeleting = false
+                }
+            } label: {
+                ZStack {
+                    if isDeleting {
+                        ProgressView()
+                            .tint(.red)
+                    } else {
+                        Image(systemName: "trash")
+                            .foregroundColor(.red.opacity(0.9))
+                    }
+                }
+                .frame(width: 44, height: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(isDeleting)
+            .accessibilityLabel("Remove reminder for \(summary) of \(reminder.title)")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    private var summary: String {
+        let episode: String
+        if reminder.source == .western, let season = reminder.season, season > 0 {
+            episode = "Season \(season), episode \(reminder.episode)"
+        } else {
+            episode = "Episode \(reminder.episode)"
+        }
+        return "\(episode) · \(Self.dateFormatter.string(from: reminder.airingAt))"
+    }
+
+    private static let dateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .short
+        return formatter
+    }()
+}
+
+private func notificationSettingsAlert(_ notice: LocalNotificationNotice) -> Alert {
+    if notice.offersSettings {
+        return Alert(
+            title: Text(notice.title),
+            message: Text(notice.message),
+            primaryButton: .default(Text("Open Settings")) {
+                guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+                UIApplication.shared.open(url)
+            },
+            secondaryButton: .cancel()
+        )
+    }
+    return Alert(
+        title: Text(notice.title),
+        message: Text(notice.message),
+        dismissButton: .default(Text("OK"))
+    )
+}
+
+private struct NotificationSubscriptionSettingsRow: View {
+    @StateObject private var manager = LocalNotificationManager.shared
+    @State private var isUpdating = false
+    let subscription: LocalMediaNotificationSubscription
+    let onNotice: (LocalNotificationNotice) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 11) {
+                Image(systemName: subscription.source == .anime ? "sparkles" : "tv.fill")
+                    .foregroundColor(subscription.source == .anime ? .pink : .blue)
+                    .frame(width: 28)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(subscription.title)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                    Text(subscription.source.displayName)
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.48))
+                }
+                Spacer()
+                Button(role: .destructive) {
+                    guard !isUpdating else { return }
+                    isUpdating = true
+                    Task { await manager.removeSubscription(id: subscription.id) }
+                } label: {
+                    Image(systemName: "trash")
+                        .foregroundColor(.red.opacity(0.88))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(isUpdating)
+                .accessibilityLabel("Unfollow \(subscription.title)")
+            }
+
+            HStack(spacing: 16) {
+                compactToggle(title: "Episodes", isOn: subscription.episodeNotifications) { enabled in
+                    update(episodes: enabled, seasons: subscription.futureSeasonNotifications)
+                }
+                compactToggle(title: "Future Seasons", isOn: subscription.futureSeasonNotifications) { enabled in
+                    update(episodes: subscription.episodeNotifications, seasons: enabled)
+                }
+            }
+            .padding(.leading, 39)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+    }
+
+    private func compactToggle(title: String, isOn: Bool, action: @escaping (Bool) -> Void) -> some View {
+        HStack(spacing: 7) {
+            Text(title)
+                .font(.caption)
+                .foregroundColor(.white.opacity(0.65))
+            Toggle("", isOn: Binding(get: { isOn }, set: action))
+                .labelsHidden()
+                .scaleEffect(0.82)
+                .tint(.orange)
+                .disabled(isUpdating)
+                .accessibilityLabel(title)
+        }
+    }
+
+    private func update(episodes: Bool, seasons: Bool) {
+        guard !isUpdating else { return }
+        isUpdating = true
+        Task {
+            let result = await manager.updateMediaSubscription(
+                source: subscription.source,
+                tmdbID: subscription.tmdbID,
+                title: subscription.title,
+                titleAliases: subscription.titleAliases,
+                animeMediaIDs: subscription.animeMediaIDs,
+                westernSeasonIDs: subscription.knownWesternSeasonIDs,
+                episodeNotifications: episodes,
+                futureSeasonNotifications: seasons
+            )
+            if let notice = LocalNotificationNotice.from(result) {
+                onNotice(notice)
+            }
+            isUpdating = false
+        }
     }
 }
 #endif
@@ -1487,10 +2851,15 @@ private struct SupportPurchaseStatusRow: View {
 
 struct ScheduleSettingsView: View {
     @AppStorage("defaultScheduleMode") private var defaultScheduleModeRaw = ScheduleMode.anime.rawValue
+    @AppStorage(ScheduleWindow.storageKey) private var scheduleWindowDays = ScheduleWindow.defaultValue.rawValue
     @StateObject private var accentColorManager = AccentColorManager.shared
 
     private var selectedMode: ScheduleMode {
         ScheduleMode.sanitized(defaultScheduleModeRaw)
+    }
+
+    private var selectedWindow: ScheduleWindow {
+        ScheduleWindow.sanitized(scheduleWindowDays)
     }
 
     var body: some View {
@@ -1516,6 +2885,33 @@ struct ScheduleSettingsView: View {
                 }
 
                 GlassSectionFooter("Choose which schedule opens first when you select the Schedule tab. You can still switch modes inside the tab.")
+
+                GlassSection(header: "Schedule Range") {
+                    VStack(spacing: 0) {
+                        ForEach(Array(ScheduleWindow.allCases.enumerated()), id: \.element.id) { index, window in
+                            GlassSelectionRow(
+                                title: window.displayName,
+                                subtitle: window.description,
+                                isSelected: selectedWindow == window,
+                                accent: accentColorManager.currentAccentColor
+                            ) {
+                                guard scheduleWindowDays != window.rawValue else { return }
+                                scheduleWindowDays = window.rawValue
+#if os(iOS)
+                                Task {
+                                    await LocalNotificationManager.shared.scheduleWindowDidChange()
+                                }
+#endif
+                            }
+
+                            if index < ScheduleWindow.allCases.count - 1 {
+                                GlassDivider(leadingInset: 16)
+                            }
+                        }
+                    }
+                }
+
+                GlassSectionFooter("Performance warning: This range also controls automatic episode notification checks and delayed startup warming. Longer ranges—especially 21 or 30 days—can load more slowly and use more data, particularly during provider fallback. Eclipse still schedules only the nearest 48 managed reminders. \(ScheduleWindow.defaultValue.rawValue) days remains the recommended default.")
             }
             .padding(.top, 16)
             .padding(.bottom, 32)

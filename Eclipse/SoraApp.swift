@@ -1,14 +1,48 @@
 import SwiftUI
+import Combine
 #if !os(tvOS)
 import Nuke
 #endif
 
 class AppDelegate: NSObject, UIApplicationDelegate {
 #if !os(tvOS)
-    static var orientationLock: UIInterfaceOrientationMask = .all
+    private static var orientationLocksByScene: [String: UIInterfaceOrientationMask] = [:]
+
+    static func setOrientationLock(_ mask: UIInterfaceOrientationMask, for scene: UIWindowScene) {
+        let identifier = scene.session.persistentIdentifier
+        if mask == .all {
+            orientationLocksByScene.removeValue(forKey: identifier)
+        } else {
+            orientationLocksByScene[identifier] = mask
+        }
+        if #available(iOS 16.0, *) {
+            scene.requestGeometryUpdate(
+                .iOS(interfaceOrientations: mask)
+            ) { error in
+                Logger.shared.log(
+                    "Player orientation geometry update failed: \(error.localizedDescription)",
+                    type: "Player"
+                )
+            }
+        }
+    }
 
     func application(_ application: UIApplication, supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
-        return AppDelegate.orientationLock
+        if let identifier = window?.windowScene?.session.persistentIdentifier {
+            return AppDelegate.orientationLocksByScene[identifier] ?? .all
+        }
+
+        // UIKit can ask without a window while an iPad scene is rotating (notably in the
+        // simulator and some multitasking modes). If exactly one scene owns a player lock, it is
+        // unambiguous and must remain authoritative; returning `.all` here silently unlocked it.
+        let activeMasks = Array(AppDelegate.orientationLocksByScene.values)
+        return activeMasks.count == 1 ? activeMasks[0] : .all
+    }
+
+    func application(_ application: UIApplication, didDiscardSceneSessions sceneSessions: Set<UISceneSession>) {
+        for session in sceneSessions {
+            AppDelegate.orientationLocksByScene.removeValue(forKey: session.persistentIdentifier)
+        }
     }
 #endif
 
@@ -32,9 +66,15 @@ struct SoraApp: App {
     @State private var startupReady = false
     @State private var startupFallbackScheduled = false
     @State private var schedulePrefetchScheduled = false
+    @State private var scheduleWarmupComplete = false
+    @State private var homeHydrationComplete = false
     @State private var showSplash = true
     @AppStorage("hideSplashScreen") private var hideSplashScreen = false
     private let startupFallbackDelay: TimeInterval = 20
+#if os(iOS)
+    @State private var lastNotificationMaintenanceDay = Calendar.current.startOfDay(for: Date())
+    private let notificationMaintenanceTimer = Timer.publish(every: 300, on: .main, in: .common).autoconnect()
+#endif
 
 #if !os(tvOS)
     @AppStorage("showKanzen") private var showKanzen: Bool = false
@@ -43,12 +83,14 @@ struct SoraApp: App {
 #endif
 
     init() {
+        _ = AppPerformanceRuntimeContext.shared
         _ = LocalizationManager.shared
         CrashReportManager.shared.start()
         GitHubReleaseChecker.registerDefaults()
         ExperimentalFeatureState.configureLaunchState()
         MediaStateSyncBootstrap.startIfAvailable()
 #if !os(tvOS)
+        LocalNotificationManager.shared.configure()
         ReaderImagePipelineConfigurator.configureIfNeeded()
 #endif
 #if os(iOS)
@@ -116,6 +158,20 @@ struct SoraApp: App {
                         .zIndex(3)
                 }
             }
+#if os(iOS)
+            .modifier(WatchTogetherJoinPresentation())
+#endif
+            .modifier(AppPerformanceOverlayPresentation(
+                startupReady: startupReady,
+                homeHydrationComplete: homeHydrationComplete,
+                splashVisible: showSplash && !hideSplashScreen,
+                appMode: performanceAppMode,
+                modeSwitchActive: performanceModeSwitchActive
+            ))
+#if os(iOS)
+            .modifier(EclipseWindowSceneScopeModifier())
+#endif
+            .environment(\.eclipseStartupOverlayVisible, showSplash && !hideSplashScreen)
 #if !os(tvOS)
             .coordinateSpace(name: ModeSwitchTransitionCoordinator.coordinateSpaceName)
 #endif
@@ -128,8 +184,8 @@ struct SoraApp: App {
                 if modeSwitchTransitionCoordinator.activeBurst == nil {
                     modeSwitchTransitionCoordinator.beginBurst(toReaderMode: newValue)
                 }
-                if !newValue, startupReady {
-                    prefetchSelectedScheduleAfterStartup()
+                if !newValue {
+                    warmSchedulesAfterStartup()
                 }
             }
             .onChange(of: modeSwitchAnimationEnabled) { isEnabled in
@@ -138,16 +194,50 @@ struct SoraApp: App {
                 }
             }
 #endif
+            .onReceive(NotificationCenter.default.publisher(for: .homeInitialHydrationDidComplete)) { _ in
+                homeHydrationComplete = true
+                warmSchedulesAfterStartup()
+            }
 #if os(iOS)
             .onAppear {
                 MediaStateSyncBootstrap.syncOnActivation()
                 ExperimentalCloudSyncManager.shared.syncOnActivationIfNeeded(reason: "launch")
+                if LocalNotificationManager.shared.hasPendingScheduleNavigation {
+                    showKanzen = false
+                }
+                if showKanzen, LocalNotificationManager.shared.hasNotificationSelections {
+                    warmSchedulesAfterStartup()
+                }
+                Task {
+                    await LocalNotificationManager.shared.refreshAuthorizationStatus()
+                }
             }
             .onChange(of: scenePhase) { newPhase in
                 if newPhase == .active {
                     MediaStateSyncBootstrap.syncOnActivation()
                     ExperimentalCloudSyncManager.shared.syncOnActivationIfNeeded(reason: "active")
+                    Task {
+                        await LocalNotificationManager.shared.refreshAuthorizationStatus()
+                        await LocalNotificationManager.shared.syncDeliveredNotificationHistory()
+                        guard scheduleWarmupComplete else { return }
+                        await LocalNotificationManager.shared.refreshSchedulesIfNeeded()
+                    }
                 }
+            }
+            .onReceive(notificationMaintenanceTimer) { _ in
+                guard scenePhase == .active, scheduleWarmupComplete else { return }
+                let today = Calendar.current.startOfDay(for: Date())
+                guard today != lastNotificationMaintenanceDay else { return }
+                lastNotificationMaintenanceDay = today
+                guard LocalNotificationManager.shared.hasNotificationSelections else { return }
+                Task {
+                    // Source caches use request-start timestamps, so a fetch
+                    // begun before midnight is correctly stale after rollover.
+                    await LocalNotificationManager.shared.refreshSchedulesIfNeeded()
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .openScheduleFromLocalNotification)) { _ in
+                showKanzen = false
             }
 #endif
         }
@@ -163,15 +253,33 @@ struct SoraApp: App {
 
 #endif
 
+    private var performanceAppMode: String {
+#if os(tvOS)
+        "media"
+#else
+        showKanzen ? "reader" : "media"
+#endif
+    }
+
+    private var performanceModeSwitchActive: Bool {
+#if os(tvOS)
+        false
+#else
+        modeSwitchTransitionCoordinator.activeBurst != nil
+#endif
+    }
+
     private func markStartupReady() {
         guard !startupReady else { return }
         startupReady = true
-        prefetchSelectedScheduleAfterStartup()
+        warmSchedulesAfterStartup()
     }
 
-    private func prefetchSelectedScheduleAfterStartup() {
+    private func warmSchedulesAfterStartup() {
 #if !os(tvOS)
-        guard !showKanzen else { return }
+        // Reader-only launches stay lazy unless existing media notifications
+        // need maintenance. Entering Media mode calls this again.
+        guard !showKanzen || LocalNotificationManager.shared.hasNotificationSelections else { return }
 #endif
         guard !schedulePrefetchScheduled else { return }
         schedulePrefetchScheduled = true
@@ -181,15 +289,24 @@ struct SoraApp: App {
             // the splash/Home transition settle before consuming provider slots.
             try? await Task.sleep(nanoseconds: 750_000_000)
             guard !Task.isCancelled else { return }
-            let defaults = UserDefaults.standard
-            let mode = ScheduleMode.sanitized(defaults.string(forKey: "defaultScheduleMode"))
-            let localTimeZone = defaults.object(forKey: "showLocalScheduleTime") == nil
-                ? true
-                : defaults.bool(forKey: "showLocalScheduleTime")
-            await ScheduleViewModel.shared.loadSchedule(
-                mode: mode,
-                localTimeZone: localTimeZone
+#if os(tvOS)
+            let requestedDayCount = ScheduleWindow.current.rawValue
+            _ = await ScheduleViewModel.shared.notificationScheduleSnapshot(
+                dayCount: requestedDayCount
             )
+#else
+            // Both providers warm the user's selected Schedule/notification
+            // range after launch. The delay keeps that chosen cost off the
+            // startup critical path.
+            let requestedDayCount = ScheduleWindow.current.rawValue
+            let snapshot = await ScheduleViewModel.shared.notificationScheduleSnapshot(
+                dayCount: requestedDayCount
+            )
+#if os(iOS)
+            await LocalNotificationManager.shared.consumeStartupScheduleSnapshot(snapshot)
+#endif
+            await MainActor.run { scheduleWarmupComplete = true }
+#endif
         }
     }
 

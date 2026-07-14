@@ -14,6 +14,13 @@ struct CollectionDetailView: View {
 
     @FocusState private var tvItemFocus: TVItemFocus?
 
+    private var collectionGridColumns: [GridItem] {
+        if isIPad {
+            return [GridItem(.adaptive(minimum: 176), spacing: 24)]
+        }
+        return [GridItem(.adaptive(minimum: 120), spacing: 8)]
+    }
+
     private struct CollectionItemButtonModifier: ViewModifier {
         let itemID: String
         let focus: FocusState<TVItemFocus?>.Binding
@@ -68,7 +75,10 @@ struct CollectionDetailView: View {
                 .padding(.horizontal, 24)
                 .padding(.top, 100)
             } else {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: isIPad ? 160 : 120))], spacing: 16) {
+                LazyVGrid(
+                    columns: collectionGridColumns,
+                    spacing: isIPad ? 24 : 16
+                ) {
                     ForEach(collection.items, id: \.searchResult.stableIdentity) { item in
                         let heroID = "collection-\(collection.id)-\(item.searchResult.stableIdentity)"
                         VStack(spacing: 10) {

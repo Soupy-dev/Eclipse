@@ -13,6 +13,9 @@ struct DownloadedShowDetailView: View {
     @StateObject private var downloadManager = DownloadManager.shared
     @State private var showingDeleteConfirmation = false
     @State private var itemToDelete: DownloadItem?
+#if os(iOS)
+    @Environment(\.eclipseWindowSceneSessionIdentifier) private var presentationSceneIdentifier
+#endif
     
     struct DownloadedSeasonGroup: Identifiable {
         var id: Int { seasonNumber }
@@ -42,7 +45,7 @@ struct DownloadedShowDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
 #endif
         .background(SettingsGradientBackground(allowsAnimatedBackground: false).ignoresSafeArea())
-        .confirmationDialog(
+        .adaptiveConfirmationDialog(
             "Delete Episode",
             isPresented: $showingDeleteConfirmation,
             titleVisibility: .visible
@@ -143,98 +146,107 @@ struct DownloadedShowDetailView: View {
         let isWatched = episodeIsWatched(item)
         let progress = episodeProgress(item)
         
-        return Button(action: { playDownloadedItem(item) }) {
-            VStack(spacing: 0) {
-                HStack(spacing: 12) {
-                    // Episode number badge
-                    ZStack {
-                        Circle()
-                            .fill(isWatched ? Color.blue : Color.gray.opacity(0.3))
-                            .frame(width: 36, height: 36)
-                        
-                        if isWatched {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 14, weight: .bold))
-                                .foregroundColor(.white)
-                        } else {
-                            Text("\(item.episodeNumber ?? 0)")
-                                .font(.system(size: 14, weight: .bold, design: .rounded))
-                                .foregroundColor(.white)
-                        }
-                    }
-                    
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Episode \(item.episodeNumber ?? 0)")
-                            .font(.subheadline)
-                            .fontWeight(.semibold)
-                            .foregroundColor(.white)
-                        
-                        if let name = item.episodeName, !name.isEmpty {
-                            Text(name)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
-                        }
-                        
-                        HStack(spacing: 6) {
-                            let formatter = ByteCountFormatter()
-                            Text(formatter.string(fromByteCount: item.totalBytes))
-                                .font(.caption2)
-                                .foregroundColor(.secondary)
-                            
+        return ZStack(alignment: .trailing) {
+            Button(action: { playDownloadedItem(item) }) {
+                VStack(spacing: 0) {
+                    HStack(spacing: 12) {
+                        // Episode number badge
+                        ZStack {
+                            Circle()
+                                .fill(isWatched ? Color.blue : Color.gray.opacity(0.3))
+                                .frame(width: 36, height: 36)
+
                             if isWatched {
-                                Text("• Watched")
-                                    .font(.caption2)
-                                    .foregroundColor(.blue)
-                            } else if progress > 0 {
-                                Text("• \(Int(progress * 100))%")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 14, weight: .bold))
+                                    .foregroundColor(.white)
+                            } else {
+                                Text("\(item.episodeNumber ?? 0)")
+                                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                                    .foregroundColor(.white)
                             }
                         }
-                    }
-                    
-                    Spacer()
-                    
-                    // Action buttons
-                    HStack(spacing: 12) {
-                        Image(systemName: "play.circle.fill")
-                            .font(.title3)
-                            .foregroundColor(.white)
-                        
-                        Button(action: {
-                            itemToDelete = item
-                            showingDeleteConfirmation = true
-                        }) {
-                            Image(systemName: "trash")
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Episode \(item.episodeNumber ?? 0)")
                                 .font(.subheadline)
-                                .foregroundColor(.red.opacity(0.8))
+                                .fontWeight(.semibold)
+                                .foregroundColor(.white)
+
+                            if let name = item.episodeName, !name.isEmpty {
+                                Text(name)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                            }
+
+                            HStack(spacing: 6) {
+                                let formatter = ByteCountFormatter()
+                                Text(formatter.string(fromByteCount: item.totalBytes))
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+
+                                if isWatched {
+                                    Text("• Watched")
+                                        .font(.caption2)
+                                        .foregroundColor(.blue)
+                                } else if progress > 0 {
+                                    Text("• \(Int(progress * 100))%")
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                }
+                            }
                         }
-                        .buttonStyle(PlainButtonStyle())
+
+                        Spacer()
+
+                        // Reserve a separate trailing hit target for Delete. Keeping the two buttons
+                        // as siblings avoids a nested Button dispatching both Delete and Play.
+                        HStack(spacing: 12) {
+                            Image(systemName: "play.circle.fill")
+                                .font(.title3)
+                                .foregroundColor(.white)
+
+                            Color.clear
+                                .frame(width: 32, height: 36)
+                        }
+                    }
+
+                    // Progress bar (only if partially watched, not fully watched)
+                    if progress > 0 && !isWatched {
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                Capsule()
+                                    .fill(Color.white.opacity(0.15))
+                                    .frame(height: 3)
+
+                                Capsule()
+                                    .fill(Color.blue)
+                                    .frame(width: geo.size.width * CGFloat(progress), height: 3)
+                            }
+                        }
+                        .frame(height: 3)
+                        .padding(.top, 8)
                     }
                 }
-                
-                // Progress bar (only if partially watched, not fully watched)
-                if progress > 0 && !isWatched {
-                    GeometryReader { geo in
-                        ZStack(alignment: .leading) {
-                            Capsule()
-                                .fill(Color.white.opacity(0.15))
-                                .frame(height: 3)
-                            
-                            Capsule()
-                                .fill(Color.blue)
-                                .frame(width: geo.size.width * CGFloat(progress), height: 3)
-                        }
-                    }
-                    .frame(height: 3)
-                    .padding(.top, 8)
-                }
+                .padding(12)
+                .applyLiquidGlassBackground(cornerRadius: 12)
             }
-            .padding(12)
-            .applyLiquidGlassBackground(cornerRadius: 12)
+            .buttonStyle(PlainButtonStyle())
+
+            Button(action: {
+                itemToDelete = item
+                showingDeleteConfirmation = true
+            }) {
+                Image(systemName: "trash")
+                    .font(.subheadline)
+                    .foregroundColor(.red.opacity(0.8))
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(PlainButtonStyle())
+            .padding(.trailing, 4)
         }
-        .buttonStyle(PlainButtonStyle())
         .contextMenu {
             Button(action: { playDownloadedItem(item) }) {
                 Label("Play", systemImage: "play.fill")
@@ -305,81 +317,85 @@ struct DownloadedShowDetailView: View {
     
     // MARK: - Playback
     
-    private func playDownloadedItem(_ item: DownloadItem) {
+    private func playDownloadedItem(_ item: DownloadItem, from presenter: UIViewController? = nil) {
         guard let fileURL = downloadManager.localFileURL(for: item) else {
             Logger.shared.log("Downloaded file not found for: \(item.id)", type: "Download")
             return
         }
         
-        let inAppRaw = Settings.normalizedInAppPlayer(UserDefaults.standard.string(forKey: "inAppPlayer"))
-        let subtitleArray: [String]? = downloadManager.localSubtitleURL(for: item).map { [$0.absoluteString] }
-        
-        if inAppRaw == "mpv" {
-            let preset = PlayerPreset.presets.first
-            let pvc = PlayerViewController(
-                url: fileURL,
-                preset: preset ?? PlayerPreset(id: .sdrRec709, title: "Default", summary: "", stream: nil, commands: []),
-                headers: [:],
-                subtitles: subtitleArray,
-                mediaInfo: item.mediaInfo
-            )
-            pvc.isAnimeHint = item.isAnime
-            pvc.episodePlaybackContext = item.episodePlaybackContext
-            pvc.originalTMDBSeasonNumber = item.episodePlaybackContext?.resolvedTMDBSeasonNumber
-            pvc.originalTMDBEpisodeNumber = item.episodePlaybackContext?.resolvedTMDBEpisodeNumber
-            pvc.modalPresentationStyle = .fullScreen
-            if !item.isMovie {
-                pvc.onRequestNextEpisode = { seasonNumber, episodeNumber in
-                    guard let nextItem = nextDownloadedEpisode(
-                        for: item.tmdbId,
-                        requestedSeasonNumber: seasonNumber,
-                        requestedEpisodeNumber: episodeNumber,
-                        currentItemId: item.id
-                    ) else {
-                        Logger.shared.log("NextEpisode: No downloaded next episode found for tmdbId=\(item.tmdbId) after \(item.id)", type: "Player")
-                        return
-                    }
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                        playDownloadedItem(nextItem)
-                    }
-                }
+        guard let originatingPresenter = downloadPresentationController(explicit: presenter) else {
+            Logger.shared.log("Downloaded playback has no presenter", type: "Player")
+            return
+        }
+        let subtitles = downloadManager.localSubtitleURL(for: item).map { [$0.absoluteString] } ?? []
+        let nextEpisodeRequest: ((_ seasonNumber: Int, _ episodeNumber: Int) -> Void)? = item.isMovie ? nil : { [weak originatingPresenter] seasonNumber, episodeNumber in
+            guard let originatingPresenter else { return }
+            guard let nextItem = nextDownloadedEpisode(
+                for: item.tmdbId,
+                requestedSeasonNumber: seasonNumber,
+                requestedEpisodeNumber: episodeNumber,
+                currentItemId: item.id,
+                allowNextAvailableFallback: false
+            ) else {
+                Logger.shared.log("NextEpisode: No downloaded next episode found for tmdbId=\(item.tmdbId) after \(item.id)", type: "Player")
+                return
             }
-            
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let rootVC = windowScene.windows.first?.rootViewController,
-               let topmostVC = rootVC.topmostViewController() as UIViewController? {
-                topmostVC.present(pvc, animated: true, completion: nil)
-            }
-        } else {
-            let playerVC = NormalPlayer()
-            let item2 = AVPlayerItem(url: fileURL)
-            playerVC.player = AVPlayer(playerItem: item2)
-            playerVC.mediaInfo = item.mediaInfo
-            playerVC.episodePlaybackContext = item.episodePlaybackContext
-            playerVC.modalPresentationStyle = .fullScreen
-            
-            if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-               let rootVC = windowScene.windows.first?.rootViewController,
-               let topmostVC = rootVC.topmostViewController() as UIViewController? {
-                topmostVC.present(playerVC, animated: true) {
-                    playerVC.playAtDefaultSpeed()
-                }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                self.playDownloadedItem(nextItem, from: originatingPresenter)
             }
         }
+        let localNextEpisode: DownloadItem? = item.isMovie ? nil : nextDownloadedEpisode(
+            for: item.tmdbId,
+            requestedSeasonNumber: item.seasonNumber ?? 0,
+            requestedEpisodeNumber: (item.episodeNumber ?? 0) + 1,
+            currentItemId: item.id
+        )
+        let request = PlaybackRequest(
+            url: fileURL,
+            subtitles: subtitles,
+            mediaInfo: item.mediaInfo,
+            episodePlaybackContext: item.episodePlaybackContext,
+            title: item.playerTitleBase,
+            subtitle: item.displayTitle,
+            artworkURL: item.posterURL.flatMap(URL.init(string:)),
+            isAnime: item.isAnime,
+            originalTMDBSeasonNumber: item.episodePlaybackContext?.resolvedTMDBSeasonNumber,
+            originalTMDBEpisodeNumber: item.episodePlaybackContext?.resolvedTMDBEpisodeNumber,
+            onRequestNextEpisode: nextEpisodeRequest,
+            localNextEpisodeFallback: PlaybackEpisodeCoordinate(
+                seasonNumber: localNextEpisode?.seasonNumber,
+                episodeNumber: localNextEpisode?.episodeNumber
+            )
+        )
+        PlaybackCoordinator.shared.present(request, from: originatingPresenter)
+    }
+
+    @MainActor
+    private func downloadPresentationController(explicit: UIViewController? = nil) -> UIViewController? {
+        if let explicit { return explicit }
+#if os(iOS)
+        return UIApplication.shared.eclipseTopmostViewController(
+            forSceneSessionIdentifier: presentationSceneIdentifier
+        )
+#else
+        return UIApplication.shared.eclipseTopmostViewController()
+#endif
     }
 
     private func nextDownloadedEpisode(
         for tmdbId: Int,
         requestedSeasonNumber: Int,
         requestedEpisodeNumber: Int,
-        currentItemId: String
+        currentItemId: String,
+        allowNextAvailableFallback: Bool = true
     ) -> DownloadItem? {
         let episodes = downloadManager.completedDownloads
             .filter {
                 !$0.isMovie &&
                 $0.tmdbId == tmdbId &&
                 $0.seasonNumber != nil &&
-                $0.episodeNumber != nil
+                $0.episodeNumber != nil &&
+                downloadManager.localFileURL(for: $0) != nil
             }
             .sorted {
                 if $0.seasonNumber == $1.seasonNumber {
@@ -394,6 +410,8 @@ struct DownloadedShowDetailView: View {
             return requested
         }
 
+        guard allowNextAvailableFallback else { return nil }
+
         guard let currentIndex = episodes.firstIndex(where: { $0.id == currentItemId }) else { return nil }
         let nextIndex = episodes.index(after: currentIndex)
         guard nextIndex < episodes.endIndex else { return nil }
@@ -406,10 +424,17 @@ struct DownloadedShowDetailView: View {
 #if os(iOS)
         guard let fileURL = downloadManager.localFileURL(for: item) else { return }
         let activityVC = UIActivityViewController(activityItems: [fileURL], applicationActivities: nil)
-        if let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene,
-           let rootVC = windowScene.windows.first?.rootViewController,
-           let topmostVC = rootVC.topmostViewController() as UIViewController? {
-            activityVC.popoverPresentationController?.sourceView = topmostVC.view
+        if let topmostVC = downloadPresentationController() {
+            if let popover = activityVC.popoverPresentationController {
+                popover.sourceView = topmostVC.view
+                popover.sourceRect = CGRect(
+                    x: topmostVC.view.bounds.midX,
+                    y: topmostVC.view.bounds.midY,
+                    width: 1,
+                    height: 1
+                )
+                popover.permittedArrowDirections = []
+            }
             topmostVC.present(activityVC, animated: true)
         }
 #endif

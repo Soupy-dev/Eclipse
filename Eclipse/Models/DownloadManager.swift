@@ -25,12 +25,16 @@ enum DownloadEnqueueResult {
 enum AutoModeDownloadValidationResult: Equatable {
     case valid
     case invalid(reason: String)
+    /// The probe hit a Cloudflare/DDoS-Guard wall. Carries the challenged URL so the caller
+    /// can run the interactive bypass and retry — the same recovery the streaming path gets.
+    case cloudflareChallenge(url: URL)
     case cancelled
 }
 
 enum AutoModeDownloadEnqueueResult {
     case accepted(DownloadEnqueueResult)
     case invalid(reason: String)
+    case cloudflareChallenge(url: URL)
     case cancelled
 }
 
@@ -44,11 +48,16 @@ struct DownloadItem: Codable, Identifiable {
     let seasonNumber: Int?
     let episodeNumber: Int?
     let episodeName: String?
-    let streamURL: String
-    let headers: [String: String]
+    var streamURL: String
+    var headers: [String: String]
     let subtitleURL: String?
     let subtitleHeaders: [String: String]?
     let serviceBaseURL: String
+    /// Provider identity retained so an expired signed CDN URL can be re-extracted instead of
+    /// opening an unsolvable verification page on the CDN itself. Optional for old metadata.
+    var sourceId: String? = nil
+    var serviceContentHref: String? = nil
+    var streamName: String? = nil
     let episodePlaybackContext: EpisodePlaybackContext?
     var status: DownloadStatus
     var progress: Double
@@ -60,6 +69,10 @@ struct DownloadItem: Codable, Identifiable {
     /// metadata written by older Eclipse builds continues to decode without migration.
     var reservedVideoFileName: String? = nil
     var reservedSubtitleFileName: String? = nil
+    /// Persisted CDN backoff gate so a process suspension during Retry-After does not leave the
+    /// item permanently paused or immediately hammer the host on relaunch.
+    var retryNotBefore: Date? = nil
+    var rateLimitRetryCount: Int? = nil
     var error: String?
     var dateAdded: Date
     var dateCompleted: Date?
@@ -137,6 +150,13 @@ struct DownloadItem: Codable, Identifiable {
 
 final class DownloadManager: NSObject, ObservableObject {
     static let shared = DownloadManager()
+
+    private struct RefreshedDownloadSource {
+        let url: URL
+        let headers: [String: String]
+        let streamName: String?
+        let serviceContentHref: String
+    }
     
     @Published private(set) var downloads: [DownloadItem] = []
     
@@ -146,6 +166,11 @@ final class DownloadManager: NSObject, ObservableObject {
     private var lastProgressUpdate: [String: Date] = [:]
     private var lastHLSCheckpointSave: [String: Date] = [:]
     private var activeHLSDownloaders: [String: HLSDownloader] = [:]
+    /// Download IDs whose confirmed Cloudflare/DDoS-Guard response is currently being
+    /// re-verified. Accessed on the main thread so a transport failure can only open one solve.
+    private var cloudflareRecoveringDownloadIDs = Set<String>()
+    private var mediaSourceRecoveryAttempts: [String: (count: Int, lastAttempt: Date)] = [:]
+    private var scheduledQueueWakeWorkItem: DispatchWorkItem?
     #if canImport(UIKit)
     private var lifecycleObservers: [NSObjectProtocol] = []
     #endif
@@ -298,6 +323,20 @@ final class DownloadManager: NSObject, ObservableObject {
                 }
 
                 let failure = autoModeValidationFailure(from: error)
+
+                // A Cloudflare wall isn't a bad source — it's one interactive solve away from
+                // working. Flag it (like the streaming fetch does) and hand the challenged URL
+                // back so the caller can show the bypass and retry THIS source, instead of
+                // dead-ending it as invalid and silently skipping to a worse candidate.
+                if let challengeURL = failure.cloudflareChallengeURL {
+                    await CloudflareBypassManager.shared.flagPendingVerification(for: challengeURL)
+                    Logger.shared.log(
+                        "Auto Mode download hit Cloudflare wall host=\(challengeURL.host ?? "unknown") — routing to verification",
+                        type: "Download"
+                    )
+                    return .cloudflareChallenge(url: challengeURL)
+                }
+
                 if attempt < maximumAttempts && failure.isRetryable {
                     Logger.shared.log(
                         "Auto Mode download validation retry host=\(host) reason=\(failure.message)",
@@ -339,6 +378,9 @@ final class DownloadManager: NSObject, ObservableObject {
         subtitleURL: String?,
         subtitleHeaders: [String: String]? = nil,
         serviceBaseURL: String,
+        sourceId: String? = nil,
+        serviceContentHref: String? = nil,
+        streamName: String? = nil,
         isAnime: Bool,
         episodePlaybackContext: EpisodePlaybackContext? = nil,
         cancellationRequested: @escaping @MainActor () -> Bool = { false }
@@ -363,6 +405,9 @@ final class DownloadManager: NSObject, ObservableObject {
             subtitleURL: subtitleURL,
             subtitleHeaders: subtitleHeaders,
             serviceBaseURL: serviceBaseURL,
+            sourceId: sourceId,
+            serviceContentHref: serviceContentHref,
+            streamName: streamName,
             episodePlaybackContext: episodePlaybackContext,
             status: .queued,
             progress: 0,
@@ -399,12 +444,17 @@ final class DownloadManager: NSObject, ObservableObject {
                 subtitleURL: subtitleURL,
                 subtitleHeaders: subtitleHeaders,
                 serviceBaseURL: serviceBaseURL,
+                sourceId: sourceId,
+                serviceContentHref: serviceContentHref,
+                streamName: streamName,
                 isAnime: isAnime,
                 episodePlaybackContext: episodePlaybackContext
             )
             return .accepted(result)
         case .invalid(let reason):
             return .invalid(reason: reason)
+        case .cloudflareChallenge(let url):
+            return .cloudflareChallenge(url: url)
         case .cancelled:
             return .cancelled
         }
@@ -456,6 +506,9 @@ final class DownloadManager: NSObject, ObservableObject {
         subtitleURL: String?,
         subtitleHeaders: [String: String]? = nil,
         serviceBaseURL: String,
+        sourceId: String? = nil,
+        serviceContentHref: String? = nil,
+        streamName: String? = nil,
         isAnime: Bool,
         episodePlaybackContext: EpisodePlaybackContext? = nil
     ) -> DownloadEnqueueResult {
@@ -481,6 +534,9 @@ final class DownloadManager: NSObject, ObservableObject {
             subtitleURL: subtitleURL,
             subtitleHeaders: subtitleHeaders,
             serviceBaseURL: serviceBaseURL,
+            sourceId: sourceId,
+            serviceContentHref: serviceContentHref,
+            streamName: streamName,
             episodePlaybackContext: episodePlaybackContext,
             status: .queued,
             progress: 0,
@@ -565,12 +621,15 @@ final class DownloadManager: NSObject, ObservableObject {
     func resumeDownload(id: String) {
         performOnMain { [weak self] in
             guard let self,
+                  !cloudflareRecoveringDownloadIDs.contains(id),
                   let index = downloads.firstIndex(where: { $0.id == id }),
                   downloads[index].status == .paused || downloads[index].status == .failed else {
                 return
             }
 
             downloads[index].status = .queued
+            downloads[index].retryNotBefore = nil
+            downloads[index].rateLimitRetryCount = nil
             downloads[index].error = nil
             // HLS downloads resume from the last checkpointed segment when one exists;
             // otherwise they restart from scratch.
@@ -1989,7 +2048,8 @@ final class DownloadManager: NSObject, ObservableObject {
         ) {
             throw AutoModeDownloadValidationFailure(
                 message: "Cloudflare verification is required before this source can download.",
-                isRetryable: false
+                isRetryable: false,
+                cloudflareChallengeURL: response.url
             )
         }
 
@@ -2017,9 +2077,16 @@ final class DownloadManager: NSObject, ObservableObject {
             || contentType.hasSuffix("+json")
             || contentType == "application/xml"
             || contentType == "text/xml"
-            || contentType.hasSuffix("+xml")
-            || contentType.hasPrefix("image/") {
+            || contentType.hasSuffix("+xml") {
             return "The source returned \(contentType.isEmpty ? "an error page" : contentType) instead of media data."
+        }
+
+        // Anti-scraping CDNs (e.g. owocdn/kwik behind AnimePahe) deliberately serve valid video
+        // segments mislabeled as image/jpeg. Playback ignores the header and reads the bytes, which
+        // is why streaming works. Only reject when the payload is *actually* an image — not merely
+        // labeled as one — otherwise Auto Mode downloads fail on sources that stream fine.
+        if contentType.hasPrefix("image/"), payloadLooksLikeImage(probe.data) {
+            return "The source returned \(contentType) instead of media data."
         }
 
         guard let preview = String(data: probe.data.prefix(64 * 1024), encoding: .utf8) else {
@@ -2034,6 +2101,29 @@ final class DownloadManager: NSObject, ObservableObject {
             return "The source returned an error document instead of media data."
         }
         return nil
+    }
+
+    /// True only when the bytes actually begin with a known image container signature. A media
+    /// segment mislabeled `image/jpeg` by an anti-scraping CDN starts with a TS sync byte or an
+    /// MP4 `ftyp` box instead, so this returns false and the download is allowed to proceed.
+    private func payloadLooksLikeImage(_ data: Data) -> Bool {
+        let bytes = [UInt8](data.prefix(12))
+        guard bytes.count >= 3 else { return false }
+
+        // JPEG: FF D8 FF
+        if bytes[0] == 0xFF, bytes[1] == 0xD8, bytes[2] == 0xFF { return true }
+        // PNG: 89 50 4E 47 0D 0A 1A 0A
+        if bytes.count >= 8, bytes[0] == 0x89, bytes[1] == 0x50, bytes[2] == 0x4E, bytes[3] == 0x47,
+           bytes[4] == 0x0D, bytes[5] == 0x0A, bytes[6] == 0x1A, bytes[7] == 0x0A { return true }
+        // GIF: "GIF8" (full four bytes — 0x47 alone collides with the TS sync byte)
+        if bytes.count >= 4, bytes[0] == 0x47, bytes[1] == 0x49, bytes[2] == 0x46, bytes[3] == 0x38 { return true }
+        // BMP: "BM"
+        if bytes[0] == 0x42, bytes[1] == 0x4D { return true }
+        // WEBP: "RIFF"...."WEBP"
+        if bytes.count >= 12, bytes[0] == 0x52, bytes[1] == 0x49, bytes[2] == 0x46, bytes[3] == 0x46,
+           bytes[8] == 0x57, bytes[9] == 0x45, bytes[10] == 0x42, bytes[11] == 0x50 { return true }
+
+        return false
     }
 
     private func advertisedFullPayloadLength(from response: HTTPURLResponse) -> Int64? {
@@ -2158,7 +2248,19 @@ final class DownloadManager: NSObject, ObservableObject {
         
         guard slotsAvailable > 0 else { return }
         
-        let queued = downloads.filter { $0.status == .queued }
+        let now = Date()
+        let delayedRetryDates = downloads.compactMap { item -> Date? in
+            guard item.status == .queued,
+                  let retryDate = item.retryNotBefore,
+                  retryDate > now else { return nil }
+            return retryDate
+        }
+        if let nextRetryDate = delayedRetryDates.min() {
+            scheduleQueueWake(at: nextRetryDate)
+        }
+        let queued = downloads.filter {
+            $0.status == .queued && ($0.retryNotBefore == nil || $0.retryNotBefore! <= now)
+        }
 
         for item in queued {
             guard slotsAvailable > 0 else { break }
@@ -2177,9 +2279,31 @@ final class DownloadManager: NSObject, ObservableObject {
             }
 
             clearQueuedMessage(id: item.id)
+            if let index = downloads.firstIndex(where: { $0.id == item.id }) {
+                downloads[index].retryNotBefore = nil
+                if downloads[index].error?.hasPrefix("CDN rate limited") == true {
+                    downloads[index].error = nil
+                }
+            }
             startDownload(item)
             slotsAvailable -= 1
         }
+    }
+
+    private func scheduleQueueWake(at date: Date) {
+        if let scheduledQueueWakeWorkItem,
+           !scheduledQueueWakeWorkItem.isCancelled {
+            scheduledQueueWakeWorkItem.cancel()
+        }
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.scheduledQueueWakeWorkItem = nil
+            self?.processQueue()
+        }
+        scheduledQueueWakeWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + max(0, date.timeIntervalSinceNow),
+            execute: workItem
+        )
     }
     
     private func startDownload(_ item: DownloadItem) {
@@ -2300,6 +2424,9 @@ final class DownloadManager: NSObject, ObservableObject {
             self.downloads[index].hlsResumeSegmentIndex = segmentsWritten
             self.downloads[index].hlsResumeByteCount = byteCount
             self.downloads[index].downloadedBytes = byteCount
+            if segmentsWritten > 0 {
+                self.downloads[index].rateLimitRetryCount = nil
+            }
             // In-memory state is always current for instant pause/resume; throttle the
             // disk write to a couple of seconds. On a hard kill we lose at most the last
             // throttle window, and the partial is truncated back to the saved checkpoint.
@@ -2361,6 +2488,25 @@ final class DownloadManager: NSObject, ObservableObject {
                         case .systemBackoff(let reason):
                             self.requeueInterruptedHLSDownload(id: item.id, message: reason)
                             Logger.shared.log("HLS packaging paused for \(item.displayTitle): \(reason)", type: "Download")
+                        case .rateLimited(let retryAfterSeconds):
+                            self.scheduleRateLimitedDownloadRetry(
+                                id: item.id,
+                                retryAfterSeconds: retryAfterSeconds
+                            )
+                        case .httpError(let statusCode) where [403, 503].contains(statusCode):
+                            self.recoverDownloadAfterMediaRejection(
+                                id: item.id,
+                                statusCode: statusCode,
+                                challengedURL: nil,
+                                rejectedCookieHeader: nil,
+                                isInteractiveChallenge: false
+                            )
+                        case .cloudflareVerificationRequired(let challengeURL, let rejectedCookieHeader):
+                            self.recoverDownloadAfterConfirmedChallenge(
+                                id: item.id,
+                                challengedURL: challengeURL,
+                                rejectedCookieHeader: rejectedCookieHeader
+                            )
                         default:
                             self.markFailed(id: item.id, error: error.localizedDescription)
                         }
@@ -2574,6 +2720,397 @@ final class DownloadManager: NSObject, ObservableObject {
         saveDownloads()
         processQueue()
     }
+
+    private func scheduleRateLimitedDownloadRetry(id: String, retryAfterSeconds: TimeInterval?) {
+        guard let index = downloads.firstIndex(where: { $0.id == id }) else {
+            processQueue()
+            return
+        }
+
+        activeTasks.removeValue(forKey: id)
+        activeHLSDownloaders.removeValue(forKey: id)
+        let retryCount = (downloads[index].rateLimitRetryCount ?? 0) + 1
+        downloads[index].rateLimitRetryCount = retryCount
+        if retryCount > 3 {
+            downloads[index].retryNotBefore = nil
+            if downloads[index].serviceContentHref?.isEmpty == false {
+                recoverDownloadAfterMediaRejection(
+                    id: id,
+                    statusCode: 429,
+                    challengedURL: URL(string: downloads[index].streamURL),
+                    rejectedCookieHeader: nil,
+                    isInteractiveChallenge: false
+                )
+            } else {
+                markFailed(id: id, error: "The CDN kept rate limiting this download.")
+            }
+            return
+        }
+        let delay = min(max(retryAfterSeconds ?? 8, 8), 30)
+        let retryDate = Date().addingTimeInterval(delay)
+        downloads[index].status = .queued
+        downloads[index].retryNotBefore = retryDate
+        downloads[index].error = "CDN rate limited this download. Retrying automatically..."
+        saveDownloads()
+        processQueue()
+        Logger.shared.log(
+            "Download rate limited; scheduled retry id=\(id) delay=\(String(format: "%.1f", delay))s",
+            type: "Download"
+        )
+
+    }
+
+    /// An explicit challenge first attempts provider re-extraction because media CDNs commonly
+    /// return terminal error pages with no solvable widget. The browser is only opened if the
+    /// response was positively identified as an interactive challenge and re-extraction failed.
+    private func recoverDownloadAfterConfirmedChallenge(
+        id: String,
+        challengedURL: URL,
+        rejectedCookieHeader: String?
+    ) {
+        recoverDownloadAfterMediaRejection(
+            id: id,
+            statusCode: 403,
+            challengedURL: challengedURL,
+            rejectedCookieHeader: rejectedCookieHeader,
+            isInteractiveChallenge: true
+        )
+    }
+
+    private func recoverDownloadAfterMediaRejection(
+        id: String,
+        statusCode: Int,
+        challengedURL: URL?,
+        rejectedCookieHeader: String?,
+        isInteractiveChallenge: Bool
+    ) {
+        performOnMain { [weak self] in
+            guard let self,
+                  let index = downloads.firstIndex(where: { $0.id == id }),
+                  cloudflareRecoveringDownloadIDs.insert(id).inserted else { return }
+
+            guard beginMediaSourceRecoveryAttempt(id: id) else {
+                cloudflareRecoveringDownloadIDs.remove(id)
+                markFailed(
+                    id: id,
+                    error: "The media source could not be refreshed after repeated HTTP \(statusCode) responses."
+                )
+                return
+            }
+
+            activeTasks.removeValue(forKey: id)
+            activeHLSDownloaders.removeValue(forKey: id)
+            downloads[index].status = .paused
+            downloads[index].error = "Refreshing expired media source"
+            saveDownloads()
+            processQueue()
+
+            Logger.shared.log(
+                "Download media access rejected; re-resolving provider id=\(id) status=\(statusCode) interactiveChallenge=\(isInteractiveChallenge) host=\(challengedURL?.host ?? "unknown")",
+                type: "Download"
+            )
+
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                var refreshed = await refreshServiceDownloadSource(id: id)
+                var solvedMediaChallenge = false
+                let rejectedStreamURL = downloads.first(where: { $0.id == id })?.streamURL
+
+                if isInteractiveChallenge,
+                   refreshed == nil || refreshed?.url.absoluteString == rejectedStreamURL,
+                   let challengedURL {
+                    solvedMediaChallenge = await CloudflareBypassManager.shared.refreshSessionAfterChallenge(
+                        for: challengedURL,
+                        rejectedCookieHeader: rejectedCookieHeader
+                    )
+                    if solvedMediaChallenge {
+                        refreshed = await refreshServiceDownloadSource(id: id) ?? refreshed
+                    }
+                }
+
+                guard let currentIndex = downloads.firstIndex(where: { $0.id == id }),
+                      downloads[currentIndex].status == .paused else {
+                    cloudflareRecoveringDownloadIDs.remove(id)
+                    processQueue()
+                    return
+                }
+
+                if let refreshed {
+                    let previousURL = downloads[currentIndex].streamURL
+                    let sourceChanged = previousURL != refreshed.url.absoluteString
+                    downloads[currentIndex].streamURL = refreshed.url.absoluteString
+                    downloads[currentIndex].headers = refreshed.headers
+                    downloads[currentIndex].streamName = refreshed.streamName
+                    downloads[currentIndex].serviceContentHref = refreshed.serviceContentHref
+                    downloads[currentIndex].retryNotBefore = nil
+                    downloads[currentIndex].rateLimitRetryCount = nil
+                    // A stable master URL can still rotate its variant/segment URLs. Any provider
+                    // re-extraction therefore invalidates an HLS pin even when the root is equal.
+                    if sourceChanged || downloads[currentIndex].isHLS {
+                        downloads[currentIndex].hlsResumeSegmentIndex = nil
+                        downloads[currentIndex].hlsResumeByteCount = nil
+                        downloads[currentIndex].hlsVariantURL = nil
+                        downloads[currentIndex].hlsTotalSegments = nil
+                        downloads[currentIndex].progress = 0
+                        downloads[currentIndex].downloadedBytes = 0
+                        downloads[currentIndex].totalBytes = 0
+                    }
+                    resumeDataStore.removeValue(forKey: id)
+                    downloads[currentIndex].status = .queued
+                    downloads[currentIndex].rateLimitRetryCount = nil
+                    downloads[currentIndex].error = nil
+                    cloudflareRecoveringDownloadIDs.remove(id)
+                    saveDownloads()
+                    Logger.shared.log(
+                        "Download provider re-resolved source id=\(id) changedURL=\(sourceChanged) host=\(refreshed.url.host ?? "unknown")",
+                        type: "Download"
+                    )
+                    processQueue()
+                } else if solvedMediaChallenge {
+                    // Legacy items lack provider metadata. A positively solved media-host
+                    // challenge can still retry the retained URL with its replacement session.
+                    downloads[currentIndex].status = .queued
+                    downloads[currentIndex].error = nil
+                    cloudflareRecoveringDownloadIDs.remove(id)
+                    saveDownloads()
+                    processQueue()
+                } else {
+                    cloudflareRecoveringDownloadIDs.remove(id)
+                    markFailed(
+                        id: id,
+                        error: isInteractiveChallenge
+                            ? "Cloudflare verification did not produce a usable refreshed source."
+                            : "The media URL expired and the provider could not refresh it."
+                    )
+                }
+            }
+        }
+    }
+
+    private func beginMediaSourceRecoveryAttempt(id: String) -> Bool {
+        let now = Date()
+        let previous = mediaSourceRecoveryAttempts[id]
+        let count: Int
+        if let previous,
+           now.timeIntervalSince(previous.lastAttempt) <= 30 {
+            count = previous.count
+        } else {
+            count = 0
+        }
+        guard count < 2 else { return false }
+        mediaSourceRecoveryAttempts[id] = (count + 1, now)
+        return true
+    }
+
+    @MainActor
+    private func refreshServiceDownloadSource(id: String) async -> RefreshedDownloadSource? {
+        guard let item = downloads.first(where: { $0.id == id }),
+              let sourceId = item.sourceId,
+              let contentHref = item.serviceContentHref?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !contentHref.isEmpty,
+              let service = ServiceManager.shared.activeServices.first(where: {
+                  SourceHealth.serviceId($0) == sourceId
+              }) else {
+            return nil
+        }
+
+        let jsController = JSController()
+        jsController.loadScript(service.jsScript, service: service)
+        let episodes: [EpisodeLink] = await withCheckedContinuation { continuation in
+            jsController.fetchEpisodesJS(url: contentHref, module: service) { [jsController] episodes in
+                _ = jsController
+                continuation.resume(returning: episodes)
+            }
+        }
+        guard !Task.isCancelled,
+              let streamHref = refreshedDownloadEpisodeHref(episodes: episodes, item: item) else {
+            return nil
+        }
+
+        let extraction: ServiceStreamExtractionResult = await withCheckedContinuation { continuation in
+            jsController.fetchStreamUrlJS(
+                episodeUrl: streamHref,
+                softsub: service.metadata.softsub ?? false,
+                module: service
+            ) { [jsController] result in
+                _ = jsController
+                continuation.resume(returning: result)
+            }
+        }
+        guard !Task.isCancelled,
+              let selected = selectRefreshedDownloadStream(
+                  streams: extraction.streams,
+                  sources: extraction.sources,
+                  item: item,
+                  sourceId: sourceId
+              ),
+              let url = URL(string: selected.url),
+              ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+            return nil
+        }
+
+        var headers: [String: String] = [
+            "Origin": service.metadata.baseUrl,
+            "Referer": service.metadata.baseUrl,
+            "User-Agent": URLSession.randomUserAgent
+        ]
+        for (key, value) in selected.headers {
+            headers[key] = value
+        }
+        return RefreshedDownloadSource(
+            url: url,
+            headers: headers,
+            streamName: selected.label,
+            serviceContentHref: contentHref
+        )
+    }
+
+    private func refreshedDownloadEpisodeHref(
+        episodes: [EpisodeLink],
+        item: DownloadItem
+    ) -> String? {
+        guard !episodes.isEmpty else { return nil }
+        if item.isMovie { return episodes.first?.href ?? item.serviceContentHref }
+
+        let localSeason = item.seasonNumber ?? 1
+        let localEpisode = item.episodeNumber ?? 1
+        var seasons: [[EpisodeLink]] = []
+        var current: [EpisodeLink] = []
+        var lastNumber = 0
+        for episode in episodes {
+            if episode.number == 1 || episode.number <= lastNumber {
+                if !current.isEmpty {
+                    seasons.append(current)
+                    current.removeAll(keepingCapacity: true)
+                }
+            }
+            current.append(episode)
+            lastNumber = episode.number
+        }
+        if !current.isEmpty { seasons.append(current) }
+
+        let seasonIndex = localSeason - 1
+        if seasons.indices.contains(seasonIndex),
+           let exact = seasons[seasonIndex].first(where: { $0.number == localEpisode }) {
+            return exact.href
+        }
+
+        let allEpisodes = seasons.flatMap { $0 }
+        let context = item.episodePlaybackContext
+        var candidates: [Int] = []
+        if context?.isSpecial == true {
+            candidates.append(contentsOf: [
+                context?.resolvedTMDBEpisodeNumber,
+                item.episodeNumber
+            ].compactMap { $0 })
+        } else {
+            candidates.append(contentsOf: [
+                context?.animeAbsoluteEpisodeNumber,
+                context?.resolvedTMDBEpisodeNumber,
+                item.episodeNumber
+            ].compactMap { $0 })
+        }
+        var seen = Set<Int>()
+        for number in candidates where number > 0 && seen.insert(number).inserted {
+            let matches = allEpisodes.filter { $0.number == number }
+            if matches.count == 1 { return matches[0].href }
+        }
+        return nil
+    }
+
+    private func selectRefreshedDownloadStream(
+        streams: [String]?,
+        sources: [[String: Any]]?,
+        item: DownloadItem,
+        sourceId: String
+    ) -> (url: String, headers: [String: String], label: String)? {
+        var candidates: [(url: String, headers: [String: String], label: String, scoreLabel: String)] = []
+        if let sources, !sources.isEmpty {
+            for source in sources {
+                guard let url = ["streamUrl", "url", "file", "src", "link", "stream"]
+                    .lazy
+                    .compactMap({ source[$0] as? String })
+                    .first(where: { !$0.isEmpty }) else { continue }
+                let metadata = ["title", "name", "label", "quality", "provider", "server"]
+                    .compactMap { source[$0] as? String }
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    .filter { !$0.isEmpty }
+                guard !StreamLanguageFilter.shouldHide(
+                    languageHints: [],
+                    metadata: metadata + [url],
+                    sourceId: sourceId,
+                    isAnime: item.isAnime
+                ) else { continue }
+                candidates.append((
+                    url,
+                    refreshedDownloadHeaders(from: source["headers"]),
+                    metadata.first ?? "Stream",
+                    (metadata + [url]).joined(separator: " ")
+                ))
+            }
+        } else if let streams {
+            var index = 0
+            while index < streams.count {
+                let value = streams[index]
+                if value.lowercased().hasPrefix("http") {
+                    candidates.append((value, [:], "Stream", value))
+                    index += 1
+                } else if index + 1 < streams.count,
+                          streams[index + 1].lowercased().hasPrefix("http") {
+                    candidates.append((streams[index + 1], [:], value, value))
+                    index += 2
+                } else {
+                    index += 1
+                }
+            }
+        }
+
+        guard !candidates.isEmpty else { return nil }
+        if let preferred = item.streamName?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+           !preferred.isEmpty,
+           let exact = candidates.first(where: {
+               $0.label.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == preferred
+           }) {
+            return (exact.url, exact.headers, exact.label)
+        }
+        if candidates.count == 1 {
+            let only = candidates[0]
+            return (only.url, only.headers, only.label)
+        }
+
+        let preference = AutoModeQualityPreference.current
+        guard preference.usesAutomaticSelection,
+              candidates.contains(where: {
+                  AutoModeStreamSelection.streamLabelHasDetectedQuality($0.scoreLabel)
+              }),
+              let best = candidates.enumerated().max(by: {
+                  AutoModeStreamSelection.streamPreferenceScore(
+                      label: $0.element.scoreLabel,
+                      preference: preference,
+                      index: $0.offset
+                  ) < AutoModeStreamSelection.streamPreferenceScore(
+                      label: $1.element.scoreLabel,
+                      preference: preference,
+                      index: $1.offset
+                  )
+              })?.element else {
+            return nil
+        }
+        return (best.url, best.headers, best.label)
+    }
+
+    private func refreshedDownloadHeaders(from value: Any?) -> [String: String] {
+        if let headers = value as? [String: String] { return headers }
+        guard let headers = value as? [String: Any] else { return [:] }
+        return headers.reduce(into: [:]) { result, pair in
+            guard let value = pair.value as? String,
+                  !pair.key.isEmpty,
+                  !value.isEmpty else { return }
+            result[pair.key] = value
+        }
+    }
     
     private func markFailed(id: String, error: String) {
         performOnMain { [weak self] in
@@ -2717,6 +3254,9 @@ final class DownloadManager: NSObject, ObservableObject {
 private struct AutoModeDownloadValidationFailure: Error {
     let message: String
     let isRetryable: Bool
+    /// Set when the failure is a Cloudflare/DDoS-Guard wall; carries the challenged URL so the
+    /// caller can trigger the interactive bypass instead of dead-ending the source.
+    var cloudflareChallengeURL: URL? = nil
 }
 
 private struct DownloadStreamProbeResult {
@@ -2906,6 +3446,45 @@ extension DownloadManager: URLSessionDownloadDelegate {
 
         if let httpResponse = downloadTask.response as? HTTPURLResponse {
             let body = downloadBodyPreview(from: location)
+            let responseHeaders = CloudflareBypassManager.headersDictionary(from: httpResponse)
+            if CloudflareBypassManager.isChallengeResponse(
+                status: httpResponse.statusCode,
+                body: body,
+                headers: responseHeaders
+            ) {
+                let challengeURL = httpResponse.url
+                    ?? downloadTask.currentRequest?.url
+                    ?? downloadTask.originalRequest?.url
+                if let challengeURL {
+                    let rejectedCookieHeader = downloadTask.currentRequest?.value(forHTTPHeaderField: "Cookie")
+                        ?? downloadTask.originalRequest?.value(forHTTPHeaderField: "Cookie")
+                    recoverDownloadAfterConfirmedChallenge(
+                        id: downloadId,
+                        challengedURL: challengeURL,
+                        rejectedCookieHeader: rejectedCookieHeader
+                    )
+                    return
+                }
+            }
+            if httpResponse.statusCode == 429 {
+                scheduleRateLimitedDownloadRetry(
+                    id: downloadId,
+                    retryAfterSeconds: httpResponse.value(forHTTPHeaderField: "Retry-After")
+                        .flatMap(TimeInterval.init)
+                )
+                return
+            }
+            if [403, 503].contains(httpResponse.statusCode),
+               downloads.first(where: { $0.id == downloadId })?.serviceContentHref?.isEmpty == false {
+                recoverDownloadAfterMediaRejection(
+                    id: downloadId,
+                    statusCode: httpResponse.statusCode,
+                    challengedURL: httpResponse.url,
+                    rejectedCookieHeader: nil,
+                    isInteractiveChallenge: false
+                )
+                return
+            }
             if let message = challengeFailureMessage(for: httpResponse, body: body) {
                 markFailed(id: downloadId, error: message)
                 return
@@ -2990,6 +3569,8 @@ extension DownloadManager: URLSessionDownloadDelegate {
     
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
         guard let downloadId = downloadTask.taskDescription else { return }
+        let responseWasSuccessful = (downloadTask.response as? HTTPURLResponse)
+            .map { (200...299).contains($0.statusCode) } ?? false
         
         // Throttle progress updates to max every 0.5 seconds to reduce UI churn
         let now = Date()
@@ -3008,6 +3589,11 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 self.downloads[index].progress = progress
                 self.downloads[index].downloadedBytes = totalBytesWritten
                 self.downloads[index].totalBytes = totalBytesExpectedToWrite
+                // A CDN error page can contain bytes too. Only successful response data proves
+                // that the source recovered and should reset the persisted 429 retry budget.
+                if responseWasSuccessful && totalBytesWritten > 0 {
+                    self.downloads[index].rateLimitRetryCount = nil
+                }
             }
         }
     }
