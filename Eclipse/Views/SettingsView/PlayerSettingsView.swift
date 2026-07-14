@@ -912,7 +912,9 @@ struct PlayerSettingsView: View {
     @StateObject private var accentColorManager = AccentColorManager.shared
     @StateObject private var store = PlayerSettingsStore()
     @Environment(\.dismiss) private var dismiss
+#if !os(tvOS)
     @Environment(\.eclipseSettingsSearchPresentation) private var settingsSearchPresentation
+#endif
     @State private var subtitleTextColorName: String = "White"
     @State private var subtitleStrokeColorName: String = "Black"
     @State private var subtitleStrokeWidth: Double = 1.0
@@ -1449,6 +1451,9 @@ struct PlayerSettingsView: View {
 
     @ViewBuilder
     private var searchableMPVSettingsPage: some View {
+#if os(tvOS)
+        mpvSettingsPage
+#else
         if let settingsSearchPresentation {
             SettingsSearchContainer(
                 text: settingsSearchPresentation.text,
@@ -1459,6 +1464,7 @@ struct PlayerSettingsView: View {
         } else {
             mpvSettingsPage
         }
+#endif
     }
 
     // MARK: - MPV disclosure groups

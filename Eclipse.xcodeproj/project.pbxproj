@@ -2100,7 +2100,7 @@
 /* Begin XCLocalSwiftPackageReference section */
 		136C25C42EFE950300E37A6E /* XCLocalSwiftPackageReference "MPVKit" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = MPVKit;
+			relativePath = ../MPVKit;
 		};
 /* End XCLocalSwiftPackageReference section */
 

@@ -8,6 +8,11 @@ import MPVKitSampleBufferGPL
 
 @MainActor
 final class TVMPVPlayerViewController: UIViewController {
+    private struct PictureInPictureRestoreKey: Equatable {
+        let controllerIdentifier: ObjectIdentifier
+        let preparationGeneration: UInt64
+    }
+
     var onFirstFrame: (() -> Void)?
     var onProgress: ((_ position: Double, _ duration: Double, _ isPlaying: Bool) -> Void)?
     var onStartupFailure: ((String) -> Void)?
@@ -23,6 +28,14 @@ final class TVMPVPlayerViewController: UIViewController {
     private var controlsContainFocus = false
     private var autoHideWorkItem: DispatchWorkItem?
     private var pictureInPictureController: AVPictureInPictureController?
+    private var pictureInPicturePreparationGeneration: UInt64 = 0
+    private var pictureInPicturePlaybackStateUpdateGeneration: UInt64 = 0
+    private var isPictureInPictureStartPending = false
+    private var pictureInPictureRestoreTask: (
+        key: PictureInPictureRestoreKey,
+        task: Task<Bool, Never>
+    )?
+    private var finalizedPictureInPictureRestoreKey: PictureInPictureRestoreKey?
     private var remoteCommandTargets: [(MPRemoteCommand, Any)] = []
     private var lastDisplayFrameRate: Double = 0
     private var lastVideoDiagnostics: MPVGPUPlayerRendererDiagnostics?
@@ -115,12 +128,21 @@ final class TVMPVPlayerViewController: UIViewController {
     func stopPlayback() {
         guard !didStop else { return }
         didStop = true
+        pictureInPicturePreparationGeneration &+= 1
+        pictureInPicturePlaybackStateUpdateGeneration &+= 1
         autoHideWorkItem?.cancel()
         displayCriteriaReapplyWorkItem?.cancel()
-        if pictureInPictureController?.isPictureInPictureActive == true {
+        if pictureInPictureController?.isPictureInPictureActive == true
+            || isPictureInPictureStartPending {
+            isPictureInPictureStartPending = false
             pictureInPictureController?.stopPictureInPicture()
         }
+        renderer.onPictureInPictureStopRequested = nil
         renderer.stop()
+        let stoppingRenderer = renderer
+        Task { @MainActor in
+            await stoppingRenderer.waitUntilStopped()
+        }
         clearPreferredDisplayCriteria()
         removeRemoteCommands()
         clearNowPlaying()
@@ -129,6 +151,7 @@ final class TVMPVPlayerViewController: UIViewController {
     func seekToPlaybackPosition(_ position: Double) {
         guard position.isFinite, position >= 0, !didStop else { return }
         renderer.seek(to: position)
+        schedulePictureInPicturePlaybackStateUpdate()
         showControls(animated: true, moveFocus: false)
     }
 
@@ -136,6 +159,7 @@ final class TVMPVPlayerViewController: UIViewController {
         guard !didStop else { return false }
         let wasPlaying = !renderer.isPaused
         renderer.pause()
+        schedulePictureInPicturePlaybackStateUpdate()
         autoHideWorkItem?.cancel()
         return wasPlaying
     }
@@ -143,6 +167,7 @@ final class TVMPVPlayerViewController: UIViewController {
     func resumeAfterNextEpisodePrompt() {
         guard !didStop else { return }
         renderer.play()
+        schedulePictureInPicturePlaybackStateUpdate()
         scheduleControlsAutoHide()
     }
 
@@ -171,6 +196,7 @@ final class TVMPVPlayerViewController: UIViewController {
         switch press.type {
         case .playPause:
             renderer.togglePlayback()
+            schedulePictureInPicturePlaybackStateUpdate()
             showControls(animated: true, moveFocus: false)
         case .select where !controlsVisible:
             showControls(animated: true, moveFocus: true)
@@ -243,7 +269,9 @@ final class TVMPVPlayerViewController: UIViewController {
             self?.seek(by: -(self?.seekInterval ?? 10))
         }
         configureTransportButton(playPauseButton, symbol: "pause.fill", title: "Pause") { [weak self] in
-            self?.renderer.togglePlayback()
+            guard let self else { return }
+            self.renderer.togglePlayback()
+            self.schedulePictureInPicturePlaybackStateUpdate()
         }
         configureTransportButton(forwardButton, symbol: "goforward.10", title: "Fast Forward") { [weak self] in
             self?.seek(by: self?.seekInterval ?? 10)
@@ -350,6 +378,38 @@ final class TVMPVPlayerViewController: UIViewController {
         }
         renderer.onStartupFailure = { [weak self] message in self?.handleStartupFailure(message) }
         renderer.onPlaybackFailure = { [weak self] message in self?.handlePlaybackFailure(message) }
+        renderer.onPictureInPictureStopRequested = { [weak self] reason in
+            guard let self, !self.didStop else { return }
+            Logger.shared.log(
+                "[TVPlayback] MPVKit requested PiP stop reason=\(reason)",
+                type: "Player"
+            )
+            self.pictureInPicturePreparationGeneration &+= 1
+            let generation = self.pictureInPicturePreparationGeneration
+            let startPending = self.isPictureInPictureStartPending
+            self.isPictureInPictureStartPending = false
+            guard let controller = self.pictureInPictureController else {
+                let restoringRenderer = self.renderer
+                Task { @MainActor in
+                    _ = await restoringRenderer.endPictureInPictureAndWait(
+                        restoringInlinePlayback: true
+                    )
+                }
+                return
+            }
+            guard controller.isPictureInPictureActive || startPending else {
+                if let restore = self.beginPictureInPictureRestore(
+                    for: controller,
+                    preparationGeneration: generation
+                ) {
+                    Task { @MainActor in
+                        _ = await restore.task.value
+                    }
+                }
+                return
+            }
+            controller.stopPictureInPicture()
+        }
         renderer.onStateChange = { [weak self] state in self?.handleRendererState(state) }
         renderer.onPositionChange = { [weak self] position, duration in
             self?.updateProgress(position: position, duration: duration)
@@ -403,6 +463,14 @@ final class TVMPVPlayerViewController: UIViewController {
         updateFocusIfNeeded()
     }
 
+    private func handlePictureInPictureFailure(_ message: String) {
+        // PiP is optional. A failed handoff must not replace healthy inline playback with the
+        // renderer-failure overlay or offer an unrelated AVPlayer engine fallback.
+        Logger.shared.log("[TVPlayback] PiP unavailable reason=\(message)", type: "Player")
+        showControls(animated: true, moveFocus: true)
+        UIAccessibility.post(notification: .announcement, argument: message)
+    }
+
     private func updateProgress(position: Double, duration: Double) {
         latestPosition = position.isFinite ? max(0, position) : 0
         latestDuration = duration.isFinite ? max(0, duration) : 0
@@ -414,8 +482,108 @@ final class TVMPVPlayerViewController: UIViewController {
         pictureInPictureController?.invalidatePlaybackState()
     }
 
+    /// Keep remote/local transport responsive, then publish the authoritative MPVKit timeline
+    /// once it is installed. Rapid commands supersede older waits.
+    private func schedulePictureInPicturePlaybackStateUpdate() {
+        guard !didStop, let controller = pictureInPictureController else { return }
+        controller.invalidatePlaybackState()
+        pictureInPicturePlaybackStateUpdateGeneration &+= 1
+        let updateGeneration = pictureInPicturePlaybackStateUpdateGeneration
+        let updatingRenderer = renderer
+        Task { @MainActor [weak self, weak controller] in
+            await updatingRenderer.waitForPictureInPictureTimelineUpdate()
+            guard let self,
+                  let controller,
+                  !self.didStop,
+                  self.pictureInPictureController === controller,
+                  self.pictureInPicturePlaybackStateUpdateGeneration == updateGeneration else {
+                return
+            }
+            controller.invalidatePlaybackState()
+        }
+    }
+
+    private func sanitizedPictureInPictureTimes() -> (currentTime: Double, duration: Double) {
+        let rawCurrentTime = renderer.currentTime
+        let rawDuration = renderer.duration
+        let currentTime = rawCurrentTime.isFinite ? max(0, rawCurrentTime) : 0
+        // Keep live/unknown timelines internally consistent. A one-second fallback can place an
+        // ordinary live position outside AVKit's advertised range and break PiP transport state.
+        let duration: Double
+        if rawDuration.isFinite, rawDuration > 0 {
+            duration = max(rawDuration, currentTime + 1)
+        } else {
+            duration = max(600, currentTime + 600)
+        }
+        return (currentTime, duration)
+    }
+
+    /// The AVKit restore callback and `didStop` are allowed to arrive in either order. Keep one
+    /// native restore operation for their shared controller/attempt identity so neither callback
+    /// can race a second teardown or report a frame from a superseded attempt.
+    private func beginPictureInPictureRestore(
+        for controller: AVPictureInPictureController,
+        preparationGeneration: UInt64
+    ) -> (key: PictureInPictureRestoreKey, task: Task<Bool, Never>)? {
+        guard !didStop,
+              pictureInPictureController === controller,
+              pictureInPicturePreparationGeneration == preparationGeneration else {
+            return nil
+        }
+
+        let key = PictureInPictureRestoreKey(
+            controllerIdentifier: ObjectIdentifier(controller),
+            preparationGeneration: preparationGeneration
+        )
+        if let existing = pictureInPictureRestoreTask, existing.key == key {
+            return existing
+        }
+
+        let restoringRenderer = renderer
+        let task = Task { @MainActor [weak self, weak controller] in
+            let restored = await restoringRenderer.endPictureInPictureAndWait(
+                restoringInlinePlayback: true
+            )
+            guard restored,
+                  let self,
+                  let controller,
+                  !self.didStop,
+                  self.pictureInPictureController === controller,
+                  self.pictureInPicturePreparationGeneration == preparationGeneration else {
+                return false
+            }
+            return true
+        }
+        let operation = (key: key, task: task)
+        pictureInPictureRestoreTask = operation
+        return operation
+    }
+
+    /// Final UI work is also one-shot for the attempt. Both AVKit callbacks may observe success,
+    /// but only the first one moves focus and rearms control auto-hide.
+    private func finalizePictureInPictureRestore(
+        _ restored: Bool,
+        key: PictureInPictureRestoreKey,
+        controller: AVPictureInPictureController
+    ) -> Bool {
+        guard restored,
+              !didStop,
+              pictureInPictureController === controller,
+              ObjectIdentifier(controller) == key.controllerIdentifier,
+              pictureInPicturePreparationGeneration == key.preparationGeneration else {
+            return false
+        }
+        if finalizedPictureInPictureRestoreKey != key {
+            finalizedPictureInPictureRestoreKey = key
+            isPictureInPictureStartPending = false
+            showControls(animated: true, moveFocus: true)
+        }
+        return true
+    }
+
     private func seek(by delta: Double) {
         renderer.seek(by: delta)
+        schedulePictureInPicturePlaybackStateUpdate()
         showControls(animated: true, moveFocus: false)
         UIAccessibility.post(notification: .announcement, argument: delta < 0 ? "Rewound \(Int(abs(delta))) seconds" : "Forward \(Int(delta)) seconds")
     }
@@ -495,27 +663,89 @@ final class TVMPVPlayerViewController: UIViewController {
 
     private func startPictureInPicture() {
         guard renderer.canStartPictureInPicture else { return }
-        if pictureInPictureController == nil {
-            let source = AVPictureInPictureController.ContentSource(
-                sampleBufferDisplayLayer: renderer.pictureInPictureDisplayLayer,
-                playbackDelegate: self
-            )
-            let controller = AVPictureInPictureController(contentSource: source)
-            controller.delegate = self
-            controller.requiresLinearPlayback = false
-            pictureInPictureController = controller
-        }
-        guard renderer.preparePictureInPicture() else {
-            handlePlaybackFailure("Picture in Picture could not prepare this stream.")
-            return
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            guard let self, let controller = self.pictureInPictureController else { return }
-            guard controller.isPictureInPicturePossible else {
-                self.handlePlaybackFailure("Picture in Picture is not currently available.")
+        guard !isPictureInPictureStartPending,
+              pictureInPictureController?.isPictureInPictureActive != true else { return }
+
+        // AVKit may deliver late playback-delegate messages after a failed or completed start.
+        // Give every attempt a distinct controller identity so those messages cannot mutate the
+        // next attempt. The identity checks in every delegate callback are the immutable latch.
+        pictureInPicturePreparationGeneration &+= 1
+        let generation = pictureInPicturePreparationGeneration
+        pictureInPictureController?.delegate = nil
+        pictureInPictureRestoreTask?.task.cancel()
+        pictureInPictureRestoreTask = nil
+        finalizedPictureInPictureRestoreKey = nil
+        let source = AVPictureInPictureController.ContentSource(
+            sampleBufferDisplayLayer: renderer.pictureInPictureDisplayLayer,
+            playbackDelegate: self
+        )
+        let controller = AVPictureInPictureController(contentSource: source)
+        controller.delegate = self
+        controller.requiresLinearPlayback = false
+        pictureInPictureController = controller
+        isPictureInPictureStartPending = true
+        Task { @MainActor [weak self] in
+            guard let self,
+                  !self.didStop,
+                  self.pictureInPictureController === controller,
+                  self.pictureInPicturePreparationGeneration == generation else {
                 return
             }
-            controller.startPictureInPicture()
+            do {
+                try await self.renderer.preparePictureInPicture()
+            } catch {
+                guard generation == self.pictureInPicturePreparationGeneration,
+                      !self.didStop,
+                      self.pictureInPictureController === controller else { return }
+                if let restore = self.beginPictureInPictureRestore(
+                    for: controller,
+                    preparationGeneration: generation
+                ) {
+                    _ = await restore.task.value
+                }
+                guard generation == self.pictureInPicturePreparationGeneration,
+                      !self.didStop,
+                      self.pictureInPictureController === controller else { return }
+                self.isPictureInPictureStartPending = false
+                self.handlePictureInPictureFailure(
+                    "Picture in Picture could not prepare this stream: \(error.localizedDescription)"
+                )
+                return
+            }
+            guard generation == self.pictureInPicturePreparationGeneration,
+                  !self.didStop,
+                  self.pictureInPictureController === controller else { return }
+
+            controller.invalidatePlaybackState()
+            let possibleDeadline = CACurrentMediaTime() + 1
+            while !controller.isPictureInPicturePossible,
+                  !controller.isPictureInPictureActive,
+                  CACurrentMediaTime() < possibleDeadline {
+                guard generation == self.pictureInPicturePreparationGeneration,
+                      !self.didStop,
+                      self.pictureInPictureController === controller else { return }
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            guard generation == self.pictureInPicturePreparationGeneration,
+                  !self.didStop,
+                  self.pictureInPictureController === controller else { return }
+            guard controller.isPictureInPicturePossible || controller.isPictureInPictureActive else {
+                if let restore = self.beginPictureInPictureRestore(
+                    for: controller,
+                    preparationGeneration: generation
+                ) {
+                    _ = await restore.task.value
+                }
+                guard generation == self.pictureInPicturePreparationGeneration,
+                      !self.didStop,
+                      self.pictureInPictureController === controller else { return }
+                self.isPictureInPictureStartPending = false
+                self.handlePictureInPictureFailure("Picture in Picture is not currently available.")
+                return
+            }
+            if !controller.isPictureInPictureActive {
+                controller.startPictureInPicture()
+            }
         }
     }
 
@@ -643,9 +873,21 @@ final class TVMPVPlayerViewController: UIViewController {
 
     private func configureRemoteCommands() {
         let commands = MPRemoteCommandCenter.shared()
-        addRemoteTarget(commands.playCommand) { [weak self] _ in self?.renderer.play(); return .success }
-        addRemoteTarget(commands.pauseCommand) { [weak self] _ in self?.renderer.pause(); return .success }
-        addRemoteTarget(commands.togglePlayPauseCommand) { [weak self] _ in self?.renderer.togglePlayback(); return .success }
+        addRemoteTarget(commands.playCommand) { [weak self] _ in
+            self?.renderer.play()
+            self?.schedulePictureInPicturePlaybackStateUpdate()
+            return .success
+        }
+        addRemoteTarget(commands.pauseCommand) { [weak self] _ in
+            self?.renderer.pause()
+            self?.schedulePictureInPicturePlaybackStateUpdate()
+            return .success
+        }
+        addRemoteTarget(commands.togglePlayPauseCommand) { [weak self] _ in
+            self?.renderer.togglePlayback()
+            self?.schedulePictureInPicturePlaybackStateUpdate()
+            return .success
+        }
         commands.skipForwardCommand.preferredIntervals = [NSNumber(value: seekInterval)]
         commands.skipBackwardCommand.preferredIntervals = [NSNumber(value: seekInterval)]
         addRemoteTarget(commands.skipForwardCommand) { [weak self] _ in self?.seek(by: self?.seekInterval ?? 10); return .success }
@@ -653,6 +895,7 @@ final class TVMPVPlayerViewController: UIViewController {
         addRemoteTarget(commands.changePlaybackPositionCommand) { [weak self] event in
             guard let event = event as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
             self?.renderer.seek(to: event.positionTime)
+            self?.schedulePictureInPicturePlaybackStateUpdate()
             return .success
         }
     }
@@ -746,34 +989,144 @@ final class TVMPVPlayerViewController: UIViewController {
 
 extension TVMPVPlayerViewController: @preconcurrency AVPictureInPictureControllerDelegate {
     func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        guard !didStop, self.pictureInPictureController === pictureInPictureController else {
+            pictureInPictureController.stopPictureInPicture()
+            return
+        }
         renderer.beginPictureInPicture()
     }
 
+    func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        guard self.pictureInPictureController === pictureInPictureController else {
+            pictureInPictureController.stopPictureInPicture()
+            return
+        }
+        isPictureInPictureStartPending = false
+        if didStop {
+            pictureInPictureController.stopPictureInPicture()
+        }
+    }
+
     func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-        renderer.endPictureInPicture(restoringInlinePlayback: true)
-        showControls(animated: true, moveFocus: true)
+        guard !didStop, self.pictureInPictureController === pictureInPictureController else { return }
+        isPictureInPictureStartPending = false
+        let generation = pictureInPicturePreparationGeneration
+        guard let restore = beginPictureInPictureRestore(
+            for: pictureInPictureController,
+            preparationGeneration: generation
+        ) else {
+            return
+        }
+        Task { @MainActor [weak self, weak pictureInPictureController] in
+            let restored = await restore.task.value
+            guard let self, let pictureInPictureController else { return }
+            _ = self.finalizePictureInPictureRestore(
+                restored,
+                key: restore.key,
+                controller: pictureInPictureController
+            )
+        }
     }
 
     func pictureInPictureController(
         _ pictureInPictureController: AVPictureInPictureController,
         failedToStartPictureInPictureWithError error: Error
     ) {
-        renderer.endPictureInPicture(restoringInlinePlayback: true)
-        handlePlaybackFailure("Picture in Picture failed: \(error.localizedDescription)")
+        guard !didStop, self.pictureInPictureController === pictureInPictureController else { return }
+        let generation = pictureInPicturePreparationGeneration
+        guard let restore = beginPictureInPictureRestore(
+            for: pictureInPictureController,
+            preparationGeneration: generation
+        ) else {
+            return
+        }
+        Task { @MainActor [weak self, weak pictureInPictureController] in
+            _ = await restore.task.value
+            guard let self,
+                  let pictureInPictureController,
+                  !self.didStop,
+                  self.pictureInPictureController === pictureInPictureController,
+                  self.pictureInPicturePreparationGeneration == generation else {
+                return
+            }
+            self.isPictureInPictureStartPending = false
+            self.handlePictureInPictureFailure(
+                "Picture in Picture failed: \(error.localizedDescription)"
+            )
+        }
     }
 
     func pictureInPictureController(
         _ pictureInPictureController: AVPictureInPictureController,
         restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
     ) {
-        completionHandler(true)
+        let generation = pictureInPicturePreparationGeneration
+        guard !didStop,
+              self.pictureInPictureController === pictureInPictureController,
+              let restore = beginPictureInPictureRestore(
+                for: pictureInPictureController,
+                preparationGeneration: generation
+              ) else {
+            completionHandler(false)
+            return
+        }
+        Task { @MainActor [weak self, weak pictureInPictureController] in
+            let restored = await restore.task.value
+            guard let self, let pictureInPictureController else {
+                completionHandler(false)
+                return
+            }
+            let didRestore = self.finalizePictureInPictureRestore(
+                restored,
+                key: restore.key,
+                controller: pictureInPictureController
+            )
+            completionHandler(didRestore)
+        }
     }
 }
 
 extension TVMPVPlayerViewController: @preconcurrency AVPictureInPictureSampleBufferPlaybackDelegate {
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, setPlaying playing: Bool) {
+        guard !didStop, self.pictureInPictureController === pictureInPictureController else { return }
+        let generation = pictureInPicturePreparationGeneration
         playing ? renderer.play() : renderer.pause()
-        pictureInPictureController.invalidatePlaybackState()
+        Task { @MainActor [weak self, weak pictureInPictureController] in
+            guard let self, let pictureInPictureController else { return }
+            await self.renderer.waitForPictureInPictureTimelineUpdate()
+            guard !self.didStop,
+                  self.pictureInPictureController === pictureInPictureController,
+                  self.pictureInPicturePreparationGeneration == generation else { return }
+            pictureInPictureController.invalidatePlaybackState()
+        }
+    }
+
+    func pictureInPictureController(
+        _ pictureInPictureController: AVPictureInPictureController,
+        setPlaying playing: Bool,
+        completion: @escaping () -> Void
+    ) {
+        guard !didStop, self.pictureInPictureController === pictureInPictureController else {
+            completion()
+            return
+        }
+        let generation = pictureInPicturePreparationGeneration
+        playing ? renderer.play() : renderer.pause()
+        Task { @MainActor [weak self, weak pictureInPictureController] in
+            guard let self, let pictureInPictureController else {
+                completion()
+                return
+            }
+            await self.renderer.waitForPictureInPictureTimelineUpdate()
+            guard !self.didStop,
+                  self.pictureInPictureController === pictureInPictureController,
+                  self.pictureInPicturePreparationGeneration == generation else {
+                completion()
+                return
+            }
+            pictureInPictureController.invalidatePlaybackState()
+            completion()
+        }
     }
 
     func pictureInPictureController(
@@ -781,24 +1134,56 @@ extension TVMPVPlayerViewController: @preconcurrency AVPictureInPictureSampleBuf
         skipByInterval skipInterval: CMTime,
         completion completionHandler: @escaping () -> Void
     ) {
+        guard !didStop,
+              self.pictureInPictureController === pictureInPictureController,
+              skipInterval.seconds.isFinite else {
+            completionHandler()
+            return
+        }
+        let generation = pictureInPicturePreparationGeneration
         renderer.seek(by: skipInterval.seconds)
-        pictureInPictureController.invalidatePlaybackState()
-        completionHandler()
+        Task { @MainActor [weak self, weak pictureInPictureController] in
+            guard let self, let pictureInPictureController else {
+                completionHandler()
+                return
+            }
+            await self.renderer.waitForPictureInPictureTimelineUpdate()
+            guard !self.didStop,
+                  self.pictureInPictureController === pictureInPictureController,
+                  self.pictureInPicturePreparationGeneration == generation else {
+                completionHandler()
+                return
+            }
+            pictureInPictureController.invalidatePlaybackState()
+            completionHandler()
+        }
     }
 
     func pictureInPictureControllerTimeRangeForPlayback(_ pictureInPictureController: AVPictureInPictureController) -> CMTimeRange {
-        let duration = renderer.duration.isFinite && renderer.duration > 0 ? renderer.duration : 1
-        return CMTimeRange(start: .zero, duration: CMTime(seconds: duration, preferredTimescale: 600))
+        guard !didStop, self.pictureInPictureController === pictureInPictureController else {
+            return .invalid
+        }
+        let times = sanitizedPictureInPictureTimes()
+        return CMTimeRange(
+            start: .zero,
+            duration: CMTime(seconds: times.duration, preferredTimescale: 600)
+        )
     }
 
     func pictureInPictureControllerIsPlaybackPaused(_ pictureInPictureController: AVPictureInPictureController) -> Bool {
-        renderer.isPaused
+        guard !didStop, self.pictureInPictureController === pictureInPictureController else { return true }
+        return renderer.isPaused
     }
 
     func pictureInPictureController(
         _ pictureInPictureController: AVPictureInPictureController,
         didTransitionToRenderSize newRenderSize: CMVideoDimensions
-    ) {}
+    ) {
+        guard !didStop, self.pictureInPictureController === pictureInPictureController else { return }
+        renderer.updatePictureInPictureRenderSize(
+            CGSize(width: CGFloat(newRenderSize.width), height: CGFloat(newRenderSize.height))
+        )
+    }
 }
 
 private final class TVPlayerGradientView: UIView {

@@ -19,6 +19,7 @@ final class MPVTVRenderer {
         case playing
         case paused
         case pictureInPicture
+        case stopping
         case stopped
         case failed(String)
     }
@@ -32,6 +33,7 @@ final class MPVTVRenderer {
     var onFirstFrame: (() -> Void)?
     var onStartupFailure: ((String) -> Void)?
     var onPlaybackFailure: ((String) -> Void)?
+    var onPictureInPictureStopRequested: ((String) -> Void)?
     var onVideoFormatChange: ((MPVGPUPlayerRendererDiagnostics) -> Void)?
     var onTracksChange: (() -> Void)?
 
@@ -50,6 +52,7 @@ final class MPVTVRenderer {
     private var didReportFatalFailure = false
     private var lastTrackSignature = ""
     private var lastVideoConfigurationSignature = ""
+    private var lifecycleGeneration: UInt64 = 0
 
     var currentTime: Double { renderer.currentTime }
     var duration: Double { renderer.duration }
@@ -67,6 +70,9 @@ final class MPVTVRenderer {
             hardwareDecoding: "videotoolbox",
             enablesTargetColorspaceHint: true,
             pausesInlineRendererDuringPictureInPicture: true,
+            pictureInPictureBackendPreference: .automatic,
+            maximumInFlightPictureInPictureFrames: 3,
+            pictureInPicturePreparationTimeout: 1,
             additionalMPVOptions: [
                 "audio-channels": prefersSurround ? "auto" : "stereo",
                 "slang": defaultSubtitleLanguage,
@@ -91,16 +97,22 @@ final class MPVTVRenderer {
         view.onLayoutChange = { [weak self] bounds, scale in
             self?.renderer.updateInlineLayerLayout(bounds: bounds, contentsScale: scale)
         }
-        configureCallbacks()
     }
 
     func start(_ request: PlaybackRequest) throws {
+        if state == .stopping {
+            // MPVKit teardown is deliberately asynchronous. Never make a caller believe a new
+            // request started while the previous handle and GPU work are still draining.
+            throw MPVGPUPlayerRendererError.teardownInProgress
+        }
         guard state == .idle || state == .stopped else { return }
         guard Self.isAvailable else {
             throw MPVMetalSampleBufferRendererError.metalUnavailable
         }
 
         self.request = request
+        lifecycleGeneration &+= 1
+        configureCallbacks(generation: lifecycleGeneration)
         pendingResumePosition = resolvedResumePosition(for: request)
         hasRenderedFirstFrame = false
         didReportFatalFailure = false
@@ -126,15 +138,25 @@ final class MPVTVRenderer {
     }
 
     func stop() {
-        guard state != .stopped else { return }
+        guard state != .stopped, state != .stopping else { return }
+        lifecycleGeneration &+= 1
         startupTimeout?.cancel()
         startupTimeout = nil
         positionTimer?.invalidate()
         positionTimer = nil
         cancelExternalSubtitleLoading()
+        updateState(.stopping)
         renderer.stop()
-        audioSession.deactivate()
-        updateState(.stopped)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.renderer.waitUntilStopped()
+            self.audioSession.deactivate()
+            self.updateState(.stopped)
+        }
+    }
+
+    func waitUntilStopped() async {
+        await renderer.waitUntilStopped()
     }
 
     func play() {
@@ -275,9 +297,11 @@ final class MPVTVRenderer {
             && (UserDefaults.standard.object(forKey: "mpvPictureInPictureEnabled") as? Bool ?? true)
     }
 
-    func preparePictureInPicture() -> Bool {
-        guard canStartPictureInPicture else { return false }
-        return renderer.prepareForPictureInPictureStart(primeFrameCount: 10)
+    func preparePictureInPicture() async throws {
+        guard canStartPictureInPicture else {
+            throw MPVGPUPlayerRendererError.pictureInPictureUnavailable("tvOS PiP is unavailable")
+        }
+        try await renderer.preparePictureInPicture()
     }
 
     func beginPictureInPicture() {
@@ -286,27 +310,78 @@ final class MPVTVRenderer {
     }
 
     func endPictureInPicture(restoringInlinePlayback: Bool = true) {
-        renderer.endPictureInPicture(restoringInlinePlayback: restoringInlinePlayback)
+        Task { @MainActor in
+            _ = await self.endPictureInPictureAndWait(
+                restoringInlinePlayback: restoringInlinePlayback
+            )
+        }
+    }
+
+    /// Completes only after MPVKit has restored a current-generation inline frame. A stop or a
+    /// replacement lifecycle invalidates the result even if the native restore finishes later.
+    @discardableResult
+    func endPictureInPictureAndWait(
+        restoringInlinePlayback: Bool = true
+    ) async -> Bool {
+        let generation = lifecycleGeneration
+        guard state != .stopping, state != .stopped else { return false }
+
+        let restored = await renderer.endPictureInPictureAndWait(
+            restoringInlinePlayback: restoringInlinePlayback
+        )
+        guard restored,
+              generation == lifecycleGeneration,
+              state != .stopping,
+              state != .stopped else {
+            return false
+        }
         updateState(isPaused ? .paused : .playing)
+        return true
+    }
+
+    func updatePictureInPictureRenderSize(_ size: CGSize) {
+        renderer.updatePictureInPictureRenderSize(size)
+    }
+
+    func waitForPictureInPictureTimelineUpdate() async {
+        await renderer.waitForPictureInPictureTimelineUpdate()
     }
 
     func diagnosticsSnapshot() -> MPVGPUPlayerRendererDiagnostics {
         renderer.diagnosticsSnapshot()
     }
 
-    private func configureCallbacks() {
+    private func configureCallbacks(generation: UInt64) {
         renderer.onStateChange = { [weak self] state in
-            Task { @MainActor in self?.handle(state) }
+            Task { @MainActor in
+                guard let self, self.lifecycleGeneration == generation else { return }
+                self.handle(state)
+            }
         }
         renderer.onError = { [weak self] message in
-            Task { @MainActor in self?.handleRendererError(message) }
+            Task { @MainActor in
+                guard let self, self.lifecycleGeneration == generation else { return }
+                self.handleRendererError(message)
+            }
         }
         renderer.onDiagnostics = { [weak self] diagnostics in
-            Task { @MainActor in self?.handleDiagnostics(diagnostics) }
+            Task { @MainActor in
+                guard let self, self.lifecycleGeneration == generation else { return }
+                self.handleDiagnostics(diagnostics)
+            }
+        }
+        renderer.onPictureInPictureStopRequested = { [weak self] reason in
+            Task { @MainActor in
+                guard let self,
+                      self.lifecycleGeneration == generation,
+                      self.state != .stopping,
+                      self.state != .stopped else { return }
+                self.onPictureInPictureStopRequested?(reason)
+            }
         }
         renderer.onVideoReconfigure = { [weak self] in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, self.lifecycleGeneration == generation else { return }
                 self.onVideoFormatChange?(self.renderer.diagnosticsSnapshot())
             }
         }
@@ -331,6 +406,8 @@ final class MPVTVRenderer {
             updateState(.paused)
         case .pictureInPicture:
             updateState(.pictureInPicture)
+        case .stopping:
+            updateState(.stopping)
         case .stopped:
             updateState(.stopped)
         case .failed(let message):

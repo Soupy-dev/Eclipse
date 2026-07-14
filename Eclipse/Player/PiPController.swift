@@ -2,16 +2,41 @@
 
 import AVKit
 import AVFoundation
+import Foundation
+
+private final class PiPRestoreCompletionOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var completion: ((Bool) -> Void)?
+
+    init(_ completion: @escaping (Bool) -> Void) {
+        self.completion = completion
+    }
+
+    func callAsFunction(_ restored: Bool) {
+        let callback: ((Bool) -> Void)?
+        lock.lock()
+        callback = completion
+        completion = nil
+        lock.unlock()
+        callback?(restored)
+    }
+}
 
 protocol PiPControllerDelegate: AnyObject {
     func pipController(_ controller: PiPController, willStartPictureInPicture: Bool)
-    func pipController(_ controller: PiPController, didStartPictureInPicture: Bool)
+    func pipController(
+        _ controller: PiPController,
+        didStartPictureInPicture: Bool,
+        attemptID: Int
+    )
     func pipController(_ controller: PiPController, willStopPictureInPicture: Bool)
     func pipController(_ controller: PiPController, didStopPictureInPicture: Bool)
     func pipController(_ controller: PiPController, restoreUserInterfaceForPictureInPictureStop completionHandler: @escaping (Bool) -> Void)
     func pipControllerPlay(_ controller: PiPController)
     func pipControllerPause(_ controller: PiPController)
-    func pipController(_ controller: PiPController, skipByInterval interval: CMTime)
+    func pipController(_ controller: PiPController, setPlaying playing: Bool, completion: @escaping () -> Void)
+    func pipController(_ controller: PiPController, didTransitionToRenderSize size: CGSize)
+    func pipController(_ controller: PiPController, skipByInterval interval: CMTime, completion: @escaping () -> Void)
     func pipControllerIsPlaying(_ controller: PiPController) -> Bool
     func pipControllerDuration(_ controller: PiPController) -> Double
     func pipControllerCurrentTime(_ controller: PiPController) -> Double
@@ -24,6 +49,12 @@ final class PiPController: NSObject {
     private var timeRangeRequestCount = 0
     private var currentTimeRequestCount = 0
     private var automaticFromInlineEnabled = false
+    let playbackLoadGeneration: Int
+    private var armedTransitionAttemptID: Int = 0
+    private var callbackTransitionAttemptID: Int?
+    var transitionAttemptID: Int {
+        callbackTransitionAttemptID ?? armedTransitionAttemptID
+    }
     
     weak var delegate: PiPControllerDelegate?
     
@@ -47,10 +78,19 @@ final class PiPController: NSObject {
         AVPictureInPictureController.isPictureInPictureSupported()
     }
     
-    init(sampleBufferDisplayLayer: AVSampleBufferDisplayLayer) {
+    init(sampleBufferDisplayLayer: AVSampleBufferDisplayLayer, playbackLoadGeneration: Int = 0) {
         self.sampleBufferDisplayLayer = sampleBufferDisplayLayer
+        self.playbackLoadGeneration = playbackLoadGeneration
         super.init()
         setupSampleBufferPictureInPicture()
+    }
+
+    func armTransition(attemptID: Int) {
+        armedTransitionAttemptID = attemptID
+        if isStartRequestPending {
+            // An explicit request can join an automatic-from-inline transition after willStart.
+            callbackTransitionAttemptID = attemptID
+        }
     }
     
     private func setupSampleBufferPictureInPicture() {
@@ -130,6 +170,22 @@ final class PiPController: NSObject {
     func invalidate() {
         pipController?.invalidatePlaybackState()
     }
+
+    /// Permanently detaches this AVKit controller before the player installs a controller for a
+    /// newer media load. Late callbacks stay on this object and cannot reach the new load.
+    func invalidateForReplacement() {
+        isStartRequestPending = false
+        callbackTransitionAttemptID = nil
+        automaticFromInlineEnabled = false
+        #if !os(tvOS)
+        pipController?.canStartPictureInPictureAutomaticallyFromInline = false
+        #endif
+        pipController?.delegate = nil
+        pipController?.stopPictureInPicture()
+        pipController?.invalidatePlaybackState()
+        pipController = nil
+        delegate = nil
+    }
     
     func updatePlaybackState() {
         pipController?.invalidatePlaybackState()
@@ -185,14 +241,24 @@ final class PiPController: NSObject {
 
 extension PiPController: AVPictureInPictureControllerDelegate {
     func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
+        // Automatic-from-inline entry does not pass through startPictureInPicture(), so establish
+        // the same pending latch here. Teardown can then cancel the AVKit handoff before stopping
+        // the renderer instead of allowing an automatic start to complete against a dead layer.
+        isStartRequestPending = true
+        callbackTransitionAttemptID = armedTransitionAttemptID
         Logger.shared.log("[PiPController] stage=will-start active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) layer={\(layerSnapshot())}", type: "PiPTrace")
         delegate?.pipController(self, willStartPictureInPicture: true)
     }
     
     func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         isStartRequestPending = false
+        let startedAttemptID = transitionAttemptID
         Logger.shared.log("[PiPController] stage=did-start active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) layer={\(layerSnapshot())}", type: "PiPTrace")
-        delegate?.pipController(self, didStartPictureInPicture: true)
+        delegate?.pipController(
+            self,
+            didStartPictureInPicture: true,
+            attemptID: startedAttemptID
+        )
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.75) { [weak self, weak pictureInPictureController] in
             guard let self, let pictureInPictureController else { return }
             Logger.shared.log("[PiPController] stage=post-start-health active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) layer={\(self.layerSnapshot())}", type: "PiPTrace")
@@ -201,11 +267,19 @@ extension PiPController: AVPictureInPictureControllerDelegate {
     
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
         isStartRequestPending = false
+        let failedAttemptID = transitionAttemptID
         let nsError = error as NSError
         Logger.shared.log("[PiPController] stage=failed-to-start error=\(nsError.domain)#\(nsError.code) desc=\(nsError.localizedDescription) active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) hasDelegate=\(delegate != nil) layer={\(layerSnapshot())}", type: "PiPTrace")
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-            self.delegate?.pipController(self, didStartPictureInPicture: false)
+            self.delegate?.pipController(
+                self,
+                didStartPictureInPicture: false,
+                attemptID: failedAttemptID
+            )
+            if self.callbackTransitionAttemptID == failedAttemptID {
+                self.callbackTransitionAttemptID = nil
+            }
         }
     }
     
@@ -218,10 +292,18 @@ extension PiPController: AVPictureInPictureControllerDelegate {
     func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         Logger.shared.log("[PiPController] stage=did-stop active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) layer={\(layerSnapshot())}", type: "PiPTrace")
         delegate?.pipController(self, didStopPictureInPicture: true)
+        callbackTransitionAttemptID = nil
     }
     
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void) {
-        delegate?.pipController(self, restoreUserInterfaceForPictureInPictureStop: completionHandler)
+        let completion = PiPRestoreCompletionOnce(completionHandler)
+        guard let delegate else {
+            completion(false)
+            return
+        }
+        delegate.pipController(self, restoreUserInterfaceForPictureInPictureStop: { restored in
+            completion(restored)
+        })
     }
 }
 
@@ -230,32 +312,48 @@ extension PiPController: AVPictureInPictureControllerDelegate {
 extension PiPController: AVPictureInPictureSampleBufferPlaybackDelegate {
     
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, setPlaying playing: Bool) {
-        if playing {
-            delegate?.pipControllerPlay(self)
-        } else {
-            delegate?.pipControllerPause(self)
-        }
-        DispatchQueue.main.async { [weak self] in
-            self?.pipController?.invalidatePlaybackState()
+        guard let delegate else { return }
+        let callbackAttemptID = transitionAttemptID
+        delegate.pipController(self, setPlaying: playing) { [weak self, weak pictureInPictureController] in
+            guard let self,
+                  let pictureInPictureController,
+                  self.pipController === pictureInPictureController,
+                  self.callbackTransitionAttemptID == callbackAttemptID else { return }
+            pictureInPictureController.invalidatePlaybackState()
         }
     }
     
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, didTransitionToRenderSize newRenderSize: CMVideoDimensions) {
         Logger.shared.log("[PiPController] stage=render-size size=\(newRenderSize.width)x\(newRenderSize.height) layer={\(layerSnapshot())}", type: "PiPTrace")
+        delegate?.pipController(
+            self,
+            didTransitionToRenderSize: CGSize(
+                width: CGFloat(newRenderSize.width),
+                height: CGFloat(newRenderSize.height)
+            )
+        )
     }
     
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, skipByInterval skipInterval: CMTime, completion completionHandler: @escaping () -> Void) {
         let seconds = CMTimeGetSeconds(skipInterval)
         let times = sanitizedPlaybackTimes()
         Logger.shared.log("[PiPController] skip callback interval=\(String(format: "%.2f", seconds)) current=\(String(format: "%.2f", times.currentTime)) duration=\(String(format: "%.2f", times.duration)) rawDuration=\(String(format: "%.2f", times.rawDuration)) synthesized=\(times.synthesizedDuration) active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) layer={\(layerSnapshot())}", type: "MPV")
-        delegate?.pipController(self, skipByInterval: skipInterval)
-        DispatchQueue.main.async { [weak self] in
-            self?.pipController?.invalidatePlaybackState()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                self?.pipController?.invalidatePlaybackState()
-            }
+        guard let delegate else {
+            completionHandler()
+            return
         }
-        completionHandler()
+        let callbackAttemptID = transitionAttemptID
+        delegate.pipController(self, skipByInterval: skipInterval) { [weak self, weak pictureInPictureController] in
+            guard let self,
+                  let pictureInPictureController,
+                  self.pipController === pictureInPictureController,
+                  self.callbackTransitionAttemptID == callbackAttemptID else {
+                completionHandler()
+                return
+            }
+            pictureInPictureController.invalidatePlaybackState()
+            completionHandler()
+        }
     }
     
     func pictureInPictureControllerTimeRangeForPlayback(_ pictureInPictureController: AVPictureInPictureController) -> CMTimeRange {
@@ -268,15 +366,22 @@ extension PiPController: AVPictureInPictureSampleBufferPlaybackDelegate {
     }
     
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, setPlaying playing: Bool, completion: @escaping () -> Void) {
-        if playing {
-            delegate?.pipControllerPlay(self)
-        } else {
-            delegate?.pipControllerPause(self)
+        guard let delegate else {
+            completion()
+            return
         }
-        DispatchQueue.main.async { [weak self] in
-            self?.pipController?.invalidatePlaybackState()
+        let callbackAttemptID = transitionAttemptID
+        delegate.pipController(self, setPlaying: playing) { [weak self, weak pictureInPictureController] in
+            guard let self,
+                  let pictureInPictureController,
+                  self.pipController === pictureInPictureController,
+                  self.callbackTransitionAttemptID == callbackAttemptID else {
+                completion()
+                return
+            }
+            pictureInPictureController.invalidatePlaybackState()
+            completion()
         }
-        completion()
     }
     
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, timeRangeForPlayback sampleBufferDisplayLayer: AVSampleBufferDisplayLayer) -> CMTimeRange {

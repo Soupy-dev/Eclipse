@@ -64,6 +64,11 @@ private final class EclipseAudioRouteWatcher {
     }
 }
 
+enum PlayerRendererPictureInPictureError: Error {
+    case preparationTimedOut
+}
+
+@MainActor
 protocol PlayerRenderer: AnyObject {
     var isPausedState: Bool { get }
     var supportsBitmapSubtitleTracks: Bool { get }
@@ -73,6 +78,7 @@ protocol PlayerRenderer: AnyObject {
     func renderingLayoutDidChange(containerSize: CGSize)
     func start() throws
     func stop()
+    func waitUntilStopped() async
     func load(url: URL, with preset: PlayerPreset, headers: [String: String]?)
     func reloadCurrentItem()
     func applyPreset(_ preset: PlayerPreset)
@@ -108,11 +114,16 @@ protocol PlayerRenderer: AnyObject {
     func applyAudioFilterChain(_ chain: String)
 
     func canStartSampleBufferPictureInPicture() -> Bool
+    func preparePictureInPicture() async throws
     func prepareForPictureInPictureStart()
     func finishPictureInPicture()
+    func finishPictureInPictureAndWait(restoringInlinePlayback: Bool) async -> Bool
     func primePictureInPictureFrames(reason: String)
     func activatePictureInPictureLayer()
     func isPictureInPicturePrimed() -> Bool
+    func updatePictureInPictureRenderSize(_ size: CGSize)
+    func waitForPictureInPictureTimelineUpdate() async
+    func setPictureInPictureStopRequestHandler(_ handler: ((String) -> Void)?)
     func resumeForegroundRendering(reason: String)
     func pictureInPictureDebugSnapshot() -> String
 }
@@ -121,6 +132,47 @@ extension PlayerRenderer {
     /// Default: renderers that don't support runtime mpv audio filters (e.g. the legacy MoltenVK
     /// renderer or non-mpv backends) ignore the comfort-audio chain.
     func applyAudioFilterChain(_ chain: String) {}
+
+    /// Legacy renderer compatibility: one immediate preparation attempt, one bounded retry, and
+    /// a readiness wait. The MPVKit GPU bridge overrides this with its generation-scoped async API.
+    func preparePictureInPicture() async throws {
+        prepareForPictureInPictureStart()
+        primePictureInPictureFrames(reason: "async-prepare")
+        if isPictureInPicturePrimed() { return }
+
+        try await Task.sleep(nanoseconds: 100_000_000)
+        primePictureInPictureFrames(reason: "async-prepare-retry")
+        let deadline = CACurrentMediaTime() + 0.9
+        while !isPictureInPicturePrimed(), CACurrentMediaTime() < deadline {
+            try Task.checkCancellation()
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        guard isPictureInPicturePrimed() else {
+            throw PlayerRendererPictureInPictureError.preparationTimedOut
+        }
+    }
+
+    func updatePictureInPictureRenderSize(_ size: CGSize) { _ = size }
+
+    func waitForPictureInPictureTimelineUpdate() async {
+        await Task.yield()
+    }
+
+    func waitUntilStopped() async {
+        await Task.yield()
+    }
+
+    /// Renderers without a generation-scoped restoration handshake must never report a proven
+    /// inline restore. Keep the synchronous cleanup for source compatibility, then fail closed.
+    func finishPictureInPictureAndWait(restoringInlinePlayback: Bool) async -> Bool {
+        _ = restoringInlinePlayback
+        finishPictureInPicture()
+        return false
+    }
+
+    func setPictureInPictureStopRequestHandler(_ handler: ((String) -> Void)?) {
+        _ = handler
+    }
 }
 
 struct SubtitleStyle {
@@ -2760,6 +2812,13 @@ final class MPVGPUInlineHostView: UIView {
         }
         onLayoutChange?(bounds)
     }
+
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        // Moving between an iPad's internal panel and an external display can keep identical
+        // bounds. Still notify the bridge so its EDR/colorspace decision follows the new screen.
+        onLayoutChange?(bounds)
+    }
 }
 
 /// PlayerRenderer that renders inline playback on the GPU, mpv `vo=gpu-next` via MoltenVK into a `CAMetalLayer`,
@@ -2793,6 +2852,9 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     private var gpuLoadGeneration: UInt64 = 0
     private var hasObservedVideoReconfigureForCurrentLoad = false
     private var isPictureInPictureActive = false
+    /// Invalidates callbacks queued by a previous start/stop cycle before they can reach the host.
+    private var callbackGeneration: UInt64 = 0
+    private var pictureInPictureStopRequestHandler: ((String) -> Void)?
     private var positionUpdateTimer: Timer?
     private var lastPositionUpdateAt: CFTimeInterval = 0
     private let positionUpdateInterval: CFTimeInterval = 0.5
@@ -2821,6 +2883,9 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     /// Last applied HDR decision signature (mode|gamma|primaries|passthrough) so repeated
     /// VIDEO_RECONFIG events don't redundantly reconfigure. Mirrors the MoltenVK reference path.
     private var lastHDRConfigurationSignature = ""
+    /// Screen identity/capability signature, kept separate from the source HDR signature so
+    /// Stage Manager layout churn is cheap while a real display migration forces re-evaluation.
+    private var lastHDRDisplayEnvironmentSignature = ""
     private var lastTrackListSignature = ""
     private var lastNotifiedSubtitleTrackId: Int?
     var isPausedState: Bool { isPaused }
@@ -2849,6 +2914,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         hostView.onLayoutChange = { [weak self] bounds in
             guard let self else { return }
             self.gpuRenderer.updateInlineLayerLayout(bounds: bounds, contentsScale: self.effectiveContentsScale())
+            self.refreshHDRConfigurationForCurrentDisplayIfNeeded(reason: "display-layout")
         }
     }
 
@@ -2910,6 +2976,9 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             // so SDR content and non-EDR displays are never affected.
             enablesTargetColorspaceHint: false,
             pausesInlineRendererDuringPictureInPicture: true,
+            pictureInPictureBackendPreference: .automatic,
+            maximumInFlightPictureInPictureFrames: 3,
+            pictureInPicturePreparationTimeout: 1,
             additionalMPVOptions: makeAdditionalMPVOptions()
         )
     }
@@ -2945,6 +3014,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             guard let self else { return }
             self.hostView.frame = bounds
             self.gpuRenderer.updateInlineLayerLayout(bounds: bounds, contentsScale: self.effectiveContentsScale())
+            self.refreshHDRConfigurationForCurrentDisplayIfNeeded(reason: "container-layout")
         }
         if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
     }
@@ -3035,24 +3105,38 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
 
     func start() throws {
         guard !isRunning else { return }
+        callbackGeneration &+= 1
+        let callbackGeneration = callbackGeneration
         gpuRenderer.onStateChange = { [weak self] state in
-            DispatchQueue.main.async { self?.handleState(state) }
+            DispatchQueue.main.async {
+                guard let self, self.callbackGeneration == callbackGeneration else { return }
+                self.handleState(state)
+            }
         }
         gpuRenderer.onError = { [weak self] message in
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, self.callbackGeneration == callbackGeneration else { return }
                 self.delegate?.renderer(self, didFailWithError: message)
             }
         }
         gpuRenderer.onDiagnostics = { [weak self] _ in
             DispatchQueue.main.async {
-                self?.notifyTrackChangesIfNeeded(reason: "diagnostics")
+                guard let self, self.callbackGeneration == callbackGeneration else { return }
+                self.notifyTrackChangesIfNeeded(reason: "diagnostics")
             }
+        }
+        gpuRenderer.onPictureInPictureStopRequested = { [weak self] reason in
+            guard let self,
+                  self.callbackGeneration == callbackGeneration,
+                  self.isRunning else { return }
+            self.pictureInPictureStopRequestHandler?(reason)
         }
         // Re-evaluate HDR/colorspace whenever the decoded video parameters resolve or change
         // (file loaded / VIDEO_RECONFIG). Fired on the main thread by the kit.
         gpuRenderer.onVideoReconfigureForGeneration = { [weak self] generation in
-            guard let self, generation == self.gpuLoadGeneration else { return }
+            guard let self,
+                  self.callbackGeneration == callbackGeneration,
+                  generation == self.gpuLoadGeneration else { return }
             // Source dimensions are now known/updated - refresh the cached size and re-apply
             // scalers so the upscaling modes pick the right scaler for the real resolution.
             self.refreshSourceVideoDimensions()
@@ -3083,18 +3167,20 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         // init-time `set` calls were no-ops without a handle), then evaluate HDR for the layer.
         applyGPUQualityScalers()
         reapplyInlineLayout()
-        applyHDRConfiguration(reason: "start")
         isRunning = true
+        refreshHDRConfigurationForCurrentDisplayIfNeeded(reason: "start")
         startPositionUpdateTimer()
     }
 
     func stop() {
+        callbackGeneration &+= 1
         gpuLoadGeneration &+= 1
         gpuRenderer.stop()
         stopPositionUpdateTimer()
         gpuRenderer.onStateChange = nil
         gpuRenderer.onError = nil
         gpuRenderer.onDiagnostics = nil
+        gpuRenderer.onPictureInPictureStopRequested = nil
         gpuRenderer.onVideoReconfigureForGeneration = nil
         isRunning = false
         isReadyToSeek = false
@@ -3107,8 +3193,13 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         setInlineVideoHidden(false)
         lastPositionUpdateAt = 0
         lastHDRConfigurationSignature = ""
+        lastHDRDisplayEnvironmentSignature = ""
         lastTrackListSignature = ""
         lastNotifiedSubtitleTrackId = nil
+    }
+
+    func waitUntilStopped() async {
+        await gpuRenderer.waitUntilStopped()
     }
 
     func load(url: URL, with preset: PlayerPreset, headers: [String: String]?) {
@@ -3355,20 +3446,43 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         true
     }
 
+    func preparePictureInPicture() async throws {
+        try await gpuRenderer.preparePictureInPicture()
+        Logger.shared.log(
+            "[MPVGPUPlayerBridge] PiP async prepare ready \(pictureInPictureDebugSnapshot())",
+            type: "MPV"
+        )
+    }
+
     func prepareForPictureInPictureStart() {
-        // Recover the shared PiP display layer if it failed (e.g. while backgrounded) before the
-        // PiP renderer starts feeding it - a safe, idempotent point matching the sample-buffer path.
-        recoverDisplayLayerIfNeeded(reason: "prepare-pip")
-        let prepared = gpuRenderer.prepareForPictureInPictureStart()
-        gpuRenderer.primePictureInPictureFrames(reason: "prepare-pip", count: 10)
-        Logger.shared.log("[MPVGPUPlayerBridge] PiP prepare requested prepared=\(prepared) primed=\(isPictureInPicturePrimed()) \(pictureInPictureDebugSnapshot())", type: "MPV")
+        requestLegacyPictureInPicturePreparation(reason: "prepare-pip")
     }
 
     func finishPictureInPicture() {
-        recoverDisplayLayerIfNeeded(reason: "finish-pip")
-        gpuRenderer.endPictureInPicture(restoringInlinePlayback: true)
         isPictureInPictureActive = false
         setInlineVideoHidden(false)
+        gpuRenderer.endPictureInPicture(restoringInlinePlayback: true)
+    }
+
+    func finishPictureInPictureAndWait(restoringInlinePlayback: Bool) async -> Bool {
+        let expectedCallbackGeneration = callbackGeneration
+        let expectedLoadGeneration = gpuLoadGeneration
+        isPictureInPictureActive = false
+        if restoringInlinePlayback {
+            // gpu-next needs an available inline drawable before MPVKit can prove token-zero
+            // restoration. Make it visible first, then await the native generation handshake.
+            setInlineVideoHidden(false)
+        }
+        let restored = await gpuRenderer.endPictureInPictureAndWait(
+            restoringInlinePlayback: restoringInlinePlayback
+        )
+        guard restored,
+              isRunning,
+              callbackGeneration == expectedCallbackGeneration,
+              gpuLoadGeneration == expectedLoadGeneration else {
+            return false
+        }
+        return true
     }
 
     /// Hides/shows the inline gpu-next CAMetalLayer while PiP is active.
@@ -3384,47 +3498,65 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     }
 
     func primePictureInPictureFrames(reason: String) {
-        // Incrementally accumulate buffered frames (does NOT re-prepare), matching the
-        // sample-buffer path's multi-prime warmup before the AVKit hand-off.
-        gpuRenderer.primePictureInPictureFrames(reason: reason, count: 8)
+        requestLegacyPictureInPicturePreparation(reason: reason)
+    }
+
+    private func requestLegacyPictureInPicturePreparation(reason: String) {
+        // PlayerRenderer keeps these synchronous entry points for older call sites. Queue the
+        // canonical bounded preparation instead of reaching into MPVKit's deprecated prime API.
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                try await self.preparePictureInPicture()
+                Logger.shared.log(
+                    "[MPVGPUPlayerBridge] legacy PiP request ready reason=\(reason) \(self.pictureInPictureDebugSnapshot())",
+                    type: "MPV"
+                )
+            } catch {
+                Logger.shared.log(
+                    "[MPVGPUPlayerBridge] legacy PiP request failed reason=\(reason) error=\(error)",
+                    type: "MPV"
+                )
+            }
+        }
     }
 
     func activatePictureInPictureLayer() {
         // Guard against re-activation: the start path activates before startPictureInPicture() and
         // the watchdog may call again - beginPictureInPicture isn't re-entrant-safe (it re-seeks).
         guard !isPictureInPictureActive else { return }
-        recoverDisplayLayerIfNeeded(reason: "activate-pip")
         gpuRenderer.beginPictureInPicture()
         isPictureInPictureActive = true
         setInlineVideoHidden(true)
     }
 
     func isPictureInPicturePrimed() -> Bool {
-        (gpuRenderer.diagnosticsSnapshot().pictureInPictureDiagnostics?.frameCount ?? 0) > 0
+        switch gpuRenderer.diagnosticsSnapshot().pictureInPictureState {
+        case .ready, .active:
+            return true
+        default:
+            return false
+        }
+    }
+
+    func updatePictureInPictureRenderSize(_ size: CGSize) {
+        gpuRenderer.updatePictureInPictureRenderSize(size)
+    }
+
+    func waitForPictureInPictureTimelineUpdate() async {
+        await gpuRenderer.waitForPictureInPictureTimelineUpdate()
+    }
+
+    func setPictureInPictureStopRequestHandler(_ handler: ((String) -> Void)?) {
+        pictureInPictureStopRequestHandler = handler
     }
 
     func resumeForegroundRendering(reason: String) {
         _ = reason
         guard isPictureInPictureActive else { return }
-        gpuRenderer.endPictureInPicture(restoringInlinePlayback: true)
-        isPictureInPictureActive = false
-        setInlineVideoHidden(false)
-    }
-
-    /// Recovers the shared PiP `AVSampleBufferDisplayLayer` if it entered a failed state, mirroring
-    /// the sample-buffer bridge. Called only at safe transition boundaries (before the PiP renderer
-    /// uses the layer) so it can't race the kit's reactive recovery during active enqueue.
-    private func recoverDisplayLayerIfNeeded(reason: String) {
-        let displayLayer = gpuRenderer.pictureInPictureDisplayLayer
-        guard displayLayer.status == .failed else { return }
-        let nsError = displayLayer.error.map { $0 as NSError }
-        let errorText = nsError.map { "\($0.domain)#\($0.code)" } ?? "nil"
-        Logger.shared.log("[MPVGPUPlayerBridge] recovering failed PiP display layer reason=\(reason) error=\(errorText)", type: "MPV")
-        displayLayer.controlTimebase = nil
-        if #available(iOS 18.0, *) {
-            displayLayer.sampleBufferRenderer.flush(removingDisplayedImage: false, completionHandler: nil)
-        } else {
-            displayLayer.flush()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            _ = await self.finishPictureInPictureAndWait(restoringInlinePlayback: true)
         }
     }
 
@@ -3467,12 +3599,34 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         Logger.shared.log("[MPVGPUPlayerBridge] HDR config reason=\(reason) mode=\(mode.rawValue) gamma=\(gamma.isEmpty ? "nil" : gamma) primaries=\(primaries.isEmpty ? "nil" : primaries) hdrSource=\(isHDRSource) passthrough=\(wantsPassthrough)", type: "MPV")
     }
 
-    private func displaySupportsEDR() -> Bool {
-        guard #available(iOS 16.0, *) else { return false }
-        let screen = hostView.window?.screen
+    private func refreshHDRConfigurationForCurrentDisplayIfNeeded(reason: String) {
+        guard isRunning else { return }
+        let screen = currentDisplayScreen()
+        let supportsEDR: Bool
+        if #available(iOS 16.0, *) {
+            supportsEDR = screen.potentialEDRHeadroom > 1.0
+        } else {
+            supportsEDR = false
+        }
+        let signature = "\(ObjectIdentifier(screen))|\(screen.traitCollection.displayGamut.rawValue)|\(supportsEDR)"
+        guard signature != lastHDRDisplayEnvironmentSignature else { return }
+        lastHDRDisplayEnvironmentSignature = signature
+
+        // A display migration can leave the source diagnostics unchanged while changing whether
+        // automatic passthrough is valid. Bust only the HDR decision cache, not decoder state.
+        lastHDRConfigurationSignature = ""
+        applyHDRConfiguration(reason: reason)
+    }
+
+    private func currentDisplayScreen() -> UIScreen {
+        hostView.window?.screen
             ?? UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.screen }.first
             ?? UIScreen.main
-        return screen.potentialEDRHeadroom > 1.0
+    }
+
+    private func displaySupportsEDR() -> Bool {
+        guard #available(iOS 16.0, *) else { return false }
+        return currentDisplayScreen().potentialEDRHeadroom > 1.0
     }
 
     private func ensureAudioSessionActive() {
@@ -3503,7 +3657,9 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         }
         positionUpdateTimer?.invalidate()
         let timer = Timer(timeInterval: positionUpdateInterval, repeats: true) { [weak self] _ in
-            self?.emitPositionUpdate(force: false)
+            Task { @MainActor [weak self] in
+                self?.emitPositionUpdate(force: false)
+            }
         }
         positionUpdateTimer = timer
         RunLoop.main.add(timer, forMode: .default)
@@ -3709,7 +3865,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             delegate?.renderer(self, didChangeLoading: false)
         case .failed(let message):
             delegate?.renderer(self, didFailWithError: message)
-        case .idle, .stopped:
+        case .idle, .stopping, .stopped:
             break
         }
     }
@@ -3810,6 +3966,8 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
     private var isLoading = false
     private var isAwaitingReadyForCurrentLoad = true
     private var sampleBufferLoadGeneration = 0
+    /// Invalidates callbacks queued by a previous start/stop cycle before they reach the host.
+    private var callbackGeneration: UInt64 = 0
     private var didLogFreshIPadStartupFence = false
     private var hasDeferredFreshIPadPlaybackState = false
     private var positionUpdateTimer: Timer?
@@ -3885,14 +4043,17 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
 
     func start() throws {
         guard !isRunning else { return }
+        callbackGeneration &+= 1
+        let callbackGeneration = callbackGeneration
         sampleRenderer.onStateChange = { [weak self] state in
             DispatchQueue.main.async {
-                self?.handleSampleBufferState(state)
+                guard let self, self.callbackGeneration == callbackGeneration else { return }
+                self.handleSampleBufferState(state)
             }
         }
         sampleRenderer.onError = { [weak self] message in
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, self.callbackGeneration == callbackGeneration else { return }
                 self.delegate?.renderer(self, didFailWithError: message)
             }
         }
@@ -3900,7 +4061,8 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
             guard let self else { return }
             let generation = self.sampleBufferLoadGeneration
             DispatchQueue.main.async {
-                guard self.sampleBufferLoadGeneration == generation else { return }
+                guard self.callbackGeneration == callbackGeneration,
+                      self.sampleBufferLoadGeneration == generation else { return }
                 self.logDiagnosticsIfNeeded(diagnostics)
                 let liveDiagnostics = self.sampleRenderer.diagnosticsSnapshot()
                 self.completeFreshIPadStartupFenceIfNeeded(
@@ -3915,6 +4077,7 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
     }
 
     func stop() {
+        callbackGeneration &+= 1
         sampleRenderer.stop()
         stopPositionUpdateTimer()
         sampleRenderer.onStateChange = nil
@@ -3931,6 +4094,10 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
         lastLoggedSampleBufferState = ""
         lastLoggedDiagnosticsFrameCount = 0
         lastLoggedDiagnosticsFailures = 0
+    }
+
+    func waitUntilStopped() async {
+        await sampleRenderer.waitUntilStopped()
     }
 
     func load(url: URL, with preset: PlayerPreset, headers: [String: String]?) {
@@ -4144,18 +4311,37 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
     }
 
     func prepareForPictureInPictureStart() {
-        recoverDisplayLayerIfNeeded(reason: "prepare-pip")
         displayLayer.isHidden = false
         displayLayer.opacity = 1.0
         sampleRenderer.primeFrames(reason: "enter-pip", count: 8)
     }
 
     func finishPictureInPicture() {
-        recoverDisplayLayerIfNeeded(reason: "finish-pip")
+        exposePictureInPictureLayerInline()
+    }
+
+    func finishPictureInPictureAndWait(restoringInlinePlayback: Bool) async -> Bool {
+        let expectedCallbackGeneration = callbackGeneration
+        let expectedLoadGeneration = sampleBufferLoadGeneration
+        if restoringInlinePlayback {
+            // The same display layer serves inline playback and AVKit. Expose it before waiting so
+            // the awaited current-generation sample is actually eligible for inline presentation.
+            exposePictureInPictureLayerInline()
+        }
+        let restored = await sampleRenderer.waitForTimelineUpdate(requiringCurrentFrame: true)
+        guard restored,
+              isRunning,
+              callbackGeneration == expectedCallbackGeneration,
+              sampleBufferLoadGeneration == expectedLoadGeneration else {
+            return false
+        }
+        return true
+    }
+
+    private func exposePictureInPictureLayerInline() {
         displayLayer.isHidden = false
         displayLayer.opacity = 1.0
         displayLayer.zPosition = 0
-        sampleRenderer.primeFrames(reason: "finish-pip", count: 4)
     }
 
     func primePictureInPictureFrames(reason: String) {
@@ -4163,7 +4349,6 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
     }
 
     func activatePictureInPictureLayer() {
-        recoverDisplayLayerIfNeeded(reason: "activate-pip")
         displayLayer.isHidden = false
         displayLayer.opacity = 1.0
         displayLayer.zPosition = 1
@@ -4174,13 +4359,13 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
         sampleRenderer.diagnosticsSnapshot().frameCount > 0
     }
 
+    func waitForPictureInPictureTimelineUpdate() async {
+        _ = await sampleRenderer.waitForTimelineUpdate(requiringCurrentFrame: true)
+    }
+
     func resumeForegroundRendering(reason: String) {
         _ = reason
-        recoverDisplayLayerIfNeeded(reason: "foreground")
-        displayLayer.isHidden = false
-        displayLayer.opacity = 1.0
-        displayLayer.zPosition = 0
-        sampleRenderer.primeFrames(reason: "foreground", count: 4)
+        exposePictureInPictureLayerInline()
     }
 
     func pictureInPictureDebugSnapshot() -> String {
@@ -4223,19 +4408,6 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
         return (options, targetFPS, pipFramesPerSecond)
     }
 
-    private func recoverDisplayLayerIfNeeded(reason: String) {
-        guard displayLayer.status == .failed else { return }
-        let nsError = displayLayer.error.map { $0 as NSError }
-        let errorText = nsError.map { "\($0.domain)#\($0.code)" } ?? "nil"
-        Logger.shared.log("[MPVSampleBufferPiPBridge] recovering failed sample-buffer layer reason=\(reason) error=\(errorText)", type: "MPV")
-        displayLayer.controlTimebase = nil
-        if #available(iOS 18.0, *) {
-            displayLayer.sampleBufferRenderer.flush(removingDisplayedImage: false, completionHandler: nil)
-        } else {
-            displayLayer.flush()
-        }
-    }
-
     private func startPositionUpdateTimer() {
         if !Thread.isMainThread {
             DispatchQueue.main.async { [weak self] in
@@ -4245,7 +4417,9 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
         }
         positionUpdateTimer?.invalidate()
         let timer = Timer(timeInterval: positionUpdateInterval, repeats: true) { [weak self] _ in
-            self?.emitPositionUpdate(force: false)
+            Task { @MainActor [weak self] in
+                self?.emitPositionUpdate(force: false)
+            }
         }
         positionUpdateTimer = timer
         RunLoop.main.add(timer, forMode: .default)
@@ -4405,7 +4579,7 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
             isLoading = false
             delegate?.renderer(self, didChangeLoading: false)
             delegate?.renderer(self, didFailWithError: message)
-        case .idle, .stopped:
+        case .idle, .stopping, .stopped:
             break
         }
     }
@@ -4419,6 +4593,7 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
         case .ready: label = "ready"
         case .playing: label = "playing"
         case .paused: label = "paused"
+        case .stopping: label = "stopping"
         case .stopped: label = "stopped"
         case .failed(let message): label = "failed:\(message)"
         }
