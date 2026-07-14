@@ -35,6 +35,8 @@ jobs:
           repository: Soupy-dev/MPVKit
           ref: eclipse-mpv-metal
           path: MPVKit
+      - name: Expose sibling MPVKit package
+        run: ln -sfn "$GITHUB_WORKSPACE/MPVKit" "$GITHUB_WORKSPACE/../MPVKit"
 
       - name: Set up Xcode
         uses: maxim-lobanov/setup-xcode@v1
