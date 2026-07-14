@@ -130,8 +130,9 @@ iOSInjectionProject/
 
 # End of https://www.toptal.com/developers/gitignore/api/macos,swift,xcode
 
-# Local-only build/audit tooling and tvOS test targets. CI workflows inline
-# their own validation logic and do not depend on scripts/ being checked out.
-/scripts/
+# Local-only build/audit tooling and tvOS test targets. Keep the validator used
+# by ipabuild.sh tracked because CI invokes it after creating the iOS archive.
+/scripts/*
+!/scripts/validate-ios-privacy-manifest.sh
 /EclipseTVTests/
 /EclipseTVUITests/
