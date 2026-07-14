@@ -844,11 +844,11 @@ enum MPVHDRMode: String, CaseIterable, Identifiable {
 }
 
 struct MPVRenderBackendSupport {
-    static let bundledMPVKitVersion = "0.41.0"
+    static let bundledMPVKitVersion = "0.41.1"
     // Diagnostic only. MPVKit is branch-tracked.
     // (eclipse-mpv-metal), so the resolved revision changes every kit Build-and-Release. Bump this
     // to the kit tip whenever you cut a new kit build, or it will under-report which binary is live.
-    static let bundledMPVKitRevision = "e3481d325caacf1a77c9262b64757c98605cdc47"
+    static let bundledMPVKitRevision = "257a961d3475bdf45a3ebec986190566f9af23b9"
     static let bundledMPVKitSupportsMoltenVKInlineRendering = true
     static let metalRendererEnabled = true
 

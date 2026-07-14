@@ -50,11 +50,8 @@ jobs:
       - name: Use latest MPVKit (resolve eclipse-mpv-metal tip)
         run: |
           set -euo pipefail
-          # MPVKit tracks the eclipse-mpv-metal branch and its 0.41.0 release is rebuilt IN PLACE,
-          # so any non-tip Package.resolved pin carries a stale checksum and SPM resolution fails
-          # with "downloaded artifact ... does not match checksum specified by the manifest".
-          # Drop just the MPVKit pin so the xcodebuild resolve inside ipabuild.sh fetches the current
-          # branch tip, whose Package.swift checksums match the freshly published binaries. Every
+          # MPVKit tracks eclipse-mpv-metal. Drop just its committed pin so the xcodebuild resolve
+          # inside ipabuild.sh fetches the current branch tip and matching artifact manifest. Every
           # other dependency stays pinned (conservative resolution keeps satisfied pins untouched).
           RESOLVED="Eclipse.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
           if command -v jq >/dev/null 2>&1 && [ -f "$RESOLVED" ]; then

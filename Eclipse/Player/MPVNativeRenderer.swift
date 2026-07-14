@@ -3051,7 +3051,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         }
         // Re-evaluate HDR/colorspace whenever the decoded video parameters resolve or change
         // (file loaded / VIDEO_RECONFIG). Fired on the main thread by the kit.
-        gpuRenderer.onVideoReconfigure = { [weak self] generation in
+        gpuRenderer.onVideoReconfigureForGeneration = { [weak self] generation in
             guard let self, generation == self.gpuLoadGeneration else { return }
             // Source dimensions are now known/updated - refresh the cached size and re-apply
             // scalers so the upscaling modes pick the right scaler for the real resolution.
@@ -3095,7 +3095,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         gpuRenderer.onStateChange = nil
         gpuRenderer.onError = nil
         gpuRenderer.onDiagnostics = nil
-        gpuRenderer.onVideoReconfigure = nil
+        gpuRenderer.onVideoReconfigureForGeneration = nil
         isRunning = false
         isReadyToSeek = false
         isLoading = false

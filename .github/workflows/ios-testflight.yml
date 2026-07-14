@@ -207,10 +207,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          # MPVKit tracks the eclipse-mpv-metal branch whose 0.41.0 release is rebuilt in place;
-          # drop just the MPVKit pin so the resolver fetches the current branch tip (matching the
-          # freshly published binary checksums) instead of a stale committed revision. Other deps
-          # stay pinned. See build.yml for the full rationale.
+          # MPVKit tracks eclipse-mpv-metal. Drop just its pin so the resolver fetches the current
+          # branch tip and matching artifact manifest. Other dependencies stay pinned.
           RESOLVED="Eclipse.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
           if command -v jq >/dev/null 2>&1 && [ -f "$RESOLVED" ]; then
             tmp="$(mktemp)"

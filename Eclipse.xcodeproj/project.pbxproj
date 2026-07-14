@@ -1272,7 +1272,7 @@
 				13A46CFB2EF5943400423BC6 /* XCRemoteSwiftPackageReference "FakeWebKit" */,
 				13A46CFE2EF5944C00423BC6 /* XCRemoteSwiftPackageReference "Kingfisher" */,
 				13A46D012EF5945700423BC6 /* XCRemoteSwiftPackageReference "SoraCore" */,
-				136C25C42EFE950300E37A6E /* XCLocalSwiftPackageReference "MPVKit" */,
+				136C25C42EFE950300E37A6E /* XCRemoteSwiftPackageReference "MPVKit" */,
 				C0A5A0032FD1000000C0A503 /* XCRemoteSwiftPackageReference "plcrashreporter" */,
 				AD0000202FD9000000AD0020 /* XCRemoteSwiftPackageReference "AidokuRunner" */,
 				AD0000212FD9000000AD0021 /* XCRemoteSwiftPackageReference "ZIPFoundation" */,
@@ -2097,14 +2097,15 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCLocalSwiftPackageReference section */
-		136C25C42EFE950300E37A6E /* XCLocalSwiftPackageReference "MPVKit" */ = {
-			isa = XCLocalSwiftPackageReference;
-			relativePath = ../MPVKit-ipad-stability;
-		};
-/* End XCLocalSwiftPackageReference section */
-
 /* Begin XCRemoteSwiftPackageReference section */
+		136C25C42EFE950300E37A6E /* XCRemoteSwiftPackageReference "MPVKit" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/Soupy-dev/MPVKit.git";
+			requirement = {
+				branch = "eclipse-mpv-metal";
+				kind = branch;
+			};
+		};
 		13A46CFB2EF5943400423BC6 /* XCRemoteSwiftPackageReference "FakeWebKit" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/undeaDD/FakeWebKit";
@@ -2178,7 +2179,7 @@
 		};
 		136C25C52EFE950300E37A6E /* MPVKit-GPL */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 136C25C42EFE950300E37A6E /* XCLocalSwiftPackageReference "MPVKit" */;
+			package = 136C25C42EFE950300E37A6E /* XCRemoteSwiftPackageReference "MPVKit" */;
 			productName = "MPVKit-GPL";
 		};
 		13A46CFC2EF5943400423BC6 /* FakeWebKit */ = {
