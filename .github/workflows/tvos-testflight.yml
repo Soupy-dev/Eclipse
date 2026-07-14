@@ -43,6 +43,12 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
+      - name: Check out canonical MPVKit
+        uses: actions/checkout@v5
+        with:
+          repository: Soupy-dev/MPVKit
+          ref: eclipse-mpv-metal
+          path: MPVKit
 
       - name: Set up Xcode
         uses: maxim-lobanov/setup-xcode@v1
@@ -300,7 +306,7 @@ jobs:
             exit 1
           fi
 
-      - name: Resolve pinned Swift packages
+      - name: Resolve Swift packages and audit MPVKit
         run: |
           set -euo pipefail
 
@@ -309,12 +315,6 @@ jobs:
 
           if [[ ! -f "$RESOLVED" ]]; then
             echo "::error::Package.resolved is required for a reproducible tvOS release."
-            exit 1
-          fi
-
-          PINNED_MPVKIT_REVISION=$(jq -r '.pins[] | select(.identity == "mpvkit") | .state.revision // empty' "$RESOLVED")
-          if ! [[ "$PINNED_MPVKIT_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::Package.resolved does not contain an immutable MPVKit revision."
             exit 1
           fi
 
@@ -327,15 +327,15 @@ jobs:
             -skipPackagePluginValidation \
             -skipMacroValidation
 
-          MPVKIT_CHECKOUT=$(find "$SOURCE_PACKAGES_DIR/checkouts" -maxdepth 1 -type d -iname 'mpvkit' -print -quit)
-          if [[ -z "$MPVKIT_CHECKOUT" ]]; then
-            echo "::error::The resolved MPVKit checkout was not found."
+          MPVKIT_CHECKOUT="$GITHUB_WORKSPACE/MPVKit"
+          if [[ ! -f "$MPVKIT_CHECKOUT/Package.swift" ]]; then
+            echo "::error::The canonical MPVKit checkout was not found."
             exit 1
           fi
 
           RESOLVED_MPVKIT_REVISION=$(git -C "$MPVKIT_CHECKOUT" rev-parse HEAD)
-          if [[ "$RESOLVED_MPVKIT_REVISION" != "$PINNED_MPVKIT_REVISION" ]]; then
-            echo "::error::Resolved MPVKit revision does not match Package.resolved."
+          if ! [[ "$RESOLVED_MPVKIT_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::The canonical MPVKit checkout does not have an immutable revision."
             exit 1
           fi
 
@@ -412,7 +412,7 @@ jobs:
               for failure in "${mpvkit_failures[@]}"; do
                   echo "::error::  $failure"
               done
-              echo "::error::Publish the reviewed MPVKit tvOS changes and a tvOS 17.0-compatible codec artifact, then update Eclipse's committed Package.resolved pin before running the tvOS release lane."
+              echo "::error::Publish the reviewed MPVKit tvOS changes and a tvOS 17.0-compatible codec artifact before running the tvOS release lane."
               exit 1
           fi
 
@@ -425,7 +425,7 @@ jobs:
 
           {
             echo "SOURCE_PACKAGES_DIR=$SOURCE_PACKAGES_DIR"
-            echo "PINNED_MPVKIT_REVISION=$PINNED_MPVKIT_REVISION"
+            echo "MPVKIT_REVISION=$RESOLVED_MPVKIT_REVISION"
           } >> "$GITHUB_ENV"
 
       - name: Select tvOS simulator

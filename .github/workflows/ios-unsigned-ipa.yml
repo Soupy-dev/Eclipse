@@ -29,6 +29,12 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+      - name: Checkout canonical MPVKit
+        uses: actions/checkout@v5
+        with:
+          repository: Soupy-dev/MPVKit
+          ref: eclipse-mpv-metal
+          path: MPVKit
 
       - name: Set up Xcode
         uses: maxim-lobanov/setup-xcode@v1
@@ -111,29 +117,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          # MPVKit tracks the eclipse-mpv-metal branch (kind = branch in project.pbxproj). The
-          # resolver is conservative: left alone it honors the revision committed in Package.resolved
-          # and never advances a branch dep to its tip, so a new kit "Build and Release" would be
-          # ignored until someone hand-edits the pin. Dropping just the MPVKit pin forces the resolver
-          # to fetch the current branch tip — the latest kit build — while every other dependency
-          # stays pinned (conservative resolution keeps satisfied pins untouched). No manual re-pin.
-          RESOLVED="Eclipse.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
-          if command -v jq >/dev/null 2>&1 && [ -f "$RESOLVED" ]; then
-            tmp="$(mktemp)"
-            jq 'del(.pins[] | select(.identity == "mpvkit")) | del(.originHash)' "$RESOLVED" > "$tmp"
-            mv "$tmp" "$RESOLVED"
-            echo "Dropped MPVKit pin; resolver will use eclipse-mpv-metal branch tip."
-          fi
-
           xcodebuild -resolvePackageDependencies \
             -project Eclipse.xcodeproj \
             -scheme Eclipse \
             -skipPackagePluginValidation \
             -skipMacroValidation
 
-          if command -v jq >/dev/null 2>&1 && [ -f "$RESOLVED" ]; then
-            echo "Resolved MPVKit revision: $(jq -r '.pins[] | select(.identity == "mpvkit") | .state.revision' "$RESOLVED")"
-          fi
+          echo "Using local MPVKit checkout: $(git -C MPVKit rev-parse HEAD)"
 
       - name: Build unsigned archive
         run: |

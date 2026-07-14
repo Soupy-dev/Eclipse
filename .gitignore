@@ -134,5 +134,6 @@ iOSInjectionProject/
 # by ipabuild.sh tracked because CI invokes it after creating the iOS archive.
 /scripts/*
 !/scripts/validate-ios-privacy-manifest.sh
+/MPVKit
 /EclipseTVTests/
 /EclipseTVUITests/
