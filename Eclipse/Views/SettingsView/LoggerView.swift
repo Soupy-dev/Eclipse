@@ -1,6 +1,6 @@
 import SwiftUI
 
-struct LogEntry: Identifiable {
+struct LogEntry: Identifiable, Sendable {
     let id = UUID()
     let timestamp: Date
     let message: String
@@ -85,12 +85,15 @@ struct LoggerView: View {
     }
     
     var body: some View {
+        let visibleLogs = filteredLogs
+        let categories = availableCategories
+
         ScrollView {
             VStack(spacing: 20) {
                 GlassSection {
                     GlassDetailRow(icon: "line.3.horizontal.decrease.circle", iconColor: .blue, title: "Category") {
                         Menu {
-                            ForEach(availableCategories, id: \.self) { category in
+                            ForEach(categories, id: \.self) { category in
                                 Button {
                                     selectedCategory = category
                                 } label: {
@@ -114,7 +117,7 @@ struct LoggerView: View {
                     }
                 }
 
-                if filteredLogs.isEmpty {
+                if visibleLogs.isEmpty {
                     EclipseEmptyState(
                         icon: "doc.text",
                         title: "No logs found",
@@ -124,11 +127,11 @@ struct LoggerView: View {
                 } else {
                     GlassSection {
                         LazyVStack(spacing: 0) {
-                            ForEach(Array(filteredLogs.enumerated()), id: \.element.id) { index, log in
+                            ForEach(Array(visibleLogs.enumerated()), id: \.element.id) { index, log in
                                 LogEntryRow(log: log)
                                     .id(log.id)
 
-                                if index < filteredLogs.count - 1 {
+                                if index < visibleLogs.count - 1 {
                                     GlassDivider(leadingInset: 16)
                                 }
                             }
@@ -277,6 +280,10 @@ struct LogEntryRow: View {
 // MARK: - Logger Manager
 class LoggerManager: ObservableObject {
     static let shared = LoggerManager()
+    private static let logLineRegex = try! NSRegularExpression(
+        pattern: #"\[([^\]]+)\] \[([^\]]+)\] (.+)"#,
+        options: []
+    )
     
     @Published var logs: [LogEntry] = []
     private let maxLogs = 1000
@@ -298,18 +305,18 @@ class LoggerManager: ObservableObject {
 
     @MainActor
     private func loadExistingLogs() {
-        Task {
+        Task { @MainActor in
             let existingLogsString = await Logger.shared.getLogsAsync()
             if !existingLogsString.isEmpty {
-                let logEntries = parseLogsString(existingLogsString)
-                DispatchQueue.main.async {
-                    self.logs = logEntries
-                }
+                let logEntries = await Task.detached(priority: .utility) {
+                    Self.parseLogsString(existingLogsString)
+                }.value
+                self.logs = logEntries
             }
         }
     }
     
-    private func parseLogsString(_ logsString: String) -> [LogEntry] {
+    private static func parseLogsString(_ logsString: String) -> [LogEntry] {
         let logSections = logsString.components(separatedBy: "\n----\n")
         var parsedLogs: [LogEntry] = []
         
@@ -319,9 +326,11 @@ class LoggerManager: ObservableObject {
         for section in logSections {
             guard !section.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
             
-            let pattern = #"\[([^\]]+)\] \[([^\]]+)\] (.+)"#
-            if let regex = try? NSRegularExpression(pattern: pattern, options: []),
-               let match = regex.firstMatch(in: section, options: [], range: NSRange(section.startIndex..., in: section)) {
+            if let match = logLineRegex.firstMatch(
+                in: section,
+                options: [],
+                range: NSRange(section.startIndex..., in: section)
+            ) {
                 
                 let timestampRange = Range(match.range(at: 1), in: section)!
                 let typeRange = Range(match.range(at: 2), in: section)!

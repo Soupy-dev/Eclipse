@@ -456,6 +456,9 @@ enum PlayerSettingsSearchTarget: String, Hashable {
     case comfortAudioApplyToAll
     case inlineFrameRate
     case playerSkin
+#if os(iOS) && canImport(GoogleCast)
+    case googleCast
+#endif
 
     var anchorID: String {
         "player-settings-search-\(rawValue)"
@@ -566,6 +569,10 @@ enum PlayerSettingsSearchTarget: String, Hashable {
              .comfortAudioApplyToAll,
              .inlineFrameRate:
             return "rendering"
+#if os(iOS) && canImport(GoogleCast)
+        case .googleCast:
+            return "googleCast"
+#endif
         case .openSubtitles, .openSubtitlesAutoFallback:
             return "openSubs"
         case .skipSegments,
@@ -927,6 +934,9 @@ struct PlayerSettingsView: View {
     @AppStorage("defaultSubtitleLanguage") private var defaultSubtitleLanguage = "eng"
     @AppStorage("preferredAutoAudioLanguage") private var preferredAutoAudioLanguage = "eng"
     @AppStorage("preferredAnimeAudioLanguage") private var preferredAnimeAudioLanguage = "jpn"
+#if os(iOS) && canImport(GoogleCast)
+    @AppStorage(GoogleCastSettings.enabledKey) private var googleCastEnabled = GoogleCastSettings.defaultEnabled
+#endif
     private let playbackSpeedOptions: [Double] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
     private let doubleTapSeekOptions: [Double] = [5, 10, 15, 20, 30, 45, 60]
     #if !os(tvOS)
@@ -1124,7 +1134,15 @@ struct PlayerSettingsView: View {
         }
         .onAppear {
             refreshPlayerSubtitleStyleStateFromDefaults()
+#if os(iOS) && canImport(GoogleCast)
+            GoogleCastCoordinator.shared.refreshEnabledState()
+#endif
         }
+#if os(iOS) && canImport(GoogleCast)
+        .onChange(of: googleCastEnabled) { enabled in
+            GoogleCastCoordinator.shared.setEnabled(enabled)
+        }
+#endif
     }
 
     private var playerOverview: some View {
@@ -1255,7 +1273,7 @@ struct PlayerSettingsView: View {
                                     icon: "play.rectangle.fill",
                                     iconColor: .indigo,
                                     title: "MPV Player Settings",
-                                    subtitle: "Rendering, subtitles, gestures, PiP, skipping, and next episode."
+                                    subtitle: "Rendering, subtitles, gestures, PiP, Google Cast, skipping, and next episode."
                                 ) {
                                     valueChevron("Open")
                                 }
@@ -1380,6 +1398,10 @@ struct PlayerSettingsView: View {
                                 subtitleAppearanceGroup
                                 GlassDivider()
                                 mpvRenderingGroup
+#if os(iOS) && canImport(GoogleCast)
+                                GlassDivider()
+                                googleCastGroup
+#endif
                                 GlassDivider()
                                 #if os(tvOS)
                                 remoteControlsGroup
@@ -1466,6 +1488,32 @@ struct PlayerSettingsView: View {
         }
 #endif
     }
+
+#if os(iOS) && canImport(GoogleCast)
+    @ViewBuilder
+    private var googleCastGroup: some View {
+        disclosureHeader("Google Cast", icon: "tv.and.hifispeaker.fill", iconColor: .orange, key: "googleCast")
+            .id(PlayerSettingsSearchTarget.googleCast.anchorID)
+        if isExpanded("googleCast") {
+            GlassDivider(leadingInset: 16)
+            settingsToggleRow(
+                title: "Enable Google Cast",
+                detail: "Enabled by default. Turning it off stops discovery, ends an active Cast session, restores local playback when possible, and hides Cast controls.",
+                binding: $googleCastEnabled
+            )
+            GlassDivider(leadingInset: 16)
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Only direct HTTP or HTTPS MP4, WebM, MPEG-TS, HLS, and DASH streams are sent to the receiver.", systemImage: "link")
+                Label("Streams needing Eclipse-only headers, downloads, local proxies, or unsupported containers stay in the in-app player.", systemImage: "lock.slash")
+                Label("The receiver controls subtitle styling, audio tracks, and supported playback speeds. Picture in Picture and local volume gestures are unavailable while casting.", systemImage: "tv")
+            }
+            .font(.caption)
+            .foregroundColor(.white.opacity(0.58))
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+        }
+    }
+#endif
 
     // MARK: - MPV disclosure groups
 
@@ -1644,7 +1692,7 @@ struct PlayerSettingsView: View {
                 GlassDivider(leadingInset: 16)
                 #endif
                 #if !os(tvOS)
-                GlassDetailRow(title: "Upscaling", subtitle: mpvUpscalingDescription + " Applies on the next playback with MoltenVK only.") {
+                GlassDetailRow(title: "Upscaling", subtitle: mpvUpscalingDescription + " Applies on the next playback with MoltenVK only. If you experience issues, disable upscaling.") {
                     Picker("", selection: $store.mpvUpscalingMode) {
                         ForEach(MPVUpscalingMode.allCases) { mode in
                             Text(mode.displayName).tag(mode)

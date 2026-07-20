@@ -94,6 +94,10 @@ playground.xcworkspace
 
 Carthage/Build/
 
+# CocoaPods dependencies are restored from Podfile.lock. The workspace metadata
+# remains tracked so iOS developers open the correct Xcode container.
+Pods/
+
 # Accio dependency management
 Dependencies/
 .accio/

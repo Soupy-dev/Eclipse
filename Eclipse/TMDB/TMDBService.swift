@@ -1339,6 +1339,37 @@ class TMDBService: ObservableObject {
         }
         return logos.first
     }
+
+    /// Picks artwork that can sit behind Eclipse's separately-rendered title art.
+    /// TMDB's language-neutral posters are the best available signal for artwork
+    /// without baked-in title text, so prefer those before localized alternates.
+    func getBestAlternatePoster(
+        from images: TMDBImagesResponse,
+        excluding posterPaths: [String?],
+        preferredLanguage: String? = nil
+    ) -> TMDBImage? {
+        let excludedPaths = Set(posterPaths.compactMap { $0 })
+        let candidates = (images.posters ?? []).filter { !excludedPaths.contains($0.filePath) }
+        guard !candidates.isEmpty else { return nil }
+
+        let langCode = (preferredLanguage ?? currentLanguage).components(separatedBy: "-").first ?? "en"
+        let languageRank: (TMDBImage) -> Int = { poster in
+            if poster.iso6391 == nil { return 0 }
+            if poster.iso6391 == langCode { return 1 }
+            if poster.iso6391 == "en" { return 2 }
+            return 3
+        }
+
+        return candidates.sorted { lhs, rhs in
+            let lhsLanguageRank = languageRank(lhs)
+            let rhsLanguageRank = languageRank(rhs)
+            if lhsLanguageRank != rhsLanguageRank { return lhsLanguageRank < rhsLanguageRank }
+            let lhsVotes = lhs.voteCount ?? 0
+            let rhsVotes = rhs.voteCount ?? 0
+            if lhsVotes != rhsVotes { return lhsVotes > rhsVotes }
+            return (lhs.voteAverage ?? 0) > (rhs.voteAverage ?? 0)
+        }.first
+    }
     
     // MARK: - Get Movie Credits (Cast)
     func getMovieCredits(id: Int) async throws -> TMDBCreditsResponse {

@@ -1,6 +1,6 @@
 import CoreData
 
-public final class ServiceStore {
+public final class ServiceStore: @unchecked Sendable {
     public static let shared = ServiceStore()
 
     // MARK: private - internal setup and update functions
@@ -63,50 +63,46 @@ public final class ServiceStore {
         }
 
         container.viewContext.performAndWait {
-            let context = container.viewContext
+            self.storeService(
+                id: id,
+                url: url,
+                jsonMetadata: jsonMetadata,
+                jsScript: jsScript,
+                isActive: isActive,
+                sortIndex: sortIndex,
+                in: container.viewContext
+            )
+        }
+    }
 
-            // Check if a service with the same ID already exists
-            let fetchRequest: NSFetchRequest<ServiceEntity> = ServiceEntity.fetchRequest()
-            fetchRequest.predicate = NSPredicate(format: "id == %@", id as CVarArg)
-            fetchRequest.fetchLimit = 1
+    /// Persists large provider scripts on a private context so callers on the
+    /// main actor can suspend instead of blocking SwiftUI while SQLite saves.
+    public func storeServiceAsync(
+        id: UUID,
+        url: String,
+        jsonMetadata: String,
+        jsScript: String,
+        isActive: Bool,
+        sortIndex: Int64? = nil
+    ) async {
+        guard let container else {
+            Logger.shared.log("Persistent container not initialized: storeServiceAsync", type: "Storage")
+            return
+        }
 
-            do {
-                let results = try context.fetch(fetchRequest)
-                let service: ServiceEntity
-
-                if let existing = results.first {
-                    // Update existing service
-                    service = existing
-                } else {
-                    // Create new service
-                    service = ServiceEntity(context: context)
-                    service.id = id
-
-                    // Assign proper sort index so new services go to the bottom
-                    let countRequest: NSFetchRequest<ServiceEntity> = ServiceEntity.fetchRequest()
-                    countRequest.includesSubentities = false
-                    let count = try context.count(for: countRequest)
-
-                    service.sortIndex = sortIndex ?? Int64(count)
-                }
-
-                service.url = url
-                service.jsonMetadata = jsonMetadata
-                service.jsScript = jsScript
-                service.isActive = isActive
-                if let sortIndex {
-                    service.sortIndex = sortIndex
-                }
-
-                do {
-                    if context.hasChanges {
-                        try context.save()
-                    }
-                } catch {
-                    Logger.shared.log("Save failed: \(error.localizedDescription)", type: "Storage")
-                }
-            } catch {
-                Logger.shared.log("Failed to fetch existing service: \(error.localizedDescription)", type: "Storage")
+        await withCheckedContinuation { continuation in
+            container.performBackgroundTask { context in
+                context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+                self.storeService(
+                    id: id,
+                    url: url,
+                    jsonMetadata: jsonMetadata,
+                    jsScript: jsScript,
+                    isActive: isActive,
+                    sortIndex: sortIndex,
+                    in: context
+                )
+                continuation.resume()
             }
         }
     }
@@ -142,19 +138,27 @@ public final class ServiceStore {
         var result: [Service] = []
 
         container.viewContext.performAndWait {
-            do {
-                let request: NSFetchRequest<ServiceEntity> = ServiceEntity.fetchRequest()
-                let sort = NSSortDescriptor(key: "sortIndex", ascending: true)
-                request.sortDescriptors = [sort]
-                let entities = try container.viewContext.fetch(request)
-                Logger.shared.log("Loaded \(entities.count) ServiceEntities", type: "Storage")
-                result = entities.compactMap { $0.asModel }
-            } catch {
-                Logger.shared.log("Fetch failed: \(error.localizedDescription)", type: "Storage")
-            }
+            result = self.fetchServices(in: container.viewContext)
         }
 
         return result
+    }
+
+    /// Fetches and decodes service metadata away from the main context. Provider
+    /// scripts can be several megabytes, so materializing them must not block a
+    /// Settings navigation transition.
+    public func getServicesAsync() async -> [Service] {
+        guard let container else {
+            Logger.shared.log("Persistent container not initialized: getServicesAsync", type: "Storage")
+            return []
+        }
+
+        return await withCheckedContinuation { continuation in
+            container.performBackgroundTask { context in
+                context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+                continuation.resume(returning: self.fetchServices(in: context))
+            }
+        }
     }
 
     public func remove(_ service: Service) {
@@ -211,6 +215,64 @@ public final class ServiceStore {
             }
         } catch {
             Logger.shared.log("Sync failed: \(error.localizedDescription)", type: "Storage")
+        }
+    }
+
+    private func storeService(
+        id: UUID,
+        url: String,
+        jsonMetadata: String,
+        jsScript: String,
+        isActive: Bool,
+        sortIndex: Int64?,
+        in context: NSManagedObjectContext
+    ) {
+        let fetchRequest: NSFetchRequest<ServiceEntity> = ServiceEntity.fetchRequest()
+        fetchRequest.predicate = NSPredicate(format: "id == %@", id as CVarArg)
+        fetchRequest.fetchLimit = 1
+
+        do {
+            let results = try context.fetch(fetchRequest)
+            let service: ServiceEntity
+
+            if let existing = results.first {
+                service = existing
+            } else {
+                service = ServiceEntity(context: context)
+                service.id = id
+
+                let countRequest: NSFetchRequest<ServiceEntity> = ServiceEntity.fetchRequest()
+                countRequest.includesSubentities = false
+                let count = try context.count(for: countRequest)
+                service.sortIndex = sortIndex ?? Int64(count)
+            }
+
+            service.url = url
+            service.jsonMetadata = jsonMetadata
+            service.jsScript = jsScript
+            service.isActive = isActive
+            if let sortIndex {
+                service.sortIndex = sortIndex
+            }
+
+            if context.hasChanges {
+                try context.save()
+            }
+        } catch {
+            Logger.shared.log("Failed to save service: \(error.localizedDescription)", type: "Storage")
+        }
+    }
+
+    private func fetchServices(in context: NSManagedObjectContext) -> [Service] {
+        do {
+            let request: NSFetchRequest<ServiceEntity> = ServiceEntity.fetchRequest()
+            request.sortDescriptors = [NSSortDescriptor(key: "sortIndex", ascending: true)]
+            let entities = try context.fetch(request)
+            Logger.shared.log("Loaded \(entities.count) ServiceEntities", type: "Storage")
+            return entities.compactMap { $0.asModel }
+        } catch {
+            Logger.shared.log("Fetch failed: \(error.localizedDescription)", type: "Storage")
+            return []
         }
     }
 }

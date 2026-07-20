@@ -29,15 +29,14 @@ struct SettingsView: View {
     @AppStorage("githubReleaseURL") private var githubReleaseURL = ""
     @AppStorage("defaultScheduleMode") private var defaultScheduleModeRaw = ScheduleMode.anime.rawValue
     @AppStorage(ScheduleWindow.storageKey) private var scheduleWindowDays = ScheduleWindow.defaultValue.rawValue
+    @AppStorage(PerformanceModeSettings.enabledKey) private var performanceModeEnabled = PerformanceModeSettings.defaultEnabled
     @AppStorage(PerformanceModeSettings.skipAniListTraversalForAnimeDetailsKey) private var skipAniListTraversalForAnimeDetails = false
-
-    @StateObject private var catalogManager = CatalogManager.shared
 #if !os(tvOS)
-    @StateObject private var serviceManager = ServiceManager.shared
-    @StateObject private var stremioManager = StremioAddonManager.shared
-    @StateObject private var localNotificationManager = LocalNotificationManager.shared
     @AppStorage("showKanzen") private var showKanzen: Bool = false
     @State private var settingsSearchText = ""
+    @State private var installedServiceSearchEntries: [SettingsSearchEntry] = []
+    @State private var installedStremioSearchEntries: [SettingsSearchEntry] = []
+    @State private var notificationAuthorizationDisplayName = "Not enabled"
 #else
     @FocusState private var tvFocusTarget: TVFocusTarget?
 #endif
@@ -155,7 +154,7 @@ struct SettingsView: View {
             .init(id: "appearance-animated-background", title: "Animated Background", location: "Appearance > Motion & Startup", icon: "sparkles", color: .purple, keywords: ["ambient motion", "background animation", "motion"], action: .destination(.appearanceTarget(.animatedBackground))),
             .init(id: "appearance-animation-quality", title: "Animation Quality", location: "Appearance > Motion & Startup", icon: "dial.medium", color: .purple, keywords: ["low", "medium", "high", "FPS", "background quality"], action: .destination(.appearanceTarget(.animationQuality))),
             .init(id: "appearance-animation-frame-rate", title: "Animation Frame Rate", location: "Appearance > Motion & Startup", icon: "speedometer", color: .purple, keywords: ["20 FPS", "30 FPS", "smooth", "battery", "background motion"], action: .destination(.appearanceTarget(.animationFrameRate))),
-            .init(id: "appearance-app-performance-overlay", title: "App Performance Overlay", location: "Appearance > Motion & Startup", icon: "gauge.with.dots.needle.67percent", color: .cyan, keywords: ["CPU", "GPU", "thermal", "stats", "logs", "spikes", "app performance", "home performance"], action: .destination(.appearanceTarget(.appPerformanceOverlay))),
+            .init(id: "appearance-app-performance-overlay", title: "App Performance Overlay", location: "Appearance > Motion & Startup", icon: "gauge.with.dots.needle.67percent", color: .cyan, keywords: ["CPU", "RAM", "memory", "thermal", "stats", "logs", "spikes", "app performance", "home performance"], action: .destination(.appearanceTarget(.appPerformanceOverlay))),
             .init(id: "appearance-hide-splash", title: "Hide Splash Screen", location: "Appearance > Motion & Startup", icon: "rectangle.slash", color: .purple, keywords: ["launch screen", "startup", "splash"], action: .destination(.appearanceTarget(.hideSplashScreen))),
             .init(id: "appearance-season-menu", title: "Alternative Season Menu", location: "Appearance > Detail Pages", icon: "list.bullet", color: .purple, keywords: ["season dropdown", "specials", "OVAs"], action: .destination(.appearanceTarget(.alternativeSeasonMenu))),
             .init(id: "appearance-horizontal-episodes", title: "Horizontal Episode List", location: "Appearance > Detail Pages", icon: "rectangle.split.3x1", color: .purple, keywords: ["episode layout", "vertical episodes"], action: .destination(.appearanceTarget(.horizontalEpisodeList))),
@@ -214,11 +213,32 @@ struct SettingsView: View {
         if !WatchTogetherSettings.isAvailableInCurrentBuild {
             entries.removeAll { $0.id == "watch-together" }
         }
+#if os(iOS) && canImport(GoogleCast)
+        if GoogleCastSettings.isAvailableInCurrentBuild {
+            entries.append(
+                .init(
+                    id: "google-cast",
+                    title: "Google Cast",
+                    location: "Media Player > MPV Player",
+                    icon: "tv.and.hifispeaker.fill",
+                    color: .orange,
+                    keywords: ["Chromecast", "Cast", "TV", "receiver", "enable", "disable", "discovery", "subtitles"],
+                    action: .destination(.playerTarget(.googleCast))
+                )
+            )
+        }
+#endif
         if supportsGitHubReleaseUpdates {
             entries.append(.init(id: "updates", title: "App Updates", location: "Updates", icon: "arrow.triangle.2.circlepath", color: .mint, keywords: ["GitHub releases", "check", "auto check", "latest version"], action: .anchor("settings-updates")))
         }
 
-        entries.append(contentsOf: serviceManager.services.map { service in
+        entries.append(contentsOf: installedServiceSearchEntries)
+        entries.append(contentsOf: installedStremioSearchEntries)
+        return entries
+    }
+
+    private static func makeInstalledServiceSearchEntries(_ services: [Service]) -> [SettingsSearchEntry] {
+        services.map { service in
             let sourceID = "service:\(service.id.uuidString)"
             return SettingsSearchEntry(
                 id: "installed-service-\(service.id.uuidString)",
@@ -236,9 +256,11 @@ struct SettingsView: View {
                 ],
                 action: .destination(.servicesTarget(.installedSource(sourceID)))
             )
-        })
+        }
+    }
 
-        entries.append(contentsOf: stremioManager.addons.map { addon in
+    private static func makeInstalledStremioSearchEntries(_ addons: [StremioAddon]) -> [SettingsSearchEntry] {
+        addons.map { addon in
             let sourceID = "stremio:\(addon.id.uuidString)"
             return SettingsSearchEntry(
                 id: "installed-addon-\(addon.id.uuidString)",
@@ -256,8 +278,7 @@ struct SettingsView: View {
                 ],
                 action: .destination(.servicesTarget(.installedSource(sourceID)))
             )
-        })
-        return entries
+        }
     }
 #endif
 
@@ -281,6 +302,20 @@ struct SettingsView: View {
         .onAppear {
             AppPerformanceRuntimeContext.shared.setSurface("settings")
         }
+#if !os(tvOS)
+        // Listen only to the collection publishers needed by Settings search.
+        // Service progress and notification-history churn must not invalidate the
+        // complete Settings navigation tree.
+        .onReceive(ServiceManager.shared.$services) { services in
+            installedServiceSearchEntries = Self.makeInstalledServiceSearchEntries(services)
+        }
+        .onReceive(StremioAddonManager.shared.$addons) { addons in
+            installedStremioSearchEntries = Self.makeInstalledStremioSearchEntries(addons)
+        }
+        .onReceive(LocalNotificationManager.shared.$authorizationStatus) { _ in
+            notificationAuthorizationDisplayName = LocalNotificationManager.shared.authorizationDisplayName
+        }
+#endif
     }
 
 #if !os(tvOS)
@@ -350,7 +385,7 @@ struct SettingsView: View {
         #else
         ScrollViewReader { scrollProxy in
             ScrollView {
-                VStack(spacing: ExperimentalFeatureState.isEnabledAtLaunch ? 22 : 28) {
+                LazyVStack(spacing: ExperimentalFeatureState.isEnabledAtLaunch ? 22 : 28) {
                     if settingsSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 // MARK: - Support
                 GlassSection(header: "Support") {
@@ -413,7 +448,7 @@ struct SettingsView: View {
                         NavigationLink(destination: settingsSearchableContent(PerformanceModeSettingsView())) {
                             GlassSettingsRow(icon: "bolt.fill", iconColor: .yellow, title: "Performance Mode") {
                                 HStack(spacing: 4) {
-                                    Text(catalogManager.performanceModeEnabled || skipAniListTraversalForAnimeDetails ? "On" : "Off")
+                                    Text(performanceModeEnabled || skipAniListTraversalForAnimeDetails ? "On" : "Off")
                                         .font(.subheadline)
                                         .foregroundColor(.white.opacity(0.5))
                                     Image(systemName: "chevron.right")
@@ -477,7 +512,7 @@ struct SettingsView: View {
                         NavigationLink(destination: settingsSearchableContent(NotificationSettingsView())) {
                             GlassSettingsRow(icon: "bell.badge.fill", iconColor: .orange, title: "Notifications") {
                                 HStack(spacing: 4) {
-                                    Text(localNotificationManager.authorizationDisplayName)
+                                    Text(notificationAuthorizationDisplayName)
                                         .font(.subheadline)
                                         .foregroundColor(.white.opacity(0.5))
                                     Image(systemName: "chevron.right")
@@ -650,7 +685,9 @@ struct SettingsView: View {
 #if !os(tvOS)
     @ViewBuilder
     private func settingsSearchResults(scrollProxy: ScrollViewProxy) -> some View {
-        if filteredSettingsSearchEntries.isEmpty {
+        let entries = filteredSettingsSearchEntries
+
+        if entries.isEmpty {
             VStack(spacing: 12) {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 32, weight: .semibold))
@@ -666,10 +703,10 @@ struct SettingsView: View {
             .padding(.top, 70)
         } else {
             GlassSection(header: "Search Results") {
-                VStack(spacing: 0) {
-                    ForEach(Array(filteredSettingsSearchEntries.enumerated()), id: \.element.id) { index, entry in
+                LazyVStack(spacing: 0) {
+                    ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
                         settingsSearchLink(for: entry, scrollProxy: scrollProxy)
-                        if index < filteredSettingsSearchEntries.count - 1 {
+                        if index < entries.count - 1 {
                             GlassDivider()
                         }
                     }
@@ -692,7 +729,7 @@ struct SettingsView: View {
         let entries = subpageSettingsSearchEntries(for: query)
 
         ScrollView {
-            VStack(spacing: 22) {
+            LazyVStack(spacing: 22) {
                 if entries.isEmpty {
                     VStack(spacing: 12) {
                         Image(systemName: "magnifyingglass")
@@ -709,7 +746,7 @@ struct SettingsView: View {
                     .padding(.top, 70)
                 } else {
                     GlassSection(header: "Search Results") {
-                        VStack(spacing: 0) {
+                        LazyVStack(spacing: 0) {
                             ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
                                 settingsSearchSuggestionLink(for: entry)
                                 if index < entries.count - 1 {

@@ -133,6 +133,7 @@ struct BackupData: Codable {
     var mpvHDRMode: String = MPVHDRMode.defaultMode.rawValue
     var mpvSurroundSoundEnabled: Bool = true
     var watchTogetherEnabled: Bool = WatchTogetherSettings.defaultEnabled
+    var googleCastEnabled: Bool = GoogleCastSettings.defaultEnabled
     var smartInAppPlayerChoosingEnabled: Bool = false
     var experimentalFeaturesEnabled: Bool = false
     var experimentalFeaturesLastChangedAt: Double = 0
@@ -163,6 +164,7 @@ struct BackupData: Codable {
     var seasonMenu: Bool = false
     var horizontalEpisodeList: Bool = false
     var mediaDetailTitleArtworkEnabled: Bool = MediaDetailTitleArtworkSettings.defaultEnabled
+    var mediaDetailAlternatePosterEnabled: Bool = MediaDetailAlternatePosterSettings.defaultEnabled
     var mediaDetailSimilarTitlesEnabled: Bool = MediaDetailSimilarTitlesSettings.defaultEnabled
     var useClassicScheduleUI: Bool = false
     var heroBannerCatalogId: String = "trending"
@@ -511,9 +513,9 @@ struct BackupData: Codable {
         case accentColor, settingsGradientColor, readerAccentColor, tmdbLanguage, selectedAppearance, readerSelectedAppearance, readerGlobalAppearanceEnabled, readerSettingsGradientColor, enableSubtitlesByDefault, defaultSubtitleLanguage, playerSubtitleAppearanceEnabled, enableVLCSubtitleEditMenu, preferredAutoAudioLanguage, preferredAnimeAudioLanguage, inAppPlayer, playerChoice, showScheduleTab, showLocalScheduleTime, defaultScheduleMode, scheduleWindowDays
         case localNotificationSubscriptions, localNotificationEpisodeReminders, localNotificationEpisodeLeadTime, localNotificationSeasonLeadTime, localNotificationIncludeAnimeSpecials
         case defaultPlaybackSpeed, holdSpeedPlayer, externalPlayer, preferDownloadedMedia, alwaysLandscape, playerPlaybackLockEnabled, aniSkipEnabled, introDBEnabled, introDBAppEnabled, aniSkipAutoSkip, skip85sEnabled, skip85sAlwaysVisible, showNextEpisodeButton, showEpisodeBrowserButton, showVLCEpisodeBrowserButton, showPlayerServicesButton, showNextEpisodePosterButton, nextEpisodeThreshold, nextEpisodeSkipFillerEnabled, vlcHeaderProxyEnabled
-        case playerBrightnessGestureEnabled, playerVolumeGestureEnabled, vlcBrightnessGestureEnabled, vlcVolumeGestureEnabled, playerTwoFingerTapPlayPauseEnabled, playerCenterTapPlayPauseEnabled, playerDoubleTapSeekEnabled, vlcDoubleTapSeekEnabled, playerDoubleTapSeekSeconds, vlcDoubleTapSeekSeconds, playerOpenSubtitlesEnabled, vlcOpenSubtitlesEnabled, playerOpenSubtitlesAutoFallbackEnabled, vlcOpenSubtitlesAutoFallbackEnabled, playerPerformanceOverlayEnabled, mpvForegroundFPS, mpvRenderBackend, mpvMetalQualityProfile, mpvUpscalingMode, mpvPlayerSkin, mpvPlayerSkinCustomPrimaryColor, mpvPlayerSkinCustomSecondaryColor, mpvPlayerSkinAnimationsEnabled, mpvPlayerSkinTintControlsOnly, mpvPictureInPictureEnabled, mpvAppExitPictureInPictureEnabled, mpvHDRMode, mpvSurroundSoundEnabled, watchTogetherEnabled, smartInAppPlayerChoosingEnabled, experimentalFeaturesEnabled, experimentalFeaturesLastChangedAt, experimentalMPVPreloadEnabled, experimentalMPVSmoothTransitionEnabled, experimentalMPVPreloadCellularEnabled, experimentalMPVPreloadWifiLimitMB, experimentalMPVPreloadCellularLimitMB, experimentalMPVShowRemainingTime, experimentalMPVPreciseProgress, experimentalMPVIgnoreSpecialSubtitleStyles, experimentalMPVPreloadAutoClear, experimentalICloudSyncEnabled
+        case playerBrightnessGestureEnabled, playerVolumeGestureEnabled, vlcBrightnessGestureEnabled, vlcVolumeGestureEnabled, playerTwoFingerTapPlayPauseEnabled, playerCenterTapPlayPauseEnabled, playerDoubleTapSeekEnabled, vlcDoubleTapSeekEnabled, playerDoubleTapSeekSeconds, vlcDoubleTapSeekSeconds, playerOpenSubtitlesEnabled, vlcOpenSubtitlesEnabled, playerOpenSubtitlesAutoFallbackEnabled, vlcOpenSubtitlesAutoFallbackEnabled, playerPerformanceOverlayEnabled, mpvForegroundFPS, mpvRenderBackend, mpvMetalQualityProfile, mpvUpscalingMode, mpvPlayerSkin, mpvPlayerSkinCustomPrimaryColor, mpvPlayerSkinCustomSecondaryColor, mpvPlayerSkinAnimationsEnabled, mpvPlayerSkinTintControlsOnly, mpvPictureInPictureEnabled, mpvAppExitPictureInPictureEnabled, mpvHDRMode, mpvSurroundSoundEnabled, watchTogetherEnabled, googleCastEnabled, smartInAppPlayerChoosingEnabled, experimentalFeaturesEnabled, experimentalFeaturesLastChangedAt, experimentalMPVPreloadEnabled, experimentalMPVSmoothTransitionEnabled, experimentalMPVPreloadCellularEnabled, experimentalMPVPreloadWifiLimitMB, experimentalMPVPreloadCellularLimitMB, experimentalMPVShowRemainingTime, experimentalMPVPreciseProgress, experimentalMPVIgnoreSpecialSubtitleStyles, experimentalMPVPreloadAutoClear, experimentalICloudSyncEnabled
         case subtitleForegroundColor, subtitleStrokeColor, subtitleStrokeWidth, subtitleFontSize, subtitleVerticalOffset, subtitlesVisible
-        case showKanzen, hideSplashScreen, modeSwitchAnimationEnabled, kanzenAutoUpdateModules, seasonMenu, horizontalEpisodeList, mediaDetailTitleArtworkEnabled, mediaDetailSimilarTitlesEnabled, useClassicScheduleUI, heroBannerCatalogId, heroBannerBehavior, homeCatalogLayoutOverrides, homeAnimatedBackgroundEnabled, homeAnimatedBackgroundQuality, homeAnimatedBackgroundFrameRate, appPerformanceOverlayEnabled, experimentalMediaDesignPreset, experimentalHeroBleedLevel, experimentalHomeCardShape, experimentalMultiGradientPalette, experimentalHeroHeightScale, experimentalHeroBleedStrength, experimentalHeroFadeDistanceScale, experimentalSectionSpacingScale, experimentalCardRadiusScale, experimentalMediaCardScale, experimentalGlassStrength, experimentalGradientBaseDarkness, experimentalGradientAccentIntensity, experimentalGradientScrollMotion, experimentalGradientUseCustomColors, experimentalGradientColorA, experimentalGradientColorB, experimentalGradientColorC, atmosphereStyle, atmosphereSolidColorSource, atmosphereSolidColor, readerAtmosphereStyle, readerAtmosphereSolidColorSource, readerAtmosphereSolidColor, mediaDetailElementOrder, mediaDetailHiddenElements, readerDetailElementOrder, readerDetailHiddenElements, mediaColumnsPortrait, mediaColumnsLandscape
+        case showKanzen, hideSplashScreen, modeSwitchAnimationEnabled, kanzenAutoUpdateModules, seasonMenu, horizontalEpisodeList, mediaDetailTitleArtworkEnabled, mediaDetailAlternatePosterEnabled, mediaDetailSimilarTitlesEnabled, useClassicScheduleUI, heroBannerCatalogId, heroBannerBehavior, homeCatalogLayoutOverrides, homeAnimatedBackgroundEnabled, homeAnimatedBackgroundQuality, homeAnimatedBackgroundFrameRate, appPerformanceOverlayEnabled, experimentalMediaDesignPreset, experimentalHeroBleedLevel, experimentalHomeCardShape, experimentalMultiGradientPalette, experimentalHeroHeightScale, experimentalHeroBleedStrength, experimentalHeroFadeDistanceScale, experimentalSectionSpacingScale, experimentalCardRadiusScale, experimentalMediaCardScale, experimentalGlassStrength, experimentalGradientBaseDarkness, experimentalGradientAccentIntensity, experimentalGradientScrollMotion, experimentalGradientUseCustomColors, experimentalGradientColorA, experimentalGradientColorB, experimentalGradientColorC, atmosphereStyle, atmosphereSolidColorSource, atmosphereSolidColor, readerAtmosphereStyle, readerAtmosphereSolidColorSource, readerAtmosphereSolidColor, mediaDetailElementOrder, mediaDetailHiddenElements, readerDetailElementOrder, readerDetailHiddenElements, mediaColumnsPortrait, mediaColumnsLandscape
         case readingMode, kanzenReaderMode, kanzenReaderModeOverrides, readerDownsampleImages, readerCropBorders, readerDisableQuickActions, readerDisableDoubleTap, readerLiveText, readerHideBarsOnSwipe, readerBackgroundColor, readerOrientation, readerTapZones, readerInvertTapZones, readerAnimatePageTransitions, readerUpscaleImages, readerUpscaleMaxHeight, readerUpscaleModelName, readerPagesToPreload, readerPagedPageLayout, readerPagedPageOffset, readerPagedPageOffsetOverrides, readerSplitWideImages, readerReverseSplitOrder, readerVerticalInfiniteScroll, readerPillarbox, readerPillarboxAmount, readerPillarboxOrientation, readerOrientationLockEnabled, readerOrientationLockMask, readerReadThresholdPercent
         case readerFontSize, readerFontFamily, readerFontWeight, readerColorPreset, readerTextAlignment, readerLineSpacing, readerMargin
         case autoClearCacheEnabled, autoClearCacheThresholdMB, highQualityThreshold, backgroundHLSPipelineEnabled, readerDownloadsBackgroundEnabled, readerDownloadsWifiOnly, readerDownloadsParallelLimit, autoUpdateServicesEnabled, servicesAutoModeEnabled, servicesAutoSelectEpisodesEnabled, servicesAutoModeSourceIds, servicesAutoModeSourceOrderIds, servicesAutoModeQualityPreference, servicesResultMinimumSimilarity, servicesDropMismatchedResults, servicesStremioStyleSheetEnabled, servicesIncludedStreamLanguages, servicesHiddenStreamLanguages, servicesHideStreamsWithoutLanguageData, servicesAssumeOriginalAudio, servicesTreatDubbedAnimeAsEnglish, servicesHiddenStreamQualities, servicesHideStreamsWithoutDetectedQuality, servicesExtraRulesSourceIds, githubReleaseAutoCheckEnabled, githubReleaseUpdateAvailable, githubReleaseLatestVersion, githubReleaseURL, githubReleaseShowAlertPending, githubReleaseLastPromptedVersion, filterHorrorContent = "filterHorror", selectedSimilarityAlgorithm, performanceModeEnabled, performanceModeSkipAniListTraversalForAnimeDetails, performanceModeFastAnimeCatalogOverrides
@@ -620,6 +622,7 @@ struct BackupData: Codable {
         mpvHDRMode = MPVHDRMode(rawValue: try container.decodeIfPresent(String.self, forKey: .mpvHDRMode) ?? MPVHDRMode.defaultMode.rawValue)?.rawValue ?? MPVHDRMode.defaultMode.rawValue
         mpvSurroundSoundEnabled = try container.decodeIfPresent(Bool.self, forKey: .mpvSurroundSoundEnabled) ?? true
         watchTogetherEnabled = try container.decodeIfPresent(Bool.self, forKey: .watchTogetherEnabled) ?? WatchTogetherSettings.defaultEnabled
+        googleCastEnabled = try container.decodeIfPresent(Bool.self, forKey: .googleCastEnabled) ?? GoogleCastSettings.defaultEnabled
         smartInAppPlayerChoosingEnabled = try container.decodeIfPresent(Bool.self, forKey: .smartInAppPlayerChoosingEnabled) ?? false
         experimentalFeaturesEnabled = try container.decodeIfPresent(Bool.self, forKey: .experimentalFeaturesEnabled) ?? false
         experimentalFeaturesLastChangedAt = try container.decodeIfPresent(Double.self, forKey: .experimentalFeaturesLastChangedAt) ?? 0
@@ -650,6 +653,7 @@ struct BackupData: Codable {
         seasonMenu = try container.decodeIfPresent(Bool.self, forKey: .seasonMenu) ?? false
         horizontalEpisodeList = try container.decodeIfPresent(Bool.self, forKey: .horizontalEpisodeList) ?? false
         mediaDetailTitleArtworkEnabled = try container.decodeIfPresent(Bool.self, forKey: .mediaDetailTitleArtworkEnabled) ?? MediaDetailTitleArtworkSettings.defaultEnabled
+        mediaDetailAlternatePosterEnabled = try container.decodeIfPresent(Bool.self, forKey: .mediaDetailAlternatePosterEnabled) ?? MediaDetailAlternatePosterSettings.defaultEnabled
         mediaDetailSimilarTitlesEnabled = try container.decodeIfPresent(Bool.self, forKey: .mediaDetailSimilarTitlesEnabled) ?? MediaDetailSimilarTitlesSettings.defaultEnabled
         useClassicScheduleUI = try container.decodeIfPresent(Bool.self, forKey: .useClassicScheduleUI) ?? false
         heroBannerCatalogId = Self.sanitizedNonEmptyString(try container.decodeIfPresent(String.self, forKey: .heroBannerCatalogId), defaultValue: "trending")
@@ -934,6 +938,7 @@ struct BackupData: Codable {
         try container.encode(mpvHDRMode, forKey: .mpvHDRMode)
         try container.encode(mpvSurroundSoundEnabled, forKey: .mpvSurroundSoundEnabled)
         try container.encode(watchTogetherEnabled, forKey: .watchTogetherEnabled)
+        try container.encode(googleCastEnabled, forKey: .googleCastEnabled)
         try container.encode(smartInAppPlayerChoosingEnabled, forKey: .smartInAppPlayerChoosingEnabled)
         try container.encode(experimentalFeaturesEnabled, forKey: .experimentalFeaturesEnabled)
         try container.encode(experimentalFeaturesLastChangedAt, forKey: .experimentalFeaturesLastChangedAt)
@@ -964,6 +969,7 @@ struct BackupData: Codable {
         try container.encode(seasonMenu, forKey: .seasonMenu)
         try container.encode(horizontalEpisodeList, forKey: .horizontalEpisodeList)
         try container.encode(mediaDetailTitleArtworkEnabled, forKey: .mediaDetailTitleArtworkEnabled)
+        try container.encode(mediaDetailAlternatePosterEnabled, forKey: .mediaDetailAlternatePosterEnabled)
         try container.encode(mediaDetailSimilarTitlesEnabled, forKey: .mediaDetailSimilarTitlesEnabled)
         try container.encode(useClassicScheduleUI, forKey: .useClassicScheduleUI)
         try container.encode(heroBannerCatalogId, forKey: .heroBannerCatalogId)
@@ -1177,6 +1183,7 @@ struct BackupData: Codable {
         mpvHDRMode: String = MPVHDRMode.defaultMode.rawValue,
         mpvSurroundSoundEnabled: Bool = true,
         watchTogetherEnabled: Bool = WatchTogetherSettings.defaultEnabled,
+        googleCastEnabled: Bool = GoogleCastSettings.defaultEnabled,
         smartInAppPlayerChoosingEnabled: Bool = false,
         experimentalFeaturesEnabled: Bool = false,
         experimentalFeaturesLastChangedAt: Double = 0,
@@ -1207,6 +1214,7 @@ struct BackupData: Codable {
         seasonMenu: Bool = false,
         horizontalEpisodeList: Bool = false,
         mediaDetailTitleArtworkEnabled: Bool = MediaDetailTitleArtworkSettings.defaultEnabled,
+        mediaDetailAlternatePosterEnabled: Bool = MediaDetailAlternatePosterSettings.defaultEnabled,
         mediaDetailSimilarTitlesEnabled: Bool = MediaDetailSimilarTitlesSettings.defaultEnabled,
         useClassicScheduleUI: Bool = false,
         heroBannerCatalogId: String = "trending",
@@ -1417,6 +1425,7 @@ struct BackupData: Codable {
         self.mpvHDRMode = MPVHDRMode(rawValue: mpvHDRMode)?.rawValue ?? MPVHDRMode.defaultMode.rawValue
         self.mpvSurroundSoundEnabled = mpvSurroundSoundEnabled
         self.watchTogetherEnabled = watchTogetherEnabled
+        self.googleCastEnabled = googleCastEnabled
         self.smartInAppPlayerChoosingEnabled = smartInAppPlayerChoosingEnabled
         self.experimentalFeaturesEnabled = experimentalFeaturesEnabled
         self.experimentalFeaturesLastChangedAt = experimentalFeaturesLastChangedAt
@@ -1445,6 +1454,7 @@ struct BackupData: Codable {
         self.seasonMenu = seasonMenu
         self.horizontalEpisodeList = horizontalEpisodeList
         self.mediaDetailTitleArtworkEnabled = mediaDetailTitleArtworkEnabled
+        self.mediaDetailAlternatePosterEnabled = mediaDetailAlternatePosterEnabled
         self.mediaDetailSimilarTitlesEnabled = mediaDetailSimilarTitlesEnabled
         self.useClassicScheduleUI = useClassicScheduleUI
         self.heroBannerCatalogId = Self.sanitizedNonEmptyString(heroBannerCatalogId, defaultValue: "trending")
@@ -2381,6 +2391,7 @@ class BackupManager {
         let mpvHDRMode = MPVHDRMode(rawValue: userDefaults.string(forKey: "mpvHDRMode") ?? MPVHDRMode.defaultMode.rawValue)?.rawValue ?? MPVHDRMode.defaultMode.rawValue
         let mpvSurroundSoundEnabled = userDefaults.object(forKey: "mpvSurroundSoundEnabled") == nil ? true : userDefaults.bool(forKey: "mpvSurroundSoundEnabled")
         let watchTogetherEnabled = WatchTogetherSettings.isEnabled(defaults: userDefaults)
+        let googleCastEnabled = GoogleCastSettings.isEnabled(defaults: userDefaults)
         let smartInAppPlayerChoosingEnabled = false
         ExperimentalFeatureState.registerDefaults(defaults: userDefaults)
         let experimentalFeaturesEnabled = userDefaults.bool(forKey: ExperimentalFeatureState.enabledKey)
@@ -2421,6 +2432,7 @@ class BackupManager {
         let seasonMenu = MediaDetailPlatformDefaults.usesCompactSeasonMenu(defaults: userDefaults)
         let horizontalEpisodeList = MediaDetailPlatformDefaults.usesHorizontalEpisodes(defaults: userDefaults)
         let mediaDetailTitleArtworkEnabled = MediaDetailTitleArtworkSettings.isEnabled(defaults: userDefaults)
+        let mediaDetailAlternatePosterEnabled = MediaDetailAlternatePosterSettings.isEnabled(defaults: userDefaults)
         let mediaDetailSimilarTitlesEnabled = MediaDetailSimilarTitlesSettings.isEnabled(defaults: userDefaults)
         let useClassicScheduleUI = userDefaults.bool(forKey: "useClassicScheduleUI")
         let heroBannerCatalogId = BackupData.sanitizedNonEmptyString(userDefaults.string(forKey: "heroBannerCatalogId"), defaultValue: "trending")
@@ -2721,6 +2733,7 @@ class BackupManager {
             mpvHDRMode: mpvHDRMode,
             mpvSurroundSoundEnabled: mpvSurroundSoundEnabled,
             watchTogetherEnabled: watchTogetherEnabled,
+            googleCastEnabled: googleCastEnabled,
             smartInAppPlayerChoosingEnabled: smartInAppPlayerChoosingEnabled,
             experimentalFeaturesEnabled: experimentalFeaturesEnabled,
             experimentalFeaturesLastChangedAt: experimentalFeaturesLastChangedAt,
@@ -2749,6 +2762,7 @@ class BackupManager {
             seasonMenu: seasonMenu,
             horizontalEpisodeList: horizontalEpisodeList,
             mediaDetailTitleArtworkEnabled: mediaDetailTitleArtworkEnabled,
+            mediaDetailAlternatePosterEnabled: mediaDetailAlternatePosterEnabled,
             mediaDetailSimilarTitlesEnabled: mediaDetailSimilarTitlesEnabled,
             useClassicScheduleUI: useClassicScheduleUI,
             heroBannerCatalogId: heroBannerCatalogId,
@@ -3009,6 +3023,7 @@ class BackupManager {
         let mpvHDRMode = MPVHDRMode(rawValue: json["mpvHDRMode"] as? String ?? MPVHDRMode.defaultMode.rawValue)?.rawValue ?? MPVHDRMode.defaultMode.rawValue
         let mpvSurroundSoundEnabled = json["mpvSurroundSoundEnabled"] as? Bool ?? true
         let watchTogetherEnabled = json["watchTogetherEnabled"] as? Bool ?? WatchTogetherSettings.defaultEnabled
+        let googleCastEnabled = json["googleCastEnabled"] as? Bool ?? GoogleCastSettings.defaultEnabled
         let smartInAppPlayerChoosingEnabled = false
         let experimentalFeaturesEnabled = json["experimentalFeaturesEnabled"] as? Bool ?? false
         let experimentalFeaturesLastChangedAt = json["experimentalFeaturesLastChangedAt"] as? Double ?? 0
@@ -3039,6 +3054,7 @@ class BackupManager {
         let seasonMenu = json["seasonMenu"] as? Bool ?? false
         let horizontalEpisodeList = json["horizontalEpisodeList"] as? Bool ?? false
         let mediaDetailTitleArtworkEnabled = json["mediaDetailTitleArtworkEnabled"] as? Bool ?? MediaDetailTitleArtworkSettings.defaultEnabled
+        let mediaDetailAlternatePosterEnabled = json["mediaDetailAlternatePosterEnabled"] as? Bool ?? MediaDetailAlternatePosterSettings.defaultEnabled
         let mediaDetailSimilarTitlesEnabled = json["mediaDetailSimilarTitlesEnabled"] as? Bool ?? MediaDetailSimilarTitlesSettings.defaultEnabled
         let useClassicScheduleUI = json["useClassicScheduleUI"] as? Bool ?? false
         let heroBannerCatalogId = BackupData.sanitizedNonEmptyString(json["heroBannerCatalogId"] as? String, defaultValue: "trending")
@@ -3383,6 +3399,7 @@ class BackupManager {
             mpvHDRMode: mpvHDRMode,
             mpvSurroundSoundEnabled: mpvSurroundSoundEnabled,
             watchTogetherEnabled: watchTogetherEnabled,
+            googleCastEnabled: googleCastEnabled,
             smartInAppPlayerChoosingEnabled: smartInAppPlayerChoosingEnabled,
             experimentalFeaturesEnabled: experimentalFeaturesEnabled,
             experimentalFeaturesLastChangedAt: experimentalFeaturesLastChangedAt,
@@ -3409,6 +3426,7 @@ class BackupManager {
             seasonMenu: seasonMenu,
             horizontalEpisodeList: horizontalEpisodeList,
             mediaDetailTitleArtworkEnabled: mediaDetailTitleArtworkEnabled,
+            mediaDetailAlternatePosterEnabled: mediaDetailAlternatePosterEnabled,
             mediaDetailSimilarTitlesEnabled: mediaDetailSimilarTitlesEnabled,
             useClassicScheduleUI: useClassicScheduleUI,
             heroBannerCatalogId: heroBannerCatalogId,
@@ -3667,6 +3685,7 @@ class BackupManager {
         userDefaults.set(MPVHDRMode(rawValue: backup.mpvHDRMode)?.rawValue ?? MPVHDRMode.defaultMode.rawValue, forKey: "mpvHDRMode")
         userDefaults.set(backup.mpvSurroundSoundEnabled, forKey: "mpvSurroundSoundEnabled")
         userDefaults.set(backup.watchTogetherEnabled, forKey: WatchTogetherSettings.enabledKey)
+        userDefaults.set(backup.googleCastEnabled, forKey: GoogleCastSettings.enabledKey)
         userDefaults.set(backup.smartInAppPlayerChoosingEnabled, forKey: "smartInAppPlayerChoosingEnabled")
         userDefaults.set(backup.experimentalFeaturesEnabled, forKey: ExperimentalFeatureState.enabledKey)
         userDefaults.set(backup.experimentalFeaturesLastChangedAt, forKey: ExperimentalFeatureState.lastChangedAtKey)
@@ -3703,6 +3722,7 @@ class BackupManager {
         userDefaults.set(backup.seasonMenu, forKey: "seasonMenu")
         userDefaults.set(backup.horizontalEpisodeList, forKey: "horizontalEpisodeList")
         userDefaults.set(backup.mediaDetailTitleArtworkEnabled, forKey: MediaDetailTitleArtworkSettings.enabledKey)
+        userDefaults.set(backup.mediaDetailAlternatePosterEnabled, forKey: MediaDetailAlternatePosterSettings.enabledKey)
         userDefaults.set(backup.mediaDetailSimilarTitlesEnabled, forKey: MediaDetailSimilarTitlesSettings.enabledKey)
         userDefaults.set(backup.useClassicScheduleUI, forKey: "useClassicScheduleUI")
         userDefaults.set(BackupData.sanitizedNonEmptyString(backup.heroBannerCatalogId, defaultValue: "trending"), forKey: "heroBannerCatalogId")

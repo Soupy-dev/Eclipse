@@ -380,10 +380,7 @@ final class TVMPVPlayerViewController: UIViewController {
         renderer.onPlaybackFailure = { [weak self] message in self?.handlePlaybackFailure(message) }
         renderer.onPictureInPictureStopRequested = { [weak self] reason in
             guard let self, !self.didStop else { return }
-            Logger.shared.log(
-                "[TVPlayback] MPVKit requested PiP stop reason=\(reason)",
-                type: "Player"
-            )
+            self.logPictureInPicture("MPVKit requested stop reason=\(reason)")
             self.pictureInPicturePreparationGeneration &+= 1
             let generation = self.pictureInPicturePreparationGeneration
             let startPending = self.isPictureInPictureStartPending
@@ -466,9 +463,16 @@ final class TVMPVPlayerViewController: UIViewController {
     private func handlePictureInPictureFailure(_ message: String) {
         // PiP is optional. A failed handoff must not replace healthy inline playback with the
         // renderer-failure overlay or offer an unrelated AVPlayer engine fallback.
-        Logger.shared.log("[TVPlayback] PiP unavailable reason=\(message)", type: "Player")
+        logPictureInPicture("unavailable reason=\(message)")
         showControls(animated: true, moveFocus: true)
         UIAccessibility.post(notification: .announcement, argument: message)
+    }
+
+    private func logPictureInPicture(_ message: String) {
+        Logger.shared.log(
+            "[TVPlayback.PiP] \(message) renderer={\(renderer.pictureInPictureDebugSnapshot())}",
+            type: "Player"
+        )
     }
 
     private func updateProgress(position: Double, duration: Double) {
@@ -536,20 +540,28 @@ final class TVMPVPlayerViewController: UIViewController {
             preparationGeneration: preparationGeneration
         )
         if let existing = pictureInPictureRestoreTask, existing.key == key {
+            logPictureInPicture(
+                "restore reused preparationGeneration=\(preparationGeneration)"
+            )
             return existing
         }
 
+        logPictureInPicture(
+            "restore begin preparationGeneration=\(preparationGeneration)"
+        )
         let restoringRenderer = renderer
         let task = Task { @MainActor [weak self, weak controller] in
             let restored = await restoringRenderer.endPictureInPictureAndWait(
                 restoringInlinePlayback: true
             )
-            guard restored,
-                  let self,
-                  let controller,
-                  !self.didStop,
-                  self.pictureInPictureController === controller,
-                  self.pictureInPicturePreparationGeneration == preparationGeneration else {
+            guard let self, let controller else { return false }
+            let controllerIsCurrent = self.pictureInPictureController === controller
+            let generationIsCurrent = self.pictureInPicturePreparationGeneration == preparationGeneration
+            let accepted = restored && !self.didStop && controllerIsCurrent && generationIsCurrent
+            self.logPictureInPicture(
+                "restore native result=\(restored) accepted=\(accepted) didStop=\(self.didStop) controllerCurrent=\(controllerIsCurrent) generationCurrent=\(generationIsCurrent) preparationGeneration=\(preparationGeneration)"
+            )
+            guard accepted else {
                 return false
             }
             return true
@@ -566,17 +578,23 @@ final class TVMPVPlayerViewController: UIViewController {
         key: PictureInPictureRestoreKey,
         controller: AVPictureInPictureController
     ) -> Bool {
-        guard restored,
-              !didStop,
-              pictureInPictureController === controller,
-              ObjectIdentifier(controller) == key.controllerIdentifier,
-              pictureInPicturePreparationGeneration == key.preparationGeneration else {
+        let controllerIsCurrent = pictureInPictureController === controller
+            && ObjectIdentifier(controller) == key.controllerIdentifier
+        let generationIsCurrent = pictureInPicturePreparationGeneration == key.preparationGeneration
+        let accepted = restored && !didStop && controllerIsCurrent && generationIsCurrent
+        guard accepted else {
+            logPictureInPicture(
+                "restore finalize rejected restored=\(restored) didStop=\(didStop) controllerCurrent=\(controllerIsCurrent) generationCurrent=\(generationIsCurrent) preparationGeneration=\(key.preparationGeneration)"
+            )
             return false
         }
         if finalizedPictureInPictureRestoreKey != key {
             finalizedPictureInPictureRestoreKey = key
             isPictureInPictureStartPending = false
             showControls(animated: true, moveFocus: true)
+            logPictureInPicture(
+                "restore finalized preparationGeneration=\(key.preparationGeneration)"
+            )
         }
         return true
     }
@@ -662,9 +680,17 @@ final class TVMPVPlayerViewController: UIViewController {
     }
 
     private func startPictureInPicture() {
-        guard renderer.canStartPictureInPicture else { return }
+        guard renderer.canStartPictureInPicture else {
+            logPictureInPicture("start blocked reason=renderer-unavailable")
+            return
+        }
         guard !isPictureInPictureStartPending,
-              pictureInPictureController?.isPictureInPictureActive != true else { return }
+              pictureInPictureController?.isPictureInPictureActive != true else {
+            logPictureInPicture(
+                "start blocked reason=already-pending-or-active pending=\(isPictureInPictureStartPending) active=\(pictureInPictureController?.isPictureInPictureActive ?? false)"
+            )
+            return
+        }
 
         // AVKit may deliver late playback-delegate messages after a failed or completed start.
         // Give every attempt a distinct controller identity so those messages cannot mutate the
@@ -684,6 +710,9 @@ final class TVMPVPlayerViewController: UIViewController {
         controller.requiresLinearPlayback = false
         pictureInPictureController = controller
         isPictureInPictureStartPending = true
+        logPictureInPicture(
+            "start requested preparationGeneration=\(generation) possible=\(controller.isPictureInPicturePossible)"
+        )
         Task { @MainActor [weak self] in
             guard let self,
                   !self.didStop,
@@ -692,6 +721,9 @@ final class TVMPVPlayerViewController: UIViewController {
                 return
             }
             do {
+                self.logPictureInPicture(
+                    "prepare begin preparationGeneration=\(generation)"
+                )
                 try await self.renderer.preparePictureInPicture()
             } catch {
                 guard generation == self.pictureInPicturePreparationGeneration,
@@ -715,6 +747,10 @@ final class TVMPVPlayerViewController: UIViewController {
             guard generation == self.pictureInPicturePreparationGeneration,
                   !self.didStop,
                   self.pictureInPictureController === controller else { return }
+
+            self.logPictureInPicture(
+                "prepare ready preparationGeneration=\(generation) possible=\(controller.isPictureInPicturePossible) active=\(controller.isPictureInPictureActive)"
+            )
 
             controller.invalidatePlaybackState()
             let possibleDeadline = CACurrentMediaTime() + 1
@@ -744,6 +780,9 @@ final class TVMPVPlayerViewController: UIViewController {
                 return
             }
             if !controller.isPictureInPictureActive {
+                self.logPictureInPicture(
+                    "AVKit start call preparationGeneration=\(generation) possible=\(controller.isPictureInPicturePossible)"
+                )
                 controller.startPictureInPicture()
             }
         }
@@ -990,18 +1029,26 @@ final class TVMPVPlayerViewController: UIViewController {
 extension TVMPVPlayerViewController: @preconcurrency AVPictureInPictureControllerDelegate {
     func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         guard !didStop, self.pictureInPictureController === pictureInPictureController else {
+            logPictureInPicture("AVKit will-start rejected reason=stale-controller-or-stopped")
             pictureInPictureController.stopPictureInPicture()
             return
         }
+        logPictureInPicture(
+            "AVKit will-start possible=\(pictureInPictureController.isPictureInPicturePossible) active=\(pictureInPictureController.isPictureInPictureActive)"
+        )
         renderer.beginPictureInPicture()
     }
 
     func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         guard self.pictureInPictureController === pictureInPictureController else {
+            logPictureInPicture("AVKit did-start rejected reason=stale-controller")
             pictureInPictureController.stopPictureInPicture()
             return
         }
         isPictureInPictureStartPending = false
+        logPictureInPicture(
+            "AVKit did-start active=\(pictureInPictureController.isPictureInPictureActive) didStop=\(didStop)"
+        )
         if didStop {
             pictureInPictureController.stopPictureInPicture()
         }
@@ -1011,6 +1058,9 @@ extension TVMPVPlayerViewController: @preconcurrency AVPictureInPictureControlle
         guard !didStop, self.pictureInPictureController === pictureInPictureController else { return }
         isPictureInPictureStartPending = false
         let generation = pictureInPicturePreparationGeneration
+        logPictureInPicture(
+            "AVKit did-stop preparationGeneration=\(generation)"
+        )
         guard let restore = beginPictureInPictureRestore(
             for: pictureInPictureController,
             preparationGeneration: generation
@@ -1034,6 +1084,10 @@ extension TVMPVPlayerViewController: @preconcurrency AVPictureInPictureControlle
     ) {
         guard !didStop, self.pictureInPictureController === pictureInPictureController else { return }
         let generation = pictureInPicturePreparationGeneration
+        let nsError = error as NSError
+        logPictureInPicture(
+            "AVKit failed-to-start error=\(nsError.domain)#\(nsError.code) desc=\(nsError.localizedDescription) preparationGeneration=\(generation)"
+        )
         guard let restore = beginPictureInPictureRestore(
             for: pictureInPictureController,
             preparationGeneration: generation
@@ -1061,6 +1115,9 @@ extension TVMPVPlayerViewController: @preconcurrency AVPictureInPictureControlle
         restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void
     ) {
         let generation = pictureInPicturePreparationGeneration
+        logPictureInPicture(
+            "AVKit restore-ui request preparationGeneration=\(generation)"
+        )
         guard !didStop,
               self.pictureInPictureController === pictureInPictureController,
               let restore = beginPictureInPictureRestore(
@@ -1080,6 +1137,9 @@ extension TVMPVPlayerViewController: @preconcurrency AVPictureInPictureControlle
                 restored,
                 key: restore.key,
                 controller: pictureInPictureController
+            )
+            self.logPictureInPicture(
+                "AVKit restore-ui complete restored=\(didRestore) preparationGeneration=\(generation)"
             )
             completionHandler(didRestore)
         }

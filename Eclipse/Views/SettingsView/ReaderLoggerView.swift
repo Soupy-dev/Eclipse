@@ -32,12 +32,15 @@ struct ReaderLoggerView: View {
     }
 
     var body: some View {
+        let visibleLogs = filteredLogs
+        let categories = availableCategories
+
         ScrollView {
             VStack(spacing: 20) {
                 GlassSection {
                     GlassDetailRow(icon: "line.3.horizontal.decrease.circle", iconColor: .blue, title: "Category") {
                         Menu {
-                            ForEach(availableCategories, id: \.self) { category in
+                            ForEach(categories, id: \.self) { category in
                                 Button {
                                     selectedCategory = category
                                 } label: {
@@ -61,7 +64,7 @@ struct ReaderLoggerView: View {
                     }
                 }
 
-                if filteredLogs.isEmpty {
+                if visibleLogs.isEmpty {
                     EclipseEmptyState(
                         icon: "doc.text",
                         title: "No reader logs found",
@@ -70,12 +73,12 @@ struct ReaderLoggerView: View {
                     .padding(.top, 32)
                 } else {
                     GlassSection {
-                        VStack(spacing: 0) {
-                            ForEach(Array(filteredLogs.enumerated()), id: \.element.id) { index, log in
+                        LazyVStack(spacing: 0) {
+                            ForEach(Array(visibleLogs.enumerated()), id: \.element.id) { index, log in
                                 LogEntryRow(log: log)
                                     .id(log.id)
 
-                                if index < filteredLogs.count - 1 {
+                                if index < visibleLogs.count - 1 {
                                     GlassDivider(leadingInset: 16)
                                 }
                             }
@@ -139,9 +142,15 @@ struct ReaderLoggerView: View {
 
 final class ReaderLoggerManager: ObservableObject {
     static let shared = ReaderLoggerManager()
+    private static let logLineRegex = try! NSRegularExpression(
+        pattern: #"\[([^\]]+)\] \[([^\]]+)\] (.+)"#,
+        options: []
+    )
 
     @Published var logs: [LogEntry] = []
     private let maxLogs = 1000
+    private var pendingLogEntries: [LogEntry] = []
+    private var logFlushScheduled = false
 
     private init() {
         NotificationCenter.default.addObserver(
@@ -158,18 +167,18 @@ final class ReaderLoggerManager: ObservableObject {
 
     @MainActor
     private func loadExistingLogs() {
-        Task {
+        Task { @MainActor in
             let existingLogsString = await ReaderLogger.shared.getLogsAsync()
             if !existingLogsString.isEmpty {
-                let logEntries = parseLogsString(existingLogsString)
-                DispatchQueue.main.async {
-                    self.logs = logEntries
-                }
+                let logEntries = await Task.detached(priority: .utility) {
+                    Self.parseLogsString(existingLogsString)
+                }.value
+                self.logs = logEntries
             }
         }
     }
 
-    private func parseLogsString(_ logsString: String) -> [LogEntry] {
+    private static func parseLogsString(_ logsString: String) -> [LogEntry] {
         let logLines = logsString
             .replacingOccurrences(of: "\n----\n", with: "\n")
             .split(separator: "\n", omittingEmptySubsequences: true)
@@ -182,9 +191,11 @@ final class ReaderLoggerManager: ObservableObject {
             let section = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
             guard !section.isEmpty else { continue }
 
-            let pattern = #"\[([^\]]+)\] \[([^\]]+)\] (.+)"#
-            if let regex = try? NSRegularExpression(pattern: pattern, options: []),
-               let match = regex.firstMatch(in: section, options: [], range: NSRange(section.startIndex..., in: section)) {
+            if let match = logLineRegex.firstMatch(
+                in: section,
+                options: [],
+                range: NSRange(section.startIndex..., in: section)
+            ) {
 
                 let timestampRange = Range(match.range(at: 1), in: section)!
                 let typeRange = Range(match.range(at: 2), in: section)!
@@ -208,8 +219,21 @@ final class ReaderLoggerManager: ObservableObject {
               let message = userInfo["message"] as? String,
               let type = userInfo["type"] as? String else { return }
 
-        DispatchQueue.main.async {
-            self.addLog(message: message, type: type)
+        let entry = LogEntry(
+            timestamp: notification.userInfo?["timestamp"] as? Date ?? Date(),
+            message: message,
+            type: ReaderLogger.displayCategory(for: type)
+        )
+        let enqueue = { [weak self] in
+            guard let self else { return }
+            self.pendingLogEntries.append(entry)
+            self.schedulePendingLogFlush()
+        }
+
+        if Thread.isMainThread {
+            enqueue()
+        } else {
+            DispatchQueue.main.async(execute: enqueue)
         }
     }
 
@@ -223,9 +247,28 @@ final class ReaderLoggerManager: ObservableObject {
     }
 
     func clearLogs() {
+        pendingLogEntries.removeAll(keepingCapacity: true)
         logs.removeAll()
         Task {
             await ReaderLogger.shared.clearLogsAsync()
+        }
+    }
+
+    private func schedulePendingLogFlush() {
+        guard !logFlushScheduled else { return }
+        logFlushScheduled = true
+
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.logFlushScheduled = false
+            guard !self.pendingLogEntries.isEmpty else { return }
+
+            let entries = self.pendingLogEntries
+            self.pendingLogEntries.removeAll(keepingCapacity: true)
+            self.logs.insert(contentsOf: entries.reversed(), at: 0)
+            if self.logs.count > self.maxLogs {
+                self.logs = Array(self.logs.prefix(self.maxLogs))
+            }
         }
     }
 }

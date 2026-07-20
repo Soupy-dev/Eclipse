@@ -461,6 +461,11 @@ class StremioAddonManager: ObservableObject {
             return []
         }
 
+        guard CatalogManager.shared.isCatalogEnabled(id: catalog.id) else {
+            Logger.shared.log("Stremio: catalog \(catalog.id) skipped because it is disabled", type: "Stremio")
+            return []
+        }
+
         guard let addon = activeCatalogAddons.first(where: { $0.id == addonId }) else {
             Logger.shared.log("Stremio: catalog \(catalog.id) skipped because addon is inactive or missing", type: "Stremio")
             return []
@@ -479,6 +484,10 @@ class StremioAddonManager: ObservableObject {
                 catalog: stremioCatalog,
                 skip: stremioCatalog.shouldSendInitialSkip ? 0 : nil
             )
+            guard CatalogManager.shared.isCatalogEnabled(id: catalog.id) else {
+                Logger.shared.log("Stremio: discarded catalog \(catalog.id) response because it was disabled during fetch", type: "Stremio")
+                return []
+            }
             let results = await resolveCatalogMetas(
                 metas,
                 catalog: stremioCatalog,
@@ -486,6 +495,10 @@ class StremioAddonManager: ObservableObject {
                 tmdbService: tmdbService,
                 limit: limit
             )
+            guard CatalogManager.shared.isCatalogEnabled(id: catalog.id) else {
+                Logger.shared.log("Stremio: discarded catalog \(catalog.id) results because it was disabled during resolution", type: "Stremio")
+                return []
+            }
             Logger.shared.log("Stremio: catalog \(catalog.id) resolved \(results.count) item(s) from \(metas.count) meta preview(s)", type: "Stremio")
             return results
         } catch {

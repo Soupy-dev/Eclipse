@@ -28,7 +28,7 @@ jobs:
       BUNDLE_IDENTIFIER: ${{ vars.IOS_BUNDLE_IDENTIFIER || 'app.Eclipse.Soupy' }}
       DEVELOPMENT_TEAM: ${{ vars.IOS_DEVELOPMENT_TEAM || 'ANMK3Y568U' }}
       ICLOUD_CONTAINER_ID: ${{ vars.IOS_ICLOUD_CONTAINER_ID || 'iCloud.Eclipse.Soupy' }}
-      PROJECT_PATH: Eclipse.xcodeproj
+      WORKSPACE_PATH: Eclipse.xcworkspace
       SCHEME: Eclipse
 
     steps:
@@ -47,6 +47,9 @@ jobs:
         uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
+
+      - name: Install iOS pods
+        run: pod install
 
       - name: Validate signing secrets
         env:
@@ -216,7 +219,7 @@ jobs:
           set -euo pipefail
 
           xcodebuild -resolvePackageDependencies \
-            -project "$PROJECT_PATH" \
+            -workspace "$WORKSPACE_PATH" \
             -scheme "$SCHEME" \
             -skipPackagePluginValidation \
             -skipMacroValidation
@@ -231,7 +234,7 @@ jobs:
           rm -rf "$ARCHIVE_PATH" "$DERIVED_DATA_PATH"
 
           xcodebuild archive \
-            -project "$PROJECT_PATH" \
+            -workspace "$WORKSPACE_PATH" \
             -scheme "$SCHEME" \
             -configuration Release \
             -archivePath "$ARCHIVE_PATH" \

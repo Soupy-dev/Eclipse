@@ -6,6 +6,7 @@ struct TVShowDetailsSection: View {
     let tvShow: TMDBTVShowWithSeasons?
     let ratingOverride: String?
     var compactHeroMetadata: Bool
+    @AppStorage(MediaDetailAgeRatingSettings.enabledKey) private var showsAgeRating = MediaDetailAgeRatingSettings.defaultEnabled
 
     init(tvShow: TMDBTVShowWithSeasons?, ratingOverride: String? = nil, compactHeroMetadata: Bool = false) {
         self.tvShow = tvShow
@@ -42,7 +43,7 @@ struct TVShowDetailsSection: View {
                         DetailRow(title: "Rating", value: String(format: "%.1f/10", tvShow.voteAverage))
                     }
 
-                    if let ageRating = getAgeRating(from: tvShow.contentRatings) {
+                    if showsAgeRating, let ageRating = getAgeRating(from: tvShow.contentRatings) {
                         DetailRow(title: "Age Rating", value: ageRating)
                     }
 

@@ -82,6 +82,7 @@ private final class MediaDetailCacheStore {
         let synopsis: String
         let romajiTitle: String?
         let logoURL: String?
+        let alternatePosterURL: String?
         let isAnimeShow: Bool
         let animeRating: AnimeMetadataRating?
         let anilistEpisodes: [AniListEpisode]?
@@ -130,6 +131,7 @@ private final class MediaDetailCacheStore {
             synopsis: existing.synopsis,
             romajiTitle: existing.romajiTitle,
             logoURL: existing.logoURL,
+            alternatePosterURL: existing.alternatePosterURL,
             isAnimeShow: existing.isAnimeShow,
             animeRating: existing.animeRating,
             anilistEpisodes: existing.anilistEpisodes,
@@ -147,6 +149,24 @@ private final class MediaDetailCacheStore {
 enum MediaDetailTitleArtworkSettings {
     static let enabledKey = "mediaDetailTitleArtworkEnabled"
     static let defaultEnabled = true
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: enabledKey) == nil ? defaultEnabled : defaults.bool(forKey: enabledKey)
+    }
+}
+
+enum MediaDetailAlternatePosterSettings {
+    static let enabledKey = "mediaDetailAlternatePosterEnabled"
+    static let defaultEnabled = false
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: enabledKey) == nil ? defaultEnabled : defaults.bool(forKey: enabledKey)
+    }
+}
+
+enum MediaDetailAgeRatingSettings {
+    static let enabledKey = "mediaDetailAgeRatingEnabled"
+    static let defaultEnabled = false
 
     static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
         defaults.object(forKey: enabledKey) == nil ? defaultEnabled : defaults.bool(forKey: enabledKey)
@@ -187,6 +207,7 @@ struct MediaDetailView: View {
     @State private var selectedEpisodeForSearch: TMDBEpisode?
     @State private var romajiTitle: String?
     @State private var logoURL: String?
+    @State private var alternatePosterURL: String?
     @State private var isAnimeShow = false
     @State private var animeRating: AnimeMetadataRating?
     @State private var anilistEpisodes: [AniListEpisode]? = nil
@@ -250,6 +271,8 @@ struct MediaDetailView: View {
     @AppStorage("showCastSection") private var legacyShowCastSection = true
     @AppStorage(MediaDetailPlatformDefaults.seasonMenuKey) private var useSeasonMenu = MediaDetailPlatformDefaults.prefersCompactSeasonMenu
     @AppStorage(MediaDetailTitleArtworkSettings.enabledKey) private var mediaDetailTitleArtworkEnabled = MediaDetailTitleArtworkSettings.defaultEnabled
+    @AppStorage(MediaDetailAlternatePosterSettings.enabledKey) private var mediaDetailAlternatePosterEnabled = MediaDetailAlternatePosterSettings.defaultEnabled
+    @AppStorage(MediaDetailAgeRatingSettings.enabledKey) private var mediaDetailAgeRatingEnabled = MediaDetailAgeRatingSettings.defaultEnabled
     @AppStorage(MediaDetailSimilarTitlesSettings.enabledKey) private var mediaDetailSimilarTitlesEnabled = MediaDetailSimilarTitlesSettings.defaultEnabled
     @AppStorage(ExperimentalMediaDesignPreset.storageKey) private var experimentalDesignPreset = ExperimentalMediaDesignPreset.defaultValue.rawValue
     @AppStorage(ExperimentalHeroBleedLevel.storageKey) private var experimentalHeroBleedLevel = ExperimentalHeroBleedLevel.defaultValue.rawValue
@@ -1653,6 +1676,15 @@ struct MediaDetailView: View {
 
     private var detailHeroImageURL: String? {
 #if !os(tvOS)
+        // The alternate-poster setting belongs to the phone detail hero, not to
+        // one particular design preset.  Previously it was gated by the
+        // experimental layout, so the visible setting was a no-op in the
+        // standard layout.
+        if !isIPad, mediaDetailTitleArtworkEnabled, mediaDetailAlternatePosterEnabled,
+           let alternatePosterURL {
+            return alternatePosterURL
+        }
+
         if ExperimentalFeatureState.isEnabledAtLaunch && !isIPad && !isTvOS {
             if searchResult.isMovie {
                 return movieDetail?.fullPosterURL
@@ -1877,10 +1909,29 @@ struct MediaDetailView: View {
         searchResult.isMovie ? (movieDetail?.voteAverage ?? searchResult.voteAverage) : (tvShowDetail?.voteAverage ?? searchResult.voteAverage)
     }
 
+    private var detailAgeRating: String? {
+        if searchResult.isMovie {
+            guard let releaseDates = movieDetail?.releaseDates else { return nil }
+            if let USRatings = releaseDates.results.first(where: { $0.iso31661 == "US" })?.releaseDates,
+               let rating = USRatings.first(where: { !$0.certification.isEmpty })?.certification {
+                return rating
+            }
+            return releaseDates.results
+                .flatMap(\.releaseDates)
+                .first(where: { !$0.certification.isEmpty })?
+                .certification
+        }
+
+        guard let contentRatings = tvShowDetail?.contentRatings else { return nil }
+        return contentRatings.results.first(where: { $0.iso31661 == "US" && !$0.rating.isEmpty })?.rating
+            ?? contentRatings.results.first(where: { !$0.rating.isEmpty })?.rating
+    }
+
     @ViewBuilder
     private var detailRatingChips: some View {
         let tmdbRating = detailVoteAverage
-        if (tmdbRating ?? 0) > 0 || traktRating != nil || (isAnimeShow && animeRating?.source == .myAnimeList) {
+        let ageRating = mediaDetailAgeRatingEnabled ? detailAgeRating : nil
+        if (tmdbRating ?? 0) > 0 || traktRating != nil || (isAnimeShow && animeRating?.source == .myAnimeList) || ageRating != nil {
             HStack(spacing: isIPad ? 15 : 11) {
                 if let tmdbRating, tmdbRating > 0 {
                     ratingChip(label: "TMDB", value: String(format: "%.1f", tmdbRating), tint: .cyan)
@@ -1892,6 +1943,10 @@ struct MediaDetailView: View {
 
                 if isAnimeShow, let animeRating, animeRating.source == .myAnimeList {
                     ratingChip(label: "MAL", value: String(format: "%.1f", animeRating.value), tint: .blue)
+                }
+
+                if let ageRating {
+                    ratingChip(label: "Age", value: ageRating, tint: .orange)
                 }
             }
             .lineLimit(1)
@@ -4419,6 +4474,7 @@ struct MediaDetailView: View {
                 self.synopsis = cached.synopsis
                 self.romajiTitle = cached.romajiTitle
                 self.logoURL = cached.logoURL
+                self.alternatePosterURL = cached.alternatePosterURL
                 self.isAnimeShow = cached.isAnimeShow
                 self.animeRating = cached.animeRating
                 self.anilistEpisodes = cached.anilistEpisodes
@@ -4457,6 +4513,7 @@ struct MediaDetailView: View {
         animeSeasonAniListIds = [:]
         animeSeasonKitsuIds = [:]
         animeSpecialEntries = []
+        alternatePosterURL = nil
         isLoadingAnimeSpecials = false
         traktComments = []
         traktRating = nil
@@ -4490,6 +4547,11 @@ struct MediaDetailView: View {
                         if let logo = tmdbService.getBestLogo(from: images, preferredLanguage: selectedLanguage) {
                             self.logoURL = logo.fullURL
                         }
+                        self.alternatePosterURL = tmdbService.getBestAlternatePoster(
+                            from: images,
+                            excluding: [detail.posterPath, self.searchResult.posterPath],
+                            preferredLanguage: selectedLanguage
+                        )?.fullURL
                         self.castMembers = credits?.cast ?? []
                         self.animeRating = nil
                         self.animeSpecialEntries = []
@@ -4506,6 +4568,7 @@ struct MediaDetailView: View {
                             synopsis: self.synopsis,
                             romajiTitle: self.romajiTitle,
                             logoURL: self.logoURL,
+                            alternatePosterURL: self.alternatePosterURL,
                             isAnimeShow: false,
                             animeRating: nil,
                             anilistEpisodes: nil,
@@ -4685,6 +4748,13 @@ struct MediaDetailView: View {
                         if let images, let logo = tmdbService.getBestLogo(from: images, preferredLanguage: selectedLanguage) {
                             self.logoURL = logo.fullURL
                         }
+                        self.alternatePosterURL = images.flatMap {
+                            tmdbService.getBestAlternatePoster(
+                                from: $0,
+                                excluding: [detail.posterPath, self.searchResult.posterPath],
+                                preferredLanguage: selectedLanguage
+                            )?.fullURL
+                        }
                         self.selectedEpisodeForSearch = nil
                         self.isLoading = false
                         self.hasLoadedContent = true
@@ -4697,6 +4767,7 @@ struct MediaDetailView: View {
                             synopsis: self.synopsis,
                             romajiTitle: self.romajiTitle,
                             logoURL: self.logoURL,
+                            alternatePosterURL: self.alternatePosterURL,
                             isAnimeShow: self.isAnimeShow,
                             animeRating: self.animeRating,
                             anilistEpisodes: self.anilistEpisodes,

@@ -3,8 +3,21 @@ import Combine
 #if !os(tvOS)
 import Nuke
 #endif
+#if os(iOS) && canImport(GoogleCast)
+import GoogleCast
+#endif
 
 class AppDelegate: NSObject, UIApplicationDelegate {
+#if os(iOS) && canImport(GoogleCast)
+    func application(
+        _ application: UIApplication,
+        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
+    ) -> Bool {
+        GoogleCastBootstrap.configure()
+        return true
+    }
+#endif
+
 #if !os(tvOS)
     private static var orientationLocksByScene: [String: UIInterfaceOrientationMask] = [:]
 
@@ -159,6 +172,11 @@ struct SoraApp: App {
                 }
             }
 #if os(iOS)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+#if canImport(GoogleCast)
+                GoogleCastMiniControllerBar()
+#endif
+            }
             .modifier(WatchTogetherJoinPresentation())
 #endif
             .modifier(AppPerformanceOverlayPresentation(

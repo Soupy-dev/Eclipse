@@ -437,6 +437,9 @@ struct ModulesSearchResultsSheet: View {
     @State private var showingResolvedServiceStreamAlert = false
     private static let maxRetainedServiceResultsPerService = 300
     private static let maxVisibleServiceResultsPerService = 80
+    private static let maxRetainedServiceStreamOptions = 300
+    private static let maxInspectedServiceStreamEntries = 1_200
+    private static let maxMetadataValuesPerField = 32
     private static let maxRetainedStremioStreamsPerAddon = 300
     private static let maxVisibleStremioStreamsPerAddon = 80
     // Probes are intentionally bounded because timed-out provider networking can outlive its JS
@@ -947,12 +950,18 @@ struct ModulesSearchResultsSheet: View {
 
     private func visibleResolvedServiceStreams(for service: Service) -> [StremioStyleResolvedServiceStream] {
         var visible: [StremioStyleResolvedServiceStream] = []
+        let configuration = StreamLanguageFilter.configuration(
+            sourceId: SourceHealth.serviceId(service)
+        )
         for result in stremioStyleServiceCandidates(for: service) {
             let key = stremioStyleServiceResolutionKey(service: service, result: result)
             guard case .resolved(let resolvedStreams) = stremioStyleServiceResolutionStates[key] else {
                 continue
             }
-            for resolved in resolvedStreams where !filteredServiceStreamOptions([resolved.option], service: service).isEmpty {
+            for resolved in resolvedStreams where serviceStreamOptionIsVisible(
+                resolved.option,
+                configuration: configuration
+            ) {
                 visible.append(resolved)
                 if visible.count == Self.maxVisibleServiceResultsPerService {
                     return visible
@@ -2239,14 +2248,22 @@ struct ModulesSearchResultsSheet: View {
             return options
         }
         return options.filter { option in
-            !StreamLanguageFilter.shouldHide(
-                languageHints: option.languageHints,
-                metadata: [option.name, option.url] + option.metadataHints,
-                configuration: configuration,
-                originalAudioLanguage: originalAudioLanguage,
-                isAnime: hasAnimeLookupContext
-            )
+            serviceStreamOptionIsVisible(option, configuration: configuration)
         }
+    }
+
+    private func serviceStreamOptionIsVisible(
+        _ option: StreamOption,
+        configuration: StreamLanguageFilter.Configuration?
+    ) -> Bool {
+        guard let configuration else { return true }
+        return !StreamLanguageFilter.shouldHide(
+            languageHints: option.languageHints,
+            metadata: [option.name, option.url] + option.metadataHints,
+            configuration: configuration,
+            originalAudioLanguage: originalAudioLanguage,
+            isAnime: hasAnimeLookupContext
+        )
     }
 
     @MainActor
@@ -3889,12 +3906,12 @@ struct ModulesSearchResultsSheet: View {
         }
 
         // Gather ALL subtitles from the stream (not just the first)
-        let allSubtitles: [(url: String, lang: String?)] = (stream.subtitles ?? []).compactMap { sub in
+        let allSubtitles: [(url: String, name: String)] = (stream.subtitles ?? []).compactMap { sub in
             guard let url = sub.url, !url.isEmpty else { return nil }
-            return (url: url, lang: sub.lang)
+            return (url: url, name: sub.playbackDisplayName)
         }
         let subtitleURLs = allSubtitles.map { $0.url }
-        let subtitleNames = allSubtitles.map { $0.lang ?? "Unknown" }
+        let subtitleNames = allSubtitles.map { $0.name }
 
         if downloadMode {
 #if os(tvOS)
@@ -5005,7 +5022,8 @@ struct ModulesSearchResultsSheet: View {
         var availableStreams: [StreamOption] = []
         
         if let sources = sources, !sources.isEmpty {
-            for (idx, source) in sources.enumerated() {
+            for (idx, source) in sources.prefix(Self.maxInspectedServiceStreamEntries).enumerated() {
+                guard availableStreams.count < Self.maxRetainedServiceStreamOptions else { break }
                 guard let rawUrl = firstStringValue(in: source, keys: ["streamUrl", "url", "file", "src", "link", "stream"]), !rawUrl.isEmpty else { continue }
                 let title = ["title", "name", "label", "quality"]
                     .compactMap { source[$0] as? String }
@@ -5036,8 +5054,9 @@ struct ModulesSearchResultsSheet: View {
         var options: [StreamOption] = []
         var index = 0
         var unnamedCount = 1
+        let inspectedCount = min(streams.count, Self.maxInspectedServiceStreamEntries)
         
-        while index < streams.count {
+        while index < inspectedCount, options.count < Self.maxRetainedServiceStreamOptions {
             let entry = streams[index]
             if isURL(entry) {
                 options.append(StreamOption(name: "Stream \(unnamedCount)", url: entry, headers: nil, subtitle: nil, subtitleTracks: []))
@@ -5045,7 +5064,7 @@ struct ModulesSearchResultsSheet: View {
                 index += 1
             } else {
                 let nextIndex = index + 1
-                if nextIndex < streams.count, isURL(streams[nextIndex]) {
+                if nextIndex < inspectedCount, isURL(streams[nextIndex]) {
                     options.append(StreamOption(name: entry, url: streams[nextIndex], headers: nil, subtitle: nil, subtitleTracks: [], metadataHints: [entry]))
                     index += 2
                 } else {
@@ -5079,7 +5098,7 @@ struct ModulesSearchResultsSheet: View {
                 return [value]
             }
             if let values = rawValue as? [Any] {
-                return values.compactMap(streamMetadataString(from:))
+                return values.prefix(Self.maxMetadataValuesPerField).compactMap(streamMetadataString(from:))
             }
             return []
         }

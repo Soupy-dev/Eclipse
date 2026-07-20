@@ -6,12 +6,14 @@ import AVKit
 enum EclipsePlatform: String, Sendable {
     case iOS
     case tvOS
+    case macOS
 }
 
 enum SettingScope: Sendable {
     case shared
     case iOS
     case tvOS
+    case macOS
     case reader
 }
 
@@ -51,6 +53,8 @@ struct SettingDescriptor<ID: Hashable>: Identifiable {
             return .hidden(reason: "This setting applies only to iPhone and iPad.")
         case .tvOS where capabilities.platform != .tvOS:
             return .hidden(reason: "This setting applies only to Apple TV.")
+        case .macOS where capabilities.platform != .macOS:
+            return .hidden(reason: "This setting applies only to Mac.")
         case .reader where !capabilities.supportsReader:
             return .hidden(reason: "Reader mode is not part of the Apple TV app.")
         default:
@@ -97,6 +101,23 @@ struct PlatformCapabilities: Equatable, Sendable {
             supportsMPV: true,
             supportsStoreKit: true,
             supportsCloudKit: true,
+            supportsGitHubUpdates: false
+        )
+#elseif os(macOS)
+        return PlatformCapabilities(
+            platform: .macOS,
+            supportsReader: true,
+            supportsDownloads: true,
+            supportsBrowserAutomation: true,
+            supportsFileSharing: true,
+            supportsTouchInput: false,
+            supportsCellularSettings: false,
+            supportsExternalPlayers: true,
+            supportsPictureInPicture: AVPictureInPictureController.isPictureInPictureSupported(),
+            supportsMPV: true,
+            supportsStoreKit: true,
+            supportsCloudKit: true,
+            // Mac App Store builds must receive updates through the App Store.
             supportsGitHubUpdates: false
         )
 #else

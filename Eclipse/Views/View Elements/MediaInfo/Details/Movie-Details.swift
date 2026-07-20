@@ -3,6 +3,7 @@ import SwiftUI
 struct MovieDetailsSection: View {
     let movie: TMDBMovieDetail?
     var compactHeroMetadata: Bool = false
+    @AppStorage(MediaDetailAgeRatingSettings.enabledKey) private var showsAgeRating = MediaDetailAgeRatingSettings.defaultEnabled
     
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -31,7 +32,7 @@ struct MovieDetailsSection: View {
                         DetailRow(title: "Rating", value: String(format: "%.1f/10", movie.voteAverage))
                     }
                     
-                    if let ageRating = getAgeRating(from: movie.releaseDates) {
+                    if showsAgeRating, let ageRating = getAgeRating(from: movie.releaseDates) {
                         DetailRow(title: "Age Rating", value: ageRating)
                     }
                     

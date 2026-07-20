@@ -413,7 +413,9 @@ class NetworkFetchSimpleMonitor: NSObject, ObservableObject {
 
     private func setupWebView() {
         let config = WKWebViewConfiguration()
+#if os(iOS)
         config.allowsInlineMediaPlayback = true
+#endif
         config.mediaTypesRequiringUserActionForPlayback = []
 
         let jsCode = """
@@ -721,7 +723,9 @@ class NetworkFetchMonitor: NSObject, ObservableObject {
     
     private func setupWebView() {
         let config = WKWebViewConfiguration()
+#if os(iOS)
         config.allowsInlineMediaPlayback = true
+#endif
         config.mediaTypesRequiringUserActionForPlayback = []
 
         let jsCode = """

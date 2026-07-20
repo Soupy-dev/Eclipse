@@ -53,6 +53,9 @@ final class MPVTVRenderer {
     private var lastTrackSignature = ""
     private var lastVideoConfigurationSignature = ""
     private var lifecycleGeneration: UInt64 = 0
+    private var lastLoggedPictureInPictureDiagnosticsSignature = ""
+    private var lastLoggedPictureInPicturePressureTotal = 0
+    private var lastLoggedAudioRecoveryCount = 0
 
     var currentTime: Double { renderer.currentTime }
     var duration: Double { renderer.duration }
@@ -103,6 +106,10 @@ final class MPVTVRenderer {
         if state == .stopping {
             // MPVKit teardown is deliberately asynchronous. Never make a caller believe a new
             // request started while the previous handle and GPU work are still draining.
+            Logger.shared.log(
+                "[MPVTVRenderer] start rejected reason=teardown-in-progress renderer={\(pictureInPictureDebugSnapshot())}",
+                type: "MPV"
+            )
             throw MPVGPUPlayerRendererError.teardownInProgress
         }
         guard state == .idle || state == .stopped else { return }
@@ -116,6 +123,13 @@ final class MPVTVRenderer {
         pendingResumePosition = resolvedResumePosition(for: request)
         hasRenderedFirstFrame = false
         didReportFatalFailure = false
+        lastLoggedPictureInPictureDiagnosticsSignature = ""
+        lastLoggedPictureInPicturePressureTotal = 0
+        lastLoggedAudioRecoveryCount = 0
+        Logger.shared.log(
+            "[MPVTVRenderer] start begin lifecycleGeneration=\(lifecycleGeneration)",
+            type: "MPV"
+        )
         audioSession.activate()
         updateState(.loading)
 
@@ -131,7 +145,15 @@ final class MPVTVRenderer {
             renderer.play()
             startPositionUpdates()
             scheduleStartupTimeout()
+            Logger.shared.log(
+                "[MPVTVRenderer] start completed lifecycleGeneration=\(lifecycleGeneration) renderer={\(pictureInPictureDebugSnapshot())}",
+                type: "MPV"
+            )
         } catch {
+            Logger.shared.log(
+                "[MPVTVRenderer] start failed error=\(error) renderer={\(pictureInPictureDebugSnapshot())}",
+                type: "MPV"
+            )
             fail(error.localizedDescription, beforeFirstFrame: true)
             throw error
         }
@@ -139,6 +161,10 @@ final class MPVTVRenderer {
 
     func stop() {
         guard state != .stopped, state != .stopping else { return }
+        Logger.shared.log(
+            "[MPVTVRenderer] stop requested lifecycleGeneration=\(lifecycleGeneration) renderer={\(pictureInPictureDebugSnapshot())}",
+            type: "MPV"
+        )
         lifecycleGeneration &+= 1
         startupTimeout?.cancel()
         startupTimeout = nil
@@ -152,6 +178,10 @@ final class MPVTVRenderer {
             await self.renderer.waitUntilStopped()
             self.audioSession.deactivate()
             self.updateState(.stopped)
+            Logger.shared.log(
+                "[MPVTVRenderer] stop drained lifecycleGeneration=\(self.lifecycleGeneration)",
+                type: "MPV"
+            )
         }
     }
 
@@ -299,14 +329,40 @@ final class MPVTVRenderer {
 
     func preparePictureInPicture() async throws {
         guard canStartPictureInPicture else {
+            Logger.shared.log(
+                "[MPVTVRenderer] PiP prepare blocked reason=unavailable renderer={\(pictureInPictureDebugSnapshot())}",
+                type: "MPV"
+            )
             throw MPVGPUPlayerRendererError.pictureInPictureUnavailable("tvOS PiP is unavailable")
         }
-        try await renderer.preparePictureInPicture()
+        Logger.shared.log(
+            "[MPVTVRenderer] PiP prepare begin renderer={\(pictureInPictureDebugSnapshot())}",
+            type: "MPV"
+        )
+        do {
+            try await renderer.preparePictureInPicture()
+        } catch {
+            Logger.shared.log(
+                "[MPVTVRenderer] PiP prepare failed error=\(error) renderer={\(pictureInPictureDebugSnapshot())}",
+                type: "MPV"
+            )
+            throw error
+        }
+        let diagnostics = renderer.diagnosticsSnapshot()
+        logPictureInPictureDiagnosticsIfNeeded(diagnostics, reason: "prepare-ready")
+        Logger.shared.log(
+            "[MPVTVRenderer] PiP prepare ready renderer={\(pictureInPictureDebugSnapshot())}",
+            type: "MPV"
+        )
     }
 
     func beginPictureInPicture() {
         renderer.beginPictureInPicture()
         updateState(.pictureInPicture)
+        Logger.shared.log(
+            "[MPVTVRenderer] PiP activate renderer={\(pictureInPictureDebugSnapshot())}",
+            type: "MPV"
+        )
     }
 
     func endPictureInPicture(restoringInlinePlayback: Bool = true) {
@@ -324,19 +380,33 @@ final class MPVTVRenderer {
         restoringInlinePlayback: Bool = true
     ) async -> Bool {
         let generation = lifecycleGeneration
-        guard state != .stopping, state != .stopped else { return false }
+        guard state != .stopping, state != .stopped else {
+            Logger.shared.log(
+                "[MPVTVRenderer] PiP restore blocked state=\(stateDescription(state)) renderer={\(pictureInPictureDebugSnapshot())}",
+                type: "MPV"
+            )
+            return false
+        }
+
+        Logger.shared.log(
+            "[MPVTVRenderer] PiP restore begin inline=\(restoringInlinePlayback) lifecycleGeneration=\(generation) renderer={\(pictureInPictureDebugSnapshot())}",
+            type: "MPV"
+        )
 
         let restored = await renderer.endPictureInPictureAndWait(
             restoringInlinePlayback: restoringInlinePlayback
         )
-        guard restored,
-              generation == lifecycleGeneration,
-              state != .stopping,
-              state != .stopped else {
-            return false
+        let lifecycleIsCurrent = generation == lifecycleGeneration
+        let stateAllowsRestore = state != .stopping && state != .stopped
+        let accepted = restored && lifecycleIsCurrent && stateAllowsRestore
+        if accepted {
+            updateState(isPaused ? .paused : .playing)
         }
-        updateState(isPaused ? .paused : .playing)
-        return true
+        Logger.shared.log(
+            "[MPVTVRenderer] PiP restore end nativeRestored=\(restored) accepted=\(accepted) lifecycleCurrent=\(lifecycleIsCurrent) stateAllowsRestore=\(stateAllowsRestore) renderer={\(pictureInPictureDebugSnapshot())}",
+            type: "MPV"
+        )
+        return accepted
     }
 
     func updatePictureInPictureRenderSize(_ size: CGSize) {
@@ -349,6 +419,10 @@ final class MPVTVRenderer {
 
     func diagnosticsSnapshot() -> MPVGPUPlayerRendererDiagnostics {
         renderer.diagnosticsSnapshot()
+    }
+
+    func pictureInPictureDebugSnapshot() -> String {
+        pictureInPictureDiagnosticsSummary(renderer.diagnosticsSnapshot())
     }
 
     private func configureCallbacks(generation: UInt64) {
@@ -376,6 +450,10 @@ final class MPVTVRenderer {
                       self.lifecycleGeneration == generation,
                       self.state != .stopping,
                       self.state != .stopped else { return }
+                Logger.shared.log(
+                    "[MPVTVRenderer] MPVKit requested PiP stop reason=\(reason) renderer={\(self.pictureInPictureDebugSnapshot())}",
+                    type: "MPV"
+                )
                 self.onPictureInPictureStopRequested?(reason)
             }
         }
@@ -416,6 +494,7 @@ final class MPVTVRenderer {
     }
 
     private func handleDiagnostics(_ diagnostics: MPVGPUPlayerRendererDiagnostics) {
+        logPictureInPictureDiagnosticsIfNeeded(diagnostics, reason: "callback")
         if !hasRenderedFirstFrame,
            diagnostics.videoWidth > 0,
            diagnostics.videoHeight > 0,
@@ -444,7 +523,12 @@ final class MPVTVRenderer {
             "playback ended with error", "mpv_initialize failed", "loadfile failed",
             "failed to open", "unrecognized file format", "fatal"
         ]
-        guard fatalMarkers.contains(where: lower.contains) else { return }
+        let isFatal = fatalMarkers.contains(where: lower.contains)
+        Logger.shared.log(
+            "[MPVTVRenderer] renderer error fatal=\(isFatal) message=\(message) renderer={\(pictureInPictureDebugSnapshot())}",
+            type: "MPV"
+        )
+        guard isFatal else { return }
         fail(message, beforeFirstFrame: !hasRenderedFirstFrame)
     }
 
@@ -453,6 +537,10 @@ final class MPVTVRenderer {
         didReportFatalFailure = true
         startupTimeout?.cancel()
         startupTimeout = nil
+        Logger.shared.log(
+            "[MPVTVRenderer] fatal failure beforeFirstFrame=\(beforeFirstFrame) message=\(message) renderer={\(pictureInPictureDebugSnapshot())}",
+            type: "MPV"
+        )
         updateState(.failed(message))
         if beforeFirstFrame {
             onStartupFailure?(message)
@@ -577,7 +665,95 @@ final class MPVTVRenderer {
     private func updateState(_ newState: State) {
         guard state != newState else { return }
         state = newState
+        Logger.shared.log(
+            "[MPVTVRenderer] state=\(stateDescription(newState)) renderer={\(pictureInPictureDebugSnapshot())}",
+            type: "MPV"
+        )
         onStateChange?(newState)
+    }
+
+    private func logPictureInPictureDiagnosticsIfNeeded(
+        _ diagnostics: MPVGPUPlayerRendererDiagnostics,
+        reason: String
+    ) {
+        let selectedBackend = diagnostics.selectedPictureInPictureBackend?.rawValue ?? "unselected"
+        let fallbackReason = sanitizedPictureInPictureDiagnosticText(
+            diagnostics.pictureInPictureFallbackReason
+        )
+        let transitionSignature = [
+            pictureInPictureStateDescription(diagnostics.pictureInPictureState),
+            diagnostics.pictureInPictureBackendPreference.rawValue,
+            selectedBackend,
+            fallbackReason,
+            String(diagnostics.activeMPVInstanceCount)
+        ].joined(separator: "|")
+        let pressureTotal = diagnostics.backpressureDropCount
+            + diagnostics.poolExhaustionDropCount
+            + diagnostics.staleGenerationDropCount
+        let transitionChanged = transitionSignature != lastLoggedPictureInPictureDiagnosticsSignature
+        let pressureDelta = pressureTotal - lastLoggedPictureInPicturePressureTotal
+        let pressureMilestone = pressureTotal != lastLoggedPictureInPicturePressureTotal
+            && (pressureTotal <= 3 || pressureDelta >= 60 || pressureDelta < 0)
+        let audioRecoveryChanged = diagnostics.audioRecoveryCount != lastLoggedAudioRecoveryCount
+        guard transitionChanged || pressureMilestone || audioRecoveryChanged else { return }
+
+        lastLoggedPictureInPictureDiagnosticsSignature = transitionSignature
+        lastLoggedPictureInPicturePressureTotal = pressureTotal
+        lastLoggedAudioRecoveryCount = diagnostics.audioRecoveryCount
+        Logger.shared.log(
+            "[MPVTVRenderer] PiP diagnostics reason=\(reason) \(pictureInPictureDiagnosticsSummary(diagnostics))",
+            type: "MPV"
+        )
+    }
+
+    private func pictureInPictureDiagnosticsSummary(
+        _ diagnostics: MPVGPUPlayerRendererDiagnostics
+    ) -> String {
+        let backend = diagnostics.selectedPictureInPictureBackend?.rawValue ?? "unselected"
+        let fallback = sanitizedPictureInPictureDiagnosticText(
+            diagnostics.pictureInPictureFallbackReason
+        )
+        let frameCount = diagnostics.pictureInPictureEnqueuedFrameCount
+        return "state=\(pictureInPictureStateDescription(diagnostics.pictureInPictureState)) preference=\(diagnostics.pictureInPictureBackendPreference.rawValue) selected=\(backend) fallback=\(fallback) instances=\(diagnostics.activeMPVInstanceCount) generation=\(diagnostics.pictureInPicturePreparationGeneration) prepareMs=\(String(format: "%.1f", diagnostics.pictureInPicturePreparationLatency * 1_000)) frames=\(frameCount) schedulerCoalesced=\(diagnostics.schedulerCoalescedRequestCount) backpressureDrops=\(diagnostics.backpressureDropCount) poolDrops=\(diagnostics.poolExhaustionDropCount) staleDrops=\(diagnostics.staleGenerationDropCount) inFlight=\(diagnostics.inFlightGPUFrameCount) gpuMs=\(String(format: "%.2f", diagnostics.lastGPULatencyMilliseconds)) epoch=\(diagnostics.timelineEpoch) rate=\(String(format: "%.2f", diagnostics.timelineRate)) pipResize=\(diagnostics.pictureInPictureResizeRequestCount)/\(diagnostics.pictureInPictureResizeApplicationCount)/\(diagnostics.pictureInPictureResizeCoalescedCount) inlineResize=\(diagnostics.inlineResizeRequestCount)/\(diagnostics.inlineResizeApplicationCount)/\(diagnostics.inlineResizeCoalescedCount) audioRecoveries=\(diagnostics.audioRecoveryCount)"
+    }
+
+    private func pictureInPictureStateDescription(_ state: MPVPictureInPictureState) -> String {
+        switch state {
+        case .idle:
+            return "idle"
+        case .preparing(let generation):
+            return "preparing(\(generation))"
+        case .ready(let generation):
+            return "ready(\(generation))"
+        case .active(let generation):
+            return "active(\(generation))"
+        case .restoring(let generation):
+            return "restoring(\(generation))"
+        case .failed(let generation, let reason):
+            return "failed(\(generation),\(sanitizedPictureInPictureDiagnosticText(reason)))"
+        }
+    }
+
+    private func sanitizedPictureInPictureDiagnosticText(_ text: String?) -> String {
+        guard let text, !text.isEmpty else { return "none" }
+        return text
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+    }
+
+    private func stateDescription(_ state: State) -> String {
+        switch state {
+        case .idle: return "idle"
+        case .loading: return "loading"
+        case .ready: return "ready"
+        case .playing: return "playing"
+        case .paused: return "paused"
+        case .pictureInPicture: return "picture-in-picture"
+        case .stopping: return "stopping"
+        case .stopped: return "stopped"
+        case .failed(let message):
+            return "failed(\(sanitizedPictureInPictureDiagnosticText(message)))"
+        }
     }
 }
 

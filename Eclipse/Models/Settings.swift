@@ -181,6 +181,27 @@ enum WatchTogetherSettings {
     }
 }
 
+/// The persisted user preference for Google Cast. Availability is separate from
+/// the preference itself so an iPhone/iPad setting can safely travel through
+/// backups or iCloud without a tvOS build silently changing it.
+enum GoogleCastSettings {
+    static let enabledKey = "googleCastEnabled"
+    static let defaultEnabled = true
+
+    static var isAvailableInCurrentBuild: Bool {
+#if os(iOS) && canImport(GoogleCast)
+        true
+#else
+        false
+#endif
+    }
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        guard defaults.object(forKey: enabledKey) != nil else { return defaultEnabled }
+        return defaults.bool(forKey: enabledKey)
+    }
+}
+
 /// Visual presets for Eclipse's MPV control overlay. The default deliberately
 /// preserves the player UI that shipped before skins were introduced.
 enum MPVPlayerSkin: String, CaseIterable, Identifiable {
@@ -3163,6 +3184,11 @@ class Settings: ObservableObject {
     var watchTogetherEnabled: Bool {
         get { WatchTogetherSettings.isEnabled() }
         set { UserDefaults.standard.set(newValue, forKey: WatchTogetherSettings.enabledKey) }
+    }
+
+    var googleCastEnabled: Bool {
+        get { GoogleCastSettings.isEnabled() }
+        set { UserDefaults.standard.set(newValue, forKey: GoogleCastSettings.enabledKey) }
     }
 
     var smartInAppPlayerChoosingEnabled: Bool {

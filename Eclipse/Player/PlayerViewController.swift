@@ -6,6 +6,9 @@ import AVFoundation
 #if os(iOS)
 import GroupActivities
 #endif
+#if os(iOS) && canImport(GoogleCast)
+import GoogleCast
+#endif
 #if canImport(Darwin)
 import Darwin
 #endif
@@ -48,6 +51,21 @@ final class PlayerPerformanceOverlayLabel: UILabel {
         )
     }
 }
+
+#if os(iOS) && canImport(GoogleCast)
+/// Google Cast owns the state artwork, but its image view expands to the full control bounds on
+/// some SDK/iOS combinations. Scale only that artwork so the 36 pt control keeps its full hit area.
+private final class PlayerCastButton: GCKUICastButton {
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        guard let imageView else { return }
+        imageView.contentMode = .scaleAspectFit
+        let artworkExtent = max(imageView.bounds.width, imageView.bounds.height)
+        let scale = artworkExtent > 0 ? min(1, 24 / artworkExtent) : 1
+        imageView.transform = CGAffineTransform(scaleX: scale, y: scale)
+    }
+}
+#endif
 
 #if !os(tvOS)
 private final class NextEpisodePreviewButton: UIButton {
@@ -502,6 +520,32 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         button.accessibilityHint = "Starts or manages secure synchronized playback with SharePlay"
         return button
     }()
+#if canImport(GoogleCast)
+    private let castButton: GCKUICastButton = {
+        let button = PlayerCastButton(frame: .zero)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.tintColor = .white
+        button.contentHorizontalAlignment = .center
+        button.contentVerticalAlignment = .center
+        button.contentMode = .center
+        button.imageView?.contentMode = .scaleAspectFit
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .vertical)
+        button.alpha = 0.0
+        button.accessibilityLabel = "Cast"
+        button.accessibilityHint = "Choose a Google Cast TV or streaming device"
+        return button
+    }()
+
+    private let castConflictButton: UIButton = {
+        let button = UIButton(type: .custom)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.backgroundColor = .clear
+        button.isHidden = true
+        button.accessibilityLabel = "Cast"
+        return button
+    }()
+#endif
 #endif
 
     private let playerTitleLabel: UILabel = {
@@ -1230,24 +1274,78 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let playbackLoadGeneration: Int
         let transitionAttemptID: Int
     }
+    private struct MPVPictureInPictureStopAuthorization {
+        let id: Int
+        let key: MPVPictureInPictureRestoreKey
+        let lifecycleGeneration: Int
+    }
+    private struct MPVBackgroundAudioFallbackKey: Equatable {
+        let lifecycleGeneration: Int
+        let loadGeneration: Int
+        let controllerIdentifier: ObjectIdentifier?
+        let transitionAttemptID: Int?
+    }
+    /// Captures the playing intent that authorized an automatic app-exit transition. Manual PiP
+    /// deliberately has no authorization so it can still be opened while playback is paused.
+    private struct MPVAutomaticPictureInPictureAuthorization {
+        let controllerIdentifier: ObjectIdentifier
+        let loadGeneration: Int
+        let transitionAttemptID: Int
+        let playbackIntentGeneration: Int
+    }
+    private var mpvPictureInPictureRestoreOperationID = 0
     private var mpvPictureInPictureRestoreOperation: (
+        id: Int,
         key: MPVPictureInPictureRestoreKey,
         task: Task<Bool, Never>
     )?
     private var mpvCompletedPictureInPictureRestore: (
+        id: Int,
         key: MPVPictureInPictureRestoreKey,
         restored: Bool
     )?
+    private var mpvPictureInPictureStopAuthorizationID = 0
+    private var mpvPictureInPictureStopAuthorization: MPVPictureInPictureStopAuthorization?
     private var mpvPiPPlaybackStateUpdateGeneration = 0
     private var mpvAppExitPiPStartRequested = false
     private var mpvPendingAppExitPiPWorkItem: DispatchWorkItem?
     private var mpvAppExitPiPSuppressedUntilForeground = false
+    /// UIApplication, UIScene, and SwiftUI scenePhase all publish overlapping lifecycle events.
+    /// Collapse them into one background/foreground transaction per owning playback scene so PiP
+    /// restoration, decoder validation, and PiP rewarming can never race one another.
+    private var mpvBackgroundLifecycleGeneration = 0
+    private var mpvBackgroundLifecycleIsArmed = false
+    private var mpvBackgroundLifecycleIsInForegroundPhase = false
+    private var mpvForegroundRecoveryRetryCount = 0
+    private var mpvForegroundRecoveryTask: Task<Void, Never>?
+    private var rendererPlaybackIntentGeneration = 0
+    private var mpvAutomaticPictureInPictureAuthorization: MPVAutomaticPictureInPictureAuthorization?
+    private var mpvBackgroundFallbackAutoPaused = false
+    private var mpvBackgroundFallbackPauseIntentGeneration: Int?
+    private var mpvBackgroundFallbackPauseLifecycleGeneration: Int?
+    private var mpvBackgroundAudioFallbackKey: MPVBackgroundAudioFallbackKey?
+    private var mpvBackgroundAudioFallbackDeadline: CFTimeInterval = 0
+    private var mpvBackgroundAudioFallbackWorkItem: DispatchWorkItem?
+    private var mpvPictureInPictureRendererHandoffGeneration = 0
+    private var mpvPictureInPictureRendererHandoffIsActive = false
+    private enum MPVForegroundRecoveryOutcome {
+        case completed
+        case retryInlineRestore
+        case failed
+    }
     private var initialURL: URL?
     private var initialPreset: PlayerPreset?
     private var initialHeaders: [String: String]?
     private var initialSubtitles: [String]?
     private var initialSubtitleNames: [String]?
     private var initialSubtitleHeadersByURL: [String: [String: String]]?
+#if os(iOS)
+    var activePlaybackRequest: PlaybackRequest?
+#if canImport(GoogleCast)
+    private var castLocalWasPausedBeforeHandoff = false
+    private var castLocalWasStopped = false
+#endif
+#endif
     /// Renderer-neutral audio/subtitle selection captured by PlaybackRequest. Coordinator-driven
     /// engine handoffs set this so Molten applies the AV session's latest language/visibility
     /// choices instead of re-reading global defaults. Legacy/direct construction leaves it nil.
@@ -1275,6 +1373,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let url: URL
         let preset: PlayerPreset
         let headers: [String: String]?
+        let playbackShouldResumeAfterLoad: Bool?
         let generation: Int
         let queuedAt: CFTimeInterval
     }
@@ -1373,6 +1472,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var nextEpisodeButtonMaxWidthConstraint: NSLayoutConstraint?
     private var nextEpisodeButtonBottomConstraint: NSLayoutConstraint?
 #endif
+#if os(iOS) && canImport(GoogleCast)
+    private var castButtonWidthConstraint: NSLayoutConstraint?
+    private var watchTogetherLeadingFromCastConstraint: NSLayoutConstraint?
+    private var wasGoogleCastControlEnabled: Bool?
+#endif
     
     private struct SubtitleTrackDescriptor {
         let id: Int
@@ -1433,7 +1537,18 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             logMPV("rendererStop requested cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) pipActive=\(pipController?.isPictureInPictureActive == true)")
         }
         mpvPiPPlaybackStateUpdateGeneration &+= 1
+        mpvForegroundRecoveryTask?.cancel()
+        mpvForegroundRecoveryTask = nil
+        mpvBackgroundLifecycleIsArmed = false
+        mpvBackgroundLifecycleIsInForegroundPhase = false
+        mpvBackgroundFallbackAutoPaused = false
+        mpvBackgroundFallbackPauseIntentGeneration = nil
+        mpvBackgroundFallbackPauseLifecycleGeneration = nil
+        cancelMPVBackgroundAudioFallback(reason: "renderer-stop")
+        mpvPictureInPictureRendererHandoffGeneration &+= 1
+        mpvPictureInPictureRendererHandoffIsActive = false
         invalidateMPVPictureInPictureRestoreOperation(reason: "renderer-stop")
+        invalidateMPVPictureInPictureStopAuthorization(reason: "renderer-stop")
         let pipState = mpvPictureInPictureControllerState()
         cancelMPVPictureInPictureStartRequests(reason: "renderer-stop")
         pipController?.setCanStartPictureInPictureAutomaticallyFromInline(false)
@@ -1462,7 +1577,22 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         await renderer.waitUntilStopped()
     }
     
-    private func rendererPlay() {
+    private func rendererPlay(recordingPlaybackIntent: Bool = true) {
+        if recordingPlaybackIntent {
+            // Any explicit transport command supersedes a pause Eclipse created solely because
+            // background PiP failed to start.
+            rendererPlaybackIntentGeneration &+= 1
+            mpvBackgroundFallbackAutoPaused = false
+            mpvBackgroundFallbackPauseIntentGeneration = nil
+            mpvBackgroundFallbackPauseLifecycleGeneration = nil
+        }
+#if os(iOS) && canImport(GoogleCast)
+        if GoogleCastCoordinator.shared.playIfRemote() {
+            updatePlayPauseButton(isPaused: false)
+            return
+        }
+        if GoogleCastCoordinator.shared.isHandoffLoadPending { return }
+#endif
         if vlcRenderer != nil {
             logVLCUI("rendererPlay requested cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) loading=\(isRendererLoading)", type: "Stream")
         } else {
@@ -1472,7 +1602,22 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         rendererSchedulePictureInPicturePlaybackStateUpdate()
     }
     
-    private func rendererPausePlayback() {
+    private func rendererPausePlayback(
+        preservingBackgroundFallbackOwnership: Bool = false
+    ) {
+        if !preservingBackgroundFallbackOwnership {
+            rendererPlaybackIntentGeneration &+= 1
+            mpvBackgroundFallbackAutoPaused = false
+            mpvBackgroundFallbackPauseIntentGeneration = nil
+            mpvBackgroundFallbackPauseLifecycleGeneration = nil
+        }
+#if os(iOS) && canImport(GoogleCast)
+        if GoogleCastCoordinator.shared.pauseIfRemote() {
+            updatePlayPauseButton(isPaused: true)
+            return
+        }
+        if GoogleCastCoordinator.shared.isHandoffLoadPending { return }
+#endif
         if vlcRenderer != nil {
             logVLCUI("rendererPause requested cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) loading=\(isRendererLoading)", type: "Stream")
         } else {
@@ -1483,6 +1628,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
     
     private func rendererTogglePause() {
+        rendererPlaybackIntentGeneration &+= 1
+        mpvBackgroundFallbackAutoPaused = false
+        mpvBackgroundFallbackPauseIntentGeneration = nil
+        mpvBackgroundFallbackPauseLifecycleGeneration = nil
+#if os(iOS) && canImport(GoogleCast)
+        if GoogleCastCoordinator.shared.togglePauseIfRemote() { return }
+        if GoogleCastCoordinator.shared.isHandoffLoadPending { return }
+#endif
         if vlcRenderer != nil {
             logVLCUI("rendererTogglePause requested paused=\(rendererIsPausedState()) loading=\(isRendererLoading) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))", type: "VLCPlayback")
         } else {
@@ -1671,6 +1824,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             Logger.shared.log("PlayerViewController: ignored absolute seek with invalid target=\(secondsText(seconds))", type: "Player")
             return
         }
+#if os(iOS) && canImport(GoogleCast)
+        if GoogleCastCoordinator.shared.seekIfRemote(to: seconds) { return }
+        if GoogleCastCoordinator.shared.isHandoffLoadPending { return }
+#endif
         if vlcRenderer != nil {
             logVLCUI("rendererSeek(to:) target=\(secondsText(seconds)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) loading=\(isRendererLoading)", type: "Progress")
         } else {
@@ -1692,6 +1849,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             Logger.shared.log("PlayerViewController: ignored relative seek with invalid delta=\(secondsText(seconds))", type: "Player")
             return
         }
+#if os(iOS) && canImport(GoogleCast)
+        if GoogleCastCoordinator.shared.seekIfRemote(by: seconds) { return }
+        if GoogleCastCoordinator.shared.isHandoffLoadPending { return }
+#endif
         if vlcRenderer != nil {
             logVLCUI("rendererSeek(by:) delta=\(secondsText(seconds)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) loading=\(isRendererLoading)", type: "Progress")
         } else {
@@ -1703,6 +1864,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
     
     private func rendererSetSpeed(_ speed: Double, notifyWatchTogether: Bool = true) {
+#if os(iOS) && canImport(GoogleCast)
+        if GoogleCastCoordinator.shared.setPlaybackRateIfRemote(speed) {
+            updateSpeedMenu()
+            return
+        }
+        if GoogleCastCoordinator.shared.isHandoffLoadPending { return }
+#endif
         let previousSpeed = rendererGetSpeed()
         if vlcRenderer != nil {
             logVLCUI("rendererSetSpeed \(String(format: "%.2f", speed))", type: "Player")
@@ -1720,7 +1888,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
     
     private func rendererGetSpeed() -> Double {
-        renderer.getSpeed()
+#if os(iOS) && canImport(GoogleCast)
+        if let speed = GoogleCastCoordinator.shared.remotePlaybackRate { return speed }
+#endif
+        return renderer.getSpeed()
     }
 
     private func currentMediaProgressKey(for info: MediaInfo? = nil) -> String? {
@@ -2086,7 +2257,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
     
     private func rendererIsPausedState() -> Bool {
-        renderer.isPausedState
+#if os(iOS) && canImport(GoogleCast)
+        if let isPaused = GoogleCastCoordinator.shared.remoteIsPaused { return isPaused }
+#endif
+        return renderer.isPausedState
     }
 
     private func rendererIsPictureInPictureAvailable() -> Bool {
@@ -2144,6 +2318,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                   controller.playbackLoadGeneration == loadGeneration,
                   self.isRunning,
                   !self.isClosing else { return }
+#if os(iOS) && canImport(GoogleCast)
+            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
             controller.updatePlaybackState()
         }
     }
@@ -2151,6 +2328,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func armMPVPictureInPictureController(_ controller: PiPController, reason: String) {
         guard pipController === controller,
               controller.playbackLoadGeneration == playbackLoadGeneration else { return }
+        invalidateMPVPictureInPictureStopAuthorization(reason: "new-transition-\(reason)")
         if let restoreKey = mpvPictureInPictureRestoreOperation?.key,
            restoreKey.transitionAttemptID != mpvPiPStartAttemptID {
             invalidateMPVPictureInPictureRestoreOperation(reason: "new-transition-\(reason)")
@@ -2162,9 +2340,73 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         )
     }
 
+    private func authorizeMPVAutomaticPictureInPicture(
+        for controller: PiPController,
+        source: String
+    ) {
+        guard pipController === controller,
+              controller.playbackLoadGeneration == playbackLoadGeneration else { return }
+        mpvAutomaticPictureInPictureAuthorization = MPVAutomaticPictureInPictureAuthorization(
+            controllerIdentifier: ObjectIdentifier(controller),
+            loadGeneration: playbackLoadGeneration,
+            transitionAttemptID: controller.transitionAttemptID,
+            playbackIntentGeneration: rendererPlaybackIntentGeneration
+        )
+        logPictureInPicture(
+            "authorized automatic PiP source=\(source) loadGeneration=\(playbackLoadGeneration) attemptID=\(controller.transitionAttemptID) intent=\(rendererPlaybackIntentGeneration)"
+        )
+    }
+
+    private func clearMPVAutomaticPictureInPictureAuthorization(reason: String) {
+        guard let authorization = mpvAutomaticPictureInPictureAuthorization else { return }
+        mpvAutomaticPictureInPictureAuthorization = nil
+        logPictureInPicture(
+            "cleared automatic PiP authorization reason=\(reason) loadGeneration=\(authorization.loadGeneration) attemptID=\(authorization.transitionAttemptID) intent=\(authorization.playbackIntentGeneration)"
+        )
+    }
+
+    /// Returns true for manual PiP (which has no automatic authorization) and for the exact
+    /// automatic attempt whose original playing intent is still current. Call this after trying
+    /// to resume an Eclipse-owned background fallback pause so a genuine user/session pause can
+    /// never be mistaken for that recoverable pause.
+    private func validateMPVAutomaticPictureInPicturePlaybackIntent(
+        for controller: PiPController,
+        attemptID: Int,
+        source: String
+    ) -> Bool {
+        guard let authorization = mpvAutomaticPictureInPictureAuthorization else {
+            return true
+        }
+        let identityMatches = authorization.controllerIdentifier == ObjectIdentifier(controller)
+            && authorization.loadGeneration == playbackLoadGeneration
+            && authorization.loadGeneration == controller.playbackLoadGeneration
+            && authorization.transitionAttemptID == attemptID
+            && controller.transitionAttemptID == attemptID
+        let intentMatches = authorization.playbackIntentGeneration == rendererPlaybackIntentGeneration
+        let paused = rendererIsPausedState()
+        guard identityMatches, intentMatches else {
+            logPictureInPicture(
+                "automatic PiP authorization rejected source=\(source) identityMatches=\(identityMatches) intentMatches=\(intentMatches) paused=\(paused) expectedIntent=\(authorization.playbackIntentGeneration) currentIntent=\(rendererPlaybackIntentGeneration) expectedAttempt=\(authorization.transitionAttemptID) callbackAttempt=\(attemptID)"
+            )
+            abortMPVAppExitPictureInPictureForPlaybackIntentChange(
+                controller: controller,
+                source: source,
+                expectedLoadGeneration: authorization.loadGeneration,
+                expectedIntentGeneration: authorization.playbackIntentGeneration
+            )
+            return false
+        }
+        return true
+    }
+
     private func installMPVPictureInPictureController(reason: String) {
         guard isMPVRenderer, !isVLCPlayer else { return }
+        clearMPVAutomaticPictureInPictureAuthorization(
+            reason: "install-controller-\(reason)"
+        )
         invalidateMPVPictureInPictureRestoreOperation(reason: "install-controller-\(reason)")
+        invalidateMPVPictureInPictureStopAuthorization(reason: "install-controller-\(reason)")
+        rendererSetPictureInPictureSourcePreparedForAutomaticStart(false)
         let previous = pipController
         previous?.delegate = nil
         previous?.invalidateForReplacement()
@@ -2189,6 +2431,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         attemptID: Int? = nil,
         requiresRunning: Bool = true
     ) -> Bool {
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else {
+            logPictureInPicture("ignored PiP callback while Google Cast owns or is taking playback source=\(source)")
+            return false
+        }
+#endif
         let expectedAttempt = mpvExpectedPiPCallbackAttemptID
         let callbackAttempt = attemptID ?? controller.transitionAttemptID
         let attemptIsCurrentOrActive = callbackAttempt == mpvPiPStartAttemptID
@@ -2219,6 +2467,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                   controller.playbackLoadGeneration == self.playbackLoadGeneration,
                   self.isRunning,
                   !self.isClosing else { return }
+#if os(iOS) && canImport(GoogleCast)
+            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
 
             let loadGeneration = self.playbackLoadGeneration
             let transitionAttemptID = controller.transitionAttemptID
@@ -2231,6 +2482,43 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self.cancelMPVPictureInPictureStartRequests(reason: "renderer-failure")
             self.releaseMPVAppExitPictureInPictureOwnership(reason: "renderer-failure")
             controller.setCanStartPictureInPictureAutomaticallyFromInline(false)
+
+            if reason.hasPrefix("native-activation-not-active") {
+                // MPVKit synchronously rejected sink activation. Stop immediately, then retire the
+                // AVKit controller on the next main turn so this delegate callback can unwind before
+                // the old controller is detached. A late didStart then has no delegate/source route.
+                controller.stopPictureInPicture(source: "renderer-activation-rejected")
+                self.rendererFinishPictureInPicture()
+                DispatchQueue.main.async { [weak self, weak controller] in
+                    guard let self,
+                          let controller,
+                          self.pipController === controller,
+                          controller.playbackLoadGeneration == self.playbackLoadGeneration,
+                          self.isRunning,
+                          !self.isClosing else { return }
+                    controller.setCanStartPictureInPictureAutomaticallyFromInline(false)
+                    controller.stopPictureInPicture(source: "renderer-activation-rejected-retire")
+                    self.installMPVPictureInPictureController(
+                        reason: "renderer-activation-rejected"
+                    )
+                    self.rendererSetPictureInPictureSourcePreparedForAutomaticStart(false)
+                    if self.mpvBackgroundLifecycleIsArmed {
+                        self.scheduleMPVBackgroundAudioFallback(
+                            source: "renderer-activation-rejected",
+                            delay: 0.25
+                        )
+                    }
+                    self.updatePiPButtonVisibility()
+                }
+                return
+            }
+
+            if self.mpvBackgroundLifecycleIsArmed {
+                self.scheduleMPVBackgroundAudioFallback(
+                    source: "renderer-failure-\(reason)",
+                    delay: 0.25
+                )
+            }
 
             guard active || pending else {
                 self.rendererFinishPictureInPicture()
@@ -2252,6 +2540,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                       !self.isClosing,
                       !controller.isPictureInPictureActive,
                       !controller.isPictureInPictureStartPending else { return }
+#if os(iOS) && canImport(GoogleCast)
+                guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
                 self.rendererFinishPictureInPicture()
                 self.updatePiPButtonVisibility()
             }
@@ -2269,15 +2560,26 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func rendererFinishPictureInPicture() {
+        mpvPictureInPictureRendererHandoffGeneration &+= 1
+        mpvPictureInPictureRendererHandoffIsActive = false
         renderer.finishPictureInPicture()
     }
 
     private func rendererFinishPictureInPictureAndWait(
         restoringInlinePlayback: Bool
     ) async -> Bool {
-        await renderer.finishPictureInPictureAndWait(
+        mpvPictureInPictureRendererHandoffGeneration &+= 1
+        let finishGeneration = mpvPictureInPictureRendererHandoffGeneration
+        mpvPictureInPictureRendererHandoffIsActive = false
+        let restored = await renderer.finishPictureInPictureAndWait(
             restoringInlinePlayback: restoringInlinePlayback
         )
+        // A new AVKit start may have activated the renderer while an older inline restore was
+        // suspended. Never let completion of the old operation clear that newer handoff.
+        if finishGeneration == mpvPictureInPictureRendererHandoffGeneration {
+            mpvPictureInPictureRendererHandoffIsActive = false
+        }
+        return restored
     }
 
     private func mpvPictureInPictureRestoreKey(
@@ -2290,10 +2592,81 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         )
     }
 
+    private func authorizeMPVPictureInPictureStop(
+        for controller: PiPController,
+        source: String
+    ) {
+        mpvPictureInPictureStopAuthorizationID &+= 1
+        let authorization = MPVPictureInPictureStopAuthorization(
+            id: mpvPictureInPictureStopAuthorizationID,
+            key: mpvPictureInPictureRestoreKey(for: controller),
+            lifecycleGeneration: mpvBackgroundLifecycleGeneration
+        )
+        mpvPictureInPictureStopAuthorization = authorization
+        logPictureInPicture(
+            "authorized PiP stop restore source=\(source) authorization=\(authorization.id) lifecycleGeneration=\(authorization.lifecycleGeneration) attemptID=\(authorization.key.transitionAttemptID)"
+        )
+    }
+
+    private func currentMPVPictureInPictureStopAuthorization(
+        _ capturedAuthorization: MPVPictureInPictureStopAuthorization? = nil,
+        for controller: PiPController
+    ) -> MPVPictureInPictureStopAuthorization? {
+        guard let currentAuthorization = mpvPictureInPictureStopAuthorization else {
+            return nil
+        }
+        if let capturedAuthorization,
+           capturedAuthorization.id != currentAuthorization.id {
+            return nil
+        }
+        let key = mpvPictureInPictureRestoreKey(for: controller)
+        guard currentAuthorization.key == key,
+              currentAuthorization.lifecycleGeneration == mpvBackgroundLifecycleGeneration,
+              isCurrentMPVPictureInPictureRestore(key, controller: controller) else {
+            return nil
+        }
+        return currentAuthorization
+    }
+
+    private func invalidateMPVPictureInPictureStopAuthorization(reason: String) {
+        guard let authorization = mpvPictureInPictureStopAuthorization else { return }
+        mpvPictureInPictureStopAuthorization = nil
+        logPictureInPicture(
+            "invalidated PiP stop restore authorization=\(authorization.id) reason=\(reason)"
+        )
+    }
+
+    private func waitForForegroundMPVPictureInPictureRestoreAuthorization(
+        _ authorization: MPVPictureInPictureStopAuthorization,
+        controller: PiPController
+    ) async -> Bool {
+        for _ in 0..<80 {
+            guard !Task.isCancelled,
+                  currentMPVPictureInPictureStopAuthorization(
+                    authorization,
+                    for: controller
+                  ) != nil else {
+                return false
+            }
+            if owningPlaybackSceneIsForegroundActive() {
+                return true
+            }
+            do {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            } catch {
+                return false
+            }
+        }
+        return false
+    }
+
     private func isCurrentMPVPictureInPictureRestore(
         _ key: MPVPictureInPictureRestoreKey,
         controller: PiPController
     ) -> Bool {
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return false }
+#endif
         guard ObjectIdentifier(controller) == key.controllerIdentifier,
               pipController === controller,
               key.playbackLoadGeneration == playbackLoadGeneration,
@@ -2313,30 +2686,60 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func beginMPVPictureInPictureRestore(
-        for controller: PiPController
-    ) -> (key: MPVPictureInPictureRestoreKey, task: Task<Bool, Never>) {
+        for controller: PiPController,
+        lifecycleGeneration: Int? = nil
+    ) -> (id: Int, key: MPVPictureInPictureRestoreKey, task: Task<Bool, Never>) {
         let key = mpvPictureInPictureRestoreKey(for: controller)
         if let operation = mpvPictureInPictureRestoreOperation,
            operation.key == key {
             return operation
         }
 
+        mpvPictureInPictureRestoreOperationID &+= 1
+        let operationID = mpvPictureInPictureRestoreOperationID
         let task = Task { @MainActor [weak self, weak controller] () -> Bool in
             guard let self,
-                  let controller,
-                  self.isCurrentMPVPictureInPictureRestore(key, controller: controller) else {
+                  let controller else {
                 return false
             }
+            let callbackAuthorized = self.isCurrentMPVPictureInPictureRestore(
+                key,
+                controller: controller
+            ) && self.owningPlaybackSceneIsForegroundActive()
+            let lifecycleAuthorized = lifecycleGeneration.map { generation in
+                self.mpvBackgroundLifecycleIsArmed
+                    && self.mpvBackgroundLifecycleGeneration == generation
+                    && self.owningPlaybackSceneIsForegroundActive()
+                    && self.pipController === controller
+                    && controller.playbackLoadGeneration == self.playbackLoadGeneration
+                    && key.playbackLoadGeneration == self.playbackLoadGeneration
+                    && controller.transitionAttemptID == key.transitionAttemptID
+                    && self.isRunning
+                    && !self.isClosing
+            } ?? false
+            let restoreAuthorized = lifecycleGeneration == nil
+                ? callbackAuthorized
+                : lifecycleAuthorized
+            guard restoreAuthorized else { return false }
             let restored = await self.rendererFinishPictureInPictureAndWait(
                 restoringInlinePlayback: true
             )
-            guard restored,
+            guard !Task.isCancelled,
+                  restored,
+                  self.mpvPictureInPictureRestoreOperation?.id == operationID,
                   self.isCurrentMPVPictureInPictureRestore(key, controller: controller) else {
                 return false
             }
+            if let lifecycleGeneration {
+                guard self.mpvBackgroundLifecycleIsArmed,
+                      self.mpvBackgroundLifecycleGeneration == lifecycleGeneration,
+                      self.owningPlaybackSceneIsForegroundActive() else {
+                    return false
+                }
+            }
             return true
         }
-        let operation = (key: key, task: task)
+        let operation = (id: operationID, key: key, task: task)
         mpvPictureInPictureRestoreOperation = operation
         mpvCompletedPictureInPictureRestore = nil
         return operation
@@ -2344,12 +2747,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     @discardableResult
     private func completeMPVPictureInPictureRestore(
-        _ operation: (key: MPVPictureInPictureRestoreKey, task: Task<Bool, Never>),
+        _ operation: (id: Int, key: MPVPictureInPictureRestoreKey, task: Task<Bool, Never>),
         controller: PiPController,
         rendererRestored: Bool,
         source: String
     ) -> Bool {
         if let completed = mpvCompletedPictureInPictureRestore,
+           completed.id == operation.id,
            completed.key == operation.key {
             guard isCurrentMPVPictureInPictureRestore(
                 operation.key,
@@ -2359,11 +2763,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
             return completed.restored
         }
-        guard isCurrentMPVPictureInPictureRestore(operation.key, controller: controller) else {
+        guard mpvPictureInPictureRestoreOperation?.id == operation.id,
+              isCurrentMPVPictureInPictureRestore(operation.key, controller: controller) else {
             return false
         }
 
         mpvCompletedPictureInPictureRestore = (
+            id: operation.id,
             key: operation.key,
             restored: rendererRestored
         )
@@ -2372,6 +2778,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
         if mpvActivePiPCallbackAttemptID == operation.key.transitionAttemptID {
             mpvActivePiPCallbackAttemptID = nil
+        }
+        if mpvPictureInPictureStopAuthorization?.key == operation.key {
+            invalidateMPVPictureInPictureStopAuthorization(reason: "restore-completed-\(source)")
         }
         updatePiPButtonVisibility()
 
@@ -2384,11 +2793,17 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if UIApplication.shared.applicationState == .active {
             clearMPVAppExitPictureInPictureSuppression(reason: "\(source)-active")
         }
-        scheduleMPVPictureInPictureForegroundWarmup(
-            source: "\(source)-rewarm",
-            delays: [0.25, 1.10],
-            forceFirst: true
-        )
+        if mpvBackgroundLifecycleIsArmed {
+            // The serialized foreground transaction performs decoder validation next and owns the
+            // single rewarm. Preparing PiP here too can reclaim the video track mid-validation.
+            logPictureInPicture("PiP restore deferring rewarm to serialized foreground recovery source=\(source)")
+        } else {
+            scheduleMPVPictureInPictureForegroundWarmup(
+                source: "\(source)-rewarm",
+                delays: [0.25, 1.10],
+                forceFirst: true
+            )
+        }
         logPictureInPicture(
             "PiP restore completed source=\(source) renderer={\(rendererPictureInPictureDebugSnapshot())}"
         )
@@ -2406,9 +2821,34 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         logPictureInPicture("invalidated PiP restore operation reason=\(reason)")
     }
 
-    private func rendererActivatePictureInPictureLayer() {
+    @discardableResult
+    private func rendererActivatePictureInPictureLayer() -> Bool {
+        mpvPictureInPictureRendererHandoffGeneration &+= 1
+        let activationGeneration = mpvPictureInPictureRendererHandoffGeneration
+        mpvPictureInPictureRendererHandoffIsActive = false
         logPictureInPicture("renderer activate layer call renderer=\(mpvRendererName) hasMPVRenderer=\(isMPVRenderer)")
-        renderer.activatePictureInPictureLayer()
+        let activated = renderer.activatePictureInPictureLayer()
+        guard activationGeneration == mpvPictureInPictureRendererHandoffGeneration else {
+            // A synchronous renderer failure may call the stop handler, which finishes the
+            // handoff and advances this generation before activate returns.
+            logPictureInPicture("renderer activation superseded during callback renderer=\(mpvRendererName)")
+            return false
+        }
+        mpvPictureInPictureRendererHandoffIsActive = activated
+        if !activated {
+            logPictureInPicture("renderer activation rejected renderer=\(mpvRendererName) renderer={\(rendererPictureInPictureDebugSnapshot())}")
+        }
+        return activated
+    }
+
+    private func rendererSetPictureInPictureSourcePreparedForAutomaticStart(_ prepared: Bool) {
+        if !prepared {
+            let state = mpvPictureInPictureControllerState()
+            // Never hide AVKit's source underneath an automatic or explicit transition that has
+            // already crossed willStart. The active/failed/restore delegate owns teardown then.
+            guard !state.active, !state.pending else { return }
+        }
+        renderer.setPictureInPictureSourcePreparedForAutomaticStart(prepared)
     }
 
     private func rendererIsPictureInPicturePrimed() -> Bool {
@@ -2417,6 +2857,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     @discardableResult
     private func prepareMPVPictureInPictureRenderer(source: String, activateLayer: Bool) async -> Bool {
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return false }
+#endif
         let active = pipController?.isPictureInPictureActive ?? false
         let possible = pipController?.isPictureInPicturePossible ?? false
         logPictureInPicture("renderer prepare begin source=\(source) active=\(active) possible=\(possible) activateLayer=\(activateLayer)")
@@ -2427,22 +2870,47 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             logPictureInPicture("renderer prepare failed source=\(source) error=\(error) renderer={\(rendererPictureInPictureDebugSnapshot())}")
             return false
         }
-        if activateLayer {
-            rendererActivatePictureInPictureLayer()
-        }
+        let activated = !activateLayer || rendererActivatePictureInPictureLayer()
         pipController?.updatePlaybackState()
         let primed = rendererIsPictureInPicturePrimed()
-        logPictureInPicture("renderer prepare end source=\(source) primed=\(primed) renderer={\(rendererPictureInPictureDebugSnapshot())}")
-        return primed
+        logPictureInPicture("renderer prepare end source=\(source) primed=\(primed) activated=\(activated) renderer={\(rendererPictureInPictureDebugSnapshot())}")
+        return primed && activated
     }
 
     private func rendererResumeForegroundRendering(reason: String) {
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else {
+            logPictureInPicture("foreground render recovery skipped for Google Cast reason=\(reason)")
+            return
+        }
+#endif
         let pipState = mpvPictureInPictureControllerState()
         if pipState.active || pipState.pending {
             logPictureInPicture("foreground render recovery deferred reason=\(reason) active=\(pipState.active) pending=\(pipState.pending) renderer={\(rendererPictureInPictureDebugSnapshot())}")
             return
         }
         renderer.resumeForegroundRendering(reason: reason)
+    }
+
+    private func rendererRecoverForegroundRendering(reason: String) async -> Bool {
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else {
+            logPictureInPicture("foreground render recovery skipped for Google Cast reason=\(reason)")
+            return false
+        }
+#endif
+        let pipState = mpvPictureInPictureControllerState()
+        guard !pipState.active, !pipState.pending else {
+            logPictureInPicture(
+                "serialized foreground recovery still waiting for AVKit reason=\(reason) active=\(pipState.active) pending=\(pipState.pending)"
+            )
+            return false
+        }
+        return await withCheckedContinuation { continuation in
+            renderer.recoverForegroundRendering(reason: reason) { success in
+                continuation.resume(returning: success)
+            }
+        }
     }
 
     private func rendererPictureInPictureDebugSnapshot() -> String {
@@ -2528,7 +2996,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         pipButton.setImage(UIImage(systemName: imageName, withConfiguration: cfg), for: .normal)
 
         let isAvailable = rendererIsPictureInPictureAvailable()
-        let shouldShow = isAvailable && !isVLCPlayer && Settings.shared.mpvPictureInPictureEnabled
+        var shouldShow = isAvailable && !isVLCPlayer && Settings.shared.mpvPictureInPictureEnabled
+#if os(iOS) && canImport(GoogleCast)
+        if GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks {
+            shouldShow = false
+        }
+#endif
         pipButton.isHidden = !shouldShow
         pipButton.isEnabled = shouldShow
         if isVLCPlayer {
@@ -2668,6 +3141,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         guard releasedOwner || clearedCandidate else { return }
 
         pipController?.setCanStartPictureInPictureAutomaticallyFromInline(false)
+        rendererSetPictureInPictureSourcePreparedForAutomaticStart(false)
         cancelPendingMPVAppExitPictureInPictureStart(reason: "\(reason)-ownership-released")
         logPictureInPicture(
             "MPV app-exit PiP arbiter released reason=\(reason) scene=\(mpvAppExitPictureInPictureSceneIdentifier) owner=\(releasedOwner) candidate=\(clearedCandidate)"
@@ -2677,12 +3151,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func configureMPVAppExitPictureInPictureAutomation(reason: String) {
         guard isMPVRenderer, !isVLCPlayer else {
             pipController?.setCanStartPictureInPictureAutomaticallyFromInline(false)
+            rendererSetPictureInPictureSourcePreparedForAutomaticStart(false)
             return
         }
 
         guard Self.appExitPictureInPictureOwner === self,
               Self.mostRecentlyActivatedPlaybackController === self else {
             pipController?.setCanStartPictureInPictureAutomaticallyFromInline(false)
+            rendererSetPictureInPictureSourcePreparedForAutomaticStart(false)
             cancelPendingMPVAppExitPictureInPictureStart(reason: "\(reason)-not-arbiter-owner")
             logPictureInPicture(
                 "MPV app-exit PiP automation denied by arbiter reason=\(reason) scene=\(mpvAppExitPictureInPictureSceneIdentifier) candidateScene=\(Self.mostRecentlyActivatedPlaybackController?.mpvAppExitPictureInPictureSceneIdentifier ?? "nil") ownerScene=\(Self.appExitPictureInPictureOwner?.mpvAppExitPictureInPictureSceneIdentifier ?? "nil")"
@@ -2692,6 +3168,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         if isClosing {
             pipController?.setCanStartPictureInPictureAutomaticallyFromInline(false)
+            rendererSetPictureInPictureSourcePreparedForAutomaticStart(false)
             cancelPendingMPVAppExitPictureInPictureStart(reason: "\(reason)-closing")
             mpvAppExitPiPStartRequested = false
             logPictureInPicture("MPV app-exit auto PiP automation disabled while closing reason=\(reason)")
@@ -2703,6 +3180,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 clearMPVAppExitPictureInPictureSuppression(reason: "\(reason)-active")
             } else {
                 pipController?.setCanStartPictureInPictureAutomaticallyFromInline(false)
+                rendererSetPictureInPictureSourcePreparedForAutomaticStart(false)
                 cancelPendingMPVAppExitPictureInPictureStart(reason: "\(reason)-suppressed")
                 mpvAppExitPiPStartRequested = false
                 logPictureInPicture("MPV app-exit auto PiP automation suppressed until foreground reason=\(reason)")
@@ -2711,21 +3189,28 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 
         let requested = Settings.shared.mpvAppExitPictureInPictureEnabled && Settings.shared.mpvPictureInPictureEnabled
-        let enabled = requested && rendererIsPictureInPicturePrimed()
+        let playing = !rendererIsPausedState()
+        let enabled = requested && rendererIsPictureInPicturePrimed() && playing
         if enabled, let controller = pipController {
             armMPVPictureInPictureController(controller, reason: "\(reason)-automatic")
+            authorizeMPVAutomaticPictureInPicture(for: controller, source: reason)
+            rendererSetPictureInPictureSourcePreparedForAutomaticStart(true)
+            controller.updatePlaybackState()
+        } else {
+            rendererSetPictureInPictureSourcePreparedForAutomaticStart(false)
         }
         pipController?.setCanStartPictureInPictureAutomaticallyFromInline(enabled)
         if !requested {
             cancelPendingMPVAppExitPictureInPictureStart(reason: "\(reason)-disabled")
             mpvAppExitPiPStartRequested = false
         }
-        logPictureInPicture("MPV app-exit auto PiP automation configured reason=\(reason) requested=\(requested) ready=\(rendererIsPictureInPicturePrimed()) enabled=\(enabled)")
+        logPictureInPicture("MPV app-exit auto PiP automation configured reason=\(reason) requested=\(requested) ready=\(rendererIsPictureInPicturePrimed()) playing=\(playing) enabled=\(enabled)")
     }
 
     private func cancelMPVPictureInPictureStartRequests(reason: String) {
         mpvPiPStartAttemptID += 1
         mpvAppExitPiPStartRequested = false
+        clearMPVAutomaticPictureInPictureAuthorization(reason: reason)
         cancelPendingMPVAppExitPictureInPictureStart(reason: reason)
         logPictureInPicture("MPV PiP start requests canceled reason=\(reason) attemptID=\(mpvPiPStartAttemptID)")
     }
@@ -2734,6 +3219,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         guard isMPVRenderer, !isVLCPlayer else { return }
         cancelMPVPictureInPictureStartRequests(reason: reason)
         pipController?.setCanStartPictureInPictureAutomaticallyFromInline(false)
+        rendererSetPictureInPictureSourcePreparedForAutomaticStart(false)
         guard !mpvAppExitPiPSuppressedUntilForeground else {
             logPictureInPicture("MPV app-exit auto PiP already suppressed until foreground reason=\(reason)")
             return
@@ -2765,6 +3251,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     @discardableResult
     private func primeMPVPictureInPictureForForegroundPlaybackIfNeeded(source: String, requiresAppExitEnabled: Bool) -> Bool {
         guard isMPVRenderer, !isVLCPlayer else { return false }
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return false }
+#endif
         if requiresAppExitEnabled {
             guard claimMPVAppExitPictureInPictureOwnership(reason: source) else { return false }
         }
@@ -2796,15 +3285,32 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             logPictureInPicture("MPV foreground PiP warm skipped source=\(source) running=\(isRunning) closing=\(isClosing) active=\(active) pending=\(pending) paused=\(paused) ready=\(playbackReady) supported=\(supported)")
             return false
         }
+        if requiresAppExitEnabled,
+           UIApplication.shared.applicationState != .background {
+            // PiP owns `vid` during app exit. Cancel/yield any foreground VideoToolbox rebuild
+            // before async preparation so deactivation cannot lose its only pre-background prime.
+            renderer.prioritizeAppExitPictureInPictureOverDecoderRecovery()
+        }
 
         let warmSource = requiresAppExitEnabled ? "\(source)-app-exit-prime" : "\(source)-foreground-prewarm"
         let mode = requiresAppExitEnabled ? "app-exit" : "foreground"
         let preparationGeneration = mpvPictureInPictureWarmupGeneration
         let loadGeneration = playbackLoadGeneration
-        if requiresAppExitEnabled {
-            // Automatic entry is armed only after MPVKit has enqueued a current-generation frame.
-            // This prevents AVKit from racing an unprepared renderer during app deactivation.
-            pip.setCanStartPictureInPictureAutomaticallyFromInline(false)
+        if rendererIsPictureInPicturePrimed() {
+            pip.updatePlaybackState()
+            if requiresAppExitEnabled
+                || (Settings.shared.mpvAppExitPictureInPictureEnabled
+                    && Settings.shared.mpvPictureInPictureEnabled) {
+                configureMPVAppExitPictureInPictureAutomation(reason: "\(source)-already-ready")
+            }
+            logPictureInPicture("MPV \(mode) PiP reused current ready state source=\(source) possible=\(pip.isPictureInPicturePossible) renderer={\(rendererPictureInPictureDebugSnapshot())}")
+            return true
+        }
+        if requiresAppExitEnabled, UIApplication.shared.applicationState == .background {
+            // AVKit must be armed while the player is still inline. Starting a fresh GPU prepare
+            // after suspension is too late and can manufacture transient decoder failures.
+            logPictureInPicture("MPV app-exit PiP prime skipped source=\(source): renderer was not ready before background")
+            return false
         }
         Task { @MainActor [weak self, weak pip] in
             guard let self, let pip else { return }
@@ -2818,11 +3324,25 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                   pip.playbackLoadGeneration == loadGeneration,
                   self.isRunning,
                   !self.isClosing else { return }
+#if os(iOS) && canImport(GoogleCast)
+            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
             pip.updatePlaybackState()
-            if requiresAppExitEnabled, primed {
+            if primed,
+               Settings.shared.mpvAppExitPictureInPictureEnabled,
+               Settings.shared.mpvPictureInPictureEnabled,
+               self.claimMPVAppExitPictureInPictureOwnership(reason: "\(source)-ready") {
+                // Normal foreground warmup is the earliest reliable point at which MPVKit has a
+                // current sample. Arm AVKit here instead of waiting for willResignActive.
                 self.configureMPVAppExitPictureInPictureAutomation(reason: "\(source)-ready")
-            } else if requiresAppExitEnabled, !primed {
-                self.releaseMPVAppExitPictureInPictureOwnership(reason: "\(source)-prepare-failed")
+            } else if !primed {
+                // A failed warm owns no PiP output but MPVKit intentionally records `.failed` for
+                // diagnostics. Finish the attempt so it cannot block a later foreground decoder
+                // reconstruction; an explicit future warm can start a new generation.
+                self.rendererFinishPictureInPicture()
+                if requiresAppExitEnabled {
+                    self.releaseMPVAppExitPictureInPictureOwnership(reason: "\(source)-prepare-failed")
+                }
             }
             self.logPictureInPicture("MPV \(mode) PiP warmed source=\(source) primed=\(primed) possible=\(pip.isPictureInPicturePossible) renderer={\(self.rendererPictureInPictureDebugSnapshot())}")
         }
@@ -2843,23 +3363,37 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         logPictureInPicture("MPV foreground PiP warmups canceled reason=\(reason) generation=\(mpvPictureInPictureWarmupGeneration)")
     }
 
-    /// Proactively reaches MPVKit's explicit ready state only when automatic app-exit PiP needs it.
-    /// Manual PiP prepares on demand, avoiding a second output (or compatibility connection) during
-    /// ordinary foreground playback.
+    /// Proactively reaches MPVKit's explicit ready state during foreground playback. This selects
+    /// and proves the GPU-owned PiP backend before either the manual button or automatic app-exit
+    /// transition needs it. A successful warm also arms automatic PiP when the user enabled it.
     @discardableResult
     private func warmMPVPictureInPictureForForegroundPlaybackIfNeeded(source: String, minInterval: CFTimeInterval = 3.0, force: Bool = false) -> Bool {
         guard isMPVRenderer, !isVLCPlayer else { return false }
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return false }
+#endif
+        guard !mpvBackgroundLifecycleIsArmed else {
+            logPictureInPicture("MPV foreground PiP warm blocked during serialized lifecycle source=\(source)")
+            return false
+        }
         guard Settings.shared.mpvPictureInPictureEnabled else { return false }
         guard isMetalMPVRenderer else { return false }
         guard UIApplication.shared.applicationState == .active else { return false }
         let now = CACurrentMediaTime()
         guard force || now - lastMPVPictureInPictureWarmAt >= minInterval else { return false }
         lastMPVPictureInPictureWarmAt = now
-        return primeMPVPictureInPictureForForegroundPlaybackIfNeeded(source: source, requiresAppExitEnabled: true)
+        return primeMPVPictureInPictureForForegroundPlaybackIfNeeded(source: source, requiresAppExitEnabled: false)
     }
 
     private func scheduleMPVPictureInPictureForegroundWarmup(source: String, delays: [TimeInterval], forceFirst: Bool = false) {
         guard isMPVRenderer, !isVLCPlayer else { return }
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
+        guard !mpvBackgroundLifecycleIsArmed else {
+            logPictureInPicture("MPV foreground PiP warmup deferred to serialized lifecycle source=\(source)")
+            return
+        }
         guard Settings.shared.mpvPictureInPictureEnabled else { return }
         guard isMetalMPVRenderer else {
             logPictureInPicture("MPV app-exit PiP readiness skipped source=\(source): renderer=\(mpvRendererName) has no explicit preparation path")
@@ -2867,24 +3401,34 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
         mpvPictureInPictureWarmupGeneration += 1
         let generation = mpvPictureInPictureWarmupGeneration
-        let delay = max(0, delays.min() ?? 0)
-        logPictureInPicture("MPV foreground PiP warmup scheduled source=\(source) delay=\(String(format: "%.2f", delay)) generation=\(generation)")
+        let normalizedDelays = Array(Set(delays.map { max(0, $0) })).sorted()
+        let scheduledDelays = normalizedDelays.isEmpty ? [0] : normalizedDelays
+        let delaySummary = scheduledDelays
+            .map { String(format: "%.2f", $0) }
+            .joined(separator: ",")
+        logPictureInPicture("MPV foreground PiP warmups scheduled source=\(source) delays=[\(delaySummary)] generation=\(generation)")
 
-        let warm: () -> Void = { [weak self] in
-            guard let self,
-                  generation == self.mpvPictureInPictureWarmupGeneration else {
-                return
+        for (index, delay) in scheduledDelays.enumerated() {
+            let attempt = index + 1
+            let warm: () -> Void = { [weak self] in
+                guard let self,
+                      generation == self.mpvPictureInPictureWarmupGeneration else {
+                    return
+                }
+#if os(iOS) && canImport(GoogleCast)
+                guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
+                _ = self.warmMPVPictureInPictureForForegroundPlaybackIfNeeded(
+                    source: "\(source)-warm-\(attempt)",
+                    minInterval: 0,
+                    force: forceFirst && index == 0
+                )
             }
-            _ = self.warmMPVPictureInPictureForForegroundPlaybackIfNeeded(
-                source: "\(source)-warm",
-                minInterval: 0,
-                force: forceFirst
-            )
-        }
-        if delay <= 0 {
-            DispatchQueue.main.async(execute: warm)
-        } else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: warm)
+            if delay <= 0 {
+                DispatchQueue.main.async(execute: warm)
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: warm)
+            }
         }
     }
 
@@ -2895,17 +3439,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func playerDisplayTitle() -> String {
-        if let override = trimmedTitle(playerTitleOverride) {
-            return override
-        }
-
-        guard let info = mediaInfo else { return "" }
+        guard let info = mediaInfo else { return trimmedTitle(playerTitleOverride) ?? "" }
         switch info {
         case .movie(_, let title, _, _):
-            return title
-        case .episode(_, let seasonNumber, let episodeNumber, let showTitle, _, let isAnime):
-            let prefix = trimmedTitle(showTitle)
-            if isAnime {
+            return trimmedTitle(playerTitleOverride) ?? title
+        case .episode(_, let seasonNumber, let episodeNumber, let showTitle, _, _):
+            // `playerTitleOverride` is the preferred show/AniList title, not a complete
+            // episodic display label. Returning it directly used to drop the episode
+            // coordinate from every coordinated MoltenVK launch.
+            let prefix = trimmedTitle(playerTitleOverride) ?? trimmedTitle(showTitle)
+            if isAnimeContent() {
                 let episodeCode = "E\(episodeNumber)"
                 if let prefix, !prefix.isEmpty {
                     return "\(prefix) \(episodeCode)"
@@ -3299,12 +3842,22 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return UserDefaults.standard.bool(forKey: "playerBrightnessGestureEnabled")
     }
     private var isVolumeControlEnabled: Bool {
+        let enabled: Bool
         if UserDefaults.standard.object(forKey: "playerVolumeGestureEnabled") == nil,
            let legacy = UserDefaults.standard.object(forKey: "vlcVolumeGestureEnabled") as? Bool {
             UserDefaults.standard.set(legacy, forKey: "playerVolumeGestureEnabled")
-            return legacy
+            enabled = legacy
+        } else {
+            enabled = UserDefaults.standard.bool(forKey: "playerVolumeGestureEnabled")
         }
-        return UserDefaults.standard.bool(forKey: "playerVolumeGestureEnabled")
+#if os(iOS) && canImport(GoogleCast)
+        // Eclipse deliberately does not take over the receiver's volume buttons.
+        // Do not leave a local-volume gesture visible while the receiver owns
+        // (or is in the middle of taking) video/audio playback.
+        return enabled && !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks
+#else
+        return enabled
+#endif
     }
     private var isMetalPerformanceOverlayActive: Bool {
 #if os(iOS) && ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE
@@ -3357,6 +3910,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     
     override func viewDidLoad() {
         super.viewDidLoad()
+        bindPlaybackWindowSceneIfAvailable(source: "view-did-load")
         beginMediaStatePlaybackLeaseIfNeeded()
         view.backgroundColor = .black
         logMPV("viewDidLoad initialURL=\(initialURL?.absoluteString ?? "nil") preset=\(initialPreset?.id.rawValue ?? "nil") mediaInfo=\(String(describing: mediaInfo))")
@@ -3366,6 +3920,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         modalPresentationCapturesStatusBarAppearance = true
 #endif
         setupLayout()
+#if os(iOS) && canImport(GoogleCast)
+        applyGoogleCastButtonVisibility()
+#endif
         applyPlayerSkinIfNeeded(force: true)
         updatePlayerTitle()
         
@@ -3435,6 +3992,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             logSharedPlayerControl("loading initial url=\(url.absoluteString) preset=\(preset.id.rawValue)")
             load(url: url, preset: preset, headers: initialHeaders)
         }
+#if os(iOS) && canImport(GoogleCast)
+        if let activePlaybackRequest {
+            GoogleCastCoordinator.shared.prepare(request: activePlaybackRequest, player: self)
+        }
+#endif
         
         updateProgressHostingController()
         updateSpeedMenu()
@@ -3461,7 +4023,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        playbackWindowScene = view.window?.windowScene ?? playbackWindowScene
+        bindPlaybackWindowSceneIfAvailable(source: "view-did-appear")
         if claimMPVAppExitPictureInPictureOwnership(
             reason: "view-did-appear",
             recordingActivation: true
@@ -3471,6 +4033,18 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #if os(iOS)
         presentationController?.delegate = self
         applyPlaybackLockState(capturingOrientationIfNeeded: true)
+#if canImport(GoogleCast)
+        GoogleCastCoordinator.shared.playerVisibilityChanged(true, player: self)
+        // `viewDidLoad` begins a direct-stream eligibility probe early so the
+        // Cast dialog is responsive. If that probe finishes before this view
+        // has a window, the coordinator deliberately discards it rather than
+        // handing off an invisible player. Retry now that the player is truly
+        // visible; `prepare` is a no-op while another Cast handoff owns the
+        // receiver.
+        if let activePlaybackRequest {
+            GoogleCastCoordinator.shared.prepare(request: activePlaybackRequest, player: self)
+        }
+#endif
 #endif
         submitDeferredIPadGPUPlaybackLoadIfReady(source: "view-did-appear")
         playbackHandoffHasAppeared = true
@@ -3488,6 +4062,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         postPlayerInterfaceCoverage(covered: false)
+#if os(iOS) && canImport(GoogleCast)
+        GoogleCastCoordinator.shared.playerVisibilityChanged(false, player: self)
+#endif
 #if os(iOS)
         if let scene = view.window?.windowScene ?? playbackWindowScene {
             AppDelegate.setOrientationLock(.all, for: scene)
@@ -3506,6 +4083,21 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 playerIdentifier: playerInterfaceCoverageIdentifier,
                 sceneSessionIdentifier: sceneSessionIdentifier
             )
+        )
+    }
+
+    private func bindPlaybackWindowSceneIfAvailable(source: String) {
+        let resolvedScene = viewIfLoaded?.window?.windowScene
+            ?? presentingViewController?.viewIfLoaded?.window?.windowScene
+            ?? navigationController?.viewIfLoaded?.window?.windowScene
+            ?? parent?.viewIfLoaded?.window?.windowScene
+        guard let resolvedScene,
+              playbackWindowScene !== resolvedScene else {
+            return
+        }
+        playbackWindowScene = resolvedScene
+        logPictureInPicture(
+            "bound playback window scene source=\(source) scene=\(resolvedScene.session.persistentIdentifier)"
         )
     }
     
@@ -3530,7 +4122,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        playbackWindowScene = view.window?.windowScene ?? playbackWindowScene
+        bindPlaybackWindowSceneIfAvailable(source: "view-will-appear")
         setNeedsStatusBarAppearanceUpdate()
         if supportsSharedPlayerControls {
             refreshGestureControlLevels(animated: false)
@@ -3574,6 +4166,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #if !os(tvOS)
         updateGestureControlLayoutForCurrentSize()
 #endif
+#if os(iOS) && canImport(GoogleCast)
+        // Google Cast swaps the button image as discovery/session state changes. Reassert
+        // aspect-fit after layout so the SDK-provided glyph cannot stretch in a narrow portrait
+        // controls row even though the outer control remains a fixed 36-point square.
+        castButton.imageView?.contentMode = .scaleAspectFit
+#endif
         
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -3614,10 +4212,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func updatePlayerTitleLayout(forWidth width: CGFloat) {
         guard let playerTitleCenterConstraint else { return }
-        let usesNarrowIPadWindow = UIDevice.current.userInterfaceIdiom == .pad
-            && width > 0
-            && width < 520
-        let priority: UILayoutPriority = usesNarrowIPadWindow ? .defaultHigh : .required
+        // Compact iPhone portrait has the same fixed-width leading controls as a narrow iPad
+        // window. Let the centered title yield before Auto Layout compresses the cast artwork.
+        let usesCompactPlayerWidth = width > 0 && width < 524
+        let priority: UILayoutPriority = usesCompactPlayerWidth ? .defaultHigh : .required
         guard playerTitleCenterConstraint.priority != priority else { return }
         playerTitleCenterConstraint.priority = priority
     }
@@ -3646,6 +4244,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         outputVolumeObservation = nil
 #endif
         MainActor.assumeIsolated {
+#if os(iOS) && canImport(GoogleCast)
+            GoogleCastCoordinator.shared.playerClosed(self)
+#endif
             renderer.setPictureInPictureStopRequestHandler(nil)
             if let mpv = mpvRenderer {
                 mpv.delegate = nil
@@ -3743,6 +4344,17 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             subtitleLanguage: subtitleLanguage,
             hasSelectedSubtitle: subtitlesEnabled
         )
+#if os(iOS) && canImport(GoogleCast)
+        if let playbackMediaSelectionIntent, let activePlaybackRequest {
+            let updatedRequest = activePlaybackRequest.replacingMediaSelectionIntent(playbackMediaSelectionIntent)
+            self.activePlaybackRequest = updatedRequest
+            // Keep the next Cast handoff aligned with a manual selection made
+            // before a receiver owns playback. The coordinator deliberately
+            // ignores this while a remote session is active, where Cast tracks
+            // are receiver-controlled.
+            GoogleCastCoordinator.shared.update(request: updatedRequest)
+        }
+#endif
     }
 
     private func rendererNeutralLanguage(
@@ -3835,7 +4447,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func deferIPadGPUPlaybackLoadIfNeeded(
         url: URL,
         preset: PlayerPreset,
-        headers: [String: String]?
+        headers: [String: String]?,
+        playbackShouldResumeAfterLoad: Bool? = nil
     ) -> Bool {
         guard shouldUseIPadGPUPlaybackLoadGate else { return false }
 
@@ -3845,6 +4458,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             url: url,
             preset: preset,
             headers: headers,
+            playbackShouldResumeAfterLoad: playbackShouldResumeAfterLoad,
             generation: generation,
             queuedAt: CACurrentMediaTime()
         )
@@ -3894,6 +4508,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let age = CACurrentMediaTime() - request.queuedAt
         logMPV("iPad gpu-next load submitted source=\(source) generation=\(request.generation) age=\(String(format: "%.2f", age))s video=\(videoContainer.bounds.size) render=\(mpvRenderingView?.bounds.size ?? .zero)")
         performLoad(url: request.url, preset: request.preset, headers: request.headers)
+        if let shouldResume = request.playbackShouldResumeAfterLoad {
+            applyPlaybackIntentAfterLoad(shouldResume: shouldResume, source: "\(source)-deferred")
+        }
     }
 
     private func invalidateIPadGPUPlaybackLoadGate() {
@@ -3903,15 +4520,56 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     func load(url: URL, preset: PlayerPreset, headers: [String: String]? = nil) {
-        if deferIPadGPUPlaybackLoadIfNeeded(url: url, preset: preset, headers: headers) {
+        load(
+            url: url,
+            preset: preset,
+            headers: headers,
+            playbackShouldResumeAfterLoad: nil
+        )
+    }
+
+    private func load(
+        url: URL,
+        preset: PlayerPreset,
+        headers: [String: String]?,
+        playbackShouldResumeAfterLoad: Bool?
+    ) {
+        if deferIPadGPUPlaybackLoadIfNeeded(
+            url: url,
+            preset: preset,
+            headers: headers,
+            playbackShouldResumeAfterLoad: playbackShouldResumeAfterLoad
+        ) {
             return
         }
         performLoad(url: url, preset: preset, headers: headers)
+        if let shouldResume = playbackShouldResumeAfterLoad {
+            applyPlaybackIntentAfterLoad(shouldResume: shouldResume, source: "immediate")
+        }
+    }
+
+    private func applyPlaybackIntentAfterLoad(shouldResume: Bool, source: String) {
+        logMPV("applying post-load playback intent source=\(source) shouldResume=\(shouldResume)")
+        rendererPlaybackIntentGeneration &+= 1
+        mpvBackgroundFallbackAutoPaused = false
+        mpvBackgroundFallbackPauseIntentGeneration = nil
+        mpvBackgroundFallbackPauseLifecycleGeneration = nil
+        if shouldResume {
+            renderer.play()
+        } else {
+            renderer.pausePlayback()
+        }
+        rendererSchedulePictureInPicturePlaybackStateUpdate()
+        updatePlayPauseButton(isPaused: !shouldResume, shouldShowControls: false)
     }
 
     private func performLoad(url: URL, preset: PlayerPreset, headers: [String: String]?) {
         pendingRendererRestartRetryGeneration = nil
         playbackLoadGeneration += 1
+        cancelMPVBackgroundAudioFallback(reason: "new-load")
+        mpvBackgroundFallbackAutoPaused = false
+        mpvBackgroundFallbackPauseIntentGeneration = nil
+        mpvBackgroundFallbackPauseLifecycleGeneration = nil
         releaseMPVAppExitPictureInPictureOwnership(reason: "new-load")
         // A PiP preparation/start belongs to exactly one media load. Invalidate any task that
         // prepared the previous item before changing renderer state so it cannot later start PiP
@@ -4036,7 +4694,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
         if let refreshPosition = pendingSourceRefreshResumePosition,
            refreshPosition.isFinite,
-           refreshPosition > 0 {
+           refreshPosition >= 0 {
             pendingSeekTime = refreshPosition
             pendingInitialResumeTarget = refreshPosition
             pendingInitialResumeDeadline = Date().addingTimeInterval(20)
@@ -4126,6 +4784,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                   !self.isClosing else {
                 return
             }
+#if os(iOS) && canImport(GoogleCast)
+            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
             self.logPlaybackStage(
                 "watchdog-fired",
                 "probe=\(self.playbackSlowProbeCount + 1) loading=\(self.isRendererLoading) paused=\(self.rendererIsPausedState()) cached=\(self.secondsText(self.cachedPosition))/\(self.secondsText(self.cachedDuration)) renderer={\(self.rendererPictureInPictureDebugSnapshot())}"
@@ -4174,6 +4835,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                       !self.isClosing else {
                     return
                 }
+#if os(iOS) && canImport(GoogleCast)
+                guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
 
                 switch result {
                 case .reachable:
@@ -4220,6 +4884,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func handlePlaybackStartupFailure(_ message: String, isSourceFailure: Bool) {
         guard !playbackDidStart, !playbackFailureHandled else { return }
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
         releaseMPVAppExitPictureInPictureOwnership(reason: "playback-startup-failure")
         logPlaybackStage(
             "startup-failure",
@@ -4363,6 +5030,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                   self.viewIfLoaded?.window != nil,
                   self.pendingRendererRestartRetryGeneration == failedGeneration,
                   self.playbackLoadGeneration == failedGeneration else { return }
+#if os(iOS) && canImport(GoogleCast)
+            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
             self.pendingRendererRestartRetryGeneration = nil
             self.retryPlaybackAfterFailure()
         }
@@ -4609,6 +5279,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         ]
 #if os(iOS)
         themedButtons.append(playbackLockButton)
+#if canImport(GoogleCast)
+        themedButtons.append(castButton)
+#endif
 #endif
         for button in themedButtons {
             button.tintColor = appearance.primary
@@ -4619,6 +5292,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 #if os(iOS)
         watchTogetherButton.tintColor = appearance.primary
+#if canImport(GoogleCast)
+        castButton.tintColor = appearance.primary
+#endif
 #endif
 #if !os(tvOS)
         if var configuration = skipButton.configuration {
@@ -4878,6 +5554,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
         videoContainer.addSubview(pipButton)
 #if os(iOS)
+#if canImport(GoogleCast)
+        videoContainer.addSubview(castButton)
+        videoContainer.addSubview(castConflictButton)
+#endif
         videoContainer.addSubview(watchTogetherButton)
 #endif
         videoContainer.addSubview(playerTitleLabel)
@@ -5059,6 +5739,27 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         ).isActive = true
 
 #if os(iOS)
+#if canImport(GoogleCast)
+        let castButtonWidthConstraint = castButton.widthAnchor.constraint(equalToConstant: 36)
+        let watchTogetherLeadingFromCastConstraint = watchTogetherButton.leadingAnchor.constraint(equalTo: castButton.trailingAnchor, constant: 12)
+        self.castButtonWidthConstraint = castButtonWidthConstraint
+        self.watchTogetherLeadingFromCastConstraint = watchTogetherLeadingFromCastConstraint
+        NSLayoutConstraint.activate([
+            castButton.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
+            castButton.leadingAnchor.constraint(equalTo: pipButton.trailingAnchor, constant: 12),
+            castButtonWidthConstraint,
+            castButton.heightAnchor.constraint(equalToConstant: 36),
+            castConflictButton.centerXAnchor.constraint(equalTo: castButton.centerXAnchor),
+            castConflictButton.centerYAnchor.constraint(equalTo: castButton.centerYAnchor),
+            castConflictButton.widthAnchor.constraint(equalTo: castButton.widthAnchor),
+            castConflictButton.heightAnchor.constraint(equalTo: castButton.heightAnchor),
+            watchTogetherButton.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
+            watchTogetherLeadingFromCastConstraint,
+            watchTogetherButton.widthAnchor.constraint(equalToConstant: 36),
+            watchTogetherButton.heightAnchor.constraint(equalToConstant: 36),
+            playerTitleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: watchTogetherButton.trailingAnchor, constant: 10)
+        ])
+#else
         NSLayoutConstraint.activate([
             watchTogetherButton.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
             watchTogetherButton.leadingAnchor.constraint(equalTo: pipButton.trailingAnchor, constant: 12),
@@ -5066,6 +5767,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             watchTogetherButton.heightAnchor.constraint(equalToConstant: 36),
             playerTitleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: watchTogetherButton.trailingAnchor, constant: 10)
         ])
+#endif
 #endif
 
         subtitleTrailingToProgressConstraint = subtitleButton.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor, constant: 0)
@@ -5252,12 +5954,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func metalPerformanceOverlayText() -> NSAttributedString {
         let cpuText = processCPUUsagePercent().map { String(format: "%.0f%%", $0) } ?? "n/a"
-        let gpuText = gpuUsagePercent().map { String(format: "%.0f%%", $0) } ?? "n/a"
+        let ramText = processResidentMemoryBytes().map { String(format: "%.0f MB", Double($0) / 1_048_576.0) } ?? "n/a"
         let thermalState = ProcessInfo.processInfo.thermalState
         let text = NSMutableAttributedString()
         text.append(metalPerformanceOverlayRow(label: "CPU", value: cpuText, valueColor: .white))
         text.append(NSAttributedString(string: "\n"))
-        text.append(metalPerformanceOverlayRow(label: "GPU", value: gpuText, valueColor: .white))
+        text.append(metalPerformanceOverlayRow(label: "RAM", value: ramText, valueColor: .white))
         text.append(NSAttributedString(string: "\n"))
         text.append(metalPerformanceOverlayRow(
             label: "Thermal",
@@ -5286,6 +5988,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         // the dynamic range, and whether the costly high-bit-depth (HDR) path is engaged.
         #if os(iOS) && ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE
         if let diag = metalPerformanceDiagnostics() {
+            text.append(NSAttributedString(string: "\n"))
+            text.append(metalPerformanceOverlayRow(
+                label: "PiP",
+                value: diag.pictureInPictureBackingText,
+                valueColor: diag.pictureInPictureBackingText.hasPrefix("GPU-backed") ? .systemGreen : .white
+            ))
+
             var videoValue = "\(Int(diag.renderSize.width))x\(Int(diag.renderSize.height))  \(diag.dynamicRangeText)"
             if diag.highBitDepthActive { videoValue += "  16-bit" }
             text.append(NSAttributedString(string: "\n"))
@@ -5435,6 +6144,22 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
     }
 
+    private func processResidentMemoryBytes() -> UInt64? {
+#if canImport(Darwin)
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) { infoPointer in
+            infoPointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { integerPointer in
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), integerPointer, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return nil }
+        return UInt64(info.resident_size)
+#else
+        return nil
+#endif
+    }
+
     /// Device GPU utilization (0,100) over the last sample interval, or nil if unavailable.
     private func gpuUsagePercent() -> Double? {
         gpuUsageSampler?.sample()
@@ -5572,6 +6297,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         pipButton.addTarget(self, action: #selector(pipTapped), for: .touchUpInside)
 #if os(iOS)
         watchTogetherButton.addTarget(self, action: #selector(watchTogetherTapped), for: .touchUpInside)
+#if canImport(GoogleCast)
+        castConflictButton.addTarget(self, action: #selector(castConflictTapped), for: .touchUpInside)
+#endif
 #endif
         skipBackwardButton.addTarget(self, action: #selector(skipBackwardTapped), for: .touchUpInside)
         skipForwardButton.addTarget(self, action: #selector(skipForwardTapped), for: .touchUpInside)
@@ -5607,6 +6335,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #if os(iOS)
             playbackLockButton.isUserInteractionEnabled = true
             watchTogetherButton.isUserInteractionEnabled = true
+#if canImport(GoogleCast)
+            castButton.isUserInteractionEnabled = true
+            castConflictButton.isUserInteractionEnabled = true
+#endif
 #endif
         }
         
@@ -5660,6 +6392,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     @objc private func leftSideDoubleTapped(_ gesture: UITapGestureRecognizer) {
         guard isDoubleTapSeekEnabled else { return }
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.isHandoffLoadPending else { return }
+#endif
         let location = gesture.location(in: videoContainer)
         let isLeftSide = location.x < videoContainer.bounds.width / 2
         guard isLeftSide else { return }
@@ -5674,6 +6409,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     @objc private func rightSideDoubleTapped(_ gesture: UITapGestureRecognizer) {
         guard isDoubleTapSeekEnabled else { return }
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.isHandoffLoadPending else { return }
+#endif
         let location = gesture.location(in: videoContainer)
         let isRightSide = location.x >= videoContainer.bounds.width / 2
         guard isRightSide else { return }
@@ -5996,6 +6734,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
     
     @objc private func playPauseTapped() {
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.isHandoffLoadPending else { return }
+#endif
         if rendererIsPausedState() {
             markBackgroundRecoveryForegrounded(source: "play-button")
             rendererPlay()
@@ -6018,6 +6759,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
     
     @objc private func skipBackwardTapped() {
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.isHandoffLoadPending else { return }
+#endif
         let seconds = playerSeekSeconds
         logSharedPlayerControl("skip backward button tapped seek=\(String(format: "%.1f", seconds))")
         rendererSeek(by: -seconds)
@@ -6029,6 +6773,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
     
     @objc private func skipForwardTapped() {
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.isHandoffLoadPending else { return }
+#endif
         let seconds = playerSeekSeconds
         logSharedPlayerControl("skip forward button tapped seek=\(String(format: "%.1f", seconds))")
         rendererSeek(by: seconds)
@@ -6597,9 +7344,80 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
     }
 
-    private func replacePlayback(with request: PlayerResolvedPlaybackRequest, reason: String = "episode-browser") {
+    private func replacePlayback(
+        with request: PlayerResolvedPlaybackRequest,
+        reason: String = "episode-browser",
+        castReplacementAlreadyLoaded: Bool = false,
+        castReplacementTransactionID: UUID? = nil
+    ) {
         DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
+            guard let self, !self.isClosing else {
+#if os(iOS) && canImport(GoogleCast)
+                if let castReplacementTransactionID {
+                    GoogleCastCoordinator.shared.abandonRemoteReplacementCommit(castReplacementTransactionID)
+                }
+#endif
+                return
+            }
+#if os(iOS) && canImport(GoogleCast)
+            if castReplacementAlreadyLoaded {
+                guard let castReplacementTransactionID,
+                      GoogleCastSettings.isEnabled(),
+                      GoogleCastCoordinator.shared.isAwaitingRemoteReplacementCommit(castReplacementTransactionID) else {
+                    if let castReplacementTransactionID {
+                        GoogleCastCoordinator.shared.abandonRemoteReplacementCommit(castReplacementTransactionID)
+                    }
+                    return
+                }
+            }
+            if !castReplacementAlreadyLoaded,
+               GoogleCastCoordinator.shared.isHandoffLoadPending {
+                self.showPlayerNotice("Cast is still connecting. Wait for it to finish before changing sources.")
+                return
+            }
+            if !castReplacementAlreadyLoaded,
+               GoogleCastCoordinator.shared.isReplacementInProgress {
+                self.showPlayerNotice("Cast is still checking the previous source change.")
+                return
+            }
+            if !castReplacementAlreadyLoaded,
+               GoogleCastCoordinator.shared.isRemoteMediaActive {
+                let candidate = self.castReplacementRequest(for: request)
+                self.showPlayerNotice("Checking the new source for your Cast device...")
+                self.showControlsTemporarily()
+                GoogleCastCoordinator.shared.replaceRemoteMedia(with: candidate, player: self) { [weak self] result in
+                    guard let self, !self.isClosing else {
+                        if case .loaded(let transactionID) = result {
+                            GoogleCastCoordinator.shared.abandonRemoteReplacementCommit(transactionID)
+                        }
+                        return
+                    }
+                    switch result {
+                    case .loaded(let transactionID):
+                        guard GoogleCastSettings.isEnabled(),
+                              GoogleCastCoordinator.shared.isAwaitingRemoteReplacementCommit(transactionID) else {
+                            GoogleCastCoordinator.shared.abandonRemoteReplacementCommit(transactionID)
+                            return
+                        }
+                        self.replacePlayback(
+                            with: request,
+                            reason: reason,
+                            castReplacementAlreadyLoaded: true,
+                            castReplacementTransactionID: transactionID
+                        )
+                    case .failed(let message):
+                        guard GoogleCastSettings.isEnabled() else { return }
+                        self.showPlayerNotice("Cast kept playing the current video.")
+                        self.presentCastCompatibilityAlert(title: "Unable to Change Cast Source", message: message)
+                    case .restoredLocally(let message):
+                        guard GoogleCastSettings.isEnabled() else { return }
+                        self.showPlayerNotice("Eclipse restored the current video locally.")
+                        self.presentCastCompatibilityAlert(title: "Unable to Change Cast Source", message: message)
+                    }
+                }
+                return
+            }
+#endif
             // The coordinator's Automatic fallback closure captures the original immutable
             // PlaybackRequest. Reusing it after an in-place episode replacement could reopen the
             // prior episode, so later in-place loads deliberately keep their normal source retry.
@@ -6666,12 +7484,27 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 imdbID: request.imdbId,
                 episodePlaybackContext: request.episodePlaybackContext,
                 launchContext: request.launchContext,
+                resumePosition: nil,
                 title: replacementTitle,
+                subtitle: self.activePlaybackRequest?.subtitle,
+                artworkURL: self.activePlaybackRequest?.artworkURL,
                 isAnime: request.isAnimeHint,
                 isAnimation: request.isAnimationContentHint ?? self.isAnimationContentHint ?? false,
                 originalTMDBSeasonNumber: request.originalTMDBSeasonNumber,
-                originalTMDBEpisodeNumber: request.originalTMDBEpisodeNumber
+                originalTMDBEpisodeNumber: request.originalTMDBEpisodeNumber,
+                servicesOriginalTitle: self.activePlaybackRequest?.servicesOriginalTitle,
+                servicesOriginalAudioLanguage: self.activePlaybackRequest?.servicesOriginalAudioLanguage,
+                onRequestNextEpisode: self.activePlaybackRequest?.onRequestNextEpisode,
+                onRequestResolvedNextEpisode: self.activePlaybackRequest?.onRequestResolvedNextEpisode,
+                onPlaybackStartupFailure: self.activePlaybackRequest?.onPlaybackStartupFailure,
+                localNextEpisodeFallback: self.activePlaybackRequest?.localNextEpisodeFallback
             )
+#if os(iOS) && canImport(GoogleCast)
+            self.activePlaybackRequest = selectionRequest
+            if castReplacementAlreadyLoaded, let castReplacementTransactionID {
+                GoogleCastCoordinator.shared.confirmRemoteReplacementCommitted(castReplacementTransactionID)
+            }
+#endif
             let existingSelectionStillMatches: Bool = {
                 guard let existing = self.servicesSelectionContext else { return false }
                 switch request.mediaInfo {
@@ -6692,6 +7525,26 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
             self.updatePlayerTitle()
             self.updateEpisodeBrowserButtonVisibility()
+#if os(iOS) && canImport(GoogleCast)
+            let castOwnsRemotePlayback = castReplacementAlreadyLoaded || GoogleCastCoordinator.shared.isRemoteMediaActive
+            // A selected receiver without Eclipse media (for example, after
+            // the previous source was blocked) must not block the local B
+            // replacement. Start the fresh Cast probe after local loading has
+            // reset A's position, so B cannot inherit A's seek time.
+            let shouldPrepareCastAfterLocalReplacement = !castOwnsRemotePlayback
+                && GoogleCastCoordinator.shared.isSessionConnected
+            if castOwnsRemotePlayback {
+                if !castReplacementAlreadyLoaded {
+                    GoogleCastCoordinator.shared.update(request: selectionRequest)
+                }
+                // Keep Molten released while the receiver owns playback. A
+                // replacement is only committed above after its Cast LOAD has
+                // succeeded, so a failed source leaves this player untouched.
+                self.showPlayerNotice("Loading the new selection on your Cast device...")
+                self.showControlsTemporarily()
+                return
+            }
+#endif
             let shouldSwitchVLCInPlace = wasVLC && self.isRunning
 
             let startReplacementLoad = { [weak self] in
@@ -6703,6 +7556,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     self.isReplacingVLCPlaybackInPlace = true
                 }
                 self.load(url: request.url, preset: request.preset, headers: request.headers)
+#if os(iOS) && canImport(GoogleCast)
+                if shouldPrepareCastAfterLocalReplacement {
+                    GoogleCastCoordinator.shared.update(request: selectionRequest)
+                }
+#endif
                 if shouldSwitchVLCInPlace {
                     self.isReplacingVLCPlaybackInPlace = false
                 }
@@ -6724,6 +7582,45 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
         }
     }
+
+#if os(iOS) && canImport(GoogleCast)
+    private func castReplacementRequest(for request: PlayerResolvedPlaybackRequest) -> PlaybackRequest {
+        let replacementTitle: String = {
+            switch request.mediaInfo {
+            case .movie(_, let title, _, _): return title
+            case .episode(_, _, _, let showTitle, _, _): return showTitle ?? playerTitleOverride ?? "Show"
+            case .none: return playerTitleOverride ?? ""
+            }
+        }()
+        return PlaybackRequest(
+            url: request.url,
+            preset: request.preset,
+            headers: request.headers ?? [:],
+            subtitles: request.subtitles ?? [],
+            subtitleNames: request.subtitleNames,
+            subtitleHeadersByURL: request.subtitleHeadersByURL,
+            mediaSelectionIntent: playbackMediaSelectionIntent,
+            mediaInfo: request.mediaInfo,
+            imdbID: request.imdbId,
+            episodePlaybackContext: request.episodePlaybackContext,
+            launchContext: request.launchContext,
+            resumePosition: nil,
+            title: replacementTitle,
+            subtitle: activePlaybackRequest?.subtitle,
+            artworkURL: activePlaybackRequest?.artworkURL,
+            isAnime: request.isAnimeHint,
+            isAnimation: request.isAnimationContentHint ?? isAnimationContentHint ?? false,
+            originalTMDBSeasonNumber: request.originalTMDBSeasonNumber,
+            originalTMDBEpisodeNumber: request.originalTMDBEpisodeNumber,
+            servicesOriginalTitle: activePlaybackRequest?.servicesOriginalTitle,
+            servicesOriginalAudioLanguage: activePlaybackRequest?.servicesOriginalAudioLanguage,
+            onRequestNextEpisode: activePlaybackRequest?.onRequestNextEpisode,
+            onRequestResolvedNextEpisode: activePlaybackRequest?.onRequestResolvedNextEpisode,
+            onPlaybackStartupFailure: activePlaybackRequest?.onPlaybackStartupFailure,
+            localNextEpisodeFallback: activePlaybackRequest?.localNextEpisodeFallback
+        )
+    }
+#endif
 
     private func resetTimedEpisodeStateForNewPlayback() {
 #if !os(tvOS)
@@ -7012,7 +7909,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func showMPVSpeedMenu() {
         let currentSpeed = rendererGetSpeed()
-        let speeds: [(String, Double)] = [
+        var speeds: [(String, Double)] = [
             ("0.25x", 0.25),
             ("0.5x", 0.5),
             ("0.75x", 0.75),
@@ -7022,6 +7919,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             ("1.75x", 1.75),
             ("2.0x", 2.0)
         ]
+#if os(iOS) && canImport(GoogleCast)
+        // The Default Media Receiver accepts 0.5x...2x. Do not present a
+        // local-only 0.25x option while the receiver owns playback.
+        if GoogleCastCoordinator.shared.isRemoteMediaActive {
+            speeds.removeAll { $0.1 < 0.5 }
+        }
+#endif
         let actions = speeds.map { name, speed in
             makeOverlayAction(title: name, imageName: "hare.fill", isSelected: abs(currentSpeed - speed) < 0.01) { [weak self] in
                 guard let self else { return }
@@ -7081,7 +7985,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 
         let currentSpeed = rendererGetSpeed()
-        let speeds: [(String, Double)] = [
+        var speeds: [(String, Double)] = [
             ("0.25x", 0.25),
             ("0.5x", 0.5),
             ("0.75x", 0.75),
@@ -7091,6 +7995,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             ("1.75x", 1.75),
             ("2.0x", 2.0)
         ]
+#if os(iOS) && canImport(GoogleCast)
+        if GoogleCastCoordinator.shared.isRemoteMediaActive {
+            speeds.removeAll { $0.1 < 0.5 }
+        }
+#endif
 
         let menuSignature = "native|\(String(format: "%.2f", currentSpeed))|\(speeds.map { "\($0.0):\(String(format: "%.2f", $0.1))" }.joined(separator: "|"))"
         if menuSignature == nativeSpeedMenuContentSignature {
@@ -8542,6 +9451,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         nextEpisodeContext: EpisodePlaybackContext?,
         attemptKey: String
     ) {
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.isRemoteMediaActive else {
+            Logger.shared.log("GoogleCast: skipped local next-episode MPV prewarm", type: "Player")
+            markNextEpisodeStagingAttemptSkipped(key: attemptKey)
+            return
+        }
+#endif
         // Only when the MoltenVK MPV warmup path is actually usable and both toggles are on.
         guard ExperimentalFeatureState.mpvAdvancedPlaybackUnavailableReason == nil,
               UserDefaults.standard.bool(forKey: ExperimentalFeatureState.mpvPreloadEnabledKey),
@@ -9881,6 +10797,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             guard playbackLoadGeneration == expectedLoadGeneration,
                   !isClosing,
                   !isBeingDismissed else { return }
+#if os(iOS) && canImport(GoogleCast)
+            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
 
             playbackFailureHandled = false
             if solved {
@@ -9963,6 +10882,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             guard playbackLoadGeneration == expectedLoadGeneration,
                   !isClosing,
                   !isBeingDismissed else { return }
+#if os(iOS) && canImport(GoogleCast)
+            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
 
             guard let resolution else {
                 playbackFailureHandled = false
@@ -11398,6 +12320,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func applyUserDefaultsChange() {
+#if os(iOS) && canImport(GoogleCast)
+        applyGoogleCastButtonVisibility()
+#endif
         guard isVLCPlayer || isMPVRenderer else { return }
         if isVLCPlaybackStartupInProgress {
             Logger.shared.log("[PlayerVC.Settings] UserDefaults changed during VLC startup; deferring subtitle/settings rebuild", type: "Player")
@@ -12174,6 +13099,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func togglePlaybackFromVideoGesture(source: String) {
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.isHandoffLoadPending else { return }
+#endif
         pendingContainerTapWorkItem?.cancel()
         suppressNextPlayPauseControlReveal = true
         playPauseRevealSuppressionToken += 1
@@ -12225,6 +13153,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
         videoContainer.bringSubviewToFront(pipButton)
 #if os(iOS)
+#if canImport(GoogleCast)
+        videoContainer.bringSubviewToFront(castButton)
+        videoContainer.bringSubviewToFront(castConflictButton)
+#endif
         videoContainer.bringSubviewToFront(watchTogetherButton)
 #endif
         videoContainer.bringSubviewToFront(playerTitleLabel)
@@ -12264,6 +13196,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
                 self.pipButton.alpha = self.pipButton.isHidden ? 0.0 : 1.0
 #if os(iOS)
+#if canImport(GoogleCast)
+                self.castButton.alpha = self.castButton.isHidden ? 0.0 : 1.0
+                self.castConflictButton.alpha = self.castConflictButton.isHidden ? 0.0 : 1.0
+#endif
                 self.watchTogetherButton.alpha = self.watchTogetherButton.isHidden ? 0.0 : 1.0
 #endif
                 self.playerTitleLabel.alpha = self.playerTitleLabel.text?.isEmpty == false ? 1.0 : 0.0
@@ -12327,6 +13263,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
                 self.pipButton.alpha = 0.0
 #if os(iOS)
+#if canImport(GoogleCast)
+                self.castButton.alpha = 0.0
+                self.castConflictButton.alpha = 0.0
+#endif
                 self.watchTogetherButton.alpha = 0.0
 #endif
                 self.playerTitleLabel.alpha = 0.0
@@ -12472,6 +13412,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
         if isClosing { return }
         isClosing = true
+#if os(iOS) && canImport(GoogleCast)
+        GoogleCastCoordinator.shared.playerClosed(self)
+#endif
         releaseMPVAppExitPictureInPictureOwnership(
             reason: "close-tapped",
             clearActivationCandidate: true
@@ -12609,7 +13552,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         hasFinalizedMediaStatePlayback = true
         var userInfo: [String: Any] = [:]
         if let mediaInfo {
+#if os(iOS) && canImport(GoogleCast)
+            if !GoogleCastCoordinator.shared.isRemoteMediaActive {
+                syncTraktProgressOnPlaybackCloseIfNeeded(for: mediaInfo, reason: "close")
+            }
+#else
             syncTraktProgressOnPlaybackCloseIfNeeded(for: mediaInfo, reason: "close")
+#endif
             switch mediaInfo {
             case .movie(let id, _, _, _):
                 userInfo["tmdbId"] = id
@@ -12678,6 +13627,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         // callbacks, commit the final outgoing position, and release the lease
         // before the sync manager installs another account's state.
         isClosing = true
+#if os(iOS) && canImport(GoogleCast)
+        GoogleCastCoordinator.shared.stopForAccountBoundary(self)
+#endif
         releaseMPVAppExitPictureInPictureOwnership(
             reason: "icloud-account-boundary",
             clearActivationCandidate: true
@@ -12737,11 +13689,113 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
     }
 
+    private func abortMPVAppExitPictureInPictureForPlaybackIntentChange(
+        controller: PiPController,
+        source: String,
+        expectedLoadGeneration: Int,
+        expectedIntentGeneration: Int
+    ) {
+        guard pipController === controller,
+              playbackLoadGeneration == expectedLoadGeneration,
+              controller.playbackLoadGeneration == expectedLoadGeneration else { return }
+        logPictureInPicture(
+            "MPV app-exit PiP canceled after playback intent changed source=\(source) expectedIntent=\(expectedIntentGeneration) currentIntent=\(rendererPlaybackIntentGeneration) paused=\(rendererIsPausedState())"
+        )
+        controller.setCanStartPictureInPictureAutomaticallyFromInline(false)
+        cancelMPVPictureInPictureStartRequests(reason: "\(source)-playback-intent-changed")
+        releaseMPVAppExitPictureInPictureOwnership(
+            reason: "\(source)-playback-intent-changed"
+        )
+        if controller.isPictureInPictureActive || controller.isPictureInPictureStartPending {
+            controller.stopPictureInPicture(source: "playback-intent-changed")
+        }
+        rendererFinishPictureInPicture()
+        // Delegate callbacks can reach this path from willStart/didStart. Let that callback unwind
+        // before detaching its AVKit controller, while the attempt generation above already makes
+        // every late callback stale.
+        DispatchQueue.main.async { [weak self, weak controller] in
+            guard let self,
+                  let controller,
+                  self.pipController === controller,
+                  self.playbackLoadGeneration == expectedLoadGeneration,
+                  controller.playbackLoadGeneration == expectedLoadGeneration,
+                  self.isRunning,
+                  !self.isClosing else { return }
+            self.installMPVPictureInPictureController(
+                reason: "playback-intent-changed"
+            )
+            self.rendererSetPictureInPictureSourcePreparedForAutomaticStart(false)
+            if self.mpvBackgroundLifecycleIsArmed {
+                self.scheduleMPVBackgroundAudioFallback(
+                    source: "\(source)-playback-intent-changed",
+                    delay: 0.25
+                )
+            }
+            self.updatePiPButtonVisibility()
+        }
+    }
+
+    private func retireMPVPictureInPictureAfterRendererActivationFailure(
+        controller: PiPController,
+        source: String,
+        attemptID: Int
+    ) {
+        // The direct MPVKit bridge reports its own synchronous failure through the stop handler,
+        // which advances the attempt before activate returns. Only perform the generic retirement
+        // when no renderer-specific handler has already claimed this exact failure.
+        guard pipController === controller,
+              controller.playbackLoadGeneration == playbackLoadGeneration,
+              controller.transitionAttemptID == attemptID,
+              mpvPiPStartAttemptID == attemptID,
+              mpvExpectedPiPCallbackAttemptID == attemptID else { return }
+        let loadGeneration = playbackLoadGeneration
+        logPictureInPicture(
+            "retiring PiP after renderer activation failure source=\(source) attemptID=\(attemptID) renderer={\(rendererPictureInPictureDebugSnapshot())}"
+        )
+        controller.setCanStartPictureInPictureAutomaticallyFromInline(false)
+        cancelMPVPictureInPictureStartRequests(
+            reason: "\(source)-renderer-activation-failed"
+        )
+        releaseMPVAppExitPictureInPictureOwnership(
+            reason: "\(source)-renderer-activation-failed"
+        )
+        if controller.isPictureInPictureActive || controller.isPictureInPictureStartPending {
+            controller.stopPictureInPicture(source: "renderer-activation-failed")
+        }
+        rendererFinishPictureInPicture()
+        DispatchQueue.main.async { [weak self, weak controller] in
+            guard let self,
+                  let controller,
+                  self.pipController === controller,
+                  self.playbackLoadGeneration == loadGeneration,
+                  controller.playbackLoadGeneration == loadGeneration,
+                  self.isRunning,
+                  !self.isClosing else { return }
+            self.installMPVPictureInPictureController(
+                reason: "\(source)-renderer-activation-failed"
+            )
+            self.rendererSetPictureInPictureSourcePreparedForAutomaticStart(false)
+            if self.mpvBackgroundLifecycleIsArmed {
+                self.scheduleMPVBackgroundAudioFallback(
+                    source: "\(source)-renderer-activation-failed",
+                    delay: 0.25
+                )
+            }
+            self.updatePiPButtonVisibility()
+        }
+    }
+
     private func startMPVPictureInPictureWhenPossible(source: String) {
         guard isMPVRenderer, !isVLCPlayer else {
             logPictureInPicture("MPV PiP start ignored source=\(source): active renderer is not MPV")
             return
         }
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else {
+            logPictureInPicture("MPV PiP start skipped for Google Cast source=\(source)")
+            return
+        }
+#endif
         guard let pip = pipController else { return }
         if source == "button" {
             clearMPVAppExitPictureInPictureSuppression(reason: "manual-button-start")
@@ -12750,9 +13804,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             logPictureInPicture("start ignored source=\(source): PiP already active")
             return
         }
+        guard !pip.isPictureInPictureStartPending else {
+            logPictureInPicture("start ignored source=\(source): PiP transition already pending")
+            return
+        }
         mpvPiPStartAttemptID += 1
         let attemptID = mpvPiPStartAttemptID
+        let requiresStablePlayingIntent = source != "button"
+        let playbackIntentGeneration = rendererPlaybackIntentGeneration
         armMPVPictureInPictureController(pip, reason: "\(source)-explicit")
+        if requiresStablePlayingIntent {
+            authorizeMPVAutomaticPictureInPicture(for: pip, source: source)
+        } else {
+            clearMPVAutomaticPictureInPictureAuthorization(reason: "manual-button-start")
+        }
         let loadGeneration = playbackLoadGeneration
         let appState: String
         switch UIApplication.shared.applicationState {
@@ -12768,6 +13833,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 source: source,
                 activateLayer: false
             )
+#if os(iOS) && canImport(GoogleCast)
+            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
             guard attemptID == self.mpvPiPStartAttemptID,
                   loadGeneration == self.playbackLoadGeneration,
                   self.pipController === pip,
@@ -12778,6 +13846,17 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                   self.isMPVRenderer,
                   !self.isVLCPlayer,
                   !self.isClosing else { return }
+            guard !requiresStablePlayingIntent
+                    || (playbackIntentGeneration == self.rendererPlaybackIntentGeneration
+                        && !self.rendererIsPausedState()) else {
+                self.abortMPVAppExitPictureInPictureForPlaybackIntentChange(
+                    controller: pip,
+                    source: source,
+                    expectedLoadGeneration: loadGeneration,
+                    expectedIntentGeneration: playbackIntentGeneration
+                )
+                return
+            }
 
             self.logPictureInPicture("prepare MPV PiP end source=\(source) attemptID=\(attemptID) primed=\(primed) subs={\(self.subtitlePictureInPictureDebugSnapshot())}")
             if pip.isPictureInPictureActive {
@@ -12787,7 +13866,17 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 self.mpvAppExitPiPStartRequested = false
                 self.mpvActivePiPCallbackAttemptID = attemptID
                 if primed {
-                    self.rendererActivatePictureInPictureLayer()
+                    guard self.rendererActivatePictureInPictureLayer() else {
+                        self.logPictureInPicture(
+                            "MPV PiP active automatic join rejected renderer activation source=\(source) attemptID=\(attemptID)"
+                        )
+                        self.retireMPVPictureInPictureAfterRendererActivationFailure(
+                            controller: pip,
+                            source: "\(source)-active-join",
+                            attemptID: attemptID
+                        )
+                        return
+                    }
                 }
                 pip.updatePlaybackState()
                 self.updatePiPButtonVisibility()
@@ -12812,6 +13901,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             let possibleDeadline = CACurrentMediaTime() + 1
             while !pip.isPictureInPicturePossible,
                   !pip.isPictureInPictureActive,
+                  (!requiresStablePlayingIntent
+                    || (playbackIntentGeneration == self.rendererPlaybackIntentGeneration
+                        && !self.rendererIsPausedState())),
                   CACurrentMediaTime() < possibleDeadline {
                 guard attemptID == self.mpvPiPStartAttemptID,
                       loadGeneration == self.playbackLoadGeneration,
@@ -12830,10 +13922,31 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                   pip.transitionAttemptID == attemptID,
                   self.mpvExpectedPiPCallbackAttemptID == attemptID,
                   self.isRunning else { return }
+            guard !requiresStablePlayingIntent
+                    || (playbackIntentGeneration == self.rendererPlaybackIntentGeneration
+                        && !self.rendererIsPausedState()) else {
+                self.abortMPVAppExitPictureInPictureForPlaybackIntentChange(
+                    controller: pip,
+                    source: source,
+                    expectedLoadGeneration: loadGeneration,
+                    expectedIntentGeneration: playbackIntentGeneration
+                )
+                return
+            }
             if pip.isPictureInPictureActive {
                 self.mpvAppExitPiPStartRequested = false
                 self.mpvActivePiPCallbackAttemptID = attemptID
-                self.rendererActivatePictureInPictureLayer()
+                guard self.rendererActivatePictureInPictureLayer() else {
+                    self.logPictureInPicture(
+                        "MPV PiP readiness join rejected renderer activation source=\(source) attemptID=\(attemptID)"
+                    )
+                    self.retireMPVPictureInPictureAfterRendererActivationFailure(
+                        controller: pip,
+                        source: "\(source)-readiness-join",
+                        attemptID: attemptID
+                    )
+                    return
+                }
                 pip.updatePlaybackState()
                 self.updatePiPButtonVisibility()
                 self.logPictureInPicture(
@@ -12854,7 +13967,17 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
             self.logPictureInPicture("starting MPV PiP source=\(source) state=ready")
             if self.renderer.prefersPictureInPictureLayerActivationBeforeStart {
-                self.rendererActivatePictureInPictureLayer()
+                guard self.rendererActivatePictureInPictureLayer() else {
+                    self.logPictureInPicture(
+                        "MPV PiP start canceled after renderer activation rejection source=\(source) attemptID=\(attemptID)"
+                    )
+                    self.retireMPVPictureInPictureAfterRendererActivationFailure(
+                        controller: pip,
+                        source: "\(source)-pre-start",
+                        attemptID: attemptID
+                    )
+                    return
+                }
                 pip.updatePlaybackState()
             }
             pip.startPictureInPicture()
@@ -12878,13 +14001,26 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 pip.stopPictureInPicture(source: "\(source)-start-timeout")
                 self.mpvAppExitPiPStartRequested = false
                 self.rendererFinishPictureInPicture()
+                self.installMPVPictureInPictureController(
+                    reason: "\(source)-start-timeout-retire"
+                )
+                self.rendererSetPictureInPictureSourcePreparedForAutomaticStart(false)
+                if self.mpvBackgroundLifecycleIsArmed {
+                    self.scheduleMPVBackgroundAudioFallback(
+                        source: "\(source)-start-timeout",
+                        delay: 0.25
+                    )
+                }
                 self.updatePiPButtonVisibility()
             }
         }
     }
 
-    private func updatePosition(_ position: Double, duration: Double) {
+    private func updatePosition(_ position: Double, duration: Double, fromGoogleCast: Bool = false) {
         guard !isClosing else { return }
+#if os(iOS) && canImport(GoogleCast)
+        guard fromGoogleCast || !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
 
         let safePosition: Double
         if position.isFinite, position >= 0 {
@@ -13100,26 +14236,22 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return
         }
         
-        switch info {
-        case .movie(let id, let title, _, _):
-            ProgressManager.shared.updateMovieProgress(movieId: id, title: title, currentTime: persistPosition, totalDuration: effectiveDuration)
-        case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, let showPosterURL, let isAnime):
-            ProgressManager.shared.updateEpisodeProgress(
-                showId: showId,
+        let progressPlaybackContext: EpisodePlaybackContext?
+        if case .episode(_, let seasonNumber, let episodeNumber, _, _, _) = info {
+            progressPlaybackContext = playbackContextForCurrentEpisode(
                 seasonNumber: seasonNumber,
-                episodeNumber: episodeNumber,
-                currentTime: persistPosition,
-                totalDuration: effectiveDuration,
-                showTitle: showTitle,
-                showPosterURL: showPosterURL,
-                playbackContext: playbackContextForCurrentEpisode(
-                    seasonNumber: seasonNumber,
-                    episodeNumber: episodeNumber
-                ),
-                isAnime: isAnime || episodePlaybackContext?.hasAnimeMediaId == true
+                episodeNumber: episodeNumber
             )
+        } else {
+            progressPlaybackContext = nil
         }
-        updateTraktScrobbleFromProgress(position: persistPosition, duration: effectiveDuration)
+        PlaybackProgressPersistence.persist(
+            mediaInfo: info,
+            position: persistPosition,
+            duration: effectiveDuration,
+            playbackContext: progressPlaybackContext,
+            traktAction: !rendererIsPausedState() && playbackDidStart ? .start : nil
+        )
     }
 
     private func retryPendingInitialResumeIfNeeded(currentPosition: Double) {
@@ -14609,9 +15741,19 @@ extension PlayerViewController: WatchTogetherPlaybackDelegate {
                 rendererPlay()
                 updatePlayPauseButton(isPaused: false, shouldShowControls: false)
             }
-        } else if !rendererIsPausedState() {
-            rendererPausePlayback()
-            updatePlayPauseButton(isPaused: true, shouldShowControls: false)
+        } else {
+            if rendererIsPausedState() {
+                // The renderer may already be paused only because Eclipse's background fallback
+                // owns it. An authoritative shared pause supersedes that ownership even though no
+                // second transport command is necessary.
+                rendererPlaybackIntentGeneration &+= 1
+                mpvBackgroundFallbackAutoPaused = false
+                mpvBackgroundFallbackPauseIntentGeneration = nil
+                mpvBackgroundFallbackPauseLifecycleGeneration = nil
+            } else {
+                rendererPausePlayback()
+                updatePlayPauseButton(isPaused: true, shouldShowControls: false)
+            }
         }
     }
 
@@ -14712,6 +15854,9 @@ extension PlayerViewController: WatchTogetherPlaybackDelegate {
             wasActive = false
         }
         updateWatchTogetherButton(for: state)
+#if canImport(GoogleCast)
+        updateCastConflictInterception()
+#endif
         if !wasActive, case .active(let count, let matches, _) = state, matches {
             let sessionPeople = count == 1 ? "1 person" : "\(count) people"
             showPlayerNotice("Watch Together connected — \(sessionPeople) in the session.")
@@ -14720,6 +15865,226 @@ extension PlayerViewController: WatchTogetherPlaybackDelegate {
 
     func watchTogetherShowNotice(_ message: String) {
         showPlayerNotice(message)
+    }
+}
+#endif
+
+#if os(iOS) && canImport(GoogleCast)
+private extension PlayerViewController {
+    func applyGoogleCastButtonVisibility() {
+        let shouldShow = GoogleCastSettings.isEnabled()
+        let becameEnabled = wasGoogleCastControlEnabled == false && shouldShow
+        wasGoogleCastControlEnabled = shouldShow
+        castButton.isHidden = !shouldShow
+        castButton.isUserInteractionEnabled = shouldShow
+        castButton.accessibilityElementsHidden = !shouldShow
+        castButtonWidthConstraint?.constant = shouldShow ? 36 : 0
+        watchTogetherLeadingFromCastConstraint?.constant = shouldShow ? 12 : 0
+
+        if !shouldShow {
+            castConflictButton.isHidden = true
+            castConflictButton.isUserInteractionEnabled = false
+            castButton.alpha = 0
+            castConflictButton.alpha = 0
+        } else {
+            castConflictButton.isUserInteractionEnabled = true
+            updateCastConflictInterception()
+            if controlsVisible {
+                castButton.alpha = 1
+                castConflictButton.alpha = castConflictButton.isHidden ? 0 : 1
+            }
+        }
+        viewIfLoaded?.setNeedsLayout()
+        if becameEnabled, let activePlaybackRequest {
+            // A player that opened while Cast was disabled has never given the
+            // coordinator its immutable request. Seed it now so the newly
+            // revealed button can hand off the currently playing item.
+            GoogleCastCoordinator.shared.prepare(request: activePlaybackRequest, player: self)
+        }
+    }
+
+    @objc func castConflictTapped() {
+        guard GoogleCastSettings.isEnabled() else { return }
+        guard case .active = watchTogetherConnectionState else {
+            GoogleCastCoordinator.shared.presentCastDialog()
+            return
+        }
+        guard presentedViewController == nil else {
+            showPlayerNotice("Close the current menu, then try Cast again.")
+            return
+        }
+        let alert = UIAlertController(
+            title: "Leave Watch Together?",
+            message: "Google Cast and SharePlay cannot control the same playback session. Leave this SharePlay session and choose a Cast device?",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "Leave and Cast", style: .default) { [weak self] _ in
+            WatchTogetherCoordinator.shared.leaveSession()
+            self?.updateCastConflictInterception()
+            GoogleCastCoordinator.shared.presentCastDialog()
+        })
+        present(alert, animated: true)
+    }
+
+    func updateCastConflictInterception() {
+        guard GoogleCastSettings.isEnabled() else {
+            castConflictButton.isHidden = true
+            castConflictButton.alpha = 0
+            return
+        }
+        if case .active = watchTogetherConnectionState {
+            castConflictButton.isHidden = false
+        } else {
+            castConflictButton.isHidden = true
+        }
+        castConflictButton.alpha = controlsVisible && !castConflictButton.isHidden ? 1 : 0
+    }
+}
+
+extension PlayerViewController: GoogleCastPlayerHandoff {
+    var castCurrentPosition: Double { max(0, cachedPosition) }
+    var castCurrentDuration: Double { max(0, cachedDuration) }
+    var castIsPaused: Bool { renderer.isPausedState }
+    var castPlaybackRate: Double { renderer.getSpeed() }
+    var castIsVisible: Bool { viewIfLoaded?.window != nil && !isClosing }
+
+    func castWillBeginHandoff() {
+        castLocalWasPausedBeforeHandoff = renderer.isPausedState
+        castLocalWasStopped = false
+        playbackStartupWorkItem?.cancel()
+        playbackStartupWorkItem = nil
+        pendingRendererRestartRetryGeneration = nil
+        cancelMPVPictureInPictureStartRequests(reason: "google-cast-handoff")
+        cancelScheduledMPVPictureInPictureWarmups(reason: "google-cast-handoff")
+        pipController?.setCanStartPictureInPictureAutomaticallyFromInline(false)
+        if let pip = pipController,
+           pip.isPictureInPictureActive || pip.isPictureInPictureStartPending {
+            pip.stopPictureInPicture(source: "google-cast-handoff")
+            rendererFinishPictureInPicture()
+        }
+        pipButton.isHidden = true
+        pipButton.isEnabled = false
+#if !os(tvOS)
+        updateVolumeControlVisibility()
+#endif
+        rendererPlaybackIntentGeneration &+= 1
+        mpvBackgroundFallbackAutoPaused = false
+        mpvBackgroundFallbackPauseIntentGeneration = nil
+        mpvBackgroundFallbackPauseLifecycleGeneration = nil
+        renderer.pausePlayback()
+        updatePlayPauseButton(isPaused: true, shouldShowControls: false)
+        showPlayerNotice("Connecting to your Cast device...")
+        Logger.shared.log("GoogleCast: Molten paused for receiver handoff", type: "Player")
+    }
+
+    func castDidBecomeActive(deviceName: String?) {
+        if !castLocalWasStopped {
+            rendererStop()
+            castLocalWasStopped = true
+        }
+        pipButton.isHidden = true
+        pipButton.isEnabled = false
+        subtitleButton.isEnabled = false
+        audioButton.isEnabled = false
+#if !os(tvOS)
+        updateVolumeControlVisibility()
+#endif
+        updatePlayPauseButton(isPaused: GoogleCastCoordinator.shared.remoteIsPaused ?? false, shouldShowControls: false)
+        let destination = deviceName?.trimmingCharacters(in: .whitespacesAndNewlines)
+        showPlayerNotice(destination?.isEmpty == false ? "Casting to \(destination!)." : "Casting to TV.")
+    }
+
+    func castDidFailOrCancel(message: String, resumeLocal: Bool, position: Double?) {
+        if resumeLocal {
+            restoreMoltenAfterCast(
+                position: position ?? cachedPosition,
+                shouldResume: !castLocalWasPausedBeforeHandoff
+            )
+        }
+        subtitleButton.isEnabled = true
+        audioButton.isEnabled = true
+#if !os(tvOS)
+        updateVolumeControlVisibility()
+#endif
+        updatePiPButtonVisibility()
+        presentCastCompatibilityAlert(title: "Unable to Cast", message: message)
+    }
+
+    func castDidUpdate(position: Double, duration: Double, isPaused: Bool, playbackRate: Double) {
+        updatePosition(position, duration: duration, fromGoogleCast: true)
+        updatePlayPauseButton(isPaused: isPaused, shouldShowControls: false)
+        if playbackRate.isFinite, playbackRate > 0 {
+            updateSpeedMenu()
+        }
+    }
+
+    func castDidEndUnexpectedly(position: Double, shouldResume: Bool) {
+        restoreMoltenAfterCast(position: position, shouldResume: shouldResume)
+        showPlayerNotice(
+            shouldResume
+                ? "Cast disconnected. Playback resumed in Eclipse."
+                : "Cast disconnected. Playback was restored in Eclipse."
+        )
+    }
+
+    func castRequiresConfirmation(
+        title: String,
+        message: String,
+        continueTitle: String,
+        completion: @escaping (Bool) -> Void
+    ) {
+        guard presentedViewController == nil else {
+            completion(false)
+            showPlayerNotice("Close the current menu, then try Cast again.")
+            return
+        }
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completion(false) })
+        alert.addAction(UIAlertAction(title: continueTitle, style: .default) { _ in completion(true) })
+        present(alert, animated: true)
+    }
+
+    private func restoreMoltenAfterCast(position: Double, shouldResume: Bool) {
+        var restoredThroughLoad = false
+        if castLocalWasStopped, let request = activePlaybackRequest {
+            // Go through the normal load path so the renderer receives its
+            // current subtitle, audio, HDR, proxy, and initial-seek settings
+            // instead of a bare URL reload after a Cast disconnect.
+            pendingSourceRefreshResumePosition = max(0, position)
+            load(
+                url: request.url,
+                preset: request.preset,
+                headers: request.headers,
+                playbackShouldResumeAfterLoad: shouldResume
+            )
+            restoredThroughLoad = true
+        } else if position.isFinite, abs(cachedPosition - position) > 2 {
+            renderer.seek(to: max(0, position))
+        }
+        castLocalWasStopped = false
+        if !restoredThroughLoad {
+            applyPlaybackIntentAfterLoad(
+                shouldResume: shouldResume,
+                source: "cast-without-reload"
+            )
+        }
+        subtitleButton.isEnabled = true
+        audioButton.isEnabled = true
+#if !os(tvOS)
+        updateVolumeControlVisibility()
+#endif
+        updatePiPButtonVisibility()
+    }
+
+    private func presentCastCompatibilityAlert(title: String, message: String) {
+        guard presentedViewController == nil else {
+            showPlayerNotice(message)
+            return
+        }
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
     }
 }
 #endif
@@ -14739,6 +16104,12 @@ extension PlayerViewController: UIAdaptivePresentationControllerDelegate {
     }
 
     func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+        if isPlayerPresentation(presentationController) {
+#if canImport(GoogleCast)
+            GoogleCastCoordinator.shared.playerClosed(self)
+#endif
+            return
+        }
         guard episodeSourceSheetController === presentationController.presentedViewController else { return }
         let transitionID = episodeSourceSheetTransitionID
         episodeSourceSheetController = nil
@@ -14757,11 +16128,17 @@ extension PlayerViewController: UIAdaptivePresentationControllerDelegate {
 extension PlayerViewController: MPVNativeRendererDelegate {
     func renderer(_ renderer: PlayerRenderer, didUpdatePosition position: Double, duration: Double) {
         if isClosing { return }
+#if os(iOS) && canImport(GoogleCast)
+        if GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks { return }
+#endif
         updatePosition(position, duration: duration)
     }
-    
+
     func renderer(_ renderer: PlayerRenderer, didChangePause isPaused: Bool) {
         if isClosing { return }
+#if os(iOS) && canImport(GoogleCast)
+        if GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks { return }
+#endif
         if playbackTraceLastPauseValue != isPaused {
             playbackTraceLastPauseValue = isPaused
             logPlaybackStage(
@@ -14787,6 +16164,9 @@ extension PlayerViewController: MPVNativeRendererDelegate {
     
     func renderer(_ renderer: PlayerRenderer, didChangeLoading isLoading: Bool) {
         if isClosing { return }
+#if os(iOS) && canImport(GoogleCast)
+        if GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks { return }
+#endif
         if playbackTraceLastLoadingValue != isLoading {
             playbackTraceLastLoadingValue = isLoading
             logPlaybackStage(
@@ -14795,8 +16175,14 @@ extension PlayerViewController: MPVNativeRendererDelegate {
             )
         }
         isRendererLoading = isLoading
+        // MPVKit's authoritative PiP rate is zero while cache-paused. Keep AVKit's play/pause
+        // model synchronized with that temporary state and invalidate again when buffering clears.
+        pipController?.updatePlaybackState()
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+#if os(iOS) && canImport(GoogleCast)
+            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
             if isLoading {
                 self.centerPlayPauseButton.isHidden = true
                 self.setPlayerLoadingIndicatorVisible(true)
@@ -14818,8 +16204,14 @@ extension PlayerViewController: MPVNativeRendererDelegate {
     
     func renderer(_ renderer: PlayerRenderer, didBecomeReadyToSeek: Bool) {
         if isClosing { return }
+#if os(iOS) && canImport(GoogleCast)
+        if GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks { return }
+#endif
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+#if os(iOS) && canImport(GoogleCast)
+            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
             self.logPlaybackStage(
                 "renderer-ready",
                 "pendingSeek=\(self.secondsText(self.pendingSeekTime)) loading=\(self.isRendererLoading) renderer={\(self.rendererPictureInPictureDebugSnapshot())}"
@@ -14854,6 +16246,9 @@ extension PlayerViewController: MPVNativeRendererDelegate {
 
     func renderer(_ renderer: PlayerRenderer, didFailWithError message: String) {
         if isClosing { return }
+#if os(iOS) && canImport(GoogleCast)
+        if GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks { return }
+#endif
         logPlaybackStage("renderer-failed", "message=\(message)")
         setIdleTimerDisabledForPlayback(false, reason: "mpv-failure")
         logMPV("delegate didFailWithError message=\(message)")
@@ -14863,13 +16258,21 @@ extension PlayerViewController: MPVNativeRendererDelegate {
         }
         if !playbackDidStart {
             handlePlaybackStartupFailure(message, isSourceFailure: true)
+        } else if message.hasPrefix("Hardware decoder unavailable") {
+            showTransientErrorBanner(message, duration: 8)
         }
     }
 
     func rendererDidChangeTracks(_ renderer: PlayerRenderer) {
         if isClosing { return }
+#if os(iOS) && canImport(GoogleCast)
+        if GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks { return }
+#endif
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+#if os(iOS) && canImport(GoogleCast)
+            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
             self.invalidateRendererTrackCaches()
             self.updateAudioTracksMenu()
             self.updateSubtitleTracksMenu()
@@ -14880,8 +16283,14 @@ extension PlayerViewController: MPVNativeRendererDelegate {
     
     func renderer(_ renderer: PlayerRenderer, subtitleTrackDidChange trackId: Int) {
         if isClosing { return }
+#if os(iOS) && canImport(GoogleCast)
+        if GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks { return }
+#endif
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+#if os(iOS) && canImport(GoogleCast)
+            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
             let shouldShowSubtitles = trackId >= 0
             if self.subtitleModel.isVisible != shouldShowSubtitles {
                 self.setSessionAwareSubtitleVisible(shouldShowSubtitles)
@@ -14910,7 +16319,33 @@ extension PlayerViewController: PiPControllerDelegate {
         }
         logPictureInPicture("delegate willStart possible=\(controller.isPictureInPicturePossible) active=\(controller.isPictureInPictureActive)")
         let primed = rendererIsPictureInPicturePrimed()
-        logPictureInPicture("delegate willStart state primed=\(primed) subs={\(subtitlePictureInPictureDebugSnapshot())}")
+        let resumedFallbackPause = primed
+            && resumeMPVBackgroundFallbackPauseForPictureInPictureIfNeeded(
+                source: "delegate-willStart"
+            )
+        logPictureInPicture("delegate willStart state primed=\(primed) resumedFallbackPause=\(resumedFallbackPause) subs={\(subtitlePictureInPictureDebugSnapshot())}")
+        guard validateMPVAutomaticPictureInPicturePlaybackIntent(
+            for: controller,
+            attemptID: controller.transitionAttemptID,
+            source: "delegate-willStart"
+        ) else { return }
+        if primed, renderer.prefersPictureInPictureLayerActivationBeforeStart {
+            // Automatic-from-inline entry bypasses the manual button's pre-start activation.
+            // Begin the already-primed GPU handoff here so AVKit never reaches didStart on a
+            // hidden/inactive source layer.
+            guard rendererActivatePictureInPictureLayer() else {
+                logPictureInPicture("delegate willStart renderer activation rejected")
+                retireMPVPictureInPictureAfterRendererActivationFailure(
+                    controller: controller,
+                    source: "delegate-willStart",
+                    attemptID: controller.transitionAttemptID
+                )
+                return
+            }
+        }
+        if resumedFallbackPause || primed {
+            controller.updatePlaybackState()
+        }
     }
     func pipController(
         _ controller: PiPController,
@@ -14928,32 +16363,92 @@ extension PlayerViewController: PiPControllerDelegate {
             return
         }
         let primed = rendererIsPictureInPicturePrimed()
-        logPictureInPicture("delegate didStart success=\(didStartPictureInPicture) possible=\(controller.isPictureInPicturePossible) active=\(controller.isPictureInPictureActive) primed=\(primed) renderer={\(rendererPictureInPictureDebugSnapshot())}")
+        let resumedFallbackPause = didStartPictureInPicture
+            && primed
+            && resumeMPVBackgroundFallbackPauseForPictureInPictureIfNeeded(
+                source: "delegate-didStart"
+            )
+        logPictureInPicture("delegate didStart success=\(didStartPictureInPicture) possible=\(controller.isPictureInPicturePossible) active=\(controller.isPictureInPictureActive) primed=\(primed) resumedFallbackPause=\(resumedFallbackPause) renderer={\(rendererPictureInPictureDebugSnapshot())}")
+        if didStartPictureInPicture,
+           !validateMPVAutomaticPictureInPicturePlaybackIntent(
+                for: controller,
+                attemptID: attemptID,
+                source: "delegate-didStart"
+           ) {
+            updatePiPButtonVisibility()
+            return
+        }
         if didStartPictureInPicture {
+            mpvAppExitPiPStartRequested = false
+            cancelPendingMPVAppExitPictureInPictureStart(reason: "delegate-didStart")
             mpvActivePiPCallbackAttemptID = attemptID
             if primed {
-                rendererActivatePictureInPictureLayer()
+                guard rendererActivatePictureInPictureLayer() else {
+                    logPictureInPicture("delegate didStart renderer activation rejected")
+                    retireMPVPictureInPictureAfterRendererActivationFailure(
+                        controller: controller,
+                        source: "delegate-didStart",
+                        attemptID: attemptID
+                    )
+                    updatePiPButtonVisibility()
+                    return
+                }
+                clearMPVAutomaticPictureInPictureAuthorization(
+                    reason: "delegate-didStart-ready"
+                )
+                cancelMPVBackgroundAudioFallback(reason: "delegate-didStart-ready")
             } else {
                 logPictureInPicture("delegate didStart found unready renderer; ending PiP cleanly")
+                clearMPVAutomaticPictureInPictureAuthorization(
+                    reason: "delegate-didStart-renderer-not-ready"
+                )
                 releaseMPVAppExitPictureInPictureOwnership(reason: "renderer-not-ready")
                 controller.stopPictureInPicture(source: "renderer-not-ready")
                 rendererFinishPictureInPicture()
+                if mpvBackgroundLifecycleIsArmed {
+                    scheduleMPVBackgroundAudioFallback(
+                        source: "delegate-didStart-renderer-not-ready",
+                        delay: 0.25
+                    )
+                }
             }
         } else {
+            // An explicit request can fail while AVKit is already accepting this controller's
+            // automatic-from-inline transition. The wrapper normally coalesces that ordering, but
+            // never let a stale terminal callback retire a renderer AVKit now owns.
+            if controller.isPictureInPictureActive
+                || controller.isPictureInPictureStartPending {
+                logPictureInPicture(
+                    "delegate didStart failure superseded by live transition active=\(controller.isPictureInPictureActive) pending=\(controller.isPictureInPictureStartPending) attemptID=\(attemptID)"
+                )
+                controller.updatePlaybackState()
+                updatePiPButtonVisibility()
+                return
+            }
             mpvPiPStartAttemptID += 1
             mpvAppExitPiPStartRequested = false
+            clearMPVAutomaticPictureInPictureAuthorization(
+                reason: "delegate-didStart-failed"
+            )
             releaseMPVAppExitPictureInPictureOwnership(reason: "delegate-didStart-failed")
             rendererFinishPictureInPicture()
             mpvExpectedPiPCallbackAttemptID = nil
             mpvActivePiPCallbackAttemptID = nil
-            scheduleMPVPictureInPictureForegroundWarmup(
-                source: "delegate-didStart-failed-rewarm",
-                delays: [0.35, 1.20],
-                forceFirst: true
-            )
+            if mpvBackgroundLifecycleIsArmed {
+                requestMPVSerializedForegroundRecovery(source: "delegate-didStart-failed")
+            } else {
+                scheduleMPVPictureInPictureForegroundWarmup(
+                    source: "delegate-didStart-failed-rewarm",
+                    delays: [0.35, 1.20],
+                    forceFirst: true
+                )
+            }
         }
         pipController?.updatePlaybackState()
         updatePiPButtonVisibility()
+        if mpvBackgroundLifecycleIsArmed, owningPlaybackSceneIsForegroundActive() {
+            requestMPVSerializedForegroundRecovery(source: "delegate-didStart-settled")
+        }
     }
     func pipController(_ controller: PiPController, willStopPictureInPicture: Bool) {
         guard shouldHandleMPVPictureInPictureCallback(
@@ -14965,9 +16460,13 @@ extension PlayerViewController: PiPControllerDelegate {
             return
         }
         logPictureInPicture("delegate willStop renderer={\(rendererPictureInPictureDebugSnapshot())}")
+        authorizeMPVPictureInPictureStop(for: controller, source: "delegate-willStop")
         disarmMPVPictureInPictureRestartAfterStop(reason: "delegate-willStop")
     }
     func pipController(_ controller: PiPController, didStopPictureInPicture: Bool) {
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
         let restoreKey = mpvPictureInPictureRestoreKey(for: controller)
         let isKnownRestore = mpvPictureInPictureRestoreOperation?.key == restoreKey
             || mpvCompletedPictureInPictureRestore?.key == restoreKey
@@ -14981,8 +16480,55 @@ extension PlayerViewController: PiPControllerDelegate {
             return
         }
         logPictureInPicture("delegate didStop renderer={\(rendererPictureInPictureDebugSnapshot())}")
+        let existingOperation = mpvPictureInPictureRestoreOperation?.key == restoreKey
+            ? mpvPictureInPictureRestoreOperation
+            : nil
+        if existingOperation == nil,
+           currentMPVPictureInPictureStopAuthorization(for: controller) == nil,
+           owningPlaybackSceneIsForegroundActive() {
+            // Match restoreUI's defensive fallback for an unusual AVKit callback sequence that
+            // omits willStop. Never synthesize this authorization while the scene is backgrounded.
+            authorizeMPVPictureInPictureStop(
+                for: controller,
+                source: "did-stop-foreground-fallback"
+            )
+        }
+        guard existingOperation != nil
+                || currentMPVPictureInPictureStopAuthorization(for: controller) != nil else {
+            logPictureInPicture(
+                "delegate didStop ignored: stop authorization expired before this lifecycle"
+            )
+            updatePiPButtonVisibility()
+            return
+        }
         disarmMPVPictureInPictureRestartAfterStop(reason: "delegate-didStop")
-        let operation = beginMPVPictureInPictureRestore(for: controller)
+        let operation: (
+            id: Int,
+            key: MPVPictureInPictureRestoreKey,
+            task: Task<Bool, Never>
+        )
+        if let existingOperation {
+            operation = existingOperation
+        } else {
+            guard let authorization = currentMPVPictureInPictureStopAuthorization(
+                for: controller
+            ), owningPlaybackSceneIsForegroundActive() else {
+                // Closing PiP while this scene remains backgrounded is terminal for AVKit but not
+                // permission to expose or restart the inline renderer. The scene's serialized
+                // foreground transaction will perform the lifecycle-scoped restore later.
+                logPictureInPicture(
+                    "delegate didStop deferred inline restore: owning scene is not foreground or stop authorization is stale"
+                )
+                updatePiPButtonVisibility()
+                return
+            }
+            operation = beginMPVPictureInPictureRestore(
+                for: controller,
+                lifecycleGeneration: mpvBackgroundLifecycleIsArmed
+                    ? authorization.lifecycleGeneration
+                    : nil
+            )
+        }
         Task { @MainActor [weak self, weak controller] in
             let rendererRestored = await operation.task.value
             guard let self, let controller else { return }
@@ -14992,11 +16538,21 @@ extension PlayerViewController: PiPControllerDelegate {
                 rendererRestored: rendererRestored,
                 source: "delegate-didStop"
             )
+            self.requestMPVSerializedForegroundRecovery(source: "delegate-didStop-restored")
         }
     }
     func pipController(_ controller: PiPController, restoreUserInterfaceForPictureInPictureStop completionHandler: @escaping (Bool) -> Void) {
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else {
+            completionHandler(false)
+            return
+        }
+#endif
         let restoreKey = mpvPictureInPictureRestoreKey(for: controller)
-        let isKnownRestore = mpvPictureInPictureRestoreOperation?.key == restoreKey
+        let existingOperation = mpvPictureInPictureRestoreOperation?.key == restoreKey
+            ? mpvPictureInPictureRestoreOperation
+            : nil
+        let isKnownRestore = existingOperation != nil
             || mpvCompletedPictureInPictureRestore?.key == restoreKey
         guard isKnownRestore || shouldHandleMPVPictureInPictureCallback(
             from: controller,
@@ -15011,20 +16567,72 @@ extension PlayerViewController: PiPControllerDelegate {
             return
         }
         logPictureInPicture("delegate restoreUI begin renderer={\(rendererPictureInPictureDebugSnapshot())}")
-        let operation = beginMPVPictureInPictureRestore(for: controller)
+        if existingOperation == nil,
+           currentMPVPictureInPictureStopAuthorization(for: controller) == nil,
+           owningPlaybackSceneIsForegroundActive() {
+            // Some programmatic foreground stops do not deliver willStop before restoreUI. It is
+            // safe to synthesize the stop token only while this exact scene is already active.
+            authorizeMPVPictureInPictureStop(
+                for: controller,
+                source: "restore-ui-foreground-fallback"
+            )
+        }
+        let stopAuthorization = currentMPVPictureInPictureStopAuthorization(for: controller)
+        guard existingOperation != nil || stopAuthorization != nil else {
+            logPictureInPicture(
+                "delegate restoreUI rejected: no current stop authorization for owning lifecycle"
+            )
+            completionHandler(false)
+            return
+        }
         let completeRestore: () -> Void = { [weak self, weak controller] in
             Task { @MainActor in
-                let rendererRestored = await operation.task.value
                 guard let self, let controller else {
                     completionHandler(false)
                     return
                 }
+                let operation: (
+                    id: Int,
+                    key: MPVPictureInPictureRestoreKey,
+                    task: Task<Bool, Never>
+                )
+                if let existingOperation {
+                    guard self.mpvPictureInPictureRestoreOperation?.id == existingOperation.id else {
+                        completionHandler(false)
+                        return
+                    }
+                    operation = existingOperation
+                } else {
+                    guard let stopAuthorization,
+                          await self.waitForForegroundMPVPictureInPictureRestoreAuthorization(
+                            stopAuthorization,
+                            controller: controller
+                          ),
+                          self.currentMPVPictureInPictureStopAuthorization(
+                            stopAuthorization,
+                            for: controller
+                          ) != nil else {
+                        self.logPictureInPicture(
+                            "delegate restoreUI rejected after waiting: lifecycle authorization expired"
+                        )
+                        completionHandler(false)
+                        return
+                    }
+                    operation = self.beginMPVPictureInPictureRestore(
+                        for: controller,
+                        lifecycleGeneration: self.mpvBackgroundLifecycleIsArmed
+                            ? stopAuthorization.lifecycleGeneration
+                            : nil
+                    )
+                }
+                let rendererRestored = await operation.task.value
                 let restored = self.completeMPVPictureInPictureRestore(
                     operation,
                     controller: controller,
                     rendererRestored: rendererRestored,
                     source: "restore-ui"
                 )
+                self.requestMPVSerializedForegroundRecovery(source: "restore-ui-restored")
                 completionHandler(restored)
             }
         }
@@ -15154,7 +16762,7 @@ extension PlayerViewController: PiPControllerDelegate {
             from: controller,
             source: "is-playing"
         ) else { return false }
-        return !rendererIsPausedState()
+        return !rendererIsPausedState() && !isRendererLoading
     }
     func pipControllerDuration(_ controller: PiPController) -> Double {
         guard shouldHandleMPVPictureInPictureCallback(
@@ -15179,6 +16787,288 @@ extension PlayerViewController: PiPControllerDelegate {
         logVLCUIViewSnapshot("memoryWarning")
     }
 
+    /// Reverses only the pause Eclipse created as an audio-only fallback after a failed background
+    /// PiP start. The lifecycle and transport generations ensure a newer user pause is never
+    /// converted into play by a late AVKit callback.
+    @discardableResult
+    private func resumeMPVBackgroundFallbackPauseForPictureInPictureIfNeeded(
+        source: String
+    ) -> Bool {
+        guard mpvBackgroundFallbackAutoPaused else { return false }
+        let pauseLifecycleGeneration = mpvBackgroundFallbackPauseLifecycleGeneration
+        let pauseIntentGeneration = mpvBackgroundFallbackPauseIntentGeneration
+        let lifecycleMatches = pauseLifecycleGeneration == mpvBackgroundLifecycleGeneration
+        let intentMatches = pauseIntentGeneration == rendererPlaybackIntentGeneration
+        let rendererWasPaused = rendererIsPausedState()
+
+        // Clear ownership before issuing play so re-entrant playback-state callbacks can never
+        // observe an Eclipse-owned pause after it has been consumed.
+        mpvBackgroundFallbackAutoPaused = false
+        mpvBackgroundFallbackPauseIntentGeneration = nil
+        mpvBackgroundFallbackPauseLifecycleGeneration = nil
+
+        guard lifecycleMatches, intentMatches else {
+            let pauseLifecycleText = pauseLifecycleGeneration.map { String($0) } ?? "nil"
+            let pauseIntentText = pauseIntentGeneration.map { String($0) } ?? "nil"
+            logPictureInPicture(
+                "background fallback resume rejected source=\(source) pauseLifecycle=\(pauseLifecycleText) currentLifecycle=\(mpvBackgroundLifecycleGeneration) pauseIntent=\(pauseIntentText) currentIntent=\(rendererPlaybackIntentGeneration) paused=\(rendererWasPaused)"
+            )
+            return false
+        }
+
+        // Some renderers publish their cached pause state asynchronously after accepting the mpv
+        // command. The matching lifecycle+intent ownership is the authoritative proof: send play
+        // idempotently so it orders after any queued fallback pause instead of dropping ownership
+        // while that pause is still in flight.
+        rendererPlay(recordingPlaybackIntent: false)
+        logPictureInPicture(
+            "background fallback pause resumed for PiP source=\(source) lifecycle=\(mpvBackgroundLifecycleGeneration) intent=\(rendererPlaybackIntentGeneration)"
+        )
+        return true
+    }
+
+    private func noteMPVBackgroundLifecycleIfNeeded(source: String) {
+        guard isMPVRenderer, !isVLCPlayer, isRunning, !isClosing else { return }
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
+        let wasAlreadyArmed = mpvBackgroundLifecycleIsArmed
+        guard !wasAlreadyArmed || mpvBackgroundLifecycleIsInForegroundPhase else {
+            logPictureInPicture(
+                "coalesced duplicate background lifecycle source=\(source) generation=\(mpvBackgroundLifecycleGeneration)"
+            )
+            return
+        }
+
+        if wasAlreadyArmed {
+            _ = resumeMPVBackgroundFallbackPauseForPictureInPictureIfNeeded(
+                source: "new-background-\(source)"
+            )
+        }
+        cancelMPVBackgroundAudioFallback(reason: "new-background-\(source)")
+        mpvBackgroundLifecycleGeneration &+= 1
+        invalidateMPVPictureInPictureStopAuthorization(
+            reason: "serialized-background-\(source)-generation-\(mpvBackgroundLifecycleGeneration)"
+        )
+        mpvBackgroundLifecycleIsArmed = true
+        mpvBackgroundLifecycleIsInForegroundPhase = false
+        mpvForegroundRecoveryRetryCount = 0
+        mpvForegroundRecoveryTask?.cancel()
+        mpvForegroundRecoveryTask = nil
+        invalidateMPVPictureInPictureRestoreOperation(
+            reason: "serialized-background-\(source)-generation-\(mpvBackgroundLifecycleGeneration)"
+        )
+        cancelScheduledMPVPictureInPictureWarmups(reason: "serialized-background-\(source)")
+        mpvBackgroundFallbackAutoPaused = false
+        mpvBackgroundFallbackPauseIntentGeneration = nil
+        mpvBackgroundFallbackPauseLifecycleGeneration = nil
+        renderer.noteApplicationDidEnterBackground()
+        logPictureInPicture(
+            "armed serialized foreground recovery source=\(source) generation=\(mpvBackgroundLifecycleGeneration)"
+        )
+    }
+
+    private func owningPlaybackSceneIsForegroundActive() -> Bool {
+        bindPlaybackWindowSceneIfAvailable(source: "foreground-state-check")
+        if let scene = playbackWindowScene ?? viewIfLoaded?.window?.windowScene {
+            return scene.activationState == .foregroundActive
+        }
+#if os(iOS)
+        // Stage Manager can keep the process active while this player belongs to an unattached or
+        // background scene. Until presentation supplies a concrete owner, process state is not a
+        // safe proxy for this renderer's foreground eligibility.
+        if UIDevice.current.userInterfaceIdiom == .pad
+            || UIDevice.current.userInterfaceIdiom == .mac {
+            return false
+        }
+#endif
+        return UIApplication.shared.applicationState == .active
+    }
+
+    private func requestMPVSerializedForegroundRecovery(source: String) {
+        guard isMPVRenderer,
+              !isVLCPlayer,
+              isRunning,
+              !isClosing,
+              mpvBackgroundLifecycleIsArmed,
+              owningPlaybackSceneIsForegroundActive() else {
+            return
+        }
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
+        cancelMPVBackgroundAudioFallback(reason: "foreground-recovery-\(source)")
+        renderer.noteApplicationDidBecomeActive()
+        mpvBackgroundLifecycleIsInForegroundPhase = true
+        guard mpvForegroundRecoveryTask == nil else {
+            logPictureInPicture(
+                "coalesced duplicate foreground lifecycle source=\(source) generation=\(mpvBackgroundLifecycleGeneration)"
+            )
+            return
+        }
+
+        let generation = mpvBackgroundLifecycleGeneration
+        logPictureInPicture(
+            "serialized foreground recovery begin source=\(source) generation=\(generation)"
+        )
+        mpvForegroundRecoveryTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let outcome = await self.performMPVSerializedForegroundRecovery(
+                source: source,
+                generation: generation
+            )
+            // The task may finish while Control Center or another window makes this scene
+            // inactive. Clear this completed generation before checking foreground eligibility so
+            // the next activation is not permanently coalesced behind a dead task.
+            guard generation == self.mpvBackgroundLifecycleGeneration else { return }
+            self.mpvForegroundRecoveryTask = nil
+            guard self.mpvBackgroundLifecycleIsArmed,
+                  self.owningPlaybackSceneIsForegroundActive() else { return }
+            switch outcome {
+            case .completed:
+                self.mpvBackgroundLifecycleIsArmed = false
+                self.mpvForegroundRecoveryRetryCount = 0
+                _ = self.claimMPVAppExitPictureInPictureOwnership(
+                    reason: "\(source)-serialized-complete",
+                    recordingActivation: true
+                )
+                self.scheduleMPVPictureInPictureForegroundWarmup(
+                    source: "\(source)-serialized-rewarm",
+                    delays: [0.25, 1.10],
+                    forceFirst: true
+                )
+                self.logPictureInPicture(
+                    "serialized foreground recovery completed source=\(source) generation=\(generation) renderer={\(self.rendererPictureInPictureDebugSnapshot())}"
+                )
+            case .retryInlineRestore:
+                guard self.mpvForegroundRecoveryRetryCount < 3,
+                      self.owningPlaybackSceneIsForegroundActive() else {
+                    self.mpvBackgroundLifecycleIsArmed = false
+                    self.logPictureInPicture(
+                        "serialized foreground recovery abandoned after bounded inline retries source=\(source) generation=\(generation)"
+                    )
+                    return
+                }
+                self.mpvForegroundRecoveryRetryCount += 1
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) { [weak self] in
+                    guard let self,
+                          generation == self.mpvBackgroundLifecycleGeneration else { return }
+                    self.requestMPVSerializedForegroundRecovery(
+                        source: "\(source)-inline-retry-\(self.mpvForegroundRecoveryRetryCount)"
+                    )
+                }
+            case .failed:
+                self.mpvBackgroundLifecycleIsArmed = false
+                self.mpvBackgroundFallbackAutoPaused = false
+                self.mpvBackgroundFallbackPauseIntentGeneration = nil
+                self.mpvBackgroundFallbackPauseLifecycleGeneration = nil
+                self.logPictureInPicture(
+                    "serialized foreground recovery failed source=\(source) generation=\(generation)"
+                )
+            }
+        }
+    }
+
+    private func performMPVSerializedForegroundRecovery(
+        source: String,
+        generation: Int
+    ) async -> MPVForegroundRecoveryOutcome {
+        guard generation == mpvBackgroundLifecycleGeneration,
+              mpvBackgroundLifecycleIsArmed,
+              owningPlaybackSceneIsForegroundActive(),
+              let controller = pipController else {
+            return .failed
+        }
+
+        // A pending automatic start is allowed to reach its authoritative AVKit callback. Once it
+        // is active, stop it exactly once. Invalidating the attempt while pending makes didStart
+        // stale and is one of the former black/frozen return paths.
+        var requestedStop = false
+        var settledInline = false
+        for _ in 0..<60 {
+            guard !Task.isCancelled,
+                  generation == mpvBackgroundLifecycleGeneration,
+                  mpvBackgroundLifecycleIsArmed,
+                  owningPlaybackSceneIsForegroundActive() else {
+                return .failed
+            }
+            let active = controller.isPictureInPictureActive
+            let pending = controller.isPictureInPictureStartPending
+            if active, !requestedStop {
+                requestedStop = true
+                cancelMPVPictureInPictureStartRequests(reason: "\(source)-active-pip-return")
+                logPictureInPicture(
+                    "serialized foreground recovery stopping active PiP source=\(source) generation=\(generation)"
+                )
+                controller.stopPictureInPicture(source: "\(source)-serialized-return")
+            }
+            if !active, !pending {
+                settledInline = true
+                break
+            }
+            do {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            } catch {
+                return .failed
+            }
+        }
+        guard settledInline else {
+            logPictureInPicture(
+                "serialized foreground recovery timed out waiting for AVKit ownership source=\(source) generation=\(generation)"
+            )
+            cancelMPVPictureInPictureStartRequests(reason: "\(source)-avkit-timeout")
+            controller.stopPictureInPicture(source: "\(source)-avkit-timeout")
+            rendererFinishPictureInPicture()
+            installMPVPictureInPictureController(reason: "\(source)-avkit-timeout-retire")
+            return .retryInlineRestore
+        }
+
+        cancelMPVPictureInPictureStartRequests(reason: "\(source)-inline-settled")
+        let operation = beginMPVPictureInPictureRestore(
+            for: controller,
+            lifecycleGeneration: generation
+        )
+        let rendererRestored = await operation.task.value
+        guard generation == mpvBackgroundLifecycleGeneration,
+              mpvBackgroundLifecycleIsArmed,
+              owningPlaybackSceneIsForegroundActive(),
+              !Task.isCancelled else {
+            return .failed
+        }
+        let inlineRestored = completeMPVPictureInPictureRestore(
+            operation,
+            controller: controller,
+            rendererRestored: rendererRestored,
+            source: "\(source)-serialized-inline"
+        )
+        if !inlineRestored {
+            // An idle renderer legitimately has no PiP restore token (for example when PiP is
+            // disabled). Continue to the foreground frame validation, which is the stronger proof
+            // that the inline Metal path is usable and also covers a failed AVKit restore token.
+            logPictureInPicture(
+                "serialized foreground recovery continuing after absent PiP restore token source=\(source) generation=\(generation)"
+            )
+        }
+
+        if resumeMPVBackgroundFallbackPauseForPictureInPictureIfNeeded(
+            source: "\(source)-serialized-foreground"
+        ) {
+            // Let MPVKit publish the new timeline before decoder validation inspects it.
+            await Task.yield()
+        }
+
+        let recovered = await rendererRecoverForegroundRendering(
+            reason: "\(source)-serialized-decoder-validation"
+        )
+        guard generation == mpvBackgroundLifecycleGeneration,
+              mpvBackgroundLifecycleIsArmed,
+              owningPlaybackSceneIsForegroundActive(),
+              !Task.isCancelled else {
+            return .failed
+        }
+        return recovered ? .completed : .failed
+    }
+
     @objc private func appWillResignActive() {
         logPictureInPicture("lifecycle notification received source=will-resign-active")
         armBackgroundRecoveryProgressGateIfNeeded(source: "will-resign-active")
@@ -15201,12 +17091,14 @@ extension PlayerViewController: PiPControllerDelegate {
         let phase = notification.userInfo?["phase"] as? String ?? "unknown"
         logPictureInPicture("scenePhase notification received phase=\(phase)")
 #if os(iOS)
-        // ContentView publishes this notification without a scene object. Once the owning scene is
-        // known on iPad, the scoped UIScene notifications below are authoritative; consuming an
-        // unscoped phase from another Stage Manager window can otherwise start PiP or tear down the
-        // foreground renderer in this window.
-        if UIDevice.current.userInterfaceIdiom == .pad, playbackWindowScene != nil {
-            logPictureInPicture("scenePhase notification ignored on iPad after owning scene attached phase=\(phase)")
+        // ContentView publishes this notification without a scene object. Scoped UIScene
+        // notifications are authoritative on iPad both before and after attachment; accepting an
+        // unscoped phase while the owner is unknown can consume another Stage Manager window's
+        // lifecycle.
+        let idiom = UIDevice.current.userInterfaceIdiom
+        if idiom == .pad || idiom == .mac {
+            bindPlaybackWindowSceneIfAvailable(source: "scene-phase-\(phase)")
+            logPictureInPicture("scenePhase notification ignored for multiwindow idiom=\(idiom.rawValue) phase=\(phase) ownerAttached=\(playbackWindowScene != nil)")
             return
         }
 #endif
@@ -15240,6 +17132,7 @@ extension PlayerViewController: PiPControllerDelegate {
                 }
             }
         case "background":
+            noteMPVBackgroundLifecycleIfNeeded(source: "scene-phase-background")
             if Thread.isMainThread {
                 cancelPendingMPVAppExitPictureInPictureStart(reason: "scene-phase-background")
                 attemptMPVAppExitPictureInPictureStart(source: "scene-phase-background")
@@ -15252,12 +17145,7 @@ extension PlayerViewController: PiPControllerDelegate {
                 }
             }
         case "active":
-            restoreMPVForegroundIfNeeded(source: "scene-phase-active")
-            scheduleMPVPictureInPictureForegroundWarmup(
-                source: "scene-phase-active-rewarm",
-                delays: [0.30, 1.20],
-                forceFirst: true
-            )
+            requestMPVSerializedForegroundRecovery(source: "scene-phase-active")
         default:
             break
         }
@@ -15280,9 +17168,20 @@ extension PlayerViewController: PiPControllerDelegate {
             return
         }
         mpvPendingAppExitPiPWorkItem?.cancel()
+        #if os(tvOS)
         if UIApplication.shared.applicationState != .background {
             attemptMPVAppExitPictureInPictureStart(source: "\(source)-pre-background")
         }
+        #else
+        if UIApplication.shared.applicationState != .background {
+            // `canStartPictureInPictureAutomaticallyFromInline` is already armed against the
+            // primed sample-buffer layer. Starting explicitly during the same deactivation races
+            // AVKit's automatic request and can produce failedToStart followed by didStart.
+            logPictureInPicture(
+                "MPV app-exit explicit pre-background start deferred to automatic-from-inline source=\(source)"
+            )
+        }
+        #endif
 
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -15350,13 +17249,34 @@ extension PlayerViewController: PiPControllerDelegate {
         let paused = rendererIsPausedState()
         let playbackReady = playbackDidStart || cachedPosition > 0.1
         let active = pip.isPictureInPictureActive
+        let pending = pip.isPictureInPictureStartPending
         let supported = pip.isPictureInPictureSupported
         let possible = pip.isPictureInPicturePossible
         let appState = applicationStateDescription(UIApplication.shared.applicationState)
+        let shouldScheduleBackgroundFallback = source.contains("background")
+            || appState == "background"
+        defer {
+            // Schedule after this function has armed/joined the PiP attempt so the fallback key
+            // captures the authoritative controller and attempt generations.
+            if shouldScheduleBackgroundFallback {
+                scheduleMPVBackgroundAudioFallback(source: source)
+            }
+        }
+
+        if UIApplication.shared.applicationState == .background,
+           !active,
+           !pending,
+           !rendererIsPictureInPicturePrimed() {
+            // AVKit/GPU ownership must be established while inline. Never manufacture a fresh
+            // renderer preparation after suspension; retain audio fallback for this exit instead.
+            logPictureInPicture("MPV app-exit auto PiP skipped source=\(source): renderer was not primed before background")
+            return
+        }
 
         let shouldStart = isRunning
             && !isClosing
             && !active
+            && !pending
             && !paused
             && playbackReady
             && supported
@@ -15370,6 +17290,8 @@ extension PlayerViewController: PiPControllerDelegate {
             skipReason = "closing"
         } else if active {
             skipReason = "already-active"
+        } else if pending {
+            skipReason = "transition-pending"
         } else if paused {
             skipReason = "paused"
         } else if !playbackReady {
@@ -15380,13 +17302,29 @@ extension PlayerViewController: PiPControllerDelegate {
             skipReason = "unknown"
         }
 
-        logPictureInPicture("MPV app-exit auto PiP check source=\(source) shouldStart=\(shouldStart) skipReason=\(skipReason) appState=\(appState) active=\(active) possible=\(possible) supported=\(supported) paused=\(paused) ready=\(playbackReady) loading=\(isRendererLoading) requested=\(mpvAppExitPiPStartRequested) subs={\(subtitlePictureInPictureDebugSnapshot())} renderer={\(rendererPictureInPictureDebugSnapshot())}")
+        logPictureInPicture("MPV app-exit auto PiP check source=\(source) shouldStart=\(shouldStart) skipReason=\(skipReason) appState=\(appState) active=\(active) pending=\(pending) possible=\(possible) supported=\(supported) paused=\(paused) ready=\(playbackReady) loading=\(isRendererLoading) requested=\(mpvAppExitPiPStartRequested) subs={\(subtitlePictureInPictureDebugSnapshot())} renderer={\(rendererPictureInPictureDebugSnapshot())}")
 
-        if source.contains("background") || appState == "background" {
-            scheduleMPVBackgroundAudioFallback(source: source)
+        if pending {
+            mpvAppExitPiPStartRequested = true
+            return
         }
-
         guard shouldStart else { return }
+        #if !os(tvOS)
+        if pip.isAutomaticFromInlineEnabled {
+            if !mpvAppExitPiPStartRequested {
+                mpvAppExitPiPStartRequested = true
+                pip.updatePlaybackState()
+                logPictureInPicture(
+                    "MPV app-exit start owned by automatic-from-inline source=\(source) attemptID=\(pip.transitionAttemptID)"
+                )
+            } else {
+                logPictureInPicture(
+                    "MPV app-exit automatic-from-inline already armed; ignoring explicit duplicate source=\(source)"
+                )
+            }
+            return
+        }
+        #endif
         guard !mpvAppExitPiPStartRequested else {
             logPictureInPicture("MPV app-exit auto PiP already requested; ignoring duplicate source=\(source)")
             return
@@ -15400,9 +17338,24 @@ extension PlayerViewController: PiPControllerDelegate {
         _ notification: Notification,
         source: String
     ) -> Bool {
-        guard let notificationScene = notification.object as? UIWindowScene,
-              let owningScene = playbackWindowScene ?? viewIfLoaded?.window?.windowScene else {
-            // Preserve early lifecycle safety while UIKit is still attaching the presentation.
+        guard let notificationScene = notification.object as? UIWindowScene else {
+            logPictureInPicture("ignored \(source) without a window scene")
+            return false
+        }
+        bindPlaybackWindowSceneIfAvailable(source: source)
+        guard let owningScene = playbackWindowScene ?? viewIfLoaded?.window?.windowScene else {
+#if os(iOS)
+            if UIDevice.current.userInterfaceIdiom == .pad
+                || UIDevice.current.userInterfaceIdiom == .mac {
+                // Do not claim the first process-wide scene notification in a multiwindow
+                // environment. viewWillAppear binds the presentation scene as soon as UIKit
+                // exposes it.
+                logPictureInPicture("ignored \(source) while multiwindow playback scene is unattached")
+                return false
+            }
+#endif
+            // Preserve the single-window fallback for phone/TV presentations whose scene has not
+            // been attached yet.
             return true
         }
         guard notificationScene === owningScene else {
@@ -15414,7 +17367,8 @@ extension PlayerViewController: PiPControllerDelegate {
 
     private func shouldHandleIPadSceneDeactivationForAppExitPiP(source: String) -> Bool {
 #if os(iOS)
-        if UIDevice.current.userInterfaceIdiom == .pad,
+        if (UIDevice.current.userInterfaceIdiom == .pad
+                || UIDevice.current.userInterfaceIdiom == .mac),
            UIApplication.shared.applicationState == .active {
             let owningScene = playbackWindowScene ?? viewIfLoaded?.window?.windowScene
             let anotherEclipseSceneIsActive = UIApplication.shared.connectedScenes
@@ -15424,9 +17378,9 @@ extension PlayerViewController: PiPControllerDelegate {
                         && (owningScene == nil || scene !== owningScene)
                 }
             guard anotherEclipseSceneIsActive else { return true }
-            // The owning Stage Manager scene can resign focus while another Eclipse scene keeps
-            // the process active. That is not an app exit and must not create a surprise PiP window.
-            logPictureInPicture("ignored \(source) app-exit PiP while another iPad scene keeps the app active")
+            // The owning Stage Manager/Catalyst scene can resign focus while another Eclipse
+            // scene keeps the process active. That is not an app exit.
+            logPictureInPicture("ignored \(source) app-exit PiP while another multiwindow scene keeps the app active")
             return false
         }
 #endif
@@ -15465,6 +17419,9 @@ extension PlayerViewController: PiPControllerDelegate {
         guard shouldHandleSceneLifecycleNotification(notification, source: "scene-did-enter-background") else { return }
         logPictureInPicture("lifecycle notification received source=scene-did-enter-background")
         armBackgroundRecoveryProgressGateIfNeeded(source: "scene-did-enter-background")
+        // Decoder ownership is scene-scoped on iPad. Arm recovery even when another Eclipse
+        // window keeps the process active and app-exit PiP is intentionally suppressed.
+        noteMPVBackgroundLifecycleIfNeeded(source: "scene-did-enter-background")
         guard shouldHandleIPadSceneDeactivationForAppExitPiP(
             source: "scene-did-enter-background"
         ) else {
@@ -15490,32 +17447,173 @@ extension PlayerViewController: PiPControllerDelegate {
         }
     }
 
-    private func scheduleMPVBackgroundAudioFallback(source: String, delay: TimeInterval = 0.75, pendingChecksRemaining: Int = 4) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self,
-                  !self.isVLCPlayer,
-                  !self.isClosing,
-                  UIApplication.shared.applicationState == .background else {
-                return
-            }
-            let active = self.pipController?.isPictureInPictureActive ?? false
-            guard !active, !self.rendererIsPausedState() else { return }
-            if self.mpvAppExitPiPStartRequested, pendingChecksRemaining > 0 {
-                self.logPictureInPicture("MPV background fallback waiting for pending PiP source=\(source) remaining=\(pendingChecksRemaining)")
-                self.scheduleMPVBackgroundAudioFallback(source: source, delay: 0.75, pendingChecksRemaining: pendingChecksRemaining - 1)
-                return
-            }
-            self.logPictureInPicture("MPV background fallback pause source=\(source) active=\(active) requested=\(self.mpvAppExitPiPStartRequested) renderer={\(self.rendererPictureInPictureDebugSnapshot())}")
-            self.mpvAppExitPiPStartRequested = false
-            self.rendererPausePlayback()
+    private func currentMPVBackgroundAudioFallbackKey() -> MPVBackgroundAudioFallbackKey {
+        MPVBackgroundAudioFallbackKey(
+            lifecycleGeneration: mpvBackgroundLifecycleGeneration,
+            loadGeneration: playbackLoadGeneration,
+            controllerIdentifier: pipController.map { ObjectIdentifier($0) },
+            transitionAttemptID: pipController?.transitionAttemptID
+        )
+    }
+
+    private func cancelMPVBackgroundAudioFallback(reason: String) {
+        let hadScheduledFallback = mpvBackgroundAudioFallbackWorkItem != nil
+            || mpvBackgroundAudioFallbackKey != nil
+        mpvBackgroundAudioFallbackWorkItem?.cancel()
+        mpvBackgroundAudioFallbackWorkItem = nil
+        mpvBackgroundAudioFallbackKey = nil
+        mpvBackgroundAudioFallbackDeadline = 0
+        if hadScheduledFallback {
+            logPictureInPicture("MPV background fallback canceled reason=\(reason)")
         }
+    }
+
+    private func scheduleMPVBackgroundAudioFallback(
+        source: String,
+        delay: TimeInterval = 0.75
+    ) {
+        guard isMPVRenderer, !isVLCPlayer, isRunning, !isClosing else { return }
+        let key = currentMPVBackgroundAudioFallbackKey()
+        let now = CACurrentMediaTime()
+
+        if mpvBackgroundAudioFallbackKey != key {
+            cancelMPVBackgroundAudioFallback(reason: "superseded-\(source)")
+            mpvBackgroundAudioFallbackKey = key
+            // Renderer preparation can legitimately cross several lifecycle callbacks. Keep one
+            // fixed deadline instead of consuming a retry budget while AVKit still owns the start.
+            mpvBackgroundAudioFallbackDeadline = now + 10
+        } else if mpvBackgroundAudioFallbackWorkItem != nil {
+            let attemptText = key.transitionAttemptID.map { String($0) } ?? "nil"
+            logPictureInPicture(
+                "MPV background fallback coalesced source=\(source) lifecycle=\(key.lifecycleGeneration) load=\(key.loadGeneration) attempt=\(attemptText)"
+            )
+            return
+        } else if mpvBackgroundAudioFallbackDeadline <= 0 {
+            mpvBackgroundAudioFallbackDeadline = now + 10
+        }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self,
+                  self.mpvBackgroundAudioFallbackKey == key else { return }
+            self.mpvBackgroundAudioFallbackWorkItem = nil
+            self.performMPVBackgroundAudioFallback(source: source, key: key)
+        }
+        mpvBackgroundAudioFallbackWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func performMPVBackgroundAudioFallback(
+        source: String,
+        key: MPVBackgroundAudioFallbackKey
+    ) {
+        guard mpvBackgroundAudioFallbackKey == key else { return }
+        let currentKey = currentMPVBackgroundAudioFallbackKey()
+        let owningScene = playbackWindowScene ?? viewIfLoaded?.window?.windowScene
+        let owningPlaybackIsBackgrounded = UIApplication.shared.applicationState == .background
+            || owningScene?.activationState == .background
+
+        guard key == currentKey,
+              key.lifecycleGeneration == mpvBackgroundLifecycleGeneration,
+              key.loadGeneration == playbackLoadGeneration,
+              mpvBackgroundLifecycleIsArmed,
+              !mpvBackgroundLifecycleIsInForegroundPhase,
+              isMPVRenderer,
+              !isVLCPlayer,
+              isRunning,
+              !isClosing,
+              owningPlaybackIsBackgrounded else {
+            cancelMPVBackgroundAudioFallback(reason: "stale-\(source)")
+            return
+        }
+#if os(iOS) && canImport(GoogleCast)
+        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else {
+            cancelMPVBackgroundAudioFallback(reason: "google-cast-\(source)")
+            return
+        }
+#endif
+
+        let controller = pipController
+        let active = controller?.isPictureInPictureActive ?? false
+        let pending = controller?.isPictureInPictureStartPending ?? false
+        let requested = mpvAppExitPiPStartRequested
+        let rendererHandoff = mpvPictureInPictureRendererHandoffIsActive
+
+        let primed = rendererIsPictureInPicturePrimed()
+        if active, primed {
+            let resumed = resumeMPVBackgroundFallbackPauseForPictureInPictureIfNeeded(
+                source: "\(source)-active-backstop"
+            )
+            if resumed {
+                controller?.updatePlaybackState()
+            }
+            cancelMPVBackgroundAudioFallback(reason: "PiP-active-\(source)")
+            return
+        }
+
+        let transitionOwned = active || pending || requested || rendererHandoff
+        if transitionOwned, CACurrentMediaTime() < mpvBackgroundAudioFallbackDeadline {
+            let attemptText = key.transitionAttemptID.map { String($0) } ?? "nil"
+            logPictureInPicture(
+                "MPV background fallback waiting for PiP source=\(source) active=\(active) pending=\(pending) requested=\(requested) rendererHandoff=\(rendererHandoff) primed=\(primed) lifecycle=\(key.lifecycleGeneration) attempt=\(attemptText)"
+            )
+            scheduleMPVBackgroundAudioFallback(source: source, delay: 0.50)
+            return
+        }
+
+        if transitionOwned {
+            // A permanently stuck transition must not keep decoding indefinitely in the
+            // background. Retire its exact attempt before entering the owned audio fallback.
+            logPictureInPicture(
+                "MPV background PiP handoff timed out source=\(source) active=\(active) pending=\(pending) requested=\(requested) rendererHandoff=\(rendererHandoff) primed=\(primed) renderer={\(rendererPictureInPictureDebugSnapshot())}"
+            )
+            controller?.setCanStartPictureInPictureAutomaticallyFromInline(false)
+            cancelMPVPictureInPictureStartRequests(reason: "background-fallback-timeout-\(source)")
+            releaseMPVAppExitPictureInPictureOwnership(
+                reason: "background-fallback-timeout-\(source)"
+            )
+            if active || pending {
+                controller?.stopPictureInPicture(source: "background-fallback-timeout")
+            }
+            // Retire preparation as well as an activated handoff. The preparation task may be
+            // suspended while the app backgrounds; replacing its controller ensures a late
+            // willStart/didStart callback cannot target the paused display layer.
+            rendererFinishPictureInPicture()
+            installMPVPictureInPictureController(reason: "background-fallback-timeout")
+            rendererSetPictureInPictureSourcePreparedForAutomaticStart(false)
+        }
+
+        if rendererIsPausedState() {
+            // Either the user paused or a prior generation-owned fallback already did its job.
+            cancelMPVBackgroundAudioFallback(reason: "renderer-paused-\(source)")
+            return
+        }
+
+        cancelMPVBackgroundAudioFallback(reason: "executing-\(source)")
+        mpvAppExitPiPStartRequested = false
+        mpvBackgroundFallbackAutoPaused = true
+        mpvBackgroundFallbackPauseIntentGeneration = rendererPlaybackIntentGeneration
+        mpvBackgroundFallbackPauseLifecycleGeneration = mpvBackgroundLifecycleGeneration
+        logPictureInPicture(
+            "MPV background fallback pause source=\(source) lifecycle=\(mpvBackgroundLifecycleGeneration) load=\(playbackLoadGeneration) renderer={\(rendererPictureInPictureDebugSnapshot())}"
+        )
+        rendererPausePlayback(preservingBackgroundFallbackOwnership: true)
     }
     
     @objc private func appDidEnterBackground() {
         logPictureInPicture("lifecycle notification received source=did-enter-background")
+#if os(iOS) && canImport(GoogleCast)
+        if GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks {
+            logPictureInPicture("background PiP skipped while Google Cast owns or is taking playback")
+            return
+        }
+#endif
         armBackgroundRecoveryProgressGateIfNeeded(source: "did-enter-background")
+        noteMPVBackgroundLifecycleIfNeeded(source: "did-enter-background")
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+#if os(iOS) && canImport(GoogleCast)
+            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
             self.logVLCUIViewSnapshot("appDidEnterBackground async start")
             if self.vlcRenderer != nil {
                 Logger.shared.log("[PlayerVC.PiP] VLC background auto-start skipped: disabled", type: "Player")
@@ -15540,10 +17638,6 @@ extension PlayerViewController: PiPControllerDelegate {
     
     @objc private func appWillEnterForeground() {
         logVLCForegroundSnapshot("will-enter-foreground notification")
-        releaseMPVAppExitPictureInPictureOwnership(reason: "will-enter-foreground")
-        markBackgroundRecoveryForegrounded(source: "will-enter-foreground")
-        cancelPendingMPVAppExitPictureInPictureStart(reason: "will-enter-foreground")
-        clearMPVAppExitPictureInPictureSuppression(reason: "will-enter-foreground")
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.refreshPlayerSkinDecorationAnimations()
@@ -15559,60 +17653,8 @@ extension PlayerViewController: PiPControllerDelegate {
                 self.scheduleVLCForegroundSnapshots("will-enter-foreground followup", delays: [0.10, 0.50, 1.50, 3.00])
                 return
             }
-            guard let pip = self.pipController else { return }
-            let active = pip.isPictureInPictureActive
-            let pending = pip.isPictureInPictureStartPending
-            guard !active else {
-                self.cancelMPVPictureInPictureStartRequests(reason: "will-enter-foreground")
-                self.logMPV("Returning to foreground; stopping PiP renderer={\(self.rendererPictureInPictureDebugSnapshot())}")
-                pip.stopPictureInPicture(source: "will-enter-foreground")
-                return
-            }
-            guard !pending else {
-                // Starting PiP from the foreground makes iOS fire a foreground event during the
-                // handshake. Preserve its attempt identity so didStart remains authoritative.
-                self.logPictureInPicture("will-enter-foreground keeping in-flight PiP start (no teardown) renderer={\(self.rendererPictureInPictureDebugSnapshot())}")
-                return
-            }
-            self.cancelMPVPictureInPictureStartRequests(reason: "will-enter-foreground")
-            self.rendererFinishPictureInPicture()
-            self.scheduleMPVPictureInPictureForegroundWarmup(
-                source: "will-enter-foreground-rewarm",
-                delays: [0.30, 1.20],
-                forceFirst: true
-            )
-        }
-    }
-
-    private func restoreMPVForegroundIfNeeded(source: String) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self, self.vlcRenderer == nil else { return }
-            self.clearMPVAppExitPictureInPictureSuppression(reason: source)
-            guard let pip = self.pipController else { return }
-            let active = pip.isPictureInPictureActive
-            let pending = pip.isPictureInPictureStartPending
-            guard !active else {
-                self.cancelMPVPictureInPictureStartRequests(reason: source)
-                self.logMPV("\(source): stopping MPV PiP for foreground return renderer={\(self.rendererPictureInPictureDebugSnapshot())}")
-                pip.stopPictureInPicture(source: source)
-                return
-            }
-            guard !pending else {
-                // See appWillEnterForeground: starting PiP itself briefly foregrounds the
-                // app, so tearing down an in-flight start here races AVKit's didStart and
-                // makes the PiP window black (and breaks MoltenVK auto-PiP on backgrounding).
-                // Leave it alone; didStart -> activate shows it, recovery paths handle failure.
-                self.logPictureInPicture("\(source): keeping in-flight PiP start (no teardown) renderer={\(self.rendererPictureInPictureDebugSnapshot())}")
-                return
-            }
-            self.cancelMPVPictureInPictureStartRequests(reason: source)
-            self.logMPV("\(source): PiP inactive; restoring MPV foreground render path renderer={\(self.rendererPictureInPictureDebugSnapshot())}")
-            self.rendererFinishPictureInPicture()
-            self.scheduleMPVPictureInPictureForegroundWarmup(
-                source: "\(source)-rewarm",
-                delays: [0.30, 1.20],
-                forceFirst: true
-            )
+            // UIApplication is process-scoped on iPad. The owning scene's didActivate callback is
+            // the sole authority for stopping PiP and restoring this renderer.
         }
     }
 
@@ -15627,38 +17669,43 @@ extension PlayerViewController: PiPControllerDelegate {
             scheduleVLCForegroundSnapshots("scene-will-enter-foreground followup", delays: [0.10, 0.75])
             return
         }
-        restoreMPVForegroundIfNeeded(source: "scene-will-enter-foreground")
+        // Wait for didActivate so the inline CAMetalLayer has a drawable before restoration.
     }
 
     @objc private func appDidBecomeActive() {
-        markBackgroundRecoveryForegrounded(source: "did-become-active")
-        cancelPendingMPVAppExitPictureInPictureStart(reason: "did-become-active")
-        clearMPVAppExitPictureInPictureSuppression(reason: "did-become-active")
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            if let owningScene = self.viewIfLoaded?.window?.windowScene ?? self.playbackWindowScene,
+               owningScene.activationState != .foregroundActive {
+                self.logPictureInPicture(
+                    "appDidBecomeActive ignored for background owning scene state=\(owningScene.activationState.rawValue)"
+                )
+                return
+            }
+            self.markBackgroundRecoveryForegrounded(source: "did-become-active")
+            self.cancelPendingMPVAppExitPictureInPictureStart(reason: "did-become-active")
+            self.clearMPVAppExitPictureInPictureSuppression(reason: "did-become-active")
             self.refreshPlayerSkinDecorationAnimations()
             if self.isVLCPlayer {
                 self.logVLCForegroundSnapshot("did-become-active")
                 self.scheduleVLCForegroundSnapshots("did-become-active followup", delays: [0.10, 0.75, 2.00])
                 return
             }
+#if os(iOS) && canImport(GoogleCast)
+            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
             guard self.vlcRenderer == nil else { return }
-            self.logMPV("appDidBecomeActive foreground render recovery renderer={\(self.rendererPictureInPictureDebugSnapshot())}")
-            self.rendererResumeForegroundRendering(reason: "app-did-become-active")
-            self.scheduleMPVPictureInPictureForegroundWarmup(
-                source: "did-become-active-rewarm",
-                delays: [0.20, 1.00],
-                forceFirst: true
-            )
+            self.requestMPVSerializedForegroundRecovery(source: "app-did-become-active")
         }
     }
 
     @objc private func sceneDidActivate(_ notification: Notification) {
         guard shouldHandleSceneLifecycleNotification(notification, source: "scene-did-activate") else { return }
-        if claimMPVAppExitPictureInPictureOwnership(
+        let claimedPiPOwnership = claimMPVAppExitPictureInPictureOwnership(
             reason: "scene-did-activate",
             recordingActivation: true
-        ) {
+        )
+        if claimedPiPOwnership, !mpvBackgroundLifecycleIsArmed {
             configureMPVAppExitPictureInPictureAutomation(reason: "scene-did-activate")
         }
         markBackgroundRecoveryForegrounded(source: "scene-did-activate")
@@ -15671,14 +17718,11 @@ extension PlayerViewController: PiPControllerDelegate {
                 self.scheduleVLCForegroundSnapshots("scene-did-activate followup", delays: [0.10, 0.75])
                 return
             }
+#if os(iOS) && canImport(GoogleCast)
+            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+#endif
             guard self.vlcRenderer == nil else { return }
-            self.logMPV("sceneDidActivate foreground render recovery")
-            self.rendererResumeForegroundRendering(reason: "scene-did-activate")
-            self.scheduleMPVPictureInPictureForegroundWarmup(
-                source: "scene-did-activate-rewarm",
-                delays: [0.20, 1.00],
-                forceFirst: true
-            )
+            self.requestMPVSerializedForegroundRecovery(source: "scene-did-activate")
         }
     }
 }

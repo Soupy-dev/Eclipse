@@ -340,11 +340,15 @@ class JSController: NSObject, ObservableObject {
         context.setupJavaScriptEnvironment(sandbox: sandbox)
         sandbox.beginLoading(serviceName: service?.metadata.sourceName)
         let runtimeScript: String
+#if os(tvOS)
         if let service {
             runtimeScript = TVServiceSettingVault.hydrating(script, serviceID: service.id)
         } else {
             runtimeScript = script
         }
+#else
+        runtimeScript = script
+#endif
         context.evaluateScript(runtimeScript)
         if context.exception != nil {
             Logger.shared.log("Service load JavaScript exception; untrusted body suppressed", type: "Error")

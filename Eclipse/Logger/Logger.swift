@@ -312,10 +312,12 @@ class Logger: @unchecked Sendable {
         }
         let logs = await getLogsAsync(category: selectedCategory)
         var content = logs.isEmpty ? "No logs available." : logs
+#if !os(macOS)
         if let crashReport = CrashReportManager.shared.latestCrashReportText(),
            !crashReport.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             content += "\n\n==== Last Native Crash Report ====\n\n\(crashReport)"
         }
+#endif
         guard let data = content.data(using: .utf8) else {
             throw ExportError.encodingFailed
         }

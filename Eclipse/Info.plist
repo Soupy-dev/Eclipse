@@ -42,6 +42,13 @@
 	</dict>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Eclipse can save images you choose, including reader images and media stills, to your photo library.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_googlecast._tcp</string>
+		<string>_CC1AD845._googlecast._tcp</string>
+	</array>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Eclipse uses your local network to find and connect to Cast-enabled TVs and streaming devices.</string>
 	<key>TMDBAPIKey</key>
 	<string>$(TMDB_API_KEY)</string>
 	<key>AniListClientID</key>

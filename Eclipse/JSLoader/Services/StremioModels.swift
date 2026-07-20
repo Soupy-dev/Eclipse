@@ -571,7 +571,20 @@ struct StremioStream: Codable, Identifiable, Hashable {
         }
         // Use try? so unexpected shapes don't kill the whole stream
         behaviorHints = try? container.decodeIfPresent(StremioStreamBehaviorHints.self, forKey: .behaviorHints)
-        subtitles = try? container.decodeIfPresent([StremioSubtitle].self, forKey: .subtitles)
+        // Keep valid embedded subtitles even if an aggregator mixes in a malformed entry.
+        if var subtitleContainer = try? container.nestedUnkeyedContainer(forKey: .subtitles) {
+            var decodedSubtitles: [StremioSubtitle] = []
+            while !subtitleContainer.isAtEnd {
+                if let subtitle = try? subtitleContainer.decode(StremioSubtitle.self) {
+                    decodedSubtitles.append(subtitle)
+                } else {
+                    _ = try? subtitleContainer.decode(AnyCodable.self)
+                }
+            }
+            subtitles = decodedSubtitles.isEmpty ? nil : decodedSubtitles
+        } else {
+            subtitles = nil
+        }
         id = url ?? infoHash ?? UUID().uuidString
     }
 
@@ -655,7 +668,7 @@ struct StremioSubtitle: Codable, Sendable, Hashable {
     let title: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, url, lang, name, title
+        case id, url, file, src, lang, language, name, label, title
     }
 
     init(from decoder: Decoder) throws {
@@ -668,16 +681,50 @@ struct StremioSubtitle: Codable, Sendable, Hashable {
         } else {
             id = nil
         }
-        url = try? container.decodeIfPresent(String.self, forKey: .url)
-        lang = try? container.decodeIfPresent(String.self, forKey: .lang)
-        name = try? container.decodeIfPresent(String.self, forKey: .name)
-        title = try? container.decodeIfPresent(String.self, forKey: .title)
+        url = Self.firstNonemptyString(in: container, keys: [.url, .file, .src])
+        lang = Self.firstNonemptyString(in: container, keys: [.lang, .language])
+        name = Self.firstNonemptyString(in: container, keys: [.name, .label])
+        title = Self.firstNonemptyString(in: container, keys: [.title])
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(id, forKey: .id)
+        try container.encodeIfPresent(url, forKey: .url)
+        try container.encodeIfPresent(lang, forKey: .lang)
+        try container.encodeIfPresent(name, forKey: .name)
+        try container.encodeIfPresent(title, forKey: .title)
+    }
+
+    private static func firstNonemptyString(
+        in container: KeyedDecodingContainer<CodingKeys>,
+        keys: [CodingKeys]
+    ) -> String? {
+        for key in keys {
+            guard let value = try? container.decodeIfPresent(String.self, forKey: key) else {
+                continue
+            }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+        }
+        return nil
     }
 
     var displayName: String {
         if let name, !name.isEmpty { return name }
         if let title, !title.isEmpty { return title }
         if let lang, !lang.isEmpty { return lang.uppercased() }
+        return id ?? "Subtitle"
+    }
+
+    /// The label handed to the player. Name/title aliases improve aggregator output, while a
+    /// standard language-only subtitle keeps the exact label older addons already produced.
+    var playbackDisplayName: String {
+        if let name, !name.isEmpty { return name }
+        if let title, !title.isEmpty { return title }
+        if let lang, !lang.isEmpty { return lang }
         return id ?? "Subtitle"
     }
 }

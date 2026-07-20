@@ -1,9 +1,168 @@
 import SwiftUI
 
-private struct StorageBreakdownItem: Identifiable {
-    let id = UUID()
+private struct StorageBreakdownItem: Identifiable, Sendable {
+    var id: String { title }
     let title: String
     let sizeBytes: Int64
+}
+
+private struct StorageScanRequest: Sendable {
+    let documentsDirectory: URL
+    let cachesDirectory: URL
+    let downloadsDirectory: URL
+    let mpvPreloadDirectory: URL
+}
+
+private struct StorageScanResult: Sendable {
+    let cacheSizeBytes: Int64
+    let breakdown: [StorageBreakdownItem]
+}
+
+private enum StorageScanner {
+    private struct Metrics {
+        var total: Int64 = 0
+        var subtitles: Int64 = 0
+        var downloads: Int64 = 0
+        var mpvPreload: Int64 = 0
+        var imageCache: Int64 = 0
+        var serviceCache: Int64 = 0
+        var readerCache: Int64 = 0
+    }
+
+    private static let subtitleExtensions: Set<String> = ["srt", "vtt", "ass", "ssa"]
+    private static let imageTokens = ["kingfisher", "imagecache", "image-cache"]
+    private static let serviceTokens = ["service", "source", "stremio"]
+    private static let readerTokens = ["kanzen", "aidoku", "reader", "manga"]
+
+    static func scan(_ request: StorageScanRequest) -> StorageScanResult? {
+        guard let documentMetrics = metrics(
+            at: request.documentsDirectory,
+            downloadsDirectory: request.downloadsDirectory,
+            mpvPreloadDirectory: request.mpvPreloadDirectory,
+            classifyNamedCaches: false
+        ), let cacheMetrics = metrics(
+            at: request.cachesDirectory,
+            downloadsDirectory: request.downloadsDirectory,
+            mpvPreloadDirectory: request.mpvPreloadDirectory,
+            classifyNamedCaches: true
+        ) else {
+            return nil
+        }
+
+        var downloadsSize = documentMetrics.downloads + cacheMetrics.downloads
+        var subtitleSize = documentMetrics.subtitles + cacheMetrics.subtitles
+        var mpvPreloadSize = documentMetrics.mpvPreload + cacheMetrics.mpvPreload
+
+        if !isDescendant(request.downloadsDirectory, of: request.documentsDirectory),
+           !isDescendant(request.downloadsDirectory, of: request.cachesDirectory) {
+            guard let downloadMetrics = metrics(
+                at: request.downloadsDirectory,
+                downloadsDirectory: request.downloadsDirectory,
+                mpvPreloadDirectory: request.mpvPreloadDirectory,
+                classifyNamedCaches: false
+            ) else { return nil }
+            downloadsSize += downloadMetrics.total
+            subtitleSize += downloadMetrics.subtitles
+            mpvPreloadSize += downloadMetrics.mpvPreload
+        }
+
+        if !isDescendant(request.mpvPreloadDirectory, of: request.documentsDirectory),
+           !isDescendant(request.mpvPreloadDirectory, of: request.cachesDirectory),
+           !isDescendant(request.mpvPreloadDirectory, of: request.downloadsDirectory) {
+            guard let preloadMetrics = metrics(
+                at: request.mpvPreloadDirectory,
+                downloadsDirectory: request.downloadsDirectory,
+                mpvPreloadDirectory: request.mpvPreloadDirectory,
+                classifyNamedCaches: false
+            ) else { return nil }
+            mpvPreloadSize += preloadMetrics.total
+            subtitleSize += preloadMetrics.subtitles
+        }
+
+        let imageCacheSize = cacheMetrics.imageCache > 0
+            ? cacheMetrics.imageCache
+            : max(0, cacheMetrics.total - cacheMetrics.mpvPreload)
+        let documentSize = max(0, documentMetrics.total - documentMetrics.downloads)
+
+        return StorageScanResult(
+            cacheSizeBytes: cacheMetrics.total,
+            breakdown: [
+                StorageBreakdownItem(title: "Document Directory", sizeBytes: documentSize),
+                StorageBreakdownItem(title: "Image Cache", sizeBytes: imageCacheSize),
+                StorageBreakdownItem(title: "MPV Warmup Cache", sizeBytes: mpvPreloadSize),
+                StorageBreakdownItem(title: "Downloads / Video Storage", sizeBytes: downloadsSize),
+                StorageBreakdownItem(title: "Subtitle Cache", sizeBytes: subtitleSize),
+                StorageBreakdownItem(title: "Service / Addon Cache", sizeBytes: cacheMetrics.serviceCache),
+                StorageBreakdownItem(title: "Reader Cache", sizeBytes: cacheMetrics.readerCache)
+            ]
+        )
+    }
+
+    private static func metrics(
+        at root: URL,
+        downloadsDirectory: URL,
+        mpvPreloadDirectory: URL,
+        classifyNamedCaches: Bool
+    ) -> Metrics? {
+        if Task.isCancelled { return nil }
+
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .fileSizeKey]
+        guard let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return Metrics()
+        }
+
+        let rootPath = root.standardizedFileURL.path
+        var result = Metrics()
+        for case let fileURL as URL in enumerator {
+            if Task.isCancelled { return nil }
+            guard let values = try? fileURL.resourceValues(forKeys: keys),
+                  values.isRegularFile == true,
+                  let fileSize = values.fileSize else {
+                continue
+            }
+
+            let size = Int64(fileSize)
+            result.total += size
+            if subtitleExtensions.contains(fileURL.pathExtension.lowercased()) {
+                result.subtitles += size
+            }
+            if isDescendant(fileURL, of: downloadsDirectory) {
+                result.downloads += size
+            }
+            if isDescendant(fileURL, of: mpvPreloadDirectory) {
+                result.mpvPreload += size
+            }
+
+            guard classifyNamedCaches else { continue }
+            let path = fileURL.standardizedFileURL.path
+            let relative = path.hasPrefix(rootPath) ? String(path.dropFirst(rootPath.count)) : path
+            let topLevelName = relative
+                .split(separator: "/", omittingEmptySubsequences: true)
+                .first
+                .map(String.init)?
+                .lowercased() ?? ""
+            if imageTokens.contains(where: topLevelName.contains) {
+                result.imageCache += size
+            }
+            if serviceTokens.contains(where: topLevelName.contains) {
+                result.serviceCache += size
+            }
+            if readerTokens.contains(where: topLevelName.contains) {
+                result.readerCache += size
+            }
+        }
+        return result
+    }
+
+    private static func isDescendant(_ url: URL, of directory: URL) -> Bool {
+        let path = url.standardizedFileURL.path
+        let directoryPath = directory.standardizedFileURL.path
+        return path == directoryPath || path.hasPrefix(directoryPath + "/")
+    }
 }
 
 struct StorageView: View {
@@ -13,6 +172,8 @@ struct StorageView: View {
     @State private var isClearing: Bool = false
     @State private var showConfirmClear: Bool = false
     @State private var errorMessage: String?
+    @State private var scanTask: Task<StorageScanResult?, Never>?
+    @State private var scanGeneration = UUID()
 
     @AppStorage("autoClearCacheEnabled") private var autoClearCacheEnabled = false
     @AppStorage("autoClearCacheThresholdMB") private var autoClearCacheThresholdMB: Double = 500
@@ -161,6 +322,10 @@ struct StorageView: View {
         .onAppear {
             refreshCacheSize()
         }
+        .onDisappear {
+            scanTask?.cancel()
+            scanTask = nil
+        }
         .onChange(of: autoClearCacheEnabled) { enabled in
             if enabled {
                 Logger.shared.log("Auto-clear cache enabled with threshold: \(formatThreshold(autoClearCacheThresholdMB))", type: "Storage")
@@ -186,23 +351,36 @@ struct StorageView: View {
     }
     
     private func refreshCacheSize() {
+        scanTask?.cancel()
         errorMessage = nil
         isLoading = true
-        DispatchQueue.global(qos: .userInitiated).async {
-            let size = calculateDirectorySize(at: cachesDirectory())
-            let breakdown = calculateStorageBreakdown()
-            DispatchQueue.main.async {
-                self.cacheSizeBytes = size
-                self.storageBreakdown = breakdown
-                self.isLoading = false
-                
-                // Check if auto-clear should be triggered
-                if self.autoClearCacheEnabled {
-                    let thresholdBytes = Int64(self.autoClearCacheThresholdMB * 1_000_000)
-                    if size > thresholdBytes {
-                        Logger.shared.log("Cache size (\(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))) exceeds threshold (\(self.formatThreshold(self.autoClearCacheThresholdMB))). Auto-clearing...", type: "Storage")
-                        self.autoClearCache()
-                    }
+        let generation = UUID()
+        scanGeneration = generation
+        let request = StorageScanRequest(
+            documentsDirectory: documentsDirectory(),
+            cachesDirectory: cachesDirectory(),
+            downloadsDirectory: DownloadManager.shared.downloadsDirectory,
+            mpvPreloadDirectory: ExperimentalMPVPreloadManager.shared.cacheDirectory
+        )
+        let task = Task.detached(priority: .utility) {
+            StorageScanner.scan(request)
+        }
+        scanTask = task
+
+        Task { @MainActor in
+            guard let result = await task.value,
+                  !task.isCancelled,
+                  scanGeneration == generation else { return }
+            scanTask = nil
+            cacheSizeBytes = result.cacheSizeBytes
+            storageBreakdown = result.breakdown
+            isLoading = false
+
+            if autoClearCacheEnabled {
+                let thresholdBytes = Int64(autoClearCacheThresholdMB * 1_000_000)
+                if result.cacheSizeBytes > thresholdBytes {
+                    Logger.shared.log("Cache size (\(ByteCountFormatter.string(fromByteCount: result.cacheSizeBytes, countStyle: .file))) exceeds threshold (\(formatThreshold(autoClearCacheThresholdMB))). Auto-clearing...", type: "Storage")
+                    autoClearCache()
                 }
             }
         }
@@ -211,69 +389,52 @@ struct StorageView: View {
     private func clearCache() {
         errorMessage = nil
         isClearing = true
-        performCacheClear { size in
-            self.cacheSizeBytes = size
-            self.isClearing = false
-            self.isLoading = false
-        }
+        performCacheClear(logCompletion: false)
     }
     
     private func autoClearCache() {
-        performCacheClear { size in
-            self.cacheSizeBytes = size
-            Logger.shared.log("Auto-clear completed. New cache size: \(ByteCountFormatter.string(fromByteCount: size, countStyle: .file))", type: "Storage")
-        }
+        isClearing = true
+        performCacheClear(logCompletion: true)
     }
     
-    private func performCacheClear(completion: @escaping (Int64) -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async {
-            do {
-                let dir = cachesDirectory()
-                let fileManager = FileManager.default
-                let items = try fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil, options: [])
-                for url in items {
-                    try? fileManager.removeItem(at: url)
-                }
-                
-                URLCache.shared.removeAllCachedResponses()
-                
-                let size = calculateDirectorySize(at: dir)
-                let breakdown = calculateStorageBreakdown()
-                DispatchQueue.main.async {
-                    self.storageBreakdown = breakdown
-                    completion(size)
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.errorMessage = error.localizedDescription
-                    self.isClearing = false
-                    self.isLoading = false
-                }
-            }
-        }
-    }
+    private func performCacheClear(logCompletion: Bool) {
+        scanTask?.cancel()
+        scanTask = nil
+        let directory = cachesDirectory()
 
-    
-    private func calculateDirectorySize(at url: URL) -> Int64 {
-        let fileManager = FileManager.default
-        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
-        var total: Int64 = 0
-        
-        guard let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles, .skipsPackageDescendants]) else {
-            return 0
-        }
-        
-        for case let fileURL as URL in enumerator {
-            do {
-                let resourceValues = try fileURL.resourceValues(forKeys: Set(keys))
-                if resourceValues.isRegularFile == true, let fileSize = resourceValues.fileSize {
-                    total += Int64(fileSize)
+        Task { @MainActor in
+            let clearError = await Task.detached(priority: .userInitiated) { () -> String? in
+                do {
+                    let fileManager = FileManager.default
+                    let items = try fileManager.contentsOfDirectory(
+                        at: directory,
+                        includingPropertiesForKeys: nil,
+                        options: []
+                    )
+                    for url in items {
+                        try? fileManager.removeItem(at: url)
+                    }
+                    URLCache.shared.removeAllCachedResponses()
+                    return nil
+                } catch {
+                    return error.localizedDescription
                 }
-            } catch {
-                continue
+            }.value
+
+            if let clearError {
+                errorMessage = clearError
+                isClearing = false
+                isLoading = false
+                return
             }
+
+            cacheSizeBytes = 0
+            isClearing = false
+            if logCompletion {
+                Logger.shared.log("Auto-clear completed.", type: "Storage")
+            }
+            refreshCacheSize()
         }
-        return total
     }
     
     private func cachesDirectory() -> URL {
@@ -284,68 +445,6 @@ struct StorageView: View {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
     }
 
-    private func calculateStorageBreakdown() -> [StorageBreakdownItem] {
-        let documents = documentsDirectory()
-        let caches = cachesDirectory()
-        let downloads = DownloadManager.shared.downloadsDirectory
-        let mpvPreload = ExperimentalMPVPreloadManager.shared.cacheDirectory
-
-        return [
-            StorageBreakdownItem(title: "Document Directory", sizeBytes: calculateDirectorySize(at: documents)),
-            StorageBreakdownItem(title: "Image Cache", sizeBytes: calculateNamedCacheSize(in: caches, matching: ["kingfisher", "imagecache", "image-cache"])),
-            StorageBreakdownItem(title: "MPV Warmup Cache", sizeBytes: ExperimentalMPVPreloadManager.shared.cacheSizeBytes),
-            StorageBreakdownItem(title: "Downloads / Video Storage", sizeBytes: calculateDirectorySize(at: downloads)),
-            StorageBreakdownItem(title: "Subtitle Cache", sizeBytes: calculateFileSize(in: [documents, caches, downloads], extensions: ["srt", "vtt", "ass", "ssa"])),
-            StorageBreakdownItem(title: "Service / Addon Cache", sizeBytes: calculateNamedCacheSize(in: caches, matching: ["service", "source", "stremio"])),
-            StorageBreakdownItem(title: "Reader Cache", sizeBytes: calculateNamedCacheSize(in: caches, matching: ["kanzen", "aidoku", "reader", "manga"]))
-        ].map { item in
-            if item.title == "Document Directory" {
-                let adjusted = max(0, item.sizeBytes - calculateDirectorySize(at: downloads))
-                return StorageBreakdownItem(title: item.title, sizeBytes: adjusted)
-            }
-            if item.title == "Image Cache", item.sizeBytes == 0 {
-                let adjusted = max(0, calculateDirectorySize(at: caches) - calculateDirectorySize(at: mpvPreload))
-                return StorageBreakdownItem(title: item.title, sizeBytes: adjusted)
-            }
-            return item
-        }
-    }
-
-    private func calculateNamedCacheSize(in directory: URL, matching tokens: [String]) -> Int64 {
-        let fileManager = FileManager.default
-        guard let items = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles]) else {
-            return 0
-        }
-
-        return items.reduce(Int64(0)) { total, url in
-            let name = url.lastPathComponent.lowercased()
-            guard tokens.contains(where: { name.contains($0) }) else { return total }
-            return total + calculateDirectorySize(at: url)
-        }
-    }
-
-    private func calculateFileSize(in directories: [URL], extensions: Set<String>) -> Int64 {
-        let fileManager = FileManager.default
-        let keys: [URLResourceKey] = [.isRegularFileKey, .fileSizeKey]
-        var total: Int64 = 0
-
-        for directory in directories {
-            guard let enumerator = fileManager.enumerator(at: directory, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles, .skipsPackageDescendants]) else {
-                continue
-            }
-            for case let fileURL as URL in enumerator {
-                guard extensions.contains(fileURL.pathExtension.lowercased()),
-                      let values = try? fileURL.resourceValues(forKeys: Set(keys)),
-                      values.isRegularFile == true,
-                      let fileSize = values.fileSize else {
-                    continue
-                }
-                total += Int64(fileSize)
-            }
-        }
-
-        return total
-    }
 }
 
 #Preview {

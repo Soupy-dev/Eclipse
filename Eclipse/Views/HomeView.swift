@@ -56,9 +56,9 @@ private enum HeroCarouselDirection {
 
 struct AppPerformanceSnapshot {
     var cpuPercent: Double? = nil
-    var gpuPercent: Double? = nil
+    var residentMemoryBytes: UInt64? = nil
     var cpuText = "Measuring…"
-    var gpuText = "Measuring…"
+    var ramText = "Measuring…"
     var thermalState = ProcessInfo.processInfo.thermalState
     var lowPowerModeEnabled = ProcessInfo.processInfo.isLowPowerModeEnabled
 }
@@ -101,9 +101,6 @@ final class AppPerformanceMonitor: ObservableObject {
 
     private var lastCPUProcessTime: TimeInterval?
     private var lastCPUWallTime: TimeInterval?
-#if os(iOS)
-    private var gpuSampler: PlayerViewController.GPUUsageSampler?
-#endif
     private var diagnosticSessionID = ""
     private var diagnosticSequence = 0
     private var diagnosticSessionActive = false
@@ -118,7 +115,7 @@ final class AppPerformanceMonitor: ObservableObject {
         if diagnosticSessionActive {
             stop(context: lastLogContext, reason: "context-restart")
         }
-        resetBaselines(prepareGPU: true)
+        resetBaselines()
         diagnosticSessionID = String(UUID().uuidString.prefix(8))
         diagnosticSequence = 0
         diagnosticSessionActive = true
@@ -149,7 +146,7 @@ final class AppPerformanceMonitor: ObservableObject {
             )
         }
         diagnosticSessionActive = false
-        resetBaselines(prepareGPU: false)
+        resetBaselines()
     }
 
     func sampleNow(context: AppPerformanceLogContext, sessionID: String) {
@@ -208,12 +205,9 @@ final class AppPerformanceMonitor: ObservableObject {
         }
     }
 
-    private func resetBaselines(prepareGPU: Bool) {
+    private func resetBaselines() {
         lastCPUProcessTime = nil
         lastCPUWallTime = nil
-#if os(iOS)
-        gpuSampler = prepareGPU ? PlayerViewController.GPUUsageSampler() : nil
-#endif
         snapshot = AppPerformanceSnapshot()
     }
 
@@ -221,25 +215,13 @@ final class AppPerformanceMonitor: ObservableObject {
     private func sample() -> AppPerformanceSnapshot {
         let cpuPercent = processCPUUsagePercent()
         let cpuText = cpuPercent.map { String(format: "%.0f%%", $0) } ?? "Measuring…"
-        let gpuPercent: Double?
-        let gpuText: String
-#if os(iOS)
-        if let gpuSampler {
-            gpuPercent = gpuSampler.sample()
-            gpuText = gpuPercent.map { String(format: "%.0f%%", $0) } ?? "Measuring…"
-        } else {
-            gpuPercent = nil
-            gpuText = "n/a"
-        }
-#else
-        gpuPercent = nil
-        gpuText = "n/a"
-#endif
+        let residentMemoryBytes = processResidentMemoryBytes()
+        let ramText = residentMemoryBytes.map(formatMemory) ?? "n/a"
         let sampled = AppPerformanceSnapshot(
             cpuPercent: cpuPercent,
-            gpuPercent: gpuPercent,
+            residentMemoryBytes: residentMemoryBytes,
             cpuText: cpuText,
-            gpuText: gpuText,
+            ramText: ramText,
             thermalState: ProcessInfo.processInfo.thermalState,
             lowPowerModeEnabled: ProcessInfo.processInfo.isLowPowerModeEnabled
         )
@@ -257,9 +239,9 @@ final class AppPerformanceMonitor: ObservableObject {
 
     private func metricFields(_ snapshot: AppPerformanceSnapshot, baseline: Double?) -> String {
         let cpu = snapshot.cpuPercent.map { String(format: "%.1f", $0) } ?? "na"
-        let gpu = snapshot.gpuPercent.map { String(format: "%.1f", $0) } ?? "na"
+        let ramMB = snapshot.residentMemoryBytes.map { String(format: "%.1f", Double($0) / 1_048_576.0) } ?? "na"
         let median = baseline.map { String(format: "%.1f", $0) } ?? "na"
-        return "cpuCore=\(cpu) cpuMedian=\(median) gpu=\(gpu) thermal=\(thermalName(snapshot.thermalState)) power=\(snapshot.lowPowerModeEnabled ? "low" : "normal")"
+        return "cpuCore=\(cpu) cpuMedian=\(median) ramMB=\(ramMB) thermal=\(thermalName(snapshot.thermalState)) power=\(snapshot.lowPowerModeEnabled ? "low" : "normal")"
     }
 
     private func median(_ values: [Double]) -> Double? {
@@ -309,6 +291,26 @@ final class AppPerformanceMonitor: ObservableObject {
         return nil
 #endif
     }
+
+    private func processResidentMemoryBytes() -> UInt64? {
+#if canImport(Darwin)
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) { infoPointer in
+            infoPointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { integerPointer in
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), integerPointer, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return nil }
+        return UInt64(info.resident_size)
+#else
+        return nil
+#endif
+    }
+
+    private func formatMemory(_ bytes: UInt64) -> String {
+        String(format: "%.0f MB", Double(bytes) / 1_048_576.0)
+    }
 }
 
 struct AppPerformanceOverlay: View {
@@ -318,7 +320,7 @@ struct AppPerformanceOverlay: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             row("CPU", snapshot.cpuText)
-            row("GPU", snapshot.gpuText)
+            row("RAM", snapshot.ramText)
             row("Thermal", thermalName)
             row("Power", snapshot.lowPowerModeEnabled ? "Low Power" : "Normal")
             row("Motion", backgroundQuality)

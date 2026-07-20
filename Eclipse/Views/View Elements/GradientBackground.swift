@@ -445,6 +445,7 @@ struct SettingsGradientBackground: View {
     @Environment(\.scenePhase) private var scenePhase
     @ObservedObject private var theme = EclipseTheme.shared
     @AppStorage(HomeAnimatedBackgroundSettings.enabledKey) private var animatedBackgroundEnabled = HomeAnimatedBackgroundSettings.defaultEnabled
+    @State private var isVisible = false
     var allowsAnimatedBackground: Bool = true
     
     @ViewBuilder
@@ -456,10 +457,12 @@ struct SettingsGradientBackground: View {
                         topClearance: 0,
                         ambientColor: nil,
                         accentColor: theme.scopedGradientColor(),
-                        motionEnabled: !reduceMotion && scenePhase == .active
+                        motionEnabled: !reduceMotion && scenePhase == .active && isVisible
                     )
                 }
             }
+            .onAppear { isVisible = true }
+            .onDisappear { isVisible = false }
     }
 
     @ViewBuilder
@@ -1416,8 +1419,10 @@ struct EclipseAmbientMotionBackground: View {
 
 struct GlobalGradientBackground: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     @ObservedObject private var theme = EclipseTheme.shared
     @AppStorage(HomeAnimatedBackgroundSettings.enabledKey) private var animatedBackgroundEnabled = HomeAnimatedBackgroundSettings.defaultEnabled
+    @State private var isVisible = false
     var overrideColor: Color? = nil
     var scrollOffset: CGFloat = 0
     var allowsAnimatedBackground: Bool = true
@@ -1440,10 +1445,12 @@ struct GlobalGradientBackground: View {
                         topClearance: animatedBackgroundTopClearance,
                         ambientColor: overrideColor,
                         accentColor: gradientColor,
-                        motionEnabled: !reduceMotion
+                        motionEnabled: !reduceMotion && scenePhase == .active && isVisible
                     )
                 }
             }
+            .onAppear { isVisible = true }
+            .onDisappear { isVisible = false }
     }
 
     @ViewBuilder

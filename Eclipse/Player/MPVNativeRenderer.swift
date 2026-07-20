@@ -119,12 +119,18 @@ protocol PlayerRenderer: AnyObject {
     func finishPictureInPicture()
     func finishPictureInPictureAndWait(restoringInlinePlayback: Bool) async -> Bool
     func primePictureInPictureFrames(reason: String)
-    func activatePictureInPictureLayer()
+    func setPictureInPictureSourcePreparedForAutomaticStart(_ prepared: Bool)
+    @discardableResult
+    func activatePictureInPictureLayer() -> Bool
     func isPictureInPicturePrimed() -> Bool
     func updatePictureInPictureRenderSize(_ size: CGSize)
     func waitForPictureInPictureTimelineUpdate() async
     func setPictureInPictureStopRequestHandler(_ handler: ((String) -> Void)?)
+    func prioritizeAppExitPictureInPictureOverDecoderRecovery()
+    func noteApplicationDidEnterBackground()
+    func noteApplicationDidBecomeActive()
     func resumeForegroundRendering(reason: String)
+    func recoverForegroundRendering(reason: String, completion: @escaping (Bool) -> Void)
     func pictureInPictureDebugSnapshot() -> String
 }
 
@@ -132,6 +138,16 @@ extension PlayerRenderer {
     /// Default: renderers that don't support runtime mpv audio filters (e.g. the legacy MoltenVK
     /// renderer or non-mpv backends) ignore the comfort-audio chain.
     func applyAudioFilterChain(_ chain: String) {}
+
+    /// Only the single-session GPU renderer needs to rebuild a potentially invalidated hardware
+    /// decoder after process suspension.
+    func prioritizeAppExitPictureInPictureOverDecoderRecovery() {}
+    func noteApplicationDidEnterBackground() {}
+    func noteApplicationDidBecomeActive() {}
+    func recoverForegroundRendering(reason: String, completion: @escaping (Bool) -> Void) {
+        resumeForegroundRendering(reason: reason)
+        completion(true)
+    }
 
     /// Legacy renderer compatibility: one immediate preparation attempt, one bounded retry, and
     /// a readiness wait. The MPVKit GPU bridge overrides this with its generation-scoped async API.
@@ -153,6 +169,10 @@ extension PlayerRenderer {
     }
 
     func updatePictureInPictureRenderSize(_ size: CGSize) { _ = size }
+
+    func setPictureInPictureSourcePreparedForAutomaticStart(_ prepared: Bool) {
+        _ = prepared
+    }
 
     func waitForPictureInPictureTimelineUpdate() async {
         await Task.yield()
@@ -1311,8 +1331,9 @@ final class MPVNativeRenderer: PlayerRenderer {
         requestRenderBurst(reason: "pip-prime-\(reason)", count: 6, interval: 0.06)
     }
 
-    func activatePictureInPictureLayer() {
-        guard isRunning, currentMode == .pictureInPicture else { return }
+    @discardableResult
+    func activatePictureInPictureLayer() -> Bool {
+        guard isRunning, currentMode == .pictureInPicture else { return false }
         logMPV("activating sample-buffer PiP layer \(pipDebugSnapshot())")
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isRunning, !self.isStopping, self.currentMode == .pictureInPicture else { return }
@@ -1323,6 +1344,7 @@ final class MPVNativeRenderer: PlayerRenderer {
             self.logMPV("sample-buffer PiP layer activated \(self.pipDebugSnapshot())")
         }
         requestRenderBurst(reason: "pip-layer-active", count: 4, interval: 0.06)
+        return true
     }
 
     func isPictureInPicturePrimed() -> Bool {
@@ -2736,7 +2758,7 @@ final class MPVNativeRenderer: PlayerRenderer {
     func prepareForPictureInPictureStart() { }
     func finishPictureInPicture() { }
     func primePictureInPictureFrames(reason: String) { }
-    func activatePictureInPictureLayer() { }
+    func activatePictureInPictureLayer() -> Bool { false }
     func isPictureInPicturePrimed() -> Bool { false }
     func resumeForegroundRendering(reason: String) { }
     func pictureInPictureDebugSnapshot() -> String { "mpv unavailable" }
@@ -2781,6 +2803,9 @@ struct MetalPlaybackDiagnostics {
     /// mpv did not expose the property at this instant (commonly while reconfiguring),
     /// while a literal "no" is the authoritative software-decoder state.
     let hardwareDecoder: String?
+    /// Runtime-selected PiP frame-production path. The GPU renderer reports the backend selected
+    /// by MPVKit; the sample-buffer renderer is always software-backed.
+    let pictureInPictureBackingText: String
 }
 
 #if ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE
@@ -2789,27 +2814,17 @@ struct MetalPlaybackDiagnostics {
 /// reporting layout changes so the renderer can resize its MoltenVK drawable.
 final class MPVGPUInlineHostView: UIView {
     var onLayoutChange: ((CGRect) -> Void)?
-    private weak var hostedLayer: CAMetalLayer?
 
-    func host(_ metalLayer: CAMetalLayer) {
-        guard hostedLayer !== metalLayer else { return }
-        hostedLayer?.removeFromSuperlayer()
-        hostedLayer = metalLayer
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        metalLayer.frame = bounds
-        layer.addSublayer(metalLayer)
-        CATransaction.commit()
+    override class var layerClass: AnyClass {
+        MPVGPUPlayerMetalLayer.self
+    }
+
+    var metalLayer: MPVGPUPlayerMetalLayer {
+        layer as! MPVGPUPlayerMetalLayer
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        if let hostedLayer {
-            CATransaction.begin()
-            CATransaction.setDisableActions(true)
-            hostedLayer.frame = bounds
-            CATransaction.commit()
-        }
         onLayoutChange?(bounds)
     }
 
@@ -2830,7 +2845,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     weak var delegate: MPVNativeRendererDelegate?
 
     private let gpuRenderer: MPVGPUPlayerRenderer
-    private let hostView = MPVGPUInlineHostView(frame: .zero)
+    private let hostView: MPVGPUInlineHostView
     private var currentPreset: PlayerPreset?
     private var currentURL: URL?
     private var currentHeaders: [String: String]?
@@ -2854,6 +2869,46 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     private var isPictureInPictureActive = false
     /// Invalidates callbacks queued by a previous start/stop cycle before they can reach the host.
     private var callbackGeneration: UInt64 = 0
+    /// VideoToolbox sessions may be invalidated while iOS suspends the process. The recovery is
+    /// armed in the background and may run only after PiP has handed ownership back to inline.
+    private var requiresHardwareDecoderRecoveryAfterBackground = false
+    private var permitsHardwareDecoderRecoveryInForeground = false
+    private var hardwareDecoderRecoveryTask: Task<Void, Never>?
+    /// A `.playing` callback can arrive while the current validation task is still unwinding from
+    /// `.playbackDeferred`. Remember that edge so clearing the task cannot lose the only retry
+    /// signal after cache buffering resumes.
+    private var hardwareDecoderRecoveryPlaybackRetryPending = false
+    private var hardwareDecoderRecoveryLateOutputWatchdogTask: Task<Void, Never>?
+    private var hardwareDecoderRecoveryAttemptID: UInt64 = 0
+    private var hardwareDecoderOwnershipRetryCount = 0
+    private enum HardwareDecoderRecoveryOutcome {
+        case finished
+        case deferredOwnership
+        case deferredPlayback
+        case waitingForOutput
+    }
+    private enum HardwareDecoderRecoveryProof {
+        case videoToolbox(String)
+        case outputWithoutVideoToolbox(String)
+        case timedOut
+        case cancelled
+    }
+    private var pendingHardwareDecoderRecoveryEpoch: UInt64?
+    private var lastHardwareDecoderRecoveryOutputEpoch: UInt64?
+    private var lastHardwareDecoderRecoveryObservedEpoch: UInt64?
+    private var lastHardwareDecoderRecoveryObservedDecoder: String?
+    private var hasHardwareDecoderRecoveryObservedDecoder = false
+    private var suppressesHardwareDecoderRecoveryPauseCallbacks = false
+    private var hardwareDecoderRecoveryCompletions: [(Bool) -> Void] = []
+    private var playbackIntentGeneration: UInt64 = 0
+    private var hardwareDecoderRecoverySuspensionGeneration: UInt64 = 0
+    private struct HardwareDecoderRecoveryPlaybackSuspension {
+        let shouldResume: Bool
+        let playbackIntentGeneration: UInt64
+        let suspensionGeneration: UInt64
+        let callbackGeneration: UInt64
+        let loadGeneration: UInt64
+    }
     private var pictureInPictureStopRequestHandler: ((String) -> Void)?
     private var positionUpdateTimer: Timer?
     private var lastPositionUpdateAt: CFTimeInterval = 0
@@ -2888,6 +2943,15 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     private var lastHDRDisplayEnvironmentSignature = ""
     private var lastTrackListSignature = ""
     private var lastNotifiedSubtitleTrackId: Int?
+    private var lastSubmittedInlineLayoutBounds: CGRect?
+    private var lastSubmittedInlineLayoutScale: CGFloat = 0
+    private var lastSubmittedInlineLayoutScreen: ObjectIdentifier?
+    /// MPVKit emits diagnostics for every meaningful renderer update. Keep the persisted player
+    /// log transition-focused so backend selection/failover and audio recovery stay visible without
+    /// turning normal frame delivery into a log storm.
+    private var lastLoggedPictureInPictureDiagnosticsSignature = ""
+    private var lastLoggedPictureInPicturePressureTotal = 0
+    private var lastLoggedAudioRecoveryCount = 0
     var isPausedState: Bool { isPaused }
     var currentTime: Double { gpuRenderer.currentTime }
     var duration: Double { gpuRenderer.duration }
@@ -2902,19 +2966,19 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     init(pictureInPictureDisplayLayer: AVSampleBufferDisplayLayer, qualityProfile: MPVMetalSampleBufferQualityProfile) {
         self.qualityProfile = qualityProfile
         self.renderScaleMultiplier = max(0.1, qualityProfile.renderScale)
+        let hostView = MPVGPUInlineHostView(frame: .zero)
+        self.hostView = hostView
         gpuRenderer = MPVGPUPlayerRenderer(
-            inlineLayer: MPVGPUPlayerMetalLayer(),
+            inlineLayer: hostView.metalLayer,
             pictureInPictureDisplayLayer: pictureInPictureDisplayLayer,
             options: Self.makeOptions()
         )
         Logger.shared.log("[MPVGPUPlayerBridge] init \(qualityProfile.logDescription)", type: "MPV")
         hostView.backgroundColor = .black
         hostView.isUserInteractionEnabled = false
-        hostView.host(gpuRenderer.inlineLayer)
         hostView.onLayoutChange = { [weak self] bounds in
             guard let self else { return }
-            self.gpuRenderer.updateInlineLayerLayout(bounds: bounds, contentsScale: self.effectiveContentsScale())
-            self.refreshHDRConfigurationForCurrentDisplayIfNeeded(reason: "display-layout")
+            self.submitInlineLayoutIfNeeded(bounds: bounds, reason: "display-layout")
         }
     }
 
@@ -2978,7 +3042,10 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             pausesInlineRendererDuringPictureInPicture: true,
             pictureInPictureBackendPreference: .automatic,
             maximumInFlightPictureInPictureFrames: 3,
-            pictureInPicturePreparationTimeout: 1,
+            // Native GPU PiP may need to observe both FILE_LOADED and VIDEO_RECONFIG before its
+            // first probe. Give slower devices enough time to prove the current load instead of
+            // prematurely latching the compatibility backend.
+            pictureInPicturePreparationTimeout: 3,
             additionalMPVOptions: makeAdditionalMPVOptions()
         )
     }
@@ -2987,7 +3054,11 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     private static func makeAdditionalMPVOptions() -> [String: String] {
         [
             "audio-channels": Settings.shared.mpvSurroundSoundEnabled ? "auto" : "stereo",
-            "hwdec-software-fallback": "3",
+            // A scene transition can briefly interrupt VideoToolbox output. Never let three
+            // transient background errors permanently demote the current load to CPU decoding.
+            // The ordered hwdec list still keeps direct VideoToolbox first and its hardware copy
+            // path second; only the final software fallback is disabled.
+            "hwdec-software-fallback": "no",
             "demuxer-thread": "yes",
             "cache": "yes",
             "cache-pause-wait": "5",
@@ -3004,19 +3075,34 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     // MARK: View / layout
 
     func getRenderingView() -> UIView {
-        hostView.host(gpuRenderer.inlineLayer)
-        return hostView
+        hostView
     }
 
     func renderingLayoutDidChange(containerSize: CGSize) {
         let bounds = CGRect(origin: .zero, size: containerSize)
         let apply = { [weak self] in
             guard let self else { return }
-            self.hostView.frame = bounds
-            self.gpuRenderer.updateInlineLayerLayout(bounds: bounds, contentsScale: self.effectiveContentsScale())
-            self.refreshHDRConfigurationForCurrentDisplayIfNeeded(reason: "container-layout")
+            self.submitInlineLayoutIfNeeded(bounds: bounds, reason: "container-layout")
         }
         if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
+    }
+
+    /// Avoids feeding identical UIKit layout passes back into the MoltenVK surface. The host view
+    /// uses the renderer's CAMetalLayer as its backing layer, so redundant geometry writes can
+    /// otherwise create a self-sustaining layout loop.
+    private func submitInlineLayoutIfNeeded(bounds: CGRect, reason: String) {
+        let scale = effectiveContentsScale()
+        let screenIdentifier = ObjectIdentifier(hostView.window?.screen ?? UIScreen.main)
+        let boundsChanged = lastSubmittedInlineLayoutBounds != bounds
+        let scaleChanged = abs(lastSubmittedInlineLayoutScale - scale) > 0.001
+        let screenChanged = lastSubmittedInlineLayoutScreen != screenIdentifier
+        guard boundsChanged || scaleChanged || screenChanged else { return }
+
+        lastSubmittedInlineLayoutBounds = bounds
+        lastSubmittedInlineLayoutScale = scale
+        lastSubmittedInlineLayoutScreen = screenIdentifier
+        gpuRenderer.updateInlineLayerLayout(bounds: bounds, contentsScale: scale)
+        refreshHDRConfigurationForCurrentDisplayIfNeeded(reason: reason)
     }
 
     /// Re-applies the current profile's drawable scale to the inline layer (used after a quality
@@ -3024,7 +3110,10 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     private func reapplyInlineLayout() {
         let apply = { [weak self] in
             guard let self else { return }
-            self.gpuRenderer.updateInlineLayerLayout(bounds: self.hostView.bounds, contentsScale: self.effectiveContentsScale())
+            self.submitInlineLayoutIfNeeded(
+                bounds: self.hostView.bounds,
+                reason: "explicit-layout-reapply"
+            )
         }
         if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
     }
@@ -3116,12 +3205,17 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         gpuRenderer.onError = { [weak self] message in
             DispatchQueue.main.async {
                 guard let self, self.callbackGeneration == callbackGeneration else { return }
+                Logger.shared.log(
+                    "[MPVGPUPlayerBridge] renderer error message=\(message) renderer={\(self.pictureInPictureDebugSnapshot())}",
+                    type: "MPV"
+                )
                 self.delegate?.renderer(self, didFailWithError: message)
             }
         }
-        gpuRenderer.onDiagnostics = { [weak self] _ in
+        gpuRenderer.onDiagnostics = { [weak self] diagnostics in
             DispatchQueue.main.async {
                 guard let self, self.callbackGeneration == callbackGeneration else { return }
+                self.logPictureInPictureDiagnosticsIfNeeded(diagnostics, reason: "callback")
                 self.notifyTrackChangesIfNeeded(reason: "diagnostics")
             }
         }
@@ -3129,6 +3223,10 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             guard let self,
                   self.callbackGeneration == callbackGeneration,
                   self.isRunning else { return }
+            Logger.shared.log(
+                "[MPVGPUPlayerBridge] MPVKit requested PiP stop reason=\(reason) renderer={\(self.pictureInPictureDebugSnapshot())}",
+                type: "MPV"
+            )
             self.pictureInPictureStopRequestHandler?(reason)
         }
         // Re-evaluate HDR/colorspace whenever the decoded video parameters resolve or change
@@ -3158,11 +3256,55 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
                 reason: "video-reconfigure",
                 currentLoadConfirmed: true
             )
+            self.scheduleHardwareDecoderRecoveryAfterForeground(
+                reason: "video-reconfigure-ready"
+            )
+        }
+        gpuRenderer.onHardwareDecoderRecoveryOutput = { [weak self] generation, epoch in
+            guard let self,
+                  self.callbackGeneration == callbackGeneration,
+                  generation == self.gpuLoadGeneration else { return }
+            self.lastHardwareDecoderRecoveryOutputEpoch = epoch
+            let decoder = self.gpuRenderer.diagnosticsSnapshot().hardwareDecoder
+            if self.pendingHardwareDecoderRecoveryEpoch == epoch,
+               self.requiresHardwareDecoderRecoveryAfterBackground,
+               self.permitsHardwareDecoderRecoveryInForeground,
+               Self.isVideoToolboxDecoder(decoder) {
+                self.completeHardwareDecoderRecovery(
+                    decoder: decoder,
+                    path: "causal-output",
+                    reason: "accepted-track-reselection"
+                )
+            } else if self.pendingHardwareDecoderRecoveryEpoch == epoch,
+                      self.hardwareDecoderRecoveryTask == nil,
+                      self.requiresHardwareDecoderRecoveryAfterBackground,
+                      self.permitsHardwareDecoderRecoveryInForeground {
+                self.finishPendingHardwareDecoderRecoveryAttempt()
+                self.scheduleHardwareDecoderRecoveryAfterForeground(
+                    reason: "late-output-without-videotoolbox"
+                )
+            }
+        }
+        gpuRenderer.onHardwareDecoderRecoveryObservation = { [weak self] generation, epoch, decoder in
+            guard let self,
+                  self.callbackGeneration == callbackGeneration,
+                  generation == self.gpuLoadGeneration else { return }
+            self.lastHardwareDecoderRecoveryObservedEpoch = epoch
+            self.lastHardwareDecoderRecoveryObservedDecoder = decoder
+            self.hasHardwareDecoderRecoveryObservedDecoder = true
         }
         // Activate the playback audio session (category/mode + preferred multichannel output);
         // the kit renderer doesn't own this.
         ensureAudioSessionActive()
-        try gpuRenderer.start()
+        do {
+            try gpuRenderer.start()
+        } catch {
+            Logger.shared.log(
+                "[MPVGPUPlayerBridge] start failed error=\(error) renderer={\(pictureInPictureDebugSnapshot())}",
+                type: "MPV"
+            )
+            throw error
+        }
         // mpv handle now exists - apply the profile's scalers/deband and drawable scale (the
         // init-time `set` calls were no-ops without a handle), then evaluate HDR for the layer.
         applyGPUQualityScalers()
@@ -3170,11 +3312,23 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         isRunning = true
         refreshHDRConfigurationForCurrentDisplayIfNeeded(reason: "start")
         startPositionUpdateTimer()
+        Logger.shared.log(
+            "[MPVGPUPlayerBridge] start completed callbackGeneration=\(callbackGeneration) renderer={\(pictureInPictureDebugSnapshot())}",
+            type: "MPV"
+        )
     }
 
     func stop() {
+        Logger.shared.log(
+            "[MPVGPUPlayerBridge] stop requested renderer={\(pictureInPictureDebugSnapshot())}",
+            type: "MPV"
+        )
         callbackGeneration &+= 1
         gpuLoadGeneration &+= 1
+        cancelHardwareDecoderRecovery(
+            resetRequirement: true,
+            restoreSuspendedPlayback: false
+        )
         gpuRenderer.stop()
         stopPositionUpdateTimer()
         gpuRenderer.onStateChange = nil
@@ -3182,6 +3336,9 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         gpuRenderer.onDiagnostics = nil
         gpuRenderer.onPictureInPictureStopRequested = nil
         gpuRenderer.onVideoReconfigureForGeneration = nil
+        gpuRenderer.onVideoOutputReconfigureForGeneration = nil
+        gpuRenderer.onHardwareDecoderRecoveryOutput = nil
+        gpuRenderer.onHardwareDecoderRecoveryObservation = nil
         isRunning = false
         isReadyToSeek = false
         isLoading = false
@@ -3191,20 +3348,40 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         hasObservedVideoReconfigureForCurrentLoad = false
         isPictureInPictureActive = false
         setInlineVideoHidden(false)
+        setPictureInPictureVideoHidden(true)
         lastPositionUpdateAt = 0
         lastHDRConfigurationSignature = ""
         lastHDRDisplayEnvironmentSignature = ""
         lastTrackListSignature = ""
         lastNotifiedSubtitleTrackId = nil
+        lastLoggedPictureInPictureDiagnosticsSignature = ""
+        lastLoggedPictureInPicturePressureTotal = 0
+        lastLoggedAudioRecoveryCount = 0
+        lastSubmittedInlineLayoutBounds = nil
+        lastSubmittedInlineLayoutScale = 0
+        lastSubmittedInlineLayoutScreen = nil
     }
 
     func waitUntilStopped() async {
         await gpuRenderer.waitUntilStopped()
+        Logger.shared.log(
+            "[MPVGPUPlayerBridge] stop drained callbackGeneration=\(callbackGeneration) loadGeneration=\(gpuLoadGeneration)",
+            type: "MPV"
+        )
     }
 
     func load(url: URL, with preset: PlayerPreset, headers: [String: String]?) {
         gpuLoadGeneration &+= 1
         let generation = gpuLoadGeneration
+        // A replacement load invalidates any recovery tied to the old item. Keep the background
+        // requirement armed: a load started while suspended still needs foreground proof.
+        completePendingForegroundRecoveryCallbacks(success: false)
+        cancelHardwareDecoderRecovery(
+            resetRequirement: false,
+            restoreSuspendedPlayback: false
+        )
+        hardwareDecoderOwnershipRetryCount = 0
+        setPictureInPictureSourcePreparedForAutomaticStart(false)
         currentURL = url
         currentPreset = preset
         currentHeaders = headers
@@ -3226,6 +3403,9 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         lastLoggedDecode = ""
         lastTrackListSignature = ""
         lastNotifiedSubtitleTrackId = nil
+        lastLoggedPictureInPictureDiagnosticsSignature = ""
+        lastLoggedPictureInPicturePressureTotal = 0
+        lastLoggedAudioRecoveryCount = 0
         applyPreset(preset)
         delegate?.renderer(self, didChangeLoading: true)
         gpuRenderer.load(url, headers: headers, generation: generation)
@@ -3259,17 +3439,16 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         if d.hardwareDecoder.isEmpty {
             decode = "reconfiguring"
         } else if d.hardwareDecoder == "no" {
-            decode = "SW"
+            decode = "HW unavailable"
         } else {
             decode = d.hardwareDecoder
         }
         return "MPV gpu-next \(isPaused ? "paused" : "playing")\(isLoading ? " loading" : "")\npos \(String(format: "%.1f", d.currentTime))/\(String(format: "%.1f", d.duration))\nmode \(d.presentationMode.rawValue) vo=\(d.inlineVideoOutput) api=\(d.inlineGPUAPI) ctx=\(d.inlineGPUContext)\ndecode=\(decode) pixfmt=\(d.videoPixelFormat.isEmpty ? "?" : d.videoPixelFormat)"
     }
 
-    /// Logs whether either ordered VideoToolbox path actually attached for the current file. If
-    /// both paths fail, mpv can still drop to libavcodec software decode (CPU-bound and
-    /// scene-dependent); this surfaces the resulting state. Read-only diagnostic;
-    /// deduped so it logs once per (decoder, pixfmt) change.
+    /// Logs whether either ordered VideoToolbox path actually attached for the current file.
+    /// Software fallback is disabled, so `no` means hardware output is unavailable rather than an
+    /// accepted CPU-decoding state. Read-only and deduped per (decoder, pixfmt) change.
     private func logDecodeEngagement() {
         let d = gpuRenderer.diagnosticsSnapshot()
         let hwdec = d.hardwareDecoder.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3279,7 +3458,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         if hwdec.isEmpty {
             Logger.shared.log("[MPVGPUPlayerBridge] decode state unavailable during video reconfigure pixfmt=\(d.videoPixelFormat) src=\(lastKnownSourceWidth)x\(lastKnownSourceHeight) (hwdec-current was not exposed at this instant; this does not prove software decoding)", type: "MPV")
         } else if hwdec == "no" {
-            Logger.shared.log("[MPVGPUPlayerBridge] software decode - hwdec-current=no pixfmt=\(d.videoPixelFormat) src=\(lastKnownSourceWidth)x\(lastKnownSourceHeight) (neither VideoToolbox path remained attached; CPU-bound, scene-dependent)", type: "MPV")
+            Logger.shared.log("[MPVGPUPlayerBridge] hardware decode unavailable - hwdec-current=no pixfmt=\(d.videoPixelFormat) src=\(lastKnownSourceWidth)x\(lastKnownSourceHeight) (software fallback is disabled)", type: "MPV")
         } else {
             Logger.shared.log("[MPVGPUPlayerBridge] hardware decode hwdec-current=\(hwdec) pixfmt=\(d.videoPixelFormat) src=\(lastKnownSourceWidth)x\(lastKnownSourceHeight)", type: "MPV")
         }
@@ -3290,13 +3469,18 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     // MARK: Playback
 
     func play() {
+        playbackIntentGeneration &+= 1
+        suppressesHardwareDecoderRecoveryPauseCallbacks = false
         isPaused = false
         gpuRenderer.play()
+        scheduleHardwareDecoderRecoveryAfterForeground(reason: "play-resumed")
         delegate?.renderer(self, didChangePause: false)
         emitPositionUpdate(force: true)
     }
 
     func pausePlayback() {
+        playbackIntentGeneration &+= 1
+        suppressesHardwareDecoderRecoveryPauseCallbacks = false
         isPaused = true
         gpuRenderer.pause()
         delegate?.renderer(self, didChangePause: true)
@@ -3426,13 +3610,27 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             ? CGSize(width: d.videoWidth, height: d.videoHeight)
             : gpuRenderer.inlineLayer.drawableSize
         let subtitleCodec = gpuRenderer.subtitleTracks().first(where: { $0.selected })?.codec
+        let pictureInPictureBackingText: String
+        switch d.selectedPictureInPictureBackend {
+        case .singleSessionGPUDirectIOSurface:
+            pictureInPictureBackingText = "GPU-backed · Direct"
+        case .singleSessionGPUAsynchronousMetalBlit:
+            pictureInPictureBackingText = "GPU-backed · Metal blit"
+        case .compatibilityDualSession:
+            pictureInPictureBackingText = "Software"
+        case nil:
+            pictureInPictureBackingText = "Not prepared"
+        @unknown default:
+            pictureInPictureBackingText = "Unknown"
+        }
         return MetalPlaybackDiagnostics(
             renderSize: renderSize,
             isHDR: isHDR,
             dynamicRangeText: rangeText,
             highBitDepthActive: highBitDepth,
             subtitleCodec: subtitleCodec,
-            hardwareDecoder: d.hardwareDecoder
+            hardwareDecoder: d.hardwareDecoder,
+            pictureInPictureBackingText: pictureInPictureBackingText
         )
     }
 
@@ -3447,9 +3645,23 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     }
 
     func preparePictureInPicture() async throws {
-        try await gpuRenderer.preparePictureInPicture()
         Logger.shared.log(
-            "[MPVGPUPlayerBridge] PiP async prepare ready \(pictureInPictureDebugSnapshot())",
+            "[MPVGPUPlayerBridge] PiP prepare begin renderer={\(pictureInPictureDebugSnapshot())}",
+            type: "MPV"
+        )
+        do {
+            try await gpuRenderer.preparePictureInPicture()
+        } catch {
+            Logger.shared.log(
+                "[MPVGPUPlayerBridge] PiP prepare failed error=\(error) renderer={\(pictureInPictureDebugSnapshot())}",
+                type: "MPV"
+            )
+            throw error
+        }
+        let diagnostics = gpuRenderer.diagnosticsSnapshot()
+        logPictureInPictureDiagnosticsIfNeeded(diagnostics, reason: "prepare-ready")
+        Logger.shared.log(
+            "[MPVGPUPlayerBridge] PiP prepare ready renderer={\(pictureInPictureDebugSnapshot())}",
             type: "MPV"
         )
     }
@@ -3459,14 +3671,24 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     }
 
     func finishPictureInPicture() {
+        Logger.shared.log(
+            "[MPVGPUPlayerBridge] PiP legacy finish requested renderer={\(pictureInPictureDebugSnapshot())}",
+            type: "MPV"
+        )
         isPictureInPictureActive = false
         setInlineVideoHidden(false)
         gpuRenderer.endPictureInPicture(restoringInlinePlayback: true)
+        setPictureInPictureVideoHidden(true)
+        scheduleHardwareDecoderRecoveryAfterForeground(reason: "pip-legacy-finish")
     }
 
     func finishPictureInPictureAndWait(restoringInlinePlayback: Bool) async -> Bool {
         let expectedCallbackGeneration = callbackGeneration
         let expectedLoadGeneration = gpuLoadGeneration
+        Logger.shared.log(
+            "[MPVGPUPlayerBridge] PiP restore begin inline=\(restoringInlinePlayback) callbackGeneration=\(expectedCallbackGeneration) loadGeneration=\(expectedLoadGeneration) renderer={\(pictureInPictureDebugSnapshot())}",
+            type: "MPV"
+        )
         isPictureInPictureActive = false
         if restoringInlinePlayback {
             // gpu-next needs an available inline drawable before MPVKit can prove token-zero
@@ -3476,13 +3698,35 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         let restored = await gpuRenderer.endPictureInPictureAndWait(
             restoringInlinePlayback: restoringInlinePlayback
         )
-        guard restored,
-              isRunning,
-              callbackGeneration == expectedCallbackGeneration,
-              gpuLoadGeneration == expectedLoadGeneration else {
-            return false
+        let callbackGenerationIsCurrent = callbackGeneration == expectedCallbackGeneration
+        let loadGenerationIsCurrent = gpuLoadGeneration == expectedLoadGeneration
+        // A rapid foreground -> background transition cancels the caller but cannot interrupt a
+        // native restore callback already in flight. Never let that stale completion hide a new
+        // PiP source or validate the decoder latch re-armed by the newer background generation.
+        let recoveryPermissionIsCurrent = !requiresHardwareDecoderRecoveryAfterBackground
+            || permitsHardwareDecoderRecoveryInForeground
+        let transitionIsCurrent = !Task.isCancelled
+            && isRunning
+            && callbackGenerationIsCurrent
+            && loadGenerationIsCurrent
+            && recoveryPermissionIsCurrent
+        if transitionIsCurrent {
+            // AVKit no longer owns this source layer after the current native sink has completed
+            // its generation-scoped handoff.
+            setPictureInPictureVideoHidden(true)
         }
-        return true
+        let accepted = restored && transitionIsCurrent
+        Logger.shared.log(
+            "[MPVGPUPlayerBridge] PiP restore end nativeRestored=\(restored) accepted=\(accepted) running=\(isRunning) cancelled=\(Task.isCancelled) callbackCurrent=\(callbackGenerationIsCurrent) loadCurrent=\(loadGenerationIsCurrent) recoveryPermissionCurrent=\(recoveryPermissionIsCurrent) renderer={\(pictureInPictureDebugSnapshot())}",
+            type: "MPV"
+        )
+        if restoringInlinePlayback, transitionIsCurrent {
+            // PiP restore can legally present a retained frame. The serialized foreground check
+            // still requires a later frame PTS plus a fresh VideoToolbox read before clearing the
+            // background decoder latch.
+            scheduleHardwareDecoderRecoveryAfterForeground(reason: "pip-restore-finished")
+        }
+        return accepted
     }
 
     /// Hides/shows the inline gpu-next CAMetalLayer while PiP is active.
@@ -3492,6 +3736,44 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
             self.gpuRenderer.inlineLayer.isHidden = hidden
+            CATransaction.commit()
+        }
+        if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
+    }
+
+    /// The GPU renderer uses a PiP-only AVSampleBufferDisplayLayer that is hidden behind the
+    /// inline CAMetalLayer at rest. AVKit still requires the source layer to be visible while it
+    /// consumes frames, just like Eclipse's OpenGL and sample-buffer renderers.
+    private func setPictureInPictureVideoHidden(_ hidden: Bool) {
+        let apply: () -> Void = { [weak self] in
+            guard let self else { return }
+            let layer = self.gpuRenderer.pictureInPictureDisplayLayer
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            layer.isHidden = hidden
+            layer.opacity = hidden ? 0 : 1
+            layer.zPosition = hidden ? -1 : 1
+            CATransaction.commit()
+        }
+        if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
+    }
+
+    /// Keeps AVKit's sample-buffer content source eligible for automatic-from-inline entry while
+    /// the real inline picture remains the MoltenVK CAMetalLayer above it. Preparation has already
+    /// enqueued a current-generation sample, so exposing this layer does not start a second render
+    /// loop or hide inline playback.
+    func setPictureInPictureSourcePreparedForAutomaticStart(_ prepared: Bool) {
+        guard !isPictureInPictureActive else { return }
+        let apply: () -> Void = { [weak self] in
+            guard let self, !self.isPictureInPictureActive else { return }
+            let layer = self.gpuRenderer.pictureInPictureDisplayLayer
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            layer.isHidden = !prepared
+            layer.opacity = prepared ? 1 : 0
+            // The inline Metal view stays visually authoritative while AVKit can still see an
+            // attached, visible content-source layer for automatic PiP eligibility.
+            layer.zPosition = -1
             CATransaction.commit()
         }
         if Thread.isMainThread { apply() } else { DispatchQueue.main.async(execute: apply) }
@@ -3521,13 +3803,36 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         }
     }
 
-    func activatePictureInPictureLayer() {
+    @discardableResult
+    func activatePictureInPictureLayer() -> Bool {
         // Guard against re-activation: the start path activates before startPictureInPicture() and
         // the watchdog may call again - beginPictureInPicture isn't re-entrant-safe (it re-seeks).
-        guard !isPictureInPictureActive else { return }
+        guard !isPictureInPictureActive else { return true }
+        setPictureInPictureVideoHidden(false)
         gpuRenderer.beginPictureInPicture()
+        let diagnostics = gpuRenderer.diagnosticsSnapshot()
+        guard case .active = diagnostics.pictureInPictureState else {
+            // MPVKit activation is synchronous from a prepared `.ready` generation. A failed
+            // sink.begin() (or an activation rejected by a newer load) must not leave Eclipse's
+            // bridge claiming PiP ownership while AVKit displays only the retained warmup frame.
+            isPictureInPictureActive = false
+            setInlineVideoHidden(false)
+            setPictureInPictureVideoHidden(true)
+            let state = String(describing: diagnostics.pictureInPictureState)
+            Logger.shared.log(
+                "[MPVGPUPlayerBridge] PiP activation rejected nativeState=\(state) renderer={\(pictureInPictureDebugSnapshot())}",
+                type: "MPV"
+            )
+            pictureInPictureStopRequestHandler?("native-activation-not-active-\(state)")
+            return false
+        }
         isPictureInPictureActive = true
         setInlineVideoHidden(true)
+        Logger.shared.log(
+            "[MPVGPUPlayerBridge] PiP activate renderer={\(pictureInPictureDebugSnapshot())}",
+            type: "MPV"
+        )
+        return true
     }
 
     func isPictureInPicturePrimed() -> Bool {
@@ -3551,12 +3856,708 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
         pictureInPictureStopRequestHandler = handler
     }
 
+    func prioritizeAppExitPictureInPictureOverDecoderRecovery() {
+        guard isRunning else { return }
+        permitsHardwareDecoderRecoveryInForeground = false
+        cancelHardwareDecoderRecovery(
+            resetRequirement: false,
+            restoreSuspendedPlayback: true
+        )
+        gpuRenderer.yieldHardwareDecoderRecoveryToPictureInPicture()
+        Logger.shared.log(
+            "[MPVGPUPlayerBridge] app-exit PiP took track ownership from foreground decoder recovery",
+            type: "MPV"
+        )
+    }
+
+    func noteApplicationDidEnterBackground() {
+        guard isRunning, currentURL != nil else { return }
+        let wasAlreadyArmed = requiresHardwareDecoderRecoveryAfterBackground
+        if !hardwareDecoderRecoveryCompletions.isEmpty {
+            completePendingForegroundRecoveryCallbacks(success: false)
+        }
+        cancelHardwareDecoderRecovery(
+            resetRequirement: false,
+            restoreSuspendedPlayback: true
+        )
+        hardwareDecoderOwnershipRetryCount = 0
+        requiresHardwareDecoderRecoveryAfterBackground = true
+        permitsHardwareDecoderRecoveryInForeground = false
+        if !wasAlreadyArmed {
+            Logger.shared.log(
+                "[MPVGPUPlayerBridge] armed hardware-only decoder recovery after background loadGeneration=\(gpuLoadGeneration)",
+                type: "MPV"
+            )
+        }
+    }
+
+    func noteApplicationDidBecomeActive() {
+        guard isRunning else { return }
+        permitsHardwareDecoderRecoveryInForeground = true
+    }
+
     func resumeForegroundRendering(reason: String) {
-        _ = reason
-        guard isPictureInPictureActive else { return }
-        Task { @MainActor [weak self] in
+        guard isRunning else { return }
+        recoverForegroundRendering(reason: reason) { _ in }
+    }
+
+    func recoverForegroundRendering(reason: String, completion: @escaping (Bool) -> Void) {
+        guard isRunning, currentURL != nil else {
+            completion(false)
+            return
+        }
+        ensureAudioSessionActive()
+        reapplyInlineLayout()
+        noteApplicationDidBecomeActive()
+        guard !isPictureInPictureActive else {
+            Logger.shared.log(
+                "[MPVGPUPlayerBridge] foreground recovery deferred until PiP returns inline reason=\(reason)",
+                type: "MPV"
+            )
+            hardwareDecoderRecoveryCompletions.append(completion)
+            return
+        }
+        guard requiresHardwareDecoderRecoveryAfterBackground else {
+            completion(true)
+            return
+        }
+        hardwareDecoderRecoveryCompletions.append(completion)
+        scheduleHardwareDecoderRecoveryAfterForeground(reason: reason)
+    }
+
+    private func cancelHardwareDecoderRecovery(
+        resetRequirement: Bool,
+        restoreSuspendedPlayback: Bool
+    ) {
+        invalidateHardwareDecoderRecoveryPlaybackSuspension(
+            restoringPlayback: restoreSuspendedPlayback
+        )
+        hardwareDecoderRecoveryAttemptID &+= 1
+        hardwareDecoderRecoveryTask?.cancel()
+        hardwareDecoderRecoveryTask = nil
+        hardwareDecoderRecoveryPlaybackRetryPending = false
+        finishPendingHardwareDecoderRecoveryAttempt()
+        if resetRequirement {
+            requiresHardwareDecoderRecoveryAfterBackground = false
+            permitsHardwareDecoderRecoveryInForeground = false
+            hardwareDecoderOwnershipRetryCount = 0
+            completePendingForegroundRecoveryCallbacks(success: false)
+        }
+    }
+
+    private func scheduleHardwareDecoderRecoveryAfterForeground(reason: String) {
+        guard isRunning,
+              currentURL != nil,
+              requiresHardwareDecoderRecoveryAfterBackground,
+              permitsHardwareDecoderRecoveryInForeground,
+              !isPictureInPictureActive,
+              hardwareDecoderRecoveryTask == nil,
+              hardwareDecoderRecoveryLateOutputWatchdogTask == nil,
+              pendingHardwareDecoderRecoveryEpoch == nil else {
+            return
+        }
+
+        hardwareDecoderRecoveryAttemptID &+= 1
+        hardwareDecoderRecoveryPlaybackRetryPending = false
+        let attemptID = hardwareDecoderRecoveryAttemptID
+        let expectedCallbackGeneration = callbackGeneration
+        let expectedLoadGeneration = gpuLoadGeneration
+        Logger.shared.log(
+            "[MPVGPUPlayerBridge] hardware-only foreground recovery scheduled reason=\(reason) callbackGeneration=\(expectedCallbackGeneration) loadGeneration=\(expectedLoadGeneration)",
+            type: "MPV"
+        )
+        hardwareDecoderRecoveryTask = Task { @MainActor [weak self] in
             guard let self else { return }
-            _ = await self.finishPictureInPictureAndWait(restoringInlinePlayback: true)
+            let outcome = await self.performHardwareDecoderRecovery(
+                reason: reason,
+                attemptID: attemptID,
+                expectedCallbackGeneration: expectedCallbackGeneration,
+                expectedLoadGeneration: expectedLoadGeneration
+            )
+            guard self.hardwareDecoderRecoveryAttemptID == attemptID else { return }
+            if case .deferredOwnership = outcome {
+                guard self.hardwareDecoderOwnershipRetryCount < 30,
+                      self.hardwareDecoderRecoveryContextIsCurrent(
+                    attemptID: attemptID,
+                    expectedCallbackGeneration: expectedCallbackGeneration,
+                    expectedLoadGeneration: expectedLoadGeneration
+                ) else {
+                    self.hardwareDecoderRecoveryTask = nil
+                    Logger.shared.log(
+                        "[MPVGPUPlayerBridge] foreground recovery ownership did not settle within the bounded retry window reason=\(reason)",
+                        type: "MPV"
+                    )
+                    self.completePendingForegroundRecoveryCallbacks(success: false)
+                    return
+                }
+                self.hardwareDecoderOwnershipRetryCount += 1
+                do {
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                } catch {
+                    return
+                }
+                guard self.hardwareDecoderRecoveryContextIsCurrent(
+                    attemptID: attemptID,
+                    expectedCallbackGeneration: expectedCallbackGeneration,
+                    expectedLoadGeneration: expectedLoadGeneration
+                ) else { return }
+                self.hardwareDecoderRecoveryTask = nil
+                self.scheduleHardwareDecoderRecoveryAfterForeground(
+                    reason: "\(reason)-ownership-retry"
+                )
+                return
+            }
+            self.hardwareDecoderRecoveryTask = nil
+            if self.hardwareDecoderRecoveryPlaybackRetryPending,
+               !self.isPaused,
+               !self.isLoading {
+                self.scheduleHardwareDecoderRecoveryAfterForeground(
+                    reason: "\(reason)-playback-ready"
+                )
+            }
+            // A paused/loading item deliberately retains the validation latch. `play()` and the
+            // next generation-matched video reconfigure call this scheduler again.
+        }
+    }
+
+    private func noteHardwareDecoderRecoveryPlaybackReady(reason: String) {
+        guard requiresHardwareDecoderRecoveryAfterBackground,
+              permitsHardwareDecoderRecoveryInForeground else { return }
+        hardwareDecoderRecoveryPlaybackRetryPending = true
+        scheduleHardwareDecoderRecoveryAfterForeground(reason: reason)
+    }
+
+    private func performHardwareDecoderRecovery(
+        reason: String,
+        attemptID: UInt64,
+        expectedCallbackGeneration: UInt64,
+        expectedLoadGeneration: UInt64
+    ) async -> HardwareDecoderRecoveryOutcome {
+        let validation = await gpuRenderer.validateForegroundVideoAfterSystemResume()
+        guard hardwareDecoderRecoveryContextIsCurrent(
+            attemptID: attemptID,
+            expectedCallbackGeneration: expectedCallbackGeneration,
+            expectedLoadGeneration: expectedLoadGeneration
+        ) else { return .finished }
+        switch validation {
+        case .healthy(let decoder):
+            completeHardwareDecoderRecovery(
+                decoder: decoder,
+                path: "non-destructive-inline-validation",
+                reason: reason
+            )
+            return .finished
+        case .playbackDeferred(let decoder):
+            Logger.shared.log(
+                "[MPVGPUPlayerBridge] foreground decoder validation deferred until playback resumes decoder=\(decoder) reason=\(reason)",
+                type: "MPV"
+            )
+            return .deferredPlayback
+        case .transitionBusy:
+            Logger.shared.log(
+                "[MPVGPUPlayerBridge] foreground validation deferred while PiP/load owns video reason=\(reason)",
+                type: "MPV"
+            )
+            return .deferredOwnership
+        case .decoderUnavailable(let decoder):
+            Logger.shared.log(
+                "[MPVGPUPlayerBridge] foreground validation found no active VideoToolbox decoder current=\(decoder.isEmpty ? "empty" : decoder) reason=\(reason)",
+                type: "MPV"
+            )
+        case .inlinePresentationTimedOut(let decoder):
+            Logger.shared.log(
+                "[MPVGPUPlayerBridge] foreground inline validation timed out decoder=\(decoder) reason=\(reason)",
+                type: "MPV"
+            )
+        case .unavailable:
+            Logger.shared.log(
+                "[MPVGPUPlayerBridge] foreground inline validation unavailable; using bounded hardware-only recovery reason=\(reason)",
+                type: "MPV"
+            )
+        }
+
+        guard !isPaused, !isLoading else {
+            Logger.shared.log(
+                "[MPVGPUPlayerBridge] destructive decoder recovery deferred paused=\(isPaused) loading=\(isLoading) reason=\(reason)",
+                type: "MPV"
+            )
+            return .deferredPlayback
+        }
+
+        let suspendedPlayback = suspendPlaybackForHardwareDecoderRecoveryIfNeeded()
+        defer { resumePlaybackAfterHardwareDecoderRecoveryIfNeeded(suspendedPlayback) }
+
+        let configuredOrderSubmission = await submitHardwareDecoderRecovery(
+            strategy: .configuredOrder,
+            label: "direct-first",
+            attemptID: attemptID,
+            expectedCallbackGeneration: expectedCallbackGeneration,
+            expectedLoadGeneration: expectedLoadGeneration
+        )
+        let configuredOrderEpoch: UInt64
+        switch configuredOrderSubmission {
+        case .accepted(let epoch):
+            configuredOrderEpoch = epoch
+            beginPendingHardwareDecoderRecoveryAttempt(epoch: epoch)
+        case .transitionBusy:
+            guard hardwareDecoderRecoveryContextIsCurrent(
+                attemptID: attemptID,
+                expectedCallbackGeneration: expectedCallbackGeneration,
+                expectedLoadGeneration: expectedLoadGeneration
+            ) else { return .finished }
+            Logger.shared.log(
+                "[MPVGPUPlayerBridge] hardware-only foreground recovery deferred reason=\(reason): load or PiP ownership did not settle",
+                type: "MPV"
+            )
+            return .deferredOwnership
+        case .unavailable:
+            guard hardwareDecoderRecoveryContextIsCurrent(
+                attemptID: attemptID,
+                expectedCallbackGeneration: expectedCallbackGeneration,
+                expectedLoadGeneration: expectedLoadGeneration
+            ) else { return .finished }
+            failHardwareDecoderRecovery(
+                reason: reason,
+                detail: "no selected video track or configured VideoToolbox path was available"
+            )
+            return .finished
+        case .commandFailed:
+            guard hardwareDecoderRecoveryContextIsCurrent(
+                attemptID: attemptID,
+                expectedCallbackGeneration: expectedCallbackGeneration,
+                expectedLoadGeneration: expectedLoadGeneration
+            ) else { return .finished }
+            failHardwareDecoderRecovery(
+                reason: reason,
+                detail: "mpv rejected the direct-first decoder reconstruction"
+            )
+            return .finished
+        case .cancelled:
+            return .finished
+        }
+
+        switch await awaitVideoToolboxProof(
+            for: configuredOrderEpoch,
+            attemptID: attemptID,
+            expectedCallbackGeneration: expectedCallbackGeneration,
+            expectedLoadGeneration: expectedLoadGeneration
+        ) {
+        case .videoToolbox(let decoder):
+            completeHardwareDecoderRecovery(decoder: decoder, path: "direct-first", reason: reason)
+            return .finished
+        case .timedOut:
+            // Keep the direct epoch active for one bounded late-output window. Paused/buffering
+            // playback can delay proof, but an epoch must never remain armed indefinitely.
+            Logger.shared.log(
+                "[MPVGPUPlayerBridge] direct VideoToolbox recovery awaiting decoded output; copy path not forced reason=\(reason)",
+                type: "MPV"
+            )
+            scheduleHardwareDecoderRecoveryLateOutputWatchdog(
+                epoch: configuredOrderEpoch,
+                reason: reason,
+                attemptID: attemptID,
+                expectedCallbackGeneration: expectedCallbackGeneration,
+                expectedLoadGeneration: expectedLoadGeneration
+            )
+            return .waitingForOutput
+        case .cancelled:
+            finishPendingHardwareDecoderRecoveryAttempt()
+            return .finished
+        case .outputWithoutVideoToolbox(let decoder):
+            finishPendingHardwareDecoderRecoveryAttempt()
+            Logger.shared.log(
+                "[MPVGPUPlayerBridge] direct VideoToolbox recovery output used hwdec-current=\(decoder.isEmpty ? "empty" : decoder); trying hardware copy path once reason=\(reason)",
+                type: "MPV"
+            )
+        }
+
+        let copySubmission = await submitHardwareDecoderRecovery(
+            strategy: .copyOnly,
+            label: "copy-only",
+            attemptID: attemptID,
+            expectedCallbackGeneration: expectedCallbackGeneration,
+            expectedLoadGeneration: expectedLoadGeneration
+        )
+        let copyEpoch: UInt64
+        switch copySubmission {
+        case .accepted(let epoch):
+            copyEpoch = epoch
+            beginPendingHardwareDecoderRecoveryAttempt(epoch: epoch)
+        case .transitionBusy:
+            guard hardwareDecoderRecoveryContextIsCurrent(
+                attemptID: attemptID,
+                expectedCallbackGeneration: expectedCallbackGeneration,
+                expectedLoadGeneration: expectedLoadGeneration
+            ) else { return .finished }
+            Logger.shared.log(
+                "[MPVGPUPlayerBridge] copy-path recovery deferred because PiP or loading reclaimed video ownership reason=\(reason)",
+                type: "MPV"
+            )
+            return .deferredOwnership
+        case .unavailable:
+            guard hardwareDecoderRecoveryContextIsCurrent(
+                attemptID: attemptID,
+                expectedCallbackGeneration: expectedCallbackGeneration,
+                expectedLoadGeneration: expectedLoadGeneration
+            ) else { return .finished }
+            failHardwareDecoderRecovery(
+                reason: reason,
+                detail: "the configured decoder list does not contain a VideoToolbox copy path"
+            )
+            return .finished
+        case .commandFailed:
+            guard hardwareDecoderRecoveryContextIsCurrent(
+                attemptID: attemptID,
+                expectedCallbackGeneration: expectedCallbackGeneration,
+                expectedLoadGeneration: expectedLoadGeneration
+            ) else { return .finished }
+            failHardwareDecoderRecovery(
+                reason: reason,
+                detail: "mpv rejected the copy-path decoder reconstruction"
+            )
+            return .finished
+        case .cancelled:
+            return .finished
+        }
+
+        switch await awaitVideoToolboxProof(
+            for: copyEpoch,
+            attemptID: attemptID,
+            expectedCallbackGeneration: expectedCallbackGeneration,
+            expectedLoadGeneration: expectedLoadGeneration
+        ) {
+        case .videoToolbox(let decoder):
+            completeHardwareDecoderRecovery(decoder: decoder, path: "copy-only", reason: reason)
+            return .finished
+        case .outputWithoutVideoToolbox(let decoder):
+            failHardwareDecoderRecovery(
+                reason: reason,
+                detail: "the copy path produced output without VideoToolbox (hwdec-current=\(decoder.isEmpty ? "empty" : decoder))"
+            )
+            return .finished
+        case .timedOut:
+            let decoder = gpuRenderer.diagnosticsSnapshot().hardwareDecoder
+            failHardwareDecoderRecovery(
+                reason: reason,
+                detail: "neither VideoToolbox path produced decoded output (hwdec-current=\(decoder.isEmpty ? "empty" : decoder))"
+            )
+            return .finished
+        case .cancelled:
+            finishPendingHardwareDecoderRecoveryAttempt()
+            return .finished
+        }
+    }
+
+    private func submitHardwareDecoderRecovery(
+        strategy: MPVGPUPlayerHardwareDecoderRecoveryStrategy,
+        label: String,
+        attemptID: UInt64,
+        expectedCallbackGeneration: UInt64,
+        expectedLoadGeneration: UInt64
+    ) async -> MPVGPUPlayerHardwareDecoderRecoverySubmission {
+        // Ownership retrying is centralized in the outer scheduler. Keeping this submission
+        // single-shot prevents two nested thirty-attempt loops from multiplying into a 90-second
+        // foreground stall.
+        guard hardwareDecoderRecoveryContextIsCurrent(
+            attemptID: attemptID,
+            expectedCallbackGeneration: expectedCallbackGeneration,
+            expectedLoadGeneration: expectedLoadGeneration
+        ) else { return .cancelled }
+        let submission = await gpuRenderer.recreateHardwareDecoderAfterSystemResume(
+            strategy: strategy
+        )
+        if case .accepted(let epoch) = submission {
+            Logger.shared.log(
+                "[MPVGPUPlayerBridge] submitted hardware decoder track reconstruction path=\(label) epoch=\(epoch)",
+                type: "MPV"
+            )
+        }
+        return submission
+    }
+
+    private func awaitVideoToolboxProof(
+        for epoch: UInt64,
+        attemptID: UInt64,
+        expectedCallbackGeneration: UInt64,
+        expectedLoadGeneration: UInt64
+    ) async -> HardwareDecoderRecoveryProof {
+        // The epoch is activated only after mpv confirms that the old track was fully deselected,
+        // so a same-load VIDEO_RECONFIG queued before suspension cannot satisfy this proof.
+        var decoderObservedWithoutVideoToolbox: String?
+        for _ in 0..<60 {
+            guard hardwareDecoderRecoveryContextIsCurrent(
+                attemptID: attemptID,
+                expectedCallbackGeneration: expectedCallbackGeneration,
+                expectedLoadGeneration: expectedLoadGeneration
+            ) else { return .cancelled }
+            if hasHardwareDecoderRecoveryObservedDecoder,
+               lastHardwareDecoderRecoveryObservedEpoch == epoch {
+                let decoder = lastHardwareDecoderRecoveryObservedDecoder ?? ""
+                if Self.isVideoToolboxDecoder(decoder) {
+                    return .videoToolbox(decoder)
+                }
+                // Deselecting the old track can briefly emit a no-video reconfigure. Give the
+                // newly selected decoder the full proof window before treating it as failure.
+                decoderObservedWithoutVideoToolbox = decoder
+            } else if lastHardwareDecoderRecoveryOutputEpoch == epoch {
+                let decoder = gpuRenderer.diagnosticsSnapshot().hardwareDecoder
+                if Self.isVideoToolboxDecoder(decoder) {
+                    return .videoToolbox(decoder)
+                }
+                decoderObservedWithoutVideoToolbox = decoder
+            }
+            do {
+                try await Task.sleep(nanoseconds: 50_000_000)
+            } catch {
+                return .cancelled
+            }
+        }
+        // Close the final-sleep race: a causal callback delivered during the sixtieth sleep must
+        // be observed before deciding that the decoder produced no output.
+        guard hardwareDecoderRecoveryContextIsCurrent(
+            attemptID: attemptID,
+            expectedCallbackGeneration: expectedCallbackGeneration,
+            expectedLoadGeneration: expectedLoadGeneration
+        ) else { return .cancelled }
+        if hasHardwareDecoderRecoveryObservedDecoder,
+           lastHardwareDecoderRecoveryObservedEpoch == epoch {
+            let decoder = lastHardwareDecoderRecoveryObservedDecoder ?? ""
+            if Self.isVideoToolboxDecoder(decoder) {
+                return .videoToolbox(decoder)
+            }
+            decoderObservedWithoutVideoToolbox = decoder
+        } else if lastHardwareDecoderRecoveryOutputEpoch == epoch {
+            let decoder = gpuRenderer.diagnosticsSnapshot().hardwareDecoder
+            if Self.isVideoToolboxDecoder(decoder) {
+                return .videoToolbox(decoder)
+            }
+            decoderObservedWithoutVideoToolbox = decoder
+        }
+        if let decoderObservedWithoutVideoToolbox {
+            return .outputWithoutVideoToolbox(decoderObservedWithoutVideoToolbox)
+        }
+        return .timedOut
+    }
+
+    private func scheduleHardwareDecoderRecoveryLateOutputWatchdog(
+        epoch: UInt64,
+        reason: String,
+        attemptID: UInt64,
+        expectedCallbackGeneration: UInt64,
+        expectedLoadGeneration: UInt64
+    ) {
+        hardwareDecoderRecoveryLateOutputWatchdogTask?.cancel()
+        hardwareDecoderRecoveryLateOutputWatchdogTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 5_000_000_000)
+            } catch {
+                return
+            }
+            guard let self else { return }
+            self.hardwareDecoderRecoveryLateOutputWatchdogTask = nil
+            guard self.pendingHardwareDecoderRecoveryEpoch == epoch,
+                  self.hardwareDecoderRecoveryContextIsCurrent(
+                    attemptID: attemptID,
+                    expectedCallbackGeneration: expectedCallbackGeneration,
+                    expectedLoadGeneration: expectedLoadGeneration
+                  ) else { return }
+
+            if self.lastHardwareDecoderRecoveryOutputEpoch == epoch {
+                let decoder = self.gpuRenderer.diagnosticsSnapshot().hardwareDecoder
+                if Self.isVideoToolboxDecoder(decoder) {
+                    self.completeHardwareDecoderRecovery(
+                        decoder: decoder,
+                        path: "direct-first-late-output",
+                        reason: reason
+                    )
+                } else {
+                    self.finishPendingHardwareDecoderRecoveryAttempt()
+                    self.scheduleHardwareDecoderRecoveryAfterForeground(
+                        reason: "\(reason)-late-output-without-videotoolbox"
+                    )
+                }
+                return
+            }
+
+            if self.isPaused {
+                // A paused item may intentionally produce no frame. Release the epoch instead of
+                // holding track ownership forever; `play()` submits a fresh causal attempt.
+                self.finishPendingHardwareDecoderRecoveryAttempt()
+                Logger.shared.log(
+                    "[MPVGPUPlayerBridge] hardware-only recovery deferred until playback resumes because the bounded proof window ended while paused reason=\(reason)",
+                    type: "MPV"
+                )
+                return
+            }
+
+            self.failHardwareDecoderRecovery(
+                reason: reason,
+                detail: "the direct path produced no decoded output within the bounded recovery window"
+            )
+        }
+    }
+
+    private func hardwareDecoderRecoveryContextIsCurrent(
+        attemptID: UInt64,
+        expectedCallbackGeneration: UInt64,
+        expectedLoadGeneration: UInt64
+    ) -> Bool {
+        hardwareDecoderRecoveryAttemptID == attemptID
+            && callbackGeneration == expectedCallbackGeneration
+            && gpuLoadGeneration == expectedLoadGeneration
+            && isRunning
+            && currentURL != nil
+            && requiresHardwareDecoderRecoveryAfterBackground
+            && permitsHardwareDecoderRecoveryInForeground
+    }
+
+    private static func isVideoToolboxDecoder(_ decoder: String) -> Bool {
+        switch decoder.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "videotoolbox", "videotoolbox-copy":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func completeHardwareDecoderRecovery(decoder: String, path: String, reason: String) {
+        finishPendingHardwareDecoderRecoveryAttempt()
+        requiresHardwareDecoderRecoveryAfterBackground = false
+        permitsHardwareDecoderRecoveryInForeground = false
+        hardwareDecoderOwnershipRetryCount = 0
+        lastLoggedDecode = ""
+        Logger.shared.log(
+            "[MPVGPUPlayerBridge] hardware-only foreground recovery confirmed decoder=\(decoder) path=\(path) reason=\(reason)",
+            type: "MPV"
+        )
+        logDecodeEngagement()
+        completePendingForegroundRecoveryCallbacks(success: true)
+    }
+
+    private func failHardwareDecoderRecovery(reason: String, detail: String) {
+        finishPendingHardwareDecoderRecoveryAttempt()
+        // Stop retrying this activation, preserve the strict no-software policy, and make the
+        // terminal state visible instead of leaving audio running behind a frozen/black frame.
+        requiresHardwareDecoderRecoveryAfterBackground = false
+        permitsHardwareDecoderRecoveryInForeground = false
+        hardwareDecoderOwnershipRetryCount = 0
+        Logger.shared.log(
+            "[MPVGPUPlayerBridge] hardware-only foreground recovery failed reason=\(reason) detail=\(detail); software fallback remains disabled",
+            type: "MPV"
+        )
+        if !isPaused {
+            pausePlayback()
+        }
+        delegate?.renderer(
+            self,
+            didFailWithError: "Hardware decoder unavailable after returning to the app. Playback was paused because software decoding is disabled."
+        )
+        completePendingForegroundRecoveryCallbacks(success: false)
+    }
+
+    private func beginPendingHardwareDecoderRecoveryAttempt(epoch: UInt64) {
+        pendingHardwareDecoderRecoveryEpoch = epoch
+        lastHardwareDecoderRecoveryOutputEpoch = nil
+        lastHardwareDecoderRecoveryObservedEpoch = nil
+        lastHardwareDecoderRecoveryObservedDecoder = nil
+        hasHardwareDecoderRecoveryObservedDecoder = false
+    }
+
+    private func finishPendingHardwareDecoderRecoveryAttempt() {
+        hardwareDecoderRecoveryLateOutputWatchdogTask?.cancel()
+        hardwareDecoderRecoveryLateOutputWatchdogTask = nil
+        let epoch = pendingHardwareDecoderRecoveryEpoch
+        pendingHardwareDecoderRecoveryEpoch = nil
+        lastHardwareDecoderRecoveryOutputEpoch = nil
+        lastHardwareDecoderRecoveryObservedEpoch = nil
+        lastHardwareDecoderRecoveryObservedDecoder = nil
+        hasHardwareDecoderRecoveryObservedDecoder = false
+        if let epoch {
+            _ = gpuRenderer.finishHardwareDecoderRecoveryAttempt(epoch: epoch)
+        }
+    }
+
+    private func completePendingForegroundRecoveryCallbacks(success: Bool) {
+        guard !hardwareDecoderRecoveryCompletions.isEmpty else { return }
+        let completions = hardwareDecoderRecoveryCompletions
+        hardwareDecoderRecoveryCompletions.removeAll(keepingCapacity: true)
+        completions.forEach { $0(success) }
+    }
+
+    private func suspendPlaybackForHardwareDecoderRecoveryIfNeeded()
+        -> HardwareDecoderRecoveryPlaybackSuspension {
+        hardwareDecoderRecoverySuspensionGeneration &+= 1
+        let suspension = HardwareDecoderRecoveryPlaybackSuspension(
+            shouldResume: !isPaused,
+            playbackIntentGeneration: playbackIntentGeneration,
+            suspensionGeneration: hardwareDecoderRecoverySuspensionGeneration,
+            callbackGeneration: callbackGeneration,
+            loadGeneration: gpuLoadGeneration
+        )
+        guard suspension.shouldResume else { return suspension }
+
+        // Keep audio and video on the same mpv clock while the rare destructive track
+        // reconstruction is in flight. Public pause state is intentionally unchanged.
+        suppressesHardwareDecoderRecoveryPauseCallbacks = true
+        gpuRenderer.pause()
+        return suspension
+    }
+
+    private func resumePlaybackAfterHardwareDecoderRecoveryIfNeeded(
+        _ suspension: HardwareDecoderRecoveryPlaybackSuspension
+    ) {
+        guard suspension.shouldResume else { return }
+        // A stale recovery's defer must never clear callback suppression owned by a newer
+        // suspension that happens to share the same user playback intent.
+        guard suspension.suspensionGeneration == hardwareDecoderRecoverySuspensionGeneration else {
+            return
+        }
+        guard suspension.playbackIntentGeneration == playbackIntentGeneration,
+              suspension.callbackGeneration == callbackGeneration,
+              suspension.loadGeneration == gpuLoadGeneration,
+              isRunning else {
+            suppressesHardwareDecoderRecoveryPauseCallbacks = false
+            return
+        }
+
+        gpuRenderer.play()
+        let expectedIntentGeneration = suspension.playbackIntentGeneration
+        let expectedSuspensionGeneration = suspension.suspensionGeneration
+        let expectedCallbackGeneration = suspension.callbackGeneration
+        let expectedLoadGeneration = suspension.loadGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            guard let self,
+                  self.playbackIntentGeneration == expectedIntentGeneration,
+                  self.hardwareDecoderRecoverySuspensionGeneration == expectedSuspensionGeneration,
+                  self.callbackGeneration == expectedCallbackGeneration,
+                  self.gpuLoadGeneration == expectedLoadGeneration,
+                  self.isRunning else { return }
+            self.suppressesHardwareDecoderRecoveryPauseCallbacks = false
+        }
+    }
+
+    private func invalidateHardwareDecoderRecoveryPlaybackSuspension(
+        restoringPlayback: Bool
+    ) {
+        hardwareDecoderRecoverySuspensionGeneration &+= 1
+        guard suppressesHardwareDecoderRecoveryPauseCallbacks else { return }
+        if restoringPlayback, !isPaused, isRunning {
+            gpuRenderer.play()
+            let expectedIntentGeneration = playbackIntentGeneration
+            let expectedSuspensionGeneration = hardwareDecoderRecoverySuspensionGeneration
+            let expectedCallbackGeneration = callbackGeneration
+            let expectedLoadGeneration = gpuLoadGeneration
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self,
+                      self.playbackIntentGeneration == expectedIntentGeneration,
+                      self.hardwareDecoderRecoverySuspensionGeneration == expectedSuspensionGeneration,
+                      self.callbackGeneration == expectedCallbackGeneration,
+                      self.gpuLoadGeneration == expectedLoadGeneration,
+                      self.isRunning else { return }
+                self.suppressesHardwareDecoderRecoveryPauseCallbacks = false
+            }
+        } else {
+            suppressesHardwareDecoderRecoveryPauseCallbacks = false
         }
     }
 
@@ -3644,8 +4645,72 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
     func pictureInPictureDebugSnapshot() -> String {
         let d = gpuRenderer.diagnosticsSnapshot()
         let layer = gpuRenderer.pictureInPictureDisplayLayer
-        let frameCount = d.pictureInPictureDiagnostics?.frameCount ?? 0
-        return "mode=gpu-next-inline presentation=\(d.presentationMode.rawValue) vo=\(d.inlineVideoOutput) api=\(d.inlineGPUAPI) ctx=\(d.inlineGPUContext) running=\(isRunning) paused=\(isPaused) loading=\(isLoading) ready=\(isReadyToSeek) pip=\(isPictureInPictureActive) pos=\(String(format: "%.2f", d.currentTime))/\(String(format: "%.2f", d.duration)) pipFrames=\(frameCount) sourceLayer={hidden=\(layer.isHidden) opacity=\(String(format: "%.2f", layer.opacity)) status=\(layer.status.rawValue) ready=\(layer.isReadyForMoreMediaData) timebase=\(layer.controlTimebase != nil)}"
+        let frameCount = d.pictureInPictureEnqueuedFrameCount
+        let selectedBackend = d.selectedPictureInPictureBackend?.rawValue ?? "unselected"
+        let fallbackReason = sanitizedPictureInPictureDiagnosticText(d.pictureInPictureFallbackReason)
+        let backend = sanitizedPictureInPictureDiagnosticText(d.backendDescription)
+        let codec = d.videoCodec.isEmpty ? "unresolved" : d.videoCodec
+        let pixelFormat = d.videoPixelFormat.isEmpty ? "unresolved" : d.videoPixelFormat
+        let hardwareDecoder = d.hardwareDecoder.isEmpty ? "unresolved" : d.hardwareDecoder
+        return "mode=gpu-next-inline presentation=\(d.presentationMode.rawValue) vo=\(d.inlineVideoOutput) api=\(d.inlineGPUAPI) ctx=\(d.inlineGPUContext) backend={\(backend)} decode={codec=\(codec) hw=\(hardwareDecoder) pixel=\(pixelFormat) size=\(d.videoWidth)x\(d.videoHeight)} running=\(isRunning) paused=\(isPaused) loading=\(isLoading) ready=\(isReadyToSeek) pip=\(isPictureInPictureActive) pipState=\(pictureInPictureStateDescription(d.pictureInPictureState)) preference=\(d.pictureInPictureBackendPreference.rawValue) selected=\(selectedBackend) fallback=\(fallbackReason) instances=\(d.activeMPVInstanceCount) generation=\(d.pictureInPicturePreparationGeneration) prepareMs=\(String(format: "%.1f", d.pictureInPicturePreparationLatency * 1_000)) pos=\(String(format: "%.2f", d.currentTime))/\(String(format: "%.2f", d.duration)) pipFrames=\(frameCount) schedulerCoalesced=\(d.schedulerCoalescedRequestCount) backpressureDrops=\(d.backpressureDropCount) poolDrops=\(d.poolExhaustionDropCount) staleDrops=\(d.staleGenerationDropCount) inFlight=\(d.inFlightGPUFrameCount) gpuMs=\(String(format: "%.2f", d.lastGPULatencyMilliseconds)) epoch=\(d.timelineEpoch) rate=\(String(format: "%.2f", d.timelineRate)) pipResize=\(d.pictureInPictureResizeRequestCount)/\(d.pictureInPictureResizeApplicationCount)/\(d.pictureInPictureResizeCoalescedCount) inlineResize=\(d.inlineResizeRequestCount)/\(d.inlineResizeApplicationCount)/\(d.inlineResizeCoalescedCount) audioRecoveries=\(d.audioRecoveryCount) sourceLayer={hidden=\(layer.isHidden) opacity=\(String(format: "%.2f", layer.opacity)) status=\(layer.status.rawValue) ready=\(layer.isReadyForMoreMediaData) timebase=\(layer.controlTimebase != nil)}"
+    }
+
+    private func logPictureInPictureDiagnosticsIfNeeded(
+        _ diagnostics: MPVGPUPlayerRendererDiagnostics,
+        reason: String
+    ) {
+        let selectedBackend = diagnostics.selectedPictureInPictureBackend?.rawValue ?? "unselected"
+        let fallbackReason = sanitizedPictureInPictureDiagnosticText(
+            diagnostics.pictureInPictureFallbackReason
+        )
+        let transitionSignature = [
+            pictureInPictureStateDescription(diagnostics.pictureInPictureState),
+            diagnostics.pictureInPictureBackendPreference.rawValue,
+            selectedBackend,
+            fallbackReason,
+            String(diagnostics.activeMPVInstanceCount)
+        ].joined(separator: "|")
+        let pressureTotal = diagnostics.backpressureDropCount
+            + diagnostics.poolExhaustionDropCount
+            + diagnostics.staleGenerationDropCount
+        let transitionChanged = transitionSignature != lastLoggedPictureInPictureDiagnosticsSignature
+        let pressureDelta = pressureTotal - lastLoggedPictureInPicturePressureTotal
+        let pressureMilestone = pressureTotal != lastLoggedPictureInPicturePressureTotal
+            && (pressureTotal <= 3 || pressureDelta >= 60 || pressureDelta < 0)
+        let audioRecoveryChanged = diagnostics.audioRecoveryCount != lastLoggedAudioRecoveryCount
+        guard transitionChanged || pressureMilestone || audioRecoveryChanged else { return }
+
+        lastLoggedPictureInPictureDiagnosticsSignature = transitionSignature
+        lastLoggedPictureInPicturePressureTotal = pressureTotal
+        lastLoggedAudioRecoveryCount = diagnostics.audioRecoveryCount
+        Logger.shared.log(
+            "[MPVGPUPlayerBridge] PiP diagnostics reason=\(reason) state=\(pictureInPictureStateDescription(diagnostics.pictureInPictureState)) preference=\(diagnostics.pictureInPictureBackendPreference.rawValue) selected=\(selectedBackend) fallback=\(fallbackReason) instances=\(diagnostics.activeMPVInstanceCount) generation=\(diagnostics.pictureInPicturePreparationGeneration) prepareMs=\(String(format: "%.1f", diagnostics.pictureInPicturePreparationLatency * 1_000)) frames=\(diagnostics.pictureInPictureEnqueuedFrameCount) schedulerCoalesced=\(diagnostics.schedulerCoalescedRequestCount) backpressureDrops=\(diagnostics.backpressureDropCount) poolDrops=\(diagnostics.poolExhaustionDropCount) staleDrops=\(diagnostics.staleGenerationDropCount) inFlight=\(diagnostics.inFlightGPUFrameCount) gpuMs=\(String(format: "%.2f", diagnostics.lastGPULatencyMilliseconds)) epoch=\(diagnostics.timelineEpoch) rate=\(String(format: "%.2f", diagnostics.timelineRate)) pipResize=\(diagnostics.pictureInPictureResizeRequestCount)/\(diagnostics.pictureInPictureResizeApplicationCount)/\(diagnostics.pictureInPictureResizeCoalescedCount) audioRecoveries=\(diagnostics.audioRecoveryCount)",
+            type: "MPV"
+        )
+    }
+
+    private func pictureInPictureStateDescription(_ state: MPVPictureInPictureState) -> String {
+        switch state {
+        case .idle:
+            return "idle"
+        case .preparing(let generation):
+            return "preparing(\(generation))"
+        case .ready(let generation):
+            return "ready(\(generation))"
+        case .active(let generation):
+            return "active(\(generation))"
+        case .restoring(let generation):
+            return "restoring(\(generation))"
+        case .failed(let generation, let reason):
+            return "failed(\(generation),\(sanitizedPictureInPictureDiagnosticText(reason)))"
+        }
+    }
+
+    private func sanitizedPictureInPictureDiagnosticText(_ text: String?) -> String {
+        guard let text, !text.isEmpty else { return "none" }
+        return text
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
     }
 
     // MARK: Position / state
@@ -3835,6 +4900,25 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             lastLoggedState = label
             Logger.shared.log("[MPVGPUPlayerBridge] state=\(label)", type: "MPV")
         }
+        if suppressesHardwareDecoderRecoveryPauseCallbacks {
+            switch state {
+            case .paused:
+                // This is the bridge's short coordinated A/V suspension, not a user pause.
+                return
+            case .playing:
+                suppressesHardwareDecoderRecoveryPauseCallbacks = false
+                isPaused = false
+                isLoading = false
+                delegate?.renderer(self, didChangeLoading: false)
+                markReadyIfNeeded(reason: "hardware-decoder-recovery-resumed")
+                noteHardwareDecoderRecoveryPlaybackReady(
+                    reason: "hardware-decoder-recovery-state-playing"
+                )
+                return
+            default:
+                break
+            }
+        }
         switch state {
         case .starting, .loading:
             isLoading = true
@@ -3846,6 +4930,7 @@ final class MPVGPUPlayerBridge: PlayerRenderer {
             delegate?.renderer(self, didChangeLoading: false)
             delegate?.renderer(self, didChangePause: false)
             markReadyIfNeeded(reason: "playing")
+            noteHardwareDecoderRecoveryPlaybackReady(reason: "state-playing")
         case .paused:
             isPaused = true
             if deferFreshIPadStartupIfNeeded(state: "paused") {
@@ -4302,7 +5387,8 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
             dynamicRangeText: rangeText,
             highBitDepthActive: diag.highBitDepthRenderingActive,
             subtitleCodec: subtitleCodec,
-            hardwareDecoder: nil
+            hardwareDecoder: nil,
+            pictureInPictureBackingText: "Software"
         )
     }
 
@@ -4348,11 +5434,13 @@ final class MPVSampleBufferPiPBridge: PlayerRenderer {
         sampleRenderer.primeFrames(reason: reason, count: 6)
     }
 
-    func activatePictureInPictureLayer() {
+    @discardableResult
+    func activatePictureInPictureLayer() -> Bool {
         displayLayer.isHidden = false
         displayLayer.opacity = 1.0
         displayLayer.zPosition = 1
         sampleRenderer.primeFrames(reason: "activate-pip", count: 4)
+        return isPictureInPicturePrimed()
     }
 
     func isPictureInPicturePrimed() -> Bool {
@@ -5329,15 +6417,15 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
         }
     }
 
-    func activatePictureInPictureLayer() {
+    @discardableResult
+    func activatePictureInPictureLayer() -> Bool {
         if let fallbackRenderer {
-            fallbackRenderer.activatePictureInPictureLayer()
-            return
+            return fallbackRenderer.activatePictureInPictureLayer()
         }
         let bridgePrimed = pipBridge.isPictureInPicturePrimed()
         guard isUsingPiPBridge || isPreparingPiPBridge || (pipBridgeLoadGeneration == loadGeneration && bridgePrimed) else {
             logMPV("PiP hybrid activate skipped preparing=\(isPreparingPiPBridge) using=\(isUsingPiPBridge) bridgeGen=\(pipBridgeLoadGeneration ?? -1) currentGen=\(loadGeneration) primed=\(bridgePrimed) bridge={\(pipBridge.pictureInPictureDebugSnapshot())}")
-            return
+            return false
         }
         let wasActive = isUsingPiPBridge
         isUsingPiPBridge = true
@@ -5349,11 +6437,22 @@ final class MPVMoltenVKRenderer: PlayerRenderer, MPVNativeRendererDelegate {
             pipBridge.setAudioMuted(false)
             logMPV("PiP hybrid activated bridge foregroundPos=\(String(format: "%.2f", cachedPosition)) bridge={\(pipBridge.pictureInPictureDebugSnapshot())}")
         }
-        pipBridge.activatePictureInPictureLayer()
+        guard pipBridge.activatePictureInPictureLayer() else {
+            isUsingPiPBridge = false
+            isPreparingPiPBridge = false
+            pipBridge.setAudioMuted(true)
+            setProperty(name: "vid", value: "auto")
+            if !isPaused {
+                setProperty(name: "pause", value: "no")
+            }
+            logMPV("PiP hybrid activation failed; restored inline renderer")
+            return false
+        }
         DispatchQueue.main.async { [weak self] in
             guard let self, self.isRunning, self.isUsingPiPBridge else { return }
             self.metalView.isHidden = true
         }
+        return true
     }
 
     func isPictureInPicturePrimed() -> Bool {
@@ -6309,7 +7408,7 @@ final class MPVNativeRenderer: PlayerRenderer {
     func prepareForPictureInPictureStart() { }
     func finishPictureInPicture() { }
     func primePictureInPictureFrames(reason: String) { }
-    func activatePictureInPictureLayer() { }
+    func activatePictureInPictureLayer() -> Bool { false }
     func isPictureInPicturePrimed() -> Bool { false }
     func resumeForegroundRendering(reason: String) { }
     func pictureInPictureDebugSnapshot() -> String { "mpv unavailable" }

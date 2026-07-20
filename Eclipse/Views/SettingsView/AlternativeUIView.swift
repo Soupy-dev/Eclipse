@@ -21,6 +21,7 @@ enum AppearanceSettingsSearchTarget: String, Hashable {
     case alternativeSeasonMenu
     case horizontalEpisodeList
     case tmdbTitleArt
+    case ageRating
     case similarTitles
 
     var anchorID: String {
@@ -35,7 +36,7 @@ enum AppearanceSettingsSearchTarget: String, Hashable {
             return "interface"
         case .switchModeAnimation, .animatedBackground, .animationQuality, .animationFrameRate, .appPerformanceOverlay, .hideSplashScreen:
             return "motion"
-        case .alternativeSeasonMenu, .horizontalEpisodeList, .tmdbTitleArt, .similarTitles:
+        case .alternativeSeasonMenu, .horizontalEpisodeList, .tmdbTitleArt, .ageRating, .similarTitles:
             return "details"
         }
     }
@@ -48,6 +49,8 @@ struct AlternativeUIView: View {
     @AppStorage(MediaDetailPlatformDefaults.seasonMenuKey) private var useSeasonMenu = MediaDetailPlatformDefaults.prefersCompactSeasonMenu
     @AppStorage(MediaDetailPlatformDefaults.horizontalEpisodeListKey) private var horizontalEpisodeList = MediaDetailPlatformDefaults.prefersHorizontalEpisodes
     @AppStorage(MediaDetailTitleArtworkSettings.enabledKey) private var mediaDetailTitleArtworkEnabled = MediaDetailTitleArtworkSettings.defaultEnabled
+    @AppStorage(MediaDetailAlternatePosterSettings.enabledKey) private var mediaDetailAlternatePosterEnabled = MediaDetailAlternatePosterSettings.defaultEnabled
+    @AppStorage(MediaDetailAgeRatingSettings.enabledKey) private var mediaDetailAgeRatingEnabled = MediaDetailAgeRatingSettings.defaultEnabled
     @AppStorage(MediaDetailSimilarTitlesSettings.enabledKey) private var mediaDetailSimilarTitlesEnabled = MediaDetailSimilarTitlesSettings.defaultEnabled
 
     // Layout knobs retained for Reset Appearance; their controls now live in Home Layout.
@@ -417,7 +420,7 @@ struct AlternativeUIView: View {
 
             toggleRow(
                 title: "App Performance Overlay",
-                description: "Show live CPU, GPU, thermal state, and background quality diagnostics throughout Eclipse. While visible, sparse samples and CPU spikes are added to Performance logs. Sampling and logging pause when the app is inactive or playback covers the interface.",
+                description: "Show live CPU, RAM, thermal state, and background quality diagnostics throughout Eclipse. While visible, sparse samples and CPU spikes are added to Performance logs. Sampling and logging pause when the app is inactive or playback covers the interface.",
                 isOn: $appPerformanceOverlayEnabled
             )
             .id(AppearanceSettingsSearchTarget.appPerformanceOverlay.anchorID)
@@ -457,6 +460,17 @@ struct AlternativeUIView: View {
                 isOn: $mediaDetailTitleArtworkEnabled
             )
             .id(AppearanceSettingsSearchTarget.tmdbTitleArt.anchorID)
+            toggleRow(
+                title: "Alternate Detail Poster",
+                description: "Use a TMDB alternate poster behind title art on phone detail pages when available.",
+                isOn: $mediaDetailAlternatePosterEnabled
+            )
+            toggleRow(
+                title: "Show Age Rating",
+                description: "Display the available content age rating on movie and series detail pages.",
+                isOn: $mediaDetailAgeRatingEnabled
+            )
+            .id(AppearanceSettingsSearchTarget.ageRating.anchorID)
         } header: {
             Text("Detail Pages")
         }
@@ -843,6 +857,8 @@ struct AlternativeUIView: View {
         hideSplashScreen = false
 #endif
         mediaDetailTitleArtworkEnabled = MediaDetailTitleArtworkSettings.defaultEnabled
+        mediaDetailAlternatePosterEnabled = MediaDetailAlternatePosterSettings.defaultEnabled
+        mediaDetailAgeRatingEnabled = MediaDetailAgeRatingSettings.defaultEnabled
         mediaDetailSimilarTitlesEnabled = MediaDetailSimilarTitlesSettings.defaultEnabled
         HomeCatalogLayoutStore.shared.resetAll()
     }

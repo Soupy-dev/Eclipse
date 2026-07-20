@@ -251,6 +251,11 @@ class CatalogManager: ObservableObject {
         catalogs.filter { isCatalogVisible($0) && isCatalogEffectivelyEnabled($0) }.sorted { $0.order < $1.order }
     }
 
+    func isCatalogEnabled(id: String) -> Bool {
+        guard let catalog = catalogs.first(where: { $0.id == id }) else { return false }
+        return isCatalogVisible(catalog) && isCatalogEffectivelyEnabled(catalog)
+    }
+
     func isCatalogVisible(_ catalog: Catalog) -> Bool {
         if catalog.requiresTraktConnection {
             return TrackerManager.shared.trackerState.getAccount(for: .trakt) != nil

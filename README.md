@@ -77,12 +77,6 @@ Get the TestFlight build (Recommended for most iOS users, easiest to download an
 
 https://testflight.apple.com/join/FDXvrxVg
 
-AltStore and SideStore users can add this source (not recommended, discontinued):
-
-```text
-https://raw.githubusercontent.com/Soupy-dev/Eclipse/main/altsource.json
-```
-
 ## Support
 
 - Join the Discord server for help, updates, and community discussion: https://discord.gg/UjHgGaEbn

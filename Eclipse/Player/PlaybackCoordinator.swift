@@ -99,6 +99,9 @@ final class PlaybackCoordinator {
         controller.onRequestResolvedNextEpisode = request.onRequestResolvedNextEpisode
         controller.localNextEpisodeFallback = request.localNextEpisodeFallback
         controller.onPlaybackStartupFailure = request.onPlaybackStartupFailure
+#if os(iOS) && canImport(GoogleCast)
+        controller.activePlaybackRequest = request
+#endif
         controller.isCoordinatorEngineFallback = isEngineFallback
         controller.forceHeaderProxyForStartup = isEngineFallback
         if preStartFallback == .avPlayer {

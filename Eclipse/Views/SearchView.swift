@@ -1010,8 +1010,8 @@ private struct BrowseMediaView: View {
                 reloadResults()
             }
         }
-        .onChangeComp(of: mediaType) { _, _ in
-            handleMediaTypeChange()
+        .onChangeComp(of: mediaType) { previousMediaType, _ in
+            handleMediaTypeChange(from: previousMediaType)
         }
         .onChangeComp(of: selectedGenreKeys) { _, _ in
             reloadResults()
@@ -1287,13 +1287,15 @@ private struct BrowseMediaView: View {
         }
     }
 
-    private func handleMediaTypeChange() {
+    private func handleMediaTypeChange(from previousMediaType: BrowseMediaType?) {
         let validGenreKeys = Set(mediaType.genres.map(\.id))
         let filteredGenreKeys = selectedGenreKeys.intersection(validGenreKeys)
         let filteredExcludedGenreKeys = excludedGenreKeys.intersection(validGenreKeys)
         let validCountryCodes = Set(mediaType.countries.map(\.code))
         var nextCountryCode = selectedCountryCode
-        if mediaType.isAnime, nextCountryCode.isEmpty {
+        if previousMediaType?.isAnime == true && !mediaType.isAnime {
+            nextCountryCode = ""
+        } else if mediaType.isAnime, nextCountryCode.isEmpty {
             nextCountryCode = "JP"
         } else if !nextCountryCode.isEmpty, !validCountryCodes.contains(nextCountryCode) {
             nextCountryCode = ""

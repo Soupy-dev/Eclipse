@@ -132,6 +132,9 @@ import WebKit
 #if os(iOS)
 import SwiftUI
 import UIKit
+#elseif os(macOS)
+import AppKit
+import SwiftUI
 #endif
 
 enum CloudflareBypassError: Error {
@@ -608,7 +611,7 @@ final class CloudflareBypassManager: ObservableObject {
 
         activeBypassWebView = webView
         var isVisible = presentation == .visible
-        #if os(iOS)
+        #if os(iOS) || os(macOS)
         switch presentation {
         case .visible:
             CloudflareBypassWindowController.shared.show()
@@ -621,7 +624,7 @@ final class CloudflareBypassManager: ObservableObject {
         #endif
         defer {
             activeBypassWebView = nil
-            #if os(iOS)
+            #if os(iOS) || os(macOS)
             CloudflareBypassSilentHost.shared.detach(webView)
             CloudflareBypassWindowController.shared.hide()
             #endif
@@ -649,7 +652,7 @@ final class CloudflareBypassManager: ObservableObject {
                 return true
             }
 
-            #if os(iOS)
+            #if os(iOS) || os(macOS)
             if presentation == .silentThenEscalate, !isVisible, elapsed >= Self.silentSolveBudgetSeconds {
                 // The silent attempt didn't resolve on its own, so this challenge needs a human
                 // (typically an interactive Turnstile checkbox). Surface the SAME flow in a
@@ -1475,6 +1478,102 @@ private final class CloudflareBypassSilentHost {
         guard hostedWebView === webView else { return }
         webView.removeFromSuperview()
         window?.isHidden = true
+        window = nil
+        hostedWebView = nil
+    }
+}
+#elseif os(macOS)
+private struct CloudflareBypassSheetView: View {
+    @ObservedObject private var manager = CloudflareBypassManager.shared
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Security Check").font(.headline)
+                Spacer()
+                Button("Cancel") { CloudflareBypassManager.shared.cancelActiveBypass() }
+            }
+            .padding(12)
+            Divider()
+            if let webView = manager.activeBypassWebView {
+                CloudflareBypassWebView(webView: webView)
+            } else {
+                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+        .frame(minWidth: 720, minHeight: 560)
+    }
+}
+
+private struct CloudflareBypassWebView: NSViewRepresentable {
+    let webView: WKWebView
+    func makeNSView(context: Context) -> WKWebView { webView }
+    func updateNSView(_ nsView: WKWebView, context: Context) {}
+}
+
+@MainActor
+private final class CloudflareBypassWindowController: NSObject, NSWindowDelegate {
+    static let shared = CloudflareBypassWindowController()
+    private var window: NSWindow?
+    private override init() { super.init() }
+
+    func show() {
+        guard window == nil else { window?.makeKeyAndOrderFront(nil); return }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 780, height: 620),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Eclipse Security Check"
+        window.level = .floating
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.contentViewController = NSHostingController(rootView: CloudflareBypassSheetView())
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        self.window = window
+    }
+
+    func hide() { window?.orderOut(nil); window = nil }
+
+    func windowWillClose(_ notification: Notification) {
+        window = nil
+        CloudflareBypassManager.shared.cancelActiveBypass()
+    }
+}
+
+@MainActor
+private final class CloudflareBypassSilentHost {
+    static let shared = CloudflareBypassSilentHost()
+    private var window: NSWindow?
+    private weak var hostedWebView: WKWebView?
+    private init() {}
+
+    func attach(_ webView: WKWebView) {
+        guard window == nil else { return }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 390, height: 844),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.alphaValue = 0.01
+        window.ignoresMouseEvents = true
+        window.level = .normal - 1
+        webView.frame = window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 390, height: 844)
+        webView.autoresizingMask = [.width, .height]
+        window.contentView?.addSubview(webView)
+        window.orderBack(nil)
+        self.window = window
+        hostedWebView = webView
+    }
+
+    func detach(_ webView: WKWebView) {
+        guard hostedWebView === webView else { return }
+        webView.removeFromSuperview()
+        window?.orderOut(nil)
         window = nil
         hostedWebView = nil
     }

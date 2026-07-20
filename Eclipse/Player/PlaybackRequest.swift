@@ -305,4 +305,34 @@ struct PlaybackRequest {
             result[key] = value
         }
     }
+
+    func replacingMediaSelectionIntent(_ mediaSelectionIntent: PlaybackMediaSelectionIntent) -> PlaybackRequest {
+        PlaybackRequest(
+            url: url,
+            preset: preset,
+            headers: headers,
+            subtitles: subtitles,
+            subtitleNames: subtitleNames,
+            subtitleHeadersByURL: subtitleHeadersByURL,
+            mediaSelectionIntent: mediaSelectionIntent,
+            mediaInfo: mediaInfo,
+            imdbID: imdbID,
+            episodePlaybackContext: episodePlaybackContext,
+            launchContext: launchContext,
+            resumePosition: resumePosition,
+            title: title,
+            subtitle: subtitle,
+            artworkURL: artworkURL,
+            isAnime: isAnime,
+            isAnimation: isAnimation,
+            originalTMDBSeasonNumber: originalTMDBSeasonNumber,
+            originalTMDBEpisodeNumber: originalTMDBEpisodeNumber,
+            servicesOriginalTitle: servicesOriginalTitle,
+            servicesOriginalAudioLanguage: servicesOriginalAudioLanguage,
+            onRequestNextEpisode: onRequestNextEpisode,
+            onRequestResolvedNextEpisode: onRequestResolvedNextEpisode,
+            onPlaybackStartupFailure: onPlaybackStartupFailure,
+            localNextEpisodeFallback: localNextEpisodeFallback
+        )
+    }
 }

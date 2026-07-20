@@ -204,8 +204,12 @@ final class HomeViewModel: ObservableObject {
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
-                if !loadedStremioCatalogs.isEmpty {
-                    self.catalogResults.merge(loadedStremioCatalogs) { _, stremio in stremio }
+                let currentlyEnabledCatalogIds = Set(catalogManager.getEnabledCatalogs().map(\.id))
+                let enabledStremioCatalogs = loadedStremioCatalogs.filter {
+                    currentlyEnabledCatalogIds.contains($0.key)
+                }
+                if !enabledStremioCatalogs.isEmpty {
+                    self.catalogResults.merge(enabledStremioCatalogs) { _, stremio in stremio }
                 }
                 if !loadedTraktCatalogs.isEmpty {
                     self.catalogResults.merge(loadedTraktCatalogs) { _, trakt in trakt }

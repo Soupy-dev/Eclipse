@@ -1069,9 +1069,9 @@ class ServiceManager: ObservableObject {
     static let shared = ServiceManager()
 
     @Published var services: [Service] = []
-    @Published var isDownloading = false
-    @Published var downloadProgress: Double = 0.0
-    @Published var downloadMessage: String = ""
+    private(set) var isDownloading = false
+    private(set) var downloadProgress: Double = 0.0
+    private(set) var downloadMessage: String = ""
 
     /// UserDefaults keys for auto-update
     private static let autoUpdateEnabledKey = "autoUpdateServicesEnabled"
@@ -1163,9 +1163,15 @@ class ServiceManager: ObservableObject {
                 try? await Task.sleep(nanoseconds: delay)
 
                 // Preserve user-modified settings from the existing script
-                let existingSettings = parseSettingsFromJS(service.jsScript)
+                let existingScript = service.jsScript
+                let existingSettings = await Task.detached(priority: .utility) {
+                    Self.parseSettingsFromJS(existingScript)
+                }.value
                 if !existingSettings.isEmpty {
-                    jsContent = updateSettingsInJS(jsContent, with: existingSettings)
+                    let downloadedScript = jsContent
+                    jsContent = await Task.detached(priority: .utility) {
+                        Self.updateSettingsInJS(downloadedScript, with: existingSettings)
+                    }.value
                 }
 #if os(tvOS)
                 guard let securedScript = secureScriptForPersistence(jsContent, serviceID: service.id) else {
@@ -1175,7 +1181,7 @@ class ServiceManager: ObservableObject {
 #endif
 
                 // Save service using existing ID
-                ServiceStore.shared.storeService(
+                await ServiceStore.shared.storeServiceAsync(
                     id: service.id,
                     url: service.url,
                     jsonMetadata: String(data: try JSONEncoder().encode(metadata), encoding: .utf8) ?? "",
@@ -1195,7 +1201,7 @@ class ServiceManager: ObservableObject {
 
         }
 
-        loadServicesFromCloud()
+        await loadServicesFromCloudAsync()
         guard !Task.isCancelled else {
             downloadProgress = 0
             downloadMessage = ""
@@ -1227,7 +1233,7 @@ class ServiceManager: ObservableObject {
             }
             jsContent = securedScript
 #endif
-            ServiceStore.shared.storeService(
+            await ServiceStore.shared.storeServiceAsync(
                 id: serviceId,
                 url: jsonURL,
                 jsonMetadata: String(data: try JSONEncoder().encode(metadata), encoding: .utf8) ?? "",
@@ -1237,7 +1243,7 @@ class ServiceManager: ObservableObject {
             AutoModeSourceSelection.appendSourceIfNeeded("service:\(serviceId.uuidString)")
             try? await Task.sleep(nanoseconds: delay)
 
-            loadServicesFromCloud()
+            await loadServicesFromCloudAsync()
             guard services.contains(where: { $0.id == serviceId }) else {
                 throw ServiceError.saveFailed
             }
@@ -1264,7 +1270,7 @@ class ServiceManager: ObservableObject {
 
     func removeService(_ service: Service) {
 #if os(tvOS)
-        for setting in parseSettingsFromJS(service.jsScript) where setting.isSensitive {
+        for setting in Self.parseSettingsFromJS(service.jsScript) where setting.isSensitive {
             TVServiceSettingVault.remove(serviceID: service.id, key: setting.key)
         }
 #endif
@@ -1387,7 +1393,7 @@ class ServiceManager: ObservableObject {
     }
 
     func getServiceSettings(_ service: Service) -> [ServiceSetting] {
-        let parsed = parseSettingsFromJS(service.jsScript)
+        let parsed = Self.parseSettingsFromJS(service.jsScript)
 #if os(tvOS)
         return parsed.map { setting in
             guard setting.isSensitive else { return setting }
@@ -1416,7 +1422,7 @@ class ServiceManager: ObservableObject {
 #else
          let persistedSettings = settings
 #endif
-         let jsScript = updateSettingsInJS(service.jsScript, with: persistedSettings)
+         let jsScript = Self.updateSettingsInJS(service.jsScript, with: persistedSettings)
 
          guard let entity = ServiceStore.shared.getEntities().first(where: { $0.id == service.id }) else { return false }
          entity.jsScript = jsScript
@@ -1515,6 +1521,10 @@ class ServiceManager: ObservableObject {
         services = ServiceStore.shared.getServices()
     }
 
+    private func loadServicesFromCloudAsync() async {
+        services = await ServiceStore.shared.getServicesAsync()
+    }
+
     private func generateServiceUUID(from metadata: ServiceMetadata) -> UUID {
         let identifier = "\(metadata.sourceName)_\(metadata.author.name)_\(metadata.version)"
         let hash = identifier.sha256
@@ -1567,7 +1577,7 @@ class ServiceManager: ObservableObject {
         }
     }
 
-    private func parseSettingsFromJS(_ jsContent: String) -> [ServiceSetting] {
+    nonisolated private static func parseSettingsFromJS(_ jsContent: String) -> [ServiceSetting] {
         let lines = jsContent.components(separatedBy: .newlines)
         var settings: [ServiceSetting] = []
         var inSettingsSection = false
@@ -1583,7 +1593,7 @@ class ServiceManager: ObservableObject {
             }
 
             if inSettingsSection && trimmedLine.hasPrefix("const "),
-               let setting = parseSettingLine(trimmedLine) {
+               let setting = Self.parseSettingLine(trimmedLine) {
                 settings.append(setting)
             }
         }
@@ -1591,7 +1601,7 @@ class ServiceManager: ObservableObject {
         return settings
     }
 
-    private func parseSettingLine(_ line: String) -> ServiceSetting? {
+    nonisolated private static func parseSettingLine(_ line: String) -> ServiceSetting? {
         let settingRegex = try! NSRegularExpression(pattern: #"const\s+(\w+)\s*=\s*([^;]+);"#)
         let commentRegex = try! NSRegularExpression(pattern: #"//\s*(.+)$"#)
         let range = NSRange(location: 0, length: line.utf16.count)
@@ -1642,7 +1652,7 @@ class ServiceManager: ObservableObject {
         return ServiceSetting(key: key, value: cleanValue, type: type, comment: comment, options: options)
     }
 
-    private func determineSettingType(from valueString: String) -> (ServiceSetting.SettingType, String) {
+    nonisolated private static func determineSettingType(from valueString: String) -> (ServiceSetting.SettingType, String) {
         func stripQuotes(_ s: String) -> String {
             var t = s.trimmingCharacters(in: .whitespacesAndNewlines)
             if t.count >= 2, let first = t.first, let last = t.last,
@@ -1666,7 +1676,7 @@ class ServiceManager: ObservableObject {
         }
     }
 
-    private func updateSettingsInJS(_ jsContent: String, with settings: [ServiceSetting]) -> String {
+    nonisolated private static func updateSettingsInJS(_ jsContent: String, with settings: [ServiceSetting]) -> String {
         var lines = jsContent.components(separatedBy: .newlines)
         let settingRegex = try! NSRegularExpression(pattern: #"const\s+(\w+)\s*=\s*([^;]+);"#)
         let settingsMap = Dictionary(
@@ -1718,12 +1728,12 @@ class ServiceManager: ObservableObject {
 
 #if os(tvOS)
     private func secureScriptForPersistence(_ script: String, serviceID: UUID) -> String? {
-        let settings = parseSettingsFromJS(script)
+        let settings = Self.parseSettingsFromJS(script)
         guard settings.contains(where: \.isSensitive) else { return script }
         guard let securedSettings = securedSettingsForPersistence(settings, serviceID: serviceID) else {
             return nil
         }
-        return updateSettingsInJS(
+        return Self.updateSettingsInJS(
             script,
             with: securedSettings
         )
@@ -1762,7 +1772,7 @@ class ServiceManager: ObservableObject {
     }
 #endif
 
-    private func formatSettingValue(_ setting: ServiceSetting) -> String {
+    nonisolated private static func formatSettingValue(_ setting: ServiceSetting) -> String {
         switch setting.type {
         case .string:
             return ServiceSettingSecurity.javascriptStringLiteral(setting.value)

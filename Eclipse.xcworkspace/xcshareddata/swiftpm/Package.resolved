@@ -1,0 +1,114 @@
+{
+  "originHash" : "a97b8465156bd61489677a59c2e10ab5f4d0bbf90958605deb6e12a1d63e3700",
+  "pins" : [
+    {
+      "identity" : "aidokurunner",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Aidoku/AidokuRunner",
+      "state" : {
+        "branch" : "main",
+        "revision" : "45560aa5326b3c3ceda1d7432edb5292463f877a"
+      }
+    },
+    {
+      "identity" : "fakewebkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/undeaDD/FakeWebKit",
+      "state" : {
+        "branch" : "main",
+        "revision" : "d0c32ecfff9f7bbe158ff0a1e0f4414648872d6b"
+      }
+    },
+    {
+      "identity" : "kingfisher",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/onevcat/Kingfisher",
+      "state" : {
+        "revision" : "ac632bd26a1c00f139ff62fd01806f21cf67325e",
+        "version" : "8.10.0"
+      }
+    },
+    {
+      "identity" : "nuke",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/kean/Nuke",
+      "state" : {
+        "revision" : "83e19143355b02e9261edb2323b3e1e93287ebb9",
+        "version" : "12.9.0"
+      }
+    },
+    {
+      "identity" : "plcrashreporter",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/microsoft/plcrashreporter.git",
+      "state" : {
+        "revision" : "0254f941c646b1ed17b243654723d0f071e990d0",
+        "version" : "1.12.2"
+      }
+    },
+    {
+      "identity" : "soracore",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/cranci1/SoraCore",
+      "state" : {
+        "branch" : "main",
+        "revision" : "e82c92005fd7d1b4d3e9d56901ad8c3ac9089bfb"
+      }
+    },
+    {
+      "identity" : "swiftlintplugins",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/SimplyDanny/SwiftLintPlugins",
+      "state" : {
+        "revision" : "3292bab28e6e92000161348003fdef8edc4e582d",
+        "version" : "0.65.0"
+      }
+    },
+    {
+      "identity" : "swiftsoup",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/scinfu/SwiftSoup.git",
+      "state" : {
+        "revision" : "ead56133a693d0184d8c2db1a6d6394410cacfd6",
+        "version" : "2.13.6"
+      }
+    },
+    {
+      "identity" : "sybau",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/cranci1/Sybau.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "1f5a664184887520996d6efbe5b4570d8a1e4cc9"
+      }
+    },
+    {
+      "identity" : "texture",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Skittyblock/Texture.git",
+      "state" : {
+        "revision" : "6a6475db9bf9f7e04731ab60053c3ca4934c1ac6",
+        "version" : "3.1.1"
+      }
+    },
+    {
+      "identity" : "wasm3",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/Skittyblock/Wasm3",
+      "state" : {
+        "branch" : "main",
+        "revision" : "8c0e4ef3dec8e88a94c19959c3fe100cf50c548b"
+      }
+    },
+    {
+      "identity" : "zipfoundation",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/weichsel/ZIPFoundation.git",
+      "state" : {
+        "revision" : "22787ffb59de99e5dc1fbfe80b19c97a904ad48d",
+        "version" : "0.9.20"
+      }
+    }
+  ],
+  "version" : 3
+}

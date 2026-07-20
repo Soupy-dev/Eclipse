@@ -16,6 +16,7 @@ enum MediaStateSettingScope: String, Codable, Sendable {
     case shared
     case iOS
     case tvOS
+    case macOS
 
     var appliesToCurrentPlatform: Bool {
         switch self {
@@ -29,6 +30,12 @@ enum MediaStateSettingScope: String, Codable, Sendable {
 #endif
         case .tvOS:
 #if os(tvOS)
+            return true
+#else
+            return false
+#endif
+        case .macOS:
+#if os(macOS)
             return true
 #else
             return false
@@ -439,6 +446,7 @@ enum MediaStateSettingRegistry {
         "audioComfortScopeCategories",
         "mpvSurroundSoundEnabled",
         "watchTogetherEnabled",
+        "googleCastEnabled",
         "mpvPictureInPictureEnabled",
         "introDBEnabled",
         "introDBAppEnabled",
@@ -461,6 +469,7 @@ enum MediaStateSettingRegistry {
         "mediaDetailHiddenElements",
         "mediaDetailSimilarTitlesEnabled",
         "mediaDetailTitleArtworkEnabled",
+        "mediaDetailAlternatePosterEnabled",
         "homeCatalogLayoutOverrides",
         "appearancePalette",
         "appearanceBleedStrength",

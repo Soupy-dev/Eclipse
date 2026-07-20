@@ -44,15 +44,25 @@ if [ -d "DerivedData$PLATFORM" ]; then
     rm -rf "DerivedData$PLATFORM"
 fi
 
-# Build with Xcode project and Swift Package Manager dependencies.
-XCODE_PROJECT="-project $WORKING_LOCATION/$PROJECT_NAME.xcodeproj"
+# Google Cast is iOS-only and is supplied by CocoaPods. tvOS intentionally
+# continues to build directly from the Xcode project without Cast linkage.
+if [ "$PLATFORM" = "ios" ]; then
+    if ! command -v pod >/dev/null 2>&1; then
+        echo "Error: CocoaPods is required for iOS builds (install it, then run pod install)."
+        exit 1
+    fi
+    (cd "$WORKING_LOCATION" && pod install)
+    XCODE_CONTAINER=(-workspace "$WORKING_LOCATION/$PROJECT_NAME.xcworkspace")
+else
+    XCODE_CONTAINER=(-project "$WORKING_LOCATION/$PROJECT_NAME.xcodeproj")
+fi
 
 # Create archive (required for proper IPA structure)
 ARCHIVE_PATH="$WORKING_LOCATION/build/$APPLICATION_NAME$OUTPUT_SUFFIX.xcarchive"
 rm -rf "$ARCHIVE_PATH"
 
 xcodebuild archive \
-    $XCODE_PROJECT \
+    "${XCODE_CONTAINER[@]}" \
     -scheme "$SCHEME" \
     -configuration Release \
     -archivePath "$ARCHIVE_PATH" \
