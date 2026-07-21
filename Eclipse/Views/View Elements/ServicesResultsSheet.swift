@@ -120,6 +120,35 @@ private struct StremioStyleResolvedServiceStream: Identifiable {
     let resolvedAt: Date
 }
 
+#if os(iOS) && !targetEnvironment(macCatalyst)
+/// A SkyStream row can only be built after the resolver has crossed the VOD/security boundary.
+/// Keeping the validated descriptor beside the shared StreamOption prevents a later picker or
+/// Auto Mode callback from reconstructing playback from raw JavaScript values.
+private struct ValidatedSkyStreamOption: Identifiable, Hashable {
+    let id: UUID
+    let resolved: SkyStreamResolvedStream
+    let option: StreamOption
+
+    init(
+        id: UUID = UUID(),
+        resolved: SkyStreamResolvedStream,
+        option: StreamOption
+    ) {
+        self.id = id
+        self.resolved = resolved
+        self.option = option
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.id == rhs.id
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(id)
+    }
+}
+#endif
+
 private enum StremioStyleServiceResolutionState {
     case queued
     case checking
@@ -247,6 +276,9 @@ struct PlayerResolvedPlaybackRequest {
     let episodePlaybackContext: EpisodePlaybackContext?
     let launchContext: PlaybackLaunchContext?
     var autoModeRecoveryIdentity: AutoModePlaybackRecoveryIdentity? = nil
+    /// Release/first-air year carried across in-player source replacement. Providers that do not
+    /// use title/year matching continue to ignore this optional value.
+    var mediaYear: Int? = nil
 }
 
 @MainActor
@@ -354,6 +386,8 @@ struct ModulesSearchResultsSheet: View {
     let isAnimeContent: Bool
     let selectedEpisode: TMDBEpisode?
     let tmdbId: Int
+    /// Optional release/first-air year used as a wrong-title guard by search-based providers.
+    var mediaYear: Int? = nil
     /// Non-nil for anime to force E## format
     let animeSeasonTitle: String?
     let posterPath: String?
@@ -409,6 +443,9 @@ struct ModulesSearchResultsSheet: View {
     @StateObject private var viewModel = ModulesSearchResultsViewModel()
     @StateObject private var serviceManager = ServiceManager.shared
     @StateObject private var stremioManager = StremioAddonManager.shared
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    @StateObject private var skyStreamManager = SkyStreamPluginManager.shared
+#endif
     @StateObject private var algorithmManager = AlgorithmManager.shared
     @StateObject private var healthStore = SourceHealthStore.shared
     @State private var autoModeDidRun = false
@@ -435,6 +472,17 @@ struct ModulesSearchResultsSheet: View {
     @State private var stremioStyleServiceResolutionWork: [UUID: StremioStyleServiceResolutionWork] = [:]
     @State private var selectedResolvedServiceStream: StremioStyleResolvedServiceStream?
     @State private var showingResolvedServiceStreamAlert = false
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    @State private var skyStreamResults: [String: [ValidatedSkyStreamOption]] = [:]
+    @State private var skyStreamSearchedSourceIds: Set<String> = []
+    @State private var skyStreamSearchingSourceIds: Set<String> = []
+    @State private var skyStreamSearchTask: Task<Void, Never>?
+    @State private var selectedSkyStreamOption: ValidatedSkyStreamOption?
+    @State private var selectedSkyStreamProvider: SkyStreamProviderDescriptor?
+    @State private var skyStreamPickerOptions: [ValidatedSkyStreamOption] = []
+    @State private var showingSkyStreamPlayAlert = false
+    @State private var showingSkyStreamPicker = false
+#endif
     private static let maxRetainedServiceResultsPerService = 300
     private static let maxVisibleServiceResultsPerService = 80
     private static let maxRetainedServiceStreamOptions = 300
@@ -442,6 +490,13 @@ struct ModulesSearchResultsSheet: View {
     private static let maxMetadataValuesPerField = 32
     private static let maxRetainedStremioStreamsPerAddon = 300
     private static let maxVisibleStremioStreamsPerAddon = 80
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    // Each validated option can retain a bounded manifest/route graph, so keep the UI cache much
+    // smaller than raw Service/Stremio rows. The resolver already returns its strongest options.
+    private static let maxRetainedSkyStreamOptionsPerProvider = 8
+    private static let maxVisibleSkyStreamOptionsPerProvider = 8
+    private static let maxConcurrentSkyStreamResolutions = 3
+#endif
     // Probes are intentionally bounded because timed-out provider networking can outlive its JS
     // context. The larger ranked pool still lets resolution backfill past early rule-rejected hits.
     private static let maxStremioStyleServiceCandidatesPerSource = 80
@@ -638,12 +693,123 @@ struct ModulesSearchResultsSheet: View {
         effectivePlaybackContext?.anilistMediaId
     }
 
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    private var activeSkyStreamProviders: [SkyStreamProviderDescriptor] {
+        guard PlatformCapabilities.current.supportsSkyStreamPlugins,
+              skyStreamManager.isLoaded else { return [] }
+        return skyStreamManager.providers.filter(\.isEnabled)
+    }
+
+    private var skyStreamResolutionTarget: SkyStreamResolutionTarget {
+        // Keep canonical anime identities ahead of decorated search queries. SkyStream bounds
+        // this vocabulary before handing it to third-party code, so appending these after the
+        // Stremio query ladder could silently discard the title that actually clears the 85%
+        // identity gate.
+        var aliases = [
+            animeSeasonTitle,
+            seasonTitleOverride,
+            normalizedAnimeSequelTitle
+        ].compactMap { $0 }
+        if !isForcedWatchTogetherAnimePlayback {
+            aliases.append(contentsOf: [originalTitle, strippedAnimeFallbackTitle].compactMap { $0 })
+        }
+        aliases.append(effectiveTitle)
+        aliases.append(contentsOf: stremioCatalogTitleCandidates)
+
+        var seenAliases = Set<String>()
+        aliases = aliases
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .filter {
+                seenAliases.insert(
+                    $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
+                ).inserted
+            }
+
+        let primaryTitle = playerMediaTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        aliases.removeAll { $0.caseInsensitiveCompare(primaryTitle) == .orderedSame }
+
+        var absoluteCandidates: [Int] = []
+        if let absolute = effectivePlaybackContext?.animeAbsoluteEpisodeNumber {
+            absoluteCandidates.append(absolute)
+        }
+        if let localEpisode = effectivePlaybackContext?.localEpisodeNumber ?? selectedEpisode?.episodeNumber {
+            absoluteCandidates.append(localEpisode)
+        }
+        if let mappedEpisode = streamLookupEpisodeNumber {
+            absoluteCandidates.append(mappedEpisode)
+        }
+        var seenEpisodes = Set<Int>()
+        absoluteCandidates = absoluteCandidates.filter { $0 > 0 && seenEpisodes.insert($0).inserted }
+
+        let dubSearchText = ([primaryTitle] + aliases).joined(separator: " ")
+        let wantsDubbed: Bool? = dubSearchText.range(
+            of: #"(?i)(?:^|[^a-z0-9])(?:dub|dubbed)(?:$|[^a-z0-9])"#,
+            options: .regularExpression
+        ) == nil ? nil : true
+
+        return SkyStreamResolutionTarget(
+            kind: isMovie ? .movie : .episode,
+            title: primaryTitle,
+            aliases: Array(aliases.prefix(8)),
+            year: hasAnimeLookupContext
+                ? nil
+                : mediaYear.flatMap { (1800...3000).contains($0) ? $0 : nil },
+            season: isMovie ? nil : streamLookupSeasonNumber,
+            episode: isMovie ? nil : streamLookupEpisodeNumber,
+            absoluteEpisodeCandidates: Array(absoluteCandidates.prefix(3)),
+            isAnime: hasAnimeLookupContext,
+            isSpecial: specialTitleOnlySearch || effectivePlaybackContext?.isSpecial == true,
+            wantsDubbed: wantsDubbed,
+            requiresExactIdentity: forceAutomaticPlayback || watchTogetherExactHandoff
+        )
+    }
+#endif
+
     private var sourceKindList: String {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        "services, addons, or SkyStream providers"
+#else
         "services or addons"
+#endif
     }
 
     private var sourceKindSelectionList: String {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        "service, addon, or SkyStream provider"
+#else
         "service or addon"
+#endif
+    }
+
+    private var activeSkyStreamSourceCount: Int {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        activeSkyStreamProviders.count
+#else
+        0
+#endif
+    }
+
+    private var searchedSkyStreamSourceCount: Int {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        skyStreamSearchedSourceIds.subtracting(skyStreamSearchingSourceIds).count
+#else
+        0
+#endif
+    }
+
+    private var isSearchingSkyStream: Bool {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        !skyStreamSearchingSourceIds.isEmpty
+#else
+        false
+#endif
+    }
+
+    private var hasAnyActiveSources: Bool {
+        !serviceManager.activeServices.isEmpty
+            || !stremioManager.activeAddons.isEmpty
+            || activeSkyStreamSourceCount > 0
     }
 
     private var stremioCatalogTitleCandidates: [String] {
@@ -672,14 +838,18 @@ struct ModulesSearchResultsSheet: View {
     }
     
     private var searchStatusText: String {
-        let anySearching = viewModel.isSearching || viewModel.isSearchingStremio
+        let anySearching = viewModel.isSearching || viewModel.isSearchingStremio || isSearchingSkyStream
         if anySearching {
-            let completed = viewModel.searchedServices.count + viewModel.stremioSearchedAddons.count
-            let total = viewModel.totalServicesCount + stremioManager.activeAddons.count
+            let completed = viewModel.searchedServices.count
+                + viewModel.stremioSearchedAddons.count
+                + searchedSkyStreamSourceCount
+            let total = viewModel.totalServicesCount
+                + stremioManager.activeAddons.count
+                + activeSkyStreamSourceCount
             return "Searching... (\(completed)/\(total))"
         }
         if isResolvingStremioStyleServiceStreams {
-            return "Checking streams against Extra Service Settings..."
+            return "Checking streams against Extra Source Settings..."
         }
         return "Search complete"
     }
@@ -753,7 +923,7 @@ struct ModulesSearchResultsSheet: View {
             
             Spacer()
             
-            if viewModel.isSearching || viewModel.isSearchingStremio {
+            if viewModel.isSearching || viewModel.isSearchingStremio || isSearchingSkyStream {
                 HStack(spacing: 8) {
                     EclipseLoadingIndicator()
                         .scaleEffect(0.8)
@@ -794,11 +964,17 @@ struct ModulesSearchResultsSheet: View {
     private enum ResultItem: Identifiable {
         case service(Service)
         case stremio(StremioAddon)
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        case skyStream(SkyStreamProviderDescriptor)
+#endif
 
         var id: String {
             switch self {
             case .service(let s): return s.id.uuidString
             case .stremio(let a): return a.id.uuidString
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            case .skyStream(let provider): return provider.id
+#endif
             }
         }
 
@@ -806,6 +982,9 @@ struct ModulesSearchResultsSheet: View {
             switch self {
             case .service(let s): return s.sortIndex
             case .stremio(let a): return a.sortIndex
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            case .skyStream(let provider): return Int64(provider.sortIndex)
+#endif
             }
         }
 
@@ -813,6 +992,9 @@ struct ModulesSearchResultsSheet: View {
             switch self {
             case .service(let s): return SourceHealth.serviceId(s)
             case .stremio(let a): return SourceHealth.stremioId(a)
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            case .skyStream(let provider): return provider.id
+#endif
             }
         }
 
@@ -820,6 +1002,9 @@ struct ModulesSearchResultsSheet: View {
             switch self {
             case .service(let s): return s.metadata.sourceName
             case .stremio(let a): return a.manifest.name
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            case .skyStream(let provider): return provider.displayName
+#endif
             }
         }
     }
@@ -827,8 +1012,13 @@ struct ModulesSearchResultsSheet: View {
     private var sortedResultItems: [ResultItem] {
         let services: [ResultItem] = serviceManager.activeServices.map { .service($0) }
         let addons: [ResultItem] = stremioManager.activeAddons.map { .stremio($0) }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        let skyStreamProviders: [ResultItem] = activeSkyStreamProviders.map { .skyStream($0) }
+#else
+        let skyStreamProviders: [ResultItem] = []
+#endif
         let orderRank = autoModeSourceOrderRank
-        return (services + addons).sorted {
+        return (services + addons + skyStreamProviders).sorted {
             let lhsRank = orderRank[autoModeSourceId(for: $0)]
             let rhsRank = orderRank[autoModeSourceId(for: $1)]
             if let lhsRank, let rhsRank, lhsRank != rhsRank {
@@ -871,10 +1061,12 @@ struct ModulesSearchResultsSheet: View {
         let orderedIds = AutoModeSourceSelection.orderedSelectedSourceIds(
             availableSourceIds: items.map { autoModeSourceId(for: $0) }
         )
-        if forceAutomaticPlayback && orderedIds.isEmpty {
-            return items
-        }
-        return orderedIds.compactMap { byId[$0] }
+        // Forced Watch Together playback is fail-closed: an empty explicit selection must not
+        // silently broaden into every installed source, and recently unhealthy sources retain
+        // the same Auto Mode quarantine across all three source families.
+        return orderedIds
+            .compactMap { byId[$0] }
+            .filter { !healthStore.shouldSkipForAutoMode(sourceId: $0.sourceId) }
     }
 
     @ViewBuilder
@@ -885,6 +1077,10 @@ struct ModulesSearchResultsSheet: View {
                 serviceSection(service: service)
             case .stremio(let addon):
                 stremioAddonSection(addon: addon)
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            case .skyStream(let provider):
+                skyStreamSection(provider: provider)
+#endif
             }
         }
     }
@@ -899,7 +1095,10 @@ struct ModulesSearchResultsSheet: View {
     }
 
     private var isStremioStyleSearchActive: Bool {
-        viewModel.isSearching || viewModel.isSearchingStremio || isResolvingStremioStyleServiceStreams
+        viewModel.isSearching
+            || viewModel.isSearchingStremio
+            || isSearchingSkyStream
+            || isResolvingStremioStyleServiceStreams
     }
 
     private func stremioStyleServiceNeedsResolvedStreams(_ service: Service) -> Bool {
@@ -1015,6 +1214,11 @@ struct ModulesSearchResultsSheet: View {
                 return !filtered.highQuality.isEmpty || !filtered.lowQuality.isEmpty
             case .stremio(let addon):
                 return !visibleStremioStreams(for: addon).isEmpty
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            case .skyStream(let provider):
+                return !visibleSkyStreamOptions(for: provider).isEmpty
+                    || skyStreamSearchingSourceIds.contains(provider.id)
+#endif
             }
         }
     }
@@ -1101,6 +1305,12 @@ struct ModulesSearchResultsSheet: View {
                         stremioStyleStreamRow(stream: stream, addon: addon)
                     }
                 }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            case .skyStream(let provider):
+                ForEach(visibleSkyStreamOptions(for: provider)) { stream in
+                    stremioStyleSkyStreamRow(stream, provider: provider)
+                }
+#endif
             }
         }
     }
@@ -1203,7 +1413,7 @@ struct ModulesSearchResultsSheet: View {
             EclipseLoadingIndicator()
                 .scaleEffect(0.55)
                 .frame(width: 14, height: 14)
-            Text("Checking \(service.metadata.sourceName) streams against Extra Service Settings…")
+            Text("Checking \(service.metadata.sourceName) streams against Extra Source Settings…")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Spacer(minLength: 0)
@@ -1588,7 +1798,7 @@ struct ModulesSearchResultsSheet: View {
     @ViewBuilder
     private var qualityThresholdAlertMessage: some View {
         if stremioStyleSheetEnabled {
-            Text("Set the ranking similarity used by Extra Service Settings to drop unmatched service results. Current: \(String(format: "%.2f", thresholdEditorValue)) (\(Int(thresholdEditorValue * 100))%)")
+            Text("Set the ranking similarity used by Extra Source Settings to drop unmatched search results. Current: \(String(format: "%.2f", thresholdEditorValue)) (\(Int(thresholdEditorValue * 100))%)")
         } else {
             Text("Set the minimum similarity score (0.0 to 1.0) for results to be considered high quality. Current: \(String(format: "%.2f", thresholdEditorValue)) (\(Int(thresholdEditorValue * 100))%)")
         }
@@ -1748,6 +1958,10 @@ struct ModulesSearchResultsSheet: View {
         let selectedActive = sortedResultItems.filter { selectedAutoModeSourceIds.contains($0.sourceId) }
         guard !selectedActive.isEmpty else {
             return "Auto Mode is enabled, but no active \(sourceKindSelectionList) is selected. Please select at least one source in Services settings."
+        }
+
+        if selectedActive.allSatisfy({ healthStore.shouldSkipForAutoMode(sourceId: $0.sourceId) }) {
+            return "Auto Mode skipped every selected source because each has a recent unhealthy status. Choose a source manually or retry after checking source health."
         }
 
         return "Auto Mode could not find a playable result from the selected sources. Try again or choose a source manually."
@@ -2235,7 +2449,7 @@ struct ModulesSearchResultsSheet: View {
     }
 
     /// Re-evaluate stored results at the presentation boundary so changing
-    /// Extra Service Settings cannot leave an already-loaded forbidden stream
+    /// Extra Source Settings cannot leave an already-loaded forbidden stream
     /// visible in either sheet layout.
     private func visibleStremioStreams(for addon: StremioAddon) -> [StremioStream] {
         guard let streams = viewModel.stremioResults[addon.id] else { return [] }
@@ -2265,6 +2479,157 @@ struct ModulesSearchResultsSheet: View {
             isAnime: hasAnimeLookupContext
         )
     }
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    /// The sole SkyStream -> StreamOption conversion seam. Every URL/header on the resulting
+    /// option comes from the validator-issued descriptor, never from the raw ABI record.
+    private func validatedSkyStreamOption(
+        from resolved: SkyStreamResolvedStream
+    ) -> ValidatedSkyStreamOption {
+        let descriptor = resolved.playback
+        let subtitles = descriptor.subtitles.map { subtitle in
+            ServiceSubtitleTrack(
+                title: subtitle.label ?? subtitle.language ?? "Subtitle",
+                url: subtitle.remoteURL.url.absoluteString,
+                headers: subtitle.headers.values.isEmpty ? nil : subtitle.headers.values
+            )
+        }
+
+        let languageHints = boundedSkyStreamMetadataValues(
+            resolved.streamRecord.additionalFields,
+            matching: ["audio", "language", "languages", "lang", "dub", "dubbed"]
+        )
+        var metadataHints = [
+            resolved.streamRecord.source,
+            resolved.streamRecord.name,
+            resolved.streamRecord.qualityLabel,
+            resolved.streamRecord.quality.map { "\($0)p" },
+            resolved.streamRecord.mediaType,
+            resolved.episodeRecord?.dubStatus?.rawValue,
+            resolved.loadedItem.providerName
+        ].compactMap { $0 }
+        metadataHints.append(contentsOf: boundedSkyStreamMetadataValues(
+            resolved.streamRecord.additionalFields,
+            matching: ["server", "codec", "audio", "quality", "resolution", "language", "lang"]
+        ))
+
+        let option = StreamOption(
+            name: resolved.displayName,
+            url: descriptor.underlyingRemoteURL.url.absoluteString,
+            headers: descriptor.headers.values.isEmpty ? nil : descriptor.headers.values,
+            subtitle: subtitles.first?.url,
+            subtitleTracks: subtitles,
+            languageHints: languageHints,
+            metadataHints: Array(metadataHints.prefix(32))
+        )
+        return ValidatedSkyStreamOption(resolved: resolved, option: option)
+    }
+
+    private func boundedSkyStreamMetadataValues(
+        _ values: [String: SkyStreamJSONValue],
+        matching allowedKeys: Set<String>
+    ) -> [String] {
+        var result: [String] = []
+        for key in values.keys.sorted() where allowedKeys.contains(key.lowercased()) {
+            guard let value = values[key] else { continue }
+            switch value {
+            case .string(let string):
+                let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty, trimmed.utf8.count <= 256 { result.append(trimmed) }
+            case .array(let entries):
+                for entry in entries.prefix(8) {
+                    guard case .string(let string) = entry else { continue }
+                    let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !trimmed.isEmpty, trimmed.utf8.count <= 128 { result.append(trimmed) }
+                }
+            case .null, .boolean, .integer, .number, .object:
+                break
+            }
+            if result.count >= 16 { break }
+        }
+        return Array(result.prefix(16))
+    }
+
+    private func visibleSkyStreamOptions(
+        for provider: SkyStreamProviderDescriptor
+    ) -> [ValidatedSkyStreamOption] {
+        var retained = Array(
+            (skyStreamResults[provider.id] ?? [])
+                .filter { skyStreamResultIsCurrent($0, provider: provider) }
+                .prefix(Self.maxRetainedSkyStreamOptionsPerProvider)
+        )
+        if downloadMode {
+            retained = retained.filter(isSkyStreamDownloadCompatible)
+        }
+        guard let configuration = StreamLanguageFilter.configuration(sourceId: provider.id) else {
+            return Array(retained.prefix(Self.maxVisibleSkyStreamOptionsPerProvider))
+        }
+        return Array(retained.lazy.filter {
+            serviceStreamOptionIsVisible($0.option, configuration: configuration)
+        }.prefix(Self.maxVisibleSkyStreamOptionsPerProvider))
+    }
+
+    /// Results can remain in SwiftUI state for a run-loop turn while another window updates or
+    /// disables a package. Bind every row back to the currently installed payload/domain before
+    /// it can be shown, downloaded, or translated into a proxy session.
+    private func skyStreamResultIsCurrent(
+        _ stream: ValidatedSkyStreamOption,
+        provider: SkyStreamProviderDescriptor
+    ) -> Bool {
+        let reference = stream.resolved.contentReference
+        guard reference.isStructurallyValid,
+              reference.sourceID == provider.id,
+              stream.resolved.provider.id == provider.id,
+              let currentAuthority = skyStreamManager.runtimeAuthoritySnapshot(
+                  sourceID: provider.id
+              ),
+              currentAuthority.revision == stream.resolved.playback.identity.authorityRevision,
+              currentAuthority.provider.isEnabled,
+              currentAuthority.provider.packageName == stream.resolved.provider.packageName,
+              currentAuthority.provider.providerID == stream.resolved.provider.providerID,
+              currentAuthority.provider.selectedDomainURL
+                == stream.resolved.provider.selectedDomainURL,
+              currentAuthority.plugin.id == reference.packageName,
+              let expectedScriptHash = reference.scriptSHA256,
+              expectedScriptHash.caseInsensitiveCompare(
+                  currentAuthority.plugin.scriptSHA256
+              ) == .orderedSame,
+              reference.pluginVersion == currentAuthority.plugin.manifest.version else {
+            return false
+        }
+        return stream.resolved.playback.identity.packageID == reference.packageName
+            && stream.resolved.playback.identity.providerID == (reference.providerID ?? "root")
+            && stream.resolved.playback.identity.payloadSHA256
+                .caseInsensitiveCompare(expectedScriptHash) == .orderedSame
+    }
+
+    private func bestSkyStreamOption(
+        from options: [ValidatedSkyStreamOption]
+    ) -> ValidatedSkyStreamOption? {
+        guard !options.isEmpty else { return nil }
+        if options.count == 1 { return options[0] }
+        guard let best = bestStreamOption(from: options.map(\.option)) else { return nil }
+        return options.first { $0.option.id == best.id }
+    }
+
+    private func isSkyStreamDownloadCompatible(_ stream: ValidatedSkyStreamOption) -> Bool {
+        let descriptor = stream.resolved.playback
+        let transportIsSupported: Bool
+        switch descriptor.mediaKind {
+        case .direct:
+            transportIsSupported = descriptor.proxyOptions == nil
+                && descriptor.acceptedManifests.isEmpty
+                && (descriptor.finiteContentLength ?? 0) > 0
+        case .hls:
+            transportIsSupported = DownloadManager.skyStreamHLSRejectionReason(descriptor) == nil
+        case .dash:
+            transportIsSupported = false
+        }
+        return transportIsSupported
+            && stream.resolved.contentReference.isStructurallyValid
+            && stream.resolved.contentReference.sourceID == stream.resolved.provider.id
+    }
+#endif
 
     @MainActor
     private func selectStremioStyleResolvedServiceStream(_ resolved: StremioStyleResolvedServiceStream) {
@@ -2361,6 +2726,16 @@ struct ModulesSearchResultsSheet: View {
     @MainActor
     private func beginNewManualSearchGeneration() {
         manualSearchGeneration = UUID()
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        skyStreamSearchTask?.cancel()
+        skyStreamSearchTask = nil
+        skyStreamSearchingSourceIds.removeAll()
+        selectedSkyStreamOption = nil
+        selectedSkyStreamProvider = nil
+        skyStreamPickerOptions = []
+        showingSkyStreamPlayAlert = false
+        showingSkyStreamPicker = false
+#endif
     }
 
     @MainActor
@@ -2585,7 +2960,8 @@ struct ModulesSearchResultsSheet: View {
               isAutoModeEnabled,
               !autoModeDidRun,
               !viewModel.isSearching,
-              !viewModel.isSearchingStremio else { return }
+              !viewModel.isSearchingStremio,
+              !isSearchingSkyStream else { return }
 
         autoModeDidRun = true
         Task { @MainActor in
@@ -2615,6 +2991,27 @@ struct ModulesSearchResultsSheet: View {
                     playStremioStream(stream, addon: addon, autoModeLaunch: true)
                     return
                 }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            case .skyStream(let provider):
+                let streams = visibleSkyStreamOptions(for: provider)
+                if let stream = bestSkyStreamOption(from: streams) {
+                    playSkyStream(stream, provider: provider, autoModeLaunch: true)
+                    return
+                }
+                if streams.count == 1, let stream = streams.first {
+                    // "Ask" only needs a picker when there is an actual choice. Match the
+                    // existing Service/Stremio behavior for a sole verified candidate.
+                    playSkyStream(stream, provider: provider, autoModeLaunch: true)
+                    return
+                }
+                if streams.count > 1 {
+                    selectedSkyStreamProvider = provider
+                    skyStreamPickerOptions = streams
+                    viewModel.pendingPlaybackAutoMode = true
+                    showingSkyStreamPicker = true
+                    return
+                }
+#endif
             }
         }
 
@@ -2625,10 +3022,15 @@ struct ModulesSearchResultsSheet: View {
     private var requestToken: String {
         [
             downloadMode ? "download" : "play",
-            isMovie ? "movie" : "show",
-            "\(tmdbId)",
-            "\(selectedEpisode?.seasonNumber ?? 0)",
-            "\(selectedEpisode?.episodeNumber ?? 0)"
+            AutoModeMediaTargetToken.make(
+                tmdbID: tmdbId,
+                isMovie: isMovie,
+                episode: selectedEpisode,
+                playbackContext: effectivePlaybackContext
+            ),
+            normalizeTitleForRanking(playerMediaTitle),
+            forceAutomaticPlayback ? "watch-together" : "local",
+            watchTogetherExactHandoff ? "exact-handoff" : "normal-handoff"
         ].joined(separator: ":")
     }
 
@@ -2674,7 +3076,13 @@ struct ModulesSearchResultsSheet: View {
 
     @MainActor
     private func finishResolvedPlayback(_ request: PlayerResolvedPlaybackRequest) {
-        guard let onResolvedPlaybackRequest else { return }
+        guard let onResolvedPlaybackRequest else {
+            invalidateAbandonedSkyStreamProxy(
+                request.url,
+                launchContext: request.launchContext
+            )
+            return
+        }
 
         // Resolution may finish after the user has manually dismissed the source sheet. In that
         // case the caller's short post-dismissal selection grace must not turn a cancelled picker
@@ -2682,6 +3090,10 @@ struct ModulesSearchResultsSheet: View {
         // we intentionally dismiss it below; the delayed callback must not re-check this state
         // because a normal selection and Watch Together Auto Mode both dismiss before delivery.
         guard isSheetActive else {
+            invalidateAbandonedSkyStreamProxy(
+                request.url,
+                launchContext: request.launchContext
+            )
             Logger.shared.log(
                 "ServicesResultsSheet: discarded resolved playback request because the source sheet is no longer active",
                 type: "Player"
@@ -2701,6 +3113,17 @@ struct ModulesSearchResultsSheet: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             onResolvedPlaybackRequest(request)
         }
+    }
+
+    @MainActor
+    private func invalidateAbandonedSkyStreamProxy(
+        _ url: URL,
+        launchContext: PlaybackLaunchContext?
+    ) {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        guard launchContext?.sourceKind == .skyStream else { return }
+        MPVHeaderProxy.shared.invalidateSession(for: url)
+#endif
     }
 
     @MainActor
@@ -2837,6 +3260,14 @@ struct ModulesSearchResultsSheet: View {
     private func startAutoModeIfNeeded() {
         guard isAutoModeEnabled, !showManualPicker else { return }
         guard autoModeRunToken != requestToken else { return }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        if selectedAutoModeSourceIds.contains(where: { $0.hasPrefix(SkyStreamStableID.prefix) }),
+           !skyStreamManager.isLoaded {
+            viewModel.currentFetchingTitle = "Loading SkyStream sources..."
+            viewModel.streamFetchProgress = "Restoring installed source state..."
+            return
+        }
+#endif
         if isForcedWatchTogetherAnimePlayback,
            effectivePlaybackContext == nil {
             showAutoModeFailure("Watch Together lost the exact anime episode context. Playback stopped instead of guessing S1E1.")
@@ -2854,6 +3285,11 @@ struct ModulesSearchResultsSheet: View {
         autoModeLastFailureMessage = activeAutoModeRetrySession?.lastFailureMessage
         viewModel.moduleResults.removeAll()
         viewModel.stremioResults.removeAll()
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        skyStreamResults.removeAll()
+        skyStreamSearchedSourceIds.removeAll()
+        skyStreamSearchingSourceIds.removeAll()
+#endif
         viewModel.searchedServices.removeAll()
         viewModel.stremioSearchedAddons.removeAll()
         viewModel.failedServices.removeAll()
@@ -2971,6 +3407,31 @@ struct ModulesSearchResultsSheet: View {
                         message: "No playable stream was returned. Trying the next selected source..."
                     )
                 }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            case .skyStream(let provider):
+                viewModel.currentFetchingTitle = provider.displayName
+                viewModel.streamFetchProgress = "Checking \(provider.displayName)..."
+                if let stream = await findAutoModeSkyStream(provider) {
+                    guard !Task.isCancelled,
+                          !autoModeCancelled,
+                          forcedWatchTogetherMediaIsCurrent() else { return }
+                    viewModel.currentFetchingTitle = stream.option.name
+                    viewModel.streamFetchProgress = "Found verified VOD in \(provider.displayName)."
+                    playSkyStream(
+                        stream,
+                        provider: provider,
+                        autoModeLaunch: true,
+                        retryCount: activeAutoModeRetrySession?.retryCount ?? 0
+                    )
+                    return
+                }
+                if !autoModeCancelled {
+                    updateAutoModeSourceStatus(
+                        sourceName: provider.displayName,
+                        message: "No verified VOD stream was returned. Trying the next selected source..."
+                    )
+                }
+#endif
             }
         }
 
@@ -3055,6 +3516,98 @@ struct ModulesSearchResultsSheet: View {
 
         return nil
     }
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    @MainActor
+    private func findAutoModeSkyStream(
+        _ provider: SkyStreamProviderDescriptor
+    ) async -> ValidatedSkyStreamOption? {
+        guard !Task.isCancelled,
+              !autoModeCancelled,
+              forcedWatchTogetherMediaIsCurrent() else { return nil }
+
+        do {
+            let asksForQuality = !AutoModeQualityPreference.current.usesAutomaticSelection
+            let resolved = try await SkyStreamResolver.shared.resolve(
+                sourceID: provider.id,
+                target: skyStreamResolutionTarget,
+                mode: asksForQuality ? .manual : .autoMode,
+                purpose: downloadMode ? .offlineDownload : .playback,
+                originalAudioLanguage: originalAudioLanguage
+            )
+            guard !Task.isCancelled,
+                  !autoModeCancelled,
+                  forcedWatchTogetherMediaIsCurrent() else { return nil }
+
+            var allowed = resolved.map(validatedSkyStreamOption(from:)).filter {
+                guard let configuration = StreamLanguageFilter.configuration(sourceId: provider.id) else {
+                    return true
+                }
+                return serviceStreamOptionIsVisible($0.option, configuration: configuration)
+            }
+            if downloadMode {
+                allowed = allowed.filter(isSkyStreamDownloadCompatible)
+            }
+
+            // Auto Mode validates one top-ranked candidate for the fast path. If that candidate
+            // is hidden by explicit language/quality rules, only then spend the extra work to
+            // inspect the bounded manual pool so a provider is not incorrectly skipped.
+            if allowed.isEmpty,
+               downloadMode
+                || StreamLanguageFilter.configuration(sourceId: provider.id)?.canHideStreams == true {
+                let fallback = try await SkyStreamResolver.shared.resolve(
+                    sourceID: provider.id,
+                    target: skyStreamResolutionTarget,
+                    mode: .manual,
+                    purpose: downloadMode ? .offlineDownload : .playback,
+                    originalAudioLanguage: originalAudioLanguage
+                )
+                guard !Task.isCancelled,
+                      !autoModeCancelled,
+                      forcedWatchTogetherMediaIsCurrent() else { return nil }
+                let configuration = StreamLanguageFilter.configuration(sourceId: provider.id)
+                allowed = fallback.map(validatedSkyStreamOption(from:)).filter {
+                    serviceStreamOptionIsVisible($0.option, configuration: configuration)
+                }
+                if downloadMode {
+                    allowed = allowed.filter(isSkyStreamDownloadCompatible)
+                }
+            }
+
+            skyStreamResults[provider.id] = Array(
+                allowed.prefix(Self.maxRetainedSkyStreamOptionsPerProvider)
+            )
+            skyStreamSearchedSourceIds.insert(provider.id)
+            let best = bestSkyStreamOption(from: allowed)
+            if allowed.count > 1, asksForQuality || best == nil {
+                selectedSkyStreamProvider = provider
+                skyStreamPickerOptions = Array(
+                    allowed.prefix(Self.maxVisibleSkyStreamOptionsPerProvider)
+                )
+                viewModel.pendingPlaybackAutoMode = true
+                viewModel.pendingPlaybackRetryCount = activeAutoModeRetrySession?.retryCount ?? 0
+                viewModel.isFetchingStreams = false
+                showingSkyStreamPicker = true
+                autoModeCancelled = true
+                return nil
+            }
+            return best ?? allowed.first
+        } catch is CancellationError {
+            return nil
+        } catch {
+            guard !Task.isCancelled,
+                  !autoModeCancelled,
+                  forcedWatchTogetherMediaIsCurrent() else { return nil }
+            Logger.shared.log(
+                "SkyStream: Auto Mode resolution failed sourceID=\(provider.id) errorType=\(String(reflecting: type(of: error)))",
+                type: "SkyStream"
+            )
+            skyStreamResults[provider.id] = []
+            skyStreamSearchedSourceIds.insert(provider.id)
+            return nil
+        }
+    }
+#endif
 
     @MainActor
     private func showAutoModeFailure(_ message: String) {
@@ -3203,10 +3756,17 @@ struct ModulesSearchResultsSheet: View {
         viewModel.searchedServices.removeAll()
         viewModel.stremioSearchedAddons.removeAll()
         viewModel.failedServices.removeAll()
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        skyStreamResults.removeAll()
+        skyStreamSearchedSourceIds.removeAll()
+#endif
         viewModel.streamError = nil
         viewModel.showingStreamError = false
         startProgressiveSearch()
         startStremioSearch()
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        startSkyStreamSearch()
+#endif
     }
     
     var body: some View {
@@ -3218,7 +3778,7 @@ struct ModulesSearchResultsSheet: View {
                     List {
                         stremioStyleHeader
 
-                        if serviceManager.activeServices.isEmpty && stremioManager.activeAddons.isEmpty {
+                        if !hasAnyActiveSources {
                             noActiveServicesSection
                         } else if hasStremioStyleResults {
                             stremioStyleResults
@@ -3235,7 +3795,7 @@ struct ModulesSearchResultsSheet: View {
                         searchInfoSection
                             .background(EclipseScrollTracker())
 
-                        if serviceManager.activeServices.isEmpty && stremioManager.activeAddons.isEmpty {
+                        if !hasAnyActiveSources {
                             noActiveServicesSection
                         } else {
                             unifiedResultsSections
@@ -3244,7 +3804,7 @@ struct ModulesSearchResultsSheet: View {
                     .eclipseSettingsStyle(allowsAnimatedBackground: false)
                 }
             }
-            .navigationTitle(autoModeOnly && !showManualPicker ? (downloadMode ? "Auto Download" : "Auto Mode") : (downloadMode ? "Download Source" : "Services Result"))
+            .navigationTitle(autoModeOnly && !showManualPicker ? (downloadMode ? "Auto Download" : "Auto Mode") : (downloadMode ? "Download Source" : "Source Results"))
 #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
 #endif
@@ -3348,6 +3908,9 @@ struct ModulesSearchResultsSheet: View {
             } else {
                 startProgressiveSearch()
                 startStremioSearch()
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                startSkyStreamSearch()
+#endif
             }
         }
         .onChangeComp(of: requestToken) { _, _ in
@@ -3368,8 +3931,15 @@ struct ModulesSearchResultsSheet: View {
                 viewModel.searchedServices.removeAll()
                 viewModel.stremioSearchedAddons.removeAll()
                 viewModel.failedServices.removeAll()
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                skyStreamResults.removeAll()
+                skyStreamSearchedSourceIds.removeAll()
+#endif
                 startProgressiveSearch()
                 startStremioSearch()
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                startSkyStreamSearch()
+#endif
             }
         }
         .onChangeComp(of: stremioStyleSheetEnabled) { _, enabled in
@@ -3391,6 +3961,37 @@ struct ModulesSearchResultsSheet: View {
         .onChangeComp(of: viewModel.isSearchingStremio) { _, _ in
             maybeRunAutoModeSelection()
         }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        .onChangeComp(of: skyStreamManager.isLoaded) { _, isLoaded in
+            guard isLoaded, isSheetActive else { return }
+            if autoModeOnly && !showManualPicker {
+                startAutoModeIfNeeded()
+            } else {
+                startSkyStreamSearch()
+            }
+        }
+        // Resolver storage/preferences are persisted back into installedPlugins after a search.
+        // Watching the presentation topology avoids recursively restarting every source while
+        // still reacting to installs, updates, provider/domain changes, and enablement changes.
+        .onChangeComp(of: skyStreamManager.providers) { _, _ in
+            guard isSheetActive, skyStreamManager.isLoaded else { return }
+            beginNewManualSearchGeneration()
+            if autoModeOnly && !showManualPicker {
+                autoModeRunToken = nil
+                startAutoModeIfNeeded()
+            } else {
+                resetStremioStyleServiceResolution()
+                viewModel.moduleResults.removeAll()
+                viewModel.stremioResults.removeAll()
+                viewModel.searchedServices.removeAll()
+                viewModel.stremioSearchedAddons.removeAll()
+                viewModel.failedServices.removeAll()
+                startProgressiveSearch()
+                startStremioSearch()
+                startSkyStreamSearch()
+            }
+        }
+#endif
         .alert(stremioStyleSheetEnabled ? "Ranking Similarity" : "Quality Threshold", isPresented: $viewModel.showingFilterEditor) {
             qualityThresholdAlertContent
         } message: {
@@ -3474,11 +4075,38 @@ struct ModulesSearchResultsSheet: View {
                 Text("\(actionVerb) '\(stream.displayName)'?")
             }
         }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        .alert(downloadMode ? "Download Stream" : "Play Stream", isPresented: $showingSkyStreamPlayAlert) {
+            Button(actionVerb) {
+                showingSkyStreamPlayAlert = false
+                if let stream = selectedSkyStreamOption,
+                   let provider = selectedSkyStreamProvider {
+                    playSkyStream(stream, provider: provider)
+                }
+                selectedSkyStreamOption = nil
+            }
+            Button("Cancel", role: .cancel) {
+                selectedSkyStreamOption = nil
+                selectedSkyStreamProvider = nil
+            }
+        } message: {
+            if let stream = selectedSkyStreamOption {
+                Text("\(actionVerb) '\(stream.option.name)'?")
+            }
+        }
+#endif
         .adaptiveConfirmationDialog("Select Stream", isPresented: $viewModel.showingStremioStreamPicker, titleVisibility: .visible) {
             stremioStreamPickerContent
         } message: {
             stremioStreamPickerMessage
         }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        .adaptiveConfirmationDialog("Select Verified Stream", isPresented: $showingSkyStreamPicker, titleVisibility: .visible) {
+            skyStreamPickerContent
+        } message: {
+            skyStreamPickerMessage
+        }
+#endif
     }
     
     @MainActor
@@ -3620,6 +4248,202 @@ struct ModulesSearchResultsSheet: View {
             )
         }
     }
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    // MARK: - SkyStream Search
+
+    @MainActor
+    private func startSkyStreamSearch() {
+        skyStreamSearchTask?.cancel()
+        skyStreamSearchTask = nil
+        skyStreamResults.removeAll()
+        skyStreamSearchedSourceIds.removeAll()
+        skyStreamSearchingSourceIds.removeAll()
+
+        guard isSheetActive,
+              skyStreamManager.isLoaded,
+              PlatformCapabilities.current.supportsSkyStreamPlugins else { return }
+
+        let providers = activeSkyStreamProviders
+        guard !providers.isEmpty else { return }
+
+        let generation = manualSearchGeneration
+        let target = skyStreamResolutionTarget
+        skyStreamSearchingSourceIds = Set(providers.map(\.id))
+
+        skyStreamSearchTask = Task { @MainActor in
+            // Publish one verified stream per provider first, then expand the same cached
+            // resolutions for the picker. This keeps first-result latency comparable to addon
+            // fanout without relaxing the VOD boundary or allowing unbounded provider work.
+            await runSkyStreamSearchPhase(
+                providers: providers,
+                target: target,
+                mode: .manualFast,
+                generation: generation,
+                isFinalPhase: false
+            )
+            guard !Task.isCancelled,
+                  isCurrentManualSearchGeneration(generation) else { return }
+            guard forcedWatchTogetherMediaIsCurrent() else {
+                // Watch Together can advance while the first verified rows are resolving. Stop
+                // the old sheet cleanly instead of leaving every provider in a permanent
+                // searching state; a replacement/cancelled search owns its own cleanup path.
+                skyStreamSearchingSourceIds.removeAll()
+                skyStreamSearchTask = nil
+                return
+            }
+            await runSkyStreamSearchPhase(
+                providers: providers,
+                target: target,
+                mode: .manual,
+                generation: generation,
+                isFinalPhase: true
+            )
+
+            guard !Task.isCancelled,
+                  isCurrentManualSearchGeneration(generation) else { return }
+            skyStreamSearchingSourceIds.removeAll()
+            skyStreamSearchTask = nil
+            maybeRunAutoModeSelection()
+        }
+    }
+
+    @MainActor
+    private func runSkyStreamSearchPhase(
+        providers: [SkyStreamProviderDescriptor],
+        target: SkyStreamResolutionTarget,
+        mode: SkyStreamResolutionMode,
+        generation: UUID,
+        isFinalPhase: Bool
+    ) async {
+        let resolutionPurpose: SkyStreamResolutionPurpose = downloadMode
+            ? .offlineDownload
+            : .playback
+        let resolutionOriginalAudioLanguage = originalAudioLanguage
+        await withTaskGroup(
+            of: (provider: SkyStreamProviderDescriptor, streams: [SkyStreamResolvedStream], error: String?).self
+        ) { group in
+            var nextProviderIndex = 0
+            let initialCount = min(Self.maxConcurrentSkyStreamResolutions, providers.count)
+
+            for provider in providers.prefix(initialCount) {
+                nextProviderIndex += 1
+                group.addTask {
+                    do {
+                        let streams = try await SkyStreamResolver.shared.resolve(
+                            sourceID: provider.id,
+                            target: target,
+                            mode: mode,
+                            purpose: resolutionPurpose,
+                            originalAudioLanguage: resolutionOriginalAudioLanguage
+                        )
+                        return (provider, streams, nil)
+                    } catch is CancellationError {
+                        return (provider, [], nil)
+                    } catch {
+                        return (provider, [], Self.skyStreamFailureDiagnostic(error))
+                    }
+                }
+            }
+
+            for await result in group {
+                guard !Task.isCancelled,
+                      isCurrentManualSearchGeneration(generation),
+                      forcedWatchTogetherMediaIsCurrent() else {
+                    group.cancelAll()
+                    return
+                }
+
+                let normalized = result.streams
+                    .prefix(Self.maxRetainedSkyStreamOptionsPerProvider)
+                    .map(validatedSkyStreamOption(from:))
+                if !normalized.isEmpty || skyStreamResults[result.provider.id] == nil {
+                    let existing = skyStreamResults[result.provider.id] ?? []
+                    skyStreamResults[result.provider.id] = normalized.map { candidate in
+                        guard let prior = existing.first(where: {
+                            $0.resolved.provider.id == candidate.resolved.provider.id
+                                && $0.resolved.streamRecord.id == candidate.resolved.streamRecord.id
+                                && $0.resolved.playback.identity == candidate.resolved.playback.identity
+                                && $0.resolved.playback.mediaKind == candidate.resolved.playback.mediaKind
+                                && $0.resolved.playback.underlyingRemoteURL.url
+                                    == candidate.resolved.playback.underlyingRemoteURL.url
+                                && $0.option.name == candidate.option.name
+                        }) else {
+                            return candidate
+                        }
+                        // Preserve SwiftUI identity without preserving potentially short-lived
+                        // headers, cookies, manifests, subtitle routes, or content references
+                        // from the fast phase. The full phase's validator output always wins.
+                        return ValidatedSkyStreamOption(
+                            id: prior.id,
+                            resolved: candidate.resolved,
+                            option: candidate.option
+                        )
+                    }
+                }
+                skyStreamSearchedSourceIds.insert(result.provider.id)
+                if isFinalPhase {
+                    skyStreamSearchingSourceIds.remove(result.provider.id)
+                }
+
+                if let error = result.error {
+                    Logger.shared.log(
+                        "SkyStream: \(isFinalPhase ? "picker" : "fast") resolution returned no rows sourceID=\(result.provider.id) failure=\(error)",
+                        type: "SkyStream"
+                    )
+                } else {
+                    Logger.shared.log(
+                        "SkyStream: \(isFinalPhase ? "picker" : "fast") resolution completed sourceID=\(result.provider.id) verified=\(normalized.count)",
+                        type: "SkyStream"
+                    )
+                }
+
+                if nextProviderIndex < providers.count {
+                    let provider = providers[nextProviderIndex]
+                    nextProviderIndex += 1
+                    group.addTask {
+                        do {
+                            let streams = try await SkyStreamResolver.shared.resolve(
+                                sourceID: provider.id,
+                                target: target,
+                                mode: mode,
+                                purpose: resolutionPurpose,
+                                originalAudioLanguage: resolutionOriginalAudioLanguage
+                            )
+                            return (provider, streams, nil)
+                        } catch is CancellationError {
+                            return (provider, [], nil)
+                        } catch {
+                            return (provider, [], Self.skyStreamFailureDiagnostic(error))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    nonisolated private static func skyStreamFailureDiagnostic(_ error: Error) -> String {
+        if let resolverError = error as? SkyStreamResolverError {
+            return "type=SkyStreamResolverError code=\(String(describing: resolverError)) reason=\(resolverError.localizedDescription)"
+        }
+
+        if let runtimeError = error as? SkyStreamRuntimeError {
+            let code: String
+            let reason: String
+            switch runtimeError {
+            case .pluginRejected:
+                code = "pluginRejected"
+                reason = "The SkyStream plugin rejected the operation."
+            default:
+                code = String(describing: runtimeError)
+                reason = runtimeError.localizedDescription
+            }
+            return "type=SkyStreamRuntimeError code=\(code) reason=\(reason)"
+        }
+
+        return "type=\(String(reflecting: type(of: error)))"
+    }
+#endif
 
     // MARK: - Stremio Addon Search
 
@@ -3876,6 +4700,520 @@ struct ModulesSearchResultsSheet: View {
         AutoModeStreamSelection.smartPlayerMetadata(for: stream)
     }
 
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    // MARK: - SkyStream Results
+
+    @ViewBuilder
+    private func skyStreamSection(provider: SkyStreamProviderDescriptor) -> some View {
+        let streams = visibleSkyStreamOptions(for: provider)
+        let hasSearched = skyStreamSearchedSourceIds.contains(provider.id)
+        let isSearching = skyStreamSearchingSourceIds.contains(provider.id)
+
+        Section(header: skyStreamHeader(for: provider, streamCount: streams.count, isSearching: isSearching)) {
+            healthWarningRow(sourceId: provider.id)
+            // The fast phase can legitimately find nothing while the bounded full phase is still
+            // checking lower-ranked candidates. Do not flash a false final "No results" state.
+            if isSearching && streams.isEmpty {
+                searchingRow
+            } else if hasSearched {
+                if streams.isEmpty {
+                    noResultsRow
+                } else {
+                    skyStreamMediaRow(streams: streams, provider: provider)
+                }
+            } else {
+                notSearchedRow
+            }
+        }
+    }
+
+    private func skyStreamHeader(
+        for provider: SkyStreamProviderDescriptor,
+        streamCount: Int,
+        isSearching: Bool
+    ) -> some View {
+        HStack {
+            Image(systemName: "shippingbox")
+                .foregroundColor(.secondary)
+                .frame(width: 20, height: 20)
+
+            Text(provider.displayName)
+                .font(.subheadline)
+                .fontWeight(.medium)
+
+            if healthStore.warningText(for: provider.id) != nil {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundColor(.orange)
+                    .font(.caption)
+                    .padding(.leading, 4)
+            }
+
+            Spacer()
+
+            if isSearching {
+                EclipseLoadingIndicator()
+                    .scaleEffect(0.6)
+                    .frame(width: 12, height: 12)
+            } else if streamCount > 0 {
+                Text("\(streamCount)")
+                    .font(.caption2)
+                    .fontWeight(.semibold)
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 2)
+                    .background(Color.green.opacity(0.2))
+                    .foregroundColor(.green)
+                    .cornerRadius(4)
+            }
+        }
+    }
+
+    private func skyStreamMediaRow(
+        streams: [ValidatedSkyStreamOption],
+        provider: SkyStreamProviderDescriptor
+    ) -> some View {
+        Button {
+            if streams.count == 1, let stream = streams.first {
+                selectSkyStreamForConfirmation(stream, provider: provider)
+            } else {
+                selectedSkyStreamProvider = provider
+                skyStreamPickerOptions = streams
+                showingSkyStreamPicker = true
+            }
+        } label: {
+            HStack(spacing: 12) {
+                KFImage(resolvedPosterURL.flatMap { URL(string: $0) })
+                    .placeholder {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(Color.gray.opacity(0.2))
+                            .overlay(
+                                Image(systemName: "photo")
+                                    .font(.title2)
+                                    .foregroundColor(.gray)
+                            )
+                    }
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: 70, height: 95)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(displayTitle)
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                        .foregroundColor(.primary)
+
+                    if let episode = selectedEpisode {
+                        Text("Episode \(episode.episodeNumber)\(episode.name.isEmpty ? "" : " • \(episode.name)")")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    HStack {
+                        Text("\(streams.count) verified VOD stream\(streams.count == 1 ? "" : "s")")
+                            .font(.caption2)
+                            .fontWeight(.medium)
+                            .foregroundColor(.green)
+                        Spacer()
+                        Image(systemName: "play.circle.fill")
+                            .font(.title2)
+                            .foregroundColor(.accentColor)
+                    }
+                }
+            }
+            .padding(.vertical, 8)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func stremioStyleSkyStreamRow(
+        _ stream: ValidatedSkyStreamOption,
+        provider: SkyStreamProviderDescriptor
+    ) -> some View {
+        Button {
+            selectSkyStreamForConfirmation(stream, provider: provider)
+        } label: {
+            HStack(alignment: .top, spacing: 12) {
+                stremioStyleActionIcon
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("\(provider.displayName) · \(stream.option.name)")
+                        .font(.subheadline)
+                        .fontWeight(.bold)
+                        .foregroundColor(.primary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                    Text(displayTitle)
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                    Text("Verified VOD")
+                        .font(.caption)
+                        .foregroundColor(.green)
+                }
+                Spacer(minLength: 0)
+            }
+            .stremioStyleStreamCard()
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(Color.clear)
+        .eclipseHideListRowSeparator()
+        .listRowInsets(EdgeInsets(top: 5, leading: 14, bottom: 5, trailing: 14))
+    }
+
+    @MainActor
+    private func selectSkyStreamForConfirmation(
+        _ stream: ValidatedSkyStreamOption,
+        provider: SkyStreamProviderDescriptor
+    ) {
+        // Re-check visibility at the selection boundary. Extra Source Settings can change while
+        // a result sheet remains open in another window.
+        guard visibleSkyStreamOptions(for: provider).contains(where: { $0.id == stream.id }) else {
+            viewModel.streamError = "This stream is hidden by your Extra Source Settings."
+            viewModel.showingStreamError = true
+            return
+        }
+        selectedSkyStreamOption = stream
+        selectedSkyStreamProvider = provider
+        showingSkyStreamPlayAlert = true
+    }
+
+    @ViewBuilder
+    private var skyStreamPickerContent: some View {
+        if let provider = selectedSkyStreamProvider {
+            let visible = visibleSkyStreamOptions(for: provider)
+            let allowedIDs = Set(skyStreamPickerOptions.map(\.id))
+            ForEach(visible.filter { allowedIDs.contains($0.id) }) { stream in
+                Button(stream.option.name) {
+                    showingSkyStreamPicker = false
+                    if viewModel.pendingPlaybackAutoMode {
+                        autoModeCancelled = false
+                    }
+                    playSkyStream(
+                        stream,
+                        provider: provider,
+                        autoModeLaunch: viewModel.pendingPlaybackAutoMode,
+                        retryCount: viewModel.pendingPlaybackRetryCount
+                    )
+                }
+            }
+        }
+        Button("Cancel", role: .cancel) {
+            let wasAutoModeChoice = viewModel.pendingPlaybackAutoMode
+            showingSkyStreamPicker = false
+            selectedSkyStreamProvider = nil
+            skyStreamPickerOptions = []
+            viewModel.pendingPlaybackAutoMode = false
+            if wasAutoModeChoice && autoModeOnly && !showManualPicker {
+                showAutoModeFailure("Auto Mode needs you to choose a SkyStream quality before it can continue.")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var skyStreamPickerMessage: some View {
+        Text("Choose a verified VOD stream to \(actionVerb.lowercased())")
+    }
+
+    @MainActor
+    private func handleSkyStreamPlaybackPreparationFailure(
+        _ provider: SkyStreamProviderDescriptor,
+        message: String,
+        autoModeLaunch: Bool
+    ) {
+        if shouldRetryNextAutoModeSource(autoModeLaunch: autoModeLaunch) {
+            retryNextAutoModeSource(sourceName: provider.displayName, message: message)
+            return
+        }
+        viewModel.isFetchingStreams = false
+        viewModel.streamError = message
+        viewModel.showingStreamError = true
+    }
+
+    /// SkyStream playback accepts only a validator-issued descriptor and a URL manufactured by
+    /// the typed local proxy. Raw plugin URLs and headers have no route into this function.
+    @MainActor
+    private func playSkyStream(
+        _ selectedStream: ValidatedSkyStreamOption,
+        provider: SkyStreamProviderDescriptor,
+        autoModeLaunch: Bool = false,
+        retryCount: Int = 0
+    ) {
+        guard isSheetActive,
+              forcedWatchTogetherMediaIsCurrent(),
+              playbackRecoveryIdentityIsCurrent else { return }
+
+        // Rebind by stable row identity so a confirmation alert opened during the fast phase
+        // cannot launch that phase's older signed headers after the full phase refreshes them.
+        guard let stream = visibleSkyStreamOptions(for: provider).first(where: {
+            $0.id == selectedStream.id
+        }) else {
+            handleSkyStreamPlaybackPreparationFailure(
+                provider,
+                message: "This SkyStream result is no longer available under your Extra Source Settings.",
+                autoModeLaunch: autoModeLaunch
+            )
+            return
+        }
+
+        guard !downloadMode else {
+            downloadSkyStream(stream, provider: provider, autoModeLaunch: autoModeLaunch)
+            return
+        }
+
+        viewModel.resetStreamState()
+
+        let playbackTraceID = String(UUID().uuidString.prefix(8))
+        let playbackTraceCreatedAt = Date()
+        guard let streamURL = MPVHeaderProxy.shared.makeSkyStreamProxyURL(
+            for: stream.resolved.playback,
+            traceID: playbackTraceID
+        ) else {
+            Logger.shared.log(
+                "SkyStream: typed proxy translation failed sourceID=\(provider.id)",
+                type: "SkyStream"
+            )
+            handleSkyStreamPlaybackPreparationFailure(
+                provider,
+                message: "The verified SkyStream could not be prepared for local playback.",
+                autoModeLaunch: autoModeLaunch
+            )
+            return
+        }
+
+        let descriptor = stream.resolved.playback
+        guard let subtitleProxyURLs = MPVHeaderProxy.shared.skyStreamSubtitleProxyURLs(
+            for: descriptor,
+            streamProxyURL: streamURL
+        ) else {
+            MPVHeaderProxy.shared.invalidateSession(for: streamURL)
+            handleSkyStreamPlaybackPreparationFailure(
+                provider,
+                message: "The verified SkyStream subtitles could not be attached safely.",
+                autoModeLaunch: autoModeLaunch
+            )
+            return
+        }
+        var subtitleURLs: [String] = []
+        for subtitle in descriptor.subtitles {
+            guard let proxyURL = subtitleProxyURLs[subtitle.remoteURL.url.absoluteString] else {
+                MPVHeaderProxy.shared.invalidateSession(for: streamURL)
+                handleSkyStreamPlaybackPreparationFailure(
+                    provider,
+                    message: "The verified SkyStream subtitle route changed before playback.",
+                    autoModeLaunch: autoModeLaunch
+                )
+                return
+            }
+            subtitleURLs.append(proxyURL.absoluteString)
+        }
+        let subtitleNames = descriptor.subtitles.map {
+            $0.label ?? $0.language ?? "Subtitle"
+        }
+        // The typed proxy owns upstream headers. Passing them to MPV would send credentials to
+        // the loopback origin and duplicate policy outside the descriptor's route whitelist.
+        // Subtitle routes use that same immutable session and therefore carry no player headers.
+        let playerHeaders: [String: String] = [:]
+
+        let playbackPlan = PlaybackLaunchPlan.make(
+            // SkyStream's immutable route graph lives in Eclipse's in-process MPV proxy. Keep
+            // the session in-process instead of handing its loopback URL to AVPlayer/external
+            // selection paths that cannot safely adopt the route graph.
+            selection: .mpv,
+            deviceFamily: .current
+        )
+        Logger.shared.log(
+            "Playback resolve diagnostics sourceID=\(provider.id) kind=skystream player=\(playbackPlan.primary.rawValue) media=\(descriptor.mediaKind.rawValue) subtitles=\(subtitleURLs.count) autoMode=\(autoModeLaunch) retry=\(retryCount)",
+            type: "StreamDiagnostics"
+        )
+        Logger.shared.log(
+            "[PlaybackTrace \(playbackTraceID)] stage=resolved sourceID=\(provider.id) kind=skystream autoMode=\(autoModeLaunch) retry=\(retryCount)",
+            type: "PlaybackTrace"
+        )
+
+        let contentReference = ProviderContentReference.skyStream(stream.resolved.contentReference)
+        if isMovie {
+            ProgressManager.shared.recordMovieSourceInfo(
+                movieId: tmdbId,
+                sourceId: provider.id,
+                reference: contentReference
+            )
+        } else if let episode = selectedEpisode {
+            ProgressManager.shared.recordEpisodeSourceInfo(
+                showId: tmdbId,
+                seasonNumber: episode.seasonNumber,
+                episodeNumber: episode.episodeNumber,
+                sourceId: provider.id,
+                reference: contentReference
+            )
+        }
+
+        let posterURL = resolvedPosterURL
+        let playerMediaInfo: MediaInfo? = {
+            if isMovie {
+                return .movie(
+                    id: tmdbId,
+                    title: playerMediaTitle,
+                    posterURL: posterURL,
+                    isAnime: isAnimeContent
+                )
+            }
+            guard let episode = selectedEpisode else { return nil }
+            return .episode(
+                showId: tmdbId,
+                seasonNumber: episode.seasonNumber,
+                episodeNumber: episode.episodeNumber,
+                showTitle: playerMediaTitle,
+                showPosterURL: posterURL,
+                isAnime: isAnimeContent
+            )
+        }()
+
+        let resolvedSubtitleArray: [String]? = subtitleURLs.isEmpty ? nil : subtitleURLs
+        let resolvedSubtitleNames: [String]? = subtitleNames.isEmpty ? nil : subtitleNames
+        let resolvedSubtitleHeaders: [String: [String: String]]? = nil
+        let resolvedPreset = PlayerPreset.presets.first
+            ?? PlayerPreset(id: .sdrRec709, title: "Default", summary: "", stream: nil, commands: [])
+        let launchContext = PlaybackLaunchContext(
+            traceID: playbackTraceID,
+            traceCreatedAt: playbackTraceCreatedAt,
+            sourceId: provider.id,
+            sourceName: provider.displayName,
+            sourceKind: .skyStream,
+            autoMode: autoModeLaunch,
+            streamURL: streamURL.absoluteString,
+            streamName: stream.option.name,
+            headers: playerHeaders,
+            subtitles: resolvedSubtitleArray ?? [],
+            subtitleNames: resolvedSubtitleNames,
+            subtitleHeadersByURL: resolvedSubtitleHeaders,
+            retryCount: retryCount,
+            titleCandidates: [skyStreamResolutionTarget.title] + skyStreamResolutionTarget.aliases,
+            providerContentReference: contentReference
+        )
+        let resolvedAnimeHint = hasAnimeLookupContext
+
+        if onResolvedPlaybackRequest != nil {
+            guard playbackRecoveryIdentityIsCurrent else {
+                MPVHeaderProxy.shared.invalidateSession(for: streamURL)
+                Logger.shared.log(
+                    "ServicesResultsSheet: discarded stale SkyStream resolution before caller handoff",
+                    type: "Player"
+                )
+                return
+            }
+            let request = PlayerResolvedPlaybackRequest(
+                url: streamURL,
+                preset: resolvedPreset,
+                headers: playerHeaders,
+                subtitles: resolvedSubtitleArray,
+                subtitleNames: resolvedSubtitleNames,
+                subtitleHeadersByURL: resolvedSubtitleHeaders,
+                mediaInfo: playerMediaInfo,
+                imdbId: imdbId,
+                isAnimeHint: resolvedAnimeHint,
+                isAnimationContentHint: isAnimationGenre16,
+                originalTMDBSeasonNumber: effectivePlaybackContext?.resolvedTMDBSeasonNumber ?? originalTMDBSeasonNumber,
+                originalTMDBEpisodeNumber: effectivePlaybackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBEpisodeNumber,
+                episodePlaybackContext: effectivePlaybackContext,
+                launchContext: launchContext,
+                autoModeRecoveryIdentity: autoModeRecoveryIdentity,
+                mediaYear: mediaYear
+            )
+            finishResolvedPlayback(request)
+            return
+        }
+
+        presentCoordinatedPlayback(
+            url: streamURL,
+            preset: resolvedPreset,
+            headers: playerHeaders,
+            subtitles: resolvedSubtitleArray ?? [],
+            subtitleNames: resolvedSubtitleNames,
+            subtitleHeadersByURL: resolvedSubtitleHeaders,
+            mediaInfo: playerMediaInfo,
+            imdbID: imdbId,
+            launchContext: launchContext,
+            isAnime: resolvedAnimeHint,
+            isAnimation: isAnimationGenre16,
+            originalTMDBSeasonNumber: effectivePlaybackContext?.resolvedTMDBSeasonNumber ?? originalTMDBSeasonNumber,
+            originalTMDBEpisodeNumber: effectivePlaybackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBEpisodeNumber,
+            sourceName: provider.displayName
+        )
+    }
+
+    @MainActor
+    private func downloadSkyStream(
+        _ stream: ValidatedSkyStreamOption,
+        provider: SkyStreamProviderDescriptor,
+        autoModeLaunch: Bool
+    ) {
+        let displayDownloadTitle: String
+        if isMovie {
+            displayDownloadTitle = effectiveTitle
+        } else if let episode = selectedEpisode {
+            if specialTitleOnlySearch {
+                displayDownloadTitle = animeSeasonTitle != nil ? animeEffectiveTitle : effectiveTitle
+            } else if isAnimeContent || animeSeasonTitle != nil {
+                displayDownloadTitle = "\(animeEffectiveTitle) E\(episode.episodeNumber)"
+            } else {
+                displayDownloadTitle = "\(effectiveTitle) S\(episode.seasonNumber)E\(episode.episodeNumber)"
+            }
+        } else {
+            displayDownloadTitle = effectiveTitle
+        }
+
+        viewModel.resetStreamState()
+        viewModel.isFetchingStreams = autoModeLaunch
+        viewModel.currentFetchingTitle = provider.displayName
+        viewModel.streamFetchProgress = "Preparing verified VOD download..."
+
+        let result = DownloadManager.shared.enqueueValidatedSkyStreamDownload(
+            tmdbId: tmdbId,
+            isMovie: isMovie,
+            title: playerMediaTitle,
+            displayTitle: displayDownloadTitle,
+            posterURL: resolvedPosterURL,
+            seasonNumber: selectedEpisode?.seasonNumber,
+            episodeNumber: selectedEpisode?.episodeNumber,
+            episodeName: selectedEpisode?.name,
+            resolved: stream.resolved,
+            isAnime: isAnimeContent,
+            episodePlaybackContext: effectivePlaybackContext,
+            cancellationRequested: { autoModeLaunch && autoModeCancelled }
+        )
+
+        switch result {
+        case .accepted:
+            viewModel.isFetchingStreams = false
+            Logger.shared.log(
+                "SkyStream: verified VOD download enqueued sourceID=\(provider.id)",
+                type: "Download"
+            )
+            onDownloadEnqueued?()
+            presentationMode.wrappedValue.dismiss()
+        case .invalid(let reason):
+            handleSkyStreamPlaybackPreparationFailure(
+                provider,
+                message: "Download verification failed. \(reason)",
+                autoModeLaunch: autoModeLaunch
+            )
+        case .cloudflareChallenge:
+            // The typed SkyStream entry point never emits this today; retain a fail-closed case
+            // so adding a new result path cannot accidentally enqueue an unvalidated fallback.
+            handleSkyStreamPlaybackPreparationFailure(
+                provider,
+                message: "Download verification requires a fresh provider resolution.",
+                autoModeLaunch: autoModeLaunch
+            )
+        case .cancelled:
+            viewModel.isFetchingStreams = false
+        }
+    }
+#endif
+
     // MARK: - Play / Download Stremio Stream
 
     private func playStremioStream(_ stream: StremioStream, addon: StremioAddon, autoModeLaunch: Bool = false, retryCount: Int = 0) {
@@ -3888,7 +5226,7 @@ struct ModulesSearchResultsSheet: View {
             Logger.shared.log("Stremio: stream hidden by extra service settings addon=\(addon.manifest.name)", type: "Stream")
             handleStremioPlaybackPreparationFailure(
                 addon,
-                message: "This Stremio stream is hidden by your extra service settings.",
+                message: "This Stremio stream is hidden by your Extra Source Settings.",
                 autoModeLaunch: autoModeLaunch
             )
             return
@@ -4040,7 +5378,8 @@ struct ModulesSearchResultsSheet: View {
                     originalTMDBEpisodeNumber: effectivePlaybackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBEpisodeNumber,
                     episodePlaybackContext: effectivePlaybackContext,
                     launchContext: resolvedLaunchContext,
-                    autoModeRecoveryIdentity: autoModeRecoveryIdentity
+                    autoModeRecoveryIdentity: autoModeRecoveryIdentity,
+                    mediaYear: mediaYear
                 )
                 finishResolvedPlayback(request)
                 return
@@ -4084,7 +5423,10 @@ struct ModulesSearchResultsSheet: View {
         sourceName: String
     ) {
         guard forcedWatchTogetherMediaIsCurrent(),
-              playbackRecoveryIdentityIsCurrent else { return }
+              playbackRecoveryIdentityIsCurrent else {
+            invalidateAbandonedSkyStreamProxy(url, launchContext: launchContext)
+            return
+        }
         let resumePosition: Double? = {
             let position: Double
             if isMovie {
@@ -4160,6 +5502,7 @@ struct ModulesSearchResultsSheet: View {
             subtitleNames: subtitleNames,
             subtitleHeadersByURL: subtitleHeadersByURL,
             mediaInfo: mediaInfo,
+            mediaYear: mediaYear,
             imdbID: imdbID,
             episodePlaybackContext: effectivePlaybackContext,
             launchContext: launchContext,
@@ -4188,14 +5531,21 @@ struct ModulesSearchResultsSheet: View {
             }
         )
 
+        let diagnosticSource = launchContext.sourceKind == .skyStream
+            ? launchContext.sourceId
+            : sourceName
         Logger.shared.log(
-            "ServicesResultsSheet: presenting coordinated playback source=\(sourceName) subtitles=\(subtitles.count) resume=\(resumePosition != nil)",
+            "ServicesResultsSheet: presenting coordinated playback source=\(diagnosticSource) subtitles=\(subtitles.count) resume=\(resumePosition != nil)",
             type: "Player"
         )
         dismissAutoModeSheetBeforePlaybackIfNeeded { topmostVC in
             guard self.forcedWatchTogetherSharedMediaMatchesCurrent(),
-                  self.playbackRecoveryIdentityIsCurrent else { return }
+                  self.playbackRecoveryIdentityIsCurrent else {
+                self.invalidateAbandonedSkyStreamProxy(url, launchContext: launchContext)
+                return
+            }
             guard let topmostVC else {
+                self.invalidateAbandonedSkyStreamProxy(url, launchContext: launchContext)
                 let report = PlaybackFailureReport(
                     context: launchContext,
                     message: "Failed to locate the originating window for player presentation.",
@@ -4215,7 +5565,9 @@ struct ModulesSearchResultsSheet: View {
             PlaybackCoordinator.shared.present(
                 request,
                 from: topmostVC,
-                engine: forceAutomaticPlayback ? .mpv : .selected
+                engine: launchContext.sourceKind == .skyStream
+                    ? .mpv
+                    : (forceAutomaticPlayback ? .mpv : .selected)
             )
         }
     }
@@ -4621,7 +5973,7 @@ struct ModulesSearchResultsSheet: View {
            !forcedWatchTogetherAnimeResultMatchesDestination(result) {
             handleServicePlaybackPreparationFailure(
                 service,
-                message: "Watch Together rejected a service result for a different anime cour instead of guessing S1E1.",
+                message: "Watch Together rejected a source result for a different anime cour instead of guessing S1E1.",
                 autoModeLaunch: true
             )
             return
@@ -4941,7 +6293,7 @@ struct ModulesSearchResultsSheet: View {
 
         if !parsedStreams.isEmpty && availableStreams.isEmpty {
             Logger.shared.log("All \(parsedStreams.count) stream options hidden by extra service settings for \(service.metadata.sourceName)", type: "Stream")
-            handleServicePlaybackPreparationFailure(service, message: "All streams from \(service.metadata.sourceName) are hidden by your extra service settings.")
+            handleServicePlaybackPreparationFailure(service, message: "All streams from \(service.metadata.sourceName) are hidden by your Extra Source Settings.")
             return
         }
         
@@ -5001,7 +6353,7 @@ struct ModulesSearchResultsSheet: View {
                 isAnime: hasAnimeLookupContext
             ) {
                 Logger.shared.log("Single stream hidden by extra service settings for \(service.metadata.sourceName)", type: "Stream")
-                handleServicePlaybackPreparationFailure(service, message: "This stream is hidden by your extra service settings.")
+                handleServicePlaybackPreparationFailure(service, message: "This stream is hidden by your Extra Source Settings.")
                 return
             }
             resolveSubtitleSelection(
@@ -5294,7 +6646,7 @@ struct ModulesSearchResultsSheet: View {
             )
             handleServicePlaybackPreparationFailure(
                 service,
-                message: "This Service stream is hidden by your extra service settings.",
+                message: "This Service stream is hidden by your Extra Source Settings.",
                 autoModeLaunch: viewModel.pendingPlaybackAutoMode
             )
             return
@@ -5539,7 +6891,8 @@ struct ModulesSearchResultsSheet: View {
                     originalTMDBEpisodeNumber: effectivePlaybackContext?.resolvedTMDBEpisodeNumber ?? originalTMDBEpisodeNumber,
                     episodePlaybackContext: effectivePlaybackContext,
                     launchContext: resolvedLaunchContext,
-                    autoModeRecoveryIdentity: autoModeRecoveryIdentity
+                    autoModeRecoveryIdentity: autoModeRecoveryIdentity,
+                    mediaYear: mediaYear
                 )
                 finishResolvedPlayback(request)
                 return

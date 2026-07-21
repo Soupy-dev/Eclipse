@@ -25,12 +25,18 @@ final class PlaybackCoordinator {
         for request: PlaybackRequest,
         engine: PlaybackEngine = .selected
     ) -> UIViewController {
+        // SkyStream playback URLs are capability-bearing loopback routes owned by the typed MPV
+        // proxy. AVPlayer/external engines cannot safely reconstruct that route graph, so keep
+        // every coordinator launch on the same MoltenVK path as the resolver handoff.
+        let effectiveEngine: PlaybackEngine = request.launchContext?.sourceKind == .skyStream
+            ? .mpv
+            : engine
 #if os(tvOS)
-        return TVPlaybackViewController(request: request, requestedEngine: engine)
+        return TVPlaybackViewController(request: request, requestedEngine: effectiveEngine)
 #else
         let deviceFamily = PlaybackDeviceFamily.current
         let plan = PlaybackLaunchPlan.make(
-            selection: engine,
+            selection: effectiveEngine,
             deviceFamily: deviceFamily
         )
         if deviceFamily == .pad,
@@ -204,6 +210,7 @@ final class PlaybackCoordinator {
 
         guard !controller.isBeingDismissed else {
             activeHandoffs.removeValue(forKey: controllerID)
+            invalidateAbandonedTypedTransport(request)
             return
         }
 
@@ -350,6 +357,7 @@ final class PlaybackCoordinator {
             request: request
         ) else {
             activeHandoffs.removeValue(forKey: controllerID)
+            invalidateAbandonedTypedTransport(request)
             request.onPlaybackStartupFailure?(report)
             return
         }
@@ -368,6 +376,7 @@ final class PlaybackCoordinator {
                   presenter.presentedViewController == nil else {
                 // A newer presentation owns this presenter now. Do not let a stale fallback cover
                 // it, and do not feed its failure into the newer playback request.
+                self.invalidateAbandonedTypedTransport(request)
                 return
             }
             presenter.present(replacement, animated: false) {
@@ -401,6 +410,7 @@ final class PlaybackCoordinator {
         guard activeHandoffs[controllerID] == handoffID else { return }
         activeHandoffs.removeValue(forKey: controllerID)
         presentationHosts.removeObject(forKey: controller)
+        invalidateAbandonedTypedTransport(request)
         guard !controller.isBeingDismissed else { return }
         guard controller.viewIfLoaded?.window != nil else {
             // A completed user/system dismissal is no longer `isBeingDismissed`. Only return
@@ -429,6 +439,13 @@ final class PlaybackCoordinator {
             return player.playbackHandoffHasAppeared
         }
         return false
+    }
+
+    private func invalidateAbandonedTypedTransport(_ request: PlaybackRequest) {
+#if !os(tvOS)
+        guard request.launchContext?.sourceKind == .skyStream else { return }
+        MPVHeaderProxy.shared.invalidateSession(for: request.url)
+#endif
     }
 
     private static func syntheticLaunchContext(for request: PlaybackRequest) -> PlaybackLaunchContext {

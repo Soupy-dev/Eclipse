@@ -3,6 +3,7 @@ import Foundation
 enum PlaybackSourceKind: String {
     case service
     case stremio
+    case skyStream
 }
 
 struct PlaybackLaunchContext {
@@ -26,6 +27,10 @@ struct PlaybackLaunchContext {
     /// Service pre-staging needs this show-level URL; an individual episode URL cannot be used
     /// to refresh the episode list.
     let serviceContentHref: String?
+    /// Generalized provider-owned resolution state. Legacy Services continue to populate
+    /// `serviceContentHref`; SkyStream uses this bounded, Codable reference for refresh,
+    /// downloads, and next-episode staging without persisting signed media URLs or headers.
+    let providerContentReference: ProviderContentReference?
 
     init(
         traceID: String = String(UUID().uuidString.prefix(8)),
@@ -42,7 +47,8 @@ struct PlaybackLaunchContext {
         subtitleHeadersByURL: [String: [String: String]]? = nil,
         retryCount: Int,
         titleCandidates: [String] = [],
-        serviceContentHref: String? = nil
+        serviceContentHref: String? = nil,
+        providerContentReference: ProviderContentReference? = nil
     ) {
         self.traceID = traceID
         self.traceCreatedAt = traceCreatedAt
@@ -59,6 +65,7 @@ struct PlaybackLaunchContext {
         self.retryCount = retryCount
         self.titleCandidates = titleCandidates
         self.serviceContentHref = serviceContentHref
+        self.providerContentReference = providerContentReference
     }
 }
 

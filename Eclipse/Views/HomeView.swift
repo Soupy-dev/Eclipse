@@ -2629,6 +2629,7 @@ struct ContinueWatchingCard: View {
     @State private var imdbId: String? = nil
     @State private var enrichedPlaybackContext: EpisodePlaybackContext? = nil
     @State private var detailGenres: [TMDBGenre] = []
+    @State private var mediaYear: Int? = nil
 
     private enum TVActionFocus: Hashable {
         case play
@@ -2906,6 +2907,7 @@ struct ContinueWatchingCard: View {
                 isAnimeContent: searchSheetIsAnime,
                 selectedEpisode: selectedEpisodeForSearch,
                 tmdbId: item.tmdbId,
+                mediaYear: nextEpisodeSearchTarget?.mediaYear ?? mediaYear,
                 animeSeasonTitle: searchSheetIsAnime ? "anime" : nil,
                 posterPath: nextEpisodeSearchTarget?.posterURL ?? item.posterURL,
                 originalAudioLanguage: originalAudioLanguage,
@@ -3045,6 +3047,7 @@ struct ContinueWatchingCard: View {
                     }
                     self.originalTitle = romaji
                     self.originalAudioLanguage = details.originalLanguage
+                    self.mediaYear = releaseYear(from: details.releaseDate)
                     self.animeSeasonRomajiTitle = nil
                     self.enrichedPlaybackContext = nil
                     self.imdbId = details.imdbId
@@ -3086,6 +3089,7 @@ struct ContinueWatchingCard: View {
                     }
                     self.originalTitle = romaji
                     self.originalAudioLanguage = details.originalLanguage
+                    self.mediaYear = releaseYear(from: details.firstAirDate)
                     self.imdbId = details.externalIds?.imdbId
                     self.detailGenres = details.genres
                     self.isLoaded = true
@@ -3404,6 +3408,7 @@ struct ContinueWatchingCard: View {
             headers: [:],
             subtitles: subtitles,
             mediaInfo: downloadedItem.mediaInfo,
+            mediaYear: mediaYear,
             episodePlaybackContext: downloadedItem.episodePlaybackContext,
             resumePosition: resumePosition,
             title: downloadedItem.playerTitleBase,
@@ -3453,6 +3458,7 @@ struct ContinueWatchingCard: View {
     @MainActor
     private func presentResolvedPlayback(_ request: PlayerResolvedPlaybackRequest) {
         guard recoveryIdentityIsCurrent(request.autoModeRecoveryIdentity) else {
+            invalidateAbandonedSkyStreamPlayback(request)
             Logger.shared.log("ContinueWatchingCard: discarded stale resolved playback before sheet dismissal", type: "Player")
             return
         }
@@ -3471,10 +3477,12 @@ struct ContinueWatchingCard: View {
         attempt: Int = 0
     ) {
         guard recoveryIdentityIsCurrent(recoveryIdentity) else {
+            invalidateAbandonedSkyStreamPlayback(request)
             Logger.shared.log("ContinueWatchingCard: stopped stale resolved playback during dismissal", type: "Player")
             return
         }
         guard let presenter = rootPresentationController() else {
+            invalidateAbandonedSkyStreamPlayback(request)
             Logger.shared.log("ContinueWatchingCard: unable to present resolved playback; no presenter", type: "Player")
             return
         }
@@ -3484,7 +3492,10 @@ struct ContinueWatchingCard: View {
             presenter.dismiss(animated: true) {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
                     Task { @MainActor in
-                        guard self.recoveryIdentityIsCurrent(recoveryIdentity) else { return }
+                        guard self.recoveryIdentityIsCurrent(recoveryIdentity) else {
+                            self.invalidateAbandonedSkyStreamPlayback(request)
+                            return
+                        }
                         self.dismissContinueWatchingSheetAndPresent(
                             request,
                             recoveryIdentity: recoveryIdentity,
@@ -3493,6 +3504,11 @@ struct ContinueWatchingCard: View {
                     }
                 }
             }
+            return
+        }
+        if presenter.presentedViewController != nil {
+            invalidateAbandonedSkyStreamPlayback(request)
+            Logger.shared.log("ContinueWatchingCard: unable to clear presentation stack for resolved playback", type: "Player")
             return
         }
 
@@ -3510,13 +3526,15 @@ struct ContinueWatchingCard: View {
         recoveryIdentity: AutoModePlaybackRecoveryIdentity?
     ) {
         guard recoveryIdentityIsCurrent(recoveryIdentity) else {
+            invalidateAbandonedSkyStreamPlayback(request)
             Logger.shared.log("ContinueWatchingCard: discarded stale resolved playback before presentation", type: "Player")
             return
         }
 #if !os(tvOS)
         let externalRaw = UserDefaults.standard.string(forKey: "externalPlayer") ?? ExternalPlayer.none.rawValue
         let external = ExternalPlayer(rawValue: externalRaw) ?? .none
-        if let scheme = external.schemeURL(for: request.url.absoluteString),
+        if request.launchContext?.sourceKind != .skyStream,
+           let scheme = external.schemeURL(for: request.url.absoluteString),
            UIApplication.shared.canOpenURL(scheme) {
             UIApplication.shared.open(scheme, options: [:], completionHandler: nil)
             Logger.shared.log("ContinueWatchingCard: opening resolved playback in external player", type: "Player")
@@ -3545,6 +3563,7 @@ struct ContinueWatchingCard: View {
             subtitleNames: request.subtitleNames,
             subtitleHeadersByURL: request.subtitleHeadersByURL,
             mediaInfo: request.mediaInfo,
+            mediaYear: nextEpisodeSearchTarget?.mediaYear ?? mediaYear,
             imdbID: request.imdbId,
             episodePlaybackContext: request.episodePlaybackContext,
             launchContext: request.launchContext,
@@ -3568,6 +3587,14 @@ struct ContinueWatchingCard: View {
         )
         Logger.shared.log("ContinueWatchingCard: presenting resolved playback through coordinator", type: "Player")
         PlaybackCoordinator.shared.present(playbackRequest, from: presenter)
+    }
+
+    @MainActor
+    private func invalidateAbandonedSkyStreamPlayback(_ request: PlayerResolvedPlaybackRequest) {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        guard request.launchContext?.sourceKind == .skyStream else { return }
+        MPVHeaderProxy.shared.invalidateSession(for: request.url)
+#endif
     }
 
     @MainActor
@@ -3630,8 +3657,18 @@ struct ContinueWatchingCard: View {
             posterURL: item.posterURL,
             imdbID: imdbId,
             isAnime: searchSheetIsAnime,
-            isAnimation: detailGenres.contains { $0.id == 16 }
+            isAnimation: detailGenres.contains { $0.id == 16 },
+            mediaYear: mediaYear
         ))
+    }
+
+    private func releaseYear(from rawDate: String?) -> Int? {
+        guard let rawDate,
+              let year = Int(rawDate.prefix(4)),
+              (1800...3000).contains(year) else {
+            return nil
+        }
+        return year
     }
 
     @MainActor

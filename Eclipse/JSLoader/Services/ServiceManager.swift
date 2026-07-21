@@ -666,6 +666,7 @@ final class SourceHealthStore: ObservableObject {
 
     private let storageKey = "sourceHealthRecordsV1"
     private let queue = DispatchQueue(label: "eclipse.source.health.store")
+    private let persistenceQueue = DispatchQueue(label: "eclipse.source.health.persistence")
     private var records: [String: SourceHealthRecord]
 
     private init() {
@@ -773,7 +774,7 @@ final class SourceHealthStore: ObservableObject {
             record.sourceName = sourceName
             mutate(&record)
             self.records[sourceId] = record
-            self.saveLocked()
+            self.scheduleSaveLocked()
             DispatchQueue.main.async {
                 guard !self.versionUpdateScheduled else { return }
                 self.versionUpdateScheduled = true
@@ -785,9 +786,12 @@ final class SourceHealthStore: ObservableObject {
         }
     }
 
-    private func saveLocked() {
-        guard let data = try? JSONEncoder().encode(records) else { return }
-        UserDefaults.standard.set(data, forKey: storageKey)
+    private func scheduleSaveLocked() {
+        let snapshot = records
+        persistenceQueue.async { [storageKey] in
+            guard let data = try? JSONEncoder().encode(snapshot) else { return }
+            UserDefaults.standard.set(data, forKey: storageKey)
+        }
     }
 }
 
@@ -833,6 +837,18 @@ enum AutoModeSourceSelection {
         UserDefaults.standard.set(order, forKey: orderKey)
     }
 
+    /// Adds a newly installed source to the shared display/priority order without
+    /// opting it into Auto Mode. SkyStream providers use this on first install.
+    static func appendSourceToOrderIfNeeded(
+        _ sourceId: String,
+        defaults: UserDefaults = .standard
+    ) {
+        var order = defaults.stringArray(forKey: orderKey) ?? []
+        guard !order.contains(sourceId) else { return }
+        order.append(sourceId)
+        defaults.set(order, forKey: orderKey)
+    }
+
     static func removeSource(_ sourceId: String) {
         var ids = Set(UserDefaults.standard.stringArray(forKey: idsKey) ?? [])
         var order = UserDefaults.standard.stringArray(forKey: orderKey) ?? []
@@ -842,6 +858,29 @@ enum AutoModeSourceSelection {
 
         UserDefaults.standard.set(Array(ids), forKey: idsKey)
         UserDefaults.standard.set(order, forKey: orderKey)
+    }
+
+    /// Cleans every shared source-selection seam when a provider is authoritatively
+    /// removed. A missing extra-rules value means "All" and must remain missing;
+    /// explicit arrays remain explicit even when removal makes them empty.
+    static func removeSourceAuthoritatively(
+        _ sourceId: String,
+        defaults: UserDefaults = .standard
+    ) {
+        var selected = Set(defaults.stringArray(forKey: idsKey) ?? [])
+        var order = defaults.stringArray(forKey: orderKey) ?? []
+        selected.remove(sourceId)
+        order.removeAll { $0 == sourceId }
+        defaults.set(Array(selected), forKey: idsKey)
+        defaults.set(order, forKey: orderKey)
+
+        guard let explicitlySelected = StreamLanguageFilter.extraRulesSourceIds(defaults: defaults) else {
+            return
+        }
+        StreamLanguageFilter.setExtraRulesSourceIds(
+            explicitlySelected.filter { $0 != sourceId },
+            defaults: defaults
+        )
     }
 }
 

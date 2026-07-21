@@ -222,6 +222,9 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
     
     @StateObject private var serviceManager = ServiceManager.shared
     @StateObject private var stremioManager = StremioAddonManager.shared
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    @StateObject private var skyStreamPluginManager = SkyStreamPluginManager.shared
+#endif
     @StateObject private var accentManager = AccentColorManager.shared
 #if !os(tvOS)
     private let downloadManager = DownloadManager.shared
@@ -244,7 +247,22 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
 
     private var hasActiveSources: Bool {
         !serviceManager.activeServices.isEmpty ||
-        !stremioManager.activeAddons.isEmpty
+        !stremioManager.activeAddons.isEmpty ||
+        hasActiveSkyStreamSources
+    }
+
+    private var hasActiveSkyStreamSources: Bool {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        PlatformCapabilities.current.supportsSkyStreamPlugins
+            && skyStreamPluginManager.providers.contains(where: \.isEnabled)
+#else
+        false
+#endif
+    }
+
+    private var sourceMatchingYear: Int? {
+        guard let firstAirDate = tvShow?.firstAirDate else { return nil }
+        return Int(firstAirDate.prefix(4))
     }
 
     private var activeSeasonDetail: TMDBSeasonDetail? {
@@ -518,6 +536,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 isAnimeContent: isAnime,
                 selectedEpisode: selectedEpisodeForSearch,
                 tmdbId: tvShow?.id ?? 0,
+                mediaYear: sourceMatchingYear,
                 animeSeasonTitle: isAnime ? activeSeasonTitle : nil,
                 posterPath: specialEpisodeContext?.posterUrl ?? tvShow?.posterPath,
                 originalAudioLanguage: tvShow?.originalLanguage,
@@ -576,6 +595,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
                 isAnimeContent: isAnime,
                 selectedEpisode: downloadEpisode ?? selectedEpisodeForSearch,
                 tmdbId: tvShow?.id ?? 0,
+                mediaYear: sourceMatchingYear,
                 animeSeasonTitle: isAnime ? activeSeasonTitle : nil,
                 posterPath: downloadAllSpecialContext?.posterUrl ?? specialEpisodeContext?.posterUrl ?? tvShow?.posterPath,
                 originalAudioLanguage: tvShow?.originalLanguage,
@@ -596,10 +616,10 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             )
         }
 #endif
-        .alert("No Active Services", isPresented: $showingNoServicesAlert) {
+        .alert("No Active Sources", isPresented: $showingNoServicesAlert) {
             Button("OK") { }
         } message: {
-            Text("You don't have any active services. Please go to the Services tab to download and activate services.")
+            Text("You don't have any active sources. Open Services settings to add or enable one.")
         }
     }
     
@@ -1070,6 +1090,7 @@ struct TVShowSeasonsSection<InsertedContent: View>: View {
             url: fileURL,
             subtitles: subtitles,
             mediaInfo: item.mediaInfo,
+            mediaYear: sourceMatchingYear,
             episodePlaybackContext: item.episodePlaybackContext,
             title: item.playerTitleBase,
             subtitle: item.displayTitle,

@@ -168,24 +168,23 @@ struct SettingsView: View {
             .init(id: "notification-following", title: "Following", location: "Notifications > Manage", icon: "bell.badge", color: .orange, keywords: ["followed shows", "episodes", "automatic reminders", "subscriptions"], action: .destination(.notificationFollowing)),
             .init(id: "future-season-alerts", title: "Future Season Alerts", location: "Notifications > Following", icon: "calendar.badge.clock", color: .orange, keywords: ["upcoming season", "sequel", "premiere", "announcement"], action: .destination(.notificationFollowing)),
             .init(id: "notification-individual-episodes", title: "Individual Episodes", location: "Notifications > Manage", icon: "calendar.badge.plus", color: .orange, keywords: ["one-off reminder", "schedule bell", "upcoming episode"], action: .destination(.notificationEpisodes)),
-            .init(id: "local-notification-limits", title: "Local Notification Limits", location: "Notifications > About", icon: "info.circle.fill", color: .orange, keywords: ["no server", "refresh", "restrictions", "48", "delivery"], action: .destination(.notificationsTarget(.limits))),
             .init(id: "catalogs", title: "Catalogs", location: "Basic", icon: "square.grid.2x2", color: .green, keywords: ["home rows", "discover", "TMDB"], action: .destination(.catalogs)),
-            .init(id: "services-auto-update", title: "Auto-Update Services", location: "Services", icon: "arrow.triangle.2.circlepath", color: .mint, keywords: ["service updates", "update sources", "startup"], action: .destination(.servicesTarget(.autoUpdateServices))),
+            .init(id: "services-auto-update", title: "Auto-Update Sources", location: "Services", icon: "arrow.triangle.2.circlepath", color: .mint, keywords: ["service updates", "auto-update services", "update sources", "startup"], action: .destination(.servicesTarget(.autoUpdateServices))),
             .init(id: "services-auto-mode", title: "Auto Mode", location: "Services", icon: "wand.and.stars", color: .indigo, keywords: ["automatic source", "source order", "auto download"], action: .destination(.servicesTarget(.autoMode))),
             .init(id: "services-auto-select-episodes", title: "Auto-Select Episodes", location: "Services > Auto Mode", icon: "forward.end.fill", color: .indigo, keywords: ["automatic episode selection", "next episode", "auto source"], action: .destination(.servicesTarget(.autoSelectEpisodes))),
             .init(id: "services-auto-quality", title: "Auto Quality", location: "Services > Auto Mode", icon: "dial.medium", color: .indigo, keywords: ["automatic quality", "resolution", "stream quality"], action: .destination(.servicesTarget(.autoQuality))),
             .init(id: "services-quality-preference", title: "Auto Quality Preference", location: "Services > Auto Mode", icon: "slider.horizontal.3", color: .indigo, keywords: ["preferred quality", "1080p", "720p", "best quality"], action: .destination(.servicesTarget(.autoQualityPreference))),
-            .init(id: "services-include-language", title: "Languages to Include", location: "Services > Extra Service Settings", icon: "checkmark.bubble", color: .green, keywords: ["include language", "allow", "whitelist", "streams", "Stremio"], action: .destination(.servicesTarget(.languagesToInclude))),
-            .init(id: "services-exclude-language", title: "Languages to Exclude", location: "Services > Extra Service Settings", icon: "xmark.bubble", color: .red, keywords: ["exclude language", "block", "hide", "streams", "Stremio"], action: .destination(.servicesTarget(.languagesToExclude))),
-            .init(id: "services-assume-original-audio", title: "Assume Original Language", location: "Services > Extra Service Settings", icon: "waveform", color: .orange, keywords: ["original language", "untagged streams", "missing language", "TMDB language", "stream language"], action: .destination(.servicesTarget(.assumeOriginalAudio))),
-            .init(id: "services-dubbed-anime-english", title: "Treat Dubbed Anime Streams as English", location: "Services > Extra Service Settings", icon: "waveform.and.mic", color: .orange, keywords: ["dubbed anime", "anime dub", "english audio", "english filter", "stream language"], action: .destination(.servicesTarget(.treatDubbedAnimeAsEnglish))),
-            .init(id: "services-stremio-style", title: "Stremio-Style Stream List", location: "Services > Extra Service Settings", icon: "rectangle.grid.1x2", color: .blue, keywords: ["stream list", "layout", "flat", "results", "Stremio"], action: .destination(.servicesTarget(.stremioStyleSheet))),
-            .init(id: "services-ranking-similarity", title: "Ranking Similarity", location: "Services > Extra Service Settings", icon: "chart.bar.xaxis", color: .orange, keywords: ["similarity percentage", "matching threshold", "rank results", "title match"], action: .destination(.servicesTarget(.rankingSimilarity))),
-            .init(id: "services-drop-unmatched", title: "Drop Unmatched Service Results", location: "Services > Extra Service Settings", icon: "line.3.horizontal.decrease.circle", color: .orange, keywords: ["drop streams", "similarity filter", "mismatched results", "auto mode"], action: .destination(.servicesTarget(.dropMismatchedResults))),
-            .init(id: "services-missing-language", title: "Hide Streams Without Language Data", location: "Services > Extra Service Settings", icon: "questionmark.bubble", color: .orange, keywords: ["unknown", "missing", "untagged"], action: .destination(.servicesTarget(.missingLanguageData))),
-            .init(id: "services-qualities-to-hide", title: "Qualities to Hide", location: "Services > Extra Service Settings", icon: "eye.slash", color: .orange, keywords: ["hide resolution", "720p", "1080p", "4K", "quality filter"], action: .destination(.servicesTarget(.qualitiesToHide))),
-            .init(id: "services-hide-qualityless", title: "Hide Streams Without Detected Quality", location: "Services > Extra Service Settings", icon: "questionmark.bubble", color: .orange, keywords: ["unknown quality", "missing resolution", "untagged quality"], action: .destination(.servicesTarget(.hideStreamsWithoutDetectedQuality))),
-            .init(id: "services-extra-rules-sources", title: "Apply Extra Rules To", location: "Services > Extra Service Settings", icon: "line.3.horizontal.decrease.circle", color: .orange, keywords: ["service filter scope", "addon filter scope", "source rules"], action: .destination(.servicesTarget(.applyExtraRulesTo))),
+            .init(id: "services-include-language", title: "Languages to Include", location: "Services > Extra Source Settings", icon: "checkmark.bubble", color: .green, keywords: ["include language", "allow", "whitelist", "streams", "Stremio"], action: .destination(.servicesTarget(.languagesToInclude))),
+            .init(id: "services-exclude-language", title: "Languages to Exclude", location: "Services > Extra Source Settings", icon: "xmark.bubble", color: .red, keywords: ["exclude language", "block", "hide", "streams", "Stremio"], action: .destination(.servicesTarget(.languagesToExclude))),
+            .init(id: "services-assume-original-audio", title: "Assume Original Language", location: "Services > Extra Source Settings", icon: "waveform", color: .orange, keywords: ["original language", "untagged streams", "missing language", "TMDB language", "stream language"], action: .destination(.servicesTarget(.assumeOriginalAudio))),
+            .init(id: "services-dubbed-anime-english", title: "Treat Dubbed Anime Streams as English", location: "Services > Extra Source Settings", icon: "waveform.and.mic", color: .orange, keywords: ["dubbed anime", "anime dub", "english audio", "english filter", "stream language"], action: .destination(.servicesTarget(.treatDubbedAnimeAsEnglish))),
+            .init(id: "services-stremio-style", title: "Stremio-Style Stream List", location: "Services > Extra Source Settings", icon: "rectangle.grid.1x2", color: .blue, keywords: ["stream list", "layout", "flat", "results", "Stremio"], action: .destination(.servicesTarget(.stremioStyleSheet))),
+            .init(id: "services-ranking-similarity", title: "Ranking Similarity", location: "Services > Extra Source Settings", icon: "chart.bar.xaxis", color: .orange, keywords: ["similarity percentage", "matching threshold", "rank results", "title match"], action: .destination(.servicesTarget(.rankingSimilarity))),
+            .init(id: "services-drop-unmatched", title: "Drop Unmatched Search Results", location: "Services > Extra Source Settings", icon: "line.3.horizontal.decrease.circle", color: .orange, keywords: ["drop streams", "drop unmatched service results", "similarity filter", "mismatched results", "auto mode"], action: .destination(.servicesTarget(.dropMismatchedResults))),
+            .init(id: "services-missing-language", title: "Hide Streams Without Language Data", location: "Services > Extra Source Settings", icon: "questionmark.bubble", color: .orange, keywords: ["unknown", "missing", "untagged"], action: .destination(.servicesTarget(.missingLanguageData))),
+            .init(id: "services-qualities-to-hide", title: "Qualities to Hide", location: "Services > Extra Source Settings", icon: "eye.slash", color: .orange, keywords: ["hide resolution", "720p", "1080p", "4K", "quality filter"], action: .destination(.servicesTarget(.qualitiesToHide))),
+            .init(id: "services-hide-qualityless", title: "Hide Streams Without Detected Quality", location: "Services > Extra Source Settings", icon: "questionmark.bubble", color: .orange, keywords: ["unknown quality", "missing resolution", "untagged quality"], action: .destination(.servicesTarget(.hideStreamsWithoutDetectedQuality))),
+            .init(id: "services-extra-rules-sources", title: "Apply Extra Rules To", location: "Services > Extra Source Settings", icon: "line.3.horizontal.decrease.circle", color: .orange, keywords: ["service filter scope", "addon filter scope", "source rules"], action: .destination(.servicesTarget(.applyExtraRulesTo))),
             .init(id: "stremio-addons", title: "Stremio Addons", location: "Services", icon: "shippingbox", color: .blue, keywords: ["addon", "configure", "install"], action: .destination(.services)),
             .init(id: "trackers", title: "Trackers", location: "Basic", icon: "chart.bar.fill", color: .pink, keywords: ["Trakt", "MyAnimeList", "MAL", "AniList", "SIMKL"], action: .destination(.trackers)),
             .init(id: "storage", title: "Storage", location: "Data", icon: "internaldrive", color: .gray, keywords: ["downloads", "cache", "files", "clear"], action: .destination(.storage)),
@@ -1077,7 +1076,6 @@ private enum NotificationSettingsSearchTarget: String, Hashable {
     case access
     case timing
     case manage
-    case limits
 }
 
 private enum SettingsSearchAction: Hashable {
@@ -1228,8 +1226,6 @@ private struct NotificationSettingsView: View {
 
     @Environment(\.eclipseSettingsSearchPresentation) private var settingsSearchPresentation
     @StateObject private var manager = LocalNotificationManager.shared
-    @AppStorage(ScheduleWindow.storageKey)
-    private var scheduleWindowDays = ScheduleWindow.defaultValue.rawValue
     @AppStorage(LocalNotificationManager.episodeLeadTimeKey)
     private var episodeLeadTimeRaw = EpisodeNotificationLeadTime.atAirtime.rawValue
     @AppStorage(LocalNotificationManager.seasonLeadTimeKey)
@@ -1254,8 +1250,6 @@ private struct NotificationSettingsView: View {
                         .id(NotificationSettingsSearchTarget.timing.rawValue)
                     manageSection
                         .id(NotificationSettingsSearchTarget.manage.rawValue)
-                    localLimitSection
-                        .id(NotificationSettingsSearchTarget.limits.rawValue)
                 }
                 .padding(.top, 16)
                 .padding(.bottom, 32)
@@ -1542,54 +1536,6 @@ private struct NotificationSettingsView: View {
             content: content,
             results: presentation.results
         ))
-    }
-
-    private var localLimitSection: some View {
-        VStack(spacing: 12) {
-            GlassSection(header: "Local-Only Delivery") {
-                VStack(alignment: .leading, spacing: 12) {
-                    notificationInfoLine(
-                        icon: "iphone",
-                        text: "Reminders are stored and scheduled on this device. No Eclipse notification server is used."
-                    )
-                    notificationInfoLine(
-                        icon: "arrow.clockwise.icloud",
-                        text: "Open Eclipse periodically to download new dates, correct schedule changes, and discover newly announced seasons. Background refresh is not guaranteed."
-                    )
-                    notificationInfoLine(
-                        icon: "calendar",
-                        text: "Episode notification checks use your selected rolling \(ScheduleWindow.sanitizedDays(scheduleWindowDays))-day Schedule range. Already scheduled reminders can fire while Eclipse is closed."
-                    )
-                    notificationInfoLine(
-                        icon: "play.slash",
-                        text: "“Aired” means the metadata provider’s scheduled airtime—not that a stream, dub, or subtitles are already available."
-                    )
-                    notificationInfoLine(
-                        icon: "questionmark.circle",
-                        text: "Episodes without a confirmed airtime are not scheduled, so Eclipse does not invent a potentially misleading release time."
-                    )
-                    notificationInfoLine(
-                        icon: "bell.and.waves.left.and.right",
-                        text: "Focus, Notification Summary, device state, and iOS delivery rules can delay alerts. Eclipse schedules at most 48 managed reminders at once and prioritizes the nearest dates."
-                    )
-                }
-                .padding(14)
-            }
-
-            GlassSectionFooter("Future-season checks happen when Eclipse refreshes. If only a year or seasonal window is known, Eclipse records the season but waits for an exact date before scheduling a premiere reminder.")
-        }
-    }
-
-    private func notificationInfoLine(icon: String, text: String) -> some View {
-        HStack(alignment: .top, spacing: 11) {
-            Image(systemName: icon)
-                .foregroundColor(.orange)
-                .frame(width: 24)
-            Text(text)
-                .font(.footnote)
-                .foregroundColor(.white.opacity(0.68))
-                .fixedSize(horizontal: false, vertical: true)
-        }
     }
 
     private func openSystemSettings() {
@@ -2998,15 +2944,34 @@ struct LegalNoticeView: View {
                     }
                 }
 
-#if !os(tvOS)
                 GlassSection(header: "Credits") {
                     VStack(spacing: 0) {
+#if !os(tvOS)
                         infoText("Reader mode includes Aidoku source compatibility work inspired by the Aidoku project.")
                         GlassDivider(leadingInset: 16)
                         linkRow(title: "Aidoku/Aidoku", icon: "book.fill", color: .orange, url: URL(string: "https://github.com/Aidoku/Aidoku")!)
+                        GlassDivider()
+                        infoText("Eclipse's SkyStream compatibility layer supports the plugin format defined by Akash's independent SkyStream project and adapts reference behavior from SkyStream Tools.")
+                        GlassDivider(leadingInset: 16)
+                        linkRow(title: "Akash's SkyStream", icon: "puzzlepiece.extension.fill", color: .purple, url: URL(string: "https://github.com/akashdh11/skystream")!)
+                        GlassDivider(leadingInset: 16)
+                        linkRow(title: "SkyStream Tools", icon: "wrench.and.screwdriver.fill", color: .purple, url: URL(string: "https://github.com/akashdh11/skystream-tools")!)
+                        GlassDivider()
+#endif
+                        infoText("This product uses the TMDB API but is not endorsed or certified by TMDB.")
+                        GlassDivider(leadingInset: 16)
+                        tmdbLinkRow
+                        GlassDivider()
+                        NavigationLink(destination: ThirdPartyAcknowledgementsView()) {
+                            GlassDetailRow(icon: "person.3.fill", iconColor: .indigo, title: "Third-Party Acknowledgements") {
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(.white.opacity(0.3))
+                            }
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
-#endif
 
                 GlassSection(header: "Warranty") {
                     infoText("This program comes with no warranty, to the extent permitted by law.")
@@ -3069,6 +3034,26 @@ struct LegalNoticeView: View {
 #endif
     }
 
+    private var tmdbLinkRow: some View {
+        Link(destination: URL(string: "https://www.themoviedb.org")!) {
+            HStack(spacing: 14) {
+                Image("TMDBLogo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 120, height: 24, alignment: .leading)
+                    .accessibilityLabel("The Movie Database")
+                Spacer(minLength: 12)
+                Image(systemName: "arrow.up.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.35))
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
 #if os(tvOS)
     private func qrCode(for url: URL) -> UIImage? {
         let filter = CIFilter.qrCodeGenerator()
@@ -3081,6 +3066,144 @@ struct LegalNoticeView: View {
         return UIImage(cgImage: cgImage)
     }
 #endif
+}
+
+private struct ThirdPartyAcknowledgement: Identifiable {
+    let title: String
+    let detail: String
+    let projectURL: URL
+    let licenseName: String?
+    let licenseURL: URL?
+
+    var id: String { title }
+
+    init(_ title: String, detail: String, project: String, licenseName: String? = nil, license: String? = nil) {
+        self.title = title
+        self.detail = detail
+        self.projectURL = URL(string: project)!
+        self.licenseName = licenseName
+        self.licenseURL = license.flatMap(URL.init(string:))
+    }
+}
+
+private struct ThirdPartyAcknowledgementsView: View {
+    private static let lineage: [ThirdPartyAcknowledgement] = [
+        .init("Luna", detail: "Original upstream project from which Eclipse was derived.", project: "https://github.com/cranci1/Luna", licenseName: "GPLv3", license: "https://github.com/cranci1/Luna/blob/main/LICENSE"),
+        .init("SkyStream", detail: "Akash's independent project defined the plugin format supported by Eclipse's compatibility layer. SkyStream plugins are not bundled with Eclipse.", project: "https://github.com/akashdh11/skystream"),
+        .init("SkyStream Tools", detail: "Reference SDK and extractor behavior adapted by Eclipse's local SkyStream compatibility layer.", project: "https://github.com/akashdh11/skystream-tools", licenseName: "GPLv3", license: "https://github.com/akashdh11/skystream-tools/blob/main/LICENSE"),
+        .init("Aidoku", detail: "Reader Mode and Aidoku source compatibility.", project: "https://github.com/Aidoku/Aidoku", licenseName: "GPLv3", license: "https://github.com/Aidoku/Aidoku/blob/main/LICENSE"),
+        .init("AidokuRunner", detail: "Runtime used for Aidoku-compatible reader sources.", project: "https://github.com/Aidoku/AidokuRunner")
+    ]
+
+    private static let libraries: [ThirdPartyAcknowledgement] = [
+        .init("FakeWebKit", detail: "Copyright © 2025 DevsForge (undeaDD).", project: "https://github.com/undeaDD/FakeWebKit", licenseName: "GPLv3", license: "https://github.com/undeaDD/FakeWebKit/blob/main/LICENSE.md"),
+        .init("Kingfisher", detail: "Copyright © 2019 Wei Wang.", project: "https://github.com/onevcat/Kingfisher", licenseName: "MIT", license: "https://github.com/onevcat/Kingfisher/blob/master/LICENSE"),
+        .init("Nuke", detail: "Copyright © 2015–2026 Alexander Grebenyuk.", project: "https://github.com/kean/Nuke", licenseName: "MIT", license: "https://github.com/kean/Nuke/blob/main/LICENSE"),
+        .init("PLCrashReporter", detail: "Copyright © Microsoft Corporation and © 2008–2014 Plausible Labs Cooperative, Inc.", project: "https://github.com/microsoft/plcrashreporter", licenseName: "License", license: "https://github.com/microsoft/plcrashreporter/blob/master/LICENSE"),
+        .init("SoraCore", detail: "Service runtime by cranci1.", project: "https://github.com/cranci1/SoraCore", licenseName: "GPLv3", license: "https://github.com/cranci1/SoraCore/blob/main/LICENSE"),
+        .init("SwiftSoup", detail: "Copyright © 2009–2025 Jonathan Hedley; Swift port © 2016–2025 Nabil Chatbi.", project: "https://github.com/scinfu/SwiftSoup", licenseName: "MIT", license: "https://github.com/scinfu/SwiftSoup/blob/master/LICENSE"),
+        .init("Sybau", detail: "JavaScript runtime dependency by cranci1.", project: "https://github.com/cranci1/Sybau", licenseName: "GPLv3", license: "https://github.com/cranci1/Sybau/blob/main/LICENSE"),
+        .init("Texture / AsyncDisplayKit", detail: "Created by Pinterest as a continuation of AsyncDisplayKit, originally developed by Facebook.", project: "https://github.com/Skittyblock/Texture", licenseName: "Apache 2.0", license: "https://github.com/Skittyblock/Texture/blob/master/LICENSE"),
+        .init("Wasm3", detail: "Copyright © 2023–2025 Skittyblock.", project: "https://github.com/Skittyblock/Wasm3", licenseName: "MIT", license: "https://github.com/Skittyblock/Wasm3/blob/main/LICENSE"),
+        .init("ZIPFoundation", detail: "Copyright © 2017–2025 Thomas Zoechling.", project: "https://github.com/weichsel/ZIPFoundation", licenseName: "MIT", license: "https://github.com/weichsel/ZIPFoundation/blob/development/LICENSE")
+    ]
+
+    private static let playback: [ThirdPartyAcknowledgement] = [
+        .init("Eclipse MPVKit fork", detail: "Eclipse's in-app playback framework, based on MPVKit.", project: "https://github.com/Soupy-dev/MPVKit", licenseName: "LGPLv3 / GPL components", license: "https://github.com/Soupy-dev/MPVKit/blob/eclipse-mpv-metal/LICENSE"),
+        .init("MPVKit", detail: "Original Apple-platform mpv framework.", project: "https://github.com/mpvkit/MPVKit", licenseName: "LGPLv3 / GPL components", license: "https://github.com/mpvkit/MPVKit/blob/main/LICENSE"),
+        .init("mpv", detail: "Media player and playback engine.", project: "https://github.com/mpv-player/mpv", licenseName: "GPLv2+ / LGPLv2.1+", license: "https://github.com/mpv-player/mpv/blob/master/Copyright"),
+        .init("FFmpeg", detail: "Multimedia codecs, demuxing, filtering, and related playback components.", project: "https://github.com/FFmpeg/FFmpeg", licenseName: "LGPLv2.1+ / GPLv2+", license: "https://github.com/FFmpeg/FFmpeg/blob/master/LICENSE.md"),
+        .init("MoltenVK", detail: "Vulkan implementation for Apple platforms used by the MoltenVK renderer.", project: "https://github.com/KhronosGroup/MoltenVK", licenseName: "Apache 2.0", license: "https://github.com/KhronosGroup/MoltenVK/blob/main/LICENSE")
+    ]
+
+    private static let services: [ThirdPartyAcknowledgement] = [
+        .init("Google Cast SDK", detail: "Optional Google Cast playback support; subject to Google's SDK terms.", project: "https://developers.google.com/cast", licenseName: "Terms", license: "https://developers.google.com/terms"),
+        .init("TMDB", detail: "Movie and television metadata and images. This product uses the TMDB API but is not endorsed or certified by TMDB.", project: "https://www.themoviedb.org"),
+        .init("AniList", detail: "Anime and manga metadata, schedules, and optional tracking.", project: "https://anilist.co"),
+        .init("MyAnimeList", detail: "Optional anime and manga tracking.", project: "https://myanimelist.net"),
+        .init("Trakt", detail: "Optional movie and television tracking, ratings, and schedules.", project: "https://trakt.tv"),
+        .init("TVmaze", detail: "Television schedule metadata.", project: "https://www.tvmaze.com"),
+        .init("Jikan", detail: "Unofficial MyAnimeList API used for supplemental anime episode metadata.", project: "https://jikan.moe"),
+        .init("Kitsu", detail: "Anime identity metadata used for season and episode matching.", project: "https://kitsu.io"),
+        .init("AniMap", detail: "Anime identity and season mapping data.", project: "https://animap.s0n1c.ca"),
+        .init("AniSkip", detail: "Anime skip-segment data.", project: "https://aniskip.com"),
+        .init("TheIntroDB", detail: "Intro, recap, outro, credits, and preview skip-segment data.", project: "https://theintrodb.org"),
+        .init("IntroDB", detail: "IMDb-based skip-segment data used as an optional fallback.", project: "https://introdb.app"),
+        .init("OpenSubtitles", detail: "Optional subtitle discovery through the Stremio OpenSubtitles addon.", project: "https://www.opensubtitles.com"),
+        .init("Stremio", detail: "Addon protocol used for optional user-installed addons.", project: "https://github.com/Stremio/stremio-addon-sdk")
+    ]
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 22) {
+                GlassSection(header: "Project Lineage & Compatibility") {
+                    acknowledgementRows(Self.lineage)
+                }
+
+                GlassSection(header: "Libraries") {
+                    acknowledgementRows(Self.libraries)
+                }
+
+                GlassSection(header: "Playback Stack") {
+                    acknowledgementRows(Self.playback)
+                }
+
+                GlassSection(header: "Data, Tracking & Services") {
+                    acknowledgementRows(Self.services)
+                }
+
+                GlassSection(header: "Notice") {
+                    Text("Names and trademarks belong to their respective owners. These acknowledgements do not imply affiliation or endorsement. Each project and service remains subject to its linked license or terms. Eclipse's corresponding source is available from the Source section.")
+                        .font(.footnote)
+                        .foregroundColor(.white.opacity(0.68))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(16)
+                }
+            }
+            .padding(.top, 16)
+            .padding(.bottom, 32)
+        }
+        .navigationTitle("Acknowledgements")
+        .background(SettingsGradientBackground().ignoresSafeArea())
+        .eclipseDarkToolbar()
+    }
+
+    @ViewBuilder
+    private func acknowledgementRows(_ items: [ThirdPartyAcknowledgement]) -> some View {
+        VStack(spacing: 0) {
+            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                acknowledgementRow(item)
+                if index < items.count - 1 {
+                    GlassDivider(leadingInset: 16)
+                }
+            }
+        }
+    }
+
+    private func acknowledgementRow(_ item: ThirdPartyAcknowledgement) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(item.title)
+                .font(.headline)
+                .foregroundColor(.white)
+
+            Text(item.detail)
+                .font(.footnote)
+                .foregroundColor(.white.opacity(0.64))
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 16) {
+                Link("Project", destination: item.projectURL)
+                if let licenseName = item.licenseName, let licenseURL = item.licenseURL {
+                    Link(licenseName, destination: licenseURL)
+                }
+            }
+            .font(.caption.weight(.semibold))
+            .foregroundColor(.cyan)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 13)
+    }
 }
 
 struct PerformanceModeSettingsView: View {
@@ -3147,6 +3270,7 @@ struct PerformanceModeSettingsView: View {
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
     }
+
 }
 
 #if !os(tvOS)
@@ -3186,7 +3310,7 @@ struct ExperimentalCloudSyncView: View {
                             Text("Cloud Sync")
                                 .font(.headline)
                                 .foregroundColor(.white)
-                            Text("Sync selected Eclipse data through iCloud, Google Drive, or OneDrive.")
+                            Text("Periodically reconcile selected Eclipse data through iCloud, Google Drive, or OneDrive.")
                                 .font(.caption)
                                 .foregroundColor(.white.opacity(0.55))
                                 .fixedSize(horizontal: false, vertical: true)
@@ -3201,6 +3325,9 @@ struct ExperimentalCloudSyncView: View {
                 providerSection(.iCloud)
                 providerSection(.googleDrive)
                 providerSection(.oneDrive)
+
+                GlassSectionFooter("Eclipse checks enabled providers at launch, when the app becomes active, after local changes, and about every 15 minutes while the app remains open. Provider rate limits may delay a retry.")
+                GlassSectionFooter("Multiple providers can stay active. The Primary provider is reconciled first; Eclipse then safely reconciles the resulting local state with the other enabled providers.")
 
                 GlassSection(header: "Notice") {
                     HStack(alignment: .top, spacing: 14) {
@@ -3240,22 +3367,44 @@ struct ExperimentalCloudSyncView: View {
         .navigationTitle("Cloud Sync")
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
-        .onAppear {
-            if !availability.isAvailable, iCloudSyncEnabled {
-                iCloudSyncEnabled = false
+        .alert(
+            "Cloud Sync Needs Your Choice",
+            isPresented: Binding(
+                get: { cloudSyncManager.overwriteWarning != nil },
+                set: { isPresented in
+                    if !isPresented {
+                        cloudSyncManager.cancelOverwriteWarning()
+                    }
+                }
+            ),
+            presenting: cloudSyncManager.overwriteWarning
+        ) { _ in
+            Button("Restore Cloud Data") {
+                cloudSyncManager.restoreCloudAfterOverwriteWarning()
             }
+            Button("Replace Cloud Backup", role: .destructive) {
+                cloudSyncManager.replaceCloudAfterOverwriteWarning()
+            }
+            Button("Cancel", role: .cancel) {
+                cloudSyncManager.cancelOverwriteWarning()
+            }
+        } message: { warning in
+            Text(warning.alertMessage)
         }
         .onChange(of: iCloudSyncEnabled) { enabled in
+            cloudSyncManager.setProviderEnabled(.iCloud, enabled: enabled)
             if enabled {
                 cloudSyncManager.syncSnapshot(provider: .iCloud, reason: "enabled")
             }
         }
         .onChange(of: googleDriveSyncEnabled) { enabled in
+            cloudSyncManager.setProviderEnabled(.googleDrive, enabled: enabled)
             if enabled {
                 cloudSyncManager.syncSnapshot(provider: .googleDrive, reason: "enabled")
             }
         }
         .onChange(of: oneDriveSyncEnabled) { enabled in
+            cloudSyncManager.setProviderEnabled(.oneDrive, enabled: enabled)
             if enabled {
                 cloudSyncManager.syncSnapshot(provider: .oneDrive, reason: "enabled")
             }
@@ -3307,12 +3456,28 @@ struct ExperimentalCloudSyncView: View {
                         .disabled(!canUse || cloudSyncManager.isSyncing)
                 }
 
+                if enabled, cloudSyncManager.primaryProvider != provider {
+                    GlassDivider()
+
+                    Button {
+                        cloudSyncManager.makePrimary(provider)
+                    } label: {
+                        GlassDetailRow(icon: "star", iconColor: .yellow, title: "Make Primary") {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(.white.opacity(0.3))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(cloudSyncManager.isSyncing)
+                }
+
                 GlassDivider()
 
                 Button {
                     cloudSyncManager.syncSnapshot(provider: provider, reason: "manual")
                 } label: {
-                    GlassDetailRow(icon: "arrow.up.doc", iconColor: .cyan, title: "Sync Now") {
+                    GlassDetailRow(icon: "arrow.triangle.2.circlepath", iconColor: .cyan, title: "Reconcile Now") {
                         providerAccessory(provider)
                     }
                 }
@@ -3378,9 +3543,11 @@ struct ExperimentalCloudSyncView: View {
         switch provider {
         case .iCloud:
             guard connected else { return "Unavailable" }
+            if enabled, cloudSyncManager.primaryProvider == provider { return "Primary · On" }
             return enabled ? "On" : "Off"
         case .googleDrive, .oneDrive:
             guard connected else { return "Not Connected" }
+            if enabled, cloudSyncManager.primaryProvider == provider { return "Primary · On" }
             return enabled ? "On" : "Connected"
         }
     }

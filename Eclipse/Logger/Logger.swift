@@ -282,6 +282,7 @@ class Logger: @unchecked Sendable {
                 self.ensureLogFileExists()
                 self.logFileBytes = 0
             }
+            CrashReportManager.shared.clearCrashReport()
         }
     }
     
@@ -300,6 +301,7 @@ class Logger: @unchecked Sendable {
                     self.ensureLogFileExists()
                     self.logFileBytes = 0
                 }
+                CrashReportManager.shared.clearCrashReport()
                 continuation.resume()
             }
         }

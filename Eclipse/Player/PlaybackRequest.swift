@@ -139,6 +139,7 @@ struct PlayerServicesSelectionContext {
     let isAnime: Bool
     let selectedEpisode: TMDBEpisode?
     let tmdbID: Int
+    let mediaYear: Int?
     let animeSeasonTitle: String?
     let posterPath: String?
     let originalAudioLanguage: String?
@@ -190,6 +191,7 @@ struct PlayerServicesSelectionContext {
             posterPath = showPosterURL ?? fallbackPoster
         }
         originalAudioLanguage = request.servicesOriginalAudioLanguage
+        mediaYear = request.mediaYear
         imdbID = request.imdbID
         originalTMDBSeasonNumber = request.episodePlaybackContext?.resolvedTMDBSeasonNumber
             ?? request.originalTMDBSeasonNumber
@@ -216,6 +218,7 @@ struct PlaybackRequest {
     let subtitleHeadersByURL: [String: [String: String]]?
     let mediaSelectionIntent: PlaybackMediaSelectionIntent
     let mediaInfo: MediaInfo?
+    let mediaYear: Int?
     let imdbID: String?
     let episodePlaybackContext: EpisodePlaybackContext?
     let launchContext: PlaybackLaunchContext?
@@ -243,6 +246,7 @@ struct PlaybackRequest {
         subtitleHeadersByURL: [String: [String: String]]? = nil,
         mediaSelectionIntent: PlaybackMediaSelectionIntent? = nil,
         mediaInfo: MediaInfo? = nil,
+        mediaYear: Int? = nil,
         imdbID: String? = nil,
         episodePlaybackContext: EpisodePlaybackContext? = nil,
         launchContext: PlaybackLaunchContext? = nil,
@@ -272,6 +276,7 @@ struct PlaybackRequest {
         self.mediaSelectionIntent = mediaSelectionIntent
             ?? PlaybackMediaSelectionIntent.currentDefaults(isAnime: isAnime)
         self.mediaInfo = mediaInfo
+        self.mediaYear = mediaYear.flatMap { (1800...3000).contains($0) ? $0 : nil }
         self.imdbID = imdbID
         self.episodePlaybackContext = episodePlaybackContext
         self.launchContext = launchContext
@@ -316,6 +321,7 @@ struct PlaybackRequest {
             subtitleHeadersByURL: subtitleHeadersByURL,
             mediaSelectionIntent: mediaSelectionIntent,
             mediaInfo: mediaInfo,
+            mediaYear: mediaYear,
             imdbID: imdbID,
             episodePlaybackContext: episodePlaybackContext,
             launchContext: launchContext,

@@ -22,6 +22,14 @@ enum DownloadEnqueueResult {
     case adoptedExistingFile
 }
 
+/// Non-secret transport identity retained across launches. SkyStream access material is
+/// deliberately kept out of the Codable model; this marker tells recovery which validated
+/// transport must be rebuilt from `lastContentReference` before a transfer can continue.
+enum DownloadProviderTransportKind: String, Codable {
+    case skyStreamDirect
+    case skyStreamHLS
+}
+
 enum AutoModeDownloadValidationResult: Equatable {
     case valid
     case invalid(reason: String)
@@ -50,13 +58,23 @@ struct DownloadItem: Codable, Identifiable {
     let episodeName: String?
     var streamURL: String
     var headers: [String: String]
-    let subtitleURL: String?
-    let subtitleHeaders: [String: String]?
+    var subtitleURL: String?
+    var subtitleHeaders: [String: String]?
     let serviceBaseURL: String
     /// Provider identity retained so an expired signed CDN URL can be re-extracted instead of
     /// opening an unsolvable verification page on the CDN itself. Optional for old metadata.
     var sourceId: String? = nil
     var serviceContentHref: String? = nil
+    /// Generalized source identity used for provider-owned URL refresh. The legacy
+    /// `sourceId`/`serviceContentHref` pair remains populated for existing Services.
+    var lastSourceId: String? = nil
+    /// Bounded provider state that can re-run resolution without retaining JavaScript values,
+    /// cookies, request headers, or a signed playable URL.
+    var lastContentReference: ProviderContentReference? = nil
+    var providerTransportKind: DownloadProviderTransportKind? = nil
+    /// Validator-proven whole-object size for finite typed direct media. This value is not a
+    /// credential and is enforced as both a hard transfer ceiling and final-size invariant.
+    var validatedExpectedContentLength: Int64? = nil
     var streamName: String? = nil
     let episodePlaybackContext: EpisodePlaybackContext?
     var status: DownloadStatus
@@ -85,7 +103,8 @@ struct DownloadItem: Codable, Identifiable {
     var hlsTotalSegments: Int?        // segment count, used to validate a resume
     
     var isHLS: Bool {
-        streamURL.lowercased().contains(".m3u8")
+        providerTransportKind == .skyStreamHLS
+            || streamURL.lowercased().contains(".m3u8")
     }
     
     var formattedSize: String {
@@ -151,21 +170,57 @@ struct DownloadItem: Codable, Identifiable {
 final class DownloadManager: NSObject, ObservableObject {
     static let shared = DownloadManager()
 
+    private enum RefreshedDownloadTransport {
+        case direct(url: URL, headers: [String: String], expectedContentLength: Int64?)
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        case skyStreamHLS(SkyStreamValidatedPlaybackDescriptor)
+#endif
+    }
+
     private struct RefreshedDownloadSource {
-        let url: URL
-        let headers: [String: String]
+        let transport: RefreshedDownloadTransport
         let streamName: String?
-        let serviceContentHref: String
+        let serviceContentHref: String?
+        let lastSourceId: String
+        let lastContentReference: ProviderContentReference
+
+        var directURL: URL? {
+            guard case .direct(let url, _, _) = transport else { return nil }
+            return url
+        }
     }
     
     @Published private(set) var downloads: [DownloadItem] = []
     
     private var backgroundSession: URLSession!
     private var activeTasks: [String: URLSessionDownloadTask] = [:]
+    /// Terminal callbacks can arrive after a task was cancelled and its stable download ID was
+    /// reused. Task identifiers are unique within this background session, so retain invalidated
+    /// identifiers until `didCompleteWithError` confirms that attempt is fully drained.
+    private var invalidatedDirectTaskIdentifiers = Set<Int>()
+    private var pendingResumeDataTaskIdentifiers: [String: Int] = [:]
     private var resumeDataStore: [String: Data] = [:]
     private var lastProgressUpdate: [String: Date] = [:]
     private var lastHLSCheckpointSave: [String: Date] = [:]
     private var activeHLSDownloaders: [String: HLSDownloader] = [:]
+    /// A stable download ID can be removed and immediately re-enqueued while the prior HLS
+    /// worker is still delivering cancellation/progress callbacks. Bind every callback to one
+    /// in-memory attempt so an abandoned worker cannot mutate or release its replacement.
+    private var activeHLSAttemptIDs: [String: UUID] = [:]
+    private var invalidatedHLSAttemptIDs = Set<UUID>()
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    /// Validator-issued route graphs and their loopback capabilities exist only in memory.
+    /// Persisted downloads retain the bounded provider reference and transport kind instead.
+    private var skyStreamHLSDescriptors: [String: SkyStreamValidatedPlaybackDescriptor] = [:]
+    private var skyStreamHLSProxyURLs: [String: URL] = [:]
+    private var skyStreamHLSPinnedVariantURLs: [String: URL] = [:]
+    private var skyStreamRestoringDownloadIDs = Set<String>()
+    /// Direct transfers repeat uncached URL/DNS policy immediately before creating their
+    /// background task. Pending IDs reserve queue slots so re-entrant queue processing cannot
+    /// start duplicate validations or let more transfers exceed the user's concurrency setting.
+    private var skyStreamDirectValidationPendingIDs = Set<String>()
+    private var skyStreamDirectDispatchApprovedIDs = Set<String>()
+#endif
     /// Download IDs whose confirmed Cloudflare/DDoS-Guard response is currently being
     /// re-verified. Accessed on the main thread so a transport failure can only open one solve.
     private var cloudflareRecoveringDownloadIDs = Set<String>()
@@ -380,12 +435,21 @@ final class DownloadManager: NSObject, ObservableObject {
         serviceBaseURL: String,
         sourceId: String? = nil,
         serviceContentHref: String? = nil,
+        lastSourceId: String? = nil,
+        lastContentReference: ProviderContentReference? = nil,
         streamName: String? = nil,
         isAnime: Bool,
         episodePlaybackContext: EpisodePlaybackContext? = nil,
         cancellationRequested: @escaping @MainActor () -> Bool = { false }
     ) async -> AutoModeDownloadEnqueueResult {
         guard !cancellationRequested() else { return .cancelled }
+
+        let recoveryMetadata = Self.validatedRecoveryMetadata(
+            legacySourceId: sourceId,
+            legacyServiceHref: serviceContentHref,
+            sourceId: lastSourceId,
+            contentReference: lastContentReference
+        )
 
         let id = isMovie
             ? "dl_movie_\(tmdbId)"
@@ -407,6 +471,8 @@ final class DownloadManager: NSObject, ObservableObject {
             serviceBaseURL: serviceBaseURL,
             sourceId: sourceId,
             serviceContentHref: serviceContentHref,
+            lastSourceId: recoveryMetadata.sourceId,
+            lastContentReference: recoveryMetadata.reference,
             streamName: streamName,
             episodePlaybackContext: episodePlaybackContext,
             status: .queued,
@@ -446,6 +512,8 @@ final class DownloadManager: NSObject, ObservableObject {
                 serviceBaseURL: serviceBaseURL,
                 sourceId: sourceId,
                 serviceContentHref: serviceContentHref,
+                lastSourceId: recoveryMetadata.sourceId,
+                lastContentReference: recoveryMetadata.reference,
                 streamName: streamName,
                 isAnime: isAnime,
                 episodePlaybackContext: episodePlaybackContext
@@ -458,6 +526,215 @@ final class DownloadManager: NSObject, ObservableObject {
         case .cancelled:
             return .cancelled
         }
+    }
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    /// SkyStream's download entry point accepts only the resolver's unforgeable VOD descriptor.
+    /// Direct media uses the validator's finite URL, while a deliberately narrow MPEG-TS HLS
+    /// shape is packaged exclusively through the descriptor-backed loopback route graph.
+    @MainActor
+    func enqueueValidatedSkyStreamDownload(
+        tmdbId: Int,
+        isMovie: Bool,
+        title: String,
+        displayTitle: String,
+        posterURL: String?,
+        seasonNumber: Int?,
+        episodeNumber: Int?,
+        episodeName: String?,
+        resolved: SkyStreamResolvedStream,
+        isAnime: Bool,
+        episodePlaybackContext: EpisodePlaybackContext? = nil,
+        cancellationRequested: @escaping @MainActor () -> Bool = { false }
+    ) -> AutoModeDownloadEnqueueResult {
+        guard !cancellationRequested() else { return .cancelled }
+        let descriptor = resolved.playback
+        guard resolved.contentReference.isStructurallyValid,
+              resolved.contentReference.sourceID == resolved.provider.id else {
+            return .invalid(reason: "The SkyStream source did not include a valid recovery reference.")
+        }
+
+        let transportKind: DownloadProviderTransportKind
+        let streamURL: String
+        let headers: [String: String]
+        let serviceBaseURL: String
+        switch descriptor.mediaKind {
+        case .direct:
+            guard descriptor.proxyOptions == nil,
+                  descriptor.acceptedManifests.isEmpty,
+                  let contentLength = descriptor.finiteContentLength,
+                  contentLength > 0 else {
+                return .invalid(
+                    reason: "This verified direct source requires a proxy-aware download transport."
+                )
+            }
+            transportKind = .skyStreamDirect
+            streamURL = descriptor.underlyingRemoteURL.url.absoluteString
+            headers = descriptor.headers.values
+            serviceBaseURL = Self.originString(for: descriptor.underlyingRemoteURL.url)
+        case .hls:
+            if let reason = Self.skyStreamHLSRejectionReason(descriptor) {
+                return .invalid(reason: reason)
+            }
+            transportKind = .skyStreamHLS
+            // The actual signed route graph is installed below and never enters Codable state.
+            streamURL = ""
+            headers = [:]
+            serviceBaseURL = ""
+        case .dash:
+            return .invalid(
+                reason: "Static DASH downloads need an MPD-aware segment packager and muxer; Eclipse cannot safely concatenate DASH representations."
+            )
+        }
+
+        let downloadID = Self.downloadID(
+            tmdbId: tmdbId,
+            isMovie: isMovie,
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber
+        )
+        if transportKind == .skyStreamHLS {
+            // Install before enqueueing because `enqueueDownload` starts the queue synchronously.
+            skyStreamHLSDescriptors[downloadID] = descriptor
+        }
+
+        // Validator-issued subtitle routes are URL-policy checked, but not fetched or bounded.
+        // The legacy sidecar downloader has no byte ceiling or typed lifetime coordination, so
+        // omitting them is safer than treating an arbitrary response as a finite subtitle file.
+        let result = enqueueDownload(
+            tmdbId: tmdbId,
+            isMovie: isMovie,
+            title: title,
+            displayTitle: displayTitle,
+            posterURL: posterURL,
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber,
+            episodeName: episodeName,
+            streamURL: streamURL,
+            headers: headers,
+            subtitleURL: nil,
+            subtitleHeaders: nil,
+            serviceBaseURL: serviceBaseURL,
+            sourceId: nil,
+            serviceContentHref: nil,
+            lastSourceId: resolved.provider.id,
+            lastContentReference: .skyStream(resolved.contentReference),
+            providerTransportKind: transportKind,
+            validatedExpectedContentLength: descriptor.mediaKind == .direct
+                ? descriptor.finiteContentLength
+                : nil,
+            streamName: resolved.displayName,
+            isAnime: isAnime,
+            episodePlaybackContext: episodePlaybackContext
+        )
+        if transportKind == .skyStreamHLS {
+            if case .enqueued = result {
+                // The queue now owns the in-memory descriptor.
+            } else {
+                clearSkyStreamDownloadRuntimeState(id: downloadID, discardDescriptor: true)
+            }
+        }
+        return .accepted(result)
+    }
+
+    /// The legacy packager concatenates one MPEG-TS rendition. It cannot preserve byte ranges,
+    /// rendition groups, discontinuities, encryption state, or fragmented-MP4 initialization.
+    /// Reject every such shape before creating a loopback capability so unsupported manifests
+    /// cannot silently produce a corrupt file.
+    static func skyStreamHLSRejectionReason(
+        _ descriptor: SkyStreamValidatedPlaybackDescriptor
+    ) -> String? {
+        guard descriptor.mediaKind == .hls,
+              !descriptor.acceptedManifests.isEmpty,
+              !descriptor.routes.isEmpty else {
+            return "The SkyStream source did not provide a finite validated HLS route graph."
+        }
+
+        for route in descriptor.routes {
+            switch route.role {
+            case .streamRoot, .manifest, .mediaSegment, .subtitle:
+                break
+            case .encryptionKey:
+                return "Encrypted HLS downloads are not supported by the safe offline packager."
+            case .initialization:
+                return "Fragmented-MP4 HLS downloads need a container-aware muxer."
+            case .dashResource:
+                return "The HLS descriptor unexpectedly included a DASH resource."
+            }
+            if route.role == .mediaSegment {
+                let ext = route.remoteURL.url.pathExtension.lowercased()
+                guard ext == "ts" || ext == "m2ts" else {
+                    return "Only explicit MPEG-TS HLS segments can be packaged safely for offline playback."
+                }
+            }
+        }
+
+        let unsupportedTagPrefixes = [
+            "#EXT-X-BYTERANGE", "#EXT-X-DISCONTINUITY", "#EXT-X-GAP",
+            "#EXT-X-I-FRAME", "#EXT-X-KEY:", "#EXT-X-SESSION-KEY:",
+            "#EXT-X-MAP:", "#EXT-X-MEDIA:", "#EXT-X-PART",
+            "#EXT-X-PRELOAD-HINT", "#EXT-X-RENDITION-REPORT",
+            "#EXT-X-SERVER-CONTROL", "#EXT-X-SKIP"
+        ]
+
+        for accepted in descriptor.acceptedManifests {
+            guard accepted.mediaKind == .hls,
+                  let text = String(data: accepted.bytes, encoding: .utf8) else {
+                return "The validated HLS playlist could not be decoded safely."
+            }
+            let lines = text.components(separatedBy: .newlines).map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines)
+            }.filter { !$0.isEmpty }
+            guard lines.first?.trimmingCharacters(
+                in: CharacterSet(charactersIn: "\u{feff}")
+            ).uppercased() == "#EXTM3U" else {
+                return "The validated HLS playlist has an unsupported format."
+            }
+
+            let upperLines = lines.map { $0.uppercased() }
+            if upperLines.contains(where: { line in
+                unsupportedTagPrefixes.contains { line.hasPrefix($0) }
+            }) {
+                return "This HLS playlist uses features the offline MPEG-TS packager cannot preserve safely."
+            }
+
+            let hasMasterEntries = upperLines.contains { $0.hasPrefix("#EXT-X-STREAM-INF:") }
+            let hasMediaEntries = upperLines.contains { $0.hasPrefix("#EXTINF:") }
+            guard hasMasterEntries != hasMediaEntries else {
+                return "The validated HLS playlist mixes or omits master and media entries."
+            }
+            if hasMasterEntries {
+                if upperLines.contains(where: {
+                    $0.hasPrefix("#EXT-X-STREAM-INF:")
+                        && ($0.contains("AUDIO=") || $0.contains("VIDEO="))
+                }) {
+                    return "HLS downloads with separate audio or video rendition groups need a muxer."
+                }
+            } else if !upperLines.contains("#EXT-X-ENDLIST") {
+                return "Only explicitly ended VOD HLS playlists can be downloaded."
+            }
+        }
+        return nil
+    }
+#endif
+
+    private static func downloadID(
+        tmdbId: Int,
+        isMovie: Bool,
+        seasonNumber: Int?,
+        episodeNumber: Int?
+    ) -> String {
+        if isMovie { return "dl_movie_\(tmdbId)" }
+        return "dl_ep_\(tmdbId)_s\(seasonNumber ?? 0)_e\(episodeNumber ?? 0)"
+    }
+
+    private static func originString(for url: URL) -> String {
+        guard let scheme = url.scheme,
+              let host = url.host else { return "" }
+        if let port = url.port {
+            return "\(scheme)://\(host):\(port)"
+        }
+        return "\(scheme)://\(host)"
     }
 
     @MainActor
@@ -489,6 +766,62 @@ final class DownloadManager: NSObject, ObservableObject {
 
         return nil
     }
+
+    private static func validatedRecoveryMetadata(
+        legacySourceId: String?,
+        legacyServiceHref: String?,
+        sourceId: String?,
+        contentReference: ProviderContentReference?
+    ) -> (sourceId: String?, reference: ProviderContentReference?) {
+        let normalizedSourceId = (sourceId ?? contentReference?.sourceID ?? legacySourceId)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let boundedSourceId = normalizedSourceId.flatMap { value in
+            value.isEmpty || value.utf8.count > 320 ? nil : value
+        }
+
+        if let contentReference,
+           let boundedSourceId,
+           isValidRecoveryReference(contentReference, matchingSourceId: boundedSourceId) {
+            return (boundedSourceId, contentReference)
+        }
+
+        guard let legacySourceId = legacySourceId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              legacySourceId.hasPrefix("service:"),
+              legacySourceId.utf8.count <= 320,
+              let legacyServiceHref,
+              !legacyServiceHref.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            // Retain a valid identity even when no safe refresh payload exists. Recovery remains
+            // disabled until a matching bounded reference is provided.
+            return (boundedSourceId, nil)
+        }
+        let reference = ProviderContentReference.service(
+            sourceID: legacySourceId,
+            href: legacyServiceHref
+        )
+        guard reference.serviceHref != nil else { return (boundedSourceId, nil) }
+        return (legacySourceId, reference)
+    }
+
+    private static func isValidRecoveryReference(
+        _ reference: ProviderContentReference,
+        matchingSourceId sourceId: String
+    ) -> Bool {
+        guard reference.schemaVersion == 1,
+              reference.sourceID == sourceId else { return false }
+        switch reference.kind {
+        case .service:
+            guard sourceId.hasPrefix("service:"),
+                  let href = reference.serviceHref else { return false }
+            return !href.isEmpty && href.utf8.count <= 8 * 1_024
+        case .stremio:
+            guard sourceId.hasPrefix("stremio:"),
+                  let contentID = reference.stremioContentID else { return false }
+            return !contentID.isEmpty && contentID.utf8.count <= 2 * 1_024
+        case .skyStream:
+            return reference.skyStream?.sourceID == sourceId
+                && reference.skyStream?.isStructurallyValid == true
+        }
+    }
     
     @discardableResult
     @MainActor
@@ -508,16 +841,26 @@ final class DownloadManager: NSObject, ObservableObject {
         serviceBaseURL: String,
         sourceId: String? = nil,
         serviceContentHref: String? = nil,
+        lastSourceId: String? = nil,
+        lastContentReference: ProviderContentReference? = nil,
+        providerTransportKind: DownloadProviderTransportKind? = nil,
+        validatedExpectedContentLength: Int64? = nil,
         streamName: String? = nil,
         isAnime: Bool,
         episodePlaybackContext: EpisodePlaybackContext? = nil
     ) -> DownloadEnqueueResult {
-        let id: String
-        if isMovie {
-            id = "dl_movie_\(tmdbId)"
-        } else {
-            id = "dl_ep_\(tmdbId)_s\(seasonNumber ?? 0)_e\(episodeNumber ?? 0)"
-        }
+        let recoveryMetadata = Self.validatedRecoveryMetadata(
+            legacySourceId: sourceId,
+            legacyServiceHref: serviceContentHref,
+            sourceId: lastSourceId,
+            contentReference: lastContentReference
+        )
+        let id = Self.downloadID(
+            tmdbId: tmdbId,
+            isMovie: isMovie,
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber
+        )
 
         var item = DownloadItem(
             id: id,
@@ -536,6 +879,10 @@ final class DownloadManager: NSObject, ObservableObject {
             serviceBaseURL: serviceBaseURL,
             sourceId: sourceId,
             serviceContentHref: serviceContentHref,
+            lastSourceId: recoveryMetadata.sourceId,
+            lastContentReference: recoveryMetadata.reference,
+            providerTransportKind: providerTransportKind,
+            validatedExpectedContentLength: validatedExpectedContentLength,
             streamName: streamName,
             episodePlaybackContext: episodePlaybackContext,
             status: .queued,
@@ -595,13 +942,23 @@ final class DownloadManager: NSObject, ObservableObject {
                   downloads[index].status == .downloading else { return }
 
             if let task = activeTasks[id] {
+                let pausedTaskIdentifier = task.taskIdentifier
+                pendingResumeDataTaskIdentifiers[id] = pausedTaskIdentifier
                 task.cancel(byProducingResumeData: { [weak self] data in
                     guard let data else { return }
                     self?.performOnMain {
-                        self?.resumeDataStore[id] = data
+                        guard let self,
+                              self.pendingResumeDataTaskIdentifiers[id] == pausedTaskIdentifier,
+                              self.activeTasks[id] == nil,
+                              self.downloads.first(where: { $0.id == id })?.status == .paused else {
+                            return
+                        }
+                        self.pendingResumeDataTaskIdentifiers.removeValue(forKey: id)
+                        self.resumeDataStore[id] = data
                     }
                 })
                 activeTasks.removeValue(forKey: id)
+                invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
             } else if let downloader = activeHLSDownloaders[id] {
                 // HLS downloads do not support resume; cancel and restart on resume.
                 // Keep the HLS lane occupied until cancellation is confirmed.
@@ -628,6 +985,7 @@ final class DownloadManager: NSObject, ObservableObject {
             }
 
             downloads[index].status = .queued
+            pendingResumeDataTaskIdentifiers.removeValue(forKey: id)
             downloads[index].retryNotBefore = nil
             downloads[index].rateLimitRetryCount = nil
             downloads[index].error = nil
@@ -650,12 +1008,19 @@ final class DownloadManager: NSObject, ObservableObject {
             if let task = activeTasks[id] {
                 task.cancel()
                 activeTasks.removeValue(forKey: id)
+                invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
             }
             if let downloader = activeHLSDownloaders[id] {
+                if let attemptID = activeHLSAttemptIDs[id] {
+                    invalidatedHLSAttemptIDs.insert(attemptID)
+                }
                 downloader.cancel()
-                activeHLSDownloaders.removeValue(forKey: id)
             }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            clearSkyStreamDownloadRuntimeState(id: id, discardDescriptor: true)
+#endif
             resumeDataStore.removeValue(forKey: id)
+            pendingResumeDataTaskIdentifiers.removeValue(forKey: id)
             lastHLSCheckpointSave.removeValue(forKey: id)
             removeDownload(id: id, deleteFile: true)
             processQueue()
@@ -666,6 +1031,22 @@ final class DownloadManager: NSObject, ObservableObject {
     
     func removeDownload(id: String, deleteFile: Bool) {
         let removal = {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            self.clearSkyStreamDownloadRuntimeState(id: id, discardDescriptor: true)
+#endif
+            if let task = self.activeTasks.removeValue(forKey: id) {
+                self.invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
+                task.cancel()
+            }
+            self.pendingResumeDataTaskIdentifiers.removeValue(forKey: id)
+            if let downloader = self.activeHLSDownloaders[id] {
+                if let attemptID = self.activeHLSAttemptIDs[id] {
+                    self.invalidatedHLSAttemptIDs.insert(attemptID)
+                }
+                // Retain the lane until this exact worker confirms cancellation. Starting a
+                // replacement against the same canonical partial path before then can mix bytes.
+                downloader.cancel()
+            }
             if let item = self.downloads.first(where: { $0.id == id }) {
                 if deleteFile {
                     self.deleteDownloadFiles(for: item, includePartial: true, removingIDs: Set([id]))
@@ -688,6 +1069,9 @@ final class DownloadManager: NSObject, ObservableObject {
             }.map { $0.id })
             guard !matchingIds.isEmpty else { return }
             for item in self.downloads where matchingIds.contains(item.id) {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                self.clearSkyStreamDownloadRuntimeState(id: item.id, discardDescriptor: true)
+#endif
                 self.deleteDownloadFiles(for: item, includePartial: false, removingIDs: matchingIds)
             }
             self.downloads.removeAll { matchingIds.contains($0.id) }
@@ -705,6 +1089,9 @@ final class DownloadManager: NSObject, ObservableObject {
             let completedIds = Set(self.downloads.filter { $0.status == .completed }.map { $0.id })
             guard !completedIds.isEmpty else { return }
             for item in self.downloads where completedIds.contains(item.id) {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                self.clearSkyStreamDownloadRuntimeState(id: item.id, discardDescriptor: true)
+#endif
                 self.deleteDownloadFiles(for: item, includePartial: false, removingIDs: completedIds)
             }
             self.downloads.removeAll { completedIds.contains($0.id) }
@@ -720,13 +1107,25 @@ final class DownloadManager: NSObject, ObservableObject {
     func deleteAll() {
         // Cancel all active tasks
         for (_, task) in activeTasks {
+            invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
             task.cancel()
         }
         activeTasks.removeAll()
+        pendingResumeDataTaskIdentifiers.removeAll()
         for (_, downloader) in activeHLSDownloaders {
             downloader.cancel()
         }
-        activeHLSDownloaders.removeAll()
+        invalidatedHLSAttemptIDs.formUnion(activeHLSAttemptIDs.values)
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        for proxyURL in skyStreamHLSProxyURLs.values {
+            MPVHeaderProxy.shared.invalidateSession(for: proxyURL)
+        }
+        skyStreamHLSProxyURLs.removeAll()
+        skyStreamHLSPinnedVariantURLs.removeAll()
+        skyStreamHLSDescriptors.removeAll()
+        skyStreamDirectValidationPendingIDs.removeAll()
+        skyStreamDirectDispatchApprovedIDs.removeAll()
+#endif
         resumeDataStore.removeAll()
         
         // Wipe the entire downloads directory to guarantee no orphans remain
@@ -2244,7 +2643,12 @@ final class DownloadManager: NSObject, ObservableObject {
         }
 
         let currentlyDownloading = downloads.filter { $0.status == .downloading }.count
-        var slotsAvailable = maxConcurrentDownloads - currentlyDownloading
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        let reservedDirectValidations = skyStreamDirectValidationPendingIDs.count
+#else
+        let reservedDirectValidations = 0
+#endif
+        var slotsAvailable = maxConcurrentDownloads - currentlyDownloading - reservedDirectValidations
         
         guard slotsAvailable > 0 else { return }
         
@@ -2259,7 +2663,15 @@ final class DownloadManager: NSObject, ObservableObject {
             scheduleQueueWake(at: nextRetryDate)
         }
         let queued = downloads.filter {
-            $0.status == .queued && ($0.retryNotBefore == nil || $0.retryNotBefore! <= now)
+            guard $0.status == .queued,
+                  $0.retryNotBefore == nil || $0.retryNotBefore! <= now else {
+                return false
+            }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            return !skyStreamDirectValidationPendingIDs.contains($0.id)
+#else
+            return true
+#endif
         }
 
         for item in queued {
@@ -2307,6 +2719,22 @@ final class DownloadManager: NSObject, ObservableObject {
     }
     
     private func startDownload(_ item: DownloadItem) {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        if item.providerTransportKind == .skyStreamHLS {
+            startValidatedSkyStreamHLSDownload(item)
+            return
+        }
+        if item.providerTransportKind == .skyStreamDirect,
+           item.streamURL.isEmpty {
+            restoreValidatedSkyStreamDownload(item)
+            return
+        }
+        if item.providerTransportKind == .skyStreamDirect,
+           skyStreamDirectDispatchApprovedIDs.remove(item.id) == nil {
+            beginValidatedSkyStreamDirectDispatch(item)
+            return
+        }
+#endif
         guard let url = URL(string: item.streamURL) else {
             markFailed(id: item.id, error: "Invalid stream URL")
             return
@@ -2329,6 +2757,12 @@ final class DownloadManager: NSObject, ObservableObject {
         var request = URLRequest(url: url)
         for (key, value) in effectiveHeaders {
             request.setValue(value, forHTTPHeaderField: key)
+        }
+        if item.providerTransportKind == .skyStreamDirect {
+            // The validator proves `finiteContentLength` against identity bytes. Prevent
+            // transparent content encoding from invalidating that size invariant—or allowing
+            // the wire representation to differ from the bytes that were actually validated.
+            request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         }
         
         let task: URLSessionDownloadTask
@@ -2365,9 +2799,74 @@ final class DownloadManager: NSObject, ObservableObject {
         
         Logger.shared.log("Started download: \(item.displayTitle)", type: "Download")
     }
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    private func beginValidatedSkyStreamDirectDispatch(_ item: DownloadItem) {
+        guard Thread.isMainThread else {
+            DispatchQueue.main.async { [weak self] in
+                self?.beginValidatedSkyStreamDirectDispatch(item)
+            }
+            return
+        }
+        guard skyStreamDirectValidationPendingIDs.insert(item.id).inserted,
+              let url = URL(string: item.streamURL),
+              !item.streamURL.isEmpty else {
+            if item.streamURL.isEmpty {
+                skyStreamDirectValidationPendingIDs.remove(item.id)
+                markFailed(id: item.id, error: "The validated download route is unavailable.")
+            }
+            return
+        }
+
+        let expectedURL = item.streamURL
+        let expectedHeaders = item.headers
+        let expectedLength = item.validatedExpectedContentLength
+        let expectedReference = item.lastContentReference
+        Task { [weak self] in
+            let approved: Bool
+            do {
+                let checked = try await SkyStreamRemoteURLPolicy.shared
+                    .validateForNetworkDispatch(url.absoluteString, purpose: .streamRoot)
+                approved = checked.url.absoluteString == url.absoluteString
+            } catch {
+                approved = false
+            }
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.skyStreamDirectValidationPendingIDs.remove(item.id)
+                guard let current = self.downloads.first(where: { $0.id == item.id }),
+                      current.status == .queued,
+                      current.providerTransportKind == .skyStreamDirect,
+                      current.streamURL == expectedURL,
+                      current.headers == expectedHeaders,
+                      current.validatedExpectedContentLength == expectedLength,
+                      current.lastContentReference == expectedReference else {
+                    self.processQueue()
+                    return
+                }
+                guard approved else {
+                    self.markFailed(
+                        id: item.id,
+                        error: "The validated download route no longer resolves safely."
+                    )
+                    return
+                }
+                self.skyStreamDirectDispatchApprovedIDs.insert(item.id)
+                self.startDownload(current)
+            }
+        }
+    }
+#endif
     
-    private func startHLSDownload(_ item: DownloadItem) {
-        guard let url = URL(string: item.streamURL) else {
+    private func startHLSDownload(
+        _ item: DownloadItem,
+        streamURLOverride: URL? = nil,
+        headersOverride: [String: String]? = nil,
+        pinnedVariantOverride: URL? = nil,
+        persistResolvedVariant: Bool = true
+    ) {
+        guard let url = streamURLOverride ?? URL(string: item.streamURL) else {
             markFailed(id: item.id, error: "Invalid stream URL")
             return
         }
@@ -2393,9 +2892,12 @@ final class DownloadManager: NSObject, ObservableObject {
 
         let resumeSegment = item.hlsResumeSegmentIndex ?? 0
         let resumeBytes = item.hlsResumeByteCount ?? 0
-        let pinnedVariant = item.hlsVariantURL.flatMap { URL(string: $0) }
+        let pinnedVariant = pinnedVariantOverride
+            ?? item.hlsVariantURL.flatMap { URL(string: $0) }
         let expectedTotal = item.hlsTotalSegments ?? 0
-        let refreshedHeaders = effectiveHeaders(item.headers, for: url)
+        let refreshedHeaders = headersOverride
+            ?? effectiveHeaders(item.headers, for: url)
+        let attemptID = UUID()
 
         let downloader = HLSDownloader(
             streamURL: url,
@@ -2405,13 +2907,26 @@ final class DownloadManager: NSObject, ObservableObject {
             resumeFromSegment: resumeSegment,
             resumeByteCount: resumeBytes,
             pinnedVariantURL: pinnedVariant,
-            expectedTotalSegments: expectedTotal
+            expectedTotalSegments: expectedTotal,
+            minimumRequestStartInterval: streamURLOverride == nil ? nil : 0,
+            enforcesConservativeDiskCapacityReserve: item.providerTransportKind == .skyStreamHLS
         )
 
         downloader.onVariantResolved = { [weak self] variantURL, totalSegments in
             guard let self = self else { return }
+            guard self.activeHLSAttemptIDs[item.id] == attemptID,
+                  !self.invalidatedHLSAttemptIDs.contains(attemptID) else { return }
             if let index = self.downloads.firstIndex(where: { $0.id == item.id }) {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                if persistResolvedVariant {
+                    self.downloads[index].hlsVariantURL = variantURL.absoluteString
+                } else {
+                    self.skyStreamHLSPinnedVariantURLs[item.id] = variantURL
+                    self.downloads[index].hlsVariantURL = nil
+                }
+#else
                 self.downloads[index].hlsVariantURL = variantURL.absoluteString
+#endif
                 self.downloads[index].hlsTotalSegments = totalSegments
                 self.saveDownloads()
             }
@@ -2419,6 +2934,8 @@ final class DownloadManager: NSObject, ObservableObject {
 
         downloader.onCheckpoint = { [weak self] segmentsWritten, byteCount in
             guard let self = self else { return }
+            guard self.activeHLSAttemptIDs[item.id] == attemptID,
+                  !self.invalidatedHLSAttemptIDs.contains(attemptID) else { return }
             guard let index = self.downloads.firstIndex(where: { $0.id == item.id }),
                   self.downloads[index].status == .downloading else { return }
             self.downloads[index].hlsResumeSegmentIndex = segmentsWritten
@@ -2440,6 +2957,8 @@ final class DownloadManager: NSObject, ObservableObject {
 
         downloader.onProgress = { [weak self] progress in
             guard let self = self else { return }
+            guard self.activeHLSAttemptIDs[item.id] == attemptID,
+                  !self.invalidatedHLSAttemptIDs.contains(attemptID) else { return }
             if let index = self.downloads.firstIndex(where: { $0.id == item.id }),
                self.downloads[index].status == .downloading {
                 self.downloads[index].progress = progress
@@ -2450,7 +2969,14 @@ final class DownloadManager: NSObject, ObservableObject {
             guard let self = self else { return }
 
             DispatchQueue.main.async {
+                guard self.activeHLSAttemptIDs[item.id] == attemptID else { return }
                 self.activeHLSDownloaders.removeValue(forKey: item.id)
+                self.activeHLSAttemptIDs.removeValue(forKey: item.id)
+                if self.invalidatedHLSAttemptIDs.remove(attemptID) != nil {
+                    self.lastHLSCheckpointSave.removeValue(forKey: item.id)
+                    self.processQueue()
+                    return
+                }
 
                 switch result {
                 case .success(let fileURL):
@@ -2470,8 +2996,15 @@ final class DownloadManager: NSObject, ObservableObject {
                         self.downloads[index].hlsResumeSegmentIndex = nil
                         self.downloads[index].hlsResumeByteCount = nil
 
+                        self.downloads[index] = Self.persistedDownloadItem(self.downloads[index])
                         self.saveDownloads()
                     }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                    self.clearSkyStreamDownloadRuntimeState(
+                        id: item.id,
+                        discardDescriptor: true
+                    )
+#endif
                     self.lastHLSCheckpointSave.removeValue(forKey: item.id)
                     self.processQueue()
                     Logger.shared.log("HLS download completed: \(item.displayTitle) -> \(fileName)", type: "Download")
@@ -2486,14 +3019,14 @@ final class DownloadManager: NSObject, ObservableObject {
                             self.requeueInterruptedHLSDownload(id: item.id, message: "Waiting for app to reopen")
                             Logger.shared.log("HLS background time expired for \(item.displayTitle)", type: "Download")
                         case .systemBackoff(let reason):
-                            self.requeueInterruptedHLSDownload(id: item.id, message: reason)
+                            self.scheduleSystemBackoffDownloadRetry(id: item.id, message: reason)
                             Logger.shared.log("HLS packaging paused for \(item.displayTitle): \(reason)", type: "Download")
                         case .rateLimited(let retryAfterSeconds):
                             self.scheduleRateLimitedDownloadRetry(
                                 id: item.id,
                                 retryAfterSeconds: retryAfterSeconds
                             )
-                        case .httpError(let statusCode) where [403, 503].contains(statusCode):
+                        case .httpError(let statusCode) where [401, 403, 410, 503].contains(statusCode):
                             self.recoverDownloadAfterMediaRejection(
                                 id: item.id,
                                 statusCode: statusCode,
@@ -2518,6 +3051,7 @@ final class DownloadManager: NSObject, ObservableObject {
         }
         
         activeHLSDownloaders[item.id] = downloader
+        activeHLSAttemptIDs[item.id] = attemptID
         
         if let index = downloads.firstIndex(where: { $0.id == item.id }) {
             downloads[index].status = .downloading
@@ -2541,6 +3075,145 @@ final class DownloadManager: NSObject, ObservableObject {
         
         Logger.shared.log("Started HLS download: \(item.displayTitle)", type: "Download")
     }
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    private func startValidatedSkyStreamHLSDownload(_ item: DownloadItem) {
+        guard item.providerTransportKind == .skyStreamHLS,
+              item.lastContentReference?.kind == .skyStream else {
+            markFailed(id: item.id, error: "The typed HLS recovery metadata is missing.")
+            return
+        }
+        guard let descriptor = skyStreamHLSDescriptors[item.id] else {
+            restoreValidatedSkyStreamDownload(item)
+            return
+        }
+        if let reason = Self.skyStreamHLSRejectionReason(descriptor) {
+            clearSkyStreamDownloadRuntimeState(id: item.id, discardDescriptor: true)
+            markFailed(id: item.id, error: reason)
+            return
+        }
+
+        var proxyURL = skyStreamHLSProxyURLs[item.id]
+        if let existing = proxyURL,
+           !MPVHeaderProxy.shared.isManagedSkyStreamSessionURL(existing) {
+            MPVHeaderProxy.shared.invalidateSession(for: existing)
+            skyStreamHLSProxyURLs.removeValue(forKey: item.id)
+            skyStreamHLSPinnedVariantURLs.removeValue(forKey: item.id)
+            proxyURL = nil
+            resetSkyStreamHLSCheckpoint(id: item.id)
+        } else if proxyURL == nil,
+                  (item.hlsResumeSegmentIndex ?? 0) > 0 {
+            // A checkpoint can only be resumed through the exact live route capability that
+            // produced it. A recreated session has different opaque route IDs and may resolve a
+            // different ABR rendition, so restarting is the only safe behavior.
+            resetSkyStreamHLSCheckpoint(id: item.id)
+        }
+
+        if proxyURL == nil {
+            proxyURL = MPVHeaderProxy.shared.makeSkyStreamProxyURL(
+                for: descriptor,
+                traceID: "download-\(item.id)"
+            ) { [weak self] challengedURL, statusCode, isInteractiveChallenge in
+                DispatchQueue.main.async {
+                    self?.recoverDownloadAfterMediaRejection(
+                        id: item.id,
+                        statusCode: statusCode,
+                        challengedURL: challengedURL,
+                        rejectedCookieHeader: nil,
+                        isInteractiveChallenge: isInteractiveChallenge
+                    )
+                }
+            }
+            guard let proxyURL,
+                  MPVHeaderProxy.shared.isManagedSkyStreamSessionURL(proxyURL) else {
+                markFailed(id: item.id, error: "The validated HLS loopback transport could not start.")
+                return
+            }
+            skyStreamHLSProxyURLs[item.id] = proxyURL
+        }
+
+        guard let proxyURL,
+              let currentItem = downloads.first(where: { $0.id == item.id }) else { return }
+        startHLSDownload(
+            currentItem,
+            streamURLOverride: proxyURL,
+            headersOverride: [:],
+            pinnedVariantOverride: skyStreamHLSPinnedVariantURLs[item.id],
+            persistResolvedVariant: false
+        )
+    }
+
+    private func restoreValidatedSkyStreamDownload(_ item: DownloadItem) {
+        guard item.lastContentReference?.kind == .skyStream,
+              skyStreamRestoringDownloadIDs.insert(item.id).inserted else {
+            return
+        }
+        let expectedReference = item.lastContentReference
+        let expectedTransport = item.providerTransportKind
+        if let index = downloads.firstIndex(where: { $0.id == item.id }),
+           downloads[index].status == .queued {
+            downloads[index].error = "Refreshing validated download access"
+            saveDownloads()
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                self.skyStreamRestoringDownloadIDs.remove(item.id)
+            }
+            let refreshed = await refreshDownloadSource(id: item.id)
+            guard let index = downloads.firstIndex(where: { $0.id == item.id }),
+                  downloads[index].status == .queued,
+                  downloads[index].lastContentReference == expectedReference,
+                  downloads[index].providerTransportKind == expectedTransport else {
+                processQueue()
+                return
+            }
+            guard let refreshed,
+                  installRefreshedDownloadSource(
+                      refreshed,
+                      id: item.id,
+                      resetTransferProgress: true
+                  ) != nil else {
+                markFailed(
+                    id: item.id,
+                    error: "The SkyStream provider could not restore validated download access."
+                )
+                return
+            }
+            downloads[index].error = nil
+            saveDownloads()
+            processQueue()
+        }
+    }
+
+    private func resetSkyStreamHLSCheckpoint(id: String) {
+        guard let index = downloads.firstIndex(where: { $0.id == id }) else { return }
+        downloads[index].hlsResumeSegmentIndex = nil
+        downloads[index].hlsResumeByteCount = nil
+        downloads[index].hlsVariantURL = nil
+        downloads[index].hlsTotalSegments = nil
+        downloads[index].progress = 0
+        downloads[index].downloadedBytes = 0
+        downloads[index].totalBytes = 0
+        lastHLSCheckpointSave.removeValue(forKey: id)
+    }
+
+    private func clearSkyStreamDownloadRuntimeState(
+        id: String,
+        discardDescriptor: Bool
+    ) {
+        skyStreamDirectValidationPendingIDs.remove(id)
+        skyStreamDirectDispatchApprovedIDs.remove(id)
+        if let proxyURL = skyStreamHLSProxyURLs.removeValue(forKey: id) {
+            MPVHeaderProxy.shared.invalidateSession(for: proxyURL)
+        }
+        skyStreamHLSPinnedVariantURLs.removeValue(forKey: id)
+        if discardDescriptor {
+            skyStreamHLSDescriptors.removeValue(forKey: id)
+        }
+    }
+#endif
 
     private func hlsStartDelayReason() -> String? {
         #if canImport(UIKit)
@@ -2727,13 +3400,15 @@ final class DownloadManager: NSObject, ObservableObject {
             return
         }
 
-        activeTasks.removeValue(forKey: id)
+        if let task = activeTasks.removeValue(forKey: id) {
+            invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
+        }
         activeHLSDownloaders.removeValue(forKey: id)
         let retryCount = (downloads[index].rateLimitRetryCount ?? 0) + 1
         downloads[index].rateLimitRetryCount = retryCount
         if retryCount > 3 {
             downloads[index].retryNotBefore = nil
-            if downloads[index].serviceContentHref?.isEmpty == false {
+            if hasRefreshableProviderReference(downloads[index]) {
                 recoverDownloadAfterMediaRejection(
                     id: id,
                     statusCode: 429,
@@ -2758,6 +3433,22 @@ final class DownloadManager: NSObject, ObservableObject {
             type: "Download"
         )
 
+    }
+
+    private func scheduleSystemBackoffDownloadRetry(id: String, message: String) {
+        guard let index = downloads.firstIndex(where: { $0.id == id }) else {
+            processQueue()
+            return
+        }
+        activeHLSDownloaders.removeValue(forKey: id)
+        downloads[index].status = .queued
+        // Disk/thermal/capacity conditions do not change merely because processQueue is called
+        // again. A persisted delay prevents a failed segment from being fetched in a tight loop;
+        // foreground/storage lifecycle events may still call processQueue after the delay.
+        downloads[index].retryNotBefore = Date().addingTimeInterval(60)
+        downloads[index].error = message
+        saveDownloads()
+        processQueue()
     }
 
     /// An explicit challenge first attempts provider re-extraction because media CDNs commonly
@@ -2798,8 +3489,21 @@ final class DownloadManager: NSObject, ObservableObject {
                 return
             }
 
-            activeTasks.removeValue(forKey: id)
-            activeHLSDownloaders.removeValue(forKey: id)
+            if let task = activeTasks.removeValue(forKey: id) {
+                invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
+                task.cancel()
+            }
+            if let downloader = activeHLSDownloaders[id] {
+                if let attemptID = activeHLSAttemptIDs[id] {
+                    invalidatedHLSAttemptIDs.insert(attemptID)
+                }
+                downloader.cancel()
+            }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            if downloads[index].providerTransportKind == .skyStreamHLS {
+                clearSkyStreamDownloadRuntimeState(id: id, discardDescriptor: true)
+            }
+#endif
             downloads[index].status = .paused
             downloads[index].error = "Refreshing expired media source"
             saveDownloads()
@@ -2812,19 +3516,22 @@ final class DownloadManager: NSObject, ObservableObject {
 
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                var refreshed = await refreshServiceDownloadSource(id: id)
+                var refreshed = await refreshDownloadSource(id: id)
                 var solvedMediaChallenge = false
                 let rejectedStreamURL = downloads.first(where: { $0.id == id })?.streamURL
+                let permitsLegacyInteractiveSolve = downloads.first(where: { $0.id == id })?
+                    .lastContentReference?.kind != .skyStream
 
                 if isInteractiveChallenge,
-                   refreshed == nil || refreshed?.url.absoluteString == rejectedStreamURL,
+                   permitsLegacyInteractiveSolve,
+                   refreshed == nil || refreshed?.directURL?.absoluteString == rejectedStreamURL,
                    let challengedURL {
                     solvedMediaChallenge = await CloudflareBypassManager.shared.refreshSessionAfterChallenge(
                         for: challengedURL,
                         rejectedCookieHeader: rejectedCookieHeader
                     )
                     if solvedMediaChallenge {
-                        refreshed = await refreshServiceDownloadSource(id: id) ?? refreshed
+                        refreshed = await refreshDownloadSource(id: id) ?? refreshed
                     }
                 }
 
@@ -2835,34 +3542,19 @@ final class DownloadManager: NSObject, ObservableObject {
                     return
                 }
 
-                if let refreshed {
-                    let previousURL = downloads[currentIndex].streamURL
-                    let sourceChanged = previousURL != refreshed.url.absoluteString
-                    downloads[currentIndex].streamURL = refreshed.url.absoluteString
-                    downloads[currentIndex].headers = refreshed.headers
-                    downloads[currentIndex].streamName = refreshed.streamName
-                    downloads[currentIndex].serviceContentHref = refreshed.serviceContentHref
-                    downloads[currentIndex].retryNotBefore = nil
-                    downloads[currentIndex].rateLimitRetryCount = nil
-                    // A stable master URL can still rotate its variant/segment URLs. Any provider
-                    // re-extraction therefore invalidates an HLS pin even when the root is equal.
-                    if sourceChanged || downloads[currentIndex].isHLS {
-                        downloads[currentIndex].hlsResumeSegmentIndex = nil
-                        downloads[currentIndex].hlsResumeByteCount = nil
-                        downloads[currentIndex].hlsVariantURL = nil
-                        downloads[currentIndex].hlsTotalSegments = nil
-                        downloads[currentIndex].progress = 0
-                        downloads[currentIndex].downloadedBytes = 0
-                        downloads[currentIndex].totalBytes = 0
-                    }
-                    resumeDataStore.removeValue(forKey: id)
+                if let refreshed,
+                   let installed = installRefreshedDownloadSource(
+                       refreshed,
+                       id: id,
+                       resetTransferProgress: true
+                   ) {
                     downloads[currentIndex].status = .queued
                     downloads[currentIndex].rateLimitRetryCount = nil
                     downloads[currentIndex].error = nil
                     cloudflareRecoveringDownloadIDs.remove(id)
                     saveDownloads()
                     Logger.shared.log(
-                        "Download provider re-resolved source id=\(id) changedURL=\(sourceChanged) host=\(refreshed.url.host ?? "unknown")",
+                        "Download provider re-resolved source id=\(id) changedTransport=\(installed.changed) kind=\(installed.kind)",
                         type: "Download"
                     )
                     processQueue()
@@ -2875,16 +3567,82 @@ final class DownloadManager: NSObject, ObservableObject {
                     saveDownloads()
                     processQueue()
                 } else {
+                    let isSkyStream = downloads[currentIndex].lastContentReference?.kind == .skyStream
                     cloudflareRecoveringDownloadIDs.remove(id)
                     markFailed(
                         id: id,
-                        error: isInteractiveChallenge
-                            ? "Cloudflare verification did not produce a usable refreshed source."
-                            : "The media URL expired and the provider could not refresh it."
+                        error: isSkyStream
+                            ? "The SkyStream provider could not produce a validated refreshed source."
+                            : isInteractiveChallenge
+                                ? "Cloudflare verification did not produce a usable refreshed source."
+                                : "The media URL expired and the provider could not refresh it."
                     )
                 }
             }
         }
+    }
+
+    @MainActor
+    private func installRefreshedDownloadSource(
+        _ refreshed: RefreshedDownloadSource,
+        id: String,
+        resetTransferProgress: Bool
+    ) -> (changed: Bool, kind: String)? {
+        guard let index = downloads.firstIndex(where: { $0.id == id }) else { return nil }
+        let previousURL = downloads[index].streamURL
+        let previousWasHLS = downloads[index].isHLS
+        let changed: Bool
+        let kind: String
+
+        switch refreshed.transport {
+        case .direct(let url, let headers, let expectedContentLength):
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            if downloads[index].providerTransportKind == .skyStreamHLS {
+                clearSkyStreamDownloadRuntimeState(id: id, discardDescriptor: true)
+            }
+#endif
+            downloads[index].streamURL = url.absoluteString
+            downloads[index].headers = headers
+            if refreshed.lastContentReference.kind == .skyStream {
+                downloads[index].providerTransportKind = .skyStreamDirect
+            }
+            downloads[index].validatedExpectedContentLength = expectedContentLength
+            changed = previousWasHLS || previousURL != url.absoluteString
+            kind = refreshed.lastContentReference.kind == .skyStream ? "sky-direct" : "direct"
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        case .skyStreamHLS(let descriptor):
+            guard Self.skyStreamHLSRejectionReason(descriptor) == nil else { return nil }
+            clearSkyStreamDownloadRuntimeState(id: id, discardDescriptor: true)
+            skyStreamHLSDescriptors[id] = descriptor
+            downloads[index].streamURL = ""
+            downloads[index].headers = [:]
+            downloads[index].providerTransportKind = .skyStreamHLS
+            downloads[index].validatedExpectedContentLength = nil
+            changed = true
+            kind = "sky-hls"
+#endif
+        }
+
+        downloads[index].streamName = refreshed.streamName
+        downloads[index].serviceContentHref = refreshed.serviceContentHref
+        downloads[index].lastSourceId = refreshed.lastSourceId
+        downloads[index].lastContentReference = refreshed.lastContentReference
+        downloads[index].retryNotBefore = nil
+        downloads[index].rateLimitRetryCount = nil
+
+        if resetTransferProgress,
+           (changed || downloads[index].isHLS
+                || downloads[index].lastContentReference?.kind == .skyStream) {
+            downloads[index].hlsResumeSegmentIndex = nil
+            downloads[index].hlsResumeByteCount = nil
+            downloads[index].hlsVariantURL = nil
+            downloads[index].hlsTotalSegments = nil
+            downloads[index].progress = 0
+            downloads[index].downloadedBytes = 0
+            downloads[index].totalBytes = 0
+            resumeDataStore.removeValue(forKey: id)
+        }
+        return (changed, kind)
     }
 
     private func beginMediaSourceRecoveryAttempt(id: String) -> Bool {
@@ -2902,11 +3660,58 @@ final class DownloadManager: NSObject, ObservableObject {
         return true
     }
 
+    private func hasRefreshableProviderReference(_ item: DownloadItem) -> Bool {
+        if let sourceId = item.lastSourceId,
+           let reference = item.lastContentReference,
+           Self.isValidRecoveryReference(reference, matchingSourceId: sourceId) {
+            switch reference.kind {
+            case .service:
+                return reference.serviceHref?.isEmpty == false
+            case .skyStream:
+                return reference.skyStream?.isStructurallyValid == true
+            case .stremio:
+                // Existing Stremio re-resolution is ID-based but is not yet exposed as a
+                // download refresh adapter. Do not guess a fresh stream here.
+                return false
+            }
+        }
+        return item.sourceId?.hasPrefix("service:") == true
+            && item.serviceContentHref?.isEmpty == false
+    }
+
+    @MainActor
+    private func refreshDownloadSource(id: String) async -> RefreshedDownloadSource? {
+        guard let item = downloads.first(where: { $0.id == id }) else { return nil }
+        if let sourceId = item.lastSourceId,
+           let reference = item.lastContentReference,
+           Self.isValidRecoveryReference(reference, matchingSourceId: sourceId) {
+            switch reference.kind {
+            case .service:
+                return await refreshServiceDownloadSource(id: id)
+            case .skyStream:
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                return await refreshSkyStreamDownloadSource(item: item, reference: reference)
+#else
+                return nil
+#endif
+            case .stremio:
+                return nil
+            }
+        }
+        return await refreshServiceDownloadSource(id: id)
+    }
+
     @MainActor
     private func refreshServiceDownloadSource(id: String) async -> RefreshedDownloadSource? {
         guard let item = downloads.first(where: { $0.id == id }),
-              let sourceId = item.sourceId,
-              let contentHref = item.serviceContentHref?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let sourceId = (item.lastContentReference?.kind == .service
+                  ? item.lastSourceId
+                  : nil) ?? item.sourceId,
+              let contentHref = (item.lastContentReference?.kind == .service
+                  ? item.lastContentReference?.serviceHref
+                  : nil) ?? item.serviceContentHref,
+              !contentHref.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              contentHref.utf8.count <= 8 * 1_024,
               !contentHref.isEmpty,
               let service = ServiceManager.shared.activeServices.first(where: {
                   SourceHealth.serviceId($0) == sourceId
@@ -2958,12 +3763,127 @@ final class DownloadManager: NSObject, ObservableObject {
             headers[key] = value
         }
         return RefreshedDownloadSource(
-            url: url,
-            headers: headers,
+            transport: .direct(url: url, headers: headers, expectedContentLength: nil),
             streamName: selected.label,
-            serviceContentHref: contentHref
+            serviceContentHref: contentHref,
+            lastSourceId: sourceId,
+            lastContentReference: .service(sourceID: sourceId, href: contentHref)
         )
     }
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    @MainActor
+    private func refreshSkyStreamDownloadSource(
+        item: DownloadItem,
+        reference: ProviderContentReference
+    ) async -> RefreshedDownloadSource? {
+        guard reference.kind == .skyStream,
+              let skyReference = reference.skyStream,
+              reference.sourceID == skyReference.sourceID,
+              skyDownloadReferenceMatchesItem(skyReference, item: item) else {
+            return nil
+        }
+
+        do {
+            let refreshed = try await SkyStreamResolver.shared.refresh(
+                skyReference,
+                mode: .downloadRefresh
+            )
+            guard !Task.isCancelled,
+                  let resolved = refreshed.first,
+                  resolved.provider.id == reference.sourceID,
+                  resolved.contentReference.sourceID == reference.sourceID else {
+                return nil
+            }
+            let descriptor = resolved.playback
+            let transport: RefreshedDownloadTransport
+            switch descriptor.mediaKind {
+            case .direct:
+                guard item.providerTransportKind != .skyStreamHLS,
+                      descriptor.proxyOptions == nil,
+                      descriptor.acceptedManifests.isEmpty,
+                      let contentLength = descriptor.finiteContentLength,
+                      contentLength > 0 else {
+                    Logger.shared.log(
+                        "SkyStream: download refresh rejected unsafe direct descriptor source=\(reference.sourceID)",
+                        type: "Download"
+                    )
+                    return nil
+                }
+                transport = .direct(
+                    url: descriptor.underlyingRemoteURL.url,
+                    headers: descriptor.headers.values,
+                    expectedContentLength: contentLength
+                )
+            case .hls:
+                guard item.providerTransportKind == .skyStreamHLS,
+                      Self.skyStreamHLSRejectionReason(descriptor) == nil else {
+                    Logger.shared.log(
+                        "SkyStream: download refresh rejected unsupported HLS descriptor source=\(reference.sourceID)",
+                        type: "Download"
+                    )
+                    return nil
+                }
+                transport = .skyStreamHLS(descriptor)
+            case .dash:
+                Logger.shared.log(
+                    "SkyStream: download refresh rejected DASH descriptor source=\(reference.sourceID)",
+                    type: "Download"
+                )
+                return nil
+            }
+            let refreshedReference = ProviderContentReference.skyStream(resolved.contentReference)
+            guard refreshedReference.sourceID == reference.sourceID else { return nil }
+            return RefreshedDownloadSource(
+                transport: transport,
+                streamName: resolved.displayName,
+                serviceContentHref: nil,
+                lastSourceId: reference.sourceID,
+                lastContentReference: refreshedReference
+            )
+        } catch is CancellationError {
+            return nil
+        } catch {
+            let errorType = String(reflecting: type(of: error))
+            Logger.shared.log(
+                "SkyStream: validated download refresh failed source=\(reference.sourceID) errorType=\(errorType)",
+                type: "Download"
+            )
+            return nil
+        }
+    }
+
+    private func skyDownloadReferenceMatchesItem(
+        _ reference: SkyStreamProviderContentReference,
+        item: DownloadItem
+    ) -> Bool {
+        guard reference.isStructurallyValid else { return false }
+        if item.isMovie {
+            return reference.season == nil && reference.episode == nil
+        }
+        guard let referenceSeason = reference.season,
+              let referenceEpisode = reference.episode,
+              referenceSeason >= 0,
+              referenceEpisode > 0 else {
+            return false
+        }
+
+        var acceptedCoordinates = Set<String>()
+        if let season = item.seasonNumber, let episode = item.episodeNumber {
+            acceptedCoordinates.insert("\(season):\(episode)")
+        }
+        if let context = item.episodePlaybackContext {
+            if let season = context.resolvedTMDBSeasonNumber,
+               let episode = context.resolvedTMDBEpisodeNumber {
+                acceptedCoordinates.insert("\(season):\(episode)")
+            }
+            if let absolute = context.animeAbsoluteEpisodeNumber, absolute > 0 {
+                acceptedCoordinates.insert("1:\(absolute)")
+            }
+        }
+        return acceptedCoordinates.contains("\(referenceSeason):\(referenceEpisode)")
+    }
+#endif
 
     private func refreshedDownloadEpisodeHref(
         episodes: [EpisodeLink],
@@ -3115,8 +4035,15 @@ final class DownloadManager: NSObject, ObservableObject {
     private func markFailed(id: String, error: String) {
         performOnMain { [weak self] in
             guard let self else { return }
-            activeTasks.removeValue(forKey: id)
+            if let task = activeTasks.removeValue(forKey: id) {
+                invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
+            }
             if let index = downloads.firstIndex(where: { $0.id == id }) {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                if downloads[index].providerTransportKind == .skyStreamHLS {
+                    clearSkyStreamDownloadRuntimeState(id: id, discardDescriptor: true)
+                }
+#endif
                 downloads[index].status = .failed
                 downloads[index].error = error
                 saveDownloads()
@@ -3127,18 +4054,59 @@ final class DownloadManager: NSObject, ObservableObject {
     }
     
     private func resumeInterruptedDownloads() {
-        let interruptedIDs = downloads.filter { $0.status == .downloading }.map(\.id)
-        performOnMain { [weak self] in
+        backgroundSession.getAllTasks { [weak self] tasks in
             guard let self else { return }
-            for id in interruptedIDs {
-                guard let index = downloads.firstIndex(where: { $0.id == id }),
-                      downloads[index].status == .downloading else { continue }
-                downloads[index].status = .queued
+            self.performOnMain { [weak self] in
+                guard let self else { return }
+                var retainedTaskIDs = Set<String>()
+
+                for case let task as URLSessionDownloadTask in tasks {
+                    guard task.state == .running || task.state == .suspended,
+                          let id = task.taskDescription,
+                          let index = downloads.firstIndex(where: { $0.id == id }),
+                          !downloads[index].isHLS,
+                          (downloads[index].status == .downloading
+                            || downloads[index].status == .queued),
+                          !invalidatedDirectTaskIdentifiers.contains(task.taskIdentifier) else {
+                        invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
+                        task.cancel()
+                        continue
+                    }
+                    guard retainedTaskIDs.insert(id).inserted else {
+                        // A prior crash must never leave two writers targeting one download ID.
+                        invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
+                        task.cancel()
+                        continue
+                    }
+                    if let newlyStartedTask = activeTasks[id],
+                       newlyStartedTask !== task,
+                       newlyStartedTask.taskIdentifier != task.taskIdentifier {
+                        // Prefer the OS-retained task, which may already contain substantial
+                        // progress, and stop a task that raced this launch-time reconciliation.
+                        invalidatedDirectTaskIdentifiers.insert(newlyStartedTask.taskIdentifier)
+                        newlyStartedTask.cancel()
+                    }
+                    activeTasks[id] = task
+                    downloads[index].status = .downloading
+                    downloads[index].error = nil
+                    if task.state == .suspended {
+                        task.resume()
+                    }
+                }
+
+                // A task may have been enqueued after `getAllTasks` captured its snapshot but
+                // before this main-thread reconciliation ran. Treat the manager's live map as
+                // retained too so it is not queued a second time.
+                retainedTaskIDs.formUnion(activeTasks.keys)
+
+                for index in downloads.indices
+                where downloads[index].status == .downloading
+                    && !retainedTaskIDs.contains(downloads[index].id) {
+                    downloads[index].status = .queued
+                }
+                saveDownloads()
+                processQueue()
             }
-            saveDownloads()
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            self.processQueue()
         }
     }
     
@@ -3220,11 +4188,36 @@ final class DownloadManager: NSObject, ObservableObject {
     }
     
     // MARK: - Persistence
+
+    private static func persistedDownloadItem(_ item: DownloadItem) -> DownloadItem {
+        var persisted = item
+        let containedSkyStreamMetadata = item.lastContentReference?.kind == .skyStream
+        let recovery = validatedRecoveryMetadata(
+            legacySourceId: item.sourceId,
+            legacyServiceHref: item.serviceContentHref,
+            sourceId: item.lastSourceId,
+            contentReference: item.lastContentReference
+        )
+        persisted.lastSourceId = recovery.sourceId
+        persisted.lastContentReference = recovery.reference
+
+        if containedSkyStreamMetadata || item.providerTransportKind != nil {
+            // Sky access is always reconstructed from the bounded content reference. Signed
+            // URLs, credential headers, loopback capabilities, subtitle routes, and variant
+            // pins never cross the persistence boundary, including for queued/paused items.
+            persisted.streamURL = ""
+            persisted.headers = [:]
+            persisted.subtitleURL = nil
+            persisted.subtitleHeaders = nil
+            persisted.hlsVariantURL = nil
+        }
+        return persisted
+    }
     
     private func saveDownloads() {
         // Capture the current downloads array on the calling thread (main) to avoid
         // a data race when encoding on the background write queue.
-        let snapshot = self.downloads
+        let snapshot = self.downloads.map(Self.persistedDownloadItem)
         accessQueue.async(flags: .barrier) { [weak self] in
             guard let self = self else { return }
             do {
@@ -3241,12 +4234,58 @@ final class DownloadManager: NSObject, ObservableObject {
         do {
             let data = try Data(contentsOf: persistenceURL)
             let loaded = try JSONDecoder().decode([DownloadItem].self, from: data)
+            let normalized = loaded.map(Self.persistedDownloadItem)
             // Set synchronously so that cleanOrphanedFiles() and resumeInterruptedDownloads()
             // see the correct data immediately after this call.
-            self.downloads = loaded
+            self.downloads = normalized
+            if loaded.contains(where: { item in
+                (item.lastContentReference?.kind == .skyStream
+                    || item.providerTransportKind != nil)
+                    && (!item.streamURL.isEmpty
+                        || !item.headers.isEmpty
+                        || item.subtitleURL != nil
+                        || item.subtitleHeaders != nil
+                        || item.hlsVariantURL != nil)
+            }) {
+                // Rewrite legacy Sky metadata immediately so merely launching the app removes
+                // access material left by an older build.
+                saveDownloads()
+            }
         } catch {
             Logger.shared.log("Failed to load downloads: \(error)", type: "Download")
         }
+    }
+
+    /// Returns true only for the exact background transfer currently owning this stable download
+    /// ID. On a background-session relaunch, delegate delivery can race `getAllTasks`; in that
+    /// one case an otherwise-unclaimed persisted running/queued item adopts the OS-retained task.
+    /// Explicitly cancelled attempts are never eligible for adoption.
+    private func claimDirectDownloadTaskIfCurrent(
+        _ task: URLSessionDownloadTask,
+        downloadID: String
+    ) -> Bool {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard task.taskDescription == downloadID,
+              !invalidatedDirectTaskIdentifiers.contains(task.taskIdentifier) else {
+            return false
+        }
+
+        if let active = activeTasks[downloadID] {
+            return active === task || active.taskIdentifier == task.taskIdentifier
+        }
+
+        guard let item = downloads.first(where: { $0.id == downloadID }),
+              !item.isHLS,
+              item.status == .downloading || item.status == .queued,
+              item.retryNotBefore.map({ $0 <= Date() }) ?? true,
+              !cloudflareRecoveringDownloadIDs.contains(downloadID) else {
+            return false
+        }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        guard !skyStreamRestoringDownloadIDs.contains(downloadID) else { return false }
+#endif
+        activeTasks[downloadID] = task
+        return true
     }
 
 }
@@ -3443,9 +4482,13 @@ private final class DownloadStreamProbe: NSObject, URLSessionDataDelegate, @unch
 extension DownloadManager: URLSessionDownloadDelegate {
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
         guard let downloadId = downloadTask.taskDescription else { return }
+        let finishCurrentAttempt = { [self] in
+            guard self.claimDirectDownloadTaskIfCurrent(downloadTask, downloadID: downloadId) else {
+                return
+            }
 
-        if let httpResponse = downloadTask.response as? HTTPURLResponse {
-            let body = downloadBodyPreview(from: location)
+            if let httpResponse = downloadTask.response as? HTTPURLResponse {
+            let body = self.downloadBodyPreview(from: location)
             let responseHeaders = CloudflareBypassManager.headersDictionary(from: httpResponse)
             if CloudflareBypassManager.isChallengeResponse(
                 status: httpResponse.statusCode,
@@ -3458,7 +4501,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 if let challengeURL {
                     let rejectedCookieHeader = downloadTask.currentRequest?.value(forHTTPHeaderField: "Cookie")
                         ?? downloadTask.originalRequest?.value(forHTTPHeaderField: "Cookie")
-                    recoverDownloadAfterConfirmedChallenge(
+                    self.recoverDownloadAfterConfirmedChallenge(
                         id: downloadId,
                         challengedURL: challengeURL,
                         rejectedCookieHeader: rejectedCookieHeader
@@ -3467,16 +4510,17 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 }
             }
             if httpResponse.statusCode == 429 {
-                scheduleRateLimitedDownloadRetry(
+                self.scheduleRateLimitedDownloadRetry(
                     id: downloadId,
                     retryAfterSeconds: httpResponse.value(forHTTPHeaderField: "Retry-After")
                         .flatMap(TimeInterval.init)
                 )
                 return
             }
-            if [403, 503].contains(httpResponse.statusCode),
-               downloads.first(where: { $0.id == downloadId })?.serviceContentHref?.isEmpty == false {
-                recoverDownloadAfterMediaRejection(
+            if [401, 403, 410, 503].contains(httpResponse.statusCode),
+               let item = self.downloads.first(where: { $0.id == downloadId }),
+               self.hasRefreshableProviderReference(item) {
+                self.recoverDownloadAfterMediaRejection(
                     id: downloadId,
                     statusCode: httpResponse.statusCode,
                     challengedURL: httpResponse.url,
@@ -3485,8 +4529,34 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 )
                 return
             }
-            if let message = challengeFailureMessage(for: httpResponse, body: body) {
-                markFailed(id: downloadId, error: message)
+            if (300...399).contains(httpResponse.statusCode),
+               let item = self.downloads.first(where: { $0.id == downloadId }),
+               item.lastContentReference?.kind == .skyStream {
+                self.recoverDownloadAfterMediaRejection(
+                    id: downloadId,
+                    statusCode: httpResponse.statusCode,
+                    challengedURL: httpResponse.url,
+                    rejectedCookieHeader: nil,
+                    isInteractiveChallenge: false
+                )
+                return
+            }
+            if let message = self.challengeFailureMessage(for: httpResponse, body: body) {
+                self.markFailed(id: downloadId, error: message)
+                return
+            }
+            }
+
+            if let expectedLength = self.downloads.first(where: { $0.id == downloadId })?
+            .validatedExpectedContentLength,
+           expectedLength > 0 {
+            let actualLength = (try? self.fileManager.attributesOfItem(atPath: location.path)[.size])
+                .flatMap { $0 as? NSNumber }?.int64Value ?? -1
+            guard actualLength == expectedLength else {
+                self.markFailed(
+                    id: downloadId,
+                    error: "The validated direct download size changed before completion."
+                )
                 return
             }
         }
@@ -3521,27 +4591,26 @@ extension DownloadManager: URLSessionDownloadDelegate {
             ext = Self.knownVideoExtensions.contains(urlExt) ? urlExt : (urlExt.isEmpty ? "mp4" : urlExt)
         }
         
-        let fileName = reserveFinalVideoFileName(downloadID: downloadId, fileExtension: ext)
-        let destURL = downloadFileURL(relativePath: fileName)
-        ensureParentDirectoryExists(for: destURL)
+            let fileName = self.reserveFinalVideoFileName(downloadID: downloadId, fileExtension: ext)
+            let destURL = self.downloadFileURL(relativePath: fileName)
+            self.ensureParentDirectoryExists(for: destURL)
 
-        if isRegularFile(at: destURL) {
-            let currentOwnsDestination = downloadOwnsTrackedPath(
+            if self.isRegularFile(at: destURL) {
+                let currentOwnsDestination = self.downloadOwnsTrackedPath(
                 downloadID: downloadId,
                 relativePath: fileName,
                 subtitle: false
             )
-            guard currentOwnsDestination else {
-                markFailed(id: downloadId, error: "The reserved destination became occupied before the download completed.")
-                return
+                guard currentOwnsDestination else {
+                    self.markFailed(id: downloadId, error: "The reserved destination became occupied before the download completed.")
+                    return
+                }
+                try? self.fileManager.removeItem(at: destURL)
             }
-            try? fileManager.removeItem(at: destURL)
-        }
-        
-        do {
-            try fileManager.moveItem(at: location, to: destURL)
-            
-            DispatchQueue.main.async {
+
+            do {
+                try self.fileManager.moveItem(at: location, to: destURL)
+
                 if let index = self.downloads.firstIndex(where: { $0.id == downloadId }) {
                     self.downloads[index].status = .completed
                     self.downloads[index].progress = 1.0
@@ -3554,16 +4623,27 @@ extension DownloadManager: URLSessionDownloadDelegate {
                         self.downloads[index].totalBytes = size
                         self.downloads[index].downloadedBytes = size
                     }
-                    
+
+                    // Completed Sky files are local-only. Drop the signed URL and credentials
+                    // from the live model immediately as well as from the persisted snapshot.
+                    self.downloads[index] = Self.persistedDownloadItem(self.downloads[index])
                     self.saveDownloads()
-                    self.activeTasks.removeValue(forKey: downloadId)
+                    if let task = self.activeTasks.removeValue(forKey: downloadId) {
+                        self.invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
+                    }
                     self.processQueue()
                 }
+
+                Logger.shared.log("Download completed: \(downloadId) -> \(fileName)", type: "Download")
+            } catch {
+                self.markFailed(id: downloadId, error: "Failed to save file: \(error.localizedDescription)")
             }
-            
-            Logger.shared.log("Download completed: \(downloadId) -> \(fileName)", type: "Download")
-        } catch {
-            markFailed(id: downloadId, error: "Failed to save file: \(error.localizedDescription)")
+        }
+
+        if Thread.isMainThread {
+            finishCurrentAttempt()
+        } else {
+            DispatchQueue.main.sync(execute: finishCurrentAttempt)
         }
     }
     
@@ -3571,42 +4651,76 @@ extension DownloadManager: URLSessionDownloadDelegate {
         guard let downloadId = downloadTask.taskDescription else { return }
         let responseWasSuccessful = (downloadTask.response as? HTTPURLResponse)
             .map { (200...299).contains($0.statusCode) } ?? false
-        
-        // Throttle progress updates to max every 0.5 seconds to reduce UI churn
-        let now = Date()
-        if let lastUpdate = lastProgressUpdate[downloadId],
-           now.timeIntervalSince(lastUpdate) < 0.5 {
-            return
-        }
-        lastProgressUpdate[downloadId] = now
-        
         let progress = totalBytesExpectedToWrite > 0
             ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
             : 0
-        
+
         DispatchQueue.main.async {
-            if let index = self.downloads.firstIndex(where: { $0.id == downloadId }) {
-                self.downloads[index].progress = progress
-                self.downloads[index].downloadedBytes = totalBytesWritten
-                self.downloads[index].totalBytes = totalBytesExpectedToWrite
-                // A CDN error page can contain bytes too. Only successful response data proves
-                // that the source recovered and should reset the persisted 429 retry budget.
-                if responseWasSuccessful && totalBytesWritten > 0 {
-                    self.downloads[index].rateLimitRetryCount = nil
-                }
+            guard self.claimDirectDownloadTaskIfCurrent(downloadTask, downloadID: downloadId),
+                  let index = self.downloads.firstIndex(where: { $0.id == downloadId }) else {
+                return
+            }
+            if responseWasSuccessful,
+               let expectedLength = self.downloads[index].validatedExpectedContentLength,
+               expectedLength > 0,
+               (totalBytesWritten > expectedLength
+                    || (totalBytesExpectedToWrite > 0 && totalBytesExpectedToWrite > expectedLength)) {
+                self.invalidatedDirectTaskIdentifiers.insert(downloadTask.taskIdentifier)
+                self.activeTasks.removeValue(forKey: downloadId)
+                downloadTask.cancel()
+                self.markFailed(
+                    id: downloadId,
+                    error: "The validated direct download exceeded its verified size."
+                )
+                return
+            }
+
+            // Throttle progress updates to max every 0.5 seconds to reduce UI churn.
+            let now = Date()
+            if let lastUpdate = self.lastProgressUpdate[downloadId],
+               now.timeIntervalSince(lastUpdate) < 0.5 {
+                return
+            }
+            self.lastProgressUpdate[downloadId] = now
+            self.downloads[index].progress = progress
+            self.downloads[index].downloadedBytes = totalBytesWritten
+            self.downloads[index].totalBytes = totalBytesExpectedToWrite
+            // A CDN error page can contain bytes too. Only successful response data proves
+            // that the source recovered and should reset the persisted 429 retry budget.
+            if responseWasSuccessful && totalBytesWritten > 0 {
+                self.downloads[index].rateLimitRetryCount = nil
             }
         }
     }
     
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        guard let downloadId = task.taskDescription else { return }
-        
-        if let error = error as NSError? {
-            // Don't mark as failed if user cancelled
-            if error.code == NSURLErrorCancelled {
+        guard let downloadId = task.taskDescription,
+              let downloadTask = task as? URLSessionDownloadTask else { return }
+
+        DispatchQueue.main.async {
+            // This is the terminal callback, so an explicitly abandoned attempt can finally
+            // release its tombstone. It must never be allowed to adopt a replacement item.
+            if self.invalidatedDirectTaskIdentifiers.remove(task.taskIdentifier) != nil {
                 return
             }
-            markFailed(id: downloadId, error: error.localizedDescription)
+            guard self.claimDirectDownloadTaskIfCurrent(downloadTask, downloadID: downloadId) else {
+                return
+            }
+            if let error = error as NSError? {
+                if error.code == NSURLErrorCancelled {
+                    self.activeTasks.removeValue(forKey: downloadId)
+                    if let index = self.downloads.firstIndex(where: { $0.id == downloadId }),
+                       self.downloads[index].status == .downloading {
+                        self.downloads[index].status = .queued
+                        self.downloads[index].error = "Download was interrupted; retrying"
+                        self.saveDownloads()
+                        self.processQueue()
+                    }
+                    return
+                }
+                self.markFailed(id: downloadId, error: error.localizedDescription)
+                self.invalidatedDirectTaskIdentifiers.remove(task.taskIdentifier)
+            }
         }
     }
     
@@ -3618,24 +4732,42 @@ extension DownloadManager: URLSessionDownloadDelegate {
     }
     
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-        // Re-attach custom headers that get stripped on redirect by background sessions
         guard let downloadId = task.taskDescription,
-              let item = downloads.first(where: { $0.id == downloadId }) else {
-            completionHandler(request)
+              let downloadTask = task as? URLSessionDownloadTask else {
+            completionHandler(nil)
             return
         }
-        
-        var updatedRequest = request
-        let targetURL = updatedRequest.url ?? URL(string: item.streamURL)
-        let refreshedHeaders = targetURL.map { effectiveHeaders(item.headers, for: $0) } ?? item.headers
-        for (key, value) in refreshedHeaders {
-            let lowerKey = key.lowercased()
-            if lowerKey == "cookie" || lowerKey == "user-agent" {
-                updatedRequest.setValue(value, forHTTPHeaderField: key)
-            } else if updatedRequest.value(forHTTPHeaderField: key) == nil {
-                updatedRequest.setValue(value, forHTTPHeaderField: key)
+
+        DispatchQueue.main.async {
+            guard self.claimDirectDownloadTaskIfCurrent(downloadTask, downloadID: downloadId),
+                  let item = self.downloads.first(where: { $0.id == downloadId }) else {
+                // A stale task must not follow another provider's route or inherit its headers.
+                completionHandler(nil)
+                return
             }
+
+            // The SkyStream validator already resolved and checked the final direct-media URL.
+            // A later redirect is a changed route, not part of that proof. Refuse it and let the
+            // normal signed-URL recovery path re-run the provider/validator instead of leaking
+            // request headers or following a newly private destination.
+            if item.lastContentReference?.kind == .skyStream {
+                completionHandler(nil)
+                return
+            }
+
+            // Re-attach custom headers that get stripped on redirect by background sessions.
+            var updatedRequest = request
+            let targetURL = updatedRequest.url ?? URL(string: item.streamURL)
+            let refreshedHeaders = targetURL.map { self.effectiveHeaders(item.headers, for: $0) } ?? item.headers
+            for (key, value) in refreshedHeaders {
+                let lowerKey = key.lowercased()
+                if lowerKey == "cookie" || lowerKey == "user-agent" {
+                    updatedRequest.setValue(value, forHTTPHeaderField: key)
+                } else if updatedRequest.value(forHTTPHeaderField: key) == nil {
+                    updatedRequest.setValue(value, forHTTPHeaderField: key)
+                }
+            }
+            completionHandler(updatedRequest)
         }
-        completionHandler(updatedRequest)
     }
 }

@@ -85,6 +85,7 @@ struct PlatformCapabilities: Equatable, Sendable {
     let supportsStoreKit: Bool
     let supportsCloudKit: Bool
     let supportsGitHubUpdates: Bool
+    let supportsSkyStreamPlugins: Bool
 
     static var current: PlatformCapabilities {
 #if os(tvOS)
@@ -101,7 +102,8 @@ struct PlatformCapabilities: Equatable, Sendable {
             supportsMPV: true,
             supportsStoreKit: true,
             supportsCloudKit: true,
-            supportsGitHubUpdates: false
+            supportsGitHubUpdates: false,
+            supportsSkyStreamPlugins: false
         )
 #elseif os(macOS)
         return PlatformCapabilities(
@@ -118,9 +120,15 @@ struct PlatformCapabilities: Equatable, Sendable {
             supportsStoreKit: true,
             supportsCloudKit: true,
             // Mac App Store builds must receive updates through the App Store.
-            supportsGitHubUpdates: false
+            supportsGitHubUpdates: false,
+            supportsSkyStreamPlugins: false
         )
 #else
+#if targetEnvironment(macCatalyst)
+        let supportsSkyStreamPlugins = false
+#else
+        let supportsSkyStreamPlugins = Bundle.main.allowsSkyStreamPlugins
+#endif
         return PlatformCapabilities(
             platform: .iOS,
             supportsReader: true,
@@ -138,7 +146,8 @@ struct PlatformCapabilities: Equatable, Sendable {
             supportsMPV: true,
             supportsStoreKit: true,
             supportsCloudKit: true,
-            supportsGitHubUpdates: GitHubReleaseChecker.isGitHubReleaseUpdatesAvailable
+            supportsGitHubUpdates: GitHubReleaseChecker.isGitHubReleaseUpdatesAvailable,
+            supportsSkyStreamPlugins: supportsSkyStreamPlugins
         )
 #endif
     }

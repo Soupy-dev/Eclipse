@@ -1,5 +1,50 @@
 import SwiftUI
 
+@MainActor
+private enum SkyStreamAutoUpdateState {
+    static var isRunning = false
+}
+
+@MainActor
+private func autoUpdateSkyStreamSourcesIfNeeded() async {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    guard PlatformCapabilities.current.supportsSkyStreamPlugins,
+          UserDefaults.standard.object(forKey: "autoUpdateServicesEnabled") == nil
+            || UserDefaults.standard.bool(forKey: "autoUpdateServicesEnabled") else {
+        return
+    }
+
+    let timestampKey = "lastSkyStreamAutoUpdateTimestamp"
+    let lastTimestamp = UserDefaults.standard.double(forKey: timestampKey)
+    if lastTimestamp > 0,
+       Date().timeIntervalSince1970 - lastTimestamp < 3_600 {
+        return
+    }
+    guard !SkyStreamAutoUpdateState.isRunning else { return }
+    SkyStreamAutoUpdateState.isRunning = true
+    defer { SkyStreamAutoUpdateState.isRunning = false }
+
+    // The manager loads Core Data lazily. Bound the wait so source maintenance never delays
+    // the rest of ContentView's background checks indefinitely on a damaged store.
+    let manager = SkyStreamPluginManager.shared
+    for _ in 0..<40 where !manager.isLoaded {
+        do {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        } catch {
+            return
+        }
+    }
+    guard !Task.isCancelled,
+          manager.isLoaded,
+          !manager.installedPlugins.isEmpty || !manager.repositories.isEmpty else {
+        return
+    }
+    await manager.refreshRepositoriesAndInstalledPlugins(autoUpdate: true)
+    guard !Task.isCancelled else { return }
+    UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: timestampKey)
+#endif
+}
+
 struct ContentView: View {
     private enum AppTab: Hashable {
         case home, schedule, downloads, library, search
@@ -196,6 +241,7 @@ struct ContentView: View {
         guard !Task.isCancelled else { return }
 
         await ServiceManager.shared.autoUpdateServicesIfNeeded()
+        await autoUpdateSkyStreamSourcesIfNeeded()
         await SourceHealthMonitor.shared.runDailyEnabledSourceChecksIfNeeded()
         await GitHubReleaseChecker.checkForUpdatesIfNeeded()
 
@@ -779,6 +825,7 @@ struct ExperimentalContentView: View {
         guard !Task.isCancelled else { return }
 
         await ServiceManager.shared.autoUpdateServicesIfNeeded()
+        await autoUpdateSkyStreamSourcesIfNeeded()
         await SourceHealthMonitor.shared.runDailyEnabledSourceChecksIfNeeded()
         await GitHubReleaseChecker.checkForUpdatesIfNeeded()
 

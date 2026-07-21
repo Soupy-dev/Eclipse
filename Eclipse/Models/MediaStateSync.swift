@@ -1,5 +1,6 @@
 import CloudKit
 import Combine
+import CryptoKit
 import Foundation
 
 enum MediaStatePlaybackLease {
@@ -81,6 +82,10 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     private static let recordType = "EclipseMediaState"
     private static let subscriptionID = "EclipseMediaStateChanges"
     private static let maxPayloadBytes = 800 * 1024
+    private static let skyStreamRecordName = MediaStateRecordName.make(
+        kind: .skyStreamMetadata,
+        identifier: "safe-cloud-v1"
+    )
 
     private lazy var container = CKContainer(identifier: Self.containerIdentifier)
     private let zoneID = CKRecordZone.ID(zoneName: zoneName, ownerName: CKCurrentUserDefaultName)
@@ -98,9 +103,15 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     private var isAccountIsolationInProgress = false
     private var verifiedAccountRecordName: String?
     private var suppressedDefaultRecordNames: Set<String> = []
+    private var pendingAccountBoundaryPayloadHashes: [String: String] = [:]
+    private var lastAppliedSkyStreamPayloadHash: String?
+    private var inFlightSkyStreamPayloadHash: String?
+    private var pendingSkyStreamReconstructionPackageIDs: Set<String> = []
+    private var lastSkyStreamMetadataEncodingFailure: String?
     private var isApplyingRemoteState = false
     private var hasDeferredRemoteApply = false
     private var captureTask: Task<Void, Never>?
+    private var skyStreamRestoreTask: Task<Void, Never>?
     private var observers: [NSObjectProtocol] = []
 
     private override init() {
@@ -116,6 +127,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     deinit {
         observers.forEach(NotificationCenter.default.removeObserver)
         captureTask?.cancel()
+        skyStreamRestoreTask?.cancel()
     }
 
     func start() {
@@ -183,6 +195,12 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
 
     func resetLocalCacheWithoutDeletingRemoteState() {
         captureTask?.cancel()
+        skyStreamRestoreTask?.cancel()
+        skyStreamRestoreTask = nil
+        lastAppliedSkyStreamPayloadHash = nil
+        inFlightSkyStreamPayloadHash = nil
+        pendingSkyStreamReconstructionPackageIDs = []
+        pendingAccountBoundaryPayloadHashes = [:]
         archive = .empty
         initialFetchCompleted = false
         isTrustedOfflineCacheActive = false
@@ -205,12 +223,12 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     /// live streaming domains around that whole-snapshot restore so a first run
     /// with no CK archive cannot treat older media fields as new local state.
     func performLegacySnapshotRestorePreservingMediaState(
-        _ restore: () -> Bool
-    ) -> Bool {
+        _ restore: () async -> Bool
+    ) async -> Bool {
         captureTask?.cancel()
         let preservedMediaState = buildLocalSnapshot()
         let authoritativeCloudRecords = archive.records
-        let succeeded = restore()
+        let succeeded = await restore()
         guard succeeded else { return false }
 
         archive.records = preservedMediaState
@@ -442,6 +460,18 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             localStatePolicy: localStatePolicy
         )
         archive.records = merge.records
+        if localStatePolicy == .isolateIncomingAccount {
+            archive.suppressedLocalRecordPayloadHashes.merge(
+                pendingAccountBoundaryPayloadHashes,
+                uniquingKeysWith: { _, incoming in incoming }
+            )
+        } else {
+            for (recordName, hash) in pendingAccountBoundaryPayloadHashes
+            where archive.suppressedLocalRecordPayloadHashes[recordName] == hash {
+                archive.suppressedLocalRecordPayloadHashes.removeValue(forKey: recordName)
+            }
+        }
+        pendingAccountBoundaryPayloadHashes = [:]
         suppressedDefaultRecordNames = defaultRecordNames.subtracting(Set(archive.records.keys))
 
         applyArchiveToManagersOrDefer()
@@ -467,6 +497,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             .libraryDataDidChange,
             .userRatingDataDidChange,
             .catalogDataDidChange,
+            .skyStreamMetadataDidChange,
             UserDefaults.didChangeNotification
         ]
 
@@ -534,6 +565,12 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         var pendingNames: [String] = []
 
         for (recordName, candidate) in current {
+            if let suppressedHash = archive.suppressedLocalRecordPayloadHashes[recordName] {
+                guard Self.payloadSHA256(candidate.payload) != suppressedHash else {
+                    continue
+                }
+                archive.suppressedLocalRecordPayloadHashes.removeValue(forKey: recordName)
+            }
             if let existing = archive.records[recordName] {
                 if existing.isDeleted,
                    MediaStateLocalMigrationPolicy.shouldSuppressTombstoneResurrection(
@@ -637,6 +674,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         addRatingRecords(to: &result)
         addSettingRecords(to: &result)
         addCatalogRecord(to: &result)
+        addSkyStreamMetadataRecord(to: &result)
         return result
     }
 
@@ -754,6 +792,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         for movie in progress.movieProgress {
             var sanitizedMovie = movie
             sanitizedMovie.lastHref = nil
+            sanitizedMovie.lastContentReference = nil
             guard let data = try? encoder.encode(sanitizedMovie) else { continue }
             let name = MediaStateRecordName.make(kind: .movieProgress, identifier: String(sanitizedMovie.id))
             result[name] = MediaStateEnvelope(
@@ -767,6 +806,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         for episode in progress.episodeProgress {
             var sanitizedEpisode = episode
             sanitizedEpisode.lastHref = nil
+            sanitizedEpisode.lastContentReference = nil
             guard let data = try? encoder.encode(sanitizedEpisode) else { continue }
             let name = MediaStateRecordName.make(kind: .episodeProgress, identifier: sanitizedEpisode.id)
             result[name] = MediaStateEnvelope(
@@ -848,6 +888,86 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         )
     }
 
+    private func addSkyStreamMetadataRecord(to result: inout [String: MediaStateEnvelope]) {
+        if let data = localSkyStreamMetadataPayload() {
+            result[Self.skyStreamRecordName] = MediaStateEnvelope(
+                recordName: Self.skyStreamRecordName,
+                kind: .skyStreamMetadata,
+                payload: data,
+                modifiedAt: .distantPast
+            )
+            return
+        }
+
+        // A temporarily unloaded manager, corrupt opaque file, or oversized local snapshot is an
+        // omission, never a deletion signal. Retain the last accepted account-owned record until
+        // a bounded local document is available again.
+        if let existing = archive.records[Self.skyStreamRecordName],
+           !existing.isDeleted,
+           let snapshot = try? SkyStreamMediaStateDocument.decodeMetadataOnly(existing.payload),
+           let canonical = try? SkyStreamMediaStateDocument.encodeMetadataOnly(snapshot) {
+            var retained = existing
+            retained.payload = canonical
+            result[Self.skyStreamRecordName] = retained
+        }
+    }
+
+    private func localSkyStreamMetadataPayload() -> Data? {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        guard PlatformCapabilities.current.supportsSkyStreamPlugins else { return nil }
+        let manager = SkyStreamPluginManager.shared
+        guard manager.isLoaded,
+              var safeSnapshot = BackupData.skyStreamSnapshotForExperimentalCloudSync(
+                manager.safeCloudMetadataSnapshot()
+              ) else { return nil }
+        if !pendingSkyStreamReconstructionPackageIDs.isEmpty,
+           let existing = archive.records[Self.skyStreamRecordName],
+           !existing.isDeleted,
+           let remoteSnapshot = try? SkyStreamMediaStateDocument.decodeMetadataOnly(existing.payload) {
+            let localPackageIDs = Set(safeSnapshot.plugins.map(\.id))
+            safeSnapshot.plugins.append(contentsOf: remoteSnapshot.plugins.filter {
+                pendingSkyStreamReconstructionPackageIDs.contains($0.id)
+                    && !localPackageIDs.contains($0.id)
+            })
+            let localRepositoryURLs = Set(safeSnapshot.repositories.map(\.sourceURL))
+            safeSnapshot.repositories.append(contentsOf: remoteSnapshot.repositories.filter {
+                !localRepositoryURLs.contains($0.sourceURL)
+            })
+        }
+        do {
+            let data = try SkyStreamMediaStateDocument.encodeMetadataOnly(safeSnapshot)
+            lastSkyStreamMetadataEncodingFailure = nil
+            return data
+        } catch {
+            logSkyStreamMetadataEncodingFailureOnce(error)
+            return nil
+        }
+#else
+        guard let data = SkyStreamPluginManager.shared.opaqueMediaStateSnapshotData(),
+              let snapshot = try? SkyStreamMediaStateDocument.decodeMetadataOnly(data) else {
+            return nil
+        }
+        do {
+            let canonical = try SkyStreamMediaStateDocument.encodeMetadataOnly(snapshot)
+            lastSkyStreamMetadataEncodingFailure = nil
+            return canonical
+        } catch {
+            logSkyStreamMetadataEncodingFailureOnce(error)
+            return nil
+        }
+#endif
+    }
+
+    private func logSkyStreamMetadataEncodingFailureOnce(_ error: Error) {
+        let failure = String(reflecting: error)
+        guard failure != lastSkyStreamMetadataEncodingFailure else { return }
+        lastSkyStreamMetadataEncodingFailure = failure
+        Logger.shared.log(
+            "SkyStream CloudKit metadata capture omitted; prior account record retained error=\(failure)",
+            type: "iCloud"
+        )
+    }
+
     // MARK: - Applying merged state
 
     private func applyArchiveToManagersOrDefer() {
@@ -859,6 +979,12 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     }
 
     private func isolateLoadedStateOrDefer() {
+        stageCurrentSkyStreamPayloadForAccountBoundary()
+        skyStreamRestoreTask?.cancel()
+        skyStreamRestoreTask = nil
+        lastAppliedSkyStreamPayloadHash = nil
+        inFlightSkyStreamPayloadHash = nil
+        pendingSkyStreamReconstructionPackageIDs = []
         if MediaStatePlaybackLease.isActive {
             hasDeferredRemoteApply = true
         } else {
@@ -875,6 +1001,7 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         applyRatingRecords()
         applySettingRecords()
         applyCatalogRecord()
+        applySkyStreamMetadataRecord()
         NotificationCenter.default.post(name: .mediaStateDidRestore, object: self)
     }
 
@@ -931,6 +1058,8 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             var merged = incoming
             merged.lastHref = currentMovies[incoming.id]?.lastHref
             merged.lastServiceId = currentMovies[incoming.id]?.lastServiceId ?? incoming.lastServiceId
+            merged.lastSourceId = currentMovies[incoming.id]?.lastSourceId ?? incoming.lastSourceId
+            merged.lastContentReference = currentMovies[incoming.id]?.lastContentReference
             return merged
         }
         progress.episodeProgress = activeRecords(of: .episodeProgress).compactMap {
@@ -939,6 +1068,8 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             var merged = incoming
             merged.lastHref = currentEpisodes[incoming.id]?.lastHref
             merged.lastServiceId = currentEpisodes[incoming.id]?.lastServiceId ?? incoming.lastServiceId
+            merged.lastSourceId = currentEpisodes[incoming.id]?.lastSourceId ?? incoming.lastSourceId
+            merged.lastContentReference = currentEpisodes[incoming.id]?.lastContentReference
             return merged
         }
         progress.showMetadata = Dictionary(
@@ -998,6 +1129,127 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
             return
         }
         CatalogManager.shared.replaceCatalogsForMediaState(catalogs.sorted { $0.order < $1.order })
+    }
+
+    private func applySkyStreamMetadataRecord() {
+        guard archive.records.values.contains(where: { $0.kind == .skyStreamMetadata }),
+              let envelope = activeRecords(of: .skyStreamMetadata).first,
+              let snapshot = try? SkyStreamMediaStateDocument.decodeMetadataOnly(envelope.payload),
+              let canonicalData = try? SkyStreamMediaStateDocument.encodeMetadataOnly(snapshot) else {
+            return
+        }
+
+        let payloadHash = Self.payloadSHA256(canonicalData)
+        guard payloadHash != lastAppliedSkyStreamPayloadHash,
+              payloadHash != inFlightSkyStreamPayloadHash else { return }
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        // The emergency capability seam is also an execution/network boundary. The fetched record
+        // remains in the account-owned archive for a later capable build, but this build neither
+        // reconstructs nor evaluates its package code.
+        guard PlatformCapabilities.current.supportsSkyStreamPlugins else {
+            lastAppliedSkyStreamPayloadHash = payloadHash
+            return
+        }
+        // A fetched document is allowed to reconstruct packages only after CloudKit has verified
+        // the account that owns this archive. An offline cache can still restore ordinary media
+        // state, but it cannot trigger code downloads/evaluation from stale account metadata.
+        guard let owner = archive.accountOwnerRecordName,
+              owner == verifiedAccountRecordName else { return }
+        if localSkyStreamMetadataPayload() == canonicalData {
+            pendingSkyStreamReconstructionPackageIDs = []
+            lastAppliedSkyStreamPayloadHash = payloadHash
+            return
+        }
+        let generation = accountPreparationGeneration
+        skyStreamRestoreTask?.cancel()
+        // Retain unresolved remote rows in every local capture until normal package validation has
+        // reconstructed them. Otherwise an offline clean device could upload an empty/subset record
+        // and erase the only recovery metadata before its next retry.
+        pendingSkyStreamReconstructionPackageIDs = Set(snapshot.plugins.map(\.id))
+        inFlightSkyStreamPayloadHash = payloadHash
+        skyStreamRestoreTask = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if self.inFlightSkyStreamPayloadHash == payloadHash {
+                    self.inFlightSkyStreamPayloadHash = nil
+                }
+            }
+            let manager = SkyStreamPluginManager.shared
+            var attemptsRemaining = 600
+            while !manager.isLoaded, attemptsRemaining > 0, !Task.isCancelled {
+                attemptsRemaining -= 1
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            guard !Task.isCancelled,
+                  manager.isLoaded,
+                  generation == self.accountPreparationGeneration,
+                  owner == self.archive.accountOwnerRecordName,
+                  owner == self.verifiedAccountRecordName else { return }
+            do {
+                var retryIndex = 0
+                while true {
+                    guard !Task.isCancelled,
+                          generation == self.accountPreparationGeneration,
+                          owner == self.archive.accountOwnerRecordName,
+                          owner == self.verifiedAccountRecordName,
+                          self.inFlightSkyStreamPayloadHash == payloadHash else { return }
+                    let result = try await manager.restoreSafeCloudSnapshot(snapshot)
+                    guard !Task.isCancelled,
+                          generation == self.accountPreparationGeneration,
+                          owner == self.archive.accountOwnerRecordName,
+                          owner == self.verifiedAccountRecordName,
+                          self.inFlightSkyStreamPayloadHash == payloadHash else { return }
+                    self.pendingSkyStreamReconstructionPackageIDs = Set(result.unresolvedPackageIDs)
+                    if result.isComplete {
+                        self.lastAppliedSkyStreamPayloadHash = payloadHash
+                        return
+                    }
+                    guard retryIndex < 2 else {
+                        Logger.shared.log(
+                            "SkyStream CloudKit metadata restore remains partial unresolvedCount=\(result.unresolvedPackageIDs.count)",
+                            type: "iCloud"
+                        )
+                        return
+                    }
+                    let delays: [UInt64] = [2_000_000_000, 5_000_000_000]
+                    let delay = delays[retryIndex]
+                    retryIndex += 1
+                    try await Task.sleep(nanoseconds: delay)
+                }
+            } catch {
+                Logger.shared.log(
+                    "SkyStream CloudKit metadata restore failed errorType=\(String(reflecting: type(of: error)))",
+                    type: "iCloud"
+                )
+            }
+        }
+#else
+        do {
+            try SkyStreamPluginManager.shared.preserveOpaqueMediaStateSnapshotData(canonicalData)
+            lastAppliedSkyStreamPayloadHash = payloadHash
+        } catch {
+            Logger.shared.log("SkyStream metadata preservation failed", type: "iCloud")
+        }
+#endif
+    }
+
+    private func stageCurrentSkyStreamPayloadForAccountBoundary() {
+        let payload = localSkyStreamMetadataPayload()
+            ?? archive.records[Self.skyStreamRecordName].flatMap { envelope in
+                guard !envelope.isDeleted,
+                      let snapshot = try? SkyStreamMediaStateDocument.decodeMetadataOnly(envelope.payload),
+                      let canonical = try? SkyStreamMediaStateDocument.encodeMetadataOnly(snapshot) else {
+                    return nil
+                }
+                return canonical
+            }
+        guard let payload else { return }
+        pendingAccountBoundaryPayloadHashes[Self.skyStreamRecordName] = Self.payloadSHA256(payload)
+    }
+
+    private static func payloadSHA256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     private func mediaCollectionKey(_ collection: LibraryCollection) -> String {
@@ -1243,6 +1495,13 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
         HomeCatalogLayoutStore.shared.reloadFromStorage()
         EclipseTheme.shared.reloadMediaAppearanceFromDefaults()
         CatalogManager.shared.resetCatalogsForMediaStateAccountChange()
+#if !os(iOS) || targetEnvironment(macCatalyst)
+        // The opaque document belongs to the verified CloudKit user just like the surrounding
+        // media archive. Non-executing targets have no editable SkyStream state, so clearing only
+        // this cloud shadow at an account boundary is lossless locally and prevents replay. The
+        // independent manual opaque backup remains untouched.
+        SkyStreamPluginManager.shared.clearOpaqueMediaStateSnapshotData()
+#endif
 #if os(iOS)
         reloadLocalNotificationSelectionsIfNeeded(
             previousSubscriptions: previousNotificationSubscriptions
@@ -1286,6 +1545,15 @@ final class MediaStateSyncManager: NSObject, ObservableObject {
     }
 
     private func persistArchive() {
+        // Persist the account-boundary quarantine before any CloudKit await. If the process exits
+        // after selecting the incoming account but before its initial fetch completes, a relaunch
+        // must still know not to upload the outgoing account's device-local SkyStream snapshot.
+        if initialLocalStatePolicy == .isolateIncomingAccount {
+            archive.suppressedLocalRecordPayloadHashes.merge(
+                pendingAccountBoundaryPayloadHashes,
+                uniquingKeysWith: { _, incoming in incoming }
+            )
+        }
         do {
             try Self.ensureStorageDirectory()
             let data = try encoder.encode(archive)

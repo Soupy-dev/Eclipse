@@ -68,6 +68,12 @@ final class CrashReportManager {
         }
     }
 
+    func clearCrashReport() {
+        fileQueue.sync {
+            try? FileManager.default.removeItem(at: crashReportURL)
+        }
+    }
+
 #if canImport(CrashReporter)
     private func collectPendingCrashReportIfNeeded(from reporter: PLCrashReporter) {
         guard reporter.hasPendingCrashReport() else { return }

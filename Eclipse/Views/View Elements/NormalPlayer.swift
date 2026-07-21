@@ -1924,6 +1924,7 @@ private extension NormalPlayer {
             subtitleHeadersByURL: playbackLaunchContext?.subtitleHeadersByURL,
             mediaSelectionIntent: mediaSelectionIntent,
             mediaInfo: mediaInfo,
+            mediaYear: configuredRequest?.mediaYear,
             episodePlaybackContext: episodePlaybackContext,
             launchContext: playbackLaunchContext,
             title: title,
@@ -2023,6 +2024,7 @@ private extension NormalPlayer {
             isAnimeContent: target.isAnime,
             selectedEpisode: target.episode,
             tmdbId: target.showID,
+            mediaYear: target.mediaYear ?? configuredRequest?.mediaYear,
             animeSeasonTitle: target.seasonTitleOverride ?? target.mediaTitle,
             posterPath: target.posterURL,
             originalAudioLanguage: configuredRequest?.servicesOriginalAudioLanguage,
@@ -2033,7 +2035,10 @@ private extension NormalPlayer {
             episodePlaybackContext: target.playbackContext,
             autoModeOnly: UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"),
             onResolvedPlaybackRequest: { [weak self] resolved in
-                guard let self, self.activeSourceSelectionID == selectionID else { return }
+                guard let self, self.activeSourceSelectionID == selectionID else {
+                    Self.invalidateAbandonedSkyStreamPlayback(resolved)
+                    return
+                }
                 self.activeSourceSelectionID = nil
                 Logger.shared.log("NormalPlayer: received next-episode replacement request", type: "Player")
                 self.replacePlaybackFromNextEpisode(with: resolved, target: target)
@@ -2095,7 +2100,8 @@ private extension NormalPlayer {
             originalTMDBSeasonNumber: target.originalTMDBSeasonNumber,
             originalTMDBEpisodeNumber: target.originalTMDBEpisodeNumber,
             episodePlaybackContext: download.episodePlaybackContext ?? target.playbackContext,
-            launchContext: nil
+            launchContext: nil,
+            mediaYear: target.mediaYear ?? configuredRequest?.mediaYear
         )
     }
 
@@ -2121,6 +2127,7 @@ private extension NormalPlayer {
             subtitles: DownloadManager.shared.localSubtitleURL(for: download).map { [$0.absoluteString] } ?? [],
             mediaSelectionIntent: mediaSelectionIntent,
             mediaInfo: download.mediaInfo,
+            mediaYear: existing.mediaYear,
             imdbID: existing.imdbID,
             episodePlaybackContext: context,
             resumePosition: nil,
@@ -2198,6 +2205,7 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
             isAnimeContent: context.isAnime,
             selectedEpisode: context.selectedEpisode,
             tmdbId: context.tmdbID,
+            mediaYear: context.mediaYear,
             animeSeasonTitle: context.animeSeasonTitle,
             posterPath: context.posterPath,
             originalAudioLanguage: context.originalAudioLanguage,
@@ -2209,7 +2217,10 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
             autoModeOnly: false,
             ignoresAutoMode: true,
             onResolvedPlaybackRequest: { [weak self] resolved in
-                guard let self, self.activeSourceSelectionID == selectionID else { return }
+                guard let self, self.activeSourceSelectionID == selectionID else {
+                    Self.invalidateAbandonedSkyStreamPlayback(resolved)
+                    return
+                }
                 self.activeSourceSelectionID = nil
                 Logger.shared.log("NormalPlayer: received Services replacement request", type: "Player")
                 self.replacePlaybackFromServices(with: resolved, context: context)
@@ -2262,7 +2273,8 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
                 || configuredRequest?.isAnime == true
                 || episodePlaybackContext?.hasAnimeMediaId == true,
             imdbId: configuredRequest?.imdbID,
-            currentPlaybackContext: episodePlaybackContext
+            currentPlaybackContext: episodePlaybackContext,
+            mediaYear: configuredRequest?.mediaYear
         )
     }
 
@@ -2336,6 +2348,7 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
             isAnimeContent: item.isAnime,
             selectedEpisode: item.episode,
             tmdbId: item.showId,
+            mediaYear: item.mediaYear ?? configuredRequest?.mediaYear,
             animeSeasonTitle: item.animeSeasonTitle,
             posterPath: item.posterURL ?? item.showPosterURL,
             originalAudioLanguage: item.originalAudioLanguage,
@@ -2346,7 +2359,10 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
             episodePlaybackContext: item.playbackContext,
             autoModeOnly: UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"),
             onResolvedPlaybackRequest: { [weak self] resolved in
-                guard let self, self.activeSourceSelectionID == selectionID else { return }
+                guard let self, self.activeSourceSelectionID == selectionID else {
+                    Self.invalidateAbandonedSkyStreamPlayback(resolved)
+                    return
+                }
                 self.activeSourceSelectionID = nil
                 Logger.shared.log("NormalPlayer: received episode-browser replacement request", type: "Player")
                 self.replacePlaybackFromEpisodeBrowser(with: resolved, item: item)
@@ -2384,15 +2400,35 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
             originalTMDBSeasonNumber: item.originalTMDBSeasonNumber,
             originalTMDBEpisodeNumber: item.originalTMDBEpisodeNumber,
             episodePlaybackContext: downloadItem.episodePlaybackContext ?? item.playbackContext,
-            launchContext: nil
+            launchContext: nil,
+            mediaYear: item.mediaYear ?? configuredRequest?.mediaYear
         )
+    }
+
+    private static func invalidateAbandonedSkyStreamPlayback(
+        _ request: PlayerResolvedPlaybackRequest
+    ) {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        guard request.launchContext?.sourceKind == .skyStream else { return }
+        MPVHeaderProxy.shared.invalidateSession(for: request.url)
+#endif
+    }
+
+    private static func invalidateAbandonedSkyStreamPlayback(_ request: PlaybackRequest) {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        guard request.launchContext?.sourceKind == .skyStream else { return }
+        MPVHeaderProxy.shared.invalidateSession(for: request.url)
+#endif
     }
 
     private func replacePlaybackFromEpisodeBrowser(
         with resolved: PlayerResolvedPlaybackRequest,
         item: PlayerEpisodeBrowserItem
     ) {
-        guard let existing = configuredRequest else { return }
+        guard let existing = configuredRequest else {
+            Self.invalidateAbandonedSkyStreamPlayback(resolved)
+            return
+        }
         let followingDownload = resolved.url.isFileURL
             ? item.downloadItem.flatMap(nextCompletedDownloadedEpisode(after:))
             : nil
@@ -2412,6 +2448,7 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
                 showPosterURL: item.showPosterURL,
                 isAnime: item.isAnime
             ),
+            mediaYear: resolved.mediaYear ?? item.mediaYear ?? existing.mediaYear,
             imdbID: resolved.imdbId ?? item.imdbId,
             episodePlaybackContext: resolved.episodePlaybackContext ?? item.playbackContext,
             launchContext: resolved.launchContext,
@@ -2447,7 +2484,10 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
         with resolved: PlayerResolvedPlaybackRequest,
         target: ResolvedNextEpisodeTarget
     ) {
-        guard let existing = configuredRequest else { return }
+        guard let existing = configuredRequest else {
+            Self.invalidateAbandonedSkyStreamPlayback(resolved)
+            return
+        }
         let existingShowTitle: String? = {
             guard case .episode(_, _, _, let title, _, _) = existing.mediaInfo else { return nil }
             return title
@@ -2479,6 +2519,7 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
                 showPosterURL: target.posterURL,
                 isAnime: target.isAnime
             ),
+            mediaYear: resolved.mediaYear ?? target.mediaYear ?? existing.mediaYear,
             imdbID: resolved.imdbId ?? target.imdbID ?? existing.imdbID,
             episodePlaybackContext: resolvedContext,
             launchContext: resolved.launchContext,
@@ -2517,7 +2558,10 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
         with resolved: PlayerResolvedPlaybackRequest,
         context: PlayerServicesSelectionContext
     ) {
-        guard let existing = configuredRequest else { return }
+        guard let existing = configuredRequest else {
+            Self.invalidateAbandonedSkyStreamPlayback(resolved)
+            return
+        }
 
         let replacement = PlaybackRequest(
             url: resolved.url,
@@ -2528,6 +2572,7 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
             subtitleHeadersByURL: resolved.subtitleHeadersByURL,
             mediaSelectionIntent: mediaSelectionIntent,
             mediaInfo: resolved.mediaInfo ?? existing.mediaInfo,
+            mediaYear: resolved.mediaYear ?? context.mediaYear ?? existing.mediaYear,
             imdbID: resolved.imdbId ?? existing.imdbID,
             episodePlaybackContext: resolved.episodePlaybackContext ?? existing.episodePlaybackContext,
             launchContext: resolved.launchContext,
@@ -2591,6 +2636,7 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
               !isHandingOffPlaybackEngine,
               !isPictureInPictureActiveOrStarting,
               viewIfLoaded?.window != nil else {
+            Self.invalidateAbandonedSkyStreamPlayback(replacement)
             restoreOutgoingPlaybackFenceIfNeeded()
             Logger.shared.log(
                 "NormalPlayer: ignored stale or unavailable replacement reason=\(reason)",
@@ -2631,12 +2677,14 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
               !isHandingOffPlaybackEngine,
               !isPictureInPictureActiveOrStarting,
               viewIfLoaded?.window != nil else {
+            Self.invalidateAbandonedSkyStreamPlayback(replacement)
             cancelInPlaceReplacement(reason: "lifecycle changed while waiting reason=\(reason)")
             return
         }
 
         if let presented = presentedViewController {
             guard selectionController === presented else {
+                Self.invalidateAbandonedSkyStreamPlayback(replacement)
                 cancelInPlaceReplacement(reason: "another controller replaced the source picker reason=\(reason)")
                 return
             }
@@ -2644,11 +2692,16 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
                 presented.dismiss(animated: false)
             }
             guard retryCount < 120 else {
+                Self.invalidateAbandonedSkyStreamPlayback(replacement)
                 cancelInPlaceReplacement(reason: "source picker dismissal timed out reason=\(reason)")
                 return
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-                self?.finishInPlaceReplacement(
+                guard let self else {
+                    Self.invalidateAbandonedSkyStreamPlayback(replacement)
+                    return
+                }
+                self.finishInPlaceReplacement(
                     replacement,
                     reason: reason,
                     generation: generation,
@@ -2684,6 +2737,7 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
               !isHandingOffPlaybackEngine,
               !isPictureInPictureActiveOrStarting,
               viewIfLoaded?.window != nil else {
+            Self.invalidateAbandonedSkyStreamPlayback(replacement)
             cancelInPlaceReplacement(reason: "commit became stale reason=\(reason)")
             return
         }
@@ -2693,6 +2747,7 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
         let outgoingPlaybackDidStart = playbackDidStart
         let changesMedia = !hasSameMediaIdentity(outgoingMediaInfo, replacement.mediaInfo)
         let preferredEngine = PlaybackEngine.selected
+        let requiresTypedMPVTransport = replacement.launchContext?.sourceKind == .skyStream
 
         endHoldSpeed()
         player?.pause()
@@ -2706,13 +2761,19 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
             )
         }
 
-        if preferredEngine == .mpv
+        if requiresTypedMPVTransport
+            || preferredEngine == .mpv
             || PlaybackCoordinator.shared.shouldHandOffAVPlayerDirectly(for: replacement) {
             isReplacingCurrentPlayback = false
             clearOutgoingPlaybackFence()
-            let handoffReason = preferredEngine == .mpv
-                ? "The saved playback engine preference is MPV."
-                : "AVPlayer does not support this stream container."
+            let handoffReason: String
+            if requiresTypedMPVTransport {
+                handoffReason = "This provider uses Eclipse's typed MPV transport."
+            } else if preferredEngine == .mpv {
+                handoffReason = "The saved playback engine preference is MPV."
+            } else {
+                handoffReason = "AVPlayer does not support this stream container."
+            }
             Logger.shared.log(
                 "NormalPlayer: handing selected stream to Molten preference=\(preferredEngine.rawValue) extension=.\(replacement.url.pathExtension.lowercased()) reason=\(reason)",
                 type: "Player"

@@ -47,6 +47,29 @@ extension Bundle {
     var allowsExternalDonationLinks: Bool {
         !isAppleReviewedDistribution
     }
+
+    /// Emergency distribution capability seam for the user-supplied SkyStream flow.
+    ///
+    /// All channels intentionally default to enabled. A future reviewed build can opt out with
+    /// an explicit Info.plist boolean without coupling availability to TestFlight/App Store
+    /// receipt heuristics or changing the behavior of existing source families.
+    var allowsSkyStreamPlugins: Bool {
+        guard let configured = infoDictionary?["EclipseSkyStreamPluginsEnabled"] else {
+            return true
+        }
+        if let value = configured as? Bool {
+            return value
+        }
+        if let value = configured as? NSNumber {
+            return value.boolValue
+        }
+        if let value = configured as? String {
+            let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if ["false", "no", "0"].contains(normalized) { return false }
+            if ["true", "yes", "1"].contains(normalized) { return true }
+        }
+        return true
+    }
 }
 
 enum GitHubReleaseChecker {

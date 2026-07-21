@@ -623,6 +623,18 @@ enum StreamLanguageFilter {
     static let hideUnknownQualityStreamsKey = "servicesHideStreamsWithoutDetectedQuality"
     static let extraRulesSourceIdsKey = "servicesExtraRulesSourceIds"
     static let supportedQualityHeights = [2160, 1440, 1080, 720, 480, 360]
+    /// Eclipse's persisted SkyStream source IDs use bounded ASCII components.
+    /// Opaque provider IDs that do not fit this grammar are SHA-256 encoded before
+    /// reaching this settings boundary, so rejecting malformed stored IDs is safe.
+    static let maximumSkyStreamSourceIDComponentLength = 128
+    private static let maximumExtraRulesSourceIDLength =
+        "skystream:".count + maximumSkyStreamSourceIDComponentLength * 2 + "::".count
+    private static let skyStreamSourceIDCharacters = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+    )
+    private static let skyStreamSourceIDBoundaryCharacters = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    )
 
     struct Matcher {
         let keys: Set<String>
@@ -842,13 +854,47 @@ enum StreamLanguageFilter {
         var seen = Set<String>()
         return values.compactMap { value -> String? in
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard trimmed.hasPrefix("service:") || trimmed.hasPrefix("stremio:") else { return nil }
-            let sourceId = String(trimmed.prefix(160))
-            guard seen.insert(sourceId).inserted else { return nil }
-            return sourceId
+            guard !trimmed.isEmpty,
+                  trimmed.count <= maximumExtraRulesSourceIDLength,
+                  trimmed.hasPrefix("service:")
+                    || trimmed.hasPrefix("stremio:")
+                    || isValidSkyStreamSourceID(trimmed),
+                  seen.insert(trimmed).inserted else {
+                return nil
+            }
+            return trimmed
         }
         .prefix(200)
         .map { $0 }
+    }
+
+    static func isValidSkyStreamSourceID(_ sourceID: String) -> Bool {
+        let prefix = "skystream:"
+        guard sourceID.hasPrefix(prefix),
+              sourceID.count <= maximumExtraRulesSourceIDLength else {
+            return false
+        }
+
+        let payload = String(sourceID.dropFirst(prefix.count))
+        let components = payload.components(separatedBy: "::")
+        guard components.count == 1 || components.count == 2 else { return false }
+        return components.allSatisfy(isValidSkyStreamSourceIDComponent)
+    }
+
+    private static func isValidSkyStreamSourceIDComponent(_ component: String) -> Bool {
+        guard !component.isEmpty,
+              component.count <= maximumSkyStreamSourceIDComponentLength,
+              component != ".",
+              component != "..",
+              !component.contains(".."),
+              component.unicodeScalars.allSatisfy({ skyStreamSourceIDCharacters.contains($0) }),
+              let first = component.unicodeScalars.first,
+              let last = component.unicodeScalars.last,
+              skyStreamSourceIDBoundaryCharacters.contains(first),
+              skyStreamSourceIDBoundaryCharacters.contains(last) else {
+            return false
+        }
+        return true
     }
 
     static func qualityLabel(for height: Int) -> String {

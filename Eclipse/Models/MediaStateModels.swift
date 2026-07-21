@@ -10,6 +10,7 @@ enum MediaStateKind: String, Codable, CaseIterable, Sendable {
     case rating
     case setting
     case catalogOrder
+    case skyStreamMetadata
 }
 
 enum MediaStateSettingScope: String, Codable, Sendable {
@@ -142,6 +143,11 @@ struct MediaStateLocalArchive: Codable, Sendable {
     /// this journal keeps an offline edit pending across termination instead of
     /// relying on CKSyncEngine's in-memory pending-change queue.
     var pendingLocalRecordNames: Set<String> = []
+    /// Payload hashes quarantined at an account boundary. Some domains (currently SkyStream
+    /// package metadata) remain installed device-locally, but the outgoing account's snapshot
+    /// must not be uploaded into a different private database merely because that local state is
+    /// still present. A real post-switch edit changes the hash and releases the suppression.
+    var suppressedLocalRecordPayloadHashes: [String: String] = [:]
     /// The globally persisted managers have already been cleared at an account
     /// boundary and now contain signed-out/unverified local edits. Keeping this
     /// bit beside the quarantined owned archive prevents every offline relaunch
@@ -154,6 +160,7 @@ struct MediaStateLocalArchive: Codable, Sendable {
         accountOwnerRecordName: String? = nil,
         ubiquityIdentityTokenData: Data? = nil,
         pendingLocalRecordNames: Set<String> = [],
+        suppressedLocalRecordPayloadHashes: [String: String] = [:],
         isAccountNeutralLocalStateActive: Bool = false
     ) {
         self.records = records
@@ -161,6 +168,7 @@ struct MediaStateLocalArchive: Codable, Sendable {
         self.accountOwnerRecordName = accountOwnerRecordName
         self.ubiquityIdentityTokenData = ubiquityIdentityTokenData
         self.pendingLocalRecordNames = pendingLocalRecordNames
+        self.suppressedLocalRecordPayloadHashes = suppressedLocalRecordPayloadHashes
         self.isAccountNeutralLocalStateActive = isAccountNeutralLocalStateActive
     }
 
@@ -170,6 +178,7 @@ struct MediaStateLocalArchive: Codable, Sendable {
         case accountOwnerRecordName
         case ubiquityIdentityTokenData
         case pendingLocalRecordNames
+        case suppressedLocalRecordPayloadHashes
         case isAccountNeutralLocalStateActive
     }
 
@@ -180,6 +189,21 @@ struct MediaStateLocalArchive: Codable, Sendable {
         accountOwnerRecordName = try container.decodeIfPresent(String.self, forKey: .accountOwnerRecordName)
         ubiquityIdentityTokenData = try container.decodeIfPresent(Data.self, forKey: .ubiquityIdentityTokenData)
         pendingLocalRecordNames = try container.decodeIfPresent(Set<String>.self, forKey: .pendingLocalRecordNames) ?? []
+        let decodedSuppressedHashes = try container.decodeIfPresent(
+            [String: String].self,
+            forKey: .suppressedLocalRecordPayloadHashes
+        ) ?? [:]
+        let allowedSuppressedRecordName = MediaStateRecordName.make(
+            kind: .skyStreamMetadata,
+            identifier: "safe-cloud-v1"
+        )
+        suppressedLocalRecordPayloadHashes = decodedSuppressedHashes.filter { name, hash in
+            name == allowedSuppressedRecordName &&
+                hash.count == 64 &&
+                hash.unicodeScalars.allSatisfy(
+                    CharacterSet(charactersIn: "0123456789abcdef").contains
+                )
+        }
         isAccountNeutralLocalStateActive = try container.decodeIfPresent(
             Bool.self,
             forKey: .isAccountNeutralLocalStateActive
@@ -192,6 +216,7 @@ struct MediaStateLocalArchive: Codable, Sendable {
         accountOwnerRecordName: nil,
         ubiquityIdentityTokenData: nil,
         pendingLocalRecordNames: [],
+        suppressedLocalRecordPayloadHashes: [:],
         isAccountNeutralLocalStateActive: false
     )
 }

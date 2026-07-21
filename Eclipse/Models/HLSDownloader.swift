@@ -43,6 +43,9 @@ final class HLSDownloader: @unchecked Sendable {
     private let pinnedVariantURL: URL?
     /// Segment count recorded on the first run, used to validate a resume.
     private let expectedTotalSegments: Int
+    /// SkyStream's typed route has no trusted content length and therefore keeps a conservative
+    /// reserve before each bounded write. Legacy Service/Stremio HLS behavior remains unchanged.
+    private let enforcesConservativeDiskCapacityReserve: Bool
 
     private var isCancelled = false
     private var cancellationError: HLSError = .cancelled
@@ -53,6 +56,7 @@ final class HLSDownloader: @unchecked Sendable {
     private var nextRequestStartByHost: [String: TimeInterval] = [:]
     private var rateLimitedUntilByHost: [String: TimeInterval] = [:]
     private var rateLimitCountByHost: [String: Int] = [:]
+    private let requestStartInterval: TimeInterval
     private let session: URLSession
     #if canImport(UIKit)
     private var backgroundTaskId: UIBackgroundTaskIdentifier = .invalid
@@ -71,7 +75,9 @@ final class HLSDownloader: @unchecked Sendable {
 
     init(streamURL: URL, headers: [String: String], destinationURL: URL, downloadId: String,
          resumeFromSegment: Int = 0, resumeByteCount: Int64 = 0,
-         pinnedVariantURL: URL? = nil, expectedTotalSegments: Int = 0) {
+         pinnedVariantURL: URL? = nil, expectedTotalSegments: Int = 0,
+         minimumRequestStartInterval: TimeInterval? = nil,
+         enforcesConservativeDiskCapacityReserve: Bool = false) {
         self.streamURL = streamURL
         self.headers = headers
         self.destinationURL = destinationURL
@@ -80,6 +86,11 @@ final class HLSDownloader: @unchecked Sendable {
         self.resumeByteCount = resumeByteCount
         self.pinnedVariantURL = pinnedVariantURL
         self.expectedTotalSegments = expectedTotalSegments
+        self.enforcesConservativeDiskCapacityReserve = enforcesConservativeDiskCapacityReserve
+        self.requestStartInterval = max(
+            minimumRequestStartInterval ?? Self.minimumRequestStartInterval,
+            0
+        )
 
         let config = URLSessionConfiguration.default
         config.httpMaximumConnectionsPerHost = 4
@@ -259,6 +270,7 @@ final class HLSDownloader: @unchecked Sendable {
     private static let maximumMediaObjectBytes = 128 * 1024 * 1024
     private static let minimumRequestStartInterval: TimeInterval = 0.15
     private static let maximumRetryAfterSeconds: TimeInterval = 30
+    private static let minimumFreeCapacityReserve: Int64 = 512 * 1024 * 1024
     
     private func fetchPlaylist(url: URL) async throws -> String {
         let data = try await fetchDataWithRetry(
@@ -391,7 +403,7 @@ final class HLSDownloader: @unchecked Sendable {
                 rateLimitedUntilByHost[host] ?? now
             )
         )
-        nextRequestStartByHost[host] = scheduledStart + Self.minimumRequestStartInterval
+        nextRequestStartByHost[host] = scheduledStart + requestStartInterval
         return scheduledStart
     }
 
@@ -609,13 +621,16 @@ final class HLSDownloader: @unchecked Sendable {
         }
 
         do {
+            try ensureDiskCapacity()
             // Initialization segment (fMP4 #EXT-X-MAP) is written exactly once, on a
             // fresh run - never re-appended on resume.
             if !isResuming, let initURL = initSegmentURL {
                 try checkSystemBackoff()
+                try ensureDiskCapacity()
                 let initData = try await fetchDataWithRetry(url: initURL)
                 try checkCancelled()
                 let decrypted = try decryptIfNeeded(data: initData, key: encryptionKey, keyData: keyData, segmentIndex: -1)
+                try ensureDiskCapacity(additionalBytes: Int64(decrypted.count))
                 fileHandle.write(decrypted)
             }
 
@@ -625,10 +640,12 @@ final class HLSDownloader: @unchecked Sendable {
             for index in startIndex..<totalSegments {
                 try checkCancelled()
                 try checkSystemBackoff()
+                try ensureDiskCapacity()
 
                 let segmentData = try await fetchSegmentWithRetry(url: segments[index], maxRetries: 3)
                 try checkCancelled()
                 let decrypted = try decryptIfNeeded(data: segmentData, key: encryptionKey, keyData: keyData, segmentIndex: index)
+                try ensureDiskCapacity(additionalBytes: Int64(decrypted.count))
 
                 fileHandle.write(decrypted)
 
@@ -830,6 +847,24 @@ final class HLSDownloader: @unchecked Sendable {
             throw HLSError.systemBackoff(reason: "Paused for thermal state")
         }
         #endif
+    }
+
+    private func ensureDiskCapacity(additionalBytes: Int64 = 0) throws {
+        guard enforcesConservativeDiskCapacityReserve else { return }
+        let directory = destinationURL.deletingLastPathComponent()
+        guard let values = try? directory.resourceValues(forKeys: [
+            .volumeAvailableCapacityForImportantUsageKey,
+            .volumeAvailableCapacityKey
+        ]) else {
+            throw HLSError.systemBackoff(reason: "Waiting for disk capacity check")
+        }
+        let available = values.volumeAvailableCapacityForImportantUsage
+            ?? values.volumeAvailableCapacity.map(Int64.init)
+        guard let available,
+              additionalBytes >= 0,
+              available >= Self.minimumFreeCapacityReserve + additionalBytes else {
+            throw HLSError.systemBackoff(reason: "Paused for low disk space")
+        }
     }
     
     private func hexStringToData(_ hex: String) -> Data? {

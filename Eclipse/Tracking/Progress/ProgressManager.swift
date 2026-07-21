@@ -84,6 +84,11 @@ struct MovieProgressEntry: Codable, Identifiable {
     var lastUpdated: Date = Date()
     var lastServiceId: UUID? = nil
     var lastHref: String? = nil
+    /// Stable source identity for provider families that do not use a Service UUID.
+    var lastSourceId: String? = nil
+    /// Device-local state used to re-run provider resolution. It can contain a bounded provider
+    /// content URL, so MediaStateSync deliberately removes it before cloud serialization.
+    var lastContentReference: ProviderContentReference? = nil
 
     var progress: Double {
         guard totalDuration > 0 else { return 0 }
@@ -102,6 +107,8 @@ struct EpisodeProgressEntry: Codable, Identifiable {
     var lastUpdated: Date = Date()
     var lastServiceId: UUID? = nil
     var lastHref: String? = nil
+    var lastSourceId: String? = nil
+    var lastContentReference: ProviderContentReference? = nil
     var playbackContext: EpisodePlaybackContext? = nil
     var isAnime: Bool? = nil
 
@@ -458,9 +465,15 @@ final class ProgressManager: ObservableObject {
     func recordMovieServiceInfo(movieId: Int, serviceId: UUID?, href: String?) {
         accessQueue.async(flags: .barrier) { [weak self] in
             guard let self = self else { return }
+            let sourceID = serviceId.map { "service:\($0.uuidString)" }
+            let reference = sourceID.flatMap { sourceID in
+                href.map { ProviderContentReference.service(sourceID: sourceID, href: $0) }
+            }
             if var entry = self.progressData.findMovie(id: movieId) {
                 entry.lastServiceId = serviceId
                 entry.lastHref = href
+                entry.lastSourceId = sourceID
+                entry.lastContentReference = reference
                 entry.lastUpdated = Date()
                 self.progressData.updateMovie(entry)
                 self.publishCurrentData()
@@ -468,6 +481,8 @@ final class ProgressManager: ObservableObject {
                 var newEntry = MovieProgressEntry(id: movieId, title: "")
                 newEntry.lastServiceId = serviceId
                 newEntry.lastHref = href
+                newEntry.lastSourceId = sourceID
+                newEntry.lastContentReference = reference
                 newEntry.lastUpdated = Date()
                 self.progressData.updateMovie(newEntry)
                 self.publishCurrentData()
@@ -479,9 +494,15 @@ final class ProgressManager: ObservableObject {
     func recordEpisodeServiceInfo(showId: Int, seasonNumber: Int, episodeNumber: Int, serviceId: UUID?, href: String?) {
         accessQueue.async(flags: .barrier) { [weak self] in
             guard let self = self else { return }
+            let sourceID = serviceId.map { "service:\($0.uuidString)" }
+            let reference = sourceID.flatMap { sourceID in
+                href.map { ProviderContentReference.service(sourceID: sourceID, href: $0) }
+            }
             if var entry = self.progressData.findEpisode(showId: showId, season: seasonNumber, episode: episodeNumber) {
                 entry.lastServiceId = serviceId
                 entry.lastHref = href
+                entry.lastSourceId = sourceID
+                entry.lastContentReference = reference
                 entry.lastUpdated = Date()
                 self.progressData.updateEpisode(entry)
                 self.publishCurrentData()
@@ -489,12 +510,76 @@ final class ProgressManager: ObservableObject {
                 var newEntry = EpisodeProgressEntry(showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber)
                 newEntry.lastServiceId = serviceId
                 newEntry.lastHref = href
+                newEntry.lastSourceId = sourceID
+                newEntry.lastContentReference = reference
                 newEntry.lastUpdated = Date()
                 self.progressData.updateEpisode(newEntry)
                 self.publishCurrentData()
             }
         }
         saveProgressData()
+    }
+
+    func recordMovieSourceInfo(
+        movieId: Int,
+        sourceId: String,
+        reference: ProviderContentReference
+    ) {
+        guard Self.isValidProviderReference(sourceId: sourceId, reference: reference) else { return }
+        accessQueue.async(flags: .barrier) { [weak self] in
+            guard let self else { return }
+            var entry = self.progressData.findMovie(id: movieId)
+                ?? MovieProgressEntry(id: movieId, title: "")
+            entry.lastSourceId = sourceId
+            entry.lastContentReference = reference
+            entry.lastServiceId = nil
+            entry.lastHref = nil
+            entry.lastUpdated = Date()
+            self.progressData.updateMovie(entry)
+            self.publishCurrentData()
+        }
+        saveProgressData()
+    }
+
+    func recordEpisodeSourceInfo(
+        showId: Int,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        sourceId: String,
+        reference: ProviderContentReference
+    ) {
+        guard Self.isValidProviderReference(sourceId: sourceId, reference: reference) else { return }
+        accessQueue.async(flags: .barrier) { [weak self] in
+            guard let self else { return }
+            var entry = self.progressData.findEpisode(
+                showId: showId,
+                season: seasonNumber,
+                episode: episodeNumber
+            ) ?? EpisodeProgressEntry(
+                showId: showId,
+                seasonNumber: seasonNumber,
+                episodeNumber: episodeNumber
+            )
+            entry.lastSourceId = sourceId
+            entry.lastContentReference = reference
+            entry.lastServiceId = nil
+            entry.lastHref = nil
+            entry.lastUpdated = Date()
+            self.progressData.updateEpisode(entry)
+            self.publishCurrentData()
+        }
+        saveProgressData()
+    }
+
+    private static func isValidProviderReference(
+        sourceId: String,
+        reference: ProviderContentReference
+    ) -> Bool {
+        let trimmed = sourceId.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty
+            && trimmed == sourceId
+            && trimmed.utf8.count <= 320
+            && reference.sourceID == sourceId
     }
 
     // MARK: - Episode Progress

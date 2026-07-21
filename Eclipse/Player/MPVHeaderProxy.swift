@@ -16,10 +16,16 @@ private final class MPVHeaderProxyCore {
     private final class CloudflareChallengeReporter {
         private let lock = NSLock()
         private var didReport = false
-        private let handler: (URL, String?, Bool, Int) -> Void
+        private var handler: (URL, String?, Bool, Int) -> Void
 
         init(handler: @escaping (URL, String?, Bool, Int) -> Void) {
             self.handler = handler
+        }
+
+        func replaceHandler(_ handler: @escaping (URL, String?, Bool, Int) -> Void) {
+            lock.lock()
+            self.handler = handler
+            lock.unlock()
         }
 
         func report(
@@ -34,8 +40,110 @@ private final class MPVHeaderProxyCore {
                 return
             }
             didReport = true
+            let handler = handler
             lock.unlock()
             handler(url, rejectedCookieHeader, isInteractiveChallenge, statusCode)
+        }
+    }
+
+    /// A SkyStream session never accepts an upstream URL from the loopback request. Each local
+    /// URL contains only an unguessable route identifier which selects one immutable resource
+    /// from the validator-produced graph captured here.
+    private enum ValidatedManifestKind {
+        case hls
+        case dash
+    }
+
+    private struct ValidatedAcceptedManifest {
+        let bytes: Data
+        let kind: ValidatedManifestKind
+    }
+
+    private struct ValidatedRouteResource {
+        let routeID: String
+        let targetURL: URL?
+        let headers: [String: String]
+        let role: String
+        let acceptedManifest: ValidatedAcceptedManifest?
+        let expectedFiniteContentLength: Int64?
+
+        func replacingAcceptedManifest(_ manifest: ValidatedAcceptedManifest) -> Self {
+            Self(
+                routeID: routeID,
+                targetURL: targetURL,
+                headers: headers,
+                role: role,
+                acceptedManifest: manifest,
+                expectedFiniteContentLength: expectedFiniteContentLength
+            )
+        }
+    }
+
+    private struct ValidatedRoutePolicy {
+        let resourcesByID: [String: ValidatedRouteResource]
+        let routeIDByURL: [String: String]
+        let generatedRouteIDByBytes: [Data: String]
+        let initialRouteID: String
+        let descriptorIdentityKey: String
+        let acceptedManifestByteCount: Int
+
+        func resource(forRouteID routeID: String) -> ValidatedRouteResource? {
+            resourcesByID[routeID]
+        }
+
+        func resource(forRemoteURL url: URL) -> ValidatedRouteResource? {
+            guard let routeID = routeIDByURL[Self.canonicalURLKey(url)] else { return nil }
+            return resourcesByID[routeID]
+        }
+
+        func resource(forGeneratedManifest bytes: Data) -> ValidatedRouteResource? {
+            guard let routeID = generatedRouteIDByBytes[bytes] else { return nil }
+            return resourcesByID[routeID]
+        }
+
+        static func canonicalURLKey(_ url: URL) -> String {
+            var components = URLComponents(url: url.absoluteURL, resolvingAgainstBaseURL: false)
+            // Fragments are not sent over HTTP and were removed by the remote URL validator.
+            components?.fragment = nil
+            return components?.url?.absoluteString ?? url.absoluteURL.absoluteString
+        }
+    }
+
+    private final class ValidatedDASHBaseCollector: NSObject, XMLParserDelegate {
+        private(set) var values: [String] = []
+        private var collecting = false
+        private var buffer = ""
+
+        func parser(
+            _ parser: XMLParser,
+            didStartElement elementName: String,
+            namespaceURI: String?,
+            qualifiedName qName: String?,
+            attributes attributeDict: [String: String] = [:]
+        ) {
+            let localName = (qName ?? elementName).split(separator: ":").last?.lowercased()
+            if localName == "baseurl" {
+                collecting = true
+                buffer = ""
+            }
+        }
+
+        func parser(_ parser: XMLParser, foundCharacters string: String) {
+            guard collecting, buffer.utf8.count <= 16_384 else { return }
+            buffer += string
+        }
+
+        func parser(
+            _ parser: XMLParser,
+            didEndElement elementName: String,
+            namespaceURI: String?,
+            qualifiedName qName: String?
+        ) {
+            let localName = (qName ?? elementName).split(separator: ":").last?.lowercased()
+            guard collecting, localName == "baseurl" else { return }
+            values.append(buffer.trimmingCharacters(in: .whitespacesAndNewlines))
+            collecting = false
+            buffer = ""
         }
     }
 
@@ -49,6 +157,7 @@ private final class MPVHeaderProxyCore {
         let requestCount: Int
         let upstreamTransport: UpstreamTransport
         let cloudflareChallengeReporter: CloudflareChallengeReporter?
+        let validatedRoutePolicy: ValidatedRoutePolicy?
     }
 
     private enum UpstreamBodyMode {
@@ -87,6 +196,12 @@ private final class MPVHeaderProxyCore {
     private let playlistProbeBytes = 4 * 1024
     private let maxPendingStreamBytes = 8 * 1024 * 1024
     private let maxPendingStreamSends = 8
+    private let maxValidatedManifestBytes = 5_000_000
+    private let maxValidatedManifestTotalBytes = 32 * 1024 * 1024
+    private let maxAggregateValidatedManifestBytes = 64 * 1024 * 1024
+    private let maxValidatedRewrittenBodyBytes = 8 * 1024 * 1024
+    private let maxValidatedRoutes = 10_000
+    private let maxValidatedSubtitles = 32
     fileprivate let logPrefix: String
     private let playlistMode: MPVHeaderProxyPlaylistMode
     private let gracefulResponseClose: Bool
@@ -242,7 +357,8 @@ private final class MPVHeaderProxyCore {
                 traceID: session.traceID,
                 requestCount: session.requestCount + 1,
                 upstreamTransport: session.upstreamTransport,
-                cloudflareChallengeReporter: session.cloudflareChallengeReporter
+                cloudflareChallengeReporter: session.cloudflareChallengeReporter,
+                validatedRoutePolicy: session.validatedRoutePolicy
             )
             sessions[id] = updated
             return updated
@@ -299,7 +415,8 @@ private final class MPVHeaderProxyCore {
                 ),
                 cloudflareChallengeReporter: onConfirmedCloudflareChallenge.map {
                     CloudflareChallengeReporter(handler: $0)
-                }
+                },
+                validatedRoutePolicy: nil
             ),
             for: sessionId
         )
@@ -309,12 +426,398 @@ private final class MPVHeaderProxyCore {
         return buildProxyURL(port: activePort, sessionId: sessionId, targetURL: targetURL)
     }
 
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    func makeSkyStreamProxyURL(
+        for descriptor: SkyStreamValidatedPlaybackDescriptor,
+        traceID: String?,
+        onValidatedRouteRejection: ((URL, Int, Bool) -> Void)? = nil
+    ) -> URL? {
+        guard ensureStarted() else { return nil }
+
+        var activePort = port
+        if (activePort ?? 0) == 0 {
+            activePort = waitForPort(timeout: 0.25)
+        }
+        guard let activePort, activePort > 0 else {
+            Logger.shared.log("\(logPrefix): SkyStream listener port unavailable", type: "Error")
+            return nil
+        }
+
+        guard descriptor.routes.count <= maxValidatedRoutes,
+              descriptor.subtitles.count <= maxValidatedSubtitles,
+              !descriptor.routes.isEmpty else {
+            Logger.shared.log("\(logPrefix): rejected oversized SkyStream route graph", type: "Error")
+            return nil
+        }
+
+        var resourcesByID: [String: ValidatedRouteResource] = [:]
+        var routeIDByURL: [String: String] = [:]
+        var subtitleRouteCount = 0
+
+        for route in descriptor.routes {
+            let targetURL = route.remoteURL.url
+            var validatedHeaders = route.headers.values
+            let routeProxyOptions = route.proxyOptions
+                ?? (ValidatedRoutePolicy.canonicalURLKey(targetURL)
+                    == ValidatedRoutePolicy.canonicalURLKey(descriptor.underlyingRemoteURL.url)
+                    ? descriptor.proxyOptions
+                    : nil)
+            if let referer = routeProxyOptions?.referer?.url.absoluteString {
+                // MAGIC v2's referer option is itself a validated remote URL. Materialize it once
+                // into this immutable route instead of letting later callers reinterpret options.
+                validatedHeaders["referer"] = referer
+            }
+            guard let scheme = targetURL.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https",
+                  targetURL.host != nil,
+                  targetURL.user == nil,
+                  targetURL.password == nil,
+                  Self.headersAreValidForValidatedRoute(validatedHeaders) else {
+                Logger.shared.log("\(logPrefix): rejected malformed SkyStream route", type: "Error")
+                return nil
+            }
+            if route.role == .subtitle {
+                subtitleRouteCount += 1
+                guard subtitleRouteCount <= maxValidatedSubtitles else {
+                    Logger.shared.log("\(logPrefix): rejected excess SkyStream subtitle routes", type: "Error")
+                    return nil
+                }
+            }
+
+            let key = ValidatedRoutePolicy.canonicalURLKey(targetURL)
+            if let existingID = routeIDByURL[key], let existing = resourcesByID[existingID] {
+                // One exact URL cannot safely select two credential sets. The validator may emit
+                // the same URL in more than one semantic role, but conflicting headers fail closed.
+                guard existing.headers == validatedHeaders else {
+                    Logger.shared.log("\(logPrefix): rejected ambiguous SkyStream route credentials", type: "Error")
+                    return nil
+                }
+                continue
+            }
+
+            let routeID = UUID().uuidString
+            routeIDByURL[key] = routeID
+            resourcesByID[routeID] = ValidatedRouteResource(
+                routeID: routeID,
+                targetURL: targetURL,
+                headers: validatedHeaders,
+                role: route.role.rawValue,
+                acceptedManifest: nil,
+                expectedFiniteContentLength: descriptor.mediaKind == .direct
+                    && route.role == .streamRoot
+                    && ValidatedRoutePolicy.canonicalURLKey(targetURL)
+                        == ValidatedRoutePolicy.canonicalURLKey(descriptor.underlyingRemoteURL.url)
+                    ? descriptor.finiteContentLength
+                    : nil
+            )
+        }
+
+        var generatedRouteIDByBytes: [Data: String] = [:]
+        var firstGeneratedRouteID: String?
+        var totalManifestBytes = 0
+        for accepted in descriptor.acceptedManifests {
+            guard !accepted.bytes.isEmpty,
+                  accepted.bytes.count <= maxValidatedManifestBytes,
+                  totalManifestBytes <= maxValidatedManifestTotalBytes - accepted.bytes.count else {
+                Logger.shared.log("\(logPrefix): rejected oversized SkyStream accepted manifest set", type: "Error")
+                return nil
+            }
+            totalManifestBytes += accepted.bytes.count
+
+            let kind: ValidatedManifestKind
+            switch accepted.mediaKind {
+            case .hls: kind = .hls
+            case .dash: kind = .dash
+            case .direct:
+                Logger.shared.log("\(logPrefix): rejected invalid SkyStream accepted manifest kind", type: "Error")
+                return nil
+            }
+            let manifest = ValidatedAcceptedManifest(bytes: accepted.bytes, kind: kind)
+
+            if let sourceURL = accepted.sourceURL?.url {
+                let key = ValidatedRoutePolicy.canonicalURLKey(sourceURL)
+                guard let routeID = routeIDByURL[key], let resource = resourcesByID[routeID] else {
+                    Logger.shared.log("\(logPrefix): accepted SkyStream manifest has no validated route", type: "Error")
+                    return nil
+                }
+                if let existing = resource.acceptedManifest {
+                    guard existing.bytes == manifest.bytes, existing.kind == manifest.kind else {
+                        Logger.shared.log("\(logPrefix): rejected conflicting SkyStream manifest bodies", type: "Error")
+                        return nil
+                    }
+                } else {
+                    resourcesByID[routeID] = resource.replacingAcceptedManifest(manifest)
+                }
+            } else if let existingID = generatedRouteIDByBytes[accepted.bytes] {
+                if firstGeneratedRouteID == nil { firstGeneratedRouteID = existingID }
+            } else {
+                let routeID = UUID().uuidString
+                generatedRouteIDByBytes[accepted.bytes] = routeID
+                if firstGeneratedRouteID == nil { firstGeneratedRouteID = routeID }
+                resourcesByID[routeID] = ValidatedRouteResource(
+                    routeID: routeID,
+                    targetURL: nil,
+                    headers: [:],
+                    role: "generated-manifest",
+                    acceptedManifest: manifest,
+                    expectedFiniteContentLength: nil
+                )
+            }
+        }
+
+        let initialRouteID: String?
+        if let firstManifest = descriptor.acceptedManifests.first,
+           firstManifest.sourceURL == nil {
+            // Validation appends the manifest currently being walked before its descendants, so
+            // the first source-less body is the top-level generated M3U8.
+            initialRouteID = firstGeneratedRouteID
+        } else {
+            initialRouteID = routeIDByURL[
+                ValidatedRoutePolicy.canonicalURLKey(descriptor.underlyingRemoteURL.url)
+            ]
+        }
+        guard let initialRouteID, resourcesByID[initialRouteID] != nil else {
+            Logger.shared.log("\(logPrefix): SkyStream descriptor has no playable initial route", type: "Error")
+            return nil
+        }
+        switch descriptor.mediaKind {
+        case .direct:
+            guard descriptor.acceptedManifests.isEmpty,
+                  let length = descriptor.finiteContentLength, length > 0 else {
+                Logger.shared.log("\(logPrefix): rejected unbounded SkyStream direct media", type: "Error")
+                return nil
+            }
+        case .hls, .dash:
+            guard resourcesByID[initialRouteID]?.acceptedManifest != nil else {
+                Logger.shared.log("\(logPrefix): SkyStream initial manifest body is unavailable", type: "Error")
+                return nil
+            }
+        }
+
+        let policy = ValidatedRoutePolicy(
+            resourcesByID: resourcesByID,
+            routeIDByURL: routeIDByURL,
+            generatedRouteIDByBytes: generatedRouteIDByBytes,
+            initialRouteID: initialRouteID,
+            descriptorIdentityKey: Self.skyDescriptorIdentityKey(descriptor),
+            acceptedManifestByteCount: totalManifestBytes
+        )
+
+        cleanupExpiredSessions()
+        if sessionCount() >= maxSessions { cleanupOldestSessions() }
+        let sessionID = UUID().uuidString
+        let now = Date()
+        let resolvedTraceID = Self.sanitizedSkyTraceID(traceID) ?? String(sessionID.prefix(8))
+        let minimumRequestStartInterval: TimeInterval = descriptor.mediaKind == .hls ? 0.15 : 0
+        let typedSession = Session(
+                headers: [:],
+                credentialOriginURL: descriptor.underlyingRemoteURL.url,
+                createdAt: now,
+                lastAccessed: now,
+                logType: "SkyStream",
+                traceID: resolvedTraceID,
+                requestCount: 0,
+                upstreamTransport: UpstreamTransport(
+                    minimumRequestStartInterval: minimumRequestStartInterval
+                ),
+                cloudflareChallengeReporter: onValidatedRouteRejection.map { callback in
+                    CloudflareChallengeReporter { url, _, isInteractiveChallenge, statusCode in
+                        callback(url, statusCode, isInteractiveChallenge)
+                    }
+                },
+                validatedRoutePolicy: policy
+            )
+        guard setValidatedSession(typedSession, for: sessionID) else {
+            typedSession.upstreamTransport.invalidateAndCancel()
+            Logger.shared.log("\(logPrefix): SkyStream manifest session memory limit reached", type: "Error")
+            return nil
+        }
+        Logger.shared.log(
+            "[MPVProxyTrace \(resolvedTraceID)] stage=skystream-session-created session=\(String(sessionID.prefix(8))) routes=\(resourcesByID.count) manifests=\(descriptor.acceptedManifests.count)",
+            type: "PlaybackTrace"
+        )
+        return buildValidatedProxyURL(port: activePort, sessionId: sessionID, routeID: initialRouteID)
+    }
+
+    private static func headersAreValidForValidatedRoute(_ headers: [String: String]) -> Bool {
+        guard headers.count <= 64 else { return false }
+        let forbidden: Set<String> = [
+            "accept-encoding", "connection", "content-length", "host", "keep-alive",
+            "proxy-authenticate", "proxy-authorization", "proxy-connection", "range", "te",
+            "trailer", "transfer-encoding", "upgrade"
+        ]
+        let validNameCharacters = CharacterSet(
+            charactersIn: "!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyz"
+        )
+        var total = 0
+        for (name, value) in headers {
+            guard name == name.lowercased(),
+                  !name.isEmpty,
+                  name.utf8.count <= 128,
+                  name.unicodeScalars.allSatisfy({
+                    $0.value < 128 && validNameCharacters.contains($0)
+                  }),
+                  !forbidden.contains(name),
+                  !name.hasPrefix("proxy-"),
+                  value.utf8.count <= 8 * 1024,
+                  value.unicodeScalars.allSatisfy({
+                    $0.value == 9 || ($0.value >= 32 && $0.value != 127)
+                  }) else { return false }
+            total += name.utf8.count + value.utf8.count + 4
+            guard total <= 32 * 1024 else { return false }
+        }
+        return true
+    }
+
+    private static func sanitizedSkyTraceID(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let scalars = value.unicodeScalars.prefix(64)
+        let result = String(String.UnicodeScalarView(scalars.filter {
+            ($0.value >= 48 && $0.value <= 57)
+                || ($0.value >= 65 && $0.value <= 90)
+                || ($0.value >= 97 && $0.value <= 122)
+                || $0.value == 45 || $0.value == 95
+        }))
+        return result.isEmpty ? nil : result
+    }
+
+    private static func skyDescriptorIdentityKey(
+        _ descriptor: SkyStreamValidatedPlaybackDescriptor
+    ) -> String {
+        let identity = descriptor.identity
+        return [
+            identity.packageID,
+            identity.providerID,
+            identity.payloadSHA256,
+            String(identity.generation)
+        ].joined(separator: "\u{1f}")
+    }
+
+    private func parsedValidatedProxyURL(
+        _ proxyURL: URL
+    ) -> (sessionID: String, routeID: String, port: UInt16)? {
+        guard let components = URLComponents(url: proxyURL, resolvingAgainstBaseURL: false),
+              components.scheme?.lowercased() == "http",
+              components.host == "127.0.0.1",
+              components.user == nil,
+              components.password == nil,
+              components.fragment == nil,
+              let urlPortValue = components.port,
+              let urlPort = UInt16(exactly: urlPortValue),
+              let listenerPort = port ?? listener?.port?.rawValue,
+              urlPort == listenerPort else { return nil }
+
+        let pathParts = components.path.split(separator: "/")
+        let queryItems = components.queryItems ?? []
+        guard pathParts.count == 2,
+              pathParts[0] == "proxy",
+              components.percentEncodedPath == "/proxy/\(pathParts[1])",
+              queryItems.count == 2,
+              queryItems.filter({ $0.name == "token" }).count == 1,
+              queryItems.first(where: { $0.name == "token" })?.value == token,
+              queryItems.filter({ $0.name == "route" }).count == 1,
+              let routeID = queryItems.first(where: { $0.name == "route" })?.value,
+              !routeID.isEmpty else { return nil }
+        return (String(pathParts[1]), routeID, urlPort)
+    }
+
+    /// A read-only ownership check for the top-level URL of a live typed session. It does not
+    /// accept generic proxy URLs or companion routes, which prevents callers from accidentally
+    /// adopting a different session shape merely because it points at this listener.
+    func isManagedSkyStreamSessionURL(_ streamProxyURL: URL) -> Bool {
+        guard let reference = parsedValidatedProxyURL(streamProxyURL) else { return false }
+        return withSessionsLock {
+            guard let policy = sessions[reference.sessionID]?.validatedRoutePolicy else {
+                return false
+            }
+            return policy.initialRouteID == reference.routeID
+                && policy.resource(forRouteID: reference.routeID) != nil
+        }
+    }
+
+    func skyStreamSubtitleProxyURLs(
+        for descriptor: SkyStreamValidatedPlaybackDescriptor,
+        streamProxyURL: URL
+    ) -> [String: URL]? {
+        guard descriptor.subtitles.count <= maxValidatedSubtitles,
+              let reference = parsedValidatedProxyURL(streamProxyURL) else { return nil }
+        guard let policy = withSessionsLock({ sessions[reference.sessionID]?.validatedRoutePolicy }),
+              policy.initialRouteID == reference.routeID,
+              policy.descriptorIdentityKey == Self.skyDescriptorIdentityKey(descriptor) else {
+            return nil
+        }
+
+        var output: [String: URL] = [:]
+        for subtitle in descriptor.subtitles {
+            let remoteURL = subtitle.remoteURL.url
+            guard let resource = policy.resource(forRemoteURL: remoteURL),
+                  resource.headers == subtitle.headers.values,
+                  let localURL = buildValidatedProxyURL(
+                    port: reference.port,
+                    sessionId: reference.sessionID,
+                    routeID: resource.routeID
+                  ) else { return nil }
+            // Callers hold this exact validator-issued URL. Canonicalization is used only for
+            // policy lookup; exposing a normalized spelling would make an otherwise safe
+            // subtitle fail closed at the handoff boundary.
+            output[remoteURL.absoluteString] = localURL
+        }
+        return output
+    }
+
+    /// Attaches the owning player's refresh path after the sheet has handed off the typed proxy.
+    /// Replacing an existing callback deliberately retains the reporter's `didReport` latch, so
+    /// one rejected response can never trigger multiple refreshes in the same playback session.
+    func setSkyStreamRouteRejectionHandler(
+        for streamProxyURL: URL,
+        handler: @escaping (URL, Int, Bool) -> Void
+    ) -> Bool {
+        guard let reference = parsedValidatedProxyURL(streamProxyURL) else { return false }
+
+        return withSessionsLock {
+            guard let session = sessions[reference.sessionID],
+                  let policy = session.validatedRoutePolicy,
+                  policy.initialRouteID == reference.routeID else { return false }
+
+            let reporterHandler: (URL, String?, Bool, Int) -> Void = {
+                url, _, isInteractiveChallenge, statusCode in
+                handler(url, statusCode, isInteractiveChallenge)
+            }
+            if let reporter = session.cloudflareChallengeReporter {
+                reporter.replaceHandler(reporterHandler)
+            } else {
+                sessions[reference.sessionID] = Session(
+                    headers: session.headers,
+                    credentialOriginURL: session.credentialOriginURL,
+                    createdAt: session.createdAt,
+                    lastAccessed: session.lastAccessed,
+                    logType: session.logType,
+                    traceID: session.traceID,
+                    requestCount: session.requestCount,
+                    upstreamTransport: session.upstreamTransport,
+                    cloudflareChallengeReporter: CloudflareChallengeReporter(
+                        handler: reporterHandler
+                    ),
+                    validatedRoutePolicy: policy
+                )
+            }
+            return true
+        }
+    }
+#endif
+
     private func ensureStarted() -> Bool {
         if listener != nil { return true }
 
         do {
             let parameters = NWParameters.tcp
             parameters.allowLocalEndpointReuse = true
+            // This is an in-process playback bridge, not a LAN HTTP server. Binding only the
+            // URL to 127.0.0.1 is insufficient: without a required local endpoint NWListener can
+            // accept connections on every interface. Keep the bearer token as defense in depth,
+            // but make the socket itself loopback-only.
+            parameters.requiredInterfaceType = .loopback
+            parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
             let listener = try NWListener(using: parameters, on: NWEndpoint.Port.any)
             listener.newConnectionHandler = { [weak self] connection in
                 self?.handleConnection(connection)
@@ -359,7 +862,11 @@ private final class MPVHeaderProxyCore {
 
     private func handleConnection(_ connection: NWConnection) {
         connection.stateUpdateHandler = { state in
-            if case .failed(let error) = state {
+            if case .ready = state,
+               connection.currentPath?.usesInterfaceType(.loopback) != true {
+                Logger.shared.log("\(self.logPrefix): rejected a non-loopback client path", type: "Error")
+                connection.cancel()
+            } else if case .failed(let error) = state {
                 if !self.isExpectedPlayerDisconnect(error) {
                     Logger.shared.log("\(self.logPrefix): connection failed: \(error)", type: "Error")
                 }
@@ -453,8 +960,9 @@ private final class MPVHeaderProxyCore {
         }
 
         let sessionId = String(pathParts[1])
+        let rawQueryItems = urlComponents.queryItems ?? []
         var queryItems: [String: String] = [:]
-        for item in urlComponents.queryItems ?? [] where queryItems[item.name] == nil {
+        for item in rawQueryItems where queryItems[item.name] == nil {
             queryItems[item.name] = item.value ?? ""
         }
 
@@ -470,9 +978,45 @@ private final class MPVHeaderProxyCore {
             return
         }
 
-        guard let encoded = queryItems["url"], let targetURL = decodeTargetURL(encoded) else {
-            sendSimpleResponse(connection, statusCode: 400, body: "Invalid target")
-            return
+        let validatedResource: ValidatedRouteResource?
+        let targetURL: URL
+        if let policy = session.validatedRoutePolicy {
+            let itemNames = rawQueryItems.map(\.name)
+            guard body.isEmpty,
+                  parts.count == 3,
+                  pathParts.count == 2,
+                  rawQueryItems.count == 2,
+                  Set(itemNames) == Set(["route", "token"]),
+                  itemNames.filter({ $0 == "route" }).count == 1,
+                  itemNames.filter({ $0 == "token" }).count == 1,
+                  let routeID = queryItems["route"],
+                  let resource = policy.resource(forRouteID: routeID) else {
+                sendSimpleResponse(connection, statusCode: 403, body: "Forbidden")
+                return
+            }
+            validatedResource = resource
+            if resource.acceptedManifest != nil {
+                serveValidatedManifest(
+                    resource,
+                    policy: policy,
+                    sessionId: sessionId,
+                    method: method,
+                    connection: connection
+                )
+                return
+            }
+            guard let remoteURL = resource.targetURL else {
+                sendSimpleResponse(connection, statusCode: 404, body: "Route unavailable")
+                return
+            }
+            targetURL = remoteURL
+        } else {
+            validatedResource = nil
+            guard let encoded = queryItems["url"], let decoded = decodeTargetURL(encoded) else {
+                sendSimpleResponse(connection, statusCode: 400, body: "Invalid target")
+                return
+            }
+            targetURL = decoded
         }
 
         guard let targetScheme = targetURL.scheme?.lowercased(),
@@ -487,14 +1031,20 @@ private final class MPVHeaderProxyCore {
         let shouldLogLifecycle = requestSequence == 1 || requestSequence.isMultiple(of: 25)
         let incomingRange = headers.first { $0.key.caseInsensitiveCompare("Range") == .orderedSame }?.value ?? "nil"
         if shouldLogLifecycle {
-            Logger.shared.log("[MPVProxyTrace \(session.traceID)] stage=request session=\(String(sessionId.prefix(8))) req=\(requestSequence) id=\(requestId) method=\(method) target=\(logURLSummary(targetURL)) range=\(incomingRange)", type: "PlaybackTrace")
+            let targetSummary = validatedResource.map { "validated-route:\($0.role)" }
+                ?? logURLSummary(targetURL)
+            Logger.shared.log("[MPVProxyTrace \(session.traceID)] stage=request session=\(String(sessionId.prefix(8))) req=\(requestSequence) id=\(requestId) method=\(method) target=\(targetSummary) range=\(incomingRange)", type: "PlaybackTrace")
         }
 
         var request = URLRequest(url: targetURL)
         request.httpMethod = method
+        if validatedResource != nil {
+            request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        }
 
+        let effectiveSessionHeaders = validatedResource?.headers ?? session.headers
         let credentialHeaderNames = Set(
-            Self.sanitizedCredentialHeaders(session.headers).keys.map { $0.lowercased() }
+            Self.sanitizedCredentialHeaders(effectiveSessionHeaders).keys.map { $0.lowercased() }
         ).union(["authorization", "cookie", "cookie2", "proxy-authorization"])
         let safeIncomingHeaderNames: Set<String> = [
             "accept", "accept-language", "cache-control", "dnt", "icy-metadata",
@@ -512,7 +1062,7 @@ private final class MPVHeaderProxyCore {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
-        let scopedSessionHeaders = Self.credentialHeaders(
+        let scopedSessionHeaders = validatedResource?.headers ?? Self.credentialHeaders(
             session.headers,
             for: targetURL,
             originURL: session.credentialOriginURL
@@ -523,7 +1073,9 @@ private final class MPVHeaderProxyCore {
         // HLS playlists can resolve onto a different CDN host than the original source. Apply
         // that host's current solved session at request time so a same-source player retry uses
         // the replacement clearance on the exact playlist/segment host that rejected it.
-        CloudflareBypassManager.shared.applyCachedBypass(to: &request, for: targetURL)
+        if validatedResource == nil {
+            CloudflareBypassManager.shared.applyCachedBypass(to: &request, for: targetURL)
+        }
 
         if playlistMode == .normalizeRewrittenPlaylist {
             let normalizedRange = request.value(forHTTPHeaderField: "Range")?
@@ -534,15 +1086,17 @@ private final class MPVHeaderProxyCore {
             }
         }
 
-        let cachedPrefixPlan = await cachedPrefixPlanIfAvailable(
-            targetURL: targetURL,
-            headers: scopedSessionHeaders,
-            method: method,
-            rangeHeader: request.value(forHTTPHeaderField: "Range"),
-            requestId: requestId,
-            logType: logType,
-            connection: connection
-        )
+        let cachedPrefixPlan = validatedResource == nil
+            ? await cachedPrefixPlanIfAvailable(
+                targetURL: targetURL,
+                headers: scopedSessionHeaders,
+                method: method,
+                rangeHeader: request.value(forHTTPHeaderField: "Range"),
+                requestId: requestId,
+                logType: logType,
+                connection: connection
+            )
+            : nil
         let cachedPrefix: CachedPrefixContinuation?
         switch cachedPrefixPlan {
         case .handled:
@@ -569,10 +1123,13 @@ private final class MPVHeaderProxyCore {
             requestSequence: requestSequence,
             shouldLogLifecycle: shouldLogLifecycle,
             logType: logType,
-            credentialHeaders: session.headers,
-            credentialOriginURL: session.credentialOriginURL,
+            credentialHeaders: effectiveSessionHeaders,
+            credentialOriginURL: validatedResource?.targetURL ?? session.credentialOriginURL,
             upstreamTransport: session.upstreamTransport,
             cloudflareChallengeReporter: session.cloudflareChallengeReporter,
+            validatedRoutePolicy: session.validatedRoutePolicy,
+            validatedRouteRole: validatedResource?.role,
+            validatedExpectedFiniteContentLength: validatedResource?.expectedFiniteContentLength,
             connection: connection,
             cachedPrefix: cachedPrefix
         )
@@ -941,6 +1498,533 @@ private final class MPVHeaderProxyCore {
         return buildProxyURL(port: port, sessionId: sessionId, targetURL: resolved)
     }
 
+    private func serveValidatedManifest(
+        _ resource: ValidatedRouteResource,
+        policy: ValidatedRoutePolicy,
+        sessionId: String,
+        method: String,
+        connection: NWConnection
+    ) {
+#if os(iOS)
+        guard let accepted = resource.acceptedManifest else {
+            sendSimpleResponse(connection, statusCode: 404, body: "Route unavailable")
+            return
+        }
+
+        let rewritten: Data?
+        let contentType: String
+        switch accepted.kind {
+        case .hls:
+            rewritten = rewriteValidatedHLS(
+                accepted.bytes,
+                sourceURL: resource.targetURL,
+                policy: policy,
+                sessionId: sessionId
+            )
+            contentType = "application/vnd.apple.mpegurl"
+        case .dash:
+            rewritten = rewriteValidatedDASH(
+                accepted.bytes,
+                sourceURL: resource.targetURL,
+                policy: policy,
+                sessionId: sessionId
+            )
+            contentType = "application/dash+xml"
+        }
+
+        guard let rewritten, rewritten.count <= maxValidatedRewrittenBodyBytes else {
+            Logger.shared.log("\(logPrefix): rejected an unrewritable SkyStream manifest", type: "Error")
+            sendSimpleResponse(connection, statusCode: 502, body: "Validated manifest unavailable")
+            return
+        }
+        let headers = [
+            "Content-Type": contentType,
+            "Content-Length": String(rewritten.count),
+            "Cache-Control": "no-store"
+        ]
+        sendResponse(
+            connection,
+            statusCode: 200,
+            headers: headers,
+            body: method == "HEAD" ? Data() : rewritten
+        )
+#else
+        sendSimpleResponse(connection, statusCode: 404, body: "Route unavailable")
+#endif
+    }
+
+#if os(iOS)
+    private func rewriteValidatedHLS(
+        _ data: Data,
+        sourceURL: URL?,
+        policy: ValidatedRoutePolicy,
+        sessionId: String
+    ) -> Data? {
+        guard data.count <= maxValidatedManifestBytes,
+              let text = String(data: data, encoding: .utf8) else { return nil }
+        let lines = text.components(separatedBy: "\n")
+        guard lines.count <= 20_000 else { return nil }
+
+        var output: [String] = []
+        output.reserveCapacity(lines.count)
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.utf8.count <= 16_384 else { return nil }
+            if trimmed.isEmpty {
+                output.append(line)
+            } else if trimmed.hasPrefix("#") {
+                guard let rewritten = rewriteValidatedHLSAttributes(
+                    in: line,
+                    sourceURL: sourceURL,
+                    policy: policy,
+                    sessionId: sessionId
+                ) else { return nil }
+                output.append(rewritten)
+            } else {
+                guard let localURL = validatedProxyURL(
+                    forHLSReference: trimmed,
+                    relativeTo: sourceURL,
+                    policy: policy,
+                    sessionId: sessionId
+                ) else { return nil }
+                output.append(localURL.absoluteString)
+            }
+        }
+        let bytes = Data(output.joined(separator: "\n").utf8)
+        return bytes.count <= maxValidatedRewrittenBodyBytes ? bytes : nil
+    }
+
+    private func rewriteValidatedHLSAttributes(
+        in line: String,
+        sourceURL: URL?,
+        policy: ValidatedRoutePolicy,
+        sessionId: String
+    ) -> String? {
+        guard let colon = line.firstIndex(of: ":") else { return line }
+        var replacements: [(Range<String.Index>, String)] = []
+        var cursor = line.index(after: colon)
+
+        while cursor < line.endIndex {
+            while cursor < line.endIndex,
+                  line[cursor].isWhitespace || line[cursor] == "," {
+                cursor = line.index(after: cursor)
+            }
+            guard cursor < line.endIndex else { break }
+
+            let keyStart = cursor
+            while cursor < line.endIndex,
+                  !line[cursor].isWhitespace,
+                  line[cursor] != "=",
+                  line[cursor] != "," {
+                cursor = line.index(after: cursor)
+            }
+            let key = String(line[keyStart..<cursor]).uppercased()
+            while cursor < line.endIndex, line[cursor].isWhitespace {
+                cursor = line.index(after: cursor)
+            }
+            guard cursor < line.endIndex, line[cursor] == "=" else {
+                while cursor < line.endIndex, line[cursor] != "," {
+                    cursor = line.index(after: cursor)
+                }
+                continue
+            }
+            cursor = line.index(after: cursor)
+            while cursor < line.endIndex, line[cursor].isWhitespace {
+                cursor = line.index(after: cursor)
+            }
+            guard cursor < line.endIndex else { return nil }
+
+            let valueStart: String.Index
+            let valueEnd: String.Index
+            if line[cursor] == "\"" {
+                valueStart = line.index(after: cursor)
+                guard let closingQuote = line[valueStart...].firstIndex(of: "\"") else { return nil }
+                valueEnd = closingQuote
+                cursor = line.index(after: closingQuote)
+            } else {
+                valueStart = cursor
+                valueEnd = line[cursor...].firstIndex(of: ",") ?? line.endIndex
+                cursor = valueEnd
+            }
+
+            if key == "URI" {
+                let reference = String(line[valueStart..<valueEnd])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !reference.isEmpty,
+                      let localURL = validatedProxyURL(
+                        forHLSReference: reference,
+                        relativeTo: sourceURL,
+                        policy: policy,
+                        sessionId: sessionId
+                      ) else { return nil }
+                replacements.append((valueStart..<valueEnd, localURL.absoluteString))
+            }
+        }
+
+        var output = line
+        for replacement in replacements.reversed() {
+            output.replaceSubrange(replacement.0, with: replacement.1)
+        }
+        return output
+    }
+
+    private func validatedProxyURL(
+        forHLSReference reference: String,
+        relativeTo sourceURL: URL?,
+        policy: ValidatedRoutePolicy,
+        sessionId: String
+    ) -> URL? {
+        let decoded: SkyStreamDecodedStreamPayload
+        do {
+            decoded = try SkyStreamMagicProxyDecoder.decode(reference)
+        } catch {
+            return nil
+        }
+
+        let resource: ValidatedRouteResource?
+        switch decoded {
+        case .generatedHLS(let bytes, _, _):
+            resource = policy.resource(forGeneratedManifest: bytes)
+        case .remote(let rawURL, _, _):
+            guard let resolved = validatedRemoteReference(
+                rawURL,
+                relativeTo: sourceURL,
+                policy: policy
+            ) else { return nil }
+            resource = policy.resource(forRemoteURL: resolved)
+        }
+        guard let resource else { return nil }
+        return buildValidatedProxyURL(port: port, sessionId: sessionId, routeID: resource.routeID)
+    }
+
+    private func rewriteValidatedDASH(
+        _ data: Data,
+        sourceURL: URL?,
+        policy: ValidatedRoutePolicy,
+        sessionId: String
+    ) -> Data? {
+        guard data.count <= maxValidatedManifestBytes,
+              let sourceURL,
+              let text = String(data: data, encoding: .utf8) else { return nil }
+
+        let collector = ValidatedDASHBaseCollector()
+        let parser = XMLParser(data: data)
+        parser.delegate = collector
+        parser.shouldResolveExternalEntities = false
+        guard parser.parse(), parser.parserError == nil, collector.values.count <= 8 else { return nil }
+
+        let validatedBases = collector.values.compactMap {
+            validatedRemoteReference($0, relativeTo: sourceURL, policy: policy)
+        }
+        guard validatedBases.count == collector.values.filter({ !$0.isEmpty }).count else { return nil }
+        let referenceBases = validatedBases + [sourceURL]
+
+        var output = ""
+        output.reserveCapacity(min(maxValidatedRewrittenBodyBytes, text.utf8.count + 16_384))
+        var cursor = text.startIndex
+        var insideBaseURL = false
+
+        while cursor < text.endIndex {
+            guard let opening = text[cursor...].firstIndex(of: "<") else {
+                let tail = String(text[cursor...])
+                if insideBaseURL {
+                    guard let rewritten = rewriteValidatedDASHBaseText(
+                        tail,
+                        sourceURL: sourceURL,
+                        policy: policy,
+                        sessionId: sessionId
+                    ) else { return nil }
+                    output += rewritten
+                } else {
+                    output += tail
+                }
+                break
+            }
+
+            let plainText = String(text[cursor..<opening])
+            if insideBaseURL {
+                guard let rewritten = rewriteValidatedDASHBaseText(
+                    plainText,
+                    sourceURL: sourceURL,
+                    policy: policy,
+                    sessionId: sessionId
+                ) else { return nil }
+                output += rewritten
+            } else {
+                output += plainText
+            }
+
+            if text[opening...].hasPrefix("<!--") {
+                guard !insideBaseURL,
+                      let end = text.range(of: "-->", range: opening..<text.endIndex)?.upperBound else {
+                    return nil
+                }
+                output += String(text[opening..<end])
+                cursor = end
+                continue
+            }
+            if text[opening...].hasPrefix("<![CDATA[") {
+                // The validator currently permits CDATA, but a source-less BaseURL hidden in it
+                // cannot be rewritten without changing XML semantics. Fail closed.
+                guard !insideBaseURL,
+                      let end = text.range(of: "]]>", range: opening..<text.endIndex)?.upperBound else {
+                    return nil
+                }
+                output += String(text[opening..<end])
+                cursor = end
+                continue
+            }
+
+            guard let tagEnd = endOfXMLTag(in: text, startingAt: opening) else { return nil }
+            let afterTag = text.index(after: tagEnd)
+            let originalTag = String(text[opening..<afterTag])
+            let tagInfo = xmlTagInfo(originalTag)
+            guard let tagInfo else { return nil }
+
+            if tagInfo.isClosing {
+                output += originalTag
+                if tagInfo.localName == "baseurl" { insideBaseURL = false }
+            } else {
+                guard let rewrittenTag = rewriteValidatedDASHAttributes(
+                    in: originalTag,
+                    localElementName: tagInfo.localName,
+                    referenceBases: referenceBases,
+                    policy: policy,
+                    sessionId: sessionId
+                ) else { return nil }
+                output += rewrittenTag
+                if tagInfo.localName == "baseurl", !tagInfo.isSelfClosing {
+                    guard !insideBaseURL else { return nil }
+                    insideBaseURL = true
+                }
+            }
+            guard output.utf8.count <= maxValidatedRewrittenBodyBytes else { return nil }
+            cursor = afterTag
+        }
+
+        guard !insideBaseURL else { return nil }
+        let bytes = Data(output.utf8)
+        return bytes.count <= maxValidatedRewrittenBodyBytes ? bytes : nil
+    }
+
+    private func rewriteValidatedDASHBaseText(
+        _ text: String,
+        sourceURL: URL,
+        policy: ValidatedRoutePolicy,
+        sessionId: String
+    ) -> String? {
+        let leading = text.prefix { $0.isWhitespace }
+        let trailing = text.reversed().prefix { $0.isWhitespace }.reversed()
+        let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty,
+              let decoded = decodeXMLReference(raw),
+              let remoteURL = validatedRemoteReference(decoded, relativeTo: sourceURL, policy: policy),
+              let resource = policy.resource(forRemoteURL: remoteURL),
+              let localURL = buildValidatedProxyURL(
+                port: port,
+                sessionId: sessionId,
+                routeID: resource.routeID
+              ) else { return nil }
+        return String(leading) + escapeXMLText(localURL.absoluteString) + String(trailing)
+    }
+
+    private struct XMLTagInfo {
+        let localName: String
+        let isClosing: Bool
+        let isSelfClosing: Bool
+    }
+
+    private func xmlTagInfo(_ tag: String) -> XMLTagInfo? {
+        guard tag.first == "<", tag.last == ">" else { return nil }
+        if tag.hasPrefix("<?") || tag.hasPrefix("<!") {
+            return XMLTagInfo(localName: "", isClosing: false, isSelfClosing: true)
+        }
+        var body = tag.dropFirst().dropLast()
+        let isClosing = body.first == "/"
+        if isClosing { body = body.dropFirst() }
+        body = body.drop(while: { $0.isWhitespace })
+        guard let nameEnd = body.firstIndex(where: { $0.isWhitespace || $0 == "/" }),
+              nameEnd > body.startIndex else {
+            let name = body.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { return nil }
+            return XMLTagInfo(
+                localName: name.split(separator: ":").last?.lowercased() ?? "",
+                isClosing: isClosing,
+                isSelfClosing: body.hasSuffix("/")
+            )
+        }
+        let name = String(body[..<nameEnd])
+        return XMLTagInfo(
+            localName: name.split(separator: ":").last?.lowercased() ?? "",
+            isClosing: isClosing,
+            isSelfClosing: body.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("/")
+        )
+    }
+
+    private func endOfXMLTag(in text: String, startingAt start: String.Index) -> String.Index? {
+        var index = text.index(after: start)
+        var quote: Character?
+        while index < text.endIndex {
+            let character = text[index]
+            if let activeQuote = quote {
+                if character == activeQuote { quote = nil }
+            } else if character == "\"" || character == "'" {
+                quote = character
+            } else if character == ">" {
+                return index
+            }
+            index = text.index(after: index)
+        }
+        return nil
+    }
+
+    private func rewriteValidatedDASHAttributes(
+        in tag: String,
+        localElementName: String,
+        referenceBases: [URL],
+        policy: ValidatedRoutePolicy,
+        sessionId: String
+    ) -> String? {
+        guard !localElementName.isEmpty else { return tag }
+        var replacements: [(Range<String.Index>, String)] = []
+        var index = tag.index(after: tag.startIndex)
+        while index < tag.endIndex {
+            while index < tag.endIndex, tag[index].isWhitespace { index = tag.index(after: index) }
+            if index >= tag.endIndex || tag[index] == ">" || tag[index] == "/" { break }
+            let nameStart = index
+            while index < tag.endIndex,
+                  !tag[index].isWhitespace,
+                  tag[index] != "=",
+                  tag[index] != ">" {
+                index = tag.index(after: index)
+            }
+            let rawName = String(tag[nameStart..<index])
+            while index < tag.endIndex, tag[index].isWhitespace { index = tag.index(after: index) }
+            guard index < tag.endIndex, tag[index] == "=" else {
+                // The first token is the element name, not an attribute.
+                continue
+            }
+            index = tag.index(after: index)
+            while index < tag.endIndex, tag[index].isWhitespace { index = tag.index(after: index) }
+            guard index < tag.endIndex, tag[index] == "\"" || tag[index] == "'" else { return nil }
+            let quote = tag[index]
+            let valueStart = tag.index(after: index)
+            guard let valueEnd = tag[valueStart...].firstIndex(of: quote) else { return nil }
+            let localAttributeName = rawName.split(separator: ":").last?.lowercased() ?? ""
+            let isReference: Bool
+            if localAttributeName == "href" {
+                // The validator treats href as a network reference on every element, including
+                // elements which also have DASH-specific URL attributes.
+                isReference = true
+            } else {
+                switch localElementName {
+                case "segmenturl":
+                    isReference = localAttributeName == "media" || localAttributeName == "index"
+                case "initialization":
+                    isReference = localAttributeName == "sourceurl"
+                case "segmenttemplate":
+                    isReference = localAttributeName == "media"
+                        || localAttributeName == "initialization"
+                        || localAttributeName == "index"
+                default: isReference = false
+                }
+            }
+            if isReference {
+                let encoded = String(tag[valueStart..<valueEnd])
+                guard let decoded = decodeXMLReference(encoded), !decoded.contains("$"),
+                      let remoteURL = referenceBases.lazy.compactMap({ base in
+                        self.validatedRemoteReference(decoded, relativeTo: base, policy: policy)
+                      }).first,
+                      let resource = policy.resource(forRemoteURL: remoteURL),
+                      let localURL = buildValidatedProxyURL(
+                        port: port,
+                        sessionId: sessionId,
+                        routeID: resource.routeID
+                      ) else { return nil }
+                replacements.append((valueStart..<valueEnd, escapeXMLAttribute(localURL.absoluteString, quote: quote)))
+            }
+            index = tag.index(after: valueEnd)
+        }
+
+        var output = tag
+        for replacement in replacements.reversed() {
+            output.replaceSubrange(replacement.0, with: replacement.1)
+        }
+        return output
+    }
+
+    private func validatedRemoteReference(
+        _ rawValue: String,
+        relativeTo baseURL: URL?,
+        policy: ValidatedRoutePolicy
+    ) -> URL? {
+        guard let resolved = URL(string: rawValue, relativeTo: baseURL)?.absoluteURL,
+              let scheme = resolved.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              resolved.user == nil,
+              resolved.password == nil else { return nil }
+        if baseURL?.scheme?.lowercased() == "https", scheme != "https" { return nil }
+        var components = URLComponents(url: resolved, resolvingAgainstBaseURL: false)
+        components?.fragment = nil
+        guard let canonical = components?.url,
+              policy.resource(forRemoteURL: canonical) != nil else { return nil }
+        return canonical
+    }
+
+    private func decodeXMLReference(_ value: String) -> String? {
+        var output = ""
+        var cursor = value.startIndex
+        while cursor < value.endIndex {
+            guard value[cursor] == "&" else {
+                output.append(value[cursor])
+                cursor = value.index(after: cursor)
+                continue
+            }
+            guard let semicolon = value[cursor...].firstIndex(of: ";") else { return nil }
+            let entityStart = value.index(after: cursor)
+            let entity = String(value[entityStart..<semicolon])
+            let scalar: UnicodeScalar?
+            switch entity {
+            case "amp": scalar = "&"
+            case "quot": scalar = "\""
+            case "apos": scalar = "'"
+            case "lt": scalar = "<"
+            case "gt": scalar = ">"
+            default:
+                if entity.hasPrefix("#x") || entity.hasPrefix("#X") {
+                    scalar = UInt32(entity.dropFirst(2), radix: 16).flatMap(UnicodeScalar.init)
+                } else if entity.hasPrefix("#") {
+                    scalar = UInt32(entity.dropFirst()).flatMap(UnicodeScalar.init)
+                } else {
+                    scalar = nil
+                }
+            }
+            guard let scalar,
+                  scalar.value >= 32,
+                  scalar.value != 127 else { return nil }
+            output.unicodeScalars.append(scalar)
+            cursor = value.index(after: semicolon)
+        }
+        return output
+    }
+
+    private func escapeXMLText(_ value: String) -> String {
+        value.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+    }
+
+    private func escapeXMLAttribute(_ value: String, quote: Character) -> String {
+        var escaped = escapeXMLText(value)
+        if quote == "\"" {
+            escaped = escaped.replacingOccurrences(of: "\"", with: "&quot;")
+        } else {
+            escaped = escaped.replacingOccurrences(of: "'", with: "&apos;")
+        }
+        return escaped
+    }
+#endif
+
     private func filteredResponseHeaders(from http: HTTPURLResponse) -> [String: String] {
         var headers: [String: String] = [:]
         for (key, value) in http.allHeaderFields {
@@ -1070,6 +2154,22 @@ private final class MPVHeaderProxyCore {
         return components.url
     }
 
+    private func buildValidatedProxyURL(port: UInt16?, sessionId: String, routeID: String) -> URL? {
+        guard let port, port > 0,
+              !sessionId.isEmpty,
+              !routeID.isEmpty else { return nil }
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = "127.0.0.1"
+        components.port = Int(port)
+        components.path = "/proxy/\(sessionId)"
+        components.queryItems = [
+            URLQueryItem(name: "route", value: routeID),
+            URLQueryItem(name: "token", value: token)
+        ]
+        return components.url
+    }
+
     private func encodeTargetURL(_ url: URL) -> String {
         let data = Data(url.absoluteString.utf8)
         let base64 = data.base64EncodedString()
@@ -1158,6 +2258,45 @@ private final class MPVHeaderProxyCore {
         for session in removed {
             session.upstreamTransport.invalidateAndCancel()
         }
+    }
+
+    /// Keeps validator-accepted manifest bodies bounded across every live typed session. Active
+    /// playback naturally stays near the end of the LRU order because each request touches its
+    /// session; abandoned handoffs are therefore reclaimed first.
+    private func setValidatedSession(_ newSession: Session, for sessionID: String) -> Bool {
+        let incomingBytes = newSession.validatedRoutePolicy?.acceptedManifestByteCount ?? 0
+        guard incomingBytes >= 0, incomingBytes <= maxAggregateValidatedManifestBytes else {
+            return false
+        }
+        var removed: [Session] = []
+        let fits = withSessionsLock { () -> Bool in
+            var total = sessions.values.reduce(0) {
+                $0 + ($1.validatedRoutePolicy?.acceptedManifestByteCount ?? 0)
+            }
+            guard total <= maxAggregateValidatedManifestBytes else { return false }
+            if total + incomingBytes <= maxAggregateValidatedManifestBytes {
+                sessions[sessionID] = newSession
+                return true
+            }
+
+            let candidates = sessions
+                .filter { $0.value.validatedRoutePolicy != nil }
+                .sorted { $0.value.lastAccessed < $1.value.lastAccessed }
+            for candidate in candidates {
+                guard total + incomingBytes > maxAggregateValidatedManifestBytes else { break }
+                if let session = sessions.removeValue(forKey: candidate.key) {
+                    total -= session.validatedRoutePolicy?.acceptedManifestByteCount ?? 0
+                    removed.append(session)
+                }
+            }
+            guard total + incomingBytes <= maxAggregateValidatedManifestBytes else { return false }
+            sessions[sessionID] = newSession
+            return true
+        }
+        for session in removed {
+            session.upstreamTransport.invalidateAndCancel()
+        }
+        return fits
     }
 
     // Each proxy playback session owns one ephemeral URLSession. Rewritten HLS playlists keep
@@ -1344,7 +2483,7 @@ private final class MPVHeaderProxyCore {
         func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
             guard let bridge = bridge(for: task) else { return }
             bridge.enqueue {
-                bridge.handleMetrics(metrics)
+                bridge.handleMetrics(metrics, task: task)
             }
         }
 
@@ -1396,6 +2535,9 @@ private final class MPVHeaderProxyCore {
         private let credentialOriginURL: URL
         private let upstreamTransport: UpstreamTransport
         private let cloudflareChallengeReporter: CloudflareChallengeReporter?
+        private let validatedRoutePolicy: ValidatedRoutePolicy?
+        private let validatedRouteRole: String?
+        private let validatedExpectedFiniteContentLength: Int64?
         private let connection: NWConnection
         private let cachedPrefix: CachedPrefixContinuation?
         private let callbackQueue: OperationQueue
@@ -1414,6 +2556,11 @@ private final class MPVHeaderProxyCore {
         private var rejectedCookieHeader: String?
         private var rateLimitRetryCount = 0
         private let maximumRateLimitRetries = 2
+        private var expectedResponseByteCount: Int64?
+        /// Numeric public addresses approved immediately before each typed SkyStream dispatch.
+        /// URLSession metrics are checked against this set so a later resolver answer cannot be
+        /// silently consumed even though URLSession itself does not expose address pinning.
+        private var approvedSkyAddressesByHost: [String: Set<String>] = [:]
 
         init(
             proxy: MPVHeaderProxyCore,
@@ -1430,6 +2577,9 @@ private final class MPVHeaderProxyCore {
             credentialOriginURL: URL,
             upstreamTransport: UpstreamTransport,
             cloudflareChallengeReporter: CloudflareChallengeReporter?,
+            validatedRoutePolicy: ValidatedRoutePolicy?,
+            validatedRouteRole: String?,
+            validatedExpectedFiniteContentLength: Int64?,
             connection: NWConnection,
             cachedPrefix: CachedPrefixContinuation? = nil
         ) {
@@ -1447,6 +2597,9 @@ private final class MPVHeaderProxyCore {
             self.credentialOriginURL = credentialOriginURL
             self.upstreamTransport = upstreamTransport
             self.cloudflareChallengeReporter = cloudflareChallengeReporter
+            self.validatedRoutePolicy = validatedRoutePolicy
+            self.validatedRouteRole = validatedRouteRole
+            self.validatedExpectedFiniteContentLength = validatedExpectedFiniteContentLength
             self.connection = connection
             self.cachedPrefix = cachedPrefix
             self.rejectedCookieHeader = request.value(forHTTPHeaderField: "Cookie")
@@ -1460,7 +2613,36 @@ private final class MPVHeaderProxyCore {
             logType == "MPV" ? "MPV" : "Error"
         }
 
+        private func logTarget(_ url: URL? = nil) -> String {
+            if validatedRoutePolicy != nil { return "validated-route" }
+            guard let proxy else { return "nil" }
+            return proxy.logURLSummary(url ?? targetURL)
+        }
+
         func start() async {
+            if validatedRoutePolicy != nil {
+                do {
+                    let checked = try await SkyStreamRemoteURLPolicy.shared
+                        .validateForNetworkDispatch(
+                            targetURL.absoluteString,
+                            purpose: Self.skyNetworkPurpose(for: validatedRouteRole)
+                        )
+                    guard ValidatedRoutePolicy.canonicalURLKey(checked.url)
+                            == ValidatedRoutePolicy.canonicalURLKey(targetURL),
+                          recordApprovedSkyDispatch(checked) else {
+                        throw SkyStreamSecurityError.invalidResponse
+                    }
+                } catch {
+                    Logger.shared.log(
+                        "\(proxy?.logPrefix ?? "MPVHeaderProxy")[\(requestId)]: rejected stale or unsafe SkyStream route before dispatch",
+                        type: "Error"
+                    )
+                    proxy?.sendSimpleResponse(connection, statusCode: 502, body: "Validated route expired")
+                    finish()
+                    return
+                }
+            }
+
             await withCheckedContinuation { continuation in
                 self.continuation = continuation
                 guard upstreamTransport.start(self, request: request) else {
@@ -1475,6 +2657,37 @@ private final class MPVHeaderProxyCore {
             callbackQueue.addOperation(operation)
         }
 
+        private static func skyNetworkPurpose(for routeRole: String?) -> SkyStreamNetworkPurpose {
+            switch routeRole {
+            case SkyStreamValidatedRouteRole.manifest.rawValue:
+                return .manifest
+            case SkyStreamValidatedRouteRole.encryptionKey.rawValue:
+                return .encryptionKey
+            case SkyStreamValidatedRouteRole.subtitle.rawValue:
+                return .subtitle
+            case SkyStreamValidatedRouteRole.streamRoot.rawValue:
+                return .streamRoot
+            case SkyStreamValidatedRouteRole.mediaSegment.rawValue,
+                 SkyStreamValidatedRouteRole.initialization.rawValue,
+                 SkyStreamValidatedRouteRole.dashResource.rawValue:
+                return .mediaSegment
+            default:
+                return .streamRoot
+            }
+        }
+
+        @discardableResult
+        private func recordApprovedSkyDispatch(_ checked: SkyStreamValidatedRemoteURL) -> Bool {
+            let addresses = Set(
+                checked.checkedAddresses.compactMap(
+                    SkyStreamRemoteURLPolicy.normalizedPublicAddressString
+                )
+            )
+            guard !addresses.isEmpty else { return false }
+            approvedSkyAddressesByHost[checked.origin.host, default: []].formUnion(addresses)
+            return true
+        }
+
         func handleResponse(
             dataTask: URLSessionDataTask,
             response: URLResponse,
@@ -1487,7 +2700,7 @@ private final class MPVHeaderProxyCore {
             }
 
             guard let http = response as? HTTPURLResponse else {
-                Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: upstream response was not HTTP target=\(proxy.logURLSummary(targetURL))", type: errorLogType)
+                Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: upstream response was not HTTP target=\(logTarget())", type: errorLogType)
                 proxy.sendSimpleResponse(connection, statusCode: 502, body: "Bad gateway")
                 completionHandler(.cancel)
                 finish()
@@ -1499,10 +2712,38 @@ private final class MPVHeaderProxyCore {
             let contentLength = http.value(forHTTPHeaderField: "Content-Length") ?? "nil"
             let contentRange = http.value(forHTTPHeaderField: "Content-Range") ?? "nil"
             if shouldLogLifecycle || !(200...299).contains(http.statusCode) {
-                Logger.shared.log("[MPVProxyTrace \(traceID)] stage=upstream-response req=\(requestSequence) status=\(http.statusCode) contentLength=\(contentLength) contentRange=\(contentRange) contentType=\(contentType) target=\(proxy.logURLSummary(targetURL))", type: shouldLogLifecycle ? "PlaybackTrace" : errorLogType)
+                Logger.shared.log("[MPVProxyTrace \(traceID)] stage=upstream-response req=\(requestSequence) status=\(http.statusCode) contentLength=\(contentLength) contentRange=\(contentRange) contentType=\(contentType) target=\(logTarget())", type: shouldLogLifecycle ? "PlaybackTrace" : errorLogType)
             }
 
             guard (200...299).contains(http.statusCode) else {
+                if validatedRoutePolicy != nil,
+                   http.statusCode == 401 || http.statusCode == 410 {
+                    // Signed SkyStream resources commonly use 401/410 for an expired route.
+                    // There is no useful browser challenge body to inspect, so immediately ask
+                    // the owning player to re-resolve the same provider. Legacy proxy sessions
+                    // retain their existing response handling.
+                    let rejectedURL = http.url ?? targetURL
+                    Logger.shared.log(
+                        "\(proxy.logPrefix)[\(requestId)]: validated media route expired status=\(http.statusCode) target=\(logTarget(rejectedURL))",
+                        type: errorLogType
+                    )
+                    cloudflareChallengeReporter?.report(
+                        url: rejectedURL,
+                        rejectedCookieHeader: nil,
+                        isInteractiveChallenge: false,
+                        statusCode: http.statusCode
+                    )
+                    proxy.sendResponse(
+                        connection,
+                        statusCode: http.statusCode,
+                        headers: proxy.emptyResponseHeaders(from: http),
+                        body: Data()
+                    )
+                    completionHandler(.cancel)
+                    finish()
+                    return
+                }
+
                 if [403, 429, 503].contains(http.statusCode), method != "HEAD" {
                     // Challenge classification needs the small HTML body. Buffer at most 1 MiB;
                     // ordinary blocked responses still pass through as the original HTTP status
@@ -1527,11 +2768,45 @@ private final class MPVHeaderProxyCore {
                 } else {
                     backoffDescription = ""
                 }
-                Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: refusing upstream error body status=\(http.statusCode)\(backoffDescription) target=\(proxy.logURLSummary(targetURL))", type: errorLogType)
+                Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: refusing upstream error body status=\(http.statusCode)\(backoffDescription) target=\(logTarget())", type: errorLogType)
                 proxy.sendResponse(connection, statusCode: http.statusCode, headers: proxy.emptyResponseHeaders(from: http), body: Data())
                 completionHandler(.cancel)
                 finish()
                 return
+            }
+
+            if let expectedFiniteLength = validatedExpectedFiniteContentLength {
+                guard let responseByteCount = Self.validatedDirectResponseByteCount(
+                    http,
+                    expectedTotal: expectedFiniteLength
+                ) else {
+                    Logger.shared.log(
+                        "\(proxy.logPrefix)[\(requestId)]: rejected changed or unbounded SkyStream direct response",
+                        type: "Error"
+                    )
+                    proxy.sendSimpleResponse(connection, statusCode: 502, body: "Direct media bounds changed")
+                    completionHandler(.cancel)
+                    finish()
+                    return
+                }
+                expectedResponseByteCount = method == "HEAD" ? 0 : responseByteCount
+            }
+
+            if validatedRoutePolicy != nil {
+                let lowerContentType = contentType.lowercased()
+                let looksLikeManifest = lowerContentType.contains("mpegurl")
+                    || lowerContentType.contains("dash+xml")
+                    || lowerContentType.contains("application/dash")
+                guard validatedRouteRole != "manifest", !looksLikeManifest else {
+                    Logger.shared.log(
+                        "\(proxy.logPrefix)[\(requestId)]: rejected a refetched SkyStream manifest",
+                        type: "Error"
+                    )
+                    proxy.sendSimpleResponse(connection, statusCode: 502, body: "Manifest refetch rejected")
+                    completionHandler(.cancel)
+                    finish()
+                    return
+                }
             }
 
             let responseHeaders = proxy.filteredResponseHeaders(from: http)
@@ -1542,7 +2817,9 @@ private final class MPVHeaderProxyCore {
                 return
             }
 
-            mode = proxy.upstreamBodyMode(for: http, targetURL: targetURL)
+            mode = validatedRoutePolicy == nil
+                ? proxy.upstreamBodyMode(for: http, targetURL: targetURL)
+                : .stream
             switch mode {
             case .playlist, .probe:
                 completionHandler(.allow)
@@ -1565,7 +2842,7 @@ private final class MPVHeaderProxyCore {
                     return
                 }
                 if cachedPrefix != nil {
-                    Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: MPV warmup cache bypassed because continuation status=\(http.statusCode) target=\(proxy.logURLSummary(targetURL))", type: logType)
+                    Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: MPV warmup cache bypassed because continuation status=\(http.statusCode) target=\(logTarget())", type: logType)
                 }
 
                 proxy.sendResponseHeaders(connection, statusCode: http.statusCode, headers: responseHeaders) { [weak self] error in
@@ -1587,11 +2864,23 @@ private final class MPVHeaderProxyCore {
             guard let proxy, !finished else { return }
             guard method != "HEAD" else { return }
 
+            if let expectedResponseByteCount,
+               Int64(streamedByteCount + pendingDownstreamBytes + data.count) > expectedResponseByteCount {
+                Logger.shared.log(
+                    "\(proxy.logPrefix)[\(requestId)]: rejected oversized SkyStream direct response body",
+                    type: "Error"
+                )
+                dataTask.cancel()
+                connection.cancel()
+                finish()
+                return
+            }
+
             switch mode {
             case .playlist:
                 bufferedData.append(data)
                 if bufferedData.count > proxy.maxPlaylistBytes {
-                    Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: playlist exceeded rewrite limit; streaming original target=\(proxy.logURLSummary(targetURL)) bytes=\(bufferedData.count)", type: errorLogType)
+                    Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: playlist exceeded rewrite limit; streaming original target=\(logTarget()) bytes=\(bufferedData.count)", type: errorLogType)
                     startStreamingBufferedData(dataTask: dataTask)
                 }
             case .probe:
@@ -1599,7 +2888,7 @@ private final class MPVHeaderProxyCore {
                 if proxy.isPlaylistData(bufferedData) {
                     mode = .playlist
                     if bufferedData.count > proxy.maxPlaylistBytes {
-                        Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: playlist exceeded rewrite limit during probe; streaming original target=\(proxy.logURLSummary(targetURL)) bytes=\(bufferedData.count)", type: errorLogType)
+                        Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: playlist exceeded rewrite limit during probe; streaming original target=\(logTarget()) bytes=\(bufferedData.count)", type: errorLogType)
                         startStreamingBufferedData(dataTask: dataTask)
                     }
                 } else if proxy.shouldStopPlaylistProbe(bufferedData) {
@@ -1630,6 +2919,111 @@ private final class MPVHeaderProxyCore {
             request: URLRequest,
             completionHandler: @escaping (URLRequest?) -> Void
         ) {
+            if let policy = validatedRoutePolicy {
+                guard let proxy,
+                      let sourceURL = response.url,
+                      let destinationURL = request.url,
+                      policy.resource(forRemoteURL: sourceURL) != nil,
+                      let destination = policy.resource(forRemoteURL: destinationURL),
+                      destination.targetURL != nil,
+                      !(sourceURL.scheme?.lowercased() == "https"
+                        && destinationURL.scheme?.lowercased() != "https") else {
+                    Logger.shared.log(
+                        "\(proxy?.logPrefix ?? "MPVHeaderProxy")[\(requestId)]: rejected unvalidated SkyStream redirect",
+                        type: "Error"
+                    )
+                    completionHandler(nil)
+                    proxy?.sendSimpleResponse(connection, statusCode: 502, body: "Redirect rejected")
+                    finish()
+                    return
+                }
+
+                if destination.acceptedManifest != nil {
+                    completionHandler(nil)
+                    proxy.serveValidatedManifest(
+                        destination,
+                        policy: policy,
+                        sessionId: sessionId,
+                        method: self.request.httpMethod ?? method,
+                        connection: connection
+                    )
+                    finish()
+                    return
+                }
+
+                // The route graph proves identity and credentials, but its earlier DNS answer may
+                // be stale. Repeat the uncached check at the exact redirect handoff before allowing
+                // URLSession to issue the next request.
+                Task { [weak self] in
+                    guard let self else {
+                        completionHandler(nil)
+                        return
+                    }
+                    do {
+                        let checked = try await SkyStreamRemoteURLPolicy.shared
+                            .validateForNetworkDispatch(
+                                destinationURL.absoluteString,
+                                purpose: Self.skyNetworkPurpose(for: destination.role)
+                            )
+                        guard ValidatedRoutePolicy.canonicalURLKey(checked.url)
+                                == ValidatedRoutePolicy.canonicalURLKey(destinationURL) else {
+                            throw SkyStreamSecurityError.invalidResponse
+                        }
+                        self.enqueue { [weak self] in
+                            guard let self, !self.finished,
+                                  self.recordApprovedSkyDispatch(checked) else {
+                                completionHandler(nil)
+                                return
+                            }
+                            var redirected = request
+                            redirected.httpMethod = self.request.httpMethod
+                            let safeNames: Set<String> = [
+                                "accept", "accept-language", "cache-control", "dnt", "icy-metadata",
+                                "if-match", "if-modified-since", "if-none-match", "if-range",
+                                "if-unmodified-since", "pragma", "range", "user-agent"
+                            ]
+                            let safeForwarded = (redirected.allHTTPHeaderFields ?? [:]).filter {
+                                safeNames.contains($0.key.lowercased())
+                            }
+                            for key in (redirected.allHTTPHeaderFields ?? [:]).keys {
+                                redirected.setValue(nil, forHTTPHeaderField: key)
+                            }
+                            for (key, value) in safeForwarded {
+                                redirected.setValue(value, forHTTPHeaderField: key)
+                            }
+                            for (key, value) in destination.headers {
+                                redirected.setValue(value, forHTTPHeaderField: key)
+                            }
+                            self.rejectedCookieHeader = nil
+                            Logger.shared.log(
+                                "\(proxy.logPrefix)[\(self.requestId)]: following validated SkyStream redirect",
+                                type: self.logType
+                            )
+                            completionHandler(redirected)
+                        }
+                    } catch {
+                        self.enqueue { [weak self] in
+                            guard let self, !self.finished else {
+                                completionHandler(nil)
+                                return
+                            }
+                            Logger.shared.log(
+                                "\(proxy.logPrefix)[\(self.requestId)]: rejected stale or unsafe SkyStream redirect",
+                                type: "Error"
+                            )
+                            completionHandler(nil)
+                            proxy.sendSimpleResponse(
+                                self.connection,
+                                statusCode: 502,
+                                body: "Redirect rejected"
+                            )
+                            self.finish()
+                        }
+                    }
+                }
+                return
+            }
+
             var redirected = request
             redirected.httpMethod = self.request.httpMethod
 
@@ -1657,12 +3051,48 @@ private final class MPVHeaderProxyCore {
                 for: request.url ?? targetURL
             )
             rejectedCookieHeader = redirected.value(forHTTPHeaderField: "Cookie")
-            let redirectTarget = redirected.url.flatMap { proxy?.logURLSummary($0) } ?? "nil"
+            // A signed provider credential may live in either the query or the path. Typed
+            // SkyStream routes already retain their destination internally, so their lifecycle
+            // log needs only a non-sensitive marker; generic proxy sessions keep the existing
+            // query/fragment-stripped diagnostic summary.
+            let redirectTarget = validatedRoutePolicy != nil
+                ? "validated-route"
+                : (redirected.url.flatMap { proxy?.logURLSummary($0) } ?? "nil")
             Logger.shared.log("\(proxy?.logPrefix ?? "MPVHeaderProxy")[\(requestId)]: following redirect status=\(response.statusCode) target=\(redirectTarget)", type: logType)
             completionHandler(redirected)
         }
 
-        func handleMetrics(_ metrics: URLSessionTaskMetrics) {
+        func handleMetrics(_ metrics: URLSessionTaskMetrics, task: URLSessionTask) {
+            if validatedRoutePolicy != nil {
+                for transaction in metrics.transactionMetrics {
+                    guard let remote = transaction.remoteAddress else { continue }
+                    let host = transaction.request.url?.host.map(
+                        SkyStreamRemoteURLPolicy.canonicalHost
+                    )
+                    let normalized = SkyStreamRemoteURLPolicy
+                        .normalizedPublicAddressString(remote)
+                    guard let host, let normalized,
+                          approvedSkyAddressesByHost[host]?.contains(normalized) == true else {
+                        Logger.shared.log(
+                            "\(proxy?.logPrefix ?? "MPVHeaderProxy")[\(requestId)]: rejected SkyStream connected-address drift",
+                            type: "Error"
+                        )
+                        task.cancel()
+                        if !responseHeadersSent {
+                            proxy?.sendSimpleResponse(
+                                connection,
+                                statusCode: 502,
+                                body: "Validated route expired"
+                            )
+                        } else {
+                            connection.cancel()
+                        }
+                        finish()
+                        return
+                    }
+                }
+            }
+
             guard shouldLogLifecycle else { return }
             let transactions = metrics.transactionMetrics
             let reusedTransactions = transactions.filter(\.isReusedConnection).count
@@ -1687,7 +3117,11 @@ private final class MPVHeaderProxyCore {
             }
 
             if let error {
-                Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: upstream error target=\(proxy.logURLSummary(targetURL)) error=\(error)", type: errorLogType)
+                let nsError = error as NSError
+                Logger.shared.log(
+                    "\(proxy.logPrefix)[\(requestId)]: upstream error target=\(logTarget()) errorType=\(String(reflecting: type(of: error))) domain=\(Self.safeErrorDomain(nsError.domain)) code=\(nsError.code)",
+                    type: errorLogType
+                )
                 if responseHeadersSent {
                     connection.cancel()
                 } else {
@@ -1762,7 +3196,7 @@ private final class MPVHeaderProxyCore {
                     mode = .stream
                     bufferedData.removeAll(keepingCapacity: true)
                     Logger.shared.log(
-                        "\(proxy.logPrefix)[\(requestId)]: retrying rate-limited media request attempt=\(rateLimitRetryCount)/\(maximumRateLimitRetries)\(backoffDescription) target=\(proxy.logURLSummary(targetURL))",
+                        "\(proxy.logPrefix)[\(requestId)]: retrying rate-limited media request attempt=\(rateLimitRetryCount)/\(maximumRateLimitRetries)\(backoffDescription) target=\(logTarget())",
                         type: errorLogType
                     )
                     if upstreamTransport.start(self, request: request) {
@@ -1784,7 +3218,7 @@ private final class MPVHeaderProxyCore {
                 || rateLimitRetryCount >= maximumRateLimitRetries {
                 let rejectedURL = http.url ?? targetURL
                 Logger.shared.log(
-                    "\(proxy.logPrefix)[\(requestId)]: media access rejected status=\(http.statusCode) interactiveChallenge=\(confirmedChallenge) target=\(proxy.logURLSummary(rejectedURL))",
+                    "\(proxy.logPrefix)[\(requestId)]: media access rejected status=\(http.statusCode) interactiveChallenge=\(confirmedChallenge) target=\(logTarget(rejectedURL))",
                     type: errorLogType
                 )
                 cloudflareChallengeReporter?.report(
@@ -1796,7 +3230,7 @@ private final class MPVHeaderProxyCore {
             }
 
             Logger.shared.log(
-                "\(proxy.logPrefix)[\(requestId)]: refusing upstream error body status=\(http.statusCode) confirmedCloudflare=\(confirmedChallenge)\(backoffDescription) target=\(proxy.logURLSummary(targetURL))",
+                "\(proxy.logPrefix)[\(requestId)]: refusing upstream error body status=\(http.statusCode) confirmedCloudflare=\(confirmedChallenge)\(backoffDescription) target=\(logTarget())",
                 type: errorLogType
             )
             proxy.sendResponse(
@@ -1923,7 +3357,7 @@ private final class MPVHeaderProxyCore {
             resumeDataTask: Bool,
             error: NWError?
         ) {
-            guard let proxy else {
+            guard proxy != nil else {
                 dataTask.cancel()
                 finish()
                 return
@@ -1945,7 +3379,7 @@ private final class MPVHeaderProxyCore {
             let now = CFAbsoluteTimeGetCurrent()
             if sendMs > 250, now - lastSlowSendLogAt > 2.0 {
                 lastSlowSendLogAt = now
-                Logger.shared.log("[MPVProxyTrace \(traceID)] stage=slow-downstream req=\(requestSequence) chunkBytes=\(data.count) sendMs=\(String(format: "%.0f", sendMs)) streamedBytes=\(streamedByteCount) pending=\(pendingDownstreamSends) pendingBytes=\(pendingDownstreamBytes) target=\(proxy.logURLSummary(targetURL))", type: "PlaybackTrace")
+                Logger.shared.log("[MPVProxyTrace \(traceID)] stage=slow-downstream req=\(requestSequence) chunkBytes=\(data.count) sendMs=\(String(format: "%.0f", sendMs)) streamedBytes=\(streamedByteCount) pending=\(pendingDownstreamSends) pendingBytes=\(pendingDownstreamBytes) target=\(logTarget())", type: "PlaybackTrace")
             }
 
             if pendingStreamCompletionStatusCode == nil, resumeDataTask, !finished {
@@ -1967,11 +3401,58 @@ private final class MPVHeaderProxyCore {
             }
 
             pendingStreamCompletionStatusCode = nil
+            if let expectedResponseByteCount,
+               Int64(streamedByteCount) != expectedResponseByteCount {
+                Logger.shared.log(
+                    "\(proxy.logPrefix)[\(requestId)]: rejected truncated SkyStream direct response body",
+                    type: "Error"
+                )
+                connection.cancel()
+                finish()
+                return
+            }
             if shouldLogLifecycle {
                 Logger.shared.log("[MPVProxyTrace \(traceID)] stage=request-complete req=\(requestSequence) bytes=\(streamedByteCount) expected=\(expected)", type: "PlaybackTrace")
             }
             proxy.finishResponse(on: connection)
             finish()
+        }
+
+        private static func validatedDirectResponseByteCount(
+            _ response: HTTPURLResponse,
+            expectedTotal: Int64
+        ) -> Int64? {
+            guard expectedTotal > 0,
+                  response.value(forHTTPHeaderField: "Transfer-Encoding") == nil,
+                  let rawLength = response.value(forHTTPHeaderField: "Content-Length")?
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                  let contentLength = Int64(rawLength),
+                  contentLength >= 0 else { return nil }
+            if response.statusCode == 200 {
+                return contentLength == expectedTotal ? contentLength : nil
+            }
+            guard response.statusCode == 206,
+                  let rawRange = response.value(forHTTPHeaderField: "Content-Range")?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased(),
+                  rawRange.hasPrefix("bytes ") else { return nil }
+            let pieces = rawRange.dropFirst("bytes ".count).split(separator: "/", maxSplits: 1)
+            guard pieces.count == 2,
+                  let total = Int64(pieces[1]), total == expectedTotal else { return nil }
+            let bounds = pieces[0].split(separator: "-", maxSplits: 1)
+            guard bounds.count == 2,
+                  let start = Int64(bounds[0]),
+                  let end = Int64(bounds[1]),
+                  start >= 0, end >= start, end < total,
+                  contentLength == end - start + 1 else { return nil }
+            return contentLength
+        }
+
+        private static func safeErrorDomain(_ value: String) -> String {
+            let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "._-"))
+            let scalars = value.unicodeScalars.prefix(96).filter { allowed.contains($0) }
+            let sanitized = String(String.UnicodeScalarView(scalars))
+            return sanitized.isEmpty ? "unknown" : sanitized
         }
 
         private func finish() {
@@ -2009,6 +3490,45 @@ final class MPVHeaderProxy {
             onConfirmedCloudflareChallenge: onConfirmedCloudflareChallenge
         )
     }
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    /// Confirms that a URL is the exact top-level route of a live typed SkyStream session.
+    func isManagedSkyStreamSessionURL(_ streamProxyURL: URL) -> Bool {
+        proxy.isManagedSkyStreamSessionURL(streamProxyURL)
+    }
+
+    /// Converts only the validator's unforgeable playback descriptor into a loopback URL. Raw
+    /// plugin URLs and headers deliberately cannot enter this boundary.
+    func makeSkyStreamProxyURL(
+        for descriptor: SkyStreamValidatedPlaybackDescriptor,
+        traceID: String? = nil,
+        onValidatedRouteRejection: ((URL, Int, Bool) -> Void)? = nil
+    ) -> URL? {
+        proxy.makeSkyStreamProxyURL(
+            for: descriptor,
+            traceID: traceID,
+            onValidatedRouteRejection: onValidatedRouteRejection
+        )
+    }
+
+    /// Returns same-session loopback routes for validated subtitle URLs. Callers must not pass
+    /// the descriptor's upstream subtitle headers to the player.
+    func skyStreamSubtitleProxyURLs(
+        for descriptor: SkyStreamValidatedPlaybackDescriptor,
+        streamProxyURL: URL
+    ) -> [String: URL]? {
+        proxy.skyStreamSubtitleProxyURLs(for: descriptor, streamProxyURL: streamProxyURL)
+    }
+
+    /// Installs the same-source refresh callback on an already-created typed SkyStream session.
+    @discardableResult
+    func setSkyStreamRouteRejectionHandler(
+        for streamProxyURL: URL,
+        handler: @escaping (URL, Int, Bool) -> Void
+    ) -> Bool {
+        proxy.setSkyStreamRouteRejectionHandler(for: streamProxyURL, handler: handler)
+    }
+#endif
 
     func invalidateSession(for proxyURL: URL) {
         proxy.invalidateSession(for: proxyURL)

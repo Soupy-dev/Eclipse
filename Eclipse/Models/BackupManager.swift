@@ -1,5 +1,8 @@
 import Foundation
 import UIKit
+#if canImport(CryptoKit)
+import CryptoKit
+#endif
 
 // MARK: - Backup Data Model
 
@@ -60,6 +63,8 @@ struct BackupSearchHistory: Codable {
 }
 
 struct BackupData: Codable {
+    static let currentCloudSchemaVersion = "2.0"
+
     let version: String
     let createdDate: Date
     
@@ -307,6 +312,11 @@ struct BackupData: Codable {
     // Stremio addons. Nil means the backup predates this field and restore should leave existing addons alone.
     var stremioAddons: [BackupStremioAddon]? = nil
 
+    // SkyStream plugins. Nil means the backup predates this field (or the
+    // manager was not ready when the snapshot was captured), so restore must
+    // leave the entire local SkyStream domain untouched.
+    var skyStream: SkyStreamBackupSnapshot? = nil
+
     // Manga / Kanzen data
     var mangaCollections: [BackupMangaCollection] = []
     var mangaReadingProgress: [String: MangaProgress] = [:]
@@ -336,8 +346,26 @@ struct BackupData: Codable {
     private(set) var hasKanzenModules = true
     private(set) var hasUserRatings = true
 
-    func redactedForExperimentalCloudSync() -> BackupData {
+    func redactedForExperimentalCloudSync(
+        stripSkyStreamArchives: Bool = false
+    ) -> BackupData {
         var snapshot = self
+
+        // Playback URLs and provider content references are intentionally device-local. They can
+        // contain short-lived signatures, cookies encoded in a URL, or package-specific opaque
+        // state. Mirror MediaStateSync's privacy boundary for every experimental cloud provider.
+        snapshot.progressData.movieProgress = progressData.movieProgress.map { entry in
+            var redacted = entry
+            redacted.lastHref = nil
+            redacted.lastContentReference = nil
+            return redacted
+        }
+        snapshot.progressData.episodeProgress = progressData.episodeProgress.map { entry in
+            var redacted = entry
+            redacted.lastHref = nil
+            redacted.lastContentReference = nil
+            return redacted
+        }
 
         snapshot.trackerState.accounts = trackerState.accounts.map { account in
             var metadataOnly = account
@@ -349,6 +377,12 @@ struct BackupData: Codable {
 
         snapshot.services = services.compactMap(Self.serviceForExperimentalCloudSync)
         snapshot.stremioAddons = stremioAddons?.compactMap(Self.stremioAddonForExperimentalCloudSync)
+        snapshot.skyStream = skyStream.flatMap {
+            Self.skyStreamSnapshotForExperimentalCloudSync(
+                $0,
+                stripArchives: stripSkyStreamArchives
+            )
+        }
 
         snapshot.kanzenModules = kanzenModules.filter {
             Self.cloudSafeURLString($0.moduleurl) != nil &&
@@ -469,6 +503,190 @@ struct BackupData: Codable {
         )
     }
 
+    /// Revalidates the cloud-safe envelope even when it came from a decoded
+    /// remote file. A forged `isSafeCloudSnapshot` bit must not be enough to
+    /// smuggle package bytes, secret preferences, or credentialed URLs into a
+    /// subsequent cloud upload.
+    static func skyStreamSnapshotForExperimentalCloudSync(
+        _ incoming: SkyStreamBackupSnapshot,
+        stripArchives: Bool = false
+    ) -> SkyStreamBackupSnapshot? {
+        let repositories = incoming.repositories.compactMap { repository -> SkyStreamRepositoryBackupSnapshot? in
+            guard let sourceURL = skyStreamCloudSafeURLString(repository.sourceURL),
+                  let baseURL = URL(string: sourceURL) else {
+                return nil
+            }
+
+            var sanitized = repository
+            sanitized.sourceURL = sourceURL
+            sanitized.additionalFields = [:]
+            let rawPluginListURLs = sanitized.pluginListURLs.isEmpty
+                ? (sanitized.manifest?.pluginLists ?? [])
+                : sanitized.pluginListURLs
+            sanitized.pluginListURLs = rawPluginListURLs.compactMap { rawValue in
+                guard let resolved = URL(string: rawValue, relativeTo: baseURL)?.absoluteURL else {
+                    return nil
+                }
+                return skyStreamCloudSafeURLString(resolved.absoluteString)
+            }
+            sanitized.lastRefreshedAt = nil
+            sanitized.frozenAt = nil
+            guard sanitized.pluginListURLs.count == rawPluginListURLs.count,
+                  !sanitized.pluginListURLs.isEmpty else { return nil }
+            if var manifest = sanitized.manifest {
+                guard sanitized.kind == .repository,
+                      SkyStreamRepositoryManifest.isSupportedManifestVersion(
+                          manifest.manifestVersion
+                      ) else { return nil }
+                manifest.additionalFields = [:]
+                manifest.pluginLists = sanitized.pluginListURLs
+                manifest.iconURL = manifest.iconURL.flatMap(skyStreamCloudSafeURLString)
+                manifest.websiteURL = manifest.websiteURL.flatMap(skyStreamCloudSafeURLString)
+                sanitized.manifest = manifest
+            } else {
+                guard sanitized.kind == .pluginList else { return nil }
+            }
+            guard SkyStreamBackupMetadataPolicy.isBounded(repository: sanitized) else {
+                return nil
+            }
+            return sanitized
+        }.sorted { $0.sourceURL < $1.sourceURL }
+
+        var aggregateArchiveBytes = 0
+        let plugins = incoming.plugins.compactMap { plugin -> SkyStreamPluginBackupSnapshot? in
+            guard let sourceURL = skyStreamCloudSafeURLString(plugin.state.provenance.sourceURL) else {
+                return nil
+            }
+
+            var sanitized = plugin
+            if stripArchives {
+                // Routine cloud captures only need immutable reconstruction metadata. Avoid even
+                // reading/hash-walking opaque package bytes on relaying platforms after an unrelated
+                // progress/settings change; restore still accepts bounded legacy archive payloads.
+                sanitized.archivePayload = nil
+                sanitized.payloadWasRedacted = true
+            } else if let archive = plugin.archivePayload {
+                let digest = SHA256.hash(data: archive)
+                    .map { String(format: "%02x", $0) }
+                    .joined()
+                let (nextAggregateBytes, overflow) = aggregateArchiveBytes.addingReportingOverflow(
+                    archive.count
+                )
+                if archive.count <= 20 * 1_024 * 1_024,
+                   digest.caseInsensitiveCompare(plugin.state.archiveSHA256) == .orderedSame,
+                   !overflow,
+                   nextAggregateBytes <= 64 * 1_024 * 1_024 {
+                    aggregateArchiveBytes = nextAggregateBytes
+                    sanitized.archivePayload = archive
+                    sanitized.payloadWasRedacted = false
+                } else {
+                    // Invalid or over-budget bytes are an archive redaction, not a package
+                    // deletion. Retaining the metadata entry prevents a redacted cloud pass
+                    // from authoritatively uninstalling the matching local package.
+                    sanitized.archivePayload = nil
+                    sanitized.payloadWasRedacted = true
+                }
+            } else {
+                sanitized.archivePayload = nil
+                sanitized.payloadWasRedacted = true
+            }
+            sanitized.additionalFields = [:]
+            sanitized.state.additionalFields = [:]
+            sanitized.state.payloadRelativePath = ""
+            sanitized.state.runtimeStorage = nil
+            sanitized.state.preferences = sanitized.state.preferences.filter { key, value in
+                !value.isSecret &&
+                    !value.isRedacted &&
+                    !containsCloudUnsafeSecret(key)
+            }
+            sanitized.state.preferences = sanitized.state.preferences.mapValues { value in
+                var canonical = value
+                canonical.updatedAt = nil
+                return canonical
+            }
+            sanitized.preferencesWereRedacted = true
+
+            sanitized.state.provenance.sourceURL = sourceURL
+            sanitized.state.provenance.repositoryURL = sanitized.state.provenance.repositoryURL.flatMap(skyStreamCloudSafeURLString)
+            sanitized.state.provenance.pluginListURL = sanitized.state.provenance.pluginListURL.flatMap(skyStreamCloudSafeURLString)
+            sanitized.state.provenance.additionalFields = [:]
+            sanitized.state.provenance.pinnedAt = Date(timeIntervalSince1970: 0)
+            sanitized.state.provenance.frozenAt = nil
+            sanitized.state.provenance.expectedArchiveSHA256 = sanitized.state.archiveSHA256
+            sanitized.state.selectedDomainURL = sanitized.state.selectedDomainURL.flatMap(skyStreamCloudSafeURLString)
+            sanitized.state.providers = sanitized.state.providers.compactMap { provider in
+                guard provider.removedAt == nil else { return nil }
+                var provider = provider
+                provider.removedAt = nil
+                provider.additionalFields = [:]
+                return provider
+            }.sorted { $0.id < $1.id }
+
+            sanitized.state.manifest.additionalFields = [:]
+            sanitized.state.manifest.baseURL = skyStreamCloudSafeURLString(sanitized.state.manifest.baseURL) ?? ""
+            sanitized.state.manifest.iconURL = sanitized.state.manifest.iconURL.flatMap(skyStreamCloudSafeURLString)
+            sanitized.state.manifest.domains = sanitized.state.manifest.domains?.compactMap { domain in
+                guard let url = skyStreamCloudSafeURLString(domain.url) else { return nil }
+                var domain = domain
+                domain.url = url
+                domain.additionalFields = [:]
+                return domain
+            }
+            sanitized.state.manifest.providers = sanitized.state.manifest.providers?.map { provider in
+                var provider = provider
+                provider.baseURL = provider.baseURL.flatMap(skyStreamCloudSafeURLString)
+                provider.iconURL = provider.iconURL.flatMap(skyStreamCloudSafeURLString)
+                provider.additionalFields = [:]
+                return provider
+            }
+            sanitized.state.compatibility.reasons = sanitized.state.compatibility.reasons.map { reason in
+                var reason = reason
+                reason.additionalFields = [:]
+                return reason
+            }
+            sanitized.state.installedAt = Date(timeIntervalSince1970: 0)
+            sanitized.state.updatedAt = Date(timeIntervalSince1970: 0)
+            sanitized.state.compatibility = .untested
+            let usesDynamicProviders = sanitized.state.usesDynamicProviders == true
+                || sanitized.state.manifest.providers?.isEmpty == true
+            sanitized.state.usesDynamicProviders = usesDynamicProviders
+            if usesDynamicProviders {
+                sanitized.state.manifest.providers = []
+            }
+            guard SkyStreamBackupMetadataPolicy.isBounded(pluginState: sanitized.state) else {
+                return nil
+            }
+            return sanitized
+        }.sorted { $0.id < $1.id }
+
+        return SkyStreamBackupSnapshot(
+            schemaVersion: incoming.schemaVersion,
+            repositories: repositories,
+            plugins: plugins,
+            createdAt: Date(timeIntervalSince1970: 0),
+            isSafeCloudSnapshot: true,
+            additionalFields: [:]
+        )
+    }
+
+    /// SkyStream repository/package URLs are public reconstruction metadata in
+    /// the experimental cloud snapshot. Reject query strings entirely because
+    /// opaque signed tokens often do not use recognizable secret parameter
+    /// names.
+    private static func skyStreamCloudSafeURLString(_ value: String) -> String? {
+        guard let sanitized = cloudSafeURLString(value),
+              var components = URLComponents(string: sanitized),
+              components.scheme?.lowercased() == "https",
+              components.user == nil,
+              components.password == nil,
+              components.queryItems?.isEmpty != false else {
+            return nil
+        }
+        components.query = nil
+        components.fragment = nil
+        return components.url?.absoluteString
+    }
+
     static func captureMediaStateSettings(from defaults: UserDefaults = .standard) -> [String: Data] {
         var result: [String: Data] = [:]
         for key in MediaStateSettingRegistry.allKeys {
@@ -520,7 +738,7 @@ struct BackupData: Codable {
         case readerFontSize, readerFontFamily, readerFontWeight, readerColorPreset, readerTextAlignment, readerLineSpacing, readerMargin
         case autoClearCacheEnabled, autoClearCacheThresholdMB, highQualityThreshold, backgroundHLSPipelineEnabled, readerDownloadsBackgroundEnabled, readerDownloadsWifiOnly, readerDownloadsParallelLimit, autoUpdateServicesEnabled, servicesAutoModeEnabled, servicesAutoSelectEpisodesEnabled, servicesAutoModeSourceIds, servicesAutoModeSourceOrderIds, servicesAutoModeQualityPreference, servicesResultMinimumSimilarity, servicesDropMismatchedResults, servicesStremioStyleSheetEnabled, servicesIncludedStreamLanguages, servicesHiddenStreamLanguages, servicesHideStreamsWithoutLanguageData, servicesAssumeOriginalAudio, servicesTreatDubbedAnimeAsEnglish, servicesHiddenStreamQualities, servicesHideStreamsWithoutDetectedQuality, servicesExtraRulesSourceIds, githubReleaseAutoCheckEnabled, githubReleaseUpdateAvailable, githubReleaseLatestVersion, githubReleaseURL, githubReleaseShowAlertPending, githubReleaseLastPromptedVersion, filterHorrorContent = "filterHorror", selectedSimilarityAlgorithm, performanceModeEnabled, performanceModeSkipAniListTraversalForAnimeDetails, performanceModeFastAnimeCatalogOverrides
         case kanzenHomeSelectedSourceID, kanzenRecentSourceSearches
-        case collections, progressData, trackerState, catalogs, services, stremioAddons
+        case collections, progressData, trackerState, catalogs, services, stremioAddons, skyStream
         case mangaCollections, mangaReadingProgress, mangaCatalogs, kanzenModules, aidokuState
         case searchHistory, recommendationCache
         case userRatings, userRatingNotes
@@ -795,6 +1013,7 @@ struct BackupData: Codable {
         catalogs = try container.decodeIfPresent([Catalog].self, forKey: .catalogs) ?? []
         services = try container.decodeIfPresent([BackupService].self, forKey: .services) ?? []
         stremioAddons = try container.decodeIfPresent([BackupStremioAddon].self, forKey: .stremioAddons)
+        skyStream = try container.decodeIfPresent(SkyStreamBackupSnapshot.self, forKey: .skyStream)
         mangaCollections = try container.decodeIfPresent([BackupMangaCollection].self, forKey: .mangaCollections) ?? []
         mangaReadingProgress = try container.decodeIfPresent([String: MangaProgress].self, forKey: .mangaReadingProgress) ?? [:]
         mangaCatalogs = try container.decodeIfPresent([MangaCatalog].self, forKey: .mangaCatalogs) ?? []
@@ -1101,6 +1320,7 @@ struct BackupData: Codable {
         try container.encode(catalogs, forKey: .catalogs)
         try container.encode(services, forKey: .services)
         try container.encodeIfPresent(stremioAddons, forKey: .stremioAddons)
+        try container.encodeIfPresent(skyStream, forKey: .skyStream)
         try container.encode(mangaCollections, forKey: .mangaCollections)
         try container.encode(mangaReadingProgress, forKey: .mangaReadingProgress)
         try container.encode(mangaCatalogs, forKey: .mangaCatalogs)
@@ -1114,7 +1334,7 @@ struct BackupData: Codable {
     }
     
     init(
-        version: String = "1.0",
+        version: String = BackupData.currentCloudSchemaVersion,
         createdDate: Date,
         accentColor: Data? = nil,
         settingsGradientColor: Data? = nil,
@@ -1341,6 +1561,7 @@ struct BackupData: Codable {
         catalogs: [Catalog] = [],
         services: [BackupService] = [],
         stremioAddons: [BackupStremioAddon]? = nil,
+        skyStream: SkyStreamBackupSnapshot? = nil,
         mangaCollections: [BackupMangaCollection] = [],
         mangaReadingProgress: [String: MangaProgress] = [:],
         mangaCatalogs: [MangaCatalog] = [],
@@ -1578,6 +1799,7 @@ struct BackupData: Codable {
         self.catalogs = catalogs
         self.services = services
         self.stremioAddons = stremioAddons
+        self.skyStream = skyStream
         self.mangaCollections = mangaCollections
         self.mangaReadingProgress = mangaReadingProgress
         self.mangaCatalogs = mangaCatalogs
@@ -1949,6 +2171,8 @@ struct BackupData: Codable {
 
 }
 
+extension BackupData: @unchecked Sendable {}
+
 // Codable wrapper for Service
 struct BackupService: Codable {
     let id: UUID
@@ -2072,6 +2296,239 @@ struct BackupAidokuState: Codable {
     var lastAutoUpdate: Date?
 }
 
+/// A compact summary of user-authored data used to detect an unexpectedly
+/// destructive cloud upload without reading the remote snapshot on every sync.
+struct ExperimentalCloudSnapshotFootprint: Codable, Equatable {
+    let libraryItems: Int
+    let movieProgress: Int
+    let episodeProgress: Int
+    let mangaLibraryItems: Int
+    let mangaReadingProgress: Int
+    let userRatings: Int
+    let services: Int
+    let stremioAddons: Int
+    let skyStreamSources: Int
+    let kanzenModules: Int
+    let aidokuSources: Int
+    let contentDigest: String?
+    let contentDigestExcludingCloudKitMediaState: String?
+
+    init(snapshot: BackupData, encodedData: Data) {
+        libraryItems = snapshot.collections.reduce(0) { $0 + $1.items.count }
+        movieProgress = snapshot.progressData.movieProgress.count
+        episodeProgress = snapshot.progressData.episodeProgress.count
+        mangaLibraryItems = snapshot.mangaCollections.reduce(0) { $0 + $1.items.count }
+        mangaReadingProgress = snapshot.mangaReadingProgress.count
+        userRatings = snapshot.userRatings.count
+        services = snapshot.services.count
+        stremioAddons = snapshot.stremioAddons?.count ?? 0
+        skyStreamSources = (snapshot.skyStream?.repositories.count ?? 0) +
+            (snapshot.skyStream?.plugins.count ?? 0)
+        kanzenModules = snapshot.kanzenModules.count
+        aidokuSources = snapshot.aidokuState?.installedSources.count ?? 0
+        let digests = Self.stableContentDigests(for: encodedData)
+        contentDigest = digests.full
+        contentDigestExcludingCloudKitMediaState = digests.excludingCloudKitMediaState
+    }
+
+    var meaningfulRecordCount: Int {
+        counts.reduce(0, +)
+    }
+
+    /// Treat clearing even a small domain as suspicious, while larger domains
+    /// must lose at least half (and at least three records) to trigger a check.
+    func isSuspiciousReduction(from previous: Self) -> Bool {
+        zip(previous.counts, counts).contains { oldCount, newCount in
+            guard newCount < oldCount else { return false }
+            if newCount == 0 { return true }
+            let removed = oldCount - newCount
+            return removed >= 3 && removed >= (oldCount + 1) / 2
+        }
+    }
+
+    func hasMeaningfullyMoreData(than other: Self) -> Bool {
+        other.isSuspiciousReduction(from: self)
+    }
+
+    func hasAnyMoreData(than other: Self) -> Bool {
+        zip(counts, other.counts).contains { currentCount, otherCount in
+            currentCount > otherCount
+        }
+    }
+
+    func hasDifferentContent(than other: Self) -> Bool {
+        if let contentDigest, let otherDigest = other.contentDigest {
+            return contentDigest != otherDigest
+        }
+        return counts != other.counts
+    }
+
+    func excludingCloudKitMediaState() -> Self {
+        Self(
+            libraryItems: 0,
+            movieProgress: 0,
+            episodeProgress: 0,
+            mangaLibraryItems: mangaLibraryItems,
+            mangaReadingProgress: mangaReadingProgress,
+            userRatings: 0,
+            services: services,
+            stremioAddons: stremioAddons,
+            skyStreamSources: skyStreamSources,
+            kanzenModules: kanzenModules,
+            aidokuSources: aidokuSources,
+            contentDigest: contentDigestExcludingCloudKitMediaState,
+            contentDigestExcludingCloudKitMediaState: contentDigestExcludingCloudKitMediaState
+        )
+    }
+
+    init(
+        libraryItems: Int,
+        movieProgress: Int,
+        episodeProgress: Int,
+        mangaLibraryItems: Int,
+        mangaReadingProgress: Int,
+        userRatings: Int,
+        services: Int,
+        stremioAddons: Int,
+        skyStreamSources: Int,
+        kanzenModules: Int,
+        aidokuSources: Int,
+        contentDigest: String?,
+        contentDigestExcludingCloudKitMediaState: String?
+    ) {
+        self.libraryItems = libraryItems
+        self.movieProgress = movieProgress
+        self.episodeProgress = episodeProgress
+        self.mangaLibraryItems = mangaLibraryItems
+        self.mangaReadingProgress = mangaReadingProgress
+        self.userRatings = userRatings
+        self.services = services
+        self.stremioAddons = stremioAddons
+        self.skyStreamSources = skyStreamSources
+        self.kanzenModules = kanzenModules
+        self.aidokuSources = aidokuSources
+        self.contentDigest = contentDigest
+        self.contentDigestExcludingCloudKitMediaState = contentDigestExcludingCloudKitMediaState
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case libraryItems, movieProgress, episodeProgress, mangaLibraryItems
+        case mangaReadingProgress, userRatings, services, stremioAddons
+        case skyStreamSources, kanzenModules, aidokuSources, contentDigest
+        case contentDigestExcludingCloudKitMediaState
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        libraryItems = try container.decodeIfPresent(Int.self, forKey: .libraryItems) ?? 0
+        movieProgress = try container.decodeIfPresent(Int.self, forKey: .movieProgress) ?? 0
+        episodeProgress = try container.decodeIfPresent(Int.self, forKey: .episodeProgress) ?? 0
+        mangaLibraryItems = try container.decodeIfPresent(Int.self, forKey: .mangaLibraryItems) ?? 0
+        mangaReadingProgress = try container.decodeIfPresent(Int.self, forKey: .mangaReadingProgress) ?? 0
+        userRatings = try container.decodeIfPresent(Int.self, forKey: .userRatings) ?? 0
+        services = try container.decodeIfPresent(Int.self, forKey: .services) ?? 0
+        stremioAddons = try container.decodeIfPresent(Int.self, forKey: .stremioAddons) ?? 0
+        skyStreamSources = try container.decodeIfPresent(Int.self, forKey: .skyStreamSources) ?? 0
+        kanzenModules = try container.decodeIfPresent(Int.self, forKey: .kanzenModules) ?? 0
+        aidokuSources = try container.decodeIfPresent(Int.self, forKey: .aidokuSources) ?? 0
+        contentDigest = try container.decodeIfPresent(String.self, forKey: .contentDigest)
+        contentDigestExcludingCloudKitMediaState = try container.decodeIfPresent(
+            String.self,
+            forKey: .contentDigestExcludingCloudKitMediaState
+        )
+    }
+
+    private var counts: [Int] {
+        [
+            libraryItems,
+            movieProgress,
+            episodeProgress,
+            mangaLibraryItems,
+            mangaReadingProgress,
+            userRatings,
+            services,
+            stremioAddons,
+            skyStreamSources,
+            kanzenModules,
+            aidokuSources
+        ]
+    }
+
+    private static func stableContentDigests(
+        for data: Data
+    ) -> (full: String?, excludingCloudKitMediaState: String?) {
+#if canImport(CryptoKit)
+        guard var object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return (nil, nil)
+        }
+        // Snapshot creation time changes on every encode and is not app state.
+        object.removeValue(forKey: "createdDate")
+        object.removeValue(forKey: "version")
+        [
+            "githubReleaseUpdateAvailable",
+            "githubReleaseLatestVersion",
+            "githubReleaseURL",
+            "githubReleaseShowAlertPending",
+            "githubReleaseLastPromptedVersion"
+        ].forEach { object.removeValue(forKey: $0) }
+        if var skyStream = object["skyStream"] as? [String: Any] {
+            skyStream.removeValue(forKey: "createdAt")
+            object["skyStream"] = skyStream
+        }
+        object = scrubTransientCloudMetadata(object) as? [String: Any] ?? object
+        guard let normalizedData = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else {
+            return (nil, nil)
+        }
+        let full = SHA256.hash(data: normalizedData)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        var excludingMediaState = object
+        [
+            "collections",
+            "progressData",
+            "userRatings",
+            "userRatingNotes",
+            "catalogs",
+            "mediaStateSettings"
+        ].forEach { excludingMediaState.removeValue(forKey: $0) }
+        guard let mediaIndependentData = try? JSONSerialization.data(
+            withJSONObject: excludingMediaState,
+            options: [.sortedKeys]
+        ) else {
+            return (full, nil)
+        }
+        let excluding = SHA256.hash(data: mediaIndependentData)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return (full, excluding)
+#else
+        return (nil, nil)
+#endif
+    }
+
+    private static func scrubTransientCloudMetadata(_ value: Any) -> Any {
+        let transientKeys: Set<String> = [
+            "createdAt", "lastRefresh", "lastRefreshedAt", "lastError", "lastUpdated",
+            "installedAt", "updatedAt", "pinnedAt", "evaluatedAt"
+        ]
+        if let dictionary = value as? [String: Any] {
+            return dictionary.reduce(into: [String: Any]()) { result, entry in
+                guard !transientKeys.contains(entry.key) else { return }
+                result[entry.key] = scrubTransientCloudMetadata(entry.value)
+            }
+        }
+        if let array = value as? [Any] {
+            return array.map(scrubTransientCloudMetadata)
+        }
+        return value
+    }
+}
+
+struct ExperimentalCloudSnapshot: @unchecked Sendable {
+    let data: Data
+    let footprint: ExperimentalCloudSnapshotFootprint
+}
+
 // Codable wrapper for LibraryCollection
 struct BackupCollection: Codable {
     let id: UUID
@@ -2095,9 +2552,144 @@ struct BackupCollection: Codable {
 
 class BackupManager {
     static let shared = BackupManager()
+
+    /// SkyStream archives are base64-expanded inside the JSON backup. The package manager caps
+    /// their raw aggregate at 64 MB; keep the complete encoded document bounded too so an
+    /// imported file cannot force multi-gigabyte allocation before validation runs.
+    private static let maximumManualBackupFileBytes = 128 * 1_024 * 1_024
+    /// Every cloud provider uses the same 50 MB bounded read path. Creation must fit that
+    /// envelope too; otherwise a successful upload could become unreadable on every device.
+    private static let maximumExperimentalCloudSnapshotBytes = 50_000_000
     
     private let fileManager = FileManager.default
     private let dateFormatter = ISO8601DateFormatter()
+
+    /// macOS/tvOS cannot execute SkyStream packages, but they can participate in backup/cloud
+    /// flows. Retain that domain opaquely so importing or syncing through those platforms never
+    /// erases the reconstructable iOS state on the next export.
+    private var opaqueSkyStreamStorageRootURL: URL? {
+        guard let root = fileManager.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else { return nil }
+        return root
+            .appendingPathComponent("Eclipse", isDirectory: true)
+            .appendingPathComponent("SkyStream", isDirectory: true)
+    }
+
+    private var manualOpaqueSkyStreamSnapshotURL: URL? {
+        opaqueSkyStreamStorageRootURL?.appendingPathComponent(
+            SkyStreamOpaqueStorageLayout.manualBackupFilename,
+            isDirectory: false
+        )
+    }
+
+    private var cloudOpaqueSkyStreamSnapshotURL: URL? {
+        opaqueSkyStreamStorageRootURL?.appendingPathComponent(
+            SkyStreamOpaqueStorageLayout.experimentalCloudBackupFilename,
+            isDirectory: false
+        )
+    }
+
+    private var legacyOpaqueSkyStreamSnapshotURL: URL? {
+        opaqueSkyStreamStorageRootURL?.appendingPathComponent(
+            SkyStreamOpaqueStorageLayout.legacySharedFilename,
+            isDirectory: false
+        )
+    }
+
+    private func loadOpaqueSkyStreamSnapshot(preferringSafeCloud: Bool) -> SkyStreamBackupSnapshot? {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let manualCandidates = [manualOpaqueSkyStreamSnapshotURL, legacyOpaqueSkyStreamSnapshotURL]
+            .compactMap { $0 }
+            .map { ($0, Self.maximumManualBackupFileBytes, false) }
+        let cloudCandidates = [cloudOpaqueSkyStreamSnapshotURL]
+            .compactMap { $0 }
+            .map { ($0, Self.maximumExperimentalCloudSnapshotBytes, true) }
+        let candidates = preferringSafeCloud
+            ? cloudCandidates + manualCandidates
+            : manualCandidates + cloudCandidates
+        for (url, maximumBytes, requiresSafeCloudFlag) in candidates {
+            guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+                  values.isRegularFile == true,
+                  (values.fileSize ?? 0) <= maximumBytes,
+                  let data = try? Data(contentsOf: url, options: [.mappedIfSafe]),
+                  data.count <= maximumBytes,
+                  let snapshot = try? decoder.decode(SkyStreamBackupSnapshot.self, from: data),
+                  !requiresSafeCloudFlag || snapshot.isSafeCloudSnapshot else {
+                continue
+            }
+            return snapshot
+        }
+        return nil
+    }
+
+    private func persistOpaqueSkyStreamSnapshot(_ snapshot: SkyStreamBackupSnapshot) throws {
+        let canonicalSnapshot: SkyStreamBackupSnapshot
+        let maximumBytes: Int
+        let url: URL
+        if snapshot.isSafeCloudSnapshot {
+            guard let sanitized = BackupData.skyStreamSnapshotForExperimentalCloudSync(snapshot),
+                  let cloudURL = cloudOpaqueSkyStreamSnapshotURL else {
+                throw CocoaError(.fileReadCorruptFile)
+            }
+            canonicalSnapshot = sanitized
+            maximumBytes = Self.maximumExperimentalCloudSnapshotBytes
+            url = cloudURL
+        } else {
+            guard let manualURL = manualOpaqueSkyStreamSnapshotURL else {
+                throw CocoaError(.fileNoSuchFile)
+            }
+            canonicalSnapshot = snapshot
+            maximumBytes = Self.maximumManualBackupFileBytes
+            url = manualURL
+        }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.sortedKeys]
+        let data = try encoder.encode(canonicalSnapshot)
+        guard data.count <= maximumBytes else {
+            throw CocoaError(.fileWriteOutOfSpace)
+        }
+        try fileManager.createDirectory(
+            at: url.deletingLastPathComponent(),
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: NSNumber(value: Int16(0o700))]
+        )
+        try data.write(to: url, options: .atomic)
+        for filename in SkyStreamOpaqueStorageLayout.filenamesInvalidatedAfterWrite(
+            isSafeCloudSnapshot: snapshot.isSafeCloudSnapshot
+        ) {
+            let staleURL = url.deletingLastPathComponent().appendingPathComponent(filename)
+            if fileManager.fileExists(atPath: staleURL.path) {
+                try fileManager.removeItem(at: staleURL)
+            }
+        }
+    }
+
+    private func clearAdoptedOpaqueSkyStreamSnapshot(isSafeCloudSnapshot: Bool) {
+        let candidates: [URL?]
+        if isSafeCloudSnapshot {
+            candidates = [cloudOpaqueSkyStreamSnapshotURL]
+        } else {
+            candidates = [
+                manualOpaqueSkyStreamSnapshotURL,
+                legacyOpaqueSkyStreamSnapshotURL,
+                cloudOpaqueSkyStreamSnapshotURL
+            ]
+        }
+        for url in candidates.compactMap({ $0 }) where fileManager.fileExists(atPath: url.path) {
+            do {
+                try fileManager.removeItem(at: url)
+            } catch {
+                Logger.shared.log(
+                    "Failed to clear adopted opaque SkyStream snapshot errorType=\(String(reflecting: type(of: error)))",
+                    type: "Error"
+                )
+            }
+        }
+    }
 
     private func performOnMainThread(_ work: () -> Void) {
         if Thread.isMainThread {
@@ -2217,14 +2809,27 @@ class BackupManager {
     
     /// Creates a backup file and returns the URL
     func createBackup() -> URL? {
-        let backupData = gatherBackupData()
-        
+        guard isSkyStreamBackupDomainReady() else {
+            Logger.shared.log(
+                "Backup deferred because the SkyStream plugin manager is still loading; no partial backup was written",
+                type: "Info"
+            )
+            return nil
+        }
         do {
+            let backupData = try gatherBackupData()
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             
             let jsonData = try encoder.encode(backupData)
+            guard jsonData.count <= Self.maximumManualBackupFileBytes else {
+                Logger.shared.log(
+                    "Backup was not written because the encoded document exceeded the 128 MB safety limit",
+                    type: "Error"
+                )
+                return nil
+            }
             
             // Create filename with timestamp
             let timestamp = Date()
@@ -2246,16 +2851,85 @@ class BackupManager {
         }
     }
 
-    func createExperimentalCloudSnapshotData() -> Data? {
-        let snapshot = gatherBackupData().redactedForExperimentalCloudSync()
+    func createExperimentalCloudSnapshotData() async -> Data? {
+        await createExperimentalCloudSnapshot()?.data
+    }
 
+    func createExperimentalCloudSnapshot() async -> ExperimentalCloudSnapshot? {
+        guard isSkyStreamBackupDomainReady() else {
+            Logger.shared.log(
+                "Experimental cloud snapshot deferred while SkyStream state is loading",
+                type: "CloudSync"
+            )
+            return nil
+        }
         do {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            return try encoder.encode(snapshot)
+            let snapshot = try gatherBackupData(useSafeCloudSkyStreamSnapshot: true)
+                .redactedForExperimentalCloudSync(stripSkyStreamArchives: true)
+            return try await Task.detached(priority: .utility) {
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .iso8601
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                var boundedSnapshot = snapshot
+                var data = try encoder.encode(boundedSnapshot)
+
+                // Package archives are the only intentionally large cloud payload. If the
+                // complete JSON exceeds the transport ceiling, remove the largest archives one
+                // at a time while preserving their redacted package/provider metadata. A clean
+                // device may need the pinned HTTPS source to reconstruct those packages, but an
+                // existing device will neither lose settings nor interpret redaction as removal.
+                if data.count > Self.maximumExperimentalCloudSnapshotBytes,
+                   var skyStream = boundedSnapshot.skyStream {
+                    let archiveIndexes = skyStream.plugins.indices
+                        .filter { skyStream.plugins[$0].archivePayload != nil }
+                        .sorted {
+                            (skyStream.plugins[$0].archivePayload?.count ?? 0)
+                                > (skyStream.plugins[$1].archivePayload?.count ?? 0)
+                        }
+                    for index in archiveIndexes {
+                        skyStream.plugins[index].archivePayload = nil
+                        skyStream.plugins[index].payloadWasRedacted = true
+                        boundedSnapshot.skyStream = skyStream
+                        data = try encoder.encode(boundedSnapshot)
+                        if data.count <= Self.maximumExperimentalCloudSnapshotBytes { break }
+                    }
+                }
+
+                guard data.count <= Self.maximumExperimentalCloudSnapshotBytes else {
+                    throw BoundedURLSessionError.responseTooLarge(
+                        maximumBytes: Self.maximumExperimentalCloudSnapshotBytes
+                    )
+                }
+                return ExperimentalCloudSnapshot(
+                    data: data,
+                    footprint: ExperimentalCloudSnapshotFootprint(
+                        snapshot: boundedSnapshot,
+                        encodedData: data
+                    )
+                )
+            }.value
         } catch {
             Logger.shared.log("Failed to create experimental iCloud snapshot: \(error.localizedDescription)", type: "iCloud")
+            return nil
+        }
+    }
+
+    func experimentalCloudSnapshotFootprint(from data: Data) -> ExperimentalCloudSnapshotFootprint? {
+        do {
+            guard Self.experimentalCloudSnapshotSchemaIsSupported(data) else {
+                Logger.shared.log("Cloud snapshot uses a newer unsupported schema", type: "CloudSync")
+                return nil
+            }
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .iso8601
+            let snapshot = try decoder.decode(BackupData.self, from: data).redactedForExperimentalCloudSync()
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            encoder.outputFormatting = [.sortedKeys]
+            let canonicalData = try encoder.encode(snapshot)
+            return ExperimentalCloudSnapshotFootprint(snapshot: snapshot, encodedData: canonicalData)
+        } catch {
+            Logger.shared.log("Failed to inspect experimental cloud snapshot: \(error.localizedDescription)", type: "CloudSync")
             return nil
         }
     }
@@ -2263,15 +2937,35 @@ class BackupManager {
     func restoreExperimentalCloudSnapshot(
         from data: Data,
         preserveMediaStateForCloudKit: Bool = true
-    ) -> Bool {
+    ) async -> Bool {
         do {
+            guard Self.experimentalCloudSnapshotSchemaIsSupported(data) else {
+                Logger.shared.log("Refused to restore a newer unsupported cloud schema", type: "CloudSync")
+                return false
+            }
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
-            let snapshot = try decoder.decode(BackupData.self, from: data).redactedForExperimentalCloudSync()
+            var snapshot = try decoder.decode(BackupData.self, from: data).redactedForExperimentalCloudSync()
+            snapshot.progressData = Self.mergingDeviceLocalProviderReferences(
+                into: snapshot.progressData,
+                current: ProgressManager.shared.getProgressData()
+            )
+            guard await restoreSkyStreamSnapshotAndWaitIfSupported(snapshot.skyStream) else {
+                return false
+            }
             let mediaStateAuthority = preserveMediaStateForCloudKit
                 ? captureLegacyCloudMediaStateAuthority()
                 : nil
-            let restored = applyBackupData(snapshot, refreshCloudSources: true)
+            let restored = applyBackupData(
+                snapshot,
+                refreshCloudSources: true
+            )
+            if restored {
+                // `applyBackupData` is the final writer of the shared source UserDefaults. Capture
+                // that exact post-merge state so a later manager persistence write cannot revive
+                // the pre-restore Auto Mode/order/extra-rule membership.
+                await SkyStreamPluginManager.shared.captureSourceDefaultsState()
+            }
             if let mediaStateAuthority {
                 restoreLegacyCloudMediaStateAuthority(mediaStateAuthority)
             }
@@ -2281,9 +2975,125 @@ class BackupManager {
             return false
         }
     }
+
+    private static func experimentalCloudSnapshotSchemaIsSupported(_ data: Data) -> Bool {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let version = object["version"] as? String else {
+            return true
+        }
+        return compareSchemaVersion(version, to: BackupData.currentCloudSchemaVersion) != .orderedDescending
+    }
+
+    private static func compareSchemaVersion(_ lhs: String, to rhs: String) -> ComparisonResult {
+        let left = lhs.split(separator: ".").map { Int($0) ?? 0 }
+        let right = rhs.split(separator: ".").map { Int($0) ?? 0 }
+        for index in 0..<max(left.count, right.count) {
+            let leftValue = index < left.count ? left[index] : 0
+            let rightValue = index < right.count ? right[index] : 0
+            if leftValue < rightValue { return .orderedAscending }
+            if leftValue > rightValue { return .orderedDescending }
+        }
+        return .orderedSame
+    }
+
+    /// Cloud progress is authoritative for watch state, but direct playback URLs and opaque
+    /// provider references belong to the receiving device. Preserve those local fields without
+    /// allowing a remote snapshot to inject them. Stable source identities remain portable and
+    /// are used only when this device has no more recent local identity for the same item.
+    private static func mergingDeviceLocalProviderReferences(
+        into incoming: ProgressData,
+        current: ProgressData
+    ) -> ProgressData {
+        let currentMovies = Dictionary(
+            current.movieProgress.map { ($0.id, $0) },
+            uniquingKeysWith: { existing, candidate in
+                candidate.lastUpdated >= existing.lastUpdated ? candidate : existing
+            }
+        )
+        let currentEpisodes = Dictionary(
+            current.episodeProgress.map { ($0.id, $0) },
+            uniquingKeysWith: { existing, candidate in
+                candidate.lastUpdated >= existing.lastUpdated ? candidate : existing
+            }
+        )
+
+        var merged = incoming
+        merged.movieProgress = incoming.movieProgress.map { entry in
+            guard let local = currentMovies[entry.id] else { return entry }
+            var result = entry
+            result.lastHref = local.lastHref
+            result.lastContentReference = local.lastContentReference
+            result.lastServiceId = local.lastServiceId ?? entry.lastServiceId
+            result.lastSourceId = local.lastSourceId ?? entry.lastSourceId
+            return result
+        }
+        merged.episodeProgress = incoming.episodeProgress.map { entry in
+            guard let local = currentEpisodes[entry.id] else { return entry }
+            var result = entry
+            result.lastHref = local.lastHref
+            result.lastContentReference = local.lastContentReference
+            result.lastServiceId = local.lastServiceId ?? entry.lastServiceId
+            result.lastSourceId = local.lastSourceId ?? entry.lastSourceId
+            return result
+        }
+        return merged
+    }
+
+    private static let experimentalCloudRestorePendingKey = "experimentalCloudRestorePendingV1"
+
+    private static var experimentalCloudRestoreRecoveryURL: URL? {
+        guard let applicationSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else { return nil }
+        let directory = applicationSupport.appendingPathComponent("Eclipse", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.appendingPathComponent("CloudSyncRestoreRecovery.json")
+    }
+
+    func prepareExperimentalCloudRestoreRecovery(using snapshot: ExperimentalCloudSnapshot? = nil) async -> Bool {
+        let recovery: ExperimentalCloudSnapshot?
+        if let snapshot {
+            recovery = snapshot
+        } else {
+            recovery = await createExperimentalCloudSnapshot()
+        }
+        guard let recovery,
+              let url = Self.experimentalCloudRestoreRecoveryURL else {
+            return false
+        }
+        do {
+            try recovery.data.write(to: url, options: [.atomic, .completeFileProtection])
+            UserDefaults.standard.set(true, forKey: Self.experimentalCloudRestorePendingKey)
+            return true
+        } catch {
+            Logger.shared.log("Could not persist cloud restore recovery snapshot: \(error.localizedDescription)", type: "CloudSync")
+            return false
+        }
+    }
+
+    func completeExperimentalCloudRestoreRecovery() {
+        UserDefaults.standard.set(false, forKey: Self.experimentalCloudRestorePendingKey)
+    }
+
+    func recoverInterruptedExperimentalCloudRestoreIfNeeded() {
+        guard UserDefaults.standard.bool(forKey: Self.experimentalCloudRestorePendingKey),
+              let url = Self.experimentalCloudRestoreRecoveryURL,
+              let data = try? Data(contentsOf: url) else {
+            return
+        }
+        Task { @MainActor in
+            if await restoreExperimentalCloudSnapshot(from: data, preserveMediaStateForCloudKit: false) {
+                UserDefaults.standard.set(false, forKey: Self.experimentalCloudRestorePendingKey)
+                Logger.shared.log("Recovered local state after an interrupted cloud restore", type: "CloudSync")
+            } else {
+                Logger.shared.log("Interrupted cloud restore recovery remains pending", type: "CloudSync")
+            }
+        }
+    }
     
     /// Gathers all user data for backup
-    private func gatherBackupData() -> BackupData {
+    private func gatherBackupData(useSafeCloudSkyStreamSnapshot: Bool = false) throws -> BackupData {
         let userDefaults = UserDefaults.standard
         
         // Get accent color
@@ -2627,6 +3437,69 @@ class BackupManager {
             )
         }
 
+        // Manual exports carry validated package archives. Routine cloud snapshots keep only
+        // bounded reconstruction metadata and public settings, avoiding archive I/O/base64 work
+        // and multi-megabyte uploads after unrelated progress changes. A clean iOS device fetches
+        // the exact pinned HTTPS archive and verifies its saved SHA-256 before installation.
+        var skyStream: SkyStreamBackupSnapshot? = nil
+        var skyStreamBackupError: Error?
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        var skyStreamManualCapturePlan: SkyStreamManualBackupCapturePlan?
+        if let opaqueSnapshot = loadOpaqueSkyStreamSnapshot(
+            preferringSafeCloud: useSafeCloudSkyStreamSnapshot
+        ) {
+            // A capability-disabled import remains the pending authority even after a later build
+            // re-enables execution. Relay it opaquely until a normal validated restore adopts it;
+            // that successful path clears the marker below.
+            skyStream = useSafeCloudSkyStreamSnapshot
+                ? BackupData.skyStreamSnapshotForExperimentalCloudSync(
+                    opaqueSnapshot,
+                    stripArchives: true
+                )
+                : opaqueSnapshot
+        } else {
+            performOnMainThread {
+                MainActor.assumeIsolated {
+                    let manager = SkyStreamPluginManager.shared
+                    guard manager.isLoaded else { return }
+                    if useSafeCloudSkyStreamSnapshot {
+                        skyStream = manager.safeCloudMetadataSnapshot()
+                    } else {
+                        do {
+                            // Capture only immutable manager authority while synchronously on the
+                            // main actor. Archive mapping and SHA-256 verification stay on this
+                            // backup worker thread so a valid 64 MB package set cannot freeze UI.
+                            skyStreamManualCapturePlan = try manager.manualBackupCapturePlan()
+                        } catch {
+                            skyStreamBackupError = error
+                        }
+                    }
+                }
+            }
+        }
+        if let skyStreamManualCapturePlan, skyStreamBackupError == nil {
+            do {
+                skyStream = try SkyStreamPluginManager.materializeManualBackupSnapshot(
+                    skyStreamManualCapturePlan
+                )
+            } catch {
+                skyStreamBackupError = error
+            }
+        }
+#else
+        if let opaqueSnapshot = loadOpaqueSkyStreamSnapshot(
+            preferringSafeCloud: useSafeCloudSkyStreamSnapshot
+        ) {
+            skyStream = useSafeCloudSkyStreamSnapshot
+                ? BackupData.skyStreamSnapshotForExperimentalCloudSync(
+                    opaqueSnapshot,
+                    stripArchives: true
+                )
+                : opaqueSnapshot
+        }
+#endif
+        if let skyStreamBackupError { throw skyStreamBackupError }
+
         // Get manga library collections
         let mangaLibraryManager = MangaLibraryManager.shared
         let mangaCollections = mangaLibraryManager.collections.map { collection in
@@ -2886,6 +3759,7 @@ class BackupManager {
             catalogs: catalogs,
             services: services,
             stremioAddons: stremioAddons,
+            skyStream: skyStream,
             mangaCollections: mangaCollections,
             mangaReadingProgress: mangaReadingProgress,
             mangaCatalogs: mangaCatalogs,
@@ -2900,13 +3774,44 @@ class BackupManager {
         
         return backup
     }
+
+    /// An optional `skyStream` field means "preserve local state" during
+    /// restore. It must not also silently mean "the manager had not loaded"
+    /// during export, because a whole-file cloud upload would otherwise erase
+    /// the only reconstructable copy of that metadata.
+    private func isSkyStreamBackupDomainReady() -> Bool {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        var isReady = false
+        performOnMainThread {
+            isReady = MainActor.assumeIsolated {
+                SkyStreamPluginManager.shared.isLoaded
+            }
+        }
+        return isReady
+#else
+        return true
+#endif
+    }
     
     // MARK: - Import Backup
     
     /// Restores data from a backup file
-    func restoreBackup(from url: URL) -> Bool {
+    func restoreBackup(from url: URL) async -> Bool {
         do {
-            let jsonData = try Data(contentsOf: url)
+            let resourceValues = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+            guard resourceValues?.isRegularFile != false,
+                  resourceValues?.fileSize.map({ $0 <= Self.maximumManualBackupFileBytes }) ?? true else {
+                Logger.shared.log(
+                    "Backup restore refused a non-regular or oversized document",
+                    type: "Error"
+                )
+                return false
+            }
+            let jsonData = try Data(contentsOf: url, options: [.mappedIfSafe])
+            guard jsonData.count <= Self.maximumManualBackupFileBytes else {
+                Logger.shared.log("Backup restore refused an oversized document", type: "Error")
+                return false
+            }
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601
             
@@ -2927,10 +3832,24 @@ class BackupManager {
                 }
                 
                 Logger.shared.log("Lenient decode succeeded with partial data", type: "Info")
-                return applyBackupData(backupData)
+                guard await restoreSkyStreamSnapshotAndWaitIfSupported(backupData.skyStream) else {
+                    return false
+                }
+                let restored = applyBackupData(backupData)
+                if restored {
+                    await SkyStreamPluginManager.shared.captureSourceDefaultsState()
+                }
+                return restored
             }
-            
-            return applyBackupData(backupData)
+
+            guard await restoreSkyStreamSnapshotAndWaitIfSupported(backupData.skyStream) else {
+                return false
+            }
+            let restored = applyBackupData(backupData)
+            if restored {
+                await SkyStreamPluginManager.shared.captureSourceDefaultsState()
+            }
+            return restored
         } catch {
             Logger.shared.log("Failed to restore backup: \(error.localizedDescription)", type: "Error")
             return false
@@ -3255,6 +4174,15 @@ class BackupManager {
             stremioAddons = decodedAddons
         }
 
+        var skyStream: SkyStreamBackupSnapshot? = nil
+        if let skyStreamValue = json["skyStream"],
+           JSONSerialization.isValidJSONObject(skyStreamValue),
+           let skyStreamJSON = try? JSONSerialization.data(withJSONObject: skyStreamValue) {
+            let skyStreamDecoder = JSONDecoder()
+            skyStreamDecoder.dateDecodingStrategy = .iso8601
+            skyStream = try? skyStreamDecoder.decode(SkyStreamBackupSnapshot.self, from: skyStreamJSON)
+        }
+
         // Manga data
         var mangaCollections: [BackupMangaCollection] = []
         if let mangaColData = json["mangaCollections"] as? [[String: Any]] {
@@ -3546,6 +4474,7 @@ class BackupManager {
             catalogs: catalogs,
             services: services,
             stremioAddons: stremioAddons,
+            skyStream: skyStream,
             mangaCollections: mangaCollections,
             mangaReadingProgress: mangaReadingProgress,
             mangaCatalogs: mangaCatalogs,
@@ -3564,8 +4493,96 @@ class BackupManager {
         )
     }
     
+    @MainActor
+    private func restoreSkyStreamSnapshotAndWaitIfSupported(
+        _ snapshot: SkyStreamBackupSnapshot?
+    ) async -> Bool {
+        guard let snapshot else { return true }
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        if !PlatformCapabilities.current.supportsSkyStreamPlugins {
+            do {
+                // The emergency product seam disables every network/evaluation restore path, but
+                // retains the bounded domain so a later capable iPhone build can recover it.
+                try persistOpaqueSkyStreamSnapshot(snapshot)
+                return true
+            } catch {
+                Logger.shared.log(
+                    "Failed to preserve disabled SkyStream restore errorType=\(String(reflecting: type(of: error)))",
+                    type: snapshot.isSafeCloudSnapshot ? "CloudSync" : "Error"
+                )
+                return false
+            }
+        }
+        let safeSnapshot = snapshot.isSafeCloudSnapshot
+            ? BackupData.skyStreamSnapshotForExperimentalCloudSync(snapshot)
+            : nil
+        if snapshot.isSafeCloudSnapshot, safeSnapshot == nil {
+            Logger.shared.log("Refused invalid safe SkyStream backup metadata", type: "CloudSync")
+            return false
+        }
+
+        let manager = SkyStreamPluginManager.shared
+        var attemptsRemaining = 100
+        while !manager.isLoaded, attemptsRemaining > 0, !Task.isCancelled {
+            attemptsRemaining -= 1
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        guard manager.isLoaded, !Task.isCancelled else {
+            let context = snapshot.isSafeCloudSnapshot ? "cloud metadata merge" : "manual restore"
+            Logger.shared.log(
+                "SkyStream \(context) skipped because the plugin manager did not finish loading",
+                type: snapshot.isSafeCloudSnapshot ? "CloudSync" : "Error"
+            )
+            return false
+        }
+        do {
+            if let safeSnapshot {
+                let result = try await manager.restoreSafeCloudSnapshot(safeSnapshot)
+                if result.isComplete {
+                    clearAdoptedOpaqueSkyStreamSnapshot(isSafeCloudSnapshot: true)
+                    Logger.shared.log("Safe SkyStream cloud metadata merged", type: "CloudSync")
+                } else {
+                    Logger.shared.log(
+                        "Safe SkyStream cloud metadata partially merged unresolvedCount=\(result.unresolvedPackageIDs.count)",
+                        type: "CloudSync"
+                    )
+                }
+            } else {
+                try await manager.restoreManualBackupSnapshot(snapshot)
+                clearAdoptedOpaqueSkyStreamSnapshot(isSafeCloudSnapshot: false)
+                Logger.shared.log("Authoritative SkyStream manual backup restored", type: "Info")
+            }
+            return true
+        } catch {
+            let context = snapshot.isSafeCloudSnapshot ? "cloud metadata merge" : "manual restore"
+            Logger.shared.log(
+                "Failed SkyStream \(context) errorType=\(String(reflecting: type(of: error)))",
+                type: snapshot.isSafeCloudSnapshot ? "CloudSync" : "Error"
+            )
+            return false
+        }
+#else
+        do {
+            // The platform cannot safely interpret or execute the domain, so retain the exact
+            // validated Codable envelope. A later iOS restore will perform package validation.
+            try persistOpaqueSkyStreamSnapshot(snapshot)
+            return true
+        } catch {
+            Logger.shared.log(
+                "Failed to preserve opaque SkyStream backup errorType=\(String(reflecting: type(of: error)))",
+                type: snapshot.isSafeCloudSnapshot ? "CloudSync" : "Error"
+            )
+            return false
+        }
+#endif
+    }
+
     /// Applies backup data to all managers and UserDefaults
-    private func applyBackupData(_ backup: BackupData, refreshCloudSources: Bool = false) -> Bool {
+    private func applyBackupData(
+        _ backup: BackupData,
+        refreshCloudSources: Bool = false
+    ) -> Bool {
         var trackerManager: TrackerManager!
         performOnMainThread {
             trackerManager = TrackerManager.shared
@@ -3576,6 +4593,96 @@ class BackupManager {
         }
 
         let userDefaults = UserDefaults.standard
+        // A backup created before the SkyStream field existed has no authority over that newer
+        // source family. Safe-cloud snapshots are also merge-only for credential-bearing sources
+        // that redaction deliberately omitted. Preserve those local rows' selection, relative
+        // order, and explicit-rule membership while applying the cloud-safe source settings.
+        let preservesLocalSkySourceSettings = backup.skyStream == nil
+            || backup.skyStream?.isSafeCloudSnapshot == true
+        let currentAutoModeSourceIds = userDefaults.stringArray(
+            forKey: "servicesAutoModeSourceIds"
+        ) ?? []
+        let currentAutoModeSourceOrderIds = userDefaults.stringArray(
+            forKey: "servicesAutoModeSourceOrderIds"
+        ) ?? []
+        let currentExtraRulesSourceIds = StreamLanguageFilter.extraRulesSourceIds(
+            defaults: userDefaults
+        )
+        var preservedLocalSourceIDs = Set<String>()
+        if preservesLocalSkySourceSettings {
+            preservedLocalSourceIDs.formUnion(currentAutoModeSourceIds.filter(
+                StreamLanguageFilter.isValidSkyStreamSourceID
+            ))
+            preservedLocalSourceIDs.formUnion(currentAutoModeSourceOrderIds.filter(
+                StreamLanguageFilter.isValidSkyStreamSourceID
+            ))
+            preservedLocalSourceIDs.formUnion((currentExtraRulesSourceIds ?? []).filter(
+                StreamLanguageFilter.isValidSkyStreamSourceID
+            ))
+        }
+        if refreshCloudSources {
+            for service in ServiceStore.shared.getServices() {
+                let metadata = (try? JSONEncoder().encode(service.metadata))
+                    .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                let backupService = BackupService(
+                    id: service.id,
+                    url: service.url,
+                    jsonMetadata: metadata,
+                    jsScript: service.jsScript,
+                    isActive: service.isActive,
+                    sortIndex: service.sortIndex
+                )
+                if BackupData.serviceForExperimentalCloudSync(backupService) == nil {
+                    preservedLocalSourceIDs.insert("service:\(service.id.uuidString)")
+                }
+            }
+            for addon in StremioAddonStore.shared.getAddons() {
+                let manifestJSON = (try? JSONEncoder().encode(addon.manifest))
+                    .flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                let backupAddon = BackupStremioAddon(
+                    id: addon.id,
+                    configuredURL: addon.configuredURL,
+                    manifestJSON: manifestJSON,
+                    isActive: addon.isActive,
+                    sortIndex: addon.sortIndex
+                )
+                if BackupData.stremioAddonForExperimentalCloudSync(backupAddon) == nil {
+                    preservedLocalSourceIDs.insert("stremio:\(addon.id.uuidString)")
+                }
+            }
+        }
+        let preservedSelectedLocalSourceIds = currentAutoModeSourceIds.filter(
+            preservedLocalSourceIDs.contains
+        )
+        let preservedOrderedLocalSourceIds = currentAutoModeSourceOrderIds.filter(
+            preservedLocalSourceIDs.contains
+        )
+        let preservedExtraRulesLocalSourceIds = (currentExtraRulesSourceIds
+            ?? currentAutoModeSourceOrderIds).filter(preservedLocalSourceIDs.contains)
+
+        func mergingPreservedLocalSourceOrder(_ restored: [String]) -> [String] {
+            guard !preservedLocalSourceIDs.isEmpty else { return restored }
+            let restoredShared = restored.filter { !preservedLocalSourceIDs.contains($0) }
+            var sharedIterator = restoredShared.makeIterator()
+            var result: [String] = []
+            var seen = Set<String>()
+            for currentID in currentAutoModeSourceOrderIds {
+                let next: String?
+                if preservedLocalSourceIDs.contains(currentID) {
+                    next = currentID
+                } else {
+                    next = sharedIterator.next()
+                }
+                if let next, seen.insert(next).inserted { result.append(next) }
+            }
+            while let next = sharedIterator.next() {
+                if seen.insert(next).inserted { result.append(next) }
+            }
+            for localID in preservedOrderedLocalSourceIds where seen.insert(localID).inserted {
+                result.append(localID)
+            }
+            return result
+        }
 
         // Restore the shared safe-settings envelope first. Hand-written fields
         // below remain authoritative for older/newer schema migrations.
@@ -3839,11 +4946,19 @@ class BackupManager {
         userDefaults.set(backup.autoUpdateServicesEnabled, forKey: "autoUpdateServicesEnabled")
         userDefaults.set(backup.servicesAutoModeEnabled, forKey: "servicesAutoModeEnabled")
         userDefaults.set(backup.servicesAutoSelectEpisodesEnabled, forKey: "servicesAutoSelectEpisodesEnabled")
-        let restoredAutoModeSourceIds = BackupData.sanitizedStringList(backup.servicesAutoModeSourceIds)
-        let restoredAutoModeSourceIdSet = Set(restoredAutoModeSourceIds)
+        var restoredAutoModeSourceIds = BackupData.sanitizedStringList(
+            backup.servicesAutoModeSourceIds
+        ).filter { !preservedLocalSourceIDs.contains($0) }
+        var restoredAutoModeSeen = Set(restoredAutoModeSourceIds)
+        restoredAutoModeSourceIds.append(contentsOf: preservedSelectedLocalSourceIds.filter {
+            restoredAutoModeSeen.insert($0).inserted
+        })
         let orderedAutoModeSourceIds = BackupData.sanitizedStringList(backup.servicesAutoModeSourceOrderIds)
-            .filter { restoredAutoModeSourceIdSet.contains($0) }
-        let restoredAutoModeSourceOrderIds = orderedAutoModeSourceIds + restoredAutoModeSourceIds.filter { !orderedAutoModeSourceIds.contains($0) }
+        let restoredAutoModeSourceOrderIds = mergingPreservedLocalSourceOrder(
+            orderedAutoModeSourceIds + restoredAutoModeSourceIds.filter {
+                !orderedAutoModeSourceIds.contains($0)
+            }
+        )
         userDefaults.set(restoredAutoModeSourceIds, forKey: "servicesAutoModeSourceIds")
         userDefaults.set(restoredAutoModeSourceOrderIds, forKey: "servicesAutoModeSourceOrderIds")
         userDefaults.set(AutoModeQualityPreference.sanitizedRawValue(backup.servicesAutoModeQualityPreference), forKey: AutoModeQualityPreference.storageKey)
@@ -3857,7 +4972,24 @@ class BackupManager {
         StreamLanguageFilter.setTreatsDubbedAnimeAsEnglish(backup.servicesTreatDubbedAnimeAsEnglish, defaults: userDefaults)
         StreamLanguageFilter.setHiddenQualityHeights(backup.servicesHiddenStreamQualities, defaults: userDefaults)
         StreamLanguageFilter.setHidesStreamsWithoutDetectedQuality(backup.servicesHideStreamsWithoutDetectedQuality, defaults: userDefaults)
-        StreamLanguageFilter.setExtraRulesSourceIds(backup.servicesExtraRulesSourceIds, defaults: userDefaults)
+        let restoredExtraRulesSourceIds: [String]?
+        if backup.servicesExtraRulesSourceIds == nil,
+           currentExtraRulesSourceIds == nil {
+            // Both authorities say "All"; preserve that compact semantic instead of expanding it
+            // into a source list that would exclude providers installed later.
+            restoredExtraRulesSourceIds = nil
+        } else {
+            let restoredBase = backup.servicesExtraRulesSourceIds
+                .map(BackupData.sanitizedStringList)
+                ?? restoredAutoModeSourceOrderIds
+            var explicit = restoredBase.filter { !preservedLocalSourceIDs.contains($0) }
+            var seen = Set(explicit)
+            explicit.append(contentsOf: preservedExtraRulesLocalSourceIds.filter {
+                seen.insert($0).inserted
+            })
+            restoredExtraRulesSourceIds = explicit
+        }
+        StreamLanguageFilter.setExtraRulesSourceIds(restoredExtraRulesSourceIds, defaults: userDefaults)
         userDefaults.set(backup.githubReleaseAutoCheckEnabled, forKey: "githubReleaseAutoCheckEnabled")
         userDefaults.set(backup.githubReleaseUpdateAvailable, forKey: "githubReleaseUpdateAvailable")
         userDefaults.set(backup.githubReleaseLatestVersion, forKey: "githubReleaseLatestVersion")
@@ -4155,7 +5287,7 @@ class BackupManager {
             await LocalNotificationManager.shared.reloadPersistedSelectionsAfterRestore()
         }
 #endif
-        
+
         Logger.shared.log("Backup restored successfully", type: "Info")
         return true
     }

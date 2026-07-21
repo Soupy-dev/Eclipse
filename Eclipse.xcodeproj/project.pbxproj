@@ -43,6 +43,10 @@
 		TVUTBF0300000000000000003 /* ServiceCompatibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVUTFR0300000000000000003 /* ServiceCompatibilityTests.swift */; };
 		TVUTBF0500000000000000005 /* NextEpisodeResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVUTFR0400000000000000004 /* NextEpisodeResolverTests.swift */; };
 		TVUTBF0600000000000000006 /* DownloadPathIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVUTFR0500000000000000005 /* DownloadPathIdentityTests.swift */; };
+		12F745102EB52DFC00889684 /* SkyStreamSecurityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12F7450E2EB52DFC00889684 /* SkyStreamSecurityTests.swift */; };
+		12F745112EB52DFC00889684 /* SkyStreamContentReferenceV1.json in Resources */ = {isa = PBXBuildFile; fileRef = 12F7450F2EB52DFC00889684 /* SkyStreamContentReferenceV1.json */; };
+		12F745122EB52DFC00889684 /* SkyStreamMagicProxyV2.json in Resources */ = {isa = PBXBuildFile; fileRef = 12F7451F2EB52DFC00889684 /* SkyStreamMagicProxyV2.json */; };
+		12F7451D2EB52DFC00889684 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = TVTSFR0100000000000000001 /* XCTest.framework */; };
 		DLPATHBF100000000000000001 /* DownloadPathIdentityPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = DLPATHFR000000000000000001 /* DownloadPathIdentityPolicy.swift */; };
 		DLPATHBF200000000000000002 /* DownloadPathIdentityPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = DLPATHFR000000000000000001 /* DownloadPathIdentityPolicy.swift */; };
 		TVUIBF0100000000000000001 /* EclipseTVRemoteSmokeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVUIFR0100000000000000001 /* EclipseTVRemoteSmokeTests.swift */; };
@@ -98,6 +102,27 @@
 		5E2222212F60000000AE2221 /* StremioClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E2222202F60000000AE2220 /* StremioClient.swift */; };
 		5E3333312F60000000AE3331 /* StremioAddonStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E3333302F60000000AE3330 /* StremioAddonStore.swift */; };
 		5E4444412F60000000AE4441 /* StremioAddonManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E4444402F60000000AE4440 /* StremioAddonManager.swift */; };
+		SKYIOSBF0000000000000001 /* SkyStreamModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000001 /* SkyStreamModels.swift */; };
+		SKYIOSBF0000000000000002 /* SkyStreamPackageValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000002 /* SkyStreamPackageValidator.swift */; };
+		SKYIOSBF0000000000000003 /* SkyStreamPluginManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000003 /* SkyStreamPluginManager.swift */; };
+		SKYIOSBF0000000000000004 /* SkyStreamRepositoryManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000004 /* SkyStreamRepositoryManager.swift */; };
+		SKYIOSBF0000000000000005 /* SkyStreamRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000005 /* SkyStreamRuntime.swift */; };
+		SKYIOSBF0000000000000006 /* SkyStreamSecurity.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000006 /* SkyStreamSecurity.swift */; };
+		SKYIOSBF0000000000000007 /* SkyStreamStateEntity.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000007 /* SkyStreamStateEntity.swift */; };
+		SKYIOSBF0000000000000008 /* SkyStreamVODValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000008 /* SkyStreamVODValidator.swift */; };
+		SKYIOSBF0000000000000009 /* SkyStreamManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000009 /* SkyStreamManagerView.swift */; };
+		SKYIOSBF000000000000000A /* SkyStreamResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR0000000000000000000A /* SkyStreamResolver.swift */; };
+		SKYIOSBF000000000000000B /* ProviderContentReference.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR0000000000000000000B /* ProviderContentReference.swift */; };
+		SKYTVBF00000000000000001 /* SkyStreamModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000001 /* SkyStreamModels.swift */; };
+		SKYTVBF00000000000000003 /* SkyStreamPluginManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000003 /* SkyStreamPluginManager.swift */; };
+		SKYTVBF00000000000000004 /* SkyStreamRepositoryManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000004 /* SkyStreamRepositoryManager.swift */; };
+		SKYTVBF00000000000000007 /* SkyStreamStateEntity.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000007 /* SkyStreamStateEntity.swift */; };
+		SKYTVBF0000000000000000B /* ProviderContentReference.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR0000000000000000000B /* ProviderContentReference.swift */; };
+		SKYMACBF0000000000000001 /* SkyStreamModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000001 /* SkyStreamModels.swift */; };
+		SKYMACBF0000000000000003 /* SkyStreamPluginManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000003 /* SkyStreamPluginManager.swift */; };
+		SKYMACBF0000000000000004 /* SkyStreamRepositoryManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000004 /* SkyStreamRepositoryManager.swift */; };
+		SKYMACBF000000000000000B /* ProviderContentReference.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR0000000000000000000B /* ProviderContentReference.swift */; };
+		SKYSOUPBF000000000000001 /* SwiftSoup in Frameworks */ = {isa = PBXBuildFile; productRef = SKYSOUPPROD0000000000001 /* SwiftSoup */; };
 		129CC90C2EBA920C00D2D84B /* Bundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 129CC90B2EBA920A00D2D84B /* Bundle.swift */; };
 		12DF1FC22F040D6700E80375 /* AdaptiveConfirmationDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12DF1FC12F040D6500E80375 /* AdaptiveConfirmationDialog.swift */; };
 		12E7AF5E2EB7FDB7003B7664 /* FakeWebKit in Frameworks */ = {isa = PBXBuildFile; productRef = 12E7AF5D2EB7FDB7003B7664 /* FakeWebKit */; };
@@ -273,6 +298,13 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXContainerItemProxy section */
+		12F7451C2EB52DFC00889684 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 13F072532E4B2D3300EF90EB /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 13F0725A2E4B2D3300EF90EB;
+			remoteInfo = Eclipse;
+		};
 		TVUTPX0100000000000000001 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = 13F072532E4B2D3300EF90EB /* Project object */;
@@ -291,6 +323,10 @@
 
 /* Begin PBXFileReference section */
 		CASTPODS0000000000000002 /* libPods-Eclipse.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; path = "libPods-Eclipse.a"; sourceTree = BUILT_PRODUCTS_DIR; };
+		12F7450E2EB52DFC00889684 /* SkyStreamSecurityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyStreamSecurityTests.swift; sourceTree = "<group>"; };
+		12F7450F2EB52DFC00889684 /* SkyStreamContentReferenceV1.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = SkyStreamContentReferenceV1.json; sourceTree = "<group>"; };
+		12F7451F2EB52DFC00889684 /* SkyStreamMagicProxyV2.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = SkyStreamMagicProxyV2.json; sourceTree = "<group>"; };
+		12F7451E2EB52DFC00889684 /* Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = Tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		CASTPODS0000000000000003 /* EclipsePodsDebug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Configurations/EclipsePodsDebug.xcconfig; sourceTree = "<group>"; };
 		CASTPODS0000000000000004 /* EclipsePodsRelease.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Configurations/EclipsePodsRelease.xcconfig; sourceTree = "<group>"; };
 		MACFR0100000000000000001 /* EclipseMacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EclipseMacApp.swift; sourceTree = "<group>"; };
@@ -357,6 +393,17 @@
 		5E2222202F60000000AE2220 /* StremioClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StremioClient.swift; sourceTree = "<group>"; };
 		5E3333302F60000000AE3330 /* StremioAddonStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StremioAddonStore.swift; sourceTree = "<group>"; };
 		5E4444402F60000000AE4440 /* StremioAddonManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StremioAddonManager.swift; sourceTree = "<group>"; };
+		SKYFR00000000000000000001 /* SkyStreamModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyStreamModels.swift; sourceTree = "<group>"; };
+		SKYFR00000000000000000002 /* SkyStreamPackageValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyStreamPackageValidator.swift; sourceTree = "<group>"; };
+		SKYFR00000000000000000003 /* SkyStreamPluginManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyStreamPluginManager.swift; sourceTree = "<group>"; };
+		SKYFR00000000000000000004 /* SkyStreamRepositoryManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyStreamRepositoryManager.swift; sourceTree = "<group>"; };
+		SKYFR00000000000000000005 /* SkyStreamRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyStreamRuntime.swift; sourceTree = "<group>"; };
+		SKYFR00000000000000000006 /* SkyStreamSecurity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyStreamSecurity.swift; sourceTree = "<group>"; };
+		SKYFR00000000000000000007 /* SkyStreamStateEntity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyStreamStateEntity.swift; sourceTree = "<group>"; };
+		SKYFR00000000000000000008 /* SkyStreamVODValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyStreamVODValidator.swift; sourceTree = "<group>"; };
+		SKYFR00000000000000000009 /* SkyStreamManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyStreamManagerView.swift; sourceTree = "<group>"; };
+		SKYFR0000000000000000000A /* SkyStreamResolver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyStreamResolver.swift; sourceTree = "<group>"; };
+		SKYFR0000000000000000000B /* ProviderContentReference.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderContentReference.swift; sourceTree = "<group>"; };
 		1240112B2EFF3B8B00CEC6EB /* Eclipse.local.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Eclipse.local.entitlements; sourceTree = "<group>"; };
 		129CC9062EBA1D4600D2D84B /* Build.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Build.xcconfig; sourceTree = "<group>"; };
 		129CC9082EBA1F8400D2D84B /* Build.local.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Build.local.xcconfig; sourceTree = "<group>"; };
@@ -516,6 +563,14 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		12F745142EB52DFC00889684 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				12F7451D2EB52DFC00889684 /* XCTest.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		MACPH0200000000000000002 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -559,6 +614,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				CASTPODS0000000000000001 /* libPods-Eclipse.a in Frameworks */,
+				SKYSOUPBF000000000000001 /* SwiftSoup in Frameworks */,
 				13A46D002EF5944C00423BC6 /* Kingfisher in Frameworks */,
 				12E7AF5E2EB7FDB7003B7664 /* FakeWebKit in Frameworks */,
 				13A46D032EF5945700423BC6 /* SoraCore in Frameworks */,
@@ -575,6 +631,24 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		12F745192EB52DFC00889684 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				12F7450E2EB52DFC00889684 /* SkyStreamSecurityTests.swift */,
+				12F7451A2EB52DFC00889684 /* Fixtures */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		12F7451A2EB52DFC00889684 /* Fixtures */ = {
+			isa = PBXGroup;
+			children = (
+				12F7450F2EB52DFC00889684 /* SkyStreamContentReferenceV1.json */,
+				12F7451F2EB52DFC00889684 /* SkyStreamMagicProxyV2.json */,
+			);
+			path = Fixtures;
+			sourceTree = "<group>";
+		};
 		MACGR0100000000000000001 /* EclipseMac */ = {
 			isa = PBXGroup;
 			children = (
@@ -638,6 +712,7 @@
 			children = (
 				CASTSRC00000000000000002 /* GoogleCastCoordinator.swift */,
 				TVFR00400000000000000040 /* PlaybackLaunchContext.swift */,
+				SKYFR0000000000000000000B /* ProviderContentReference.swift */,
 				TVFR00410000000000000041 /* AVPlayerResourceLoader.swift */,
 				TVFR00420000000000000042 /* NextEpisodeResolver.swift */,
 				TVFR00300000000000000030 /* PlaybackEngine.swift */,
@@ -940,6 +1015,7 @@
 			children = (
 				CASTPODS0000000000000003 /* EclipsePodsDebug.xcconfig */,
 				CASTPODS0000000000000004 /* EclipsePodsRelease.xcconfig */,
+				12F745192EB52DFC00889684 /* Tests */,
 				MACGR0100000000000000001 /* EclipseMac */,
 				TVGR00010000000000000001 /* EclipseTV */,
 				TVUTGR0100000000000000001 /* EclipseTVTests */,
@@ -957,6 +1033,7 @@
 			isa = PBXGroup;
 			children = (
 				CASTPODS0000000000000002 /* libPods-Eclipse.a */,
+				12F7451E2EB52DFC00889684 /* Tests.xctest */,
 				MACPR0100000000000000001 /* Eclipse.app */,
 				13F0725B2E4B2D3300EF90EB /* Eclipse.app */,
 				TVFR00070000000000000007 /* Eclipse.app */,
@@ -994,6 +1071,7 @@
 			isa = PBXGroup;
 			children = (
 				13F072BD2E4B2ED600EF90EB /* Services */,
+				SKYGR00000000000000000001 /* SkyStream */,
 				13F0726F2E4B2D9000EF90EB /* JavaScriptCore+Extensions.swift */,
 				13B2E5732E7597B9009F3271 /* JSController-NetworkFetch.swift */,
 				CFB000012FE7000000CFB001 /* CloudflareBypassManager.swift */,
@@ -1003,6 +1081,23 @@
 				13F072742E4B2D9000EF90EB /* JSController.swift */,
 			);
 			path = JSLoader;
+			sourceTree = "<group>";
+		};
+		SKYGR00000000000000000001 /* SkyStream */ = {
+			isa = PBXGroup;
+			children = (
+				SKYFR00000000000000000001 /* SkyStreamModels.swift */,
+				SKYFR00000000000000000002 /* SkyStreamPackageValidator.swift */,
+				SKYFR00000000000000000003 /* SkyStreamPluginManager.swift */,
+				SKYFR00000000000000000004 /* SkyStreamRepositoryManager.swift */,
+				SKYFR00000000000000000005 /* SkyStreamRuntime.swift */,
+				SKYFR00000000000000000006 /* SkyStreamSecurity.swift */,
+				SKYFR00000000000000000007 /* SkyStreamStateEntity.swift */,
+				SKYFR00000000000000000008 /* SkyStreamVODValidator.swift */,
+				SKYFR00000000000000000009 /* SkyStreamManagerView.swift */,
+				SKYFR0000000000000000000A /* SkyStreamResolver.swift */,
+			);
+			path = SkyStream;
 			sourceTree = "<group>";
 		};
 		13F072752E4B2D9000EF90EB /* Views */ = {
@@ -1238,6 +1333,26 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		12F7450D2EB52DFC00889684 /* Tests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 12F745162EB52DFC00889684 /* Build configuration list for PBXNativeTarget "Tests" */;
+			buildPhases = (
+				12F745132EB52DFC00889684 /* Sources */,
+				12F745142EB52DFC00889684 /* Frameworks */,
+				12F745152EB52DFC00889684 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				12F7451B2EB52DFC00889684 /* PBXTargetDependency */,
+			);
+			name = Tests;
+			packageProductDependencies = (
+			);
+			productName = Tests;
+			productReference = 12F7451E2EB52DFC00889684 /* Tests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 		MACTG0100000000000000001 /* Eclipse-macOS */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = MACCL0100000000000000001 /* Build configuration list for PBXNativeTarget "Eclipse-macOS" */;
@@ -1350,6 +1465,7 @@
 				AD0000232FD9000000AD0023 /* ZIPFoundation */,
 				AD0000322FDA000000AD0032 /* Nuke */,
 				AD0000422FDB000000AD0042 /* AsyncDisplayKit */,
+				SKYSOUPPROD0000000000001 /* SwiftSoup */,
 			);
 			productName = Eclipse;
 			productReference = 13F0725B2E4B2D3300EF90EB /* Eclipse.app */;
@@ -1365,6 +1481,10 @@
 				LastSwiftUpdateCheck = 2600;
 				LastUpgradeCheck = 2620;
 				TargetAttributes = {
+					12F7450D2EB52DFC00889684 = {
+						CreatedOnToolsVersion = 26.0;
+						TestTargetID = 13F0725A2E4B2D3300EF90EB;
+					};
 					MACTG0100000000000000001 = {
 						CreatedOnToolsVersion = 26.0;
 					};
@@ -1403,6 +1523,7 @@
 				AD0000212FD9000000AD0021 /* XCRemoteSwiftPackageReference "ZIPFoundation" */,
 				AD0000312FDA000000AD0031 /* XCRemoteSwiftPackageReference "Nuke" */,
 				AD0000412FDB000000AD0041 /* XCRemoteSwiftPackageReference "Texture" */,
+				SKYSOUPPKG00000000000001 /* XCRemoteSwiftPackageReference "SwiftSoup" */,
 			);
 			productRefGroup = 13F0725C2E4B2D3300EF90EB /* Products */;
 			projectDirPath = "";
@@ -1410,6 +1531,7 @@
 			targets = (
 				MACTG0100000000000000001 /* Eclipse-macOS */,
 				13F0725A2E4B2D3300EF90EB /* Eclipse */,
+				12F7450D2EB52DFC00889684 /* Tests */,
 				TVTG00010000000000000001 /* Eclipse-tvOS */,
 				TVUTTG0100000000000000001 /* Eclipse-tvOSTests */,
 				TVUITG0100000000000000001 /* Eclipse-tvOSUITests */,
@@ -1418,6 +1540,15 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
+		12F745152EB52DFC00889684 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				12F745112EB52DFC00889684 /* SkyStreamContentReferenceV1.json in Resources */,
+				12F745122EB52DFC00889684 /* SkyStreamMagicProxyV2.json in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		MACPH0300000000000000003 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
@@ -1510,10 +1641,22 @@
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		12F745132EB52DFC00889684 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				12F745102EB52DFC00889684 /* SkyStreamSecurityTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		MACPH0100000000000000001 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				SKYMACBF0000000000000001 /* SkyStreamModels.swift in Sources */,
+				SKYMACBF0000000000000003 /* SkyStreamPluginManager.swift in Sources */,
+				SKYMACBF0000000000000004 /* SkyStreamRepositoryManager.swift in Sources */,
+				SKYMACBF000000000000000B /* ProviderContentReference.swift in Sources */,
 				MACBF0100000000000000001 /* EclipseMacApp.swift in Sources */,
 				MACBF0200000000000000002 /* MacRootView.swift in Sources */,
 				MACBF0300000000000000003 /* MacPlayback.swift in Sources */,
@@ -1565,6 +1708,11 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				SKYTVBF00000000000000001 /* SkyStreamModels.swift in Sources */,
+				SKYTVBF00000000000000003 /* SkyStreamPluginManager.swift in Sources */,
+				SKYTVBF00000000000000004 /* SkyStreamRepositoryManager.swift in Sources */,
+				SKYTVBF00000000000000007 /* SkyStreamStateEntity.swift in Sources */,
+				SKYTVBF0000000000000000B /* ProviderContentReference.swift in Sources */,
 				TVBF00410000000000000041 /* PlaybackLaunchContext.swift in Sources */,
 				DLPATHBF200000000000000002 /* DownloadPathIdentityPolicy.swift in Sources */,
 				TVBF00420000000000000042 /* AVPlayerResourceLoader.swift in Sources */,
@@ -1675,6 +1823,17 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				SKYIOSBF0000000000000001 /* SkyStreamModels.swift in Sources */,
+				SKYIOSBF0000000000000002 /* SkyStreamPackageValidator.swift in Sources */,
+				SKYIOSBF0000000000000003 /* SkyStreamPluginManager.swift in Sources */,
+				SKYIOSBF0000000000000004 /* SkyStreamRepositoryManager.swift in Sources */,
+				SKYIOSBF0000000000000005 /* SkyStreamRuntime.swift in Sources */,
+				SKYIOSBF0000000000000006 /* SkyStreamSecurity.swift in Sources */,
+				SKYIOSBF0000000000000007 /* SkyStreamStateEntity.swift in Sources */,
+				SKYIOSBF0000000000000008 /* SkyStreamVODValidator.swift in Sources */,
+				SKYIOSBF0000000000000009 /* SkyStreamManagerView.swift in Sources */,
+				SKYIOSBF000000000000000A /* SkyStreamResolver.swift in Sources */,
+				SKYIOSBF000000000000000B /* ProviderContentReference.swift in Sources */,
 				TVBF00450000000000000045 /* AVPlayerResourceLoader.swift in Sources */,
 				TVBF00400000000000000040 /* PlaybackLaunchContext.swift in Sources */,
 				TVBF00430000000000000043 /* NextEpisodeResolver.swift in Sources */,
@@ -1856,6 +2015,11 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		12F7451B2EB52DFC00889684 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 13F0725A2E4B2D3300EF90EB /* Eclipse */;
+			targetProxy = 12F7451C2EB52DFC00889684 /* PBXContainerItemProxy */;
+		};
 		TVUTDP0100000000000000001 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = TVTG00010000000000000001 /* Eclipse-tvOS */;
@@ -1869,6 +2033,49 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		12F745172EB52DFC00889684 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "${DEVELOPMENT_TEAM}";
+				FRAMEWORK_SEARCH_PATHS = "$(inherited) \"$(PROJECT_DIR)/Pods/google-cast-sdk/GoogleCastSDK-ios-4.8.4_static_xcframework\" \"$(BUILD_DIR)/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)/XCFrameworkIntermediates/google-cast-sdk\"";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks";
+				PRODUCT_BUNDLE_IDENTIFIER = "${BUNDLE_IDENTIFIER}.Tests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Eclipse.app/Eclipse";
+			};
+			name = Debug;
+		};
+		12F745182EB52DFC00889684 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = "${DEVELOPMENT_TEAM}";
+				FRAMEWORK_SEARCH_PATHS = "$(inherited) \"$(PROJECT_DIR)/Pods/google-cast-sdk/GoogleCastSDK-ios-4.8.4_static_xcframework\" \"$(BUILD_DIR)/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)/XCFrameworkIntermediates/google-cast-sdk\"";
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks";
+				PRODUCT_BUNDLE_IDENTIFIER = "${BUNDLE_IDENTIFIER}.Tests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Eclipse.app/Eclipse";
+			};
+			name = Release;
+		};
 		MACCF0100000000000000001 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			baseConfigurationReference = 129CC9062EBA1D4600D2D84B /* Build.xcconfig */;
@@ -2322,6 +2529,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		12F745162EB52DFC00889684 /* Build configuration list for PBXNativeTarget "Tests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				12F745172EB52DFC00889684 /* Debug */,
+				12F745182EB52DFC00889684 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		MACCL0100000000000000001 /* Build configuration list for PBXNativeTarget "Eclipse-macOS" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -2450,6 +2666,14 @@
 				minimumVersion = 3.1.1;
 			};
 		};
+		SKYSOUPPKG00000000000001 /* XCRemoteSwiftPackageReference "SwiftSoup" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/scinfu/SwiftSoup.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.11.1;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -2501,6 +2725,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AD0000412FDB000000AD0041 /* XCRemoteSwiftPackageReference "Texture" */;
 			productName = AsyncDisplayKit;
+		};
+		SKYSOUPPROD0000000000001 /* SwiftSoup */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = SKYSOUPPKG00000000000001 /* XCRemoteSwiftPackageReference "SwiftSoup" */;
+			productName = SwiftSoup;
 		};
 /* End XCSwiftPackageProductDependency section */
 

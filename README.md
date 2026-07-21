@@ -100,24 +100,29 @@ Users are responsible for the services and addons they choose to add. The app an
 To add a service/addon, click the top right settings icon in the homescreen and then click services. Then click the top right plus icon and choose whichever type of link you copied.
 
 
+## Credits and acknowledgements
+
+Eclipse is built on the work of many projects and services:
+
+- [Luna](https://github.com/cranci1/Luna) is the original upstream project from which Eclipse was derived.
+- [SkyStream](https://github.com/akashdh11/skystream), created by Akash, defined the plugin format and behavior supported by Eclipse's SkyStream compatibility layer. SkyStream plugins are independent projects and are not bundled with Eclipse.
+- [SkyStream Tools](https://github.com/akashdh11/skystream-tools) (GPLv3) provides the reference SDK and extractor behavior adapted by Eclipse's local compatibility layer.
+- [Aidoku](https://github.com/Aidoku/Aidoku) and [AidokuRunner](https://github.com/Aidoku/AidokuRunner) power Eclipse's Aidoku-compatible Reader Mode.
+- Runtime libraries and components include [FakeWebKit](https://github.com/undeaDD/FakeWebKit) (GPLv3), [Kingfisher](https://github.com/onevcat/Kingfisher) (MIT), [Nuke](https://github.com/kean/Nuke) (MIT), [PLCrashReporter](https://github.com/microsoft/plcrashreporter), [SoraCore](https://github.com/cranci1/SoraCore) (GPLv3), [SwiftSoup](https://github.com/scinfu/SwiftSoup) (MIT), [Texture](https://github.com/Skittyblock/Texture) (Apache 2.0), [Wasm3](https://github.com/Skittyblock/Wasm3) (MIT), [ZIPFoundation](https://github.com/weichsel/ZIPFoundation) (MIT), and [Sybau](https://github.com/cranci1/Sybau) (GPLv3).
+- Playback uses Eclipse's [MPVKit fork](https://github.com/Soupy-dev/MPVKit), based on [MPVKit](https://github.com/mpvkit/MPVKit), and the multimedia projects bundled by MPVKit, including [mpv](https://github.com/mpv-player/mpv), [FFmpeg](https://github.com/FFmpeg/FFmpeg), and [MoltenVK](https://github.com/KhronosGroup/MoltenVK).
+- Google Cast support uses the [Google Cast SDK](https://developers.google.com/cast).
+- Optional metadata, tracking, subtitle, schedule, mapping, and skip-data features use services including [TMDB](https://www.themoviedb.org), [AniList](https://anilist.co), [MyAnimeList](https://myanimelist.net), [Trakt](https://trakt.tv), [TVmaze](https://www.tvmaze.com), [Jikan](https://jikan.moe), [Kitsu](https://kitsu.io), [AniMap](https://animap.s0n1c.ca), [AniSkip](https://aniskip.com), [TheIntroDB](https://theintrodb.org), [IntroDB](https://introdb.app), [OpenSubtitles](https://www.opensubtitles.com), and the [Stremio addon protocol](https://github.com/Stremio/stremio-addon-sdk).
+
+This product uses the TMDB API but is not endorsed or certified by TMDB.
+
+All product names, trademarks, services, and projects belong to their respective owners. Their inclusion above is an acknowledgement, not a claim of affiliation or endorsement. Each dependency and service remains subject to its own license or terms.
+
+License links, copyright notices, and the expanded component inventory are available in Eclipse under **Settings > Legal & Source > Third-Party Acknowledgements**.
+
 ## License
 
 Eclipse is released under the GNU General Public License version 3. See `LICENSE`.
 
-The original Luna project is available at `https://github.com/cranci1/Luna`.
-
 Source code for builds distributed from this repository is available at `https://github.com/Soupy-dev/Eclipse`. If you redistribute an IPA or another binary, provide the corresponding source under GPLv3.
-
-Credits to https://github.com/Aidoku/Aidoku for powering Reader Mode.
-
-Acknowledgments inherited from parent repo:
-
-https://github.com/undeaDD/FakeWebKit
-
-https://github.com/onevcat/Kingfisher
-
-https://github.com/mpvkit/MPVKit
-
-https://github.com/cranci1/SoraCore
 
 This program comes with no warranty, to the extent permitted by law.

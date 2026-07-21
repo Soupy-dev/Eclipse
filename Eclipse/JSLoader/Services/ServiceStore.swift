@@ -1,32 +1,77 @@
 import CoreData
 
+private actor ServiceStoreReadiness {
+    private enum State {
+        case pending
+        case ready
+        case failed
+    }
+
+    private var state: State = .pending
+    private var waiters: [CheckedContinuation<Void, Error>] = []
+
+    func complete(successfully: Bool) {
+        guard case .pending = state else { return }
+        state = successfully ? .ready : .failed
+        let pending = waiters
+        waiters.removeAll(keepingCapacity: false)
+        for waiter in pending {
+            if successfully {
+                waiter.resume()
+            } else {
+                waiter.resume(throwing: CocoaError(.persistentStoreOperation))
+            }
+        }
+    }
+
+    func waitUntilReady() async throws {
+        switch state {
+        case .ready:
+            return
+        case .failed:
+            throw CocoaError(.persistentStoreOperation)
+        case .pending:
+            try await withCheckedThrowingContinuation {
+                (continuation: CheckedContinuation<Void, Error>) in
+                waiters.append(continuation)
+            }
+        }
+    }
+}
+
 public final class ServiceStore: @unchecked Sendable {
     public static let shared = ServiceStore()
 
     // MARK: private - internal setup and update functions
 
     private var container: NSPersistentContainer? = nil
+    private let readiness = ServiceStoreReadiness()
 
     private init() {
         container = NSPersistentContainer(name: "ServiceModels")
 
         guard let description = container?.persistentStoreDescriptions.first else {
             Logger.shared.log("Missing store description", type: "Storage")
+            Task { await readiness.complete(successfully: false) }
             return
         }
 
         description.type = NSSQLiteStoreType
         description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
+        description.setOption(true as NSNumber, forKey: NSMigratePersistentStoresAutomaticallyOption)
+        description.setOption(true as NSNumber, forKey: NSInferMappingModelAutomaticallyOption)
 
         container?.loadPersistentStores { _, error in
             if let error = error {
                 Logger.shared.log("Failed to load persistent store: \(error.localizedDescription)", type: "Storage")
+                Task { await self.readiness.complete(successfully: false) }
             } else {
                 DispatchQueue.main.async { [weak self] in
                     guard let viewContext = self?.container?.viewContext else { return }
                     viewContext.automaticallyMergesChangesFromParent = true
                     viewContext.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
                 }
+                Task { await self.readiness.complete(successfully: true) }
             }
         }
     }
@@ -215,6 +260,89 @@ public final class ServiceStore: @unchecked Sendable {
             }
         } catch {
             Logger.shared.log("Sync failed: \(error.localizedDescription)", type: "Storage")
+        }
+    }
+
+    // MARK: - SkyStream state
+
+    /// Loads the compact SkyStream metadata/provider-state document from this same persistent
+    /// store. Package archives and executable scripts deliberately remain in Application Support;
+    /// Core Data only carries the bounded Codable state needed for ordering, settings, backup,
+    /// and provenance.
+    func loadSkyStreamStateData() async throws -> Data? {
+        try await readiness.waitUntilReady()
+        guard let container else {
+            Logger.shared.log("SkyStream: persistent container unavailable while loading state", type: "Storage")
+            throw CocoaError(.persistentStoreOperation)
+        }
+
+        return try await withCheckedThrowingContinuation {
+            (continuation: CheckedContinuation<Data?, Error>) in
+            container.performBackgroundTask { context in
+                let request: NSFetchRequest<SkyStreamStateEntity> = SkyStreamStateEntity.fetchRequest()
+                request.predicate = NSPredicate(format: "id == %@", SkyStreamStateEntity.singletonID)
+                request.fetchLimit = 1
+                do {
+                    guard let entity = try context.fetch(request).first else {
+                        continuation.resume(returning: nil)
+                        return
+                    }
+                    // `nil` is reserved for a successful fetch with no singleton row. Treat a
+                    // partially synced/corrupt row as a load failure so callers do not mistake it
+                    // for authoritative empty state and prune the installed package payloads.
+                    guard let json = entity.jsonState,
+                          let state = json.data(using: .utf8) else {
+                        throw CocoaError(.fileReadCorruptFile)
+                    }
+                    guard state.count <= 8 * 1_024 * 1_024 else {
+                        throw CocoaError(.fileReadTooLarge)
+                    }
+                    continuation.resume(returning: state)
+                } catch {
+                    Logger.shared.log(
+                        "SkyStream: failed to load persistent state (\(error.localizedDescription))",
+                        type: "Storage"
+                    )
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    /// Atomically replaces the single bounded metadata document on a background context.
+    func saveSkyStreamStateData(_ data: Data) async throws {
+        try await readiness.waitUntilReady()
+        guard let container else {
+            throw CocoaError(.persistentStoreOperation)
+        }
+        guard data.count <= 8 * 1_024 * 1_024,
+              let json = String(data: data, encoding: .utf8) else {
+            throw CocoaError(.fileWriteInapplicableStringEncoding)
+        }
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            container.performBackgroundTask { context in
+                context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+                let request: NSFetchRequest<SkyStreamStateEntity> = SkyStreamStateEntity.fetchRequest()
+                request.predicate = NSPredicate(format: "id == %@", SkyStreamStateEntity.singletonID)
+                request.fetchLimit = 1
+                do {
+                    let entity = try context.fetch(request).first ?? SkyStreamStateEntity(context: context)
+                    entity.id = SkyStreamStateEntity.singletonID
+                    entity.jsonState = json
+                    entity.updatedAt = Date()
+                    if context.hasChanges {
+                        try context.save()
+                    }
+                    continuation.resume()
+                } catch {
+                    Logger.shared.log(
+                        "SkyStream: failed to persist state (\(error.localizedDescription))",
+                        type: "Storage"
+                    )
+                    continuation.resume(throwing: error)
+                }
+            }
         }
     }
 

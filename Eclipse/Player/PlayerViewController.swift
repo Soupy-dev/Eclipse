@@ -1490,9 +1490,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     
     private func rendererLoad(url: URL, preset: PlayerPreset, headers: [String: String]?) {
         if vlcRenderer != nil {
-            logVLCUI("rendererLoad url=\(url.absoluteString) preset=\(preset.id.rawValue) headers=\(headers?.count ?? 0) pendingSeek=\(secondsText(pendingSeekTime)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))", type: "Stream")
+            logVLCUI("rendererLoad target={\(playbackURLSummary(url))} preset=\(preset.id.rawValue) headers=\(headers?.count ?? 0) pendingSeek=\(secondsText(pendingSeekTime)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))", type: "Stream")
         } else {
-            logMPV("rendererLoad url=\(url.absoluteString) preset=\(preset.id.rawValue) headers=\(headers?.count ?? 0) pendingSeek=\(secondsText(pendingSeekTime)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))")
+            logMPV("rendererLoad target={\(playbackURLSummary(url))} preset=\(preset.id.rawValue) headers=\(headers?.count ?? 0) pendingSeek=\(secondsText(pendingSeekTime)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))")
         }
         renderer.load(url: url, with: preset, headers: headers)
 #if !os(tvOS)
@@ -1530,7 +1530,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         isRunning = true
     }
     
-    private func rendererStop() {
+    private func rendererStop(retainingMPVHeaderProxyURL retainedProxyURL: URL? = nil) {
         if vlcRenderer != nil {
             logVLCUI("rendererStop requested cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))", type: "Stream")
         } else {
@@ -1560,7 +1560,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         cancelScheduledMPVPictureInPictureWarmups(reason: "renderer-stop")
         renderer.stop()
 #if !os(tvOS)
-        releaseMPVHeaderProxySessions()
+        releaseMPVHeaderProxySessions(retaining: retainedProxyURL)
 #endif
         isRunning = false
         mpvExpectedPiPCallbackAttemptID = nil
@@ -1572,8 +1572,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         didLogDuplicateVLCReadyToSeekForCurrentLoad = false
     }
 
-    private func rendererStopAndWait() async {
-        rendererStop()
+    private func rendererStopAndWait(retainingMPVHeaderProxyURL retainedProxyURL: URL? = nil) async {
+        rendererStop(retainingMPVHeaderProxyURL: retainedProxyURL)
         await renderer.waitUntilStopped()
     }
     
@@ -3913,8 +3913,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         bindPlaybackWindowSceneIfAvailable(source: "view-did-load")
         beginMediaStatePlaybackLeaseIfNeeded()
         view.backgroundColor = .black
-        logMPV("viewDidLoad initialURL=\(initialURL?.absoluteString ?? "nil") preset=\(initialPreset?.id.rawValue ?? "nil") mediaInfo=\(String(describing: mediaInfo))")
-        logVLCUI("viewDidLoad initialURL=\(initialURL?.absoluteString ?? "nil") preset=\(initialPreset?.id.rawValue ?? "nil") mediaInfo=\(String(describing: mediaInfo))", type: "Stream")
+        let initialURLSummary = initialURL.map(playbackURLSummary) ?? "nil"
+        logMPV("viewDidLoad initialURL={\(initialURLSummary)} preset=\(initialPreset?.id.rawValue ?? "nil") mediaInfo=\(String(describing: mediaInfo))")
+        logVLCUI("viewDidLoad initialURL={\(initialURLSummary)} preset=\(initialPreset?.id.rawValue ?? "nil") mediaInfo=\(String(describing: mediaInfo))", type: "Stream")
         
 #if !os(tvOS)
         modalPresentationCapturesStatusBarAppearance = true
@@ -3989,7 +3990,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         showControlsTemporarily()
         
         if let url = initialURL, let preset = initialPreset {
-            logSharedPlayerControl("loading initial url=\(url.absoluteString) preset=\(preset.id.rawValue)")
+            logSharedPlayerControl("loading initial target={\(playbackURLSummary(url))} preset=\(preset.id.rawValue)")
             load(url: url, preset: preset, headers: initialHeaders)
         }
 #if os(iOS) && canImport(GoogleCast)
@@ -4304,7 +4305,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
         self.mediaInfo = mediaInfo
         self.imdbId = imdbId
-        Logger.shared.log("[PlayerViewController.init] URL=\(url.absoluteString) preset=\(preset.id.rawValue) headers=\(headers?.count ?? 0) subtitles=\(subtitles?.count ?? 0) mediaInfo=\(mediaInfo != nil)", type: "Stream")
+        Logger.shared.log("[PlayerViewController.init] target={\(playbackURLSummary(url))} preset=\(preset.id.rawValue) headers=\(headers?.count ?? 0) subtitles=\(subtitles?.count ?? 0) mediaInfo=\(mediaInfo != nil)", type: "Stream")
     }
 
     private var automaticAudioSelectionLanguage: String {
@@ -4564,6 +4565,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func performLoad(url: URL, preset: PlayerPreset, headers: [String: String]?) {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        if isMPVRenderer,
+           MPVHeaderProxy.shared.isManagedSkyStreamSessionURL(url) {
+            // The resolver creates the typed session before this controller exists. Adopt that
+            // exact top-level route so normal renderer replacement/close cleanup owns it instead
+            // of leaving a manifest graph alive until the proxy TTL expires.
+            registerMPVHeaderProxyURL(url)
+        }
+#endif
         pendingRendererRestartRetryGeneration = nil
         playbackLoadGeneration += 1
         cancelMPVBackgroundAudioFallback(reason: "new-load")
@@ -4590,9 +4600,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             "load-begin",
             "renderer=\(mpvRendererName) target={\(playbackURLSummary(url))} upscaling=\(Settings.shared.mpvUpscalingMode.rawValue) resumeCandidate=\(mediaInfo != nil) autoMode=\(playbackLaunchContext?.autoMode ?? false)"
         )
-        logMPV("load url=\(url.absoluteString) preset=\(preset.id.rawValue) headers=\(headers?.count ?? 0)")
+        logMPV("load target={\(playbackURLSummary(url))} preset=\(preset.id.rawValue) headers=\(headers?.count ?? 0)")
         initialURL = url
         initialHeaders = headers
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        configureSkyStreamRouteRejectionRecovery(
+            for: url,
+            expectedLoadGeneration: playbackLoadGeneration
+        )
+#endif
         openSubtitlesResults.removeAll()
         openSubtitlesFetchTask?.cancel()
         openSubtitlesFetchTask = nil
@@ -4707,11 +4723,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             )
         }
         logPlaybackStage("resume-prepared", "target=\(secondsText(pendingSeekTime))")
-        logVLCUI("load resume prepared pendingSeek=\(secondsText(pendingSeekTime)) progressCached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) launchContext=\(String(describing: playbackLaunchContext))", type: "Progress")
+        let launchContextSummary = playbackLaunchContext.map {
+            "source=\($0.sourceName) kind=\($0.sourceKind.rawValue) autoMode=\($0.autoMode) headers=\($0.headers.count) subtitles=\($0.subtitles.count)"
+        } ?? "nil"
+        logVLCUI("load resume prepared pendingSeek=\(secondsText(pendingSeekTime)) progressCached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) launchContext={\(launchContextSummary)}", type: "Progress")
         rendererPrepareInitialSeek(to: pendingSeekTime)
         if isMPVRenderer {
             if isMetalMPVRenderer && ExperimentalFeatureState.canUseExperimentalMPVPlayback {
-                Logger.shared.log("[PlayerVC.PlaybackStart] MPV warmup candidate source=resolved-playback-url autoMode=\(UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled")) renderer=\(mpvRendererName) target=\(url.absoluteString)", type: "MPV")
+                Logger.shared.log("[PlayerVC.PlaybackStart] MPV warmup candidate source=resolved-playback-url autoMode=\(UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled")) renderer=\(mpvRendererName) target={\(playbackURLSummary(url))}", type: "MPV")
                 ExperimentalMPVPreloadManager.shared.prewarm(
                     url: url,
                     headers: headers,
@@ -4719,7 +4738,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 )
             } else if UserDefaults.standard.bool(forKey: ExperimentalFeatureState.mpvPreloadEnabledKey) {
                 let reason = isMetalMPVRenderer ? (ExperimentalFeatureState.mpvAdvancedPlaybackUnavailableReason ?? "advanced-unavailable") : "renderer-not-moltenvk-active"
-                Logger.shared.log("[PlayerVC.PlaybackStart] MPV warmup not started reason=\(reason) renderer=\(mpvRendererName) target=\(url.absoluteString)", type: "MPV")
+                Logger.shared.log("[PlayerVC.PlaybackStart] MPV warmup not started reason=\(reason) renderer=\(mpvRendererName) target={\(playbackURLSummary(url))}", type: "MPV")
             }
         }
         let playbackRequest = preparePlayerHeaderProxyIfNeeded(originalURL: url, headers: headers)
@@ -4759,7 +4778,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             logPlaybackStage("monitor-skipped", "reason=local-file")
             return
         }
-        Logger.shared.log("[PlayerVC.PlaybackStart] startup monitor armed renderer=\(isVLCPlayer ? "VLC" : "MPV") url=\(url.absoluteString) headerKeys=[\(headers.keys.sorted().joined(separator: ","))]", type: isVLCPlayer ? "Stream" : "MPV")
+        Logger.shared.log("[PlayerVC.PlaybackStart] startup monitor armed renderer=\(isVLCPlayer ? "VLC" : "MPV") target={\(playbackURLSummary(url))} headerKeys=[\(headers.keys.sorted().joined(separator: ","))]", type: isVLCPlayer ? "Stream" : "MPV")
         logPlaybackStage("monitor-armed", "deadline=18.00s target={\(playbackURLSummary(url))}")
         schedulePlaybackStartupCheck(
             url: url,
@@ -5024,7 +5043,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         pendingRendererRestartRetryGeneration = failedGeneration
         Task { @MainActor [weak self] in
             guard let self else { return }
-            await self.rendererStopAndWait()
+            let retainedProxyURL = self.initialURL.flatMap {
+                self.isLocalProxyURL($0) ? $0 : nil
+            }
+            await self.rendererStopAndWait(retainingMPVHeaderProxyURL: retainedProxyURL)
             guard !self.isClosing,
                   !self.isBeingDismissed,
                   self.viewIfLoaded?.window != nil,
@@ -7111,6 +7133,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             isAnimeContent: context.isAnime,
             selectedEpisode: context.selectedEpisode,
             tmdbId: context.tmdbID,
+            mediaYear: context.mediaYear,
             animeSeasonTitle: context.animeSeasonTitle,
             posterPath: context.posterPath,
             originalAudioLanguage: context.originalAudioLanguage,
@@ -7168,7 +7191,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             currentEpisodeNumber: episodeNumber,
             isAnime: isAnime || isAnimeContent(),
             imdbId: imdbId,
-            currentPlaybackContext: episodePlaybackContext
+            currentPlaybackContext: episodePlaybackContext,
+            mediaYear: servicesSelectionContext?.mediaYear
         )
     }
 
@@ -7280,7 +7304,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             originalTMDBSeasonNumber: item.originalTMDBSeasonNumber,
             originalTMDBEpisodeNumber: item.originalTMDBEpisodeNumber,
             episodePlaybackContext: downloadItem.episodePlaybackContext ?? item.playbackContext,
-            launchContext: nil
+            launchContext: nil,
+            mediaYear: item.mediaYear
         )
     }
     #endif
@@ -7304,6 +7329,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             isAnimeContent: item.isAnime,
             selectedEpisode: item.episode,
             tmdbId: item.showId,
+            mediaYear: item.mediaYear,
             animeSeasonTitle: item.animeSeasonTitle,
             posterPath: item.posterURL ?? item.showPosterURL,
             originalAudioLanguage: item.originalAudioLanguage,
@@ -7481,6 +7507,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 subtitleHeadersByURL: request.subtitleHeadersByURL,
                 mediaSelectionIntent: self.playbackMediaSelectionIntent,
                 mediaInfo: request.mediaInfo,
+                mediaYear: request.mediaYear
+                    ?? self.activePlaybackRequest?.mediaYear
+                    ?? self.servicesSelectionContext?.mediaYear,
                 imdbID: request.imdbId,
                 episodePlaybackContext: request.episodePlaybackContext,
                 launchContext: request.launchContext,
@@ -7519,7 +7548,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     return false
                 }
             }()
-            if !existingSelectionStillMatches {
+            if !existingSelectionStillMatches
+                || (self.servicesSelectionContext?.mediaYear == nil && selectionRequest.mediaYear != nil) {
                 self.servicesSelectionContext = PlayerServicesSelectionContext(request: selectionRequest)
             }
 
@@ -7570,12 +7600,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             if shouldSwitchVLCInPlace {
                 startReplacementLoad()
             } else if wasVLC {
-                self.rendererStop()
+                self.rendererStop(
+                    retainingMPVHeaderProxyURL: self.isLocalProxyURL(request.url)
+                        ? request.url
+                        : nil
+                )
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.20, execute: startReplacementLoad)
             } else {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
-                    await self.rendererStopAndWait()
+                    await self.rendererStopAndWait(
+                        retainingMPVHeaderProxyURL: self.isLocalProxyURL(request.url)
+                            ? request.url
+                            : nil
+                    )
                     guard self.playbackReplacementGeneration == replacementGeneration else { return }
                     startReplacementLoad()
                 }
@@ -7601,6 +7639,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             subtitleHeadersByURL: request.subtitleHeadersByURL,
             mediaSelectionIntent: playbackMediaSelectionIntent,
             mediaInfo: request.mediaInfo,
+            mediaYear: request.mediaYear
+                ?? activePlaybackRequest?.mediaYear
+                ?? servicesSelectionContext?.mediaYear,
             imdbID: request.imdbId,
             episodePlaybackContext: request.episodePlaybackContext,
             launchContext: request.launchContext,
@@ -9600,7 +9641,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             subtitleHeadersByURL: resolution.subtitleHeadersByURL,
             retryCount: 0,
             titleCandidates: resolution.titleCandidates,
-            serviceContentHref: resolution.serviceContentHref
+            serviceContentHref: resolution.serviceContentHref,
+            providerContentReference: resolution.providerContentReference
         )
         stagedNextEpisodeRequest = PlayerResolvedPlaybackRequest(
             url: resolution.streamURL,
@@ -9617,20 +9659,32 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             originalTMDBSeasonNumber: tmdbSeason,
             originalTMDBEpisodeNumber: tmdbEpisode,
             episodePlaybackContext: context,
-            launchContext: launchContext
+            launchContext: launchContext,
+            mediaYear: nextEpisodePreview?.mediaYear
+                ?? servicesSelectionContext?.mediaYear
+                ?? activePlaybackRequest?.mediaYear
         )
         stagedNextEpisodeRequestKey = key
-        Logger.shared.log("[PlayerVC.MPV] next-episode staged request ready key=\(key) source=\(resolution.sourceName) target=\(resolution.streamURL.absoluteString)", type: "MPV")
+        Logger.shared.log(
+            "[PlayerVC.MPV] next-episode staged request ready key=\(key) source=\(resolution.sourceName) target={\(playbackURLSummary(resolution.streamURL))}",
+            type: "MPV"
+        )
     }
 
     private enum NextEpisodePrestageCandidate {
         case service(Service, contentHref: String?)
         case stremio(StremioAddon)
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        case skyStream(SkyStreamProviderDescriptor)
+#endif
 
         var sourceId: String {
             switch self {
             case .service(let service, _): SourceHealth.serviceId(service)
             case .stremio(let addon): SourceHealth.stremioId(addon)
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            case .skyStream(let provider): provider.id
+#endif
             }
         }
 
@@ -9638,6 +9692,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             switch self {
             case .service(let service, _): service.metadata.sourceName
             case .stremio(let addon): addon.manifest.name
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            case .skyStream(let provider): provider.displayName
+#endif
             }
         }
 
@@ -9645,6 +9702,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             switch self {
             case .service(let service, _): service.sortIndex
             case .stremio(let addon): addon.sortIndex
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            case .skyStream(let provider): Int64(provider.sortIndex)
+#endif
             }
         }
     }
@@ -9661,6 +9721,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let sourceKind: PlaybackSourceKind
         let titleCandidates: [String]
         let serviceContentHref: String?
+        let providerContentReference: ProviderContentReference?
     }
 
     /// Prefer the source that successfully launched the current episode, then fall back through
@@ -9685,6 +9746,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         candidates.append(contentsOf: StremioAddonManager.shared.activeStreamAddons.map {
             .stremio($0)
         })
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        if PlatformCapabilities.current.supportsSkyStreamPlugins {
+            candidates.append(contentsOf: SkyStreamPluginManager.shared.providers
+                .filter(\.isEnabled)
+                .map { .skyStream($0) })
+        }
+#endif
 
         candidates.sort { lhs, rhs in
             if lhs.sortIndex != rhs.sortIndex { return lhs.sortIndex < rhs.sortIndex }
@@ -9730,10 +9798,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             currentEpisodeNumber: currentEpisodeNumber
         )
         if changesAnimeIdentity {
-            // A service content href belongs to the currently-playing cour. Its single-season
-            // E1 is not evidence for the destination AniList/Kitsu identity. Only exact-ID
-            // Stremio lookups are safe to pre-stage across that boundary; normal Services
-            // resolution will run after the user taps Next.
+            // A Service content href belongs to the currently-playing cour. Its single-season
+            // E1 is not evidence for the destination AniList/Kitsu identity. Stremio uses an
+            // exact content ID and SkyStream re-searches the verified destination identity;
+            // neither path reuses the current provider's opaque episode reference.
             candidates.removeAll { candidate in
                 if case .service = candidate { return true }
                 return false
@@ -9769,7 +9837,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             guard let self else { return }
             for candidate in candidates {
                 guard !Task.isCancelled,
-                      self.experimentalStagedNextEpisodeKey == attemptKey else { return }
+                      self.experimentalStagedNextEpisodeKey == attemptKey else {
+                    return
+                }
                 Logger.shared.log("[PlayerVC.MPV] next-episode candidate resolving source=\(candidate.sourceName) target=S\(nextSeasonNumber)E\(nextEpisodeNumber)", type: "MPV")
 
                 let resolution: NextEpisodePrestageResolution?
@@ -9801,16 +9871,33 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                         isAnime: isAnime,
                         titleCandidates: titleCandidates
                     )
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                case .skyStream(let provider):
+                    resolution = await self.resolveSkyStreamPrestageCandidate(
+                        provider: provider,
+                        lookupSeason: lookupSeason,
+                        lookupEpisode: lookupEpisode,
+                        nextContext: nextContext,
+                        isAnime: isAnime,
+                        titleCandidates: titleCandidates
+                    )
+#endif
                 }
 
                 guard !Task.isCancelled,
-                      self.experimentalStagedNextEpisodeKey == attemptKey else { return }
+                      self.experimentalStagedNextEpisodeKey == attemptKey else {
+                    self.discardResolvedProviderPlayback(resolution)
+                    return
+                }
                 guard let resolution else {
                     Logger.shared.log("[PlayerVC.MPV] next-episode candidate failed source=\(candidate.sourceName); trying next", type: "MPV")
                     continue
                 }
 
-                Logger.shared.log("[PlayerVC.MPV] next-episode candidate selected source=\(resolution.sourceName) target=\(resolution.streamURL.absoluteString)", type: "MPV")
+                Logger.shared.log(
+                    "[PlayerVC.MPV] next-episode candidate selected source=\(resolution.sourceName) target={\(self.playbackURLSummary(resolution.streamURL))}",
+                    type: "MPV"
+                )
                 ExperimentalMPVPreloadManager.shared.prewarm(
                     url: resolution.streamURL,
                     headers: resolution.headers,
@@ -9943,7 +10030,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             sourceName: service.metadata.sourceName,
             sourceKind: .service,
             titleCandidates: titleCandidates,
-            serviceContentHref: contentHref
+            serviceContentHref: contentHref,
+            providerContentReference: nil
         )
     }
 
@@ -9998,9 +10086,141 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             sourceName: addon.manifest.name,
             sourceKind: .stremio,
             titleCandidates: titleCandidates,
-            serviceContentHref: nil
+            serviceContentHref: nil,
+            providerContentReference: nil
         )
     }
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    private func resolveSkyStreamPrestageCandidate(
+        provider: SkyStreamProviderDescriptor,
+        lookupSeason: Int,
+        lookupEpisode: Int,
+        nextContext: EpisodePlaybackContext?,
+        isAnime: Bool,
+        titleCandidates: [String]
+    ) async -> NextEpisodePrestageResolution? {
+        guard PlatformCapabilities.current.supportsSkyStreamPlugins,
+              provider.isEnabled,
+              let title = titleCandidates.first,
+              !title.isEmpty else {
+            return nil
+        }
+        let absoluteCandidates = [
+            nextContext?.animeAbsoluteEpisodeNumber,
+            nextContext?.resolvedTMDBEpisodeNumber
+        ].compactMap { $0 }
+        let target = SkyStreamResolutionTarget(
+            kind: .episode,
+            title: title,
+            aliases: Array(titleCandidates.dropFirst()),
+            year: nil,
+            season: lookupSeason,
+            episode: lookupEpisode,
+            absoluteEpisodeCandidates: absoluteCandidates,
+            isAnime: isAnime,
+            isSpecial: nextContext?.isSpecial == true,
+            wantsDubbed: nil,
+            // Pre-staging must never warm a merely plausible episode. The normal flow remains
+            // available after a miss, so this optimization can afford to fail closed.
+            requiresExactIdentity: true
+        )
+
+        do {
+            let values = try await SkyStreamResolver.shared.resolve(
+                sourceID: provider.id,
+                target: target,
+                mode: .autoMode
+            )
+            guard !Task.isCancelled,
+                  let resolved = values.first,
+                  resolved.provider.id == provider.id,
+                  resolved.contentReference.sourceID == provider.id,
+                  !StreamLanguageFilter.shouldHide(
+                    languageHints: [],
+                    metadata: [resolved.displayName],
+                    sourceId: provider.id,
+                    isAnime: isAnime
+                  ) else {
+                return nil
+            }
+            return makeSkyStreamPlaybackResolution(
+                resolved,
+                titleCandidates: titleCandidates,
+                traceID: "next-\(playbackTraceID)"
+            )
+        } catch is CancellationError {
+            return nil
+        } catch {
+            Logger.shared.log(
+                "SkyStream: next-episode staging failed source=\(provider.id) errorType=\(String(reflecting: type(of: error)))",
+                type: "MPV"
+            )
+            return nil
+        }
+    }
+
+    /// Converts only a resolver-produced descriptor into one same-session proxy graph. Main media
+    /// and subtitles therefore share the validator's immutable route/header policy; no upstream
+    /// URL, cookie, or header is handed to the renderer.
+    private func makeSkyStreamPlaybackResolution(
+        _ resolved: SkyStreamResolvedStream,
+        titleCandidates: [String],
+        traceID: String
+    ) -> NextEpisodePrestageResolution? {
+        guard let proxyURL = MPVHeaderProxy.shared.makeSkyStreamProxyURL(
+            for: resolved.playback,
+            traceID: traceID
+        ) else {
+            return nil
+        }
+        guard let subtitleProxyURLs = MPVHeaderProxy.shared.skyStreamSubtitleProxyURLs(
+            for: resolved.playback,
+            streamProxyURL: proxyURL
+        ) else {
+            MPVHeaderProxy.shared.invalidateSession(for: proxyURL)
+            return nil
+        }
+        if Task.isCancelled {
+            MPVHeaderProxy.shared.invalidateSession(for: proxyURL)
+            return nil
+        }
+
+        let descriptor = resolved.playback
+        let subtitles = descriptor.subtitles.compactMap { subtitle -> String? in
+                var components = URLComponents(
+                    url: subtitle.remoteURL.url.absoluteURL,
+                    resolvingAgainstBaseURL: false
+                )
+                components?.fragment = nil
+                let key = components?.url?.absoluteString
+                    ?? subtitle.remoteURL.url.absoluteURL.absoluteString
+                return subtitleProxyURLs[key]?.absoluteString
+        }
+        guard subtitles.count == descriptor.subtitles.count else {
+            MPVHeaderProxy.shared.invalidateSession(for: proxyURL)
+            return nil
+        }
+        registerMPVHeaderProxyURL(proxyURL)
+        let subtitleNames = descriptor.subtitles.map {
+            $0.label ?? $0.language ?? "Subtitle"
+        }
+        return NextEpisodePrestageResolution(
+            streamURL: proxyURL,
+            headers: [:],
+            subtitles: subtitles,
+            subtitleNames: subtitleNames.isEmpty ? nil : subtitleNames,
+            subtitleHeadersByURL: nil,
+            streamName: resolved.displayName,
+            sourceId: resolved.provider.id,
+            sourceName: resolved.provider.displayName,
+            sourceKind: .skyStream,
+            titleCandidates: titleCandidates,
+            serviceContentHref: nil,
+            providerContentReference: .skyStream(resolved.contentReference)
+        )
+    }
+#endif
 
     private func discoverServiceContentHref(
         service: Service,
@@ -10582,7 +10802,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             posterURL: showPosterURL,
             imdbID: imdbId,
             isAnime: mediaIsAnime,
-            isAnimation: isAnimationContentHint ?? false
+            isAnimation: isAnimationContentHint ?? false,
+            mediaYear: servicesSelectionContext?.mediaYear
+                ?? activePlaybackRequest?.mediaYear
         )
     }
 
@@ -10644,11 +10866,67 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         activeMPVHeaderProxyURLs.insert(proxyURL)
     }
 
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    private func configureSkyStreamRouteRejectionRecovery(
+        for streamProxyURL: URL,
+        expectedLoadGeneration: Int
+    ) {
+        guard let context = playbackLaunchContext,
+              context.sourceKind == .skyStream,
+              context.streamURL == streamProxyURL.absoluteString,
+              let providerReference = context.providerContentReference,
+              providerReference.kind == .skyStream,
+              providerReference.sourceID == context.sourceId,
+              let reference = providerReference.skyStream,
+              reference.sourceID == context.sourceId,
+              reference.isStructurallyValid,
+              skyStreamReferenceMatchesCurrentMedia(reference) else {
+            return
+        }
+
+        let attached = MPVHeaderProxy.shared.setSkyStreamRouteRejectionHandler(
+            for: streamProxyURL
+        ) { [weak self] challengedURL, statusCode, isInteractiveChallenge in
+            DispatchQueue.main.async { [weak self] in
+                self?.handleMPVHeaderProxyCloudflareChallenge(
+                    challengeURL: challengedURL,
+                    rejectedCookieHeader: nil,
+                    isInteractiveChallenge: isInteractiveChallenge,
+                    statusCode: statusCode,
+                    originalURL: streamProxyURL,
+                    originalHeaders: [:],
+                    expectedLoadGeneration: expectedLoadGeneration
+                )
+            }
+        }
+        guard attached else {
+            Logger.shared.log(
+                "SkyStream: typed playback recovery handler could not attach source=\(context.sourceId)",
+                type: "MPV"
+            )
+            return
+        }
+        registerMPVHeaderProxyURL(streamProxyURL)
+    }
+#endif
+
     private func releaseMPVHeaderProxySessions(retaining retainedURL: URL? = nil) {
         let staleURLs = activeMPVHeaderProxyURLs.filter { $0 != retainedURL }
+        let invalidatesStagedRequest = stagedNextEpisodeRequest.map { staged in
+            staleURLs.contains(staged.url)
+        } ?? false
         for proxyURL in staleURLs {
             MPVHeaderProxy.shared.invalidateSession(for: proxyURL)
             activeMPVHeaderProxyURLs.remove(proxyURL)
+        }
+        if invalidatesStagedRequest {
+            stagedNextEpisodeRequest = nil
+            stagedNextEpisodeRequestKey = nil
+            experimentalStagedNextEpisodeKey = nil
+            Logger.shared.log(
+                "[PlayerVC.MPV] cleared staged next-episode request because its proxy session ended",
+                type: "MPV"
+            )
         }
     }
 
@@ -10683,20 +10961,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 for: originalURL,
                 headers: proxyHeaders
             ) else {
-                Logger.shared.log("[PlayerVC.PlaybackStart] MPV warmup proxy URL creation failed; using direct HTTP target=\(originalURL.absoluteString) headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "MPV")
+                Logger.shared.log("[PlayerVC.PlaybackStart] MPV warmup proxy URL creation failed; using direct HTTP target={\(playbackURLSummary(originalURL))} headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "MPV")
                 return (originalURL, proxyHeaders.isEmpty ? headers : proxyHeaders)
             }
 
             registerMPVHeaderProxyURL(proxyURL)
             let reason = forceHeaderProxyForStartup ? "coordinator-engine-fallback" : "warmup"
-            Logger.shared.log("[PlayerVC.PlaybackStart] MPV header proxy activated reason=\(reason) target=\(originalURL.absoluteString) headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "MPV")
+            Logger.shared.log("[PlayerVC.PlaybackStart] MPV header proxy activated reason=\(reason) target={\(playbackURLSummary(originalURL))} headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "MPV")
             return (proxyURL, nil)
         }
 
         let proxySkipReason = isMetalMPVRenderer
             ? (ExperimentalMPVPreloadManager.shared.playbackProxySkipReason(for: originalURL) ?? "not-requested")
             : "renderer-not-moltenvk-active"
-        Logger.shared.log("[PlayerVC.PlaybackStart] MPV direct HTTP playback target=\(originalURL.absoluteString) warmupProxySkipped=\(proxySkipReason) renderer=\(mpvRendererName) headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "MPV")
+        Logger.shared.log("[PlayerVC.PlaybackStart] MPV direct HTTP playback target={\(playbackURLSummary(originalURL))} warmupProxySkipped=\(proxySkipReason) renderer=\(mpvRendererName) headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "MPV")
         return (originalURL, proxyHeaders.isEmpty ? headers : proxyHeaders)
     }
 
@@ -10745,15 +11023,32 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
               !isClosing,
               let preset = initialPreset else { return }
 
-        if playbackLaunchContext?.sourceKind == .service,
-           playbackLaunchContext?.serviceContentHref?.isEmpty == false {
+        let hasRefreshableProviderReference: Bool = {
+            guard let context = playbackLaunchContext else { return false }
+            switch context.sourceKind {
+            case .service:
+                return context.serviceContentHref?.isEmpty == false
+            case .stremio:
+                return false
+            case .skyStream:
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                guard let reference = context.providerContentReference else { return false }
+                return reference.kind == .skyStream
+                    && reference.sourceID == context.sourceId
+                    && reference.skyStream?.isStructurallyValid == true
+#else
+                return false
+#endif
+            }
+        }()
+        if hasRefreshableProviderReference {
             guard beginMediaSourceRefreshAttempt() else {
                 handleUnrecoverableMediaSourceRejection(
                     "The media source could not be refreshed after repeated HTTP \(statusCode) responses."
                 )
                 return
             }
-            refreshCurrentServicePlaybackSource(
+            refreshCurrentProviderPlaybackSource(
                 challengeURL: challengeURL,
                 rejectedCookieHeader: rejectedCookieHeader,
                 isInteractiveChallenge: isInteractiveChallenge,
@@ -10833,7 +11128,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return true
     }
 
-    private func refreshCurrentServicePlaybackSource(
+    private func refreshCurrentProviderPlaybackSource(
         challengeURL: URL,
         rejectedCookieHeader: String?,
         isInteractiveChallenge: Bool,
@@ -10861,29 +11156,37 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         Task { @MainActor [weak self] in
             guard let self else { return }
             await self.renderer.waitUntilStopped()
-            var resolution = await resolveCurrentServicePlaybackSource(context: context)
+            var resolution = await resolveCurrentProviderPlaybackSource(context: context)
             var solvedMediaChallenge = false
+            let permitsLegacyInteractiveSolve = context.sourceKind == .service
 
             // An explicit challenge on the media host may still be the only gate. Prefer provider
             // re-resolution first (signed URLs commonly rotate). If extraction returns the same
             // challenged URL, it still needs a fresh media-host session before it can be retried.
             if isInteractiveChallenge,
+               permitsLegacyInteractiveSolve,
                resolution == nil || resolution?.streamURL == originalURL {
                 solvedMediaChallenge = await CloudflareBypassManager.shared.refreshSessionAfterChallenge(
                     for: challengeURL,
                     rejectedCookieHeader: rejectedCookieHeader
                 )
                 if solvedMediaChallenge {
-                    resolution = await resolveCurrentServicePlaybackSource(context: context) ?? resolution
+                    resolution = await resolveCurrentProviderPlaybackSource(context: context) ?? resolution
                 }
             }
 
             cloudflareStartupRecoveryInProgress = false
             guard playbackLoadGeneration == expectedLoadGeneration,
                   !isClosing,
-                  !isBeingDismissed else { return }
+                  !isBeingDismissed else {
+                discardResolvedProviderPlayback(resolution)
+                return
+            }
 #if os(iOS) && canImport(GoogleCast)
-            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
+            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else {
+                discardResolvedProviderPlayback(resolution)
+                return
+            }
 #endif
 
             guard let resolution else {
@@ -10909,7 +11212,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 subtitleHeadersByURL: resolution.subtitleHeadersByURL,
                 retryCount: context.retryCount,
                 titleCandidates: resolution.titleCandidates,
-                serviceContentHref: resolution.serviceContentHref
+                serviceContentHref: resolution.serviceContentHref,
+                providerContentReference: resolution.providerContentReference
             )
             playbackLaunchContext = refreshedContext
             initialSubtitles = resolution.subtitles
@@ -10926,9 +11230,22 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
     }
 
-    private func resolveCurrentServicePlaybackSource(
+    private func discardResolvedProviderPlayback(_ resolution: NextEpisodePrestageResolution?) {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        guard let resolution, resolution.sourceKind == .skyStream else { return }
+        MPVHeaderProxy.shared.invalidateSession(for: resolution.streamURL)
+        activeMPVHeaderProxyURLs.remove(resolution.streamURL)
+#endif
+    }
+
+    private func resolveCurrentProviderPlaybackSource(
         context: PlaybackLaunchContext
     ) async -> NextEpisodePrestageResolution? {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        if context.sourceKind == .skyStream {
+            return await resolveCurrentSkyStreamPlaybackSource(context: context)
+        }
+#endif
         guard context.sourceKind == .service,
               let service = ServiceManager.shared.activeServices.first(where: {
                   SourceHealth.serviceId($0) == context.sourceId
@@ -10999,13 +11316,92 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 sourceName: service.metadata.sourceName,
                 sourceKind: .service,
                 titleCandidates: context.titleCandidates,
-                serviceContentHref: contentHref
+                serviceContentHref: contentHref,
+                providerContentReference: nil
             )
 
         case nil:
             return nil
         }
     }
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    private func resolveCurrentSkyStreamPlaybackSource(
+        context: PlaybackLaunchContext
+    ) async -> NextEpisodePrestageResolution? {
+        guard context.sourceKind == .skyStream,
+              let providerReference = context.providerContentReference,
+              providerReference.kind == .skyStream,
+              providerReference.sourceID == context.sourceId,
+              let reference = providerReference.skyStream,
+              reference.sourceID == context.sourceId,
+              reference.isStructurallyValid,
+              skyStreamReferenceMatchesCurrentMedia(reference) else {
+            return nil
+        }
+
+        do {
+            let values = try await SkyStreamResolver.shared.refresh(
+                reference,
+                mode: .playbackRefresh
+            )
+            guard !Task.isCancelled,
+                  let resolved = values.first,
+                  resolved.provider.id == context.sourceId,
+                  resolved.contentReference.sourceID == context.sourceId,
+                  resolved.contentReference.isStructurallyValid,
+                  resolved.playback.identity.packageID == reference.packageName,
+                  resolved.playback.identity.providerID == (reference.providerID ?? "root"),
+                  reference.scriptSHA256.map({
+                    resolved.playback.identity.payloadSHA256.caseInsensitiveCompare($0) == .orderedSame
+                  }) ?? true else {
+                return nil
+            }
+            return makeSkyStreamPlaybackResolution(
+                resolved,
+                titleCandidates: context.titleCandidates,
+                traceID: "refresh-\(context.traceID)"
+            )
+        } catch is CancellationError {
+            return nil
+        } catch {
+            Logger.shared.log(
+                "SkyStream: playback refresh failed source=\(context.sourceId) errorType=\(String(reflecting: type(of: error)))",
+                type: "MPV"
+            )
+            return nil
+        }
+    }
+
+    private func skyStreamReferenceMatchesCurrentMedia(
+        _ reference: SkyStreamProviderContentReference
+    ) -> Bool {
+        switch mediaInfo {
+        case .movie:
+            return reference.season == nil && reference.episode == nil
+        case .episode(_, let localSeason, let localEpisode, _, _, _):
+            guard let referenceSeason = reference.season,
+                  let referenceEpisode = reference.episode,
+                  referenceSeason >= 0,
+                  referenceEpisode > 0 else {
+                return false
+            }
+            var acceptedCoordinates = Set(["\(localSeason):\(localEpisode)"])
+            if let context = episodePlaybackContext {
+                if let season = context.resolvedTMDBSeasonNumber,
+                   let episode = context.resolvedTMDBEpisodeNumber {
+                    acceptedCoordinates.insert("\(season):\(episode)")
+                }
+                if let absolute = context.animeAbsoluteEpisodeNumber, absolute > 0 {
+                    acceptedCoordinates.insert("1:\(absolute)")
+                }
+            }
+            return acceptedCoordinates.contains("\(referenceSeason):\(referenceEpisode)")
+        case nil:
+            return false
+        }
+    }
+#endif
 
     private func handleUnrecoverableMediaSourceRejection(_ message: String) {
         guard let context = playbackLaunchContext else {
@@ -11061,7 +11457,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         registerMPVHeaderProxyURL(proxyURL)
         mpvTransportBridgeFallbackTried = true
         isMPVTransportBridgePlaybackActive = true
-        Logger.shared.log("[PlayerVC.PlaybackStart] MPV transport bridge activated after TLS failure target=\(originalURL.absoluteString) headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "MPV")
+        Logger.shared.log("[PlayerVC.PlaybackStart] MPV transport bridge activated after TLS failure target={\(playbackURLSummary(originalURL))} headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "MPV")
         load(url: proxyURL, preset: preset, headers: nil)
         return true
     }
@@ -14323,6 +14719,7 @@ struct PlayerEpisodeBrowserSeed {
     let isAnime: Bool
     let imdbId: String?
     let currentPlaybackContext: EpisodePlaybackContext?
+    var mediaYear: Int? = nil
 }
 
 struct PlayerEpisodeBrowserSeason: Identifiable {
@@ -14357,6 +14754,7 @@ struct PlayerEpisodeBrowserItem: Identifiable {
     let downloadItem: DownloadItem?
     #endif
     let isCurrent: Bool
+    var mediaYear: Int? = nil
 
     var imageURL: String? {
         PlayerEpisodeBrowserViewModel.fullImageURL(from: episode.stillPath)
@@ -14419,9 +14817,11 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
 
     let seed: PlayerEpisodeBrowserSeed
     private var didLoad = false
+    private var resolvedMediaYear: Int?
 
     init(seed: PlayerEpisodeBrowserSeed) {
         self.seed = seed
+        self.resolvedMediaYear = seed.mediaYear
     }
 
     func loadIfNeeded() async {
@@ -14552,6 +14952,9 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
             let showTitle = tvShow.name.isEmpty ? seed.showTitle : tvShow.name
             let showPosterURL = seed.showPosterURL ?? tvShow.fullPosterURL
             let resolvedImdbId = seed.imdbId ?? tvShow.externalIds?.imdbId
+            let fetchedMediaYear = tvShow.firstAirDate.flatMap { Int($0.prefix(4)) }
+            resolvedMediaYear = seed.mediaYear
+                ?? fetchedMediaYear.flatMap { (1800...3000).contains($0) ? $0 : nil }
             var animeData: AniListAnimeWithSeasons?
             var specialContexts: [SpecialEpisodeListContext] = []
 
@@ -14920,7 +15323,8 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
             originalTMDBEpisodeNumber: originalTMDBEpisodeNumber,
             progress: progress,
             isDownloaded: false,
-            isCurrent: isCurrent
+            isCurrent: isCurrent,
+            mediaYear: resolvedMediaYear
         )
         #else
         return PlayerEpisodeBrowserItem(
@@ -14944,7 +15348,8 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
             progress: progress,
             isDownloaded: download != nil,
             downloadItem: download,
-            isCurrent: isCurrent
+            isCurrent: isCurrent,
+            mediaYear: resolvedMediaYear
         )
         #endif
     }

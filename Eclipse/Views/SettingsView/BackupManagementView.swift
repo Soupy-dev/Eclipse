@@ -265,7 +265,7 @@ struct BackupManagementView: View {
         let shouldUseSecurityScope = !selectedBackupIsTemporary
         let shouldRemoveBackupAfterRestore = selectedBackupIsTemporary
         
-        DispatchQueue.global(qos: .userInitiated).async {
+        Task.detached(priority: .userInitiated) {
             var accessGranted = false
             if shouldUseSecurityScope {
                 accessGranted = backupURL.startAccessingSecurityScopedResource()
@@ -279,9 +279,9 @@ struct BackupManagementView: View {
                 }
             }
 
-            let success = BackupManager.shared.restoreBackup(from: backupURL)
+            let success = await BackupManager.shared.restoreBackup(from: backupURL)
             
-            DispatchQueue.main.async {
+            await MainActor.run {
                 isProcessing = false
                 selectedBackupURL = nil
                 selectedBackupIsTemporary = false

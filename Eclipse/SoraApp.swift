@@ -87,6 +87,10 @@ struct SoraApp: App {
 #if os(iOS)
     @State private var lastNotificationMaintenanceDay = Calendar.current.startOfDay(for: Date())
     private let notificationMaintenanceTimer = Timer.publish(every: 300, on: .main, in: .common).autoconnect()
+    // Remote snapshot providers do not offer one shared push mechanism. A
+    // conservative foreground poll keeps another active device discoverable
+    // without turning ordinary UI activity into provider API traffic.
+    private let cloudSyncMaintenanceTimer = Timer.publish(every: 900, on: .main, in: .common).autoconnect()
 #endif
 
 #if !os(tvOS)
@@ -253,6 +257,12 @@ struct SoraApp: App {
                     // begun before midnight is correctly stale after rollover.
                     await LocalNotificationManager.shared.refreshSchedulesIfNeeded()
                 }
+            }
+            .onReceive(cloudSyncMaintenanceTimer) { _ in
+                guard scenePhase == .active else { return }
+                ExperimentalCloudSyncManager.shared.syncOnActivationIfNeeded(
+                    reason: "foreground-periodic"
+                )
             }
             .onReceive(NotificationCenter.default.publisher(for: .openScheduleFromLocalNotification)) { _ in
                 showKanzen = false

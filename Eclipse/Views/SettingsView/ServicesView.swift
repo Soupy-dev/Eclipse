@@ -66,6 +66,7 @@ struct ServicesView: View {
     let initialSearchTarget: ServicesSettingsSearchTarget?
     @StateObject private var serviceManager = ServiceManager.shared
     @StateObject private var stremioManager = StremioAddonManager.shared
+    @StateObject private var skyStreamManager = SkyStreamPluginManager.shared
     @StateObject private var healthStore = SourceHealthStore.shared
 #if !os(tvOS)
     @Environment(\.editMode) private var editMode
@@ -100,6 +101,8 @@ struct ServicesView: View {
     @State private var didFocusInitialSearchTarget = false
     @State private var didScheduleInitialExtraSettingsNavigation = false
     @State private var showExtraServiceSettings = false
+    @State private var showSkyStreamManager = false
+    @State private var pendingSkyStreamUninstallPackageName: String?
 
     init(initialSearchTarget: ServicesSettingsSearchTarget? = nil) {
         self.initialSearchTarget = initialSearchTarget
@@ -107,7 +110,8 @@ struct ServicesView: View {
 
     private var hasAnyInstalledSources: Bool {
         !serviceManager.services.isEmpty ||
-        !stremioManager.addons.isEmpty
+        !stremioManager.addons.isEmpty ||
+        !skyStreamManager.providers.isEmpty
     }
 
     private struct ServiceDownloadAlert: Identifiable {
@@ -152,6 +156,15 @@ struct ServicesView: View {
                         } label: {
                             Label("Add Stremio Addon", systemImage: "play.circle")
                         }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                        if PlatformCapabilities.current.supportsSkyStreamPlugins {
+                            Button {
+                                showSkyStreamManager = true
+                            } label: {
+                                Label("Add SkyStream Plugin", systemImage: "shippingbox")
+                            }
+                        }
+#endif
                     } label: {
                         Image(systemName: "plus")
                     }
@@ -160,6 +173,12 @@ struct ServicesView: View {
 #endif
             .refreshable {
                 await serviceManager.updateServices()
+                await stremioManager.refreshAddons()
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                if PlatformCapabilities.current.supportsSkyStreamPlugins {
+                    await skyStreamManager.refreshRepositoriesAndInstalledPlugins(autoUpdate: autoUpdateEnabled)
+                }
+#endif
             }
             .modifier(AddServiceInputModifier(
                 isPresented: $showDownloadAlert,
@@ -188,6 +207,32 @@ struct ServicesView: View {
             .sheet(item: $pendingConfigureAddon) { addon in
                 StremioConfigureView(addon: addon, manager: stremioManager)
             }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            .sheet(isPresented: $showSkyStreamManager) {
+                SkyStreamManagerView()
+            }
+            .confirmationDialog(
+                "Uninstall SkyStream Plugin?",
+                isPresented: Binding(
+                    get: { pendingSkyStreamUninstallPackageName != nil },
+                    set: { if !$0 { pendingSkyStreamUninstallPackageName = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Uninstall Plugin", role: .destructive) {
+                    guard let packageName = pendingSkyStreamUninstallPackageName else { return }
+                    pendingSkyStreamUninstallPackageName = nil
+                    Task {
+                        try? await skyStreamManager.uninstall(packageName: packageName)
+                        reloadAutoModeSelectionFromDefaults()
+                        reloadExtraRulesSettingsFromDefaults()
+                    }
+                }
+                Button("Cancel", role: .cancel) { pendingSkyStreamUninstallPackageName = nil }
+            } message: {
+                Text("This removes the whole package and every provider row. Installed repositories are unchanged.")
+            }
+#endif
             .onAppear {
                 _ = healthStore.version
                 reloadAutoModeSelectionFromDefaults()
@@ -236,15 +281,17 @@ struct ServicesView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
     
-    /// A tagged union so services and Stremio addons can share one reorderable list.
+    /// A tagged union so every stream source family can share one reorderable list.
     private enum UnifiedItem: Identifiable {
         case service(Service)
         case stremio(StremioAddon)
+        case skyStream(SkyStreamProviderDescriptor)
 
         var id: String {
             switch self {
             case .service(let s): return "service:\(s.id.uuidString)"
             case .stremio(let a): return "stremio:\(a.id.uuidString)"
+            case .skyStream(let provider): return provider.id
             }
         }
 
@@ -252,6 +299,7 @@ struct ServicesView: View {
             switch self {
             case .service(let s): return s.sortIndex
             case .stremio(let a): return a.sortIndex
+            case .skyStream(let provider): return Int64(provider.sortIndex)
             }
         }
 
@@ -262,6 +310,8 @@ struct ServicesView: View {
                     && s.providerCapabilities.isSupportedOnCurrentPlatform
             case .stremio(let a):
                 return PlatformSourceActivation.isEnabled(sourceID: SourceHealth.stremioId(a), sharedValue: a.isActive)
+            case .skyStream(let provider):
+                return provider.isEnabled
             }
         }
 
@@ -271,6 +321,8 @@ struct ServicesView: View {
                 return service.providerCapabilities.isSupportedOnCurrentPlatform
             case .stremio(let a):
                 return a.manifest.supportsStreams
+            case .skyStream(let provider):
+                return provider.compatibility.status != .incompatible
             }
         }
 
@@ -285,6 +337,8 @@ struct ServicesView: View {
                 return service.providerCapabilities.isSupportedOnCurrentPlatform
             case .stremio:
                 return true
+            case .skyStream(let provider):
+                return provider.compatibility.status != .incompatible
             }
         }
 
@@ -292,6 +346,7 @@ struct ServicesView: View {
             switch self {
             case .service(let s): return s.metadata.sourceName
             case .stremio(let a): return a.manifest.name
+            case .skyStream(let provider): return provider.displayName
             }
         }
 
@@ -299,6 +354,7 @@ struct ServicesView: View {
             switch self {
             case .service(let s): return "service:\(s.id.uuidString)"
             case .stremio(let a): return "stremio:\(a.id.uuidString)"
+            case .skyStream(let provider): return provider.id
             }
         }
 
@@ -310,11 +366,14 @@ struct ServicesView: View {
     private var unifiedItems: [UnifiedItem] {
         let services: [UnifiedItem] = serviceManager.services.map { .service($0) }
         let addons: [UnifiedItem] = stremioManager.addons.map { .stremio($0) }
+        let skyStreamProviders: [UnifiedItem] = PlatformCapabilities.current.supportsSkyStreamPlugins
+            ? skyStreamManager.providers.map { .skyStream($0) }
+            : []
         var orderRank: [String: Int] = [:]
         for (index, sourceId) in autoModeSourceOrderIds.enumerated() where orderRank[sourceId] == nil {
             orderRank[sourceId] = index
         }
-        return (services + addons).sorted {
+        return (services + addons + skyStreamProviders).sorted {
             let lhsRank = orderRank[$0.autoModeSourceId]
             let rhsRank = orderRank[$1.autoModeSourceId]
             if let lhsRank, let rhsRank, lhsRank != rhsRank {
@@ -336,6 +395,7 @@ struct ServicesView: View {
     private enum AutoModeSourceItem: Identifiable {
         case service(Service)
         case stremio(StremioAddon)
+        case skyStream(SkyStreamProviderDescriptor)
 
         var id: String { autoModeSourceId }
 
@@ -346,6 +406,8 @@ struct ServicesView: View {
                     && service.providerCapabilities.isSupportedOnCurrentPlatform
             case .stremio(let addon):
                 return PlatformSourceActivation.isEnabled(sourceID: SourceHealth.stremioId(addon), sharedValue: addon.isActive)
+            case .skyStream(let provider):
+                return provider.isEnabled
             }
         }
 
@@ -355,6 +417,8 @@ struct ServicesView: View {
                 return service.providerCapabilities.isSupportedOnCurrentPlatform
             case .stremio(let addon):
                 return addon.manifest.supportsStreams
+            case .skyStream(let provider):
+                return provider.compatibility.status != .incompatible
             }
         }
 
@@ -362,6 +426,7 @@ struct ServicesView: View {
             switch self {
             case .service(let service): return service.metadata.sourceName
             case .stremio(let addon): return addon.manifest.name
+            case .skyStream(let provider): return provider.displayName
             }
         }
 
@@ -369,6 +434,7 @@ struct ServicesView: View {
             switch self {
             case .service(let service): return "service:\(service.id.uuidString)"
             case .stremio(let addon): return "stremio:\(addon.id.uuidString)"
+            case .skyStream(let provider): return provider.id
             }
         }
     }
@@ -378,6 +444,7 @@ struct ServicesView: View {
             switch item {
             case .service(let service): return .service(service)
             case .stremio(let addon): return .stremio(addon)
+            case .skyStream(let provider): return .skyStream(provider)
             }
         }
         .filter { $0.isActive && $0.supportsAutoMode }
@@ -427,8 +494,20 @@ struct ServicesView: View {
             }
     }
 
+    private var connectedSkyStreamRuleSources: [ExtraRulesSourceItem] {
+        guard PlatformCapabilities.current.supportsSkyStreamPlugins else { return [] }
+        return skyStreamManager.providers.map { provider in
+            ExtraRulesSourceItem(
+                id: provider.id,
+                displayName: provider.displayName,
+                kind: "SkyStream Plugin",
+                isActive: provider.isEnabled
+            )
+        }
+    }
+
     private var connectedExtraRulesSources: [ExtraRulesSourceItem] {
-        connectedServiceRuleSources + connectedStremioRuleSources
+        connectedServiceRuleSources + connectedStremioRuleSources + connectedSkyStreamRuleSources
     }
 
     private var autoModeQualityPreference: AutoModeQualityPreference {
@@ -494,10 +573,10 @@ struct ServicesView: View {
 #endif
 
             Section {
-                Toggle("Auto-Update Services", isOn: $autoUpdateEnabled)
+                Toggle("Auto-Update Sources", isOn: $autoUpdateEnabled)
                     .id(ServicesSettingsSearchTarget.autoUpdateServices.anchorID)
             } footer: {
-                Text("Automatically check for service updates when the app is opened.")
+                Text("Automatically check for source updates when the app is opened.")
             }
             .eclipseExperimentalSettingsRows()
             .background(EclipseScrollTracker())
@@ -576,7 +655,7 @@ struct ServicesView: View {
                 NavigationLink(isActive: $showExtraServiceSettings) {
                     extraServiceSettingsView
                 } label: {
-                    Label("Extra Service Settings", systemImage: "slider.horizontal.3")
+                    Label("Extra Source Settings", systemImage: "slider.horizontal.3")
                 }
             } footer: {
                 Text("Configure the stream list layout, language, quality, and source rules.")
@@ -585,7 +664,7 @@ struct ServicesView: View {
 
             Section(header: unifiedSectionHeader) {
                 if !hasAnyInstalledSources {
-                    Text("No services or addons installed")
+                    Text("No stream sources installed")
                         .foregroundColor(.secondary)
                         .font(.subheadline)
                 } else {
@@ -635,6 +714,17 @@ struct ServicesView: View {
                             StremioAddonRow(addon: addon, manager: stremioManager, healthStore: healthStore)
                                 .id(item.settingsSearchAnchorID)
 #endif
+                        case .skyStream(let provider):
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                            SkyStreamProviderRow(
+                                provider: provider,
+                                manager: skyStreamManager,
+                                healthStore: healthStore
+                            )
+                            .id(item.settingsSearchAnchorID)
+#else
+                            EmptyView()
+#endif
                         }
                     }
 #if !os(tvOS)
@@ -681,10 +771,10 @@ struct ServicesView: View {
                         .accessibilityValue("\(Int(serviceResultMinimumSimilarity * 100)) percent")
                     }
 
-                    Toggle("Drop Unmatched Service Results", isOn: $dropMismatchedServiceResults)
+                    Toggle("Drop Unmatched Search Results", isOn: $dropMismatchedServiceResults)
                         .id(ServicesSettingsSearchTarget.dropMismatchedResults.anchorID)
                 } footer: {
-                    Text("Results at or above this percentage are prioritized by similarity. When dropping is enabled, service results below this percentage are hidden and Auto Mode skips them instead of using a weaker match.")
+                    Text("Results at or above this percentage are prioritized by similarity. When dropping is enabled, search results below this percentage are hidden and Auto Mode skips them instead of using a weaker match.")
                 }
                 .eclipseExperimentalSettingsRows()
 
@@ -847,11 +937,11 @@ struct ServicesView: View {
                     .id(ServicesSettingsSearchTarget.applyExtraRulesTo.anchorID)
 #endif
                 } footer: {
-                    Text("Best-effort stream rules for the selected Services and Stremio addons. An Include list only keeps streams with a matching detected language; Exclude takes priority when the same language appears in both lists. When Assume Original Language for Untagged Streams is enabled, a stream with no language data is evaluated using the media's TMDB original language before Include and Exclude rules run. When Treat Dubbed Anime Streams as English is enabled, anime streams labeled dubbed or dub match English filters and count as having language data. Quality and language detection use stream tags, filenames, URLs, and labels.")
+                    Text("Best-effort stream rules for the selected sources. An Include list only keeps streams with a matching detected language; Exclude takes priority when the same language appears in both lists. When Assume Original Language for Untagged Streams is enabled, a stream with no language data is evaluated using the media's TMDB original language before Include and Exclude rules run. When Treat Dubbed Anime Streams as English is enabled, anime streams labeled dubbed or dub match English filters and count as having language data. Quality and language detection use stream tags, filenames, URLs, and labels.")
                 }
                 .eclipseExperimentalSettingsRows()
             }
-            .navigationTitle("Extra Service Settings")
+            .navigationTitle("Extra Source Settings")
             .eclipseSettingsStyle()
             .onAppear {
                 serviceResultMinimumSimilarity = ServicesResultRankingSettings.minimumSimilarity()
@@ -891,7 +981,7 @@ struct ServicesView: View {
 
     @ViewBuilder
     private var unifiedSectionHeader: some View {
-        Text("Services & Addons")
+        Text("Sources")
     }
 
 #if os(tvOS)
@@ -916,13 +1006,25 @@ struct ServicesView: View {
     private func deleteUnifiedItems(offsets: IndexSet) {
         let items = unifiedItems
         for index in offsets {
-            switch items[index] {
+            let item = items[index]
+            if case .skyStream(let provider) = item {
+                pendingSkyStreamUninstallPackageName = provider.packageName
+                continue
+            }
+            let sourceID = item.autoModeSourceId
+            selectedAutoModeSourceIds.remove(sourceID)
+            autoModeSourceOrderIds.removeAll { $0 == sourceID }
+            AutoModeSourceSelection.removeSourceAuthoritatively(sourceID)
+            switch item {
             case .service(let service):
                 serviceManager.removeService(service)
             case .stremio(let addon):
                 stremioManager.removeAddon(addon)
+            case .skyStream:
+                break
             }
         }
+        reloadExtraRulesSettingsFromDefaults()
         syncAutoModeSelectionWithInstalledSources()
     }
 
@@ -944,6 +1046,8 @@ struct ServicesView: View {
                 if let entity = stremioEntities.first(where: { $0.id == addon.id }) {
                     entity.sortIndex = Int64(index)
                 }
+            case .skyStream:
+                break
             }
         }
 
@@ -977,6 +1081,8 @@ struct ServicesView: View {
                 serviceEntities.first(where: { $0.id == service.id })?.sortIndex = Int64(index)
             case .stremio(let addon):
                 stremioEntities.first(where: { $0.id == addon.id })?.sortIndex = Int64(index)
+            case .skyStream:
+                break
             }
         }
         ServiceStore.shared.save()
@@ -988,12 +1094,22 @@ struct ServicesView: View {
     }
 
     private func removeUnifiedItem(_ item: UnifiedItem) {
+        if case .skyStream(let provider) = item {
+            pendingSkyStreamUninstallPackageName = provider.packageName
+            return
+        }
+        selectedAutoModeSourceIds.remove(item.autoModeSourceId)
+        autoModeSourceOrderIds.removeAll { $0 == item.autoModeSourceId }
+        AutoModeSourceSelection.removeSourceAuthoritatively(item.autoModeSourceId)
         switch item {
         case .service(let service):
             serviceManager.removeService(service)
         case .stremio(let addon):
             stremioManager.removeAddon(addon)
+        case .skyStream:
+            break
         }
+        reloadExtraRulesSettingsFromDefaults()
         syncAutoModeSelectionWithInstalledSources()
     }
     
@@ -1045,18 +1161,20 @@ struct ServicesView: View {
     private func persistAutoModeSelection() {
         let orderedActive = orderedAutoModeListItems.map(\.autoModeSourceId)
         UserDefaults.standard.set(Array(selectedAutoModeSourceIds), forKey: "servicesAutoModeSourceIds")
-#if os(tvOS)
-        autoModeSourceOrderIds = mergedTVAutoModeOrder(visibleSourceIDs: orderedActive)
-#else
-        autoModeSourceOrderIds = orderedActive
-#endif
+        autoModeSourceOrderIds = mergedAutoModeOrder(visibleSourceIDs: orderedActive)
         UserDefaults.standard.set(autoModeSourceOrderIds, forKey: "servicesAutoModeSourceOrderIds")
+        captureSkyStreamSourceDefaults()
     }
 
     private func persistUnifiedOrder(_ items: [UnifiedItem]) {
         let ids = items.map(\.autoModeSourceId)
-        autoModeSourceOrderIds = ids
-        UserDefaults.standard.set(ids, forKey: "servicesAutoModeSourceOrderIds")
+        autoModeSourceOrderIds = mergedAutoModeOrder(visibleSourceIDs: ids)
+        UserDefaults.standard.set(autoModeSourceOrderIds, forKey: "servicesAutoModeSourceOrderIds")
+        captureSkyStreamSourceDefaults()
+    }
+
+    private func captureSkyStreamSourceDefaults() {
+        Task { await skyStreamManager.captureSourceDefaultsState() }
     }
 
     private func reloadAutoModeSelectionFromDefaults() {
@@ -1138,12 +1256,24 @@ struct ServicesView: View {
                     extraRulesSourceToggle(source)
                 }
             }
+
+            if !connectedSkyStreamRuleSources.isEmpty {
+                Text("SkyStream Plugins")
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundColor(.secondary)
+
+                ForEach(connectedSkyStreamRuleSources) { source in
+                    extraRulesSourceToggle(source)
+                }
+            }
         }
 
         if extraRulesSourceIds != nil {
             Button {
                 StreamLanguageFilter.setExtraRulesSourceIds(nil)
                 reloadExtraRulesSettingsFromDefaults()
+                captureSkyStreamSourceDefaults()
             } label: {
                 Label("Apply to All Connected Sources", systemImage: "checkmark.circle")
             }
@@ -1166,17 +1296,27 @@ struct ServicesView: View {
         Binding(
             get: { extraRulesSourceIds?.contains(sourceId) ?? true },
             set: { isSelected in
-                var selected = extraRulesSourceIds ?? Set(connectedExtraRulesSources.map(\.id))
+                let visibleConnectedIDs = Set(connectedExtraRulesSources.map(\.id))
+                // `nil` means every connected source, including a SkyStream domain this target or
+                // emergency-disabled build intentionally cannot display. Materializing that value
+                // while toggling one visible source must retain those opaque IDs for a later iPhone.
+                let preservedHiddenSkyStreamIDs = Set(
+                    (UserDefaults.standard.stringArray(forKey: "servicesAutoModeSourceOrderIds") ?? [])
+                        .filter(StreamLanguageFilter.isValidSkyStreamSourceID)
+                ).subtracting(visibleConnectedIDs)
+                var selected = extraRulesSourceIds
+                    ?? visibleConnectedIDs.union(preservedHiddenSkyStreamIDs)
                 if isSelected {
                     selected.insert(sourceId)
                 } else {
                     selected.remove(sourceId)
                 }
 
-                let allConnectedIds = Set(connectedExtraRulesSources.map(\.id))
+                let allConnectedIds = visibleConnectedIDs
                 let storedSelection: [String]? = selected.isSuperset(of: allConnectedIds) ? nil : Array(selected)
                 StreamLanguageFilter.setExtraRulesSourceIds(storedSelection)
                 reloadExtraRulesSettingsFromDefaults()
+                captureSkyStreamSourceDefaults()
             }
         )
     }
@@ -1210,12 +1350,15 @@ struct ServicesView: View {
         let validIds = Set(orderedAutoModeListItems.map(\.autoModeSourceId))
 #endif
         let previous = selectedAutoModeSourceIds
-        selectedAutoModeSourceIds = selectedAutoModeSourceIds.intersection(validIds)
-#if os(tvOS)
-        let ordered = mergedTVAutoModeOrder(visibleSourceIDs: orderedAutoModeListItems.map(\.autoModeSourceId))
-#else
-        let ordered = orderedAutoModeListItems.map(\.autoModeSourceId)
-#endif
+        let unavailableSkyStreamIds = selectedAutoModeSourceIds.filter {
+            StreamLanguageFilter.isValidSkyStreamSourceID($0)
+        }
+        selectedAutoModeSourceIds = selectedAutoModeSourceIds
+            .intersection(validIds)
+            .union(unavailableSkyStreamIds)
+        let ordered = mergedAutoModeOrder(
+            visibleSourceIDs: orderedAutoModeListItems.map(\.autoModeSourceId)
+        )
         if selectedAutoModeSourceIds != previous || ordered != autoModeSourceOrderIds {
             autoModeSourceOrderIds = ordered
             persistAutoModeSelection()
@@ -1230,24 +1373,30 @@ struct ServicesView: View {
                 return item.autoModeSourceId
             case .stremio(let addon):
                 return addon.manifest.supportsStreams ? item.autoModeSourceId : nil
+            case .skyStream:
+                return nil
             }
         })
     }
 
-    /// Reorders the sources TV can currently run without deleting inactive or incompatible
-    /// source positions that may still be used by the iPhone app.
-    private func mergedTVAutoModeOrder(visibleSourceIDs: [String]) -> [String] {
-        let installed = installedAutoModeSourceIDs
-        let visibleSet = Set(visibleSourceIDs)
-        var remainingVisible = visibleSourceIDs.makeIterator()
+#endif
+
+    /// Reorders currently visible sources in place while retaining every inactive,
+    /// platform-hidden, or not-yet-loaded source ID from the prior shared order.
+    private func mergedAutoModeOrder(visibleSourceIDs: [String]) -> [String] {
+        var seenVisible = Set<String>()
+        let visible = visibleSourceIDs.filter { seenVisible.insert($0).inserted }
+        let visibleSet = Set(visible)
+        var remainingVisible = visible.makeIterator()
+        var seenPrior = Set<String>()
         var result: [String] = []
 
-        for sourceID in autoModeSourceOrderIds where installed.contains(sourceID) {
+        for sourceID in autoModeSourceOrderIds where seenPrior.insert(sourceID).inserted {
             if visibleSet.contains(sourceID) {
-                if let replacement = remainingVisible.next(), !result.contains(replacement) {
+                if let replacement = remainingVisible.next() {
                     result.append(replacement)
                 }
-            } else if !result.contains(sourceID) {
+            } else {
                 result.append(sourceID)
             }
         }
@@ -1257,18 +1406,15 @@ struct ServicesView: View {
                 result.append(sourceID)
             }
         }
-        for sourceID in unifiedItems.map(\.autoModeSourceId) where installed.contains(sourceID) && !result.contains(sourceID) {
-            result.append(sourceID)
-        }
         return result
     }
-#endif
 
     private func moveAutoModeSources(fromOffsets: IndexSet, toOffset: Int) {
         var ids = orderedAutoModeListItems.map(\.autoModeSourceId)
         ids.move(fromOffsets: fromOffsets, toOffset: toOffset)
-        autoModeSourceOrderIds = ids
-        UserDefaults.standard.set(ids, forKey: "servicesAutoModeSourceOrderIds")
+        autoModeSourceOrderIds = mergedAutoModeOrder(visibleSourceIDs: ids)
+        UserDefaults.standard.set(autoModeSourceOrderIds, forKey: "servicesAutoModeSourceOrderIds")
+        captureSkyStreamSourceDefaults()
     }
 
     private func moveAutoModeSource(from index: Int, direction: Int) {
@@ -1276,12 +1422,9 @@ struct ServicesView: View {
         var ids = orderedAutoModeListItems.map(\.autoModeSourceId)
         guard ids.indices.contains(index), ids.indices.contains(target) else { return }
         ids.swapAt(index, target)
-#if os(tvOS)
-        autoModeSourceOrderIds = mergedTVAutoModeOrder(visibleSourceIDs: ids)
-#else
-        autoModeSourceOrderIds = ids
-#endif
+        autoModeSourceOrderIds = mergedAutoModeOrder(visibleSourceIDs: ids)
         UserDefaults.standard.set(autoModeSourceOrderIds, forKey: "servicesAutoModeSourceOrderIds")
+        captureSkyStreamSourceDefaults()
     }
     
     private func downloadServiceFromURL() {

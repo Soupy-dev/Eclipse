@@ -9,6 +9,7 @@ struct NextEpisodeSeed: Equatable {
     let currentSeasonNumber: Int
     let currentEpisodeNumber: Int
     let showTitle: String
+    let mediaYear: Int?
     let showPosterURL: String?
     let imdbID: String?
     let isAnime: Bool
@@ -34,6 +35,7 @@ struct NextEpisodeSeed: Equatable {
                 currentSeasonNumber: seasonNumber,
                 currentEpisodeNumber: episodeNumber,
                 showTitle: normalizedTitle?.isEmpty == false ? normalizedTitle! : request.title,
+                mediaYear: request.mediaYear,
                 showPosterURL: showPosterURL ?? request.artworkURL?.absoluteString,
                 imdbID: request.imdbID,
                 isAnime: request.isAnime || mediaInfoIsAnime || request.episodePlaybackContext?.hasAnimeMediaId == true,
@@ -48,6 +50,7 @@ struct NextEpisodeSeed: Equatable {
         currentSeasonNumber: Int,
         currentEpisodeNumber: Int,
         showTitle: String,
+        mediaYear: Int? = nil,
         showPosterURL: String? = nil,
         imdbID: String? = nil,
         isAnime: Bool,
@@ -58,6 +61,7 @@ struct NextEpisodeSeed: Equatable {
         self.currentSeasonNumber = currentSeasonNumber
         self.currentEpisodeNumber = currentEpisodeNumber
         self.showTitle = showTitle
+        self.mediaYear = mediaYear
         self.showPosterURL = showPosterURL
         self.imdbID = imdbID
         self.isAnime = isAnime
@@ -79,6 +83,9 @@ struct ResolvedNextEpisodeTarget: Identifiable {
     let imdbID: String?
     let isAnime: Bool
     let isAnimation: Bool
+    /// Release/first-air year inherited from the show so search providers can reject same-title
+    /// collisions after a player-driven episode transition. Optional for older launch paths.
+    var mediaYear: Int? = nil
 
     var id: String {
         "next-\(showID)-s\(episode.seasonNumber)-e\(episode.episodeNumber)"
@@ -408,7 +415,8 @@ struct NextEpisodeResolver {
             posterURL: destinationSeason.posterUrl ?? seed.showPosterURL,
             imdbID: seed.imdbID,
             isAnime: true,
-            isAnimation: seed.isAnimation
+            isAnimation: seed.isAnimation,
+            mediaYear: seed.mediaYear
         ))
     }
 
@@ -501,7 +509,8 @@ struct NextEpisodeResolver {
             posterURL: entry.posterUrl ?? seed.showPosterURL,
             imdbID: entry.imdbId ?? seed.imdbID,
             isAnime: true,
-            isAnimation: seed.isAnimation
+            isAnimation: seed.isAnimation,
+            mediaYear: seed.mediaYear
         ))
     }
 
@@ -520,7 +529,8 @@ struct NextEpisodeResolver {
             posterURL: posterURL,
             imdbID: seed.imdbID,
             isAnime: false,
-            isAnimation: seed.isAnimation
+            isAnimation: seed.isAnimation,
+            mediaYear: seed.mediaYear
         )
     }
 

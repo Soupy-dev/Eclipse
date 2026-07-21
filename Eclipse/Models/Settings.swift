@@ -1075,7 +1075,10 @@ enum ExperimentalFeatureState {
 }
 
 #if os(iOS)
-enum CloudSyncProvider: String, CaseIterable, Identifiable, Hashable {
+private let eclipseCloudSnapshotFileName = "EclipseExperimentalSync-v2.json"
+private let eclipseLegacyCloudSnapshotFileName = "EclipseExperimentalSync.json"
+
+enum CloudSyncProvider: String, CaseIterable, Identifiable, Hashable, Sendable {
     case iCloud = "icloud"
     case googleDrive = "googleDrive"
     case oneDrive = "oneDrive"
@@ -1115,6 +1118,30 @@ enum CloudSyncProvider: String, CaseIterable, Identifiable, Hashable {
         case .oneDrive:
             return "experimentalOneDriveSyncLastSeenRemoteModificationAt"
         }
+    }
+
+    var lastSyncedFootprintKey: String {
+        "experimentalCloudSyncLastFootprintV1.\(rawValue)"
+    }
+
+    var accountIdentityKey: String {
+        "experimentalCloudSyncAccountIdentityV1.\(rawValue)"
+    }
+
+    var lastSeenRemoteRevisionKey: String {
+        "experimentalCloudSyncLastRemoteRevisionV1.\(rawValue)"
+    }
+
+    var lastAutomaticAttemptKey: String {
+        "experimentalCloudSyncLastAutomaticAttemptV1.\(rawValue)"
+    }
+
+    var retryNotBeforeKey: String {
+        "experimentalCloudSyncRetryNotBeforeV1.\(rawValue)"
+    }
+
+    var lastSuccessfulSyncKey: String {
+        "experimentalCloudSyncLastSuccessfulSyncV1.\(rawValue)"
     }
 
     var requiresAccountConnection: Bool {
@@ -1166,9 +1193,77 @@ struct ExperimentalCloudSyncAvailability {
     }
 }
 
+enum ExperimentalCloudReconciliationAction: Equatable {
+    case restoreRemote
+    case concurrentConflict
+    case remoteWouldReduceLocalData
+}
+
+/// Pure decision seam for the destructive part of whole-snapshot
+/// reconciliation. Keeping this independent from provider I/O makes the
+/// conflict rules deterministic and directly testable.
+struct ExperimentalCloudReconciliationPolicy {
+    static func actionForUnseenRemote(
+        local: ExperimentalCloudSnapshotFootprint,
+        remote: ExperimentalCloudSnapshotFootprint,
+        previous: ExperimentalCloudSnapshotFootprint?
+    ) -> ExperimentalCloudReconciliationAction {
+        let localChangedSinceBaseline: Bool
+        if let previous {
+            localChangedSinceBaseline = local.hasDifferentContent(than: previous)
+        } else {
+            localChangedSinceBaseline = local.meaningfulRecordCount > 0
+        }
+
+        if localChangedSinceBaseline && local.hasDifferentContent(than: remote) {
+            return .concurrentConflict
+        }
+        if local.hasAnyMoreData(than: remote) {
+            return .remoteWouldReduceLocalData
+        }
+        return .restoreRemote
+    }
+}
+
+struct ExperimentalCloudSyncErrorPolicy {
+    static func requiresFreshAuthorization(statusCode: Int, body: String) -> Bool {
+        statusCode == 401 ||
+            (statusCode == 400 && body.localizedCaseInsensitiveContains("invalid_grant"))
+    }
+
+    static func message(
+        provider: CloudSyncProvider,
+        statusCode: Int,
+        body: String
+    ) -> String {
+        if requiresFreshAuthorization(statusCode: statusCode, body: body) {
+            return "Your \(provider.displayName) connection expired. Connect it again to resume sync."
+        }
+        if statusCode == 429 ||
+            (statusCode == 403 &&
+             (body.localizedCaseInsensitiveContains("rateLimit") ||
+              body.localizedCaseInsensitiveContains("rate_limit"))) {
+            return "\(provider.displayName) is temporarily limiting sync requests. Eclipse will retry later."
+        }
+        if statusCode == 507 ||
+            body.localizedCaseInsensitiveContains("quotaExceeded") ||
+            body.localizedCaseInsensitiveContains("storageQuota") {
+            return "\(provider.displayName) does not have enough available storage for this snapshot."
+        }
+        if (500...599).contains(statusCode) {
+            return "\(provider.displayName) is temporarily unavailable. Eclipse will retry later."
+        }
+        if statusCode == 403 {
+            return "\(provider.displayName) denied access to Eclipse's app folder. Reconnect the account and try again."
+        }
+        return "\(provider.displayName) could not complete the sync request (HTTP \(statusCode))."
+    }
+}
+
 @MainActor
 final class ExperimentalCloudSyncManager: ObservableObject {
     static let shared = ExperimentalCloudSyncManager()
+    private static let primaryProviderKey = "experimentalCloudSyncPrimaryProviderV1"
 
     @Published private(set) var isSyncing = false
     @Published private(set) var activeProvider: CloudSyncProvider?
@@ -1177,10 +1272,13 @@ final class ExperimentalCloudSyncManager: ObservableObject {
     @Published private var providerStatusMessages: [CloudSyncProvider: String] = [:]
     @Published private var providerLastSyncDates: [CloudSyncProvider: Date] = [:]
     @Published private(set) var connectionStateVersion = 0
+    @Published private(set) var overwriteWarning: CloudSyncOverwriteWarning?
+    @Published private(set) var primaryProvider: CloudSyncProvider?
 
-    private static let snapshotFileName = "EclipseExperimentalSync.json"
+    private static let snapshotFileName = eclipseCloudSnapshotFileName
+    private static let legacySnapshotFileName = eclipseLegacyCloudSnapshotFileName
     private static let maximumCloudControlResponseBytes = 2_000_000
-    private static let maximumCloudSnapshotBytes = 50_000_000
+    nonisolated private static let maximumCloudSnapshotBytes = 50_000_000
     private static let maximumCloudErrorPreviewBytes = 32_768
     private static let googleClientID = "871649357486-168i49j7ouc70r4t879112h65kmdilit.apps.googleusercontent.com"
     private static let googleURLScheme = "com.googleusercontent.apps.871649357486-168i49j7ouc70r4t879112h65kmdilit"
@@ -1190,17 +1288,43 @@ final class ExperimentalCloudSyncManager: ObservableObject {
 
     private let authPresentationContextProvider = CloudSyncAuthPresentationContextProvider()
     private var authenticationSession: ASWebAuthenticationSession?
-    private var lastAutomaticSync: Date?
     private var pendingAutomaticSyncTask: Task<Void, Never>?
+    private var pendingChangeDuringSync = false
+    private var queuedOverwriteWarnings: [CloudSyncOverwriteWarning] = []
     private var observers: [NSObjectProtocol] = []
 
     private init() {
+        let defaults = UserDefaults.standard
+        for provider in CloudSyncProvider.allCases {
+            let timestamp = defaults.double(forKey: provider.lastSuccessfulSyncKey)
+            guard timestamp > 0 else { continue }
+            let date = Date(timeIntervalSince1970: timestamp)
+            providerLastSyncDates[provider] = date
+            providerStatusMessages[provider] = "Last synced \(Self.relativeSyncTime(for: date))"
+        }
+        lastSyncDate = providerLastSyncDates.values.max()
+        if let rawPrimary = defaults.string(forKey: Self.primaryProviderKey),
+           let preferred = CloudSyncProvider(rawValue: rawPrimary),
+           defaults.bool(forKey: preferred.syncEnabledKey) {
+            primaryProvider = preferred
+        } else {
+            primaryProvider = CloudSyncProvider.allCases.first {
+                defaults.bool(forKey: $0.syncEnabledKey)
+            }
+            if let primaryProvider {
+                defaults.set(primaryProvider.rawValue, forKey: Self.primaryProviderKey)
+            } else {
+                defaults.removeObject(forKey: Self.primaryProviderKey)
+            }
+        }
+        BackupManager.shared.recoverInterruptedExperimentalCloudRestoreIfNeeded()
         let center = NotificationCenter.default
         let names: [Notification.Name] = [
             .libraryDataDidChange,
             .progressDataDidChange,
             .userRatingDataDidChange,
             .catalogDataDidChange,
+            .skyStreamMetadataDidChange,
             UserDefaults.didChangeNotification
         ]
         observers = names.map { name in
@@ -1222,13 +1346,29 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         let providers = enabledProvidersForAutomaticSync()
         guard !providers.isEmpty else { return }
 
-        if let lastAutomaticSync,
-           Date().timeIntervalSince(lastAutomaticSync) < 300 {
+        let now = Date()
+        let nextAllowedByProvider = Dictionary(uniqueKeysWithValues: providers.map { provider -> (CloudSyncProvider, Date) in
+            let defaults = UserDefaults.standard
+            let attempt = defaults.double(forKey: provider.lastAutomaticAttemptKey)
+            let retry = defaults.double(forKey: provider.retryNotBeforeKey)
+            let attemptDate = attempt > 0 ? Date(timeIntervalSince1970: attempt + 300) : .distantPast
+            let retryDate = retry > 0 ? Date(timeIntervalSince1970: retry) : .distantPast
+            return (provider, max(attemptDate, retryDate))
+        })
+        let readyProviders = providers.filter { (nextAllowedByProvider[$0] ?? .distantPast) <= now }
+        let delayedDates = providers.compactMap { provider -> Date? in
+            guard let date = nextAllowedByProvider[provider], date > now else { return nil }
+            return date
+        }
+
+        if let nextDelayed = delayedDates.min() {
+            scheduleAutomaticSync(after: nextDelayed.timeIntervalSince(now), reason: reason)
+        }
+        guard !readyProviders.isEmpty else {
             return
         }
 
-        lastAutomaticSync = Date()
-        syncProviders(providers, reason: reason)
+        syncProviders(readyProviders, reason: reason, automatic: true)
     }
 
     func syncSnapshot(reason: String = "manual") {
@@ -1251,7 +1391,30 @@ final class ExperimentalCloudSyncManager: ObservableObject {
 
     func restoreRemoteSnapshot(provider: CloudSyncProvider) {
         runProviderTask(provider: provider, statusPrefix: "Restored") {
-            try await Self.restoreRemoteSnapshot(provider: provider)
+            try await Self.restoreRemoteSnapshotSafely(provider: provider)
+        }
+    }
+
+    func cancelOverwriteWarning() {
+        advanceOverwriteWarning()
+    }
+
+    func restoreCloudAfterOverwriteWarning() {
+        guard let warning = overwriteWarning else { return }
+        advanceOverwriteWarning()
+        runProviderTask(provider: warning.provider, statusPrefix: "Restored") {
+            try await Self.restoreRemoteSnapshot(provider: warning.provider)
+        }
+    }
+
+    func replaceCloudAfterOverwriteWarning() {
+        guard let warning = overwriteWarning else { return }
+        advanceOverwriteWarning()
+        runProviderTask(provider: warning.provider, statusPrefix: "Replaced cloud backup") {
+            try await Self.writeLocalSnapshot(
+                provider: warning.provider,
+                reason: "confirmed-destructive-replacement"
+            )
         }
     }
 
@@ -1267,7 +1430,12 @@ final class ExperimentalCloudSyncManager: ObservableObject {
             do {
                 let token = try await authorize(provider: provider)
                 try CloudSyncTokenStore.save(token, for: provider)
-                UserDefaults.standard.set(true, forKey: provider.syncEnabledKey)
+                // A newly authorized account must never inherit reconciliation
+                // markers from a previously connected account.
+                UserDefaults.standard.removeObject(forKey: provider.lastSeenRemoteModificationKey)
+                UserDefaults.standard.removeObject(forKey: provider.lastSyncedFootprintKey)
+                UserDefaults.standard.removeObject(forKey: provider.lastSeenRemoteRevisionKey)
+                setProviderEnabled(provider, enabled: true)
                 connectionStateVersion += 1
 
                 let date = try await Self.reconcileSnapshot(provider: provider, reason: "connected")
@@ -1281,7 +1449,7 @@ final class ExperimentalCloudSyncManager: ObservableObject {
     func disconnectProvider(_ provider: CloudSyncProvider) {
         guard provider.requiresAccountConnection else { return }
         CloudSyncTokenStore.deleteToken(for: provider)
-        UserDefaults.standard.set(false, forKey: provider.syncEnabledKey)
+        setProviderEnabled(provider, enabled: false)
         connectionStateVersion += 1
         let message = "Disconnected from \(provider.displayName)."
         setStatus(message, for: provider)
@@ -1319,24 +1487,66 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         }
     }
 
+    func setProviderEnabled(_ provider: CloudSyncProvider, enabled: Bool) {
+        let defaults = UserDefaults.standard
+        defaults.set(enabled, forKey: provider.syncEnabledKey)
+        if enabled {
+            // The most recently enabled provider is the least surprising first
+            // authority, while every other enabled provider remains active.
+            makePrimary(provider)
+        } else if primaryProvider == provider {
+            let replacement = CloudSyncProvider.allCases.first {
+                $0 != provider && defaults.bool(forKey: $0.syncEnabledKey)
+            }
+            primaryProvider = replacement
+            if let replacement {
+                defaults.set(replacement.rawValue, forKey: Self.primaryProviderKey)
+            } else {
+                defaults.removeObject(forKey: Self.primaryProviderKey)
+            }
+        }
+        connectionStateVersion += 1
+    }
+
+    func makePrimary(_ provider: CloudSyncProvider) {
+        guard UserDefaults.standard.bool(forKey: provider.syncEnabledKey) else { return }
+        primaryProvider = provider
+        UserDefaults.standard.set(provider.rawValue, forKey: Self.primaryProviderKey)
+        connectionStateVersion += 1
+    }
+
     private func enabledProvidersForAutomaticSync() -> [CloudSyncProvider] {
-        CloudSyncProvider.allCases.filter { provider in
+        let enabled = CloudSyncProvider.allCases.filter { provider in
             UserDefaults.standard.bool(forKey: provider.syncEnabledKey) && canUseProvider(provider)
         }
+        guard !enabled.isEmpty else { return [] }
+
+        let first = primaryProvider.flatMap { enabled.contains($0) ? $0 : nil } ?? enabled[0]
+        return [first] + enabled.filter { $0 != first }
     }
 
     private func scheduleAutomaticSync() {
         guard ExperimentalFeatureState.isEnabledAtLaunch,
-              !isSyncing,
               !enabledProvidersForAutomaticSync().isEmpty else {
             return
         }
 
+        if isSyncing {
+            pendingChangeDuringSync = true
+            return
+        }
+
+        scheduleAutomaticSync(after: 2, reason: "local-change")
+    }
+
+    private func scheduleAutomaticSync(after delay: TimeInterval, reason: String) {
         pendingAutomaticSyncTask?.cancel()
         pendingAutomaticSyncTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            let nanoseconds = UInt64(max(0, min(delay, 86_400)) * 1_000_000_000)
+            try? await Task.sleep(nanoseconds: nanoseconds)
             guard !Task.isCancelled, let self else { return }
-            self.syncOnActivationIfNeeded(reason: "local-change")
+            self.pendingAutomaticSyncTask = nil
+            self.syncOnActivationIfNeeded(reason: reason)
         }
     }
 
@@ -1348,15 +1558,25 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         return providers
     }
 
-    private func syncProviders(_ providers: [CloudSyncProvider], reason: String) {
+    private func syncProviders(
+        _ providers: [CloudSyncProvider],
+        reason: String,
+        automatic: Bool = false
+    ) {
         guard !providers.isEmpty, !isSyncing else { return }
-        lastAutomaticSync = Date()
+        if automatic {
+            let timestamp = Date().timeIntervalSince1970
+            providers.forEach {
+                UserDefaults.standard.set(timestamp, forKey: $0.lastAutomaticAttemptKey)
+            }
+        }
         isSyncing = true
         activeProvider = nil
 
         Task {
             var syncedCount = 0
             var lastDate: Date?
+            var failedProviders: [CloudSyncProvider] = []
 
             for provider in providers {
                 activeProvider = provider
@@ -1365,9 +1585,10 @@ final class ExperimentalCloudSyncManager: ObservableObject {
                     syncedCount += 1
                     lastDate = date
                     setStatus("Synced \(Self.relativeSyncTime(for: date))", for: provider)
-                    providerLastSyncDates[provider] = date
+                    recordSuccessfulSync(date, for: provider)
                 } catch {
-                    setStatus(error.localizedDescription, for: provider)
+                    failedProviders.append(provider)
+                    handleProviderFailure(provider: provider, error: error)
                 }
             }
 
@@ -1381,6 +1602,10 @@ final class ExperimentalCloudSyncManager: ObservableObject {
             } else {
                 lastStatusMessage = "Cloud sync could not complete."
             }
+            if automatic, !failedProviders.isEmpty {
+                scheduleAutomaticRetry(for: failedProviders)
+            }
+            scheduleFollowUpIfNeeded(afterSyncing: providers)
         }
     }
 
@@ -1401,7 +1626,6 @@ final class ExperimentalCloudSyncManager: ObservableObject {
 
         isSyncing = true
         activeProvider = provider
-        lastAutomaticSync = Date()
 
         Task {
             do {
@@ -1415,23 +1639,146 @@ final class ExperimentalCloudSyncManager: ObservableObject {
 
     private func completeProviderTask(provider: CloudSyncProvider, statusPrefix: String, date: Date) {
         let message = "\(statusPrefix) \(Self.relativeSyncTime(for: date))"
-        providerLastSyncDates[provider] = date
+        recordSuccessfulSync(date, for: provider)
         setStatus(message, for: provider)
         lastSyncDate = date
         lastStatusMessage = "\(provider.displayName): \(message)"
         activeProvider = nil
         isSyncing = false
+        scheduleFollowUpIfNeeded(afterSyncing: [provider])
     }
 
     private func failProviderTask(provider: CloudSyncProvider, error: Error) {
-        setStatus(error.localizedDescription, for: provider)
-        lastStatusMessage = "\(provider.displayName): \(error.localizedDescription)"
+        handleProviderFailure(provider: provider, error: error)
+        lastStatusMessage = "\(provider.displayName): \(statusMessage(for: provider))"
         activeProvider = nil
         isSyncing = false
+        scheduleFollowUpIfNeeded(afterSyncing: [provider])
+    }
+
+    private func handleProviderFailure(provider: CloudSyncProvider, error: Error) {
+        presentOverwriteWarningIfNeeded(provider: provider, error: error)
+
+        if provider.requiresAccountConnection, Self.requiresFreshAuthorization(error) {
+            CloudSyncTokenStore.deleteToken(for: provider)
+            setProviderEnabled(provider, enabled: false)
+            setStatus("Your \(provider.displayName) connection expired. Connect it again to resume sync.", for: provider)
+        } else {
+            setStatus(error.localizedDescription, for: provider)
+        }
+
+        Logger.shared.log(
+            "Cloud sync failed provider=\(provider.rawValue) errorType=\(String(reflecting: type(of: error)))",
+            type: "CloudSync"
+        )
+    }
+
+    private static func requiresFreshAuthorization(_ error: Error) -> Bool {
+        switch error {
+        case SyncError.authenticationRequired:
+            return true
+        case let SyncError.remoteRequestFailed(_, statusCode, body):
+            return ExperimentalCloudSyncErrorPolicy.requiresFreshAuthorization(
+                statusCode: statusCode,
+                body: body
+            )
+        default:
+            return false
+        }
+    }
+
+    private func presentOverwriteWarningIfNeeded(provider: CloudSyncProvider, error: Error) {
+        switch error {
+        case let SyncError.suspiciousLocalReduction(_, localCount, remoteCount):
+            enqueueOverwriteWarning(CloudSyncOverwriteWarning(
+                provider: provider,
+                localRecordCount: localCount,
+                remoteRecordCount: remoteCount,
+                direction: .cloudIsFuller
+            ))
+        case let SyncError.suspiciousRemoteReduction(_, localCount, remoteCount):
+            enqueueOverwriteWarning(CloudSyncOverwriteWarning(
+                provider: provider,
+                localRecordCount: localCount,
+                remoteRecordCount: remoteCount,
+                direction: .deviceIsFuller
+            ))
+        case let SyncError.concurrentSnapshotConflict(_, localCount, remoteCount):
+            enqueueOverwriteWarning(CloudSyncOverwriteWarning(
+                provider: provider,
+                localRecordCount: localCount,
+                remoteRecordCount: remoteCount,
+                direction: .bothChanged
+            ))
+        default:
+            break
+        }
+    }
+
+    private func enqueueOverwriteWarning(_ warning: CloudSyncOverwriteWarning) {
+        queuedOverwriteWarnings.removeAll { $0.provider == warning.provider }
+        if overwriteWarning == nil {
+            overwriteWarning = warning
+        } else if overwriteWarning?.provider != warning.provider {
+            queuedOverwriteWarnings.append(warning)
+        }
+    }
+
+    private func advanceOverwriteWarning() {
+        overwriteWarning = nil
+        guard !queuedOverwriteWarnings.isEmpty else { return }
+        let next = queuedOverwriteWarnings.removeFirst()
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard let self, self.overwriteWarning == nil else { return }
+            self.overwriteWarning = next
+        }
+    }
+
+    private func scheduleFollowUpIfNeeded(afterSyncing providers: [CloudSyncProvider]) {
+        guard pendingChangeDuringSync else { return }
+        pendingChangeDuringSync = false
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard let snapshot = await BackupManager.shared.createExperimentalCloudSnapshot() else {
+                self.scheduleAutomaticSync(after: 2, reason: "change-during-sync")
+                return
+            }
+            let hasUnsyncedContent = providers.contains { provider in
+                guard let previous = Self.lastSyncedFootprint(provider: provider) else { return true }
+                return Self.protectedFootprint(snapshot.footprint, provider: provider)
+                    .hasDifferentContent(than: previous)
+            }
+            if hasUnsyncedContent {
+                self.scheduleAutomaticSync(after: 2, reason: "change-during-sync")
+            }
+        }
+    }
+
+    private func scheduleAutomaticRetry(for providers: [CloudSyncProvider]) {
+        let now = Date()
+        let retryDate = providers.map { provider -> Date in
+            let defaults = UserDefaults.standard
+            let attempt = defaults.double(forKey: provider.lastAutomaticAttemptKey)
+            let cooldown = defaults.double(forKey: provider.retryNotBeforeKey)
+            return max(
+                attempt > 0 ? Date(timeIntervalSince1970: attempt + 300) : now,
+                cooldown > 0 ? Date(timeIntervalSince1970: cooldown) : now
+            )
+        }.min() ?? now.addingTimeInterval(300)
+        scheduleAutomaticSync(
+            after: max(1, retryDate.timeIntervalSince(now)),
+            reason: "automatic-retry"
+        )
     }
 
     private func setStatus(_ message: String, for provider: CloudSyncProvider) {
         providerStatusMessages[provider] = message
+    }
+
+    private func recordSuccessfulSync(_ date: Date, for provider: CloudSyncProvider) {
+        providerLastSyncDates[provider] = date
+        UserDefaults.standard.set(date.timeIntervalSince1970, forKey: provider.lastSuccessfulSyncKey)
     }
 
     private func unavailableMessage(for provider: CloudSyncProvider) -> String {
@@ -1517,84 +1864,276 @@ final class ExperimentalCloudSyncManager: ObservableObject {
     }
 
     private static func reconcileSnapshot(provider: CloudSyncProvider, reason: String) async throws -> Date {
+        prepareReconciliationIdentity(provider: provider)
+
         guard let metadata = try await remoteMetadata(provider: provider) else {
-            return try await writeLocalSnapshot(provider: provider, reason: reason)
+            return try await writeLocalSnapshot(
+                provider: provider,
+                reason: reason,
+                writePrecondition: .remoteMissing
+            )
         }
+
+        guard let localSnapshot = await BackupManager.shared.createExperimentalCloudSnapshot() else {
+            throw SyncError.snapshotEncodingFailed
+        }
+
+        let localFootprint = protectedFootprint(localSnapshot.footprint, provider: provider)
 
         if hasUnseenRemoteSnapshot(metadata: metadata, provider: provider) {
-            Logger.shared.log("Experimental cloud snapshot restoring newer remote provider=\(provider.rawValue) reason=\(reason)", type: "CloudSync")
-            return try await restoreRemoteSnapshot(provider: provider)
+            let remoteSnapshot = try await readRemoteSnapshot(provider: provider, knownMetadata: metadata)
+            guard let decodedRemoteFootprint = BackupManager.shared.experimentalCloudSnapshotFootprint(from: remoteSnapshot.data) else {
+                throw SyncError.snapshotInspectionFailed
+            }
+            let remoteFootprint = protectedFootprint(decodedRemoteFootprint, provider: provider)
+
+            switch ExperimentalCloudReconciliationPolicy.actionForUnseenRemote(
+                local: localFootprint,
+                remote: remoteFootprint,
+                previous: lastSyncedFootprint(provider: provider)
+            ) {
+            case .concurrentConflict:
+                throw SyncError.concurrentSnapshotConflict(
+                    provider,
+                    localFootprint.meaningfulRecordCount,
+                    remoteFootprint.meaningfulRecordCount
+                )
+            case .remoteWouldReduceLocalData:
+                // A newer timestamp is not permission to erase fuller device data.
+                // Any protected domain that is richer locally requires an explicit
+                // choice before applying the remote snapshot.
+                throw SyncError.suspiciousRemoteReduction(
+                    provider,
+                    localFootprint.meaningfulRecordCount,
+                    remoteFootprint.meaningfulRecordCount
+                )
+            case .restoreRemote:
+                break
+            }
+
+            Logger.shared.log("Experimental cloud snapshot restoring verified newer remote provider=\(provider.rawValue) reason=\(reason)", type: "CloudSync")
+            return try await restoreRemoteSnapshot(
+                provider: provider,
+                knownMetadata: metadata,
+                preparedSnapshot: remoteSnapshot
+            )
         }
 
-        return try await writeLocalSnapshot(provider: provider, reason: reason)
+
+        if !metadata.isLegacy,
+           let previousFootprint = lastSyncedFootprint(provider: provider),
+           !localFootprint.hasDifferentContent(than: previousFootprint) {
+            markRemoteSnapshotSeen(
+                provider: provider,
+                fallbackDate: metadata.modifiedAt ?? Date(),
+                revision: metadata.revision
+            )
+            Logger.shared.log(
+                "Experimental cloud sync skipped unchanged snapshot provider=\(provider.rawValue) reason=\(reason)",
+                type: "CloudSync"
+            )
+            return Date()
+        }
+
+        let needsRemoteSafetyCheck: Bool
+        if let previousFootprint = lastSyncedFootprint(provider: provider) {
+            needsRemoteSafetyCheck = localFootprint.isSuspiciousReduction(from: previousFootprint)
+        } else {
+            needsRemoteSafetyCheck = true
+        }
+
+        if needsRemoteSafetyCheck {
+            // This read occurs only once when adopting the safeguard for an
+            // existing provider, or after a suspicious local reduction.
+            let remoteSnapshot = try await readRemoteSnapshot(provider: provider, knownMetadata: metadata)
+            if let remoteFootprint = BackupManager.shared.experimentalCloudSnapshotFootprint(from: remoteSnapshot.data),
+               protectedFootprint(remoteFootprint, provider: provider).hasMeaningfullyMoreData(than: localFootprint) {
+                let protectedRemoteFootprint = protectedFootprint(remoteFootprint, provider: provider)
+                throw SyncError.suspiciousLocalReduction(
+                    provider,
+                    localFootprint.meaningfulRecordCount,
+                    protectedRemoteFootprint.meaningfulRecordCount
+                )
+            }
+        }
+
+        return try await writeLocalSnapshot(
+            provider: provider,
+            reason: reason,
+            snapshot: localSnapshot,
+            writePrecondition: metadata.isLegacy ? .remoteMissing : .remoteMatches(metadata)
+        )
     }
 
-    private static func writeLocalSnapshot(provider: CloudSyncProvider, reason: String) async throws -> Date {
-        guard let data = BackupManager.shared.createExperimentalCloudSnapshotData() else {
+    private static func writeLocalSnapshot(
+        provider: CloudSyncProvider,
+        reason: String,
+        snapshot preparedSnapshot: ExperimentalCloudSnapshot? = nil,
+        writePrecondition: RemoteWritePrecondition = .unconditional
+    ) async throws -> Date {
+        let snapshot: ExperimentalCloudSnapshot?
+        if let preparedSnapshot {
+            snapshot = preparedSnapshot
+        } else {
+            snapshot = await BackupManager.shared.createExperimentalCloudSnapshot()
+        }
+        guard let snapshot else {
             throw SyncError.snapshotEncodingFailed
+        }
+        let data = snapshot.data
+        guard data.count <= maximumCloudSnapshotBytes else {
+            throw BoundedURLSessionError.responseTooLarge(
+                maximumBytes: maximumCloudSnapshotBytes
+            )
         }
 
         let metadata: RemoteSnapshotMetadata
         switch provider {
         case .iCloud:
-            metadata = try writeICloudSnapshot(data: data)
+            metadata = try await writeICloudSnapshot(data: data, precondition: writePrecondition)
         case .googleDrive:
-            metadata = try await writeGoogleDriveSnapshot(data: data)
+            metadata = try await writeGoogleDriveSnapshot(data: data, precondition: writePrecondition)
         case .oneDrive:
-            metadata = try await writeOneDriveSnapshot(data: data)
+            metadata = try await writeOneDriveSnapshot(data: data, precondition: writePrecondition)
         }
 
-        markRemoteSnapshotSeen(provider: provider, fallbackDate: metadata.modifiedAt ?? Date())
+        markRemoteSnapshotSeen(
+            provider: provider,
+            fallbackDate: metadata.modifiedAt ?? Date(),
+            revision: metadata.revision
+        )
+        saveLastSyncedFootprint(protectedFootprint(snapshot.footprint, provider: provider), provider: provider)
         Logger.shared.log("Experimental cloud snapshot pushed provider=\(provider.rawValue) reason=\(reason) bytes=\(data.count)", type: "CloudSync")
         return Date()
     }
 
-    private static func restoreRemoteSnapshot(provider: CloudSyncProvider) async throws -> Date {
+    private static func restoreRemoteSnapshotSafely(provider: CloudSyncProvider) async throws -> Date {
+        prepareReconciliationIdentity(provider: provider)
+        guard let metadata = try await remoteMetadata(provider: provider) else {
+            throw SyncError.noSnapshot(provider)
+        }
+        guard let localSnapshot = await BackupManager.shared.createExperimentalCloudSnapshot() else {
+            throw SyncError.snapshotEncodingFailed
+        }
+
+        let remoteSnapshot = try await readRemoteSnapshot(provider: provider, knownMetadata: metadata)
+        guard let decodedRemoteFootprint = BackupManager.shared.experimentalCloudSnapshotFootprint(from: remoteSnapshot.data) else {
+            throw SyncError.snapshotInspectionFailed
+        }
+
+        let localFootprint = protectedFootprint(localSnapshot.footprint, provider: provider)
+        let remoteFootprint = protectedFootprint(decodedRemoteFootprint, provider: provider)
+        if localFootprint.hasAnyMoreData(than: remoteFootprint) {
+            throw SyncError.suspiciousRemoteReduction(
+                provider,
+                localFootprint.meaningfulRecordCount,
+                remoteFootprint.meaningfulRecordCount
+            )
+        }
+        if localFootprint.meaningfulRecordCount > 0,
+           localFootprint.hasDifferentContent(than: remoteFootprint) {
+            throw SyncError.concurrentSnapshotConflict(
+                provider,
+                localFootprint.meaningfulRecordCount,
+                remoteFootprint.meaningfulRecordCount
+            )
+        }
+
+        return try await restoreRemoteSnapshot(
+            provider: provider,
+            knownMetadata: metadata,
+            preparedSnapshot: remoteSnapshot
+        )
+    }
+
+    private static func restoreRemoteSnapshot(
+        provider: CloudSyncProvider,
+        knownMetadata: RemoteSnapshotMetadata? = nil,
+        preparedSnapshot: RemoteSnapshot? = nil
+    ) async throws -> Date {
         let data: Data
         let modifiedAt: Date?
 
-        switch provider {
-        case .iCloud:
-            let snapshot = try readICloudSnapshot()
-            data = snapshot.data
-            modifiedAt = snapshot.modifiedAt
-        case .googleDrive:
-            let snapshot = try await readGoogleDriveSnapshot()
-            data = snapshot.data
-            modifiedAt = snapshot.modifiedAt
-        case .oneDrive:
-            let snapshot = try await readOneDriveSnapshot()
-            data = snapshot.data
-            modifiedAt = snapshot.modifiedAt
+        let snapshot: RemoteSnapshot
+        if let preparedSnapshot {
+            snapshot = preparedSnapshot
+        } else {
+            snapshot = try await readRemoteSnapshot(provider: provider, knownMetadata: knownMetadata)
+        }
+        data = snapshot.data
+        modifiedAt = snapshot.modifiedAt
+
+        // Keep an in-memory rollback snapshot in case applying a validly
+        // decoded remote backup fails partway through a restore.
+        let rollbackSnapshot = await BackupManager.shared.createExperimentalCloudSnapshot()
+        guard await BackupManager.shared.prepareExperimentalCloudRestoreRecovery(using: rollbackSnapshot) else {
+            throw SyncError.restoreRecoveryPreparationFailed
         }
 
         let didRestore: Bool
         if provider == .iCloud, #available(iOS 17.0, *) {
-            didRestore = MediaStateSyncManager.shared.performLegacySnapshotRestorePreservingMediaState {
-                BackupManager.shared.restoreExperimentalCloudSnapshot(
+            didRestore = await MediaStateSyncManager.shared.performLegacySnapshotRestorePreservingMediaState {
+                await BackupManager.shared.restoreExperimentalCloudSnapshot(
                     from: data,
                     preserveMediaStateForCloudKit: provider == .iCloud
                 )
             }
         } else {
-            didRestore = BackupManager.shared.restoreExperimentalCloudSnapshot(
+            didRestore = await BackupManager.shared.restoreExperimentalCloudSnapshot(
                 from: data,
                 preserveMediaStateForCloudKit: provider == .iCloud
             )
         }
         guard didRestore else {
+            if let rollbackSnapshot {
+                let rolledBack = await BackupManager.shared.restoreExperimentalCloudSnapshot(
+                    from: rollbackSnapshot.data,
+                    preserveMediaStateForCloudKit: provider == .iCloud
+                )
+                if rolledBack {
+                    BackupManager.shared.completeExperimentalCloudRestoreRecovery()
+                    Logger.shared.log("Experimental cloud restore rolled local state back after an apply failure", type: "CloudSync")
+                }
+            }
             throw SyncError.snapshotRestoreFailed
         }
+        BackupManager.shared.completeExperimentalCloudRestoreRecovery()
 
-        markRemoteSnapshotSeen(provider: provider, fallbackDate: modifiedAt ?? Date())
+        markRemoteSnapshotSeen(
+            provider: provider,
+            fallbackDate: modifiedAt ?? Date(),
+            revision: snapshot.revision
+        )
+        if let localSnapshot = await BackupManager.shared.createExperimentalCloudSnapshot() {
+            saveLastSyncedFootprint(
+                protectedFootprint(localSnapshot.footprint, provider: provider),
+                provider: provider
+            )
+        } else if let footprint = BackupManager.shared.experimentalCloudSnapshotFootprint(from: data) {
+            saveLastSyncedFootprint(protectedFootprint(footprint, provider: provider), provider: provider)
+        }
         Logger.shared.log("Experimental cloud snapshot restored provider=\(provider.rawValue) bytes=\(data.count)", type: "CloudSync")
         return Date()
+    }
+
+    private static func readRemoteSnapshot(
+        provider: CloudSyncProvider,
+        knownMetadata: RemoteSnapshotMetadata? = nil
+    ) async throws -> RemoteSnapshot {
+        switch provider {
+        case .iCloud:
+            return try await readICloudSnapshot(fileName: knownMetadata?.id ?? snapshotFileName)
+        case .googleDrive:
+            return try await readGoogleDriveSnapshot(knownMetadata: knownMetadata)
+        case .oneDrive:
+            return try await readOneDriveSnapshot(knownMetadata: knownMetadata)
+        }
     }
 
     private static func remoteMetadata(provider: CloudSyncProvider) async throws -> RemoteSnapshotMetadata? {
         switch provider {
         case .iCloud:
-            return try iCloudMetadata()
+            return try await iCloudMetadata()
         case .googleDrive:
             return try await googleDriveMetadata()
         case .oneDrive:
@@ -1602,63 +2141,198 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         }
     }
 
-    private static func iCloudSnapshotURL() throws -> URL {
+    private nonisolated static func iCloudSnapshotURL(fileName: String) throws -> URL {
         guard let container = FileManager.default.url(forUbiquityContainerIdentifier: nil) else {
             throw SyncError.unavailable(.iCloud)
         }
 
         let documents = container.appendingPathComponent("Documents", isDirectory: true)
         try FileManager.default.createDirectory(at: documents, withIntermediateDirectories: true)
-        return documents.appendingPathComponent(snapshotFileName)
+        return documents.appendingPathComponent(fileName)
     }
 
-    private static func iCloudMetadata() throws -> RemoteSnapshotMetadata? {
-        let url = try iCloudSnapshotURL()
-        guard FileManager.default.fileExists(atPath: url.path) else {
+    private nonisolated static func iCloudMetadata() async throws -> RemoteSnapshotMetadata? {
+        try await Task.detached(priority: .utility) {
+            let currentURL = try iCloudSnapshotURL(fileName: eclipseCloudSnapshotFileName)
+            let legacyURL = try iCloudSnapshotURL(fileName: eclipseLegacyCloudSnapshotFileName)
+            let url: URL
+            let isLegacy: Bool
+            if FileManager.default.fileExists(atPath: currentURL.path) {
+                url = currentURL
+                isLegacy = false
+            } else if FileManager.default.fileExists(atPath: legacyURL.path) {
+                url = legacyURL
+                isLegacy = true
+            } else {
+                return nil
+            }
+            return try coordinatedICloudRead(at: url) { coordinatedURL in
+                try throwIfICloudVersionsConflict(at: coordinatedURL)
+                return RemoteSnapshotMetadata(
+                    id: isLegacy ? eclipseLegacyCloudSnapshotFileName : eclipseCloudSnapshotFileName,
+                    modifiedAt: remoteModificationDate(at: coordinatedURL),
+                    revision: iCloudRevision(at: coordinatedURL),
+                    isLegacy: isLegacy
+                )
+            }
+        }.value
+    }
+
+    private nonisolated static func writeICloudSnapshot(
+        data: Data,
+        precondition: RemoteWritePrecondition
+    ) async throws -> RemoteSnapshotMetadata {
+        try await Task.detached(priority: .utility) {
+            let url = try iCloudSnapshotURL(fileName: eclipseCloudSnapshotFileName)
+            return try coordinatedICloudWrite(at: url) { coordinatedURL in
+                try throwIfICloudVersionsConflict(at: coordinatedURL)
+                let currentMetadata: RemoteSnapshotMetadata? = FileManager.default.fileExists(atPath: coordinatedURL.path)
+                    ? RemoteSnapshotMetadata(
+                        id: nil,
+                        modifiedAt: remoteModificationDate(at: coordinatedURL),
+                        revision: iCloudRevision(at: coordinatedURL)
+                    )
+                    : nil
+                guard remoteWritePrecondition(precondition, accepts: currentMetadata) else {
+                    throw SyncError.remoteChangedDuringSync(.iCloud)
+                }
+                try data.write(to: coordinatedURL, options: .atomic)
+                return RemoteSnapshotMetadata(
+                    id: nil,
+                    modifiedAt: remoteModificationDate(at: coordinatedURL),
+                    revision: iCloudRevision(at: coordinatedURL)
+                )
+            }
+        }.value
+    }
+
+    private nonisolated static func readICloudSnapshot(fileName: String) async throws -> RemoteSnapshot {
+        try await Task.detached(priority: .utility) {
+            let url = try iCloudSnapshotURL(fileName: fileName)
+            guard FileManager.default.fileExists(atPath: url.path) else {
+                throw SyncError.noSnapshot(.iCloud)
+            }
+            try FileManager.default.startDownloadingUbiquitousItem(at: url)
+            try await waitForCurrentICloudSnapshot(at: url)
+            return try coordinatedICloudRead(at: url) { coordinatedURL in
+                try throwIfICloudVersionsConflict(at: coordinatedURL)
+                let handle = try FileHandle(forReadingFrom: coordinatedURL)
+                defer { try? handle.close() }
+                var data = Data()
+                while data.count <= maximumCloudSnapshotBytes {
+                    let remaining = maximumCloudSnapshotBytes + 1 - data.count
+                    guard remaining > 0 else { break }
+                    let chunk = try handle.read(upToCount: min(1_048_576, remaining)) ?? Data()
+                    guard !chunk.isEmpty else { break }
+                    data.append(chunk)
+                }
+                guard data.count <= maximumCloudSnapshotBytes else {
+                    throw BoundedURLSessionError.responseTooLarge(maximumBytes: maximumCloudSnapshotBytes)
+                }
+                return RemoteSnapshot(
+                    data: data,
+                    modifiedAt: remoteModificationDate(at: coordinatedURL),
+                    revision: iCloudRevision(at: coordinatedURL)
+                )
+            }
+        }.value
+    }
+
+    /// `startDownloadingUbiquitousItem` only requests a download. Reading the
+    /// coordinated URL before Foundation reports `.current` can return a stale
+    /// local generation or fail for an offloaded placeholder.
+    private nonisolated static func waitForCurrentICloudSnapshot(
+        at url: URL,
+        timeout: TimeInterval = 45
+    ) async throws {
+        let fileManager = FileManager.default
+        guard fileManager.isUbiquitousItem(at: url) else { return }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        let keys: Set<URLResourceKey> = [
+            .ubiquitousItemDownloadingStatusKey,
+            .ubiquitousItemDownloadingErrorKey
+        ]
+
+        while Date() < deadline {
+            try Task.checkCancellation()
+            let values = try url.resourceValues(forKeys: keys)
+            if values.ubiquitousItemDownloadingStatus == .current {
+                return
+            }
+            if values.ubiquitousItemDownloadingError != nil {
+                throw SyncError.iCloudDownloadFailed
+            }
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+
+        throw SyncError.iCloudDownloadTimedOut
+    }
+
+    private nonisolated static func coordinatedICloudRead<T>(at url: URL, body: (URL) throws -> T) throws -> T {
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        var coordinationError: NSError?
+        var result: Result<T, Error>?
+        coordinator.coordinate(readingItemAt: url, options: [], error: &coordinationError) { coordinatedURL in
+            result = Result { try body(coordinatedURL) }
+        }
+        if let coordinationError { throw coordinationError }
+        guard let result else { throw SyncError.invalidResponse(.iCloud) }
+        return try result.get()
+    }
+
+    private nonisolated static func coordinatedICloudWrite<T>(at url: URL, body: (URL) throws -> T) throws -> T {
+        let coordinator = NSFileCoordinator(filePresenter: nil)
+        var coordinationError: NSError?
+        var result: Result<T, Error>?
+        let options: NSFileCoordinator.WritingOptions = FileManager.default.fileExists(atPath: url.path)
+            ? .forReplacing
+            : []
+        coordinator.coordinate(writingItemAt: url, options: options, error: &coordinationError) { coordinatedURL in
+            result = Result { try body(coordinatedURL) }
+        }
+        if let coordinationError { throw coordinationError }
+        guard let result else { throw SyncError.invalidResponse(.iCloud) }
+        return try result.get()
+    }
+
+    private nonisolated static func throwIfICloudVersionsConflict(at url: URL) throws {
+        if let conflicts = NSFileVersion.unresolvedConflictVersionsOfItem(at: url), !conflicts.isEmpty {
+            throw SyncError.remoteChangedDuringSync(.iCloud)
+        }
+    }
+
+    private nonisolated static func iCloudRevision(at url: URL) -> String? {
+        guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]) else {
             return nil
         }
-        return RemoteSnapshotMetadata(id: nil, modifiedAt: remoteModificationDate(at: url))
+        let timestamp = values.contentModificationDate?.timeIntervalSince1970 ?? 0
+        return "\(timestamp):\(values.fileSize ?? -1)"
     }
 
-    private static func writeICloudSnapshot(data: Data) throws -> RemoteSnapshotMetadata {
-        let url = try iCloudSnapshotURL()
-        try data.write(to: url, options: .atomic)
-        return RemoteSnapshotMetadata(id: nil, modifiedAt: remoteModificationDate(at: url))
-    }
-
-    private static func readICloudSnapshot() throws -> RemoteSnapshot {
-        let url = try iCloudSnapshotURL()
-        guard FileManager.default.fileExists(atPath: url.path) else {
-            throw SyncError.noSnapshot(.iCloud)
-        }
-        let handle = try FileHandle(forReadingFrom: url)
-        defer { try? handle.close() }
-        var data = Data()
-        while data.count <= maximumCloudSnapshotBytes {
-            let remaining = maximumCloudSnapshotBytes + 1 - data.count
-            guard remaining > 0 else { break }
-            let chunk = try handle.read(upToCount: min(1_048_576, remaining)) ?? Data()
-            guard !chunk.isEmpty else { break }
-            data.append(chunk)
-        }
-        guard data.count <= maximumCloudSnapshotBytes else {
-            throw BoundedURLSessionError.responseTooLarge(maximumBytes: maximumCloudSnapshotBytes)
-        }
-        return RemoteSnapshot(data: data, modifiedAt: remoteModificationDate(at: url))
-    }
-
-    private static func remoteModificationDate(at url: URL) -> Date? {
+    private nonisolated static func remoteModificationDate(at url: URL) -> Date? {
         (try? FileManager.default.attributesOfItem(atPath: url.path)[.modificationDate]) as? Date
     }
 
     private static func googleDriveMetadata() async throws -> RemoteSnapshotMetadata? {
+        if let current = try await googleDriveMetadata(fileName: snapshotFileName, isLegacy: false) {
+            return current
+        }
+        return try await googleDriveMetadata(fileName: legacySnapshotFileName, isLegacy: true)
+    }
+
+    private static func googleDriveMetadata(
+        fileName: String,
+        isLegacy: Bool
+    ) async throws -> RemoteSnapshotMetadata? {
         let accessToken = try await accessToken(for: .googleDrive)
         var components = URLComponents(string: "https://www.googleapis.com/drive/v3/files")!
         components.queryItems = [
             URLQueryItem(name: "spaces", value: "appDataFolder"),
-            URLQueryItem(name: "pageSize", value: "1"),
-            URLQueryItem(name: "fields", value: "files(id,modifiedTime)"),
-            URLQueryItem(name: "q", value: "name = '\(snapshotFileName)' and 'appDataFolder' in parents and trashed = false")
+            URLQueryItem(name: "pageSize", value: "6"),
+            URLQueryItem(name: "orderBy", value: "modifiedTime desc"),
+            URLQueryItem(name: "fields", value: "files(id,modifiedTime,md5Checksum)"),
+            URLQueryItem(name: "q", value: "name = '\(fileName)' and 'appDataFolder' in parents and trashed = false")
         ]
 
         var request = URLRequest(url: components.url!)
@@ -1667,29 +2341,25 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         let data = try await validatedData(for: request, provider: .googleDrive)
         let response = try JSONDecoder().decode(GoogleDriveListResponse.self, from: data)
         guard let file = response.files.first else { return nil }
-        return RemoteSnapshotMetadata(id: file.id, modifiedAt: parseRemoteDate(file.modifiedTime))
+        return RemoteSnapshotMetadata(
+            id: file.id,
+            modifiedAt: parseRemoteDate(file.modifiedTime),
+            revision: file.md5Checksum,
+            historicalIDs: isLegacy ? [] : response.files.map(\.id),
+            isLegacy: isLegacy
+        )
     }
 
-    private static func writeGoogleDriveSnapshot(data: Data) async throws -> RemoteSnapshotMetadata {
+    private static func writeGoogleDriveSnapshot(
+        data: Data,
+        precondition: RemoteWritePrecondition
+    ) async throws -> RemoteSnapshotMetadata {
         let accessToken = try await accessToken(for: .googleDrive)
-        let existing = try await googleDriveMetadata()
-
-        if let fileID = existing?.id, !fileID.isEmpty {
-            var components = URLComponents(string: "https://www.googleapis.com/upload/drive/v3/files/\(fileID)")!
-            components.queryItems = [
-                URLQueryItem(name: "uploadType", value: "media"),
-                URLQueryItem(name: "fields", value: "id,modifiedTime")
-            ]
-
-            var request = URLRequest(url: components.url!)
-            request.httpMethod = "PATCH"
-            request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = data
-
-            let responseData = try await validatedData(for: request, provider: .googleDrive)
-            let file = try JSONDecoder().decode(GoogleDriveFile.self, from: responseData)
-            return RemoteSnapshotMetadata(id: file.id, modifiedAt: parseRemoteDate(file.modifiedTime))
+        let existing: RemoteSnapshotMetadata?
+        switch precondition {
+        case .remoteMatches(let metadata): existing = metadata
+        case .remoteMissing: existing = nil
+        case .unconditional: existing = try await googleDriveMetadata()
         }
 
         let boundary = "EclipseCloudSync-\(UUID().uuidString)"
@@ -1703,7 +2373,7 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         var components = URLComponents(string: "https://www.googleapis.com/upload/drive/v3/files")!
         components.queryItems = [
             URLQueryItem(name: "uploadType", value: "multipart"),
-            URLQueryItem(name: "fields", value: "id,modifiedTime")
+            URLQueryItem(name: "fields", value: "id,modifiedTime,md5Checksum")
         ]
 
         var request = URLRequest(url: components.url!)
@@ -1714,13 +2384,41 @@ final class ExperimentalCloudSyncManager: ObservableObject {
 
         let responseData = try await validatedData(for: request, provider: .googleDrive)
         let file = try JSONDecoder().decode(GoogleDriveFile.self, from: responseData)
-        return RemoteSnapshotMetadata(id: file.id, modifiedAt: parseRemoteDate(file.modifiedTime))
+        // Drive v3 does not expose a documented atomic content-update
+        // precondition. Keep each upload immutable and prune only snapshots
+        // outside the recovery window, so concurrent clients cannot destroy
+        // the previously valid backup.
+        if let existing, existing.historicalIDs.count >= 6 {
+            for obsoleteID in existing.historicalIDs.dropFirst(4) {
+                var deleteRequest = URLRequest(
+                    url: URL(string: "https://www.googleapis.com/drive/v3/files/\(obsoleteID)")!
+                )
+                deleteRequest.httpMethod = "DELETE"
+                deleteRequest.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+                _ = try? await validatedData(for: deleteRequest, provider: .googleDrive)
+            }
+        }
+        return RemoteSnapshotMetadata(
+            id: file.id,
+            modifiedAt: parseRemoteDate(file.modifiedTime),
+            revision: file.md5Checksum,
+            historicalIDs: [file.id] + (existing?.historicalIDs ?? [])
+        )
     }
 
-    private static func readGoogleDriveSnapshot() async throws -> RemoteSnapshot {
+    private static func readGoogleDriveSnapshot(
+        knownMetadata: RemoteSnapshotMetadata? = nil
+    ) async throws -> RemoteSnapshot {
         let accessToken = try await accessToken(for: .googleDrive)
-        guard let metadata = try await googleDriveMetadata(),
-              let fileID = metadata.id,
+        let metadata: RemoteSnapshotMetadata
+        if let knownMetadata {
+            metadata = knownMetadata
+        } else if let fetchedMetadata = try await googleDriveMetadata() {
+            metadata = fetchedMetadata
+        } else {
+            throw SyncError.noSnapshot(.googleDrive)
+        }
+        guard let fileID = metadata.id,
               !fileID.isEmpty else {
             throw SyncError.noSnapshot(.googleDrive)
         }
@@ -1737,13 +2435,24 @@ final class ExperimentalCloudSyncManager: ObservableObject {
                 provider: .googleDrive,
                 maximumResponseBytes: maximumCloudSnapshotBytes
             ),
-            modifiedAt: metadata.modifiedAt
+            modifiedAt: metadata.modifiedAt,
+            revision: metadata.revision
         )
     }
 
     private static func oneDriveMetadata() async throws -> RemoteSnapshotMetadata? {
+        if let current = try await oneDriveMetadata(fileName: snapshotFileName, isLegacy: false) {
+            return current
+        }
+        return try await oneDriveMetadata(fileName: legacySnapshotFileName, isLegacy: true)
+    }
+
+    private static func oneDriveMetadata(
+        fileName: String,
+        isLegacy: Bool
+    ) async throws -> RemoteSnapshotMetadata? {
         let accessToken = try await accessToken(for: .oneDrive)
-        var request = URLRequest(url: oneDriveSnapshotMetadataURL())
+        var request = URLRequest(url: oneDriveSnapshotMetadataURL(fileName: fileName))
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
         guard let data = try await validatedData(
@@ -1756,30 +2465,65 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         }
 
         let item = try JSONDecoder().decode(OneDriveItem.self, from: data)
-        return RemoteSnapshotMetadata(id: item.id, modifiedAt: parseRemoteDate(item.lastModifiedDateTime))
+        return RemoteSnapshotMetadata(
+            id: item.id,
+            modifiedAt: parseRemoteDate(item.lastModifiedDateTime),
+            revision: item.eTag,
+            isLegacy: isLegacy
+        )
     }
 
-    private static func writeOneDriveSnapshot(data: Data) async throws -> RemoteSnapshotMetadata {
+    private static func writeOneDriveSnapshot(
+        data: Data,
+        precondition: RemoteWritePrecondition
+    ) async throws -> RemoteSnapshotMetadata {
         let accessToken = try await accessToken(for: .oneDrive)
         var request = URLRequest(url: oneDriveSnapshotContentURL())
         request.httpMethod = "PUT"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        switch precondition {
+        case .remoteMissing:
+            request.setValue("*", forHTTPHeaderField: "If-None-Match")
+        case .remoteMatches(let metadata):
+            if let revision = metadata.revision {
+                request.setValue(revision, forHTTPHeaderField: "If-Match")
+            }
+        case .unconditional:
+            break
+        }
         request.httpBody = data
 
-        let responseData = try await validatedData(for: request, provider: .oneDrive)
+        let responseData: Data
+        do {
+            responseData = try await validatedData(for: request, provider: .oneDrive)
+        } catch SyncError.remoteRequestFailed(_, 412, _) {
+            throw SyncError.remoteChangedDuringSync(.oneDrive)
+        }
         let item = try JSONDecoder().decode(OneDriveItem.self, from: responseData)
-        return RemoteSnapshotMetadata(id: item.id, modifiedAt: parseRemoteDate(item.lastModifiedDateTime))
+        return RemoteSnapshotMetadata(id: item.id, modifiedAt: parseRemoteDate(item.lastModifiedDateTime), revision: item.eTag)
     }
 
-    private static func readOneDriveSnapshot() async throws -> RemoteSnapshot {
+    private static func readOneDriveSnapshot(
+        knownMetadata: RemoteSnapshotMetadata? = nil
+    ) async throws -> RemoteSnapshot {
         let accessToken = try await accessToken(for: .oneDrive)
-        let metadata = try await oneDriveMetadata()
-        guard metadata != nil else {
+        let metadata: RemoteSnapshotMetadata
+        if let knownMetadata {
+            metadata = knownMetadata
+        } else if let fetchedMetadata = try await oneDriveMetadata() {
+            metadata = fetchedMetadata
+        } else {
             throw SyncError.noSnapshot(.oneDrive)
         }
 
-        var request = URLRequest(url: oneDriveSnapshotContentURL())
+        let contentURL: URL
+        if let itemID = metadata.id, !itemID.isEmpty {
+            contentURL = URL(string: "https://graph.microsoft.com/v1.0/me/drive/items/\(itemID)/content")!
+        } else {
+            contentURL = oneDriveSnapshotContentURL()
+        }
+        var request = URLRequest(url: contentURL)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
         return RemoteSnapshot(
@@ -1788,12 +2532,13 @@ final class ExperimentalCloudSyncManager: ObservableObject {
                 provider: .oneDrive,
                 maximumResponseBytes: maximumCloudSnapshotBytes
             ),
-            modifiedAt: metadata?.modifiedAt
+            modifiedAt: metadata.modifiedAt,
+            revision: metadata.revision
         )
     }
 
-    private static func oneDriveSnapshotMetadataURL() -> URL {
-        URL(string: "https://graph.microsoft.com/v1.0/me/drive/special/approot:/\(snapshotFileName)")!
+    private static func oneDriveSnapshotMetadataURL(fileName: String) -> URL {
+        URL(string: "https://graph.microsoft.com/v1.0/me/drive/special/approot:/\(fileName)")!
     }
 
     private static func oneDriveSnapshotContentURL() -> URL {
@@ -1801,14 +2546,107 @@ final class ExperimentalCloudSyncManager: ObservableObject {
     }
 
     private static func hasUnseenRemoteSnapshot(metadata: RemoteSnapshotMetadata, provider: CloudSyncProvider) -> Bool {
+        if let revision = metadata.revision {
+            let lastRevision = UserDefaults.standard.string(forKey: provider.lastSeenRemoteRevisionKey)
+            if lastRevision != revision { return true }
+        }
         guard let modificationDate = metadata.modifiedAt else { return false }
         let lastSeen = UserDefaults.standard.double(forKey: provider.lastSeenRemoteModificationKey)
         guard lastSeen > 0 else { return true }
-        return modificationDate.timeIntervalSince1970 > lastSeen + 1
+        return modificationDate.timeIntervalSince1970 > lastSeen + 0.001
     }
 
-    private static func markRemoteSnapshotSeen(provider: CloudSyncProvider, fallbackDate: Date) {
+    private nonisolated static func remoteWritePrecondition(
+        _ precondition: RemoteWritePrecondition,
+        accepts actualMetadata: RemoteSnapshotMetadata?
+    ) -> Bool {
+        switch precondition {
+        case .unconditional:
+            return true
+        case .remoteMissing:
+            return actualMetadata == nil
+        case .remoteMatches(let expected):
+            guard let actualMetadata else { return false }
+            if let expectedRevision = expected.revision,
+               let actualRevision = actualMetadata.revision {
+                return expectedRevision == actualRevision
+            }
+            guard let expectedDate = expected.modifiedAt,
+                  let actualDate = actualMetadata.modifiedAt else {
+                return expected.id == actualMetadata.id
+            }
+            return abs(expectedDate.timeIntervalSince(actualDate)) < 0.001
+        }
+    }
+
+    private static func markRemoteSnapshotSeen(
+        provider: CloudSyncProvider,
+        fallbackDate: Date,
+        revision: String?
+    ) {
         UserDefaults.standard.set(fallbackDate.timeIntervalSince1970, forKey: provider.lastSeenRemoteModificationKey)
+        if let revision {
+            UserDefaults.standard.set(revision, forKey: provider.lastSeenRemoteRevisionKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: provider.lastSeenRemoteRevisionKey)
+        }
+    }
+
+    private static func lastSyncedFootprint(provider: CloudSyncProvider) -> ExperimentalCloudSnapshotFootprint? {
+        guard let data = UserDefaults.standard.data(forKey: provider.lastSyncedFootprintKey) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(ExperimentalCloudSnapshotFootprint.self, from: data)
+    }
+
+    private static func saveLastSyncedFootprint(
+        _ footprint: ExperimentalCloudSnapshotFootprint,
+        provider: CloudSyncProvider
+    ) {
+        guard let data = try? JSONEncoder().encode(footprint) else { return }
+        UserDefaults.standard.set(data, forKey: provider.lastSyncedFootprintKey)
+    }
+
+    private static func protectedFootprint(
+        _ footprint: ExperimentalCloudSnapshotFootprint,
+        provider: CloudSyncProvider
+    ) -> ExperimentalCloudSnapshotFootprint {
+        // On iOS 17+, CloudKit owns these media-state domains. The legacy
+        // iCloud Documents restore deliberately preserves their local values.
+        provider == .iCloud ? footprint.excludingCloudKitMediaState() : footprint
+    }
+
+    private static func prepareReconciliationIdentity(provider: CloudSyncProvider) {
+        guard provider == .iCloud,
+              let token = FileManager.default.ubiquityIdentityToken,
+              let currentIdentity = try? NSKeyedArchiver.archivedData(
+                withRootObject: token,
+                requiringSecureCoding: false
+              ) else {
+            return
+        }
+
+        let defaults = UserDefaults.standard
+        if let previousIdentity = defaults.data(forKey: provider.accountIdentityKey),
+           !ubiquityIdentity(previousIdentity, matches: token) {
+            defaults.removeObject(forKey: provider.lastSeenRemoteModificationKey)
+            defaults.removeObject(forKey: provider.lastSyncedFootprintKey)
+            defaults.removeObject(forKey: provider.lastSeenRemoteRevisionKey)
+            Logger.shared.log("Experimental cloud sync detected an iCloud account change; reconciliation markers cleared", type: "CloudSync")
+        }
+        defaults.set(currentIdentity, forKey: provider.accountIdentityKey)
+    }
+
+    private static func ubiquityIdentity(_ archivedData: Data, matches currentToken: Any) -> Bool {
+        guard let unarchiver = try? NSKeyedUnarchiver(forReadingFrom: archivedData) else {
+            return false
+        }
+        unarchiver.requiresSecureCoding = false
+        let previousToken = unarchiver.decodeObject(
+            forKey: NSKeyedArchiveRootObjectKey
+        ) as? NSObjectProtocol
+        unarchiver.finishDecoding()
+        return previousToken?.isEqual(currentToken) == true
     }
 
     private static func accessToken(for provider: CloudSyncProvider) async throws -> String {
@@ -1832,6 +2670,24 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         token = refreshed
         try CloudSyncTokenStore.save(token, for: provider)
         return token.accessToken
+    }
+
+    private static func forceRefreshAccessToken(for provider: CloudSyncProvider) async throws -> String {
+        guard provider.requiresAccountConnection,
+              let token = CloudSyncTokenStore.token(for: provider),
+              let refreshToken = token.refreshToken,
+              !refreshToken.isEmpty else {
+            throw SyncError.authenticationRequired(provider)
+        }
+        let configuration = try oauthConfiguration(for: provider)
+        let refreshed = try await refreshAccessToken(
+            refreshToken,
+            currentToken: token,
+            configuration: configuration,
+            provider: provider
+        )
+        try CloudSyncTokenStore.save(refreshed, for: provider)
+        return refreshed.accessToken
     }
 
     private static func oauthConfiguration(for provider: CloudSyncProvider) throws -> OAuthConfiguration {
@@ -1957,26 +2813,120 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         allowNotFound: Bool,
         maximumResponseBytes: Int
     ) async throws -> Data? {
-        let (data, response) = try await URLSession.custom.boundedData(
-            for: request,
-            maximumResponseBytes: maximumResponseBytes
+        var currentRequest = request
+        var refreshedAuthorization = false
+        let maximumAttempts = 4
+
+        for attempt in 0..<maximumAttempts {
+            do {
+                let (data, response) = try await URLSession.custom.boundedData(
+                    for: currentRequest,
+                    maximumResponseBytes: maximumResponseBytes
+                )
+                guard let httpResponse = response as? HTTPURLResponse else {
+                    throw SyncError.invalidResponse(provider)
+                }
+
+                if allowNotFound, httpResponse.statusCode == 404 {
+                    clearProviderCooldown(provider)
+                    return nil
+                }
+                if (200..<300).contains(httpResponse.statusCode) {
+                    clearProviderCooldown(provider)
+                    return data
+                }
+
+                if httpResponse.statusCode == 401,
+                   !refreshedAuthorization,
+                   currentRequest.value(forHTTPHeaderField: "Authorization") != nil,
+                   provider.requiresAccountConnection {
+                    let accessToken = try await forceRefreshAccessToken(for: provider)
+                    currentRequest.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+                    refreshedAuthorization = true
+                    continue
+                }
+
+                let previewData = data.prefix(maximumCloudErrorPreviewBytes)
+                let body = String(data: previewData, encoding: .utf8)
+                    ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
+                let googleQuotaFailure = provider == .googleDrive &&
+                    httpResponse.statusCode == 403 &&
+                    (body.localizedCaseInsensitiveContains("rateLimit") ||
+                     body.localizedCaseInsensitiveContains("rate_limit"))
+                let retryable = httpResponse.statusCode == 429 ||
+                    httpResponse.statusCode == 503 ||
+                    (500...599).contains(httpResponse.statusCode) ||
+                    googleQuotaFailure
+
+                if retryable, attempt + 1 < maximumAttempts {
+                    let delay = retryDelay(
+                        response: httpResponse,
+                        attempt: attempt,
+                        provider: provider
+                    )
+                    persistProviderCooldown(provider, delay: delay)
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    continue
+                }
+                if retryable {
+                    let delay = retryDelay(response: httpResponse, attempt: attempt, provider: provider)
+                    persistProviderCooldown(provider, delay: delay)
+                }
+                throw SyncError.remoteRequestFailed(provider, httpResponse.statusCode, body)
+            } catch let error as SyncError {
+                throw error
+            } catch {
+                if attempt + 1 < maximumAttempts,
+                   !(error is CancellationError),
+                   !(error is BoundedURLSessionError) {
+                    let delay = retryDelay(response: nil, attempt: attempt, provider: provider)
+                    persistProviderCooldown(provider, delay: delay)
+                    try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    continue
+                }
+                if !(error is CancellationError), !(error is BoundedURLSessionError) {
+                    persistProviderCooldown(provider, delay: 60)
+                }
+                throw error
+            }
+        }
+        throw SyncError.invalidResponse(provider)
+    }
+
+    private static func retryDelay(
+        response: HTTPURLResponse?,
+        attempt: Int,
+        provider: CloudSyncProvider
+    ) -> TimeInterval {
+        if let value = response?.value(forHTTPHeaderField: "Retry-After") {
+            if let seconds = TimeInterval(value.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return min(max(seconds, 1), 300)
+            }
+            if let date = parseHTTPDate(value) {
+                return min(max(date.timeIntervalSinceNow, 1), 300)
+            }
+        }
+        let base = min(pow(2, Double(attempt)), 64)
+        return base + Double.random(in: 0...1)
+    }
+
+    private static func parseHTTPDate(_ value: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss z"
+        return formatter.date(from: value)
+    }
+
+    private static func persistProviderCooldown(_ provider: CloudSyncProvider, delay: TimeInterval) {
+        UserDefaults.standard.set(
+            Date().addingTimeInterval(delay).timeIntervalSince1970,
+            forKey: provider.retryNotBeforeKey
         )
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw SyncError.invalidResponse(provider)
-        }
+    }
 
-        if allowNotFound, httpResponse.statusCode == 404 {
-            return nil
-        }
-
-        guard (200..<300).contains(httpResponse.statusCode) else {
-            let previewData = data.prefix(maximumCloudErrorPreviewBytes)
-            let body = String(data: previewData, encoding: .utf8)
-                ?? HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode)
-            throw SyncError.remoteRequestFailed(provider, httpResponse.statusCode, body)
-        }
-
-        return data
+    private static func clearProviderCooldown(_ provider: CloudSyncProvider) {
+        UserDefaults.standard.removeObject(forKey: provider.retryNotBeforeKey)
     }
 
     private static func validatedData(
@@ -2120,14 +3070,50 @@ final class ExperimentalCloudSyncManager: ObservableObject {
         let expiresAt: Date
     }
 
-    private struct RemoteSnapshotMetadata {
+    private struct RemoteSnapshotMetadata: Sendable {
         let id: String?
         let modifiedAt: Date?
+        let revision: String?
+        var historicalIDs: [String] = []
+        var isLegacy: Bool = false
     }
 
-    private struct RemoteSnapshot {
+    private struct RemoteSnapshot: Sendable {
         let data: Data
         let modifiedAt: Date?
+        let revision: String?
+    }
+
+    private enum RemoteWritePrecondition: Sendable {
+        case unconditional
+        case remoteMissing
+        case remoteMatches(RemoteSnapshotMetadata)
+    }
+
+    struct CloudSyncOverwriteWarning: Identifiable {
+        enum Direction {
+            case cloudIsFuller
+            case deviceIsFuller
+            case bothChanged
+        }
+
+        let provider: CloudSyncProvider
+        let localRecordCount: Int
+        let remoteRecordCount: Int
+        let direction: Direction
+
+        var id: CloudSyncProvider { provider }
+
+        var alertMessage: String {
+            switch direction {
+            case .cloudIsFuller:
+                return "This device has about \(localRecordCount) saved items, while \(provider.displayName) has about \(remoteRecordCount). Eclipse paused before overwriting the fuller cloud backup."
+            case .deviceIsFuller:
+                return "This device has about \(localRecordCount) saved items, while the newer \(provider.displayName) backup has about \(remoteRecordCount). Eclipse paused before replacing the fuller device data."
+            case .bothChanged:
+                return "Both this device and the newer \(provider.displayName) backup changed since the last sync. Eclipse paused without replacing either copy. Choose which version to keep."
+            }
+        }
     }
 
     private struct GoogleDriveListResponse: Decodable {
@@ -2137,19 +3123,29 @@ final class ExperimentalCloudSyncManager: ObservableObject {
     private struct GoogleDriveFile: Decodable {
         let id: String
         let modifiedTime: String?
+        let md5Checksum: String?
     }
 
     private struct OneDriveItem: Decodable {
         let id: String?
         let lastModifiedDateTime: String?
+        let eTag: String?
     }
 
-    private enum SyncError: LocalizedError {
+    private enum SyncError: LocalizedError, Sendable {
         case unavailable(CloudSyncProvider)
         case authenticationRequired(CloudSyncProvider)
         case noSnapshot(CloudSyncProvider)
         case snapshotEncodingFailed
+        case snapshotInspectionFailed
         case snapshotRestoreFailed
+        case restoreRecoveryPreparationFailed
+        case iCloudDownloadFailed
+        case iCloudDownloadTimedOut
+        case suspiciousLocalReduction(CloudSyncProvider, Int, Int)
+        case suspiciousRemoteReduction(CloudSyncProvider, Int, Int)
+        case concurrentSnapshotConflict(CloudSyncProvider, Int, Int)
+        case remoteChangedDuringSync(CloudSyncProvider)
         case authorizationFailed(String)
         case invalidResponse(CloudSyncProvider)
         case remoteRequestFailed(CloudSyncProvider, Int, String)
@@ -2164,18 +3160,34 @@ final class ExperimentalCloudSyncManager: ObservableObject {
                 return "No \(provider.displayName) snapshot was found."
             case .snapshotEncodingFailed:
                 return "Could not prepare a safe cloud snapshot."
+            case .snapshotInspectionFailed:
+                return "The cloud snapshot could not be safely inspected, so Eclipse left both copies unchanged."
             case .snapshotRestoreFailed:
                 return "Could not restore the cloud snapshot."
+            case .restoreRecoveryPreparationFailed:
+                return "Could not create a local recovery point, so Eclipse did not start the cloud restore."
+            case .iCloudDownloadFailed:
+                return "iCloud could not download the latest Eclipse snapshot. Check iCloud Drive and try again."
+            case .iCloudDownloadTimedOut:
+                return "iCloud is still downloading the latest Eclipse snapshot. Eclipse left local data unchanged; try again shortly."
+            case .suspiciousLocalReduction(let provider, _, _):
+                return "\(provider.displayName) sync paused because this device has substantially less data than the cloud backup."
+            case .suspiciousRemoteReduction(let provider, _, _):
+                return "\(provider.displayName) restore paused because the cloud snapshot has less data than this device."
+            case .concurrentSnapshotConflict(let provider, _, _):
+                return "\(provider.displayName) sync paused because both copies changed since the last sync."
+            case .remoteChangedDuringSync(let provider):
+                return "\(provider.displayName) changed during this sync, so Eclipse left it untouched and will retry safely."
             case .authorizationFailed(let message):
                 return message
             case .invalidResponse(let provider):
                 return "\(provider.displayName) returned an invalid response."
             case .remoteRequestFailed(let provider, let statusCode, let message):
-                let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
-                if trimmed.isEmpty {
-                    return "\(provider.displayName) request failed with HTTP \(statusCode)."
-                }
-                return "\(provider.displayName) request failed with HTTP \(statusCode): \(trimmed)"
+                return ExperimentalCloudSyncErrorPolicy.message(
+                    provider: provider,
+                    statusCode: statusCode,
+                    body: message
+                )
             }
         }
     }

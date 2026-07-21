@@ -15,4 +15,9 @@
         <attribute name="manifestJSON" optional="YES" attributeType="String"/>
         <attribute name="sortIndex" attributeType="Integer 64" defaultValueString="0" usesScalarValueType="YES"/>
     </entity>
+    <entity name="SkyStreamStateEntity" representedClassName="SkyStreamStateEntity" syncable="YES">
+        <attribute name="id" attributeType="String" defaultValueString="state-v1"/>
+        <attribute name="jsonState" optional="YES" attributeType="String"/>
+        <attribute name="updatedAt" optional="YES" attributeType="Date" usesScalarValueType="NO"/>
+    </entity>
 </model>

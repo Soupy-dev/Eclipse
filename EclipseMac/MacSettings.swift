@@ -1592,6 +1592,7 @@ private struct MacSettingsRow<Accessory: View>: View {
 private struct MacSettingsDivider: View { var body: some View { Divider().overlay(.white.opacity(0.08)).padding(.leading, 58) } }
 private struct MacSettingsFootnote: View { let text: String; let color: Color; init(_ text: String, color: Color = .secondary) { self.text = text; self.color = color }; var body: some View { Text(text).font(.caption).foregroundStyle(color).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 8) } }
 
+@MainActor
 private enum MacBackupCoordinator {
     static let keys = [
         "performanceModeEnabled", "performanceModeSkipAniListTraversalForAnimeDetails", "macPlayerSeekSeconds", "defaultPlaybackSpeed",
@@ -1675,15 +1676,18 @@ private enum MacBackupCoordinator {
     static func export(to url: URL) throws {
         let defaults = UserDefaults.standard
         let values = Dictionary(uniqueKeysWithValues: keys.compactMap { key in defaults.object(forKey: key).map { (key, $0) } })
-        let payload: [String: Any] = ["format": "EclipseMacBackup", "version": 1, "createdAt": Date(), "values": values]
+        var payload: [String: Any] = ["format": "EclipseMacBackup", "version": 1, "createdAt": Date(), "values": values]
+        if let opaqueSkyStream = SkyStreamPluginManager.shared.opaqueBackupSnapshotData() {
+            payload["skyStreamOpaque"] = opaqueSkyStream
+        }
         let data = try PropertyListSerialization.data(fromPropertyList: payload, format: .xml, options: 0)
-        guard data.count <= 12 * 1024 * 1024 else { throw CocoaError(.fileWriteOutOfSpace) }
+        guard data.count <= 128 * 1_024 * 1_024 else { throw CocoaError(.fileWriteOutOfSpace) }
         try data.write(to: url, options: .atomic)
     }
 
     static func restore(from url: URL) throws {
         let resources = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
-        guard resources.isRegularFile == true, (resources.fileSize ?? 0) <= 12 * 1024 * 1024 else { throw CocoaError(.fileReadTooLarge) }
+        guard resources.isRegularFile == true, (resources.fileSize ?? 0) <= 128 * 1_024 * 1_024 else { throw CocoaError(.fileReadTooLarge) }
         let data = try Data(contentsOf: url, options: [.mappedIfSafe])
         guard let payload = try PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
               payload["format"] as? String == "EclipseMacBackup",
@@ -1695,6 +1699,12 @@ private enum MacBackupCoordinator {
         for (key, value) in values where keys.contains(key) {
             guard let clean = sanitizedValue(value, for: key) else { throw CocoaError(.fileReadCorruptFile) }
             sanitized[key] = clean
+        }
+        // Validate and durably preserve the opaque iOS-only domain before mutating any Mac
+        // settings. A corrupt SkyStream payload must not turn a reported restore failure into a
+        // partially applied settings restore.
+        if let opaqueSkyStream = payload["skyStreamOpaque"] as? Data {
+            try SkyStreamPluginManager.shared.preserveOpaqueBackupSnapshotData(opaqueSkyStream)
         }
         for (key, value) in sanitized { UserDefaults.standard.set(value, forKey: key) }
     }

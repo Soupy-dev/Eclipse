@@ -251,6 +251,9 @@ struct MediaDetailView: View {
     
     @StateObject private var serviceManager = ServiceManager.shared
     @StateObject private var stremioManager = StremioAddonManager.shared
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    @StateObject private var skyStreamPluginManager = SkyStreamPluginManager.shared
+#endif
 #if !os(tvOS)
     private let downloadManager = DownloadManager.shared
     @ObservedObject private var localNotificationManager = LocalNotificationManager.shared
@@ -340,7 +343,25 @@ struct MediaDetailView: View {
 
     private var hasActiveSources: Bool {
         !serviceManager.activeServices.isEmpty ||
-        !stremioManager.activeAddons.isEmpty
+        !stremioManager.activeAddons.isEmpty ||
+        hasActiveSkyStreamSources
+    }
+
+    private var hasActiveSkyStreamSources: Bool {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        PlatformCapabilities.current.supportsSkyStreamPlugins
+            && skyStreamPluginManager.providers.contains(where: \.isEnabled)
+#else
+        false
+#endif
+    }
+
+    private var sourceMatchingYear: Int? {
+        let date = searchResult.isMovie
+            ? (movieDetail?.releaseDate ?? searchResult.releaseDate)
+            : (tvShowDetail?.firstAirDate ?? searchResult.firstAirDate)
+        guard let date else { return nil }
+        return Int(date.prefix(4))
     }
 
     private var preferDownloadedMedia: Bool {
@@ -927,6 +948,7 @@ struct MediaDetailView: View {
                 isAnimeContent: playbackIsAnime,
                 selectedEpisode: selectedEpisodeForSearch,
                 tmdbId: searchResult.id,
+                mediaYear: nextEpisodeResolvedTargetOverride?.mediaYear ?? sourceMatchingYear,
                 animeSeasonTitle: playbackIsAnime ? "anime" : nil,
                 posterPath: nextEpisodeResolvedTargetOverride?.posterURL
                     ?? (searchResult.isMovie ? movieDetail?.posterPath : tvShowDetail?.posterPath),
@@ -982,6 +1004,7 @@ struct MediaDetailView: View {
                 isAnimeContent: isAnimeShow,
                 selectedEpisode: selectedEpisodeForSearch,
                 tmdbId: searchResult.id,
+                mediaYear: sourceMatchingYear,
                 animeSeasonTitle: isAnimeShow ? "anime" : nil,
                 posterPath: searchResult.isMovie ? movieDetail?.posterPath : tvShowDetail?.posterPath,
                 originalAudioLanguage: searchResult.originalLanguage ?? (searchResult.isMovie ? movieDetail?.originalLanguage : tvShowDetail?.originalLanguage),
@@ -1017,6 +1040,7 @@ struct MediaDetailView: View {
                 isAnimeContent: true,
                 selectedEpisode: request.episode,
                 tmdbId: searchResult.id,
+                mediaYear: nextEpisodeResolvedTargetOverride?.mediaYear ?? sourceMatchingYear,
                 animeSeasonTitle: request.title,
                 posterPath: request.posterUrl ?? tvShowDetail?.posterPath,
                 originalAudioLanguage: searchResult.originalLanguage ?? tvShowDetail?.originalLanguage,
@@ -1154,29 +1178,17 @@ struct MediaDetailView: View {
                 Button(action: {
                     presentationMode.wrappedValue.dismiss()
                 }) {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: ExperimentalFeatureState.isEnabledAtLaunch ? 28 : 16, weight: .medium))
+                    Image(systemName: "chevron.backward")
+                        .font(.system(size: 17, weight: .semibold))
                         .foregroundColor(.white)
-                        .frame(
-                            width: ExperimentalFeatureState.isEnabledAtLaunch ? 58 : 32,
-                            height: ExperimentalFeatureState.isEnabledAtLaunch ? 58 : 32
-                        )
-                        .background(
-                            Circle()
-                                .fill(ExperimentalFeatureState.isEnabledAtLaunch ? atmosphereColor.opacity(0.36) : Color.clear)
-                                .background(
-                                    Circle()
-                                        .fill(.ultraThinMaterial)
-                                        .opacity(ExperimentalFeatureState.isEnabledAtLaunch ? 0.72 : 0)
-                                )
-                        )
-                        .applyLiquidGlassBackground(cornerRadius: ExperimentalFeatureState.isEnabledAtLaunch ? 29 : 16)
+                        .frame(width: 44, height: 44)
+                        .applyLiquidGlassBackground(cornerRadius: 22)
                 }
+                .accessibilityLabel("Back")
                 
                 Spacer()
             }
-            .padding(.horizontal, ExperimentalFeatureState.isEnabledAtLaunch ? 22 : 16)
-            .padding(.top, ExperimentalFeatureState.isEnabledAtLaunch ? 20 : 0)
+            .padding(.horizontal, 16)
             
             Spacer()
         }
@@ -1458,7 +1470,7 @@ struct MediaDetailView: View {
         HStack(spacing: 10) {
             Button(action: searchInServices) {
                 Label(
-                    canUseMainPlayButton ? playButtonText : "No Services",
+                    canUseMainPlayButton ? playButtonText : "No Sources",
                     systemImage: canUseMainPlayButton ? "play.fill" : "exclamationmark.triangle"
                 )
                 .font(.headline)
@@ -2127,7 +2139,7 @@ struct MediaDetailView: View {
                 HStack {
                     Image(systemName: canUseMainPlayButton ? "play.fill" : "exclamationmark.triangle")
                     
-                    Text(canUseMainPlayButton ? playButtonText : "No Services")
+                    Text(canUseMainPlayButton ? playButtonText : "No Sources")
                         .fontWeight(.semibold)
                 }
                 .frame(maxWidth: .infinity)
@@ -2209,7 +2221,7 @@ struct MediaDetailView: View {
             Button(action: {
                 searchInServices()
             }) {
-                Text(canUseMainPlayButton ? playButtonText : "No Services")
+                Text(canUseMainPlayButton ? playButtonText : "No Sources")
                     .font(.system(size: isIPad ? 25 : 22, weight: .bold))
                     .foregroundColor(canUseMainPlayButton ? .black : .white.opacity(0.62))
                     .lineLimit(1)
@@ -4062,6 +4074,7 @@ struct MediaDetailView: View {
             url: fileURL,
             subtitles: subtitles,
             mediaInfo: item.mediaInfo,
+            mediaYear: sourceMatchingYear,
             episodePlaybackContext: item.episodePlaybackContext,
             title: item.playerTitleBase,
             subtitle: item.displayTitle,
