@@ -1,0 +1,64 @@
+name: Franchise Dataset
+
+# Builds the precomputed AniList franchise-component dataset consumed by
+# Eclipse's AnimeFranchiseResolver and publishes it to a rolling release.
+# Daily full rebuild: the sweep is ~650 rate-limited requests (~25 min),
+# which is modest for CI and keeps brand-new cours at most a day stale
+# (the app's live-batch + gap-repair layers cover the remainder).
+
+on:
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: franchise-dataset
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build dataset
+        env:
+          ECLIPSE_DATASET_DIR: ${{ github.workspace }}/dataset-out
+        run: python3 scripts/dataset/build_franchise_dataset.py
+
+      - name: Sanity-check artifacts
+        run: |
+          python3 - << 'EOF'
+          import json, os
+          root = os.environ.get("GITHUB_WORKSPACE", ".") + "/dataset-out"
+          meta = json.load(open(root + "/franchises-meta-v1.json"))
+          blob = os.path.getsize(root + "/franchises-blob-v1.bin")
+          assert meta["schemaVersion"] == 1
+          assert meta["blobByteCount"] == blob, (meta["blobByteCount"], blob)
+          assert meta["mediaCount"] > 15000, "suspiciously small sweep: %d" % meta["mediaCount"]
+          assert meta["componentCount"] > 5000
+          print("ok:", meta["mediaCount"], "media,", meta["componentCount"], "components,", blob, "blob bytes")
+          EOF
+
+      - name: Publish rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=franchise-dataset-v1
+          gh release view "$TAG" > /dev/null 2>&1 || \
+            gh release create "$TAG" \
+              --title "Franchise Dataset (rolling)" \
+              --notes "Auto-built AniList franchise-component dataset with AniMap TMDB joins. Replaced in place on every build; consumed by Eclipse's anime structure resolver. Data from AniList (https://anilist.co) and AniMap (https://animap.s0n1c.ca)." \
+              --latest=false
+          gh release upload "$TAG" \
+            dataset-out/franchises-meta-v1.json \
+            dataset-out/franchises-blob-v1.bin \
+            --clobber

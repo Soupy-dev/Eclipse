@@ -141,3 +141,6 @@ iOSInjectionProject/
 /MPVKit
 /EclipseTVTests/
 /EclipseTVUITests/
+
+# Claude Cowork session working area (scripts/logs, never shipped)
+_claude_ops/
