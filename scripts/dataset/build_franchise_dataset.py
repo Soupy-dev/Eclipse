@@ -38,11 +38,15 @@ MAX_PAGES_PER_PARTITION = 100  # AniList hard cap: 5,000 results per query shape
 FIRST_SEASON_YEAR = 1917
 ALLOWED_RELATIONS = {"SEQUEL", "PREQUEL", "SEASON"}
 
+# Partitioning uses startDate windows, NOT the seasonYear filter: AniList's
+# seasonYear argument resolves old years bizarrely (1917 returns 2017's shows),
+# while FuzzyDateInt range filters are deterministic. Entries with a null
+# startDate match no window and are covered by the id-asc/id-desc partitions.
 QUERY = """
-query ($page: Int, $perPage: Int, $seasonYear: Int, $sort: [MediaSort]) {
+query ($page: Int, $perPage: Int, $startGreater: FuzzyDateInt, $startLesser: FuzzyDateInt, $sort: [MediaSort]) {
   Page(page: $page, perPage: $perPage) {
     pageInfo { hasNextPage currentPage }
-    media(type: ANIME, seasonYear: $seasonYear, sort: $sort) {
+    media(type: ANIME, startDate_greater: $startGreater, startDate_lesser: $startLesser, sort: $sort) {
       id
       idMal
       format
@@ -173,12 +177,27 @@ def sweep_anilist():
             % (label, added, page, len(media), min_interval[0])
         )
 
-    # Plain ascending ids: covers the oldest/no-season-year range (first 5,000 ids).
+    # Plain ascending ids: covers the oldest/no-start-date range (first 5,000 ids).
     run_partition("id-asc", {"sort": ["ID"]})
+    # One combined window for the sparse early decades, then yearly windows.
+    # Windows deliberately overlap by one day; dedupe-by-id absorbs it, and
+    # year-only fuzzy dates (YYYY0000) land in the preceding window because
+    # startDate_greater is exclusive.
+    run_partition(
+        "w-pre1940",
+        {"startGreater": 0, "startLesser": 19400101, "sort": ["ID"]},
+    )
     current_year = time.gmtime().tm_year
-    for year in range(FIRST_SEASON_YEAR, current_year + 3):
-        run_partition("y%d" % year, {"seasonYear": year, "sort": ["ID"]})
-    # Newest ids last: covers recent/TBA entries that have no seasonYear yet.
+    for year in range(1940, current_year + 3):
+        run_partition(
+            "w%d" % year,
+            {
+                "startGreater": year * 10000,
+                "startLesser": (year + 1) * 10000 + 101,
+                "sort": ["ID"],
+            },
+        )
+    # Newest ids last: covers recent/TBA entries that have no start date yet.
     run_partition("id-desc", {"sort": ["ID_DESC"]})
 
     out.close()
