@@ -144,3 +144,4 @@ iOSInjectionProject/
 
 # Claude Cowork session working area (scripts/logs, never shipped)
 _claude_ops/
+!/scripts/dataset/
