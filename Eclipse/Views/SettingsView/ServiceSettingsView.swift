@@ -1,3 +1,10 @@
+//
+//  ServiceSettingsView.swift
+//  Sora
+//
+//  Created by Francesco on 15/08/25.
+//
+
 import SwiftUI
 import Kingfisher
 
@@ -5,7 +12,7 @@ struct ServiceSettingsView: View {
     let service: Service
     @ObservedObject var serviceManager: ServiceManager
     @Environment(\.dismiss) private var dismiss
-    
+
     @State private var settings: [ServiceSetting] = []
     @State private var editedSettings: [String: String] = [:]
     @State private var isLoading = true
@@ -13,7 +20,7 @@ struct ServiceSettingsView: View {
     @State private var showSuccessAlert = false
     @State private var showErrorAlert = false
     @State private var errorMessage = ""
-    
+
     var body: some View {
         NavigationView {
             Group {
@@ -29,13 +36,14 @@ struct ServiceSettingsView: View {
 #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
 #endif
+#if !os(tvOS)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {
                         dismiss()
                     }
                 }
-                
+
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
                         saveSettings()
@@ -43,6 +51,7 @@ struct ServiceSettingsView: View {
                     .disabled(isSaving || !hasChanges)
                 }
             }
+#endif
         }
         .navigationViewStyle(StackNavigationViewStyle())
         .task {
@@ -61,7 +70,7 @@ struct ServiceSettingsView: View {
             Text(errorMessage)
         }
     }
-    
+
     @ViewBuilder
     private var loadingView: some View {
         VStack {
@@ -74,27 +83,38 @@ struct ServiceSettingsView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-    
+
     @ViewBuilder
     private var emptyStateView: some View {
         VStack(spacing: 20) {
             Image(systemName: "gear.badge.xmark")
                 .font(.system(size: 60))
                 .foregroundColor(.secondary)
-            
+
             Text("No Settings Available")
                 .font(.title2)
                 .fontWeight(.semibold)
-            
+
             Text("This service doesn't have configurable settings.")
                 .font(.body)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
+
+#if os(tvOS)
+
+            Button {
+                dismiss()
+            } label: {
+                Label("Close", systemImage: "xmark.circle")
+            }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("tv.serviceSettings.close")
+#endif
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-    
+
     @ViewBuilder
     private var settingsList: some View {
         List {
@@ -102,7 +122,7 @@ struct ServiceSettingsView: View {
                 serviceHeaderView
             }
             .listRowBackground(Color.clear)
-            
+
             Section {
                 ForEach(Array(settings.enumerated()), id: \.element.key) { index, setting in
                     SettingRow(
@@ -116,45 +136,65 @@ struct ServiceSettingsView: View {
             } header: {
                 Text("Configuration")
             }
+
+#if os(tvOS)
+
+            Section {
+                Button {
+                    saveSettings()
+                } label: {
+                    Label("Save", systemImage: "checkmark.circle")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isSaving || !hasChanges)
+                .accessibilityIdentifier("tv.serviceSettings.save")
+
+                Button(role: .cancel) {
+                    dismiss()
+                } label: {
+                    Label("Cancel", systemImage: "xmark.circle")
+                }
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("tv.serviceSettings.cancel")
+            }
+#endif
         }
     }
-    
+
     @ViewBuilder
     private var serviceHeaderView: some View {
         HStack(spacing: 16) {
-            KFImage(URL(string: service.metadata.iconUrl))
-                .placeholder {
-                    RoundedRectangle(cornerRadius: 12)
-                        .fill(Color.gray.opacity(0.2))
-                        .overlay(
-                            Image(systemName: "app.dashed")
-                                .foregroundColor(.secondary)
-                        )
-                }
-                .resizable()
+            PinnedProviderImage(URL(string: service.metadata.iconUrl)) {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(Color.gray.opacity(0.2))
+                    .overlay(
+                        Image(systemName: "app.dashed")
+                            .foregroundColor(.secondary)
+                    )
+            }
                 .frame(width: 60, height: 60)
                 .clipShape(RoundedRectangle(cornerRadius: 12))
-            
+
             VStack(alignment: .leading, spacing: 4) {
                 Text(service.metadata.sourceName)
                     .font(.title2)
                     .fontWeight(.bold)
                     .foregroundStyle(.primary)
-                
+
                 HStack(spacing: 4) {
                     Text("v\(service.metadata.version)")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    
+
                     Text("•")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    
+
                     Text(service.metadata.author.name)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                
+
                 Text(service.metadata.language)
                     .font(.caption)
                     .padding(.horizontal, 8)
@@ -162,12 +202,12 @@ struct ServiceSettingsView: View {
                     .background(Color.secondary.opacity(0.2))
                     .cornerRadius(4)
             }
-            
+
             Spacer()
         }
         .padding(.vertical, 8)
     }
-    
+
     private var hasChanges: Bool {
         for setting in settings {
             if editedSettings[setting.key] != setting.value {
@@ -176,19 +216,19 @@ struct ServiceSettingsView: View {
         }
         return false
     }
-    
+
     private func loadSettings() {
         settings = serviceManager.getServiceSettings(service)
         isLoading = false
-        
+
         for setting in settings {
             editedSettings[setting.key] = setting.value
         }
     }
-    
+
     private func saveSettings() {
         isSaving = true
-        
+
         let updatedSettings = settings.map { setting in
             ServiceSetting(
                 key: setting.key,
@@ -198,14 +238,14 @@ struct ServiceSettingsView: View {
                 options: setting.options
             )
         }
-        
+
         if serviceManager.updateServiceSettings(service, settings: updatedSettings) {
             showSuccessAlert = true
         } else {
             errorMessage = "Failed to save settings. Please try again."
             showErrorAlert = true
         }
-        
+
         isSaving = false
     }
 }
@@ -213,26 +253,26 @@ struct ServiceSettingsView: View {
 struct SettingRow: View {
     let setting: ServiceSetting
     @Binding var value: String
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text(setting.key)
                     .font(.headline)
                     .fontWeight(.semibold)
-                
+
                 if let comment = setting.comment {
                     Text(comment)
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
             }
-            
+
             settingInputView
         }
         .padding(.vertical, 8)
     }
-    
+
     @ViewBuilder
     private var settingInputView: some View {
         switch setting.type {
@@ -240,16 +280,16 @@ struct SettingRow: View {
             HStack {
                 Text(setting.key)
                     .font(.body)
-                
+
                 Spacer()
-                
+
                 Toggle("", isOn: Binding(
                     get: { value.lowercased() == "true" },
                     set: { value = $0 ? "true" : "false" }
                 ))
                 .labelsHidden()
             }
-            
+
         case .int:
             TextField("Enter number", text: Binding(
                 get: { value },
@@ -262,7 +302,7 @@ struct SettingRow: View {
 #if os(iOS)
             .keyboardType(.numberPad)
 #endif
-            
+
         case .float:
             TextField("Enter decimal number", text: Binding(
                 get: { value },
@@ -275,7 +315,7 @@ struct SettingRow: View {
 #if os(iOS)
             .keyboardType(.decimalPad)
 #endif
-            
+
         case .string:
             if let options = setting.options, !options.isEmpty {
                 Menu {
@@ -302,10 +342,12 @@ struct SettingRow: View {
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 10)
+#if !os(tvOS)
                     .background(
                         RoundedRectangle(cornerRadius: 10)
                             .fill(Color.black.opacity(0.06))
                     )
+#endif
                 }
             } else {
 #if os(tvOS)
@@ -324,7 +366,7 @@ struct SettingRow: View {
             }
         }
     }
-    
+
     private var modernTextFieldStyle: some TextFieldStyle {
         ModernTextFieldStyle()
     }

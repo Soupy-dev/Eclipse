@@ -1,3 +1,11 @@
+//
+//  circularLoading.swift
+//  Kanzen
+//
+//  Created by Dawud Osman on 24/10/2025.
+//
+
+// circular progress bar
 import SwiftUI
 
 struct CircularLoader: View {
@@ -22,4 +30,3 @@ struct CircularLoader: View {
         }
     }
 }
-

@@ -8,10 +8,16 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>EclipseDistributionChannel</key>
 	<string>$(ECLIPSE_DISTRIBUTION_CHANNEL)</string>
 	<key>EclipseReleaseVersion</key>
 	<string>$(ECLIPSE_RELEASE_VERSION)</string>
+	<key>EclipseSourceRevision</key>
+	<string>$(ECLIPSE_SOURCE_REVISION)</string>
+	<key>EclipseMPVKitSourceRevision</key>
+	<string>$(ECLIPSE_MPVKIT_SOURCE_REVISION)</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -40,15 +46,12 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Eclipse connects to media add-ons you configure on your local network.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>Eclipse can save images you choose, including reader images and media stills, to your photo library.</string>
-	<key>NSBonjourServices</key>
-	<array>
-		<string>_googlecast._tcp</string>
-		<string>_CC1AD845._googlecast._tcp</string>
-	</array>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>Eclipse uses your local network to find and connect to Cast-enabled TVs and streaming devices.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Eclipse uses Face ID to unlock a PIN-protected profile without typing its PIN. Authentication happens entirely on this device; Eclipse never receives or stores your biometric data.</string>
 	<key>TMDBAPIKey</key>
 	<string>$(TMDB_API_KEY)</string>
 	<key>AniListClientID</key>

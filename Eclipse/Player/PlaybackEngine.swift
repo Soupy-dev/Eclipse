@@ -3,10 +3,6 @@ import Foundation
 import UIKit
 #endif
 
-/// The playback implementation selected for a launch. On iPad and tvOS, `automatic` is a real
-/// persisted choice rather than an alias: the platform chooses the primary engine and may perform
-/// one pre-first-frame retry without changing the user's future launches. iPhone normalizes it to
-/// MPV instead.
 enum PlaybackEngine: String, CaseIterable, Codable, Identifiable {
     case automatic
     case mpv
@@ -40,46 +36,46 @@ enum PlaybackEngine: String, CaseIterable, Codable, Identifiable {
     }
 
     static var selected: PlaybackEngine {
-        get {
-#if os(tvOS)
-            if let raw = UserDefaults.standard.string(forKey: defaultsKey),
-               let value = PlaybackEngine(rawValue: raw) {
-                return value
-            }
-            return .automatic
-#else
-            let persistedEngine = UserDefaults.standard.string(forKey: defaultsKey)
-            let resolved = selected(
-                persistedEngine: persistedEngine,
-                legacyInAppPlayer: UserDefaults.standard.object(forKey: "inAppPlayer") as? String,
-                deviceFamily: .current
-            )
-            // Automatic is an iPad-only choice. Repair a value restored or migrated from an
-            // iPad so every iPhone caller (including launch sites that never open Settings)
-            // consistently receives and persists MoltenVK instead.
-            if persistedEngine != nil, persistedEngine != resolved.rawValue {
-                UserDefaults.standard.set(resolved.rawValue, forKey: defaultsKey)
-            }
-            return resolved
-#endif
-        }
-        set {
-            let resolved = supportedSelection(newValue, deviceFamily: .current)
-            UserDefaults.standard.set(resolved.rawValue, forKey: defaultsKey)
-        }
+        get { selected() }
+        set { setSelected(newValue) }
     }
 
-    /// Choices exposed by Settings for the current device family. Automatic is deliberately
-    /// unavailable on iPhone, where MoltenVK is the default and AVPlayer remains an explicit
-    /// opt-in.
+    static func selected(defaults: UserDefaults = ProfileSettingsStore.active) -> PlaybackEngine {
+#if os(tvOS)
+        if let raw = defaults.string(forKey: defaultsKey),
+           let value = PlaybackEngine(rawValue: raw) {
+            return value
+        }
+        return .automatic
+#else
+        let persistedEngine = defaults.string(forKey: defaultsKey)
+        let resolved = selected(
+            persistedEngine: persistedEngine,
+            legacyInAppPlayer: defaults.object(forKey: "inAppPlayer") as? String,
+            deviceFamily: .current
+        )
+
+        if persistedEngine != nil, persistedEngine != resolved.rawValue {
+            defaults.set(resolved.rawValue, forKey: defaultsKey)
+        }
+        return resolved
+#endif
+    }
+
+    static func setSelected(
+        _ engine: PlaybackEngine,
+        defaults: UserDefaults = ProfileSettingsStore.active
+    ) {
+        let resolved = supportedSelection(engine, deviceFamily: .current)
+        defaults.set(resolved.rawValue, forKey: defaultsKey)
+    }
+
     static func availableSelections(
         deviceFamily: PlaybackDeviceFamily
     ) -> [PlaybackEngine] {
         deviceFamily == .phone ? [.mpv, .avPlayer] : allCases
     }
 
-    /// Normalizes a selection imported from another device without disturbing explicit MPV or
-    /// AVPlayer choices. An iPad Automatic backup therefore becomes MoltenVK on iPhone.
     static func supportedSelection(
         _ selection: PlaybackEngine,
         deviceFamily: PlaybackDeviceFamily
@@ -101,8 +97,6 @@ enum PlaybackEngine: String, CaseIterable, Codable, Identifiable {
         }
     }
 
-    /// Pure migration policy. A stored modern value wins; a genuinely stored legacy value is
-    /// treated as an explicit choice; an untouched installation uses the device-family default.
     static func selected(
         persistedEngine: String?,
         legacyInAppPlayer: String?,
@@ -133,6 +127,20 @@ enum PlaybackEngine: String, CaseIterable, Codable, Identifiable {
     }
 }
 
+enum TypedPluginPlaybackEnginePolicy {
+    static func effectiveEngine(
+        requested: PlaybackEngine,
+        sourceKind: PlaybackSourceKind?
+    ) -> PlaybackEngine {
+        switch sourceKind {
+        case .skyStream:
+            return .mpv
+        default:
+            return requested
+        }
+    }
+}
+
 enum PlaybackDeviceFamily: Equatable {
     case phone
     case pad
@@ -146,8 +154,7 @@ enum PlaybackDeviceFamily: Equatable {
         switch UIDevice.current.userInterfaceIdiom {
         case .phone: return .phone
         case .pad: return .pad
-        // Automatic is an intentional iPad feature. Treat any unexpected iOS idiom
-        // conservatively as phone-like rather than leaking the option onto an iPhone UI.
+
         default: return .phone
         }
 #else
@@ -179,8 +186,7 @@ struct PlaybackLaunchPlan: Equatable {
 }
 
 enum PlaybackEngineRetryPolicy {
-    /// Engine fallback helps with renderer, codec, and container incompatibility. It cannot repair
-    /// an unreachable network or an HTTP response that makes the stream unusable for both engines.
+
     static func shouldTryAlternateEngine(message: String) -> Bool {
         let lower = message.lowercased()
         let terminalSourceMarkers = [
@@ -193,9 +199,7 @@ enum PlaybackEngineRetryPolicy {
         if terminalSourceMarkers.contains(where: { lower.contains($0) }) {
             return false
         }
-        // A different decoder cannot repair a provider's 4xx/5xx response. Recognize the common
-        // "HTTP 503", "status: 404", and "status code 500" shapes without maintaining a list of
-        // every possible response code.
+
         if let expression = try? NSRegularExpression(
             pattern: #"\b(?:http|status(?:\s+code)?)\s*[:=]?\s*[45]\d{2}\b"#
         ), expression.firstMatch(
@@ -269,8 +273,6 @@ enum TVSkipSegmentPolicy {
     }
 }
 
-/// Pure state used by the television player so progress and end-of-item events can reveal a
-/// choice, but can never launch the next episode themselves.
 enum TVNextEpisodeState: Equatable {
     case watching
     case promptingNearEnd

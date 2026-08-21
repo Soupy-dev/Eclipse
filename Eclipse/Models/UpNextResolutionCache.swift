@@ -11,6 +11,42 @@ final class UpNextResolutionCache: @unchecked Sendable {
         let resolvedAt: Date
 
         var hasTarget: Bool { seasonNumber != nil && episodeNumber != nil }
+
+        fileprivate var sanitizedForPersistence: Resolution? {
+            let timestamp = resolvedAt.timeIntervalSince1970
+            guard timestamp.isFinite,
+                  timestamp >= 0,
+                  timestamp <= Date().timeIntervalSince1970
+                    + MediaStateEnvelopeValidator.maximumFutureClockSkew else {
+                return nil
+            }
+            if seasonNumber == nil || episodeNumber == nil {
+                guard seasonNumber == nil, episodeNumber == nil else { return nil }
+                return Resolution(
+                    seasonNumber: nil,
+                    episodeNumber: nil,
+                    playbackContext: nil,
+                    resolvedAt: resolvedAt
+                )
+            }
+            guard let seasonNumber,
+                  let episodeNumber,
+                  (0...ProgressPersistencePolicy.maximumCoordinate).contains(seasonNumber),
+                  (1...ProgressPersistencePolicy.maximumCoordinate).contains(episodeNumber) else {
+                return nil
+            }
+            return Resolution(
+                seasonNumber: seasonNumber,
+                episodeNumber: episodeNumber,
+                playbackContext: playbackContext.flatMap {
+                    ProgressPersistencePolicy.sanitizedPlaybackContext(
+                        $0,
+                        expectedLocalEpisodeNumber: episodeNumber
+                    )
+                },
+                resolvedAt: resolvedAt
+            )
+        }
     }
 
     private struct Store: Codable {
@@ -21,6 +57,7 @@ final class UpNextResolutionCache: @unchecked Sendable {
 
     private static let negativeTTL: TimeInterval = 12 * 60 * 60
     private static let maximumEntryCount = 300
+    static let maximumPersistedStoreBytes = 2 * 1_024 * 1_024
 
     private let lock = NSLock()
     private var store = Store()
@@ -43,9 +80,11 @@ final class UpNextResolutionCache: @unchecked Sendable {
     }
 
     func store(_ resolution: Resolution, forKey key: String, profile profileID: UUID) {
+        guard Self.keyIsValid(key),
+              let sanitized = resolution.sanitizedForPersistence else { return }
         lock.lock()
         loadIfNeededLocked(forProfile: profileID)
-        store.entries[key] = resolution
+        store.entries[key] = sanitized
         pruneLocked()
         lock.unlock()
         scheduleSave()
@@ -82,18 +121,40 @@ final class UpNextResolutionCache: @unchecked Sendable {
         store = Store()
 
         let url = Self.fileURL(for: profileID)
-        guard let data = try? Data(contentsOf: url) else { return }
+        guard let data = try? BoundedLocalStoreReader.read(
+            from: url,
+            maximumBytes: Self.maximumPersistedStoreBytes
+        ) else { return }
         guard let decoded = try? JSONDecoder().decode(Store.self, from: data) else {
             Logger.shared.log("UpNextResolutionCache: dropping unreadable store", type: "Error")
             return
         }
         store = decoded
-        store.entries = store.entries.filter { !Self.isExpired($0.value) }
+        store.entries = Dictionary(
+            uniqueKeysWithValues: store.entries.compactMap { key, value in
+                guard Self.keyIsValid(key),
+                      let sanitized = value.sanitizedForPersistence,
+                      !Self.isExpired(sanitized) else { return nil }
+                return (key, sanitized)
+            }
+        )
+        pruneLocked()
     }
 
     private static func isExpired(_ resolution: Resolution) -> Bool {
         let ttl = resolution.hasTarget ? positiveTTL : negativeTTL
         return Date().timeIntervalSince(resolution.resolvedAt) >= ttl
+    }
+
+    private static func keyIsValid(_ key: String) -> Bool {
+        let components = key.split(separator: ":", omittingEmptySubsequences: false)
+        guard components.count == 3,
+              let showID = Int(components[0]),
+              let seasonNumber = Int(components[1]),
+              let episodeNumber = Int(components[2]) else { return false }
+        return ProgressPersistencePolicy.validPositiveIdentifier(showID)
+            && (0...ProgressPersistencePolicy.maximumCoordinate).contains(seasonNumber)
+            && (1...ProgressPersistencePolicy.maximumCoordinate).contains(episodeNumber)
     }
 
     private func pruneLocked() {
@@ -129,6 +190,10 @@ final class UpNextResolutionCache: @unchecked Sendable {
     private func write(_ snapshot: Store, forProfile profileID: UUID) {
         do {
             let data = try JSONEncoder().encode(snapshot)
+            guard data.count <= Self.maximumPersistedStoreBytes else {
+                Logger.shared.log("UpNextResolutionCache: refused oversized save", type: "Error")
+                return
+            }
             try data.write(to: Self.fileURL(for: profileID), options: .atomic)
         } catch {
             Logger.shared.log(

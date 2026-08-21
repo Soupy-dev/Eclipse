@@ -1,6 +1,11 @@
-// Custom Seekbar
-// Thanks to pratikg29 for this code inside his open source project "https://github.com/pratikg29/Custom-Slider-Control?ref=iosexample.com"
-// I did edit some of the code for my liking (added a buffer indicator, etc.)
+//
+//  MusicProgressSlider.swift
+//  Custom Seekbar
+//
+//  Created by Pratik on 08/01/23.
+//
+//  Thanks to pratikg29 for this code inside his open source project "https://github.com/pratikg29/Custom-Slider-Control?ref=iosexample.com"
+//  I did edit some of the code for my liking (added a buffer indicator, etc.)
 
 import SwiftUI
 
@@ -15,16 +20,15 @@ struct MusicProgressSlider<T: BinaryFloatingPoint>: View {
     let durationKnown: Bool
     let showRemainingTime: Bool
     let preciseAdjustment: Bool
-    /// Normalized 0-1 skip segment ranges to render as yellow overlays.
+
     let segments: [(start: Double, end: Double)]
     let onEditingChanged: (Bool) -> Void
-    
+
     @State private var localRealProgress: T = 0
     @State private var localTempProgress: T = 0
     @GestureState private var isActive: Bool = false
     @State private var progressDuration: T = 0
 
-    
     init(
         value: Binding<T>,
         inRange: ClosedRange<T>,
@@ -52,7 +56,7 @@ struct MusicProgressSlider<T: BinaryFloatingPoint>: View {
         self.segments = segments
         self.onEditingChanged = onEditingChanged
     }
-    
+
     var body: some View {
         GeometryReader { bounds in
             ZStack {
@@ -60,12 +64,10 @@ struct MusicProgressSlider<T: BinaryFloatingPoint>: View {
                     .allowsHitTesting(false)
                 VStack(spacing: 8) {
                     ZStack(alignment: .leading) {
-                        // Background capsule. A static translucent fill rather than a .ultraThinMaterial backdrop blur: the bar sits over
-                        // live video,.
+
                         Capsule()
                             .fill(Color.white.opacity(0.2))
 
-                        // Yellow skip-segment overlays
                         ForEach(Array(segments.enumerated()), id: \.offset) { _, seg in
                             let segStart = CGFloat(max(0, min(seg.start, 1)))
                             let segEnd = CGFloat(max(0, min(seg.end, 1)))
@@ -76,7 +78,6 @@ struct MusicProgressSlider<T: BinaryFloatingPoint>: View {
                                 .offset(x: segStart * bounds.size.width)
                         }
 
-                        // Progress fill
                         Capsule()
                             .fill(isActive ? activeFillColor : fillColor)
                             .mask({
@@ -94,7 +95,7 @@ struct MusicProgressSlider<T: BinaryFloatingPoint>: View {
                             })
                     }
                     .clipShape(Capsule())
-                    
+
                     HStack {
                         Text(timeString(from: progressDuration))
                         Spacer(minLength: 0)
@@ -144,7 +145,7 @@ struct MusicProgressSlider<T: BinaryFloatingPoint>: View {
         }
         .frame(height: isActive ? height * 1.25 : height, alignment: .center)
     }
-        
+
     private var animation: Animation {
         if isActive {
             return .spring()
@@ -165,7 +166,7 @@ struct MusicProgressSlider<T: BinaryFloatingPoint>: View {
         }
         return timeString(from: inRange.upperBound)
     }
-    
+
     private func getPrgPercentage(_ value: T) -> T {
         let range = inRange.upperBound - inRange.lowerBound
         let rangeDouble = Double(range)
@@ -184,7 +185,7 @@ struct MusicProgressSlider<T: BinaryFloatingPoint>: View {
         }
         return clamped
     }
-    
+
     private func getPrgValue() -> T {
         let candidate = ((localRealProgress + localTempProgress) * (inRange.upperBound - inRange.lowerBound)) + inRange.lowerBound
         let candidateDouble = Double(candidate)
@@ -194,11 +195,12 @@ struct MusicProgressSlider<T: BinaryFloatingPoint>: View {
         }
         return candidate
     }
-    
+
     private func timeString(from value: T) -> String {
         let seconds = Double(value)
-        guard seconds.isFinite && seconds > 0 else { return "00:00" }
-        let total = Int(round(seconds))
+        guard seconds.isFinite,
+              seconds > 0,
+              let total = Int(exactly: seconds.rounded()) else { return "00:00" }
         let s = total % 60
         let m = (total / 60) % 60
         let h = total / 3600

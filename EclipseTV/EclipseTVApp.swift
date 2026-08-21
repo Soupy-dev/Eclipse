@@ -4,36 +4,100 @@ import SwiftUI
 struct EclipseTVApp: App {
     @StateObject private var theme = EclipseTheme.shared
     @StateObject private var localization = LocalizationManager.shared
+    @StateObject private var profileManager = ProfileManager.shared
+
+    @State private var showOnboarding: Bool
+    @State private var showProfilePicker = false
+    @State private var didEvaluateLaunchPicker = false
+    @State private var launchUnlockProfile: Profile?
+    @State private var cloudKitUpgradeNoticePending = false
+    @State private var showCloudKitUpgradeNotice = false
+
+    private static let isUITestHarness = ProcessInfo.processInfo.arguments
+        .contains("-UITestingPlayerHarness")
+
+    private static let isUITestRun = ProcessInfo.processInfo.arguments
+        .contains("-UITesting")
 
     init() {
+        OnboardingState.bootstrapIfNeeded()
         _ = LocalizationManager.shared
         CrashReportManager.shared.start()
         ExperimentalFeatureState.configureLaunchState()
 
-        // tvOS treats everything outside UserDefaults as purgeable. Keep the
-        // bounded media cache tidy without instantiating the download stack.
         DispatchQueue.global(qos: .utility).async {
             CacheManager.shared.checkAndAutoClearIfNeeded()
         }
 
         MediaStateSyncBootstrap.startIfAvailable()
+
+        let completed = UserDefaults.standard.bool(forKey: OnboardingState.completedKey)
+        _showOnboarding = State(initialValue: !completed && !Self.isUITestHarness && !Self.isUITestRun)
     }
 
     var body: some Scene {
         WindowGroup {
             Group {
-                if ProcessInfo.processInfo.arguments.contains("-UITestingPlayerHarness") {
+                if showOnboarding {
+                    OnboardingView {
+                        showOnboarding = false
+                        presentCloudKitUpgradeNoticeIfReady()
+                    }
+                } else if Self.isUITestHarness {
                     TVPlayerUITestHarness()
+                } else if showProfilePicker {
+                    ProfilePickerView(autoUnlockProfile: launchUnlockProfile) {
+                        showProfilePicker = false
+                        presentCloudKitUpgradeNoticeIfReady()
+                    }
+                    .ignoresSafeArea()
                 } else {
                     TVRootView()
                 }
             }
+                .onAppear {
+                    guard !didEvaluateLaunchPicker else { return }
+                    didEvaluateLaunchPicker = true
+                    showProfilePicker = !showOnboarding
+                        && !Self.isUITestHarness
+                        && !Self.isUITestRun
+                        && ProfileManager.shared.shouldPresentLaunchPicker
+                    launchUnlockProfile = ProfileManager.shared.launchProfileRequiringUnlock
+                    cloudKitUpgradeNoticePending =
+                        MediaStateSyncBootstrap.prepareCloudKitUpgradeNoticeIfNeeded()
+                    presentCloudKitUpgradeNoticeIfReady()
+                }
+                .defaultAppStorage(ProfileSettingsStore.shared.store(for: profileManager.activeProfileID))
                 .environmentObject(theme)
                 .environmentObject(localization)
                 .environment(\.locale, localization.locale)
                 .environment(\.layoutDirection, localization.layoutDirection)
                 .preferredColorScheme(.dark)
+                .alert(
+                    "Cloud Sync Changed",
+                    isPresented: $showCloudKitUpgradeNotice
+                ) {
+                    Button("Resume Sync") {
+                        MediaStateSyncBootstrap.markCloudKitUpgradeNoticeHandled()
+                        MediaStateSyncBootstrap.setCloudKitSyncEnabled(true)
+                    }
+                    Button("Keep Off", role: .cancel) {
+                        MediaStateSyncBootstrap.markCloudKitUpgradeNoticeHandled()
+                    }
+                } message: {
+                    Text("Earlier versions of Eclipse automatically synced your library and watch progress through iCloud on this Apple TV. That sync is now off, and no data was deleted. You can keep it off or explicitly resume syncing.")
+                }
         }
+    }
+
+    private func presentCloudKitUpgradeNoticeIfReady() {
+        guard cloudKitUpgradeNoticePending,
+              !showOnboarding,
+              !showProfilePicker,
+              !Self.isUITestHarness,
+              !Self.isUITestRun else { return }
+        cloudKitUpgradeNoticePending = false
+        showCloudKitUpgradeNotice = true
     }
 }
 

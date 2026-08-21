@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       build_number:
-        description: "CFBundleVersion. Empty uses the GitHub run number."
+        description: "CFBundleVersion; blank uses run number. Override must be >= run number and > checked-in build."
         required: false
         default: ""
       upload:
@@ -17,9 +17,13 @@ concurrency:
   group: ios-testflight-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   testflight:
     name: Archive, export, and upload iOS build
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     runs-on: macos-latest
     timeout-minutes: 120
 
@@ -28,52 +32,99 @@ jobs:
       BUNDLE_IDENTIFIER: ${{ vars.IOS_BUNDLE_IDENTIFIER || 'app.Eclipse.Soupy' }}
       DEVELOPMENT_TEAM: ${{ vars.IOS_DEVELOPMENT_TEAM || 'ANMK3Y568U' }}
       ICLOUD_CONTAINER_ID: ${{ vars.IOS_ICLOUD_CONTAINER_ID || 'iCloud.Eclipse.Soupy' }}
-      WORKSPACE_PATH: Eclipse.xcworkspace
+      PROJECT_PATH: Eclipse.xcodeproj
       SCHEME: Eclipse
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Validate immutable MPVKit revision
+        env:
+          MPVKIT_SOURCE_REVISION: ${{ vars.MPVKIT_SOURCE_REVISION }}
+        run: |
+          set -euo pipefail
+
+          if ! [[ "$MPVKIT_SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::MPVKIT_SOURCE_REVISION must be an explicitly reviewed lowercase 40-character commit SHA. Mutable MPVKit branches are not accepted."
+            exit 1
+          fi
       - name: Check out canonical MPVKit
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: Soupy-dev/MPVKit
-          ref: eclipse-mpv-metal
+          ref: ${{ vars.MPVKIT_SOURCE_REVISION }}
           path: MPVKit
+      - name: Verify immutable MPVKit checkout
+        env:
+          MPVKIT_SOURCE_REVISION: ${{ vars.MPVKIT_SOURCE_REVISION }}
+        run: test "$(git -C MPVKit rev-parse HEAD)" = "$MPVKIT_SOURCE_REVISION"
       - name: Expose sibling MPVKit package
         run: ln -sfn "$GITHUB_WORKSPACE/MPVKit" "$GITHUB_WORKSPACE/../MPVKit"
 
       - name: Set up Xcode
-        uses: maxim-lobanov/setup-xcode@v1
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
           xcode-version: latest-stable
 
-      - name: Install iOS pods
-        run: pod install
-
-      - name: Validate signing secrets
+      - name: Validate signing and runtime secrets
         env:
-          APP_STORE_CONNECT_API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
-          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          REQUEST_UPLOAD: ${{ inputs.upload }}
+          RELEASE_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           IOS_DISTRIBUTION_CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
           IOS_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
           IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
           KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          ANILIST_CLIENT_ID: ${{ secrets.ANILIST_CLIENT_ID }}
+          ANILIST_CLIENT_SECRET: ${{ secrets.ANILIST_CLIENT_SECRET }}
+          TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
+          TRAKT_CLIENT_SECRET: ${{ secrets.TRAKT_CLIENT_SECRET }}
+          MAL_CLIENT_ID: ${{ secrets.MAL_CLIENT_ID }}
+          MAL_CLIENT_SECRET: ${{ secrets.MAL_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$REQUEST_UPLOAD" == "true" && "$RELEASE_REF" != "refs/heads/$DEFAULT_BRANCH" ]]; then
+            echo "::error::Uploading is allowed only from the default branch 'refs/heads/$DEFAULT_BRANCH'; received '$RELEASE_REF'. Run with upload disabled to validate another branch."
+            exit 1
+          fi
+
+          for name in \
+            IOS_DISTRIBUTION_CERTIFICATE_BASE64 \
+            IOS_DISTRIBUTION_CERTIFICATE_PASSWORD \
+            IOS_PROVISIONING_PROFILE_BASE64 \
+            KEYCHAIN_PASSWORD \
+            TMDB_API_KEY \
+            ANILIST_CLIENT_ID \
+            ANILIST_CLIENT_SECRET \
+            TRAKT_CLIENT_ID \
+            TRAKT_CLIENT_SECRET \
+            MAL_CLIENT_ID \
+            MAL_CLIENT_SECRET
+          do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::$name is missing."
+              exit 1
+            fi
+          done
+
+      - name: Validate App Store Connect credentials
+        if: ${{ inputs.upload }}
+        env:
+          APP_STORE_CONNECT_API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
         run: |
           set -euo pipefail
 
           for name in \
             APP_STORE_CONNECT_API_KEY_P8 \
             APP_STORE_CONNECT_ISSUER_ID \
-            APP_STORE_CONNECT_KEY_ID \
-            IOS_DISTRIBUTION_CERTIFICATE_BASE64 \
-            IOS_DISTRIBUTION_CERTIFICATE_PASSWORD \
-            IOS_PROVISIONING_PROFILE_BASE64 \
-            KEYCHAIN_PASSWORD
+            APP_STORE_CONNECT_KEY_ID
           do
-            if [ -z "${!name:-}" ]; then
-              echo "::error::$name is missing."
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::$name is required when upload is enabled."
               exit 1
             fi
           done
@@ -85,10 +136,30 @@ jobs:
           set -euo pipefail
 
           BUILD_NUMBER="${INPUT_BUILD_NUMBER:-${GITHUB_RUN_NUMBER}}"
-          if ! [[ "$BUILD_NUMBER" =~ ^[0-9]+$ ]]; then
-            echo "::error::Build number must be numeric. Received '$BUILD_NUMBER'."
+          if ! [[ "$BUILD_NUMBER" =~ ^[1-9][0-9]{0,3}$ ]]; then
+            echo "::error::Build number must be an integer from 1 through 9999 without leading zeroes. Received '$BUILD_NUMBER'."
             exit 1
           fi
+
+          PROJECT_BUILD_FLOOR="$(
+            agvtool what-version -terse 2>/dev/null \
+              | awk 'BEGIN { maximum = 0 } /^[0-9]+$/ { if ($1 > maximum) maximum = $1 } END { print maximum }'
+          )"
+          python3 - "$BUILD_NUMBER" "$PROJECT_BUILD_FLOOR" "$GITHUB_RUN_NUMBER" <<'PY'
+          import sys
+
+          requested = int(sys.argv[1])
+          checked_in = int(sys.argv[2])
+          workflow_run = int(sys.argv[3])
+          if requested <= checked_in:
+              raise SystemExit(
+                  f"error: iOS build number {requested} must be greater than the checked-in build {checked_in}."
+              )
+          if requested < workflow_run:
+              raise SystemExit(
+                  f"error: iOS build number {requested} must be at least the current GitHub workflow run number {workflow_run}."
+              )
+          PY
 
           echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
 
@@ -110,15 +181,15 @@ jobs:
             printf 'DEVELOPMENT_TEAM = %s\n' "$DEVELOPMENT_TEAM"
             printf '%s\n' 'CODE_SIGN_ENTITLEMENTS = Eclipse/Eclipse.entitlements'
             printf 'ICLOUD_CONTAINER_ID = %s\n' "$ICLOUD_CONTAINER_ID"
-            printf 'TMDB_API_KEY = %s\n' "${TMDB_API_KEY:-}"
-            printf 'ANILIST_CLIENT_ID = %s\n' "${ANILIST_CLIENT_ID:-}"
-            printf 'ANILIST_CLIENT_SECRET = %s\n' "${ANILIST_CLIENT_SECRET:-}"
+            printf 'TMDB_API_KEY = %s\n' "$TMDB_API_KEY"
+            printf 'ANILIST_CLIENT_ID = %s\n' "$ANILIST_CLIENT_ID"
+            printf 'ANILIST_CLIENT_SECRET = %s\n' "$ANILIST_CLIENT_SECRET"
             printf '%s\n' 'ANILIST_REDIRECT_URI = luna:/$()/anilist-callback'
-            printf 'TRAKT_CLIENT_ID = %s\n' "${TRAKT_CLIENT_ID:-}"
-            printf 'TRAKT_CLIENT_SECRET = %s\n' "${TRAKT_CLIENT_SECRET:-}"
+            printf 'TRAKT_CLIENT_ID = %s\n' "$TRAKT_CLIENT_ID"
+            printf 'TRAKT_CLIENT_SECRET = %s\n' "$TRAKT_CLIENT_SECRET"
             printf '%s\n' 'TRAKT_REDIRECT_URI = luna:/$()/trakt-callback'
-            printf 'MAL_CLIENT_ID = %s\n' "${MAL_CLIENT_ID:-}"
-            printf 'MAL_CLIENT_SECRET = %s\n' "${MAL_CLIENT_SECRET:-}"
+            printf 'MAL_CLIENT_ID = %s\n' "$MAL_CLIENT_ID"
+            printf 'MAL_CLIENT_SECRET = %s\n' "$MAL_CLIENT_SECRET"
             printf '%s\n' 'MAL_REDIRECT_URI = luna:/$()/mal-callback'
           } > Build.local.xcconfig
 
@@ -135,6 +206,7 @@ jobs:
           PROFILE_PATH="$RUNNER_TEMP/profile.mobileprovision"
           PROFILE_PLIST="$RUNNER_TEMP/profile.plist"
           KEYCHAIN_PATH="$RUNNER_TEMP/eclipse-signing.keychain-db"
+          echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
 
           echo "$IOS_DISTRIBUTION_CERTIFICATE_BASE64" | base64 -D > "$CERTIFICATE_PATH"
           echo "$IOS_PROVISIONING_PROFILE_BASE64" | base64 -D > "$PROFILE_PATH"
@@ -153,6 +225,7 @@ jobs:
 
           security cms -D -i "$PROFILE_PATH" > "$PROFILE_PLIST"
           PROFILE_UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" "$PROFILE_PLIST")
+          echo "PROFILE_UUID=$PROFILE_UUID" >> "$GITHUB_ENV"
           PROFILE_NAME=$(/usr/libexec/PlistBuddy -c "Print Name" "$PROFILE_PLIST")
           PROFILE_APP_ID=$(/usr/libexec/PlistBuddy -c "Print Entitlements:application-identifier" "$PROFILE_PLIST")
           EXPECTED_APP_ID="${DEVELOPMENT_TEAM}.${BUNDLE_IDENTIFIER}"
@@ -198,12 +271,11 @@ jobs:
           printf 'PROVISIONING_PROFILE_SPECIFIER = %s\n' "$PROFILE_NAME" >> Build.local.xcconfig
 
           {
-            echo "KEYCHAIN_PATH=$KEYCHAIN_PATH"
-            echo "PROFILE_UUID=$PROFILE_UUID"
             echo "PROFILE_NAME=$PROFILE_NAME"
           } >> "$GITHUB_ENV"
 
       - name: Install App Store Connect API key
+        if: ${{ inputs.upload }}
         env:
           APP_STORE_CONNECT_API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
@@ -218,11 +290,102 @@ jobs:
         run: |
           set -euo pipefail
 
+          SOURCE_PACKAGES_DIR="$RUNNER_TEMP/SourcePackages"
+          rm -rf "$SOURCE_PACKAGES_DIR"
           xcodebuild -resolvePackageDependencies \
-            -workspace "$WORKSPACE_PATH" \
+            -project "$PROJECT_PATH" \
             -scheme "$SCHEME" \
+            -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_DIR" \
             -skipPackagePluginValidation \
             -skipMacroValidation
+
+          LIBMPV_BINARY="$(find "$SOURCE_PACKAGES_DIR/artifacts" \
+            -path '*Libmpv.xcframework/ios-arm64/Libmpv.framework/Libmpv' \
+            -type f -print -quit)"
+          if [[ -z "$LIBMPV_BINARY" ]]; then
+            echo "::error::The resolved MPVKit runtime does not contain the iOS Libmpv device slice."
+            exit 1
+          fi
+          LIBMPV_SYMBOLS="$(mktemp)"
+          xcrun nm -gU "$LIBMPV_BINARY" > "$LIBMPV_SYMBOLS" 2>/dev/null || true
+          for symbol in \
+            mpv_apple_pip_api_version \
+            mpv_apple_pip_get_capabilities \
+            mpv_apple_pip_set_callback \
+            mpv_apple_pip_set_mode \
+            mpv_apple_pip_submit_target \
+            mpv_apple_pip_disable_and_drain \
+            mpv_apple_audiounit_recovery_count
+          do
+            if ! grep -Eq "[[:space:]]_?${symbol}$" "$LIBMPV_SYMBOLS"; then
+              echo "::error::The resolved iOS Libmpv artifact is missing required native export '$symbol'. Provide the reviewed MPVKit source and matching private native runtime before releasing."
+              exit 1
+            fi
+          done
+          rm -f "$LIBMPV_SYMBOLS"
+
+          echo "SOURCE_PACKAGES_DIR=$SOURCE_PACKAGES_DIR" >> "$GITHUB_ENV"
+
+      - name: Select iOS simulator
+        run: |
+          set -euo pipefail
+
+          IOS_SIMULATOR_ID="$(xcrun simctl list devices available -j | python3 -c '
+          import json
+          import re
+          import sys
+
+          payload = json.load(sys.stdin)
+          candidates = []
+          for runtime, devices in payload.get("devices", {}).items():
+              if "SimRuntime.iOS-" not in runtime:
+                  continue
+              version = tuple(int(part) for part in re.findall(r"[0-9]+", runtime))
+              for device in devices:
+                  if not device.get("isAvailable", False):
+                      continue
+                  name = str(device.get("name", ""))
+                  if not name.startswith("iPhone"):
+                      continue
+                  candidates.append((version, name, str(device.get("udid", ""))))
+
+          if not candidates:
+              raise SystemExit("No available iPhone simulator was found.")
+          candidates.sort(reverse=True)
+          print(candidates[0][2])
+          ')"
+
+          if [[ -z "$IOS_SIMULATOR_ID" ]]; then
+            echo "::error::No available iPhone simulator was selected."
+            exit 1
+          fi
+          echo "IOS_SIMULATOR_ID=$IOS_SIMULATOR_ID" >> "$GITHUB_ENV"
+
+      - name: Run iOS tests
+        run: |
+          set -euo pipefail
+
+          if [ ! -d "$GITHUB_WORKSPACE/Eclipse/Tests" ] && [ ! -d "$GITHUB_WORKSPACE/Tests" ]; then
+            echo "Test sources are local-only and not tracked; skipping test run."
+            exit 0
+          fi
+
+          TEST_DERIVED_DATA="$RUNNER_TEMP/DerivedData-iOS-Tests"
+          TEST_RESULT="$RUNNER_TEMP/Eclipse-iOS-tests.xcresult"
+          rm -rf "$TEST_DERIVED_DATA" "$TEST_RESULT"
+
+          xcodebuild test \
+            -project "$PROJECT_PATH" \
+            -scheme "$SCHEME" \
+            -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
+            -derivedDataPath "$TEST_DERIVED_DATA" \
+            -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_DIR" \
+            -disableAutomaticPackageResolution \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            -parallel-testing-enabled NO \
+            -resultBundlePath "$TEST_RESULT" \
+            CODE_SIGNING_ALLOWED=NO
 
       - name: Archive signed app
         run: |
@@ -230,20 +393,25 @@ jobs:
 
           ARCHIVE_PATH="$RUNNER_TEMP/$APP_NAME.xcarchive"
           DERIVED_DATA_PATH="$RUNNER_TEMP/DerivedData"
+          MPVKIT_SOURCE_REVISION="$(git -C "$GITHUB_WORKSPACE/MPVKit" rev-parse HEAD)"
 
           rm -rf "$ARCHIVE_PATH" "$DERIVED_DATA_PATH"
 
           xcodebuild archive \
-            -workspace "$WORKSPACE_PATH" \
+            -project "$PROJECT_PATH" \
             -scheme "$SCHEME" \
             -configuration Release \
             -archivePath "$ARCHIVE_PATH" \
             -destination "generic/platform=iOS" \
             -sdk iphoneos \
             -derivedDataPath "$DERIVED_DATA_PATH" \
+            -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_DIR" \
+            -disableAutomaticPackageResolution \
             -skipPackagePluginValidation \
             -skipMacroValidation \
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            ECLIPSE_SOURCE_REVISION="$GITHUB_SHA" \
+            ECLIPSE_MPVKIT_SOURCE_REVISION="$MPVKIT_SOURCE_REVISION" \
             ECLIPSE_DISTRIBUTION_CHANNEL=TestFlight \
             ICLOUD_CONTAINER_ENVIRONMENT=Production \
             PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_IDENTIFIER" \
@@ -254,6 +422,59 @@ jobs:
             ENABLE_USER_SCRIPT_SANDBOXING=NO
 
           APP_PATH="$(find "$ARCHIVE_PATH/Products/Applications" -maxdepth 1 -type d -name '*.app' -print -quit)"
+
+          test -f "$APP_PATH/OpenSourceLicenses/THIRD-PARTY-NOTICES.txt"
+          test "$(/usr/libexec/PlistBuddy -c 'Print EclipseSourceRevision' "$APP_PATH/Info.plist")" = "$GITHUB_SHA"
+          test "$(/usr/libexec/PlistBuddy -c 'Print EclipseMPVKitSourceRevision' "$APP_PATH/Info.plist")" = "$MPVKIT_SOURCE_REVISION"
+          test "$(/usr/libexec/PlistBuddy -c 'Print ITSAppUsesNonExemptEncryption' "$APP_PATH/Info.plist")" = "false"
+
+          for runtime_key in \
+            TMDBAPIKey \
+            AniListClientID \
+            AniListClientSecret \
+            AniListRedirectUri \
+            TraktClientID \
+            TraktClientSecret \
+            TraktRedirectUri \
+            MALClientID \
+            MALClientSecret \
+            MALRedirectUri
+          do
+            runtime_value=$(/usr/libexec/PlistBuddy -c "Print :$runtime_key" "$APP_PATH/Info.plist" 2>/dev/null || true)
+            if [[ -z "$runtime_value" || "$runtime_value" == *'$('* ]]; then
+              echo "::error::archived iOS app is missing configured runtime value '$runtime_key'."
+              exit 1
+            fi
+          done
+
+          ENTITLEMENTS_PLIST="$RUNNER_TEMP/ios-signed-entitlements.plist"
+          if ! codesign -d --entitlements :- "$APP_PATH" > "$ENTITLEMENTS_PLIST" 2>/dev/null; then
+            echo "::error::Signed iOS app entitlements could not be read."
+            exit 1
+          fi
+          plutil -lint "$ENTITLEMENTS_PLIST" >/dev/null
+
+          SIGNED_CLOUDKIT_ENVIRONMENT=$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.icloud-container-environment' "$ENTITLEMENTS_PLIST")
+          if [[ "$SIGNED_CLOUDKIT_ENVIRONMENT" != "Production" ]]; then
+            echo "::error::Signed iOS app uses CloudKit environment '$SIGNED_CLOUDKIT_ENVIRONMENT', expected 'Production'."
+            exit 1
+          fi
+
+          SIGNED_ICLOUD_SERVICES=$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.icloud-services' "$ENTITLEMENTS_PLIST")
+          if ! grep -Fq 'CloudKit' <<< "$SIGNED_ICLOUD_SERVICES"; then
+            echo "::error::Signed iOS app does not include the CloudKit service entitlement."
+            exit 1
+          fi
+          if ! grep -Fq 'CloudDocuments' <<< "$SIGNED_ICLOUD_SERVICES"; then
+            echo "::error::Signed iOS app does not include the iCloud Documents service entitlement."
+            exit 1
+          fi
+
+          SIGNED_ICLOUD_CONTAINERS=$(/usr/libexec/PlistBuddy -c 'Print :com.apple.developer.icloud-container-identifiers' "$ENTITLEMENTS_PLIST")
+          if ! grep -Fq "$ICLOUD_CONTAINER_ID" <<< "$SIGNED_ICLOUD_CONTAINERS"; then
+            echo "::error::Signed iOS app does not include iCloud container '$ICLOUD_CONTAINER_ID'."
+            exit 1
+          fi
 
           MANIFEST_PATH="$APP_PATH/PrivacyInfo.xcprivacy"
           if [[ ! -f "$MANIFEST_PATH" ]]; then
@@ -280,6 +501,7 @@ jobs:
               "NSPrivacyAccessedAPICategoryUserDefaults": {"CA92.1"},
               "NSPrivacyAccessedAPICategoryFileTimestamp": {"C617.1"},
               "NSPrivacyAccessedAPICategoryDiskSpace": {"85F4.1", "E174.1"},
+              "NSPrivacyAccessedAPICategorySystemBootTime": {"35F9.1"},
           }
           declared = {
               entry.get("NSPrivacyAccessedAPIType"): set(entry.get("NSPrivacyAccessedAPITypeReasons", []))
@@ -364,8 +586,26 @@ jobs:
 
       - name: Clean up signing keychain
         if: always()
+        env:
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
         run: |
           set +e
-          if [ -n "${KEYCHAIN_PATH:-}" ] && [ -f "$KEYCHAIN_PATH" ]; then
-            security delete-keychain "$KEYCHAIN_PATH"
+          cleanup_keychain="${KEYCHAIN_PATH:-$RUNNER_TEMP/eclipse-signing.keychain-db}"
+          if [ -f "$cleanup_keychain" ]; then
+            security delete-keychain "$cleanup_keychain"
           fi
+          cleanup_profile_uuid="${PROFILE_UUID:-}"
+          if [ -z "$cleanup_profile_uuid" ] && [ -f "$RUNNER_TEMP/profile.plist" ]; then
+            cleanup_profile_uuid=$(/usr/libexec/PlistBuddy -c "Print UUID" "$RUNNER_TEMP/profile.plist" 2>/dev/null || true)
+          fi
+          if [[ "$cleanup_profile_uuid" =~ ^[0-9A-Fa-f-]{36}$ ]]; then
+            rm -f "$HOME/Library/MobileDevice/Provisioning Profiles/${cleanup_profile_uuid}.mobileprovision"
+          fi
+          if [ -n "${APP_STORE_CONNECT_KEY_ID:-}" ]; then
+            rm -f "$HOME/private_keys/AuthKey_${APP_STORE_CONNECT_KEY_ID}.p8"
+          fi
+          rm -f \
+            "$RUNNER_TEMP/distribution.p12" \
+            "$RUNNER_TEMP/profile.mobileprovision" \
+            "$RUNNER_TEMP/profile.plist" \
+            Build.local.xcconfig

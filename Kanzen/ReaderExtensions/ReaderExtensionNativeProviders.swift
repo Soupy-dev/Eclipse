@@ -546,7 +546,7 @@ private struct ReaderExtensionNativeFamilyConfiguration {
 
     private static func triState(_ filter: ReaderExtensionFilter) -> Int {
         switch filter.value {
-        case .number(let value): return Int(value)
+        case .number(let value): return Int(exactly: value) ?? 0
         case .string(let value): return Int(value) ?? 0
         case .bool(let value): return value ? 1 : 0
         case .stringList, .secretReference: return 0
@@ -1557,7 +1557,7 @@ private final class ReaderExtensionNepNepProvider: ReaderSourceProvider {
 
     private static func triState(_ filter: ReaderExtensionFilter) -> Int {
         switch filter.value {
-        case .number(let value): return Int(value)
+        case .number(let value): return Int(exactly: value) ?? 0
         case .bool(let value): return value ? 1 : 0
         case .string(let value): return Int(value) ?? 0
         case .stringList, .secretReference: return 0
@@ -1601,7 +1601,14 @@ private enum ReaderExtensionNativeParsing {
 
     static func date(_ text: String?, source: ReaderExtensionInstalledSource) -> Date? {
         guard let text, !text.isEmpty else { return nil }
-        if let seconds = TimeInterval(text), seconds > 1_000_000 { return Date(timeIntervalSince1970: seconds > 10_000_000_000 ? seconds / 1_000 : seconds) }
+        if let rawValue = TimeInterval(text), rawValue > 1_000_000 {
+            let seconds = rawValue > 10_000_000_000 ? rawValue / 1_000 : rawValue
+            guard seconds.isFinite,
+                  (-62_135_596_800...253_402_300_799).contains(seconds) else {
+                return nil
+            }
+            return Date(timeIntervalSince1970: seconds)
+        }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: source.dateFormatLocale?.replacingOccurrences(of: "_", with: "-") ?? "en_US_POSIX")

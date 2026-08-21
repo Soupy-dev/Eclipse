@@ -1,19 +1,15 @@
 import AVFoundation
 import AVKit
+import Combine
 import MediaPlayer
 import UIKit
 
-/// One construction and presentation seam for MPV and AVPlayer. Existing launch sites can move to
-/// this coordinator incrementally; the request remains identical if Automatic falls back before
-/// MPV's first frame.
 @MainActor
 final class PlaybackCoordinator {
     static let shared = PlaybackCoordinator()
 
     private var activeHandoffs: [ObjectIdentifier: UUID] = [:]
-    // Retain the host while its player is alive. SwiftUI can otherwise release a transient
-    // presentation controller before an in-player Services/episode selection finishes resolving.
-    // The weak key removes the entry (and releases the host) as soon as the player is dismissed.
+
     private let presentationHosts = NSMapTable<UIViewController, UIViewController>(
         keyOptions: .weakMemory,
         valueOptions: .strongMemory
@@ -25,12 +21,11 @@ final class PlaybackCoordinator {
         for request: PlaybackRequest,
         engine: PlaybackEngine = .selected
     ) -> UIViewController {
-        // SkyStream playback URLs are capability-bearing loopback routes owned by the typed MPV
-        // proxy. AVPlayer/external engines cannot safely reconstruct that route graph, so keep
-        // every coordinator launch on the same MoltenVK path as the resolver handoff.
-        let effectiveEngine: PlaybackEngine = request.launchContext?.sourceKind == .skyStream
-            ? .mpv
-            : engine
+
+        let effectiveEngine = TypedPluginPlaybackEnginePolicy.effectiveEngine(
+            requested: engine,
+            sourceKind: request.launchContext?.sourceKind
+        )
 #if os(tvOS)
         return TVPlaybackViewController(request: request, requestedEngine: effectiveEngine)
 #else
@@ -66,6 +61,48 @@ final class PlaybackCoordinator {
         engine: PlaybackEngine = .selected,
         animated: Bool = true
     ) {
+
+        switch KidsPlaybackGate.decision(for: request) {
+        case .allow:
+            presentApprovedPlayer(request, from: presenter, engine: engine, animated: animated)
+        case .deny:
+            invalidateAbandonedTypedTransport(request)
+            KidsPlaybackGate.presentDenial(from: presenter, animated: animated)
+        case .resolve(let identity):
+            let pendingGateLease = request.launchContext?.ephemeralProxyOwnership?.acquireLease()
+            KidsPlaybackGate.presentResolving(
+                identity,
+                from: presenter,
+                animated: animated
+            ) { [weak presenter] host in
+
+                host.dismiss(animated: false) {
+                    guard let presenter,
+                          !presenter.isBeingDismissed,
+                          presenter.viewIfLoaded?.window != nil,
+                          presenter.presentedViewController == nil else {
+                        self.invalidateAbandonedTypedTransport(request)
+                        pendingGateLease?.release()
+                        return
+                    }
+                    self.presentApprovedPlayer(
+                        request,
+                        from: presenter,
+                        engine: engine,
+                        animated: false
+                    )
+                    pendingGateLease?.release()
+                }
+            }
+        }
+    }
+
+    private func presentApprovedPlayer(
+        _ request: PlaybackRequest,
+        from presenter: UIViewController,
+        engine: PlaybackEngine,
+        animated: Bool
+    ) {
         let controller = makeViewController(for: request, engine: engine)
         controller.modalPresentationStyle = .fullScreen
         presentationHosts.setObject(presenter, forKey: controller)
@@ -74,6 +111,14 @@ final class PlaybackCoordinator {
             (controller as? NormalPlayer)?.playAtDefaultSpeed()
 #endif
         }
+    }
+
+    private func invalidateAbandonedTypedTransport(_ request: PlaybackRequest) {
+        request.launchContext?.ephemeralProxyOwnership?.invalidate()
+#if !os(tvOS)
+        guard request.launchContext?.sourceKind == .skyStream else { return }
+        MPVHeaderProxy.shared.invalidateSession(for: request.url)
+#endif
     }
 
 #if !os(tvOS)
@@ -101,13 +146,11 @@ final class PlaybackCoordinator {
         controller.originalTMDBEpisodeNumber = request.originalTMDBEpisodeNumber
         controller.episodePlaybackContext = request.episodePlaybackContext
         controller.playbackLaunchContext = request.launchContext ?? Self.syntheticLaunchContext(for: request)
+        controller.retainEphemeralProxyOwnership(request.launchContext?.ephemeralProxyOwnership)
         controller.onRequestNextEpisode = request.onRequestNextEpisode
         controller.onRequestResolvedNextEpisode = request.onRequestResolvedNextEpisode
         controller.localNextEpisodeFallback = request.localNextEpisodeFallback
         controller.onPlaybackStartupFailure = request.onPlaybackStartupFailure
-#if os(iOS) && canImport(GoogleCast)
-        controller.activePlaybackRequest = request
-#endif
         controller.isCoordinatorEngineFallback = isEngineFallback
         controller.forceHeaderProxyForStartup = isEngineFallback
         if preStartFallback == .avPlayer {
@@ -143,9 +186,6 @@ final class PlaybackCoordinator {
         return controller
     }
 
-    /// Rebinds AVPlayer's one-shot fallback to the exact request currently loaded in the
-    /// controller. In-place source and episode changes must call this; retaining the closure made
-    /// during initial presentation would reopen the original URL or episode in Molten.
     func armMoltenFallback(for controller: NormalPlayer, request: PlaybackRequest) {
         controller.automaticallyFallsBackToMolten = true
         controller.onAutomaticPlaybackFallback = { [weak controller] report in
@@ -166,9 +206,6 @@ final class PlaybackCoordinator {
         Self.isKnownAVPlayerIncompatibleContainer(request.url)
     }
 
-    /// Uses the normal coordinator handoff without first installing a container AVFoundation is
-    /// known not to support. The request is passed through unchanged, including headers, subtitle
-    /// metadata, episode identity, and playback context.
     func handOffAVPlayerToMolten(
         _ controller: NormalPlayer,
         request: PlaybackRequest,
@@ -217,8 +254,7 @@ final class PlaybackCoordinator {
         if controller.isBeingPresented {
             if let transitionCoordinator = controller.transitionCoordinator {
                 let registered = transitionCoordinator.animate(alongsideTransition: nil) { _ in
-                    // UIKit can still report `isBeingPresented` during the transition-completion
-                    // callback itself. Cross one run-loop boundary before evaluating final state.
+
                     DispatchQueue.main.async {
                         self.replace(
                             controller,
@@ -258,9 +294,6 @@ final class PlaybackCoordinator {
             return
         }
 
-        // A runtime failure can be reported while a source picker or failure alert is still
-        // attached to the player. Dismissing the player at that moment only dismisses its child,
-        // so drain the child first and retry the same, generation-guarded handoff.
         if let child = controller.presentedViewController {
             if !child.isBeingDismissed {
                 child.dismiss(animated: false)
@@ -292,9 +325,7 @@ final class PlaybackCoordinator {
 
         guard let presenter = controller.presentingViewController else {
             if presentationRetryCount < 40 {
-                // An item's initial KVO failure can arrive while UIKit is still connecting the
-                // full-screen presentation relationship. Give that relationship one run-loop
-                // turn before deciding there is no safe presenter.
+
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                     self.replace(
                         controller,
@@ -374,8 +405,7 @@ final class PlaybackCoordinator {
             guard !presenter.isBeingDismissed,
                   presenter.viewIfLoaded?.window != nil,
                   presenter.presentedViewController == nil else {
-                // A newer presentation owns this presenter now. Do not let a stale fallback cover
-                // it, and do not feed its failure into the newer playback request.
+
                 self.invalidateAbandonedTypedTransport(request)
                 return
             }
@@ -413,9 +443,7 @@ final class PlaybackCoordinator {
         invalidateAbandonedTypedTransport(request)
         guard !controller.isBeingDismissed else { return }
         guard controller.viewIfLoaded?.window != nil else {
-            // A completed user/system dismissal is no longer `isBeingDismissed`. Only return
-            // control to source selection when this controller genuinely never reached a window;
-            // otherwise a deliberate Close could reopen playback behind the user's back.
+
             if !wasEverVisible, !Self.hasBeenVisible(controller) {
                 request.onPlaybackStartupFailure?(report)
             }
@@ -441,13 +469,6 @@ final class PlaybackCoordinator {
         return false
     }
 
-    private func invalidateAbandonedTypedTransport(_ request: PlaybackRequest) {
-#if !os(tvOS)
-        guard request.launchContext?.sourceKind == .skyStream else { return }
-        MPVHeaderProxy.shared.invalidateSession(for: request.url)
-#endif
-    }
-
     private static func syntheticLaunchContext(for request: PlaybackRequest) -> PlaybackLaunchContext {
         PlaybackLaunchContext(
             sourceId: request.url.isFileURL ? "local-playback" : "direct-playback",
@@ -463,9 +484,6 @@ final class PlaybackCoordinator {
         )
     }
 
-    /// AVFoundation does not support these container families. Avoid briefly showing Apple's
-    /// terminal error UI when iPad Automatic can choose Molten deterministically before launch.
-    /// Unknown extensions still try AVPlayer and retain the normal one-shot fallback.
     private static func isKnownAVPlayerIncompatibleContainer(_ url: URL) -> Bool {
         ["avi", "flv", "mkv", "mpd", "webm", "wmv"].contains(url.pathExtension.lowercased())
     }
@@ -473,8 +491,7 @@ final class PlaybackCoordinator {
 }
 
 #if os(tvOS)
-/// Container controller used so AVPlayer is composed as Apple's unmodified
-/// `AVPlayerViewController`, while MPV remains a dedicated remote-native controller.
+
 @MainActor
 final class TVPlaybackViewController: UIViewController {
     private let request: PlaybackRequest
@@ -482,6 +499,10 @@ final class TVPlaybackViewController: UIViewController {
     private var activeChild: UIViewController?
     private var mpvController: TVMPVPlayerViewController?
     private var avPlayerController: AVPlayerViewController?
+
+    private var pictureInPictureSessionRetainer: TVPlaybackViewController?
+    private var isPictureInPictureActiveOrStarting = false
+    private var hasViewDisappeared = false
     private var avPlayerResourceLoader: AVPlayerResourceLoader?
     private var avExternalSubtitleController: TVAVPlayerExternalSubtitleController?
     private var avMediaSelectionTask: Task<Void, Never>?
@@ -493,6 +514,8 @@ final class TVPlaybackViewController: UIViewController {
     private var hasBegunPlaybackLease = false
     private var hasEndedPlaybackLease = false
     private var hasFinalizedPlayback = false
+    private var ephemeralProxySessionLease: PlaybackProxySessionOwnership.Lease?
+    private let playerInterfaceCoverageIdentifier = UUID().uuidString
     private var playbackDidStart = false
     private var currentPosition: Double = 0
     private var currentDuration: Double = 0
@@ -512,11 +535,28 @@ final class TVPlaybackViewController: UIViewController {
     private var activeSkipSegment: SkipSegment?
     private var autoSkippedSegmentKeys = Set<String>()
 
+    private let playbackProfileAuthority: (
+        owner: UUID,
+        progress: ProgressManager.ProfileMutationAuthority?
+    ) = {
+        let owner = ProfileManager.shared.activeProfileID
+        return (
+            owner,
+            ProgressManager.shared.profileMutationAuthority(requiredOwner: owner)
+        )
+    }()
+    private var playbackOwnerProfileID: UUID { playbackProfileAuthority.owner }
+    private var activeProfileWillChangeCancellable: AnyCancellable?
+    private var didReportAbandonedProgressWrite = false
+
     private let skipSegmentButton = UIButton(type: .system)
     private let nextEpisodeOverlay = UIView()
     private let nextEpisodeCard = UIView()
     private let nextEpisodeTitleLabel = UILabel()
     private let nextEpisodeMessageLabel = UILabel()
+    private let nextEpisodeButtonStack = UIStackView()
+    private var nextEpisodeCardCenterConstraints: [NSLayoutConstraint] = []
+    private var nextEpisodeCardCornerConstraints: [NSLayoutConstraint] = []
     private let playNextEpisodeButton = UIButton(type: .system)
     private let keepWatchingButton = UIButton(type: .system)
     private lazy var nextEpisodeBackGesture: UITapGestureRecognizer = {
@@ -530,6 +570,9 @@ final class TVPlaybackViewController: UIViewController {
         self.request = request
         self.requestedEngine = requestedEngine
         super.init(nibName: nil, bundle: nil)
+        ephemeralProxySessionLease = request.launchContext?
+            .ephemeralProxyOwnership?
+            .acquireLease()
         modalPresentationStyle = .fullScreen
     }
 
@@ -546,6 +589,24 @@ final class TVPlaybackViewController: UIViewController {
             name: .mediaStateWillChangeCurrentUser,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleActiveProfileChange),
+            name: .activeProfileDidChange,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleApplicationWillTerminate),
+            name: UIApplication.willTerminateNotification,
+            object: nil
+        )
+        activeProfileWillChangeCancellable = ProfileManager.shared.$activeProfileID
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] incomingProfileID in
+                self?.handleActiveProfileWillChange(to: incomingProfileID)
+            }
         resolveNextEpisodeIfNeeded()
         switch requestedEngine {
         case .avPlayer:
@@ -558,6 +619,13 @@ final class TVPlaybackViewController: UIViewController {
     }
 
     deinit {
+        ephemeralProxySessionLease?.release()
+        if MediaStatePlaybackLeaseLifecyclePolicy.shouldEnd(
+            hasBegunLease: hasBegunPlaybackLease,
+            hasEndedLease: hasEndedPlaybackLease
+        ) {
+            MediaStatePlaybackLease.end()
+        }
         NotificationCenter.default.removeObserver(
             self,
             name: .mediaStateWillChangeCurrentUser,
@@ -575,10 +643,50 @@ final class TVPlaybackViewController: UIViewController {
         return super.preferredFocusEnvironments
     }
 
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        guard presses.contains(where: { $0.type == .menu }),
+              avPlayerController != nil,
+              nextEpisodeOverlay.isHidden,
+              presentedViewController == nil else {
+            super.pressesBegan(presses, with: event)
+            return
+        }
+        dismissPlayback()
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        hasViewDisappeared = false
+        postPlayerInterfaceCoverage(covered: true)
+    }
+
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         guard isBeingDismissed || navigationController?.isBeingDismissed == true || view.window == nil else { return }
+        postPlayerInterfaceCoverage(covered: false)
+        hasViewDisappeared = true
+        if isPictureInPictureActiveOrStarting {
+
+            Logger.shared.log(
+                "[TVPlayback] deferring finalization to the Picture in Picture window",
+                type: "Player"
+            )
+            return
+        }
         finalizePlaybackIfNeeded()
+    }
+
+    private func postPlayerInterfaceCoverage(covered: Bool) {
+        NotificationCenter.default.post(
+            name: .playerInterfaceCoverageDidChange,
+            object: self,
+            userInfo: PlayerInterfaceCoverageNotification.userInfo(
+                covered: covered,
+                playerIdentifier: playerInterfaceCoverageIdentifier,
+
+                sceneSessionIdentifier: nil
+            )
+        )
     }
 
     private func startMPV(allowsAutomaticFallback: Bool) {
@@ -586,7 +694,10 @@ final class TVPlaybackViewController: UIViewController {
             if allowsAutomaticFallback {
                 fallbackToAVPlayer(reason: "The MPV Metal renderer is unavailable.")
             } else {
-                showTerminalError("The MPV Metal renderer is unavailable on this Apple TV.")
+                showTerminalError(
+                    "The MPV Metal renderer is unavailable on this Apple TV.",
+                    isSourceFailure: false
+                )
             }
             return
         }
@@ -669,14 +780,15 @@ final class TVPlaybackViewController: UIViewController {
 
         let controller = AVPlayerViewController()
         controller.player = player
+        controller.delegate = self
         controller.showsPlaybackControls = true
-        let pictureInPictureEnabled = UserDefaults.standard.object(
+        let pictureInPictureEnabled = ProfileSettingsStore.active.object(
             forKey: "mpvPictureInPictureEnabled"
         ) as? Bool ?? true
         controller.allowsPictureInPicturePlayback = pictureInPictureEnabled
             && AVPictureInPictureController.isPictureInPictureSupported()
         controller.appliesPreferredDisplayCriteriaAutomatically = true
-        let seekInterval = UserDefaults.standard.double(forKey: "playerDoubleTapSeekSeconds")
+        let seekInterval = ProfileSettingsStore.active.double(forKey: "playerDoubleTapSeekSeconds")
         let normalizedSeekInterval = seekInterval > 0 ? min(max(seekInterval, 5), 60) : 10
         let remoteCommands = MPRemoteCommandCenter.shared()
         remoteCommands.skipForwardCommand.preferredIntervals = [NSNumber(value: normalizedSeekInterval)]
@@ -864,17 +976,17 @@ final class TVPlaybackViewController: UIViewController {
             self?.applyNextEpisodeEvent(.keepWatching)
         }, for: .primaryActionTriggered)
 
-        let buttonStack = UIStackView(arrangedSubviews: [playNextEpisodeButton, keepWatchingButton])
-        buttonStack.translatesAutoresizingMaskIntoConstraints = false
-        buttonStack.axis = .horizontal
-        buttonStack.alignment = .fill
-        buttonStack.distribution = .fillEqually
-        buttonStack.spacing = 34
+        [playNextEpisodeButton, keepWatchingButton].forEach(nextEpisodeButtonStack.addArrangedSubview)
+        nextEpisodeButtonStack.translatesAutoresizingMaskIntoConstraints = false
+        nextEpisodeButtonStack.axis = .horizontal
+        nextEpisodeButtonStack.alignment = .fill
+        nextEpisodeButtonStack.distribution = .fillEqually
+        nextEpisodeButtonStack.spacing = 34
 
         let contentStack = UIStackView(arrangedSubviews: [
             nextEpisodeTitleLabel,
             nextEpisodeMessageLabel,
-            buttonStack
+            nextEpisodeButtonStack
         ])
         contentStack.translatesAutoresizingMaskIntoConstraints = false
         contentStack.axis = .vertical
@@ -883,20 +995,27 @@ final class TVPlaybackViewController: UIViewController {
         contentStack.setCustomSpacing(40, after: nextEpisodeMessageLabel)
         nextEpisodeCard.addSubview(contentStack)
 
+        nextEpisodeCardCenterConstraints = [
+            nextEpisodeCard.centerXAnchor.constraint(equalTo: nextEpisodeOverlay.centerXAnchor),
+            nextEpisodeCard.centerYAnchor.constraint(equalTo: nextEpisodeOverlay.centerYAnchor),
+            nextEpisodeCard.widthAnchor.constraint(equalTo: nextEpisodeOverlay.safeAreaLayoutGuide.widthAnchor, multiplier: 0.64)
+        ]
+        nextEpisodeCardCornerConstraints = [
+            nextEpisodeCard.trailingAnchor.constraint(equalTo: nextEpisodeOverlay.safeAreaLayoutGuide.trailingAnchor, constant: -72),
+            nextEpisodeCard.bottomAnchor.constraint(equalTo: nextEpisodeOverlay.safeAreaLayoutGuide.bottomAnchor, constant: -72),
+            nextEpisodeCard.widthAnchor.constraint(equalTo: nextEpisodeOverlay.safeAreaLayoutGuide.widthAnchor, multiplier: 0.34)
+        ]
         NSLayoutConstraint.activate([
             nextEpisodeOverlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             nextEpisodeOverlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             nextEpisodeOverlay.topAnchor.constraint(equalTo: view.topAnchor),
             nextEpisodeOverlay.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            nextEpisodeCard.centerXAnchor.constraint(equalTo: nextEpisodeOverlay.centerXAnchor),
-            nextEpisodeCard.centerYAnchor.constraint(equalTo: nextEpisodeOverlay.centerYAnchor),
-            nextEpisodeCard.widthAnchor.constraint(equalTo: nextEpisodeOverlay.safeAreaLayoutGuide.widthAnchor, multiplier: 0.64),
             contentStack.leadingAnchor.constraint(equalTo: nextEpisodeCard.leadingAnchor, constant: 58),
             contentStack.trailingAnchor.constraint(equalTo: nextEpisodeCard.trailingAnchor, constant: -58),
             contentStack.topAnchor.constraint(equalTo: nextEpisodeCard.topAnchor, constant: 48),
             contentStack.bottomAnchor.constraint(equalTo: nextEpisodeCard.bottomAnchor, constant: -48),
-            buttonStack.heightAnchor.constraint(equalToConstant: 88)
-        ])
+            nextEpisodeButtonStack.heightAnchor.constraint(greaterThanOrEqualToConstant: 88)
+        ] + nextEpisodeCardCenterConstraints)
     }
 
     private func configureSkipSegmentButton() {
@@ -940,7 +1059,31 @@ final class TVPlaybackViewController: UIViewController {
         present(alert, animated: true)
     }
 
-    private func showTerminalError(_ message: String) {
+    private func showTerminalError(_ message: String, isSourceFailure: Bool = true) {
+        if isSourceFailure,
+           !playbackDidStart,
+           presentingViewController != nil,
+           let launchContext = request.launchContext,
+           launchContext.autoMode,
+           let reportFailure = request.onPlaybackStartupFailure {
+            Logger.shared.log(
+                "[TVPlayback] reporting startup failure to Auto Mode reason=\(message)",
+                type: "Player"
+            )
+            SourceHealthStore.shared.recordPlaybackFailure(
+                sourceId: launchContext.sourceId,
+                sourceName: launchContext.sourceName,
+                reason: message,
+                isSourceFailure: true
+            )
+            let report = PlaybackFailureReport(
+                context: launchContext,
+                message: message,
+                isSourceFailure: true
+            )
+            dismissPlayback { reportFailure(report) }
+            return
+        }
         guard presentedViewController == nil else { return }
         let alert = UIAlertController(title: "Playback Failed", message: message, preferredStyle: .alert)
         alert.addAction(UIAlertAction(title: "Close", style: .cancel) { [weak self] _ in
@@ -949,32 +1092,62 @@ final class TVPlaybackViewController: UIViewController {
         present(alert, animated: true)
     }
 
-    private func dismissPlayback() {
+    private func dismissPlayback(completion: (() -> Void)? = nil) {
         mpvController?.stopPlayback()
-        avPlayerController?.player?.pause()
-        finalizePlaybackIfNeeded()
-        dismiss(animated: true)
+        if !isPictureInPictureActiveOrStarting {
+            avPlayerController?.player?.pause()
+            finalizePlaybackIfNeeded()
+        }
+        dismiss(animated: true, completion: completion)
+    }
+
+    private func handleActiveProfileWillChange(to incomingProfileID: UUID) {
+        guard incomingProfileID != playbackOwnerProfileID else { return }
+        Logger.shared.log(
+            "TVPlaybackViewController: closing playback before its owning profile changes",
+            type: "Player"
+        )
+        endPlaybackForRestrictedContent()
+    }
+
+    @objc private func handleActiveProfileChange() {
+        guard ProfileManager.shared.isKidsModeActive else { return }
+        guard KidsPlaybackGate.decision(for: request) != .allow else { return }
+        endPlaybackForRestrictedContent()
     }
 
     @objc private func handleCurrentUserBoundary() {
-        // CKSyncEngine posts this synchronously before replacing the outgoing user's managers.
-        // Stopping first freezes the last position; `finalizePlaybackIfNeeded` is idempotent, so
-        // the ensuing dismissal cannot double-write progress or scrobble-close the session twice.
-        guard !hasFinalizedPlayback else { return }
+
+        endPlaybackForRestrictedContent()
+    }
+
+    @objc private func handleApplicationWillTerminate() {
+        finalizePlaybackIfNeeded()
+    }
+
+    private func endPlaybackForRestrictedContent() {
+        let wasFinalized = hasFinalizedPlayback
         mpvController?.stopPlayback()
-        avPlayerController?.player?.pause()
+        stopAVPlayerAndPictureInPicture()
+        guard !wasFinalized else { return }
         finalizePlaybackIfNeeded()
         dismiss(animated: false)
     }
 
     private func beginPlaybackLeaseIfNeeded() {
-        guard !hasBegunPlaybackLease else { return }
+        guard MediaStatePlaybackLeaseLifecyclePolicy.shouldBegin(
+            hasFinalizedPlayback: hasFinalizedPlayback,
+            hasBegunLease: hasBegunPlaybackLease
+        ) else { return }
         hasBegunPlaybackLease = true
         MediaStatePlaybackLease.begin()
     }
 
     private func finishPlaybackLeaseIfNeeded() {
-        guard hasBegunPlaybackLease, !hasEndedPlaybackLease else { return }
+        guard MediaStatePlaybackLeaseLifecyclePolicy.shouldEnd(
+            hasBegunLease: hasBegunPlaybackLease,
+            hasEndedLease: hasEndedPlaybackLease
+        ) else { return }
         hasEndedPlaybackLease = true
         MediaStatePlaybackLease.end()
     }
@@ -983,6 +1156,30 @@ final class TVPlaybackViewController: UIViewController {
         guard let token = avPlayerTimeObserver else { return }
         avPlayerController?.player?.removeTimeObserver(token)
         avPlayerTimeObserver = nil
+    }
+
+    private func stopAVPlayerAndPictureInPicture() {
+        isPictureInPictureActiveOrStarting = false
+        guard let controller = avPlayerController else { return }
+        controller.player?.pause()
+        controller.allowsPictureInPicturePlayback = false
+
+        removeAVPlayerTimeObserver()
+        controller.player?.replaceCurrentItem(with: nil)
+        controller.player = nil
+        releasePictureInPictureSessionRetainer()
+    }
+
+    private func releasePictureInPictureSessionRetainer() {
+
+        if hasFinalizedPlayback {
+            avPlayerResourceLoader?.invalidate()
+            avPlayerResourceLoader = nil
+        }
+        guard let retained = pictureInPictureSessionRetainer else { return }
+        pictureInPictureSessionRetainer = nil
+
+        DispatchQueue.main.async { withExtendedLifetime(retained) {} }
     }
 
     private func resolvedResumePosition() -> Double? {
@@ -1030,26 +1227,42 @@ final class TVPlaybackViewController: UIViewController {
               duration >= 5,
               let mediaInfo = request.mediaInfo else { return }
 
-        let defaults = UserDefaults.standard
+        let defaults = ProfileSettingsStore.active
+        let aniSkipEnabled = defaults.object(forKey: "aniSkipEnabled") as? Bool ?? true
         let introDBEnabled = defaults.object(forKey: "introDBEnabled") as? Bool ?? true
         let introDBAppEnabled = defaults.object(forKey: "introDBAppEnabled") as? Bool ?? true
-        guard introDBEnabled || (introDBAppEnabled && request.imdbID != nil) else {
-            didRequestSkipSegments = true
-            return
-        }
 
         let tmdbID: Int
         let storedSeason: Int?
         let storedEpisode: Int?
+        let showTitle: String?
+        let mediaIsAnime: Bool
         switch mediaInfo {
-        case .movie(let id, _, _, _):
+        case .movie(let id, _, _, let isAnime):
             tmdbID = id
             storedSeason = nil
             storedEpisode = nil
-        case .episode(let showID, let season, let episode, _, _, _):
+            showTitle = nil
+            mediaIsAnime = isAnime
+        case .episode(let showID, let season, let episode, let title, _, let isAnime):
             tmdbID = showID
             storedSeason = season
             storedEpisode = episode
+            let trimmedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            showTitle = trimmedTitle.isEmpty ? nil : trimmedTitle
+            mediaIsAnime = isAnime
+        }
+
+        let isAnime = request.isAnime
+            || mediaIsAnime
+            || request.episodePlaybackContext?.hasAnimeMediaId == true
+        let aniSkipEpisode: Int? = (aniSkipEnabled && isAnime) ? storedEpisode : nil
+
+        guard aniSkipEpisode != nil
+                || introDBEnabled
+                || (introDBAppEnabled && request.imdbID != nil) else {
+            didRequestSkipSegments = true
+            return
         }
 
         let tmdbSeason = request.originalTMDBSeasonNumber
@@ -1066,11 +1279,22 @@ final class TVPlaybackViewController: UIViewController {
             : storedEpisode
 
         didRequestSkipSegments = true
+        let aniSkipSeason = storedSeason ?? 1
         skipSegmentFetchTask = Task { [weak self] in
             guard let self else { return }
             var fetched: [SkipSegment] = []
 
-            if introDBEnabled {
+            if let aniSkipEpisode {
+                fetched = await self.fetchAniSkipSegments(
+                    tmdbID: tmdbID,
+                    seasonNumber: aniSkipSeason,
+                    episodeNumber: aniSkipEpisode,
+                    showTitle: showTitle,
+                    duration: duration
+                )
+            }
+
+            if fetched.isEmpty, introDBEnabled {
                 do {
                     fetched = try await IntroDBService.shared.fetchSkipTimes(
                         tmdbId: tmdbID,
@@ -1111,6 +1335,95 @@ final class TVPlaybackViewController: UIViewController {
         }
     }
 
+    private func fetchAniSkipSegments(
+        tmdbID: Int,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        showTitle: String?,
+        duration: Double
+    ) async -> [SkipSegment] {
+        let trackerManager = TrackerManager.shared
+        let skipsAniListTraversal = PerformanceModeSettings.skipsAniListTraversalForAnimeDetails
+
+        var animeProviderID = request.episodePlaybackContext?.anilistMediaId
+            ?? trackerManager.cachedAniListSeasonId(tmdbId: tmdbID, seasonNumber: seasonNumber)
+            ?? trackerManager.cachedAniListId(for: tmdbID)
+
+        if animeProviderID == nil, !skipsAniListTraversal, let showTitle {
+            do {
+                let animeData = try await AniListService.shared.fetchAnimeDetailsWithEpisodes(
+                    title: showTitle,
+                    tmdbShowId: tmdbID,
+                    tmdbService: TMDBService.shared,
+                    tmdbShowPoster: nil,
+                    token: nil
+                )
+                trackerManager.registerAniListAnimeData(
+                    tmdbId: tmdbID,
+                    seasons: animeData.seasons.map {
+                        (seasonNumber: $0.seasonNumber, anilistId: $0.anilistId)
+                    }
+                )
+                animeProviderID = animeData.seasons.first(
+                    where: { $0.seasonNumber == seasonNumber }
+                )?.anilistId
+            } catch {
+                Logger.shared.log(
+                    "[TVPlayback] AniSkip AniList season resolution failed category=network-or-decoding",
+                    type: "Player"
+                )
+            }
+        }
+
+        if animeProviderID == nil, !skipsAniListTraversal {
+            animeProviderID = await trackerManager.getAniListMediaId(tmdbId: tmdbID)
+        }
+
+        guard let animeProviderID else {
+            Logger.shared.log(
+                "[TVPlayback] AniSkip skipped: unresolved anime id tmdbId=\(tmdbID) s=\(seasonNumber)",
+                type: "Player"
+            )
+            return []
+        }
+
+        let malID: Int?
+        if animeProviderID < 0 {
+            malID = RemoteMediaNumericBoundary.positiveMagnitude(animeProviderID)
+        } else if skipsAniListTraversal {
+            malID = trackerManager.cachedMyAnimeListAnimeId(fromAniListId: animeProviderID)
+        } else {
+            malID = await trackerManager.resolveMyAnimeListAnimeId(fromAniListId: animeProviderID)
+        }
+
+        guard let malID else {
+            Logger.shared.log(
+                "[TVPlayback] AniSkip skipped: no MyAnimeList id for AniList \(animeProviderID)",
+                type: "Player"
+            )
+            return []
+        }
+
+        do {
+            let segments = try await AniSkipService.shared.fetchSkipTimes(
+                malId: malID,
+                episodeNumber: episodeNumber,
+                episodeDuration: duration
+            )
+            Logger.shared.log(
+                "[TVPlayback] AniSkip returned \(segments.count) segment(s) malId=\(malID) ep=\(episodeNumber)",
+                type: "Player"
+            )
+            return segments
+        } catch {
+            Logger.shared.log(
+                "[TVPlayback] AniSkip lookup failed category=network-or-decoding",
+                type: "Player"
+            )
+            return []
+        }
+    }
+
     private var activePlaybackIsPlaying: Bool {
         if let mpvController {
             return mpvController.isPlaybackActive
@@ -1130,7 +1443,7 @@ final class TVPlaybackViewController: UIViewController {
         }
 
         activeSkipSegment = segment
-        let autoSkipEnabled = UserDefaults.standard.bool(forKey: "aniSkipAutoSkip")
+        let autoSkipEnabled = ProfileSettingsStore.active.bool(forKey: "aniSkipAutoSkip")
         if isPlaying,
            autoSkipEnabled,
            autoSkippedSegmentKeys.insert(segment.uniqueKey).inserted {
@@ -1182,7 +1495,8 @@ final class TVPlaybackViewController: UIViewController {
     private func persistCurrentProgress() {
         guard let mediaInfo = request.mediaInfo,
               currentDuration >= 5,
-              currentPosition >= 0 else { return }
+              currentPosition >= 0,
+              playbackProfileIsStillActive() else { return }
         switch mediaInfo {
         case .movie(let id, let title, let posterURL, _):
             ProgressManager.shared.updateMovieProgress(
@@ -1190,7 +1504,8 @@ final class TVPlaybackViewController: UIViewController {
                 title: title,
                 currentTime: currentPosition,
                 totalDuration: currentDuration,
-                posterURL: posterURL
+                posterURL: posterURL,
+                owner: playbackOwnerProfileID
             )
         case .episode(let showID, let season, let episode, let title, let posterURL, let isAnime):
             ProgressManager.shared.updateEpisodeProgress(
@@ -1202,13 +1517,33 @@ final class TVPlaybackViewController: UIViewController {
                 showTitle: title,
                 showPosterURL: posterURL,
                 playbackContext: request.episodePlaybackContext?.forEpisodeNumber(episode),
-                isAnime: isAnime || request.episodePlaybackContext?.hasAnimeMediaId == true
+                isAnime: isAnime || request.episodePlaybackContext?.hasAnimeMediaId == true,
+                owner: playbackOwnerProfileID
             )
         }
     }
 
+    private func playbackProfileIsStillActive() -> Bool {
+        if ProfileManager.shared.isStillActive(playbackOwnerProfileID),
+           playbackProfileAuthority.progress.map(
+               ProgressManager.shared.profileMutationAuthorityIsCurrent
+           ) == true {
+            return true
+        }
+        if !didReportAbandonedProgressWrite {
+            didReportAbandonedProgressWrite = true
+            Logger.shared.log(
+                "Abandoned a playback write: the profile changed after this session started",
+                type: "Playback"
+            )
+        }
+        return false
+    }
+
     private func scrobbleCurrentProgress() {
-        guard let mediaInfo = request.mediaInfo, currentDuration > 0 else { return }
+        guard let mediaInfo = request.mediaInfo,
+              currentDuration > 0,
+              playbackProfileIsStillActive() else { return }
         let progress = min(max(currentPosition / currentDuration, 0), 1)
         let context: EpisodePlaybackContext?
         if case .episode(_, _, let episode, _, _, _) = mediaInfo {
@@ -1220,18 +1555,20 @@ final class TVPlaybackViewController: UIViewController {
             .start,
             for: mediaInfo,
             progress: progress,
-            playbackContext: context
+            playbackContext: context,
+            requiredOwner: playbackOwnerProfileID,
+            progressAuthority: playbackProfileAuthority.progress
         )
     }
 
     private var nextEpisodeTarget: ResolvedNextEpisodeTarget? {
-        let enabled = UserDefaults.standard.object(forKey: "showNextEpisodeButton") as? Bool ?? true
+        let enabled = ProfileSettingsStore.active.object(forKey: "showNextEpisodeButton") as? Bool ?? true
         guard enabled, case .available(let target) = nextEpisodeResolution else { return nil }
         return target
     }
 
     private func resolveNextEpisodeIfNeeded() {
-        let enabled = UserDefaults.standard.object(forKey: "showNextEpisodeButton") as? Bool ?? true
+        let enabled = ProfileSettingsStore.active.object(forKey: "showNextEpisodeButton") as? Bool ?? true
         guard enabled, NextEpisodeSeed(request: request) != nil else {
             nextEpisodeResolution = .noAvailableEpisode
             return
@@ -1265,7 +1602,7 @@ final class TVPlaybackViewController: UIViewController {
 
     private func offerNextEpisodeAtThresholdIfNeeded() {
         guard nextEpisodeTarget != nil, currentDuration > 0 else { return }
-        let savedThreshold = UserDefaults.standard.double(forKey: "nextEpisodeThreshold")
+        let savedThreshold = ProfileSettingsStore.active.double(forKey: "nextEpisodeThreshold")
         let threshold = savedThreshold > 0 ? min(max(savedThreshold, 0.5), 0.99) : 0.90
         guard currentPosition / currentDuration >= threshold else { return }
         applyNextEpisodeEvent(.thresholdReached)
@@ -1284,9 +1621,6 @@ final class TVPlaybackViewController: UIViewController {
             return
         }
 
-        // Resolution begins at player creation and normally finishes long before playback ends.
-        // If metadata is still in flight, wait briefly rather than flashing a false prompt or
-        // leaving a completed player stranded indefinitely on a network failure.
         naturalEndResolutionTimeoutTask?.cancel()
         naturalEndResolutionTimeoutTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(2))
@@ -1316,7 +1650,9 @@ final class TVPlaybackViewController: UIViewController {
     }
 
     private func showNextEpisodePrompt(atNaturalEnd: Bool) {
-        wasPlayingBeforeNextEpisodePrompt = pauseActivePlaybackForPrompt()
+
+        guard !isPictureInPictureActiveOrStarting else { return }
+        wasPlayingBeforeNextEpisodePrompt = atNaturalEnd ? pauseActivePlaybackForPrompt() : false
         setSkipSegmentButtonVisible(false)
         let destination = nextEpisodeTarget.map {
             $0.isAnime
@@ -1325,7 +1661,11 @@ final class TVPlaybackViewController: UIViewController {
         } ?? "the next episode"
         nextEpisodeMessageLabel.text = atNaturalEnd
             ? "Playback has ended. Play \(destination) or stay here."
-            : "\(destination) is ready. Choose Play Next Episode or keep watching this one."
+            : "\(destination) is up next."
+        nextEpisodeOverlay.backgroundColor = UIColor.black.withAlphaComponent(atNaturalEnd ? 0.58 : 0)
+        NSLayoutConstraint.deactivate(atNaturalEnd ? nextEpisodeCardCornerConstraints : nextEpisodeCardCenterConstraints)
+        NSLayoutConstraint.activate(atNaturalEnd ? nextEpisodeCardCenterConstraints : nextEpisodeCardCornerConstraints)
+        nextEpisodeButtonStack.axis = atNaturalEnd ? .horizontal : .vertical
         nextEpisodeOverlay.isHidden = false
         nextEpisodeOverlay.accessibilityViewIsModal = true
         nextEpisodeBackGesture.isEnabled = true
@@ -1369,7 +1709,7 @@ final class TVPlaybackViewController: UIViewController {
 
     private func resolvedAVPlayerRate() -> Float {
         Float(PlaybackSpeedPolicy.normalized(
-            UserDefaults.standard.double(forKey: "defaultPlaybackSpeed")
+            ProfileSettingsStore.active.double(forKey: "defaultPlaybackSpeed")
         ))
     }
 
@@ -1397,10 +1737,11 @@ final class TVPlaybackViewController: UIViewController {
     private func finalizePlaybackIfNeeded() {
         guard !hasFinalizedPlayback else { return }
         hasFinalizedPlayback = true
-        // `viewDidDisappear` can be reached through a parent/system dismissal rather than the
-        // player's explicit Close action. Always stop the active engine here so an MPV timer,
-        // remote-command target, audio session, or AVPlayer cannot survive offscreen.
+        ephemeralProxySessionLease?.release()
+        ephemeralProxySessionLease = nil
+
         mpvController?.stopPlayback()
+
         avPlayerController?.player?.pause()
         nextEpisodeResolutionTask?.cancel()
         nextEpisodeResolutionTask = nil
@@ -1417,8 +1758,11 @@ final class TVPlaybackViewController: UIViewController {
             NotificationCenter.default.removeObserver(avPlayerEndToken)
             self.avPlayerEndToken = nil
         }
-        avPlayerResourceLoader?.invalidate()
-        avPlayerResourceLoader = nil
+
+        if pictureInPictureSessionRetainer == nil {
+            avPlayerResourceLoader?.invalidate()
+            avPlayerResourceLoader = nil
+        }
         avMediaSelectionTask?.cancel()
         avMediaSelectionTask = nil
         avExternalSubtitleController?.invalidate()
@@ -1430,7 +1774,9 @@ final class TVPlaybackViewController: UIViewController {
             ProgressManager.shared.syncTraktProgressOnPlaybackClose(
                 for: mediaInfo,
                 playbackContext: request.episodePlaybackContext,
-                played: playbackDidStart
+                played: playbackDidStart,
+                owner: playbackOwnerProfileID,
+                progressAuthority: playbackProfileAuthority.progress
             )
         }
         ProgressManager.shared.flushPendingSave()
@@ -1450,12 +1796,38 @@ final class TVPlaybackViewController: UIViewController {
         finishPlaybackLeaseIfNeeded()
     }
 }
+
+extension TVPlaybackViewController: @preconcurrency AVPlayerViewControllerDelegate {
+    func playerViewControllerWillStartPictureInPicture(_ playerViewController: AVPlayerViewController) {
+        isPictureInPictureActiveOrStarting = true
+        pictureInPictureSessionRetainer = self
+    }
+
+    func playerViewControllerDidStartPictureInPicture(_ playerViewController: AVPlayerViewController) {
+        isPictureInPictureActiveOrStarting = true
+    }
+
+    func playerViewController(
+        _ playerViewController: AVPlayerViewController,
+        failedToStartPictureInPictureWithError error: Error
+    ) {
+        isPictureInPictureActiveOrStarting = false
+        if hasViewDisappeared {
+            finalizePlaybackIfNeeded()
+        }
+        releasePictureInPictureSessionRetainer()
+    }
+
+    func playerViewControllerDidStopPictureInPicture(_ playerViewController: AVPlayerViewController) {
+        isPictureInPictureActiveOrStarting = false
+        if hasViewDisappeared {
+            finalizePlaybackIfNeeded()
+        }
+        releasePictureInPictureSessionRetainer()
+    }
+}
 #endif
 
-/// Applies only the media-selection intent that AVFoundation exposes publicly. AVFoundation can
-/// select embedded audio/legible options by language, but its old tvOS external-subtitle option
-/// API is unavailable to Swift and deprecated as unsupported. External SRT/WebVTT files are
-/// therefore represented by the public transport-bar menu and content-overlay adapter below.
 @MainActor
 enum AVPlayerMediaSelectionAdapter {
     static func apply(
@@ -1540,8 +1912,6 @@ struct TVExternalSubtitleCue: Equatable {
     let text: String
 }
 
-/// Bounded parser for the text subtitle formats providers commonly return. Bitmap formats such as
-/// PGS cannot be represented by AVPlayer's public overlay APIs and remain MPV-only.
 enum TVExternalSubtitleParser {
     private static let maximumCueCount = 20_000
     private static let maximumCueTextLength = 4_000
@@ -1783,12 +2153,12 @@ private final class TVAVPlayerExternalSubtitleController {
         label.numberOfLines = 4
         label.textAlignment = .center
         label.textColor = Self.subtitleColor(forKey: "subtitles_foregroundColor", fallback: .white)
-        label.backgroundColor = UserDefaults.standard.bool(forKey: "subtitles_closedCaptionBackground")
+        label.backgroundColor = ProfileSettingsStore.active.bool(forKey: "subtitles_closedCaptionBackground")
             ? UIColor.black.withAlphaComponent(0.72)
             : .clear
         label.layer.cornerRadius = 12
         label.layer.masksToBounds = true
-        let savedFontSize = UserDefaults.standard.double(forKey: "subtitles_fontSize")
+        let savedFontSize = ProfileSettingsStore.active.double(forKey: "subtitles_fontSize")
         label.font = .systemFont(
             ofSize: CGFloat(savedFontSize > 0 ? min(max(savedFontSize, 24), 72) : 44),
             weight: .semibold
@@ -1872,8 +2242,7 @@ private final class TVAVPlayerExternalSubtitleController {
                 }
                 self.cues = parsed
             case .failure:
-                // No provider URL or credential-bearing error is logged. Falling back to the
-                // embedded legible selection is safer than leaving a failed option checked.
+
                 self.disableExternalSubtitles()
             }
         }
@@ -1915,7 +2284,7 @@ private final class TVAVPlayerExternalSubtitleController {
     }
 
     private static func styledCueText(_ text: String) -> NSAttributedString {
-        let defaults = UserDefaults.standard
+        let defaults = ProfileSettingsStore.active
         let savedFontSize = defaults.double(forKey: "subtitles_fontSize")
         let fontSize = CGFloat(savedFontSize > 0 ? min(max(savedFontSize, 24), 72) : 44)
         let strokeWidth = defaults.object(forKey: "subtitles_strokeWidth") as? Double ?? 1
@@ -1932,7 +2301,7 @@ private final class TVAVPlayerExternalSubtitleController {
     }
 
     private static func subtitleColor(forKey key: String, fallback: UIColor) -> UIColor {
-        guard let data = UserDefaults.standard.data(forKey: key),
+        guard let data = ProfileSettingsStore.active.data(forKey: key),
               let color = try? NSKeyedUnarchiver.unarchivedObject(
                 ofClass: UIColor.self,
                 from: data
@@ -1943,7 +2312,7 @@ private final class TVAVPlayerExternalSubtitleController {
     }
 
     private static var subtitleBottomConstant: CGFloat {
-        let defaults = UserDefaults.standard
+        let defaults = ProfileSettingsStore.active
         let offset = defaults.object(forKey: "playerSubtitleOverlayBottomConstant") == nil
             ? -6
             : defaults.double(forKey: "playerSubtitleOverlayBottomConstant")

@@ -16,6 +16,9 @@ protocol MediaStateSyncTransport: AnyObject, Sendable {
     ) async throws
 
     func synchronize(reason: String) async
+
+    func recordSuccessfulSynchronization() async
+    func recordFailedSynchronization(_ message: String) async
 }
 
 struct MediaStateRemoteRevision: Sendable, Equatable {
@@ -25,6 +28,11 @@ struct MediaStateRemoteRevision: Sendable, Equatable {
     var token: String?
 
     var observedFiles: [MediaStateRemoteFileVersion] = []
+
+    /// False means the fetch returned usable salvage but at least one remote
+    /// candidate/record was missing, unreadable, or repaired. Such a fetch may
+    /// be applied locally, but must never authorize a destructive replacement.
+    var isComplete: Bool = true
 }
 
 struct MediaStateRemoteFileVersion: Sendable, Equatable {
@@ -36,34 +44,63 @@ struct MediaStateRemoteFetch: Sendable {
     var records: [String: MediaStateEnvelope]
 
     var revision: MediaStateRemoteRevision?
+
+    var isComplete: Bool = true
 }
 
 struct MediaStateRemoteRevisionConflict: Error {}
 
 private struct MediaStateSyncPassInvalidated: Error {}
 
+private enum MediaStateTransportPassOutcome {
+    case completed
+    case skipped
+    case retry
+    case failed(String)
+}
+
 @available(iOS 17.0, tvOS 17.0, *)
 extension MediaStateSyncTransport {
 
     var accountContinuityToken: String? { nil }
 
+    func recordSuccessfulSynchronization() async {}
+
+    func recordFailedSynchronization(_ message: String) async {}
+
     func synchronize(reason: String) async {
 
         let maximumAttempts = 3
         for _ in 0..<maximumAttempts {
-            if await reconcileOnce(reason: reason) { return }
+            switch await reconcileOnce(reason: reason) {
+            case .completed:
+                guard !Task.isCancelled else { return }
+                await recordSuccessfulSynchronization()
+                return
+            case .skipped:
+                return
+            case .retry:
+                continue
+            case .failed(let message):
+                guard !Task.isCancelled else { return }
+                await recordFailedSynchronization(message)
+                return
+            }
         }
+        guard !Task.isCancelled else { return }
+        let message = "The remote copy changed repeatedly while Eclipse was syncing."
         Logger.shared.log(
             "MediaStateSync: \(providerDisplayName) abandoned (\(reason)); the remote copy moved under every write",
             type: "iCloud"
         )
+        await recordFailedSynchronization(message)
     }
 
-    private func reconcileOnce(reason: String) async -> Bool {
+    private func reconcileOnce(reason: String) async -> MediaStateTransportPassOutcome {
 
         guard isEnabled,
               !MediaStateAccountBoundaryRecoveryGate.isBlockingSync,
-              !Task.isCancelled else { return true }
+              !Task.isCancelled else { return .skipped }
 
         let startingAccount = accountContinuityToken
         do {
@@ -72,7 +109,7 @@ extension MediaStateSyncTransport {
                   !MediaStateAccountBoundaryRecoveryGate.isBlockingSync,
                   isEnabled,
                   accountContinuityToken == startingAccount else {
-                return true
+                return .skipped
             }
 
             let outcome = await MainActor.run { () -> MediaStateEnvelopeReconciler.Result? in
@@ -92,10 +129,26 @@ extension MediaStateSyncTransport {
                     "MediaStateSync: \(providerDisplayName) deferred (\(reason)); \(cause)",
                     type: "iCloud"
                 )
-                return true
+                if accountContinuityToken == startingAccount,
+                   !Task.isCancelled,
+                   !MediaStateAccountBoundaryRecoveryGate.isBlockingSync,
+                   isEnabled {
+                    return .failed("Eclipse could not safely apply the downloaded media state.")
+                }
+                return .skipped
             }
 
             if outcome.remoteNeedsPush {
+                guard fetched.isComplete,
+                      fetched.revision?.isComplete != false else {
+                    Logger.shared.log(
+                        "MediaStateSync: \(providerDisplayName) kept usable remote salvage but blocked upload because the fetched authority was incomplete",
+                        type: "Error"
+                    )
+                    return .failed(
+                        "Eclipse recovered usable remote media state, but did not overwrite an incomplete remote copy."
+                    )
+                }
                 guard !Task.isCancelled,
                       !MediaStateAccountBoundaryRecoveryGate.isBlockingSync,
                       isEnabled,
@@ -104,7 +157,7 @@ extension MediaStateSyncTransport {
                         "MediaStateSync: \(providerDisplayName) push abandoned (\(reason)); the account or recovery state changed mid-pass",
                         type: "iCloud"
                     )
-                    return true
+                    return .skipped
                 }
                 do {
                     try await pushEnvelopes(
@@ -116,39 +169,48 @@ extension MediaStateSyncTransport {
                           !MediaStateAccountBoundaryRecoveryGate.isBlockingSync,
                           isEnabled,
                           accountContinuityToken == startingAccount else {
-                        return true
+                        return .skipped
                     }
                 } catch is MediaStateRemoteRevisionConflict {
                     Logger.shared.log(
                         "MediaStateSync: \(providerDisplayName) re-reading (\(reason)); another device wrote the bundle first",
                         type: "iCloud"
                     )
-                    return false
+                    return .retry
                 }
+            }
+            guard !Task.isCancelled,
+                  !MediaStateAccountBoundaryRecoveryGate.isBlockingSync,
+                  isEnabled,
+                  accountContinuityToken == startingAccount else {
+                return .skipped
             }
             Logger.shared.log(
                 "MediaStateSync: \(providerDisplayName) reconciled (\(reason)) applied=\(outcome.namesChangedLocally.count) pushed=\(outcome.namesOwedToRemote.count)",
                 type: "iCloud"
             )
-            return true
+            return .completed
         } catch is MediaStateSyncPassInvalidated {
             Logger.shared.log(
                 "MediaStateSync: \(providerDisplayName) deferred (\(reason)); the account or recovery state changed",
                 type: "iCloud"
             )
-            return true
+            return .skipped
         } catch is MediaStateRemoteRevisionConflict {
             Logger.shared.log(
                 "MediaStateSync: \(providerDisplayName) re-reading (\(reason)); the fetched candidate set changed",
                 type: "iCloud"
             )
-            return false
+            return .retry
+        } catch is CancellationError {
+            return .skipped
         } catch {
+            guard !Task.isCancelled else { return .skipped }
             Logger.shared.log(
                 "MediaStateSync: \(providerDisplayName) transport failed (\(reason)): \(error.localizedDescription)",
                 type: "Error"
             )
-            return true
+            return .failed(error.localizedDescription)
         }
     }
 }
@@ -270,8 +332,7 @@ final class MediaStateCloudKitTransport: MediaStateSyncTransport {
     nonisolated var providerDisplayName: String { "iCloud" }
 
     nonisolated var isEnabled: Bool {
-        MediaStateSyncBootstrap.hasCloudKitEntitlement
-            && !MediaStateCloudKitSuspension.isSuspended
+        MediaStateSyncBootstrap.isCloudKitSyncEnabled
     }
 
     func synchronize(reason: String) async {
@@ -304,6 +365,20 @@ final class MediaStateCloudKitTransport: MediaStateSyncTransport {
 
 #if os(iOS)
 
+enum MediaStateRemoteTransportCooldownPolicy {
+    static func isReady(retryNotBefore: Date?, now: Date) -> Bool {
+        guard let retryNotBefore else { return true }
+        guard retryNotBefore.timeIntervalSince1970.isFinite else { return true }
+        return retryNotBefore <= now
+    }
+
+    static func nextRetryDate(_ dates: [Date?], after now: Date) -> Date? {
+        dates.compactMap { $0 }.filter {
+            $0.timeIntervalSince1970.isFinite && $0 > now
+        }.min()
+    }
+}
+
 @available(iOS 17.0, *)
 final class MediaStateRemoteEnvelopeTransport: MediaStateSyncTransport {
     private let provider: CloudSyncProvider
@@ -329,6 +404,35 @@ final class MediaStateRemoteEnvelopeTransport: MediaStateSyncTransport {
         let generation = defaults.integer(forKey: provider.accountGenerationKey)
         let identity = defaults.string(forKey: provider.accountIdentityKey) ?? ""
         return "\(generation)|\(identity)"
+    }
+
+    var retryNotBefore: Date? {
+        let defaults = UserDefaults.standard
+        let timestamp = defaults.double(forKey: provider.retryNotBeforeKey)
+        guard timestamp != 0 else { return nil }
+        guard let date = ExperimentalCloudPersistedSchedule.date(
+            timestamp: timestamp,
+            now: Date()
+        ) else {
+            defaults.removeObject(forKey: provider.retryNotBeforeKey)
+            return nil
+        }
+        return date
+    }
+
+    func recordSuccessfulSynchronization() async {
+        await MainActor.run {
+            ExperimentalCloudSyncManager.shared.recordMediaStateTransportSuccess(for: provider)
+        }
+    }
+
+    func recordFailedSynchronization(_ message: String) async {
+        await MainActor.run {
+            ExperimentalCloudSyncManager.shared.recordMediaStateTransportFailure(
+                for: provider,
+                message: message
+            )
+        }
     }
 
     func fetchRemoteEnvelopes(accountContinuityToken: String?) async throws -> MediaStateRemoteFetch {
@@ -361,13 +465,26 @@ final class MediaStateRemoteEnvelopeTransport: MediaStateSyncTransport {
                 type: "Error"
             )
         }
+        if !usable.repairedRecordNames.isEmpty {
+            Logger.shared.log(
+                "MediaStateSync: stripped invalid nested playback context from \(usable.repairedRecordNames.count) \(provider.rawValue) progress record(s) while retaining their watch progress",
+                type: "Error"
+            )
+        }
         if let overflow = MediaStateEnvelopeValidator.rosterOverflowDescription(in: usable.records) {
             Logger.shared.log(
                 "MediaStateSync: \(provider.rawValue) bundle carries \(overflow); loaded it and left the cap to the roster merge",
                 type: "Error"
             )
         }
-        return MediaStateRemoteFetch(records: usable.records, revision: fetched.revision)
+        let isComplete = usable.droppedRecordNames.isEmpty
+            && usable.repairedRecordNames.isEmpty
+            && fetched.revision?.isComplete != false
+        return MediaStateRemoteFetch(
+            records: usable.records,
+            revision: fetched.revision,
+            isComplete: isComplete
+        )
     }
 
     func pushEnvelopes(
@@ -382,7 +499,7 @@ final class MediaStateRemoteEnvelopeTransport: MediaStateSyncTransport {
             throw MediaStateSyncPassInvalidated()
         }
         let stripped = MediaStateEnvelopeReconciler.strippedForRemote(merged)
-        if let reason = MediaStateEnvelopeValidator.aggregateRejectionReason(
+        if let reason = MediaStateEnvelopeValidator.rejectionReason(
             for: stripped,
             allowsSystemFields: false
         ) {
@@ -393,11 +510,12 @@ final class MediaStateRemoteEnvelopeTransport: MediaStateSyncTransport {
             throw MediaStateRemoteBundleError.unpublishable(reason)
         }
         let publishable = MediaStateEnvelopeValidator.structurallyValidRemoteRecords(stripped)
-        if !publishable.droppedRecordNames.isEmpty {
+        if !publishable.droppedRecordNames.isEmpty || !publishable.repairedRecordNames.isEmpty {
             Logger.shared.log(
-                "MediaStateSync: dropped \(publishable.droppedRecordNames.count) invalid record(s) from the outgoing \(provider.rawValue) bundle and published the remaining \(publishable.records.count)",
+                "MediaStateSync: refused an outgoing \(provider.rawValue) bundle that required record dropping or repair",
                 type: "Error"
             )
+            throw MediaStateRemoteBundleError.unpublishable("outgoing records require repair")
         }
         let outgoing = publishable.records
         let bundle = MediaStateEnvelopeBundle(records: outgoing)
@@ -451,6 +569,7 @@ final class MediaStateRemoteTransportCoordinator {
     private var lastActivationPassStartedAt: Date?
 
     private var deferredSyncTask: Task<Void, Never>?
+    private var cooldownSyncTask: Task<Void, Never>?
 
     private let localChangeDebounce: TimeInterval = 8
     private let activationPassFloor: TimeInterval = 60
@@ -478,6 +597,8 @@ final class MediaStateRemoteTransportCoordinator {
         isSyncing = false
         activeSyncTask?.cancel()
         activeSyncTask = nil
+        cooldownSyncTask?.cancel()
+        cooldownSyncTask = nil
     }
 
     private var enabledTransports: [MediaStateRemoteEnvelopeTransport] {
@@ -495,7 +616,20 @@ final class MediaStateRemoteTransportCoordinator {
 
     func syncEnabledProviders(reason: String) {
         guard !MediaStateAccountBoundaryRecoveryGate.isBlockingSync else { return }
-        let active = enabledTransports
+        let now = Date()
+        let enabled = enabledTransports
+        let active = enabled.filter { transport in
+            MediaStateRemoteTransportCooldownPolicy.isReady(
+                retryNotBefore: transport.retryNotBefore,
+                now: now
+            )
+        }
+        if let nextRetry = MediaStateRemoteTransportCooldownPolicy.nextRetryDate(
+            enabled.map(\.retryNotBefore),
+            after: now
+        ) {
+            scheduleCooldownSync(at: nextRetry)
+        }
         guard !active.isEmpty else { return }
 
         guard !isSyncing else {
@@ -541,6 +675,27 @@ final class MediaStateRemoteTransportCoordinator {
                 }
                 await transport.synchronize(reason: reason)
             }
+            let now = Date()
+            if let nextRetry = MediaStateRemoteTransportCooldownPolicy.nextRetryDate(
+                enabledTransports.map(\.retryNotBefore),
+                after: now
+            ) {
+                scheduleCooldownSync(at: nextRetry)
+            }
+        }
+    }
+
+    private func scheduleCooldownSync(at date: Date) {
+        cooldownSyncTask?.cancel()
+        cooldownSyncTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let rawDelay = date.timeIntervalSinceNow
+            guard rawDelay.isFinite else { return }
+            let delay = max(0, min(rawDelay, 86_400))
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self.cooldownSyncTask = nil
+            self.syncEnabledProviders(reason: "provider-cooldown-ended")
         }
     }
 }

@@ -1,7 +1,6 @@
 #if !os(tvOS)
 import Foundation
 import ImageIO
-import Kingfisher
 import SwiftSoup
 import SwiftUI
 import UIKit
@@ -246,8 +245,8 @@ private final class ReaderExtensionAssetImageCache {
     }
 }
 
-/// A drop-in resizable image surface that keeps legacy URLs on Kingfisher but
-/// sends Reader Extension assets through the source-scoped pinned client.
+/// A drop-in resizable image surface that sends both legacy module artwork and
+/// Reader Extension assets through numeric-address-pinned transports.
 struct ReaderScopedRemoteImage<Placeholder: View>: View {
     let url: URL?
     let readerExtensionSourceID: ReaderExtensionSourceID?
@@ -282,10 +281,13 @@ struct ReaderScopedRemoteImage<Placeholder: View>: View {
                     placeholder()
                 }
             } else {
-                KFImage(url)
-                    .placeholder { placeholder() }
-                    .onSuccess { result in onImage?(result.image) }
-                    .resizable()
+                ReaderPinnedRemoteImage(
+                    url: url,
+                    onImage: onImage,
+                    maximumPixelSize: maximumPixelSize
+                ) {
+                    placeholder()
+                }
             }
         }
         .task(id: "\(secureTaskID)|\(cacheGeneration.uuidString)") {

@@ -30,8 +30,7 @@ final class CrashReportManager {
 
         let signalHandlerType: PLCrashReporterSignalHandlerType
 #if os(tvOS)
-        // PLCrashReporter exposes the BSD handler as raw value 0 on tvOS, but
-        // this package version doesn't import the acronym as a Swift enum case.
+
         signalHandlerType = PLCrashReporterSignalHandlerType(rawValue: 0)!
 #else
         signalHandlerType = .mach

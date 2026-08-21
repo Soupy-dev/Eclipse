@@ -1,22 +1,20 @@
+//
+//  SoraApp.swift
+//  Sora
+//
+//  Created by Francesco on 12/08/25.
+//
+
 import SwiftUI
 import Combine
+#if canImport(Kingfisher)
+import Kingfisher
+#endif
 #if !os(tvOS)
 import Nuke
 #endif
-#if os(iOS) && canImport(GoogleCast)
-import GoogleCast
-#endif
 
 class AppDelegate: NSObject, UIApplicationDelegate {
-#if os(iOS) && canImport(GoogleCast)
-    func application(
-        _ application: UIApplication,
-        didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
-    ) -> Bool {
-        GoogleCastBootstrap.configure()
-        return true
-    }
-#endif
 
 #if !os(tvOS)
     private static var orientationLocksByScene: [String: UIInterfaceOrientationMask] = [:]
@@ -45,9 +43,6 @@ class AppDelegate: NSObject, UIApplicationDelegate {
             return AppDelegate.orientationLocksByScene[identifier] ?? .all
         }
 
-        // UIKit can ask without a window while an iPad scene is rotating (notably in the
-        // simulator and some multitasking modes). If exactly one scene owns a player lock, it is
-        // unambiguous and must remain authoritative; returning `.all` here silently unlocked it.
         let activeMasks = Array(AppDelegate.orientationLocksByScene.values)
         return activeMasks.count == 1 ? activeMasks[0] : .all
     }
@@ -71,9 +66,11 @@ class AppDelegate: NSObject, UIApplicationDelegate {
 @main
 struct SoraApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @StateObject private var settings = Settings()
+    @StateObject private var settings = Settings.shared
     @StateObject private var theme = EclipseTheme.shared
     @StateObject private var localization = LocalizationManager.shared
+    @StateObject private var trackerManager = TrackerManager.shared
+    @StateObject private var profileManager = ProfileManager.shared
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var startupReady = false
@@ -82,26 +79,45 @@ struct SoraApp: App {
     @State private var scheduleWarmupComplete = false
     @State private var homeHydrationComplete = false
     @State private var showSplash = true
-    @AppStorage("hideSplashScreen") private var hideSplashScreen = false
+    @State private var showProfilePicker: Bool
+    @State private var didEvaluateLaunchPicker = false
+    @State private var launchUnlockProfile: Profile?
+    @State private var showOnboarding: Bool
+    @State private var cloudKitUpgradeNoticePending = false
+    @State private var showCloudKitUpgradeNotice = false
+
+    @AppStorage("hideSplashScreen", store: .standard) private var hideSplashScreen = false
+
+    @AppStorage(OnboardingState.completedKey, store: .standard)
+    private var onboardingCompleted = false
+#if !os(tvOS)
+    @State private var showAppHubNotice = false
+
+    @AppStorage(OnboardingState.appHubNoticeSeenKey, store: .standard)
+    private var appHubNoticeSeen = false
+#endif
     private let startupFallbackDelay: TimeInterval = 20
 #if os(iOS)
     @State private var lastNotificationMaintenanceDay = Calendar.current.startOfDay(for: Date())
     private let notificationMaintenanceTimer = Timer.publish(every: 300, on: .main, in: .common).autoconnect()
-    // Remote snapshot providers do not offer one shared push mechanism. A
-    // conservative foreground poll keeps another active device discoverable
-    // without turning ordinary UI activity into provider API traffic.
+
     private let cloudSyncMaintenanceTimer = Timer.publish(every: 900, on: .main, in: .common).autoconnect()
 #endif
 
 #if !os(tvOS)
-    @AppStorage("showKanzen") private var showKanzen: Bool = false
-    @AppStorage(ModeSwitchAnimationSettings.enabledKey) private var modeSwitchAnimationEnabled = ModeSwitchAnimationSettings.defaultEnabled
+    @AppStorage("showKanzen", store: .standard) private var showKanzen: Bool = false
+    private var modeSwitchAnimationEnabled: Bool { ModeSwitchAnimationSettings.isEnabled() }
     @StateObject private var modeSwitchTransitionCoordinator = ModeSwitchTransitionCoordinator()
 #endif
 
     init() {
+
+        OnboardingState.bootstrapIfNeeded()
         _ = AppPerformanceRuntimeContext.shared
         _ = LocalizationManager.shared
+#if canImport(Kingfisher)
+        KingfisherImageCacheConfigurator.configureIfNeeded()
+#endif
         CrashReportManager.shared.start()
         GitHubReleaseChecker.registerDefaults()
         ExperimentalFeatureState.configureLaunchState()
@@ -121,10 +137,24 @@ struct SoraApp: App {
         }
         _ = DownloadManager.shared
 #if !os(tvOS)
+        // ReaderDownloadManager runs migration recovery synchronously before it
+        // loads the mutable queue. If another Reader store is quarantined, the
+        // manager still exposes independently verified completed chapters
+        // read-only while keeping every provider and mutation path inert.
         Task { @MainActor in
             _ = ReaderDownloadManager.shared
         }
 #endif
+
+        let onboardingCompletedAtLaunch = UserDefaults.standard.bool(forKey: OnboardingState.completedKey)
+#if (DEBUG || ECLIPSE_PERF_HARNESS) && os(iOS)
+        let debugAutoplayRequested = EclipseDebugAutoplay.isRequested
+#else
+        let debugAutoplayRequested = false
+#endif
+        _showOnboarding = State(initialValue: !onboardingCompletedAtLaunch && !debugAutoplayRequested)
+        _showProfilePicker = State(initialValue: onboardingCompletedAtLaunch && !debugAutoplayRequested && ProfileManager.shared.shouldPresentLaunchPicker)
+        _launchUnlockProfile = State(initialValue: ProfileManager.shared.launchProfileRequiringUnlock)
     }
 
     var body: some Scene {
@@ -143,6 +173,7 @@ struct SoraApp: App {
                     )
                         .onAppear { scheduleStartupFallback() }
                         .transition(modeSwitchTransition(isReaderMode: true))
+                        .zIndex(1)
                 } else {
                     Group {
                         if ExperimentalFeatureState.isEnabledAtLaunch {
@@ -157,6 +188,7 @@ struct SoraApp: App {
                     }
                     .environmentObject(modeSwitchTransitionCoordinator)
                     .transition(modeSwitchTransition(isReaderMode: false))
+                    .zIndex(0)
                 }
 
                 if modeSwitchAnimationEnabled, let modeSwitchBurst = modeSwitchTransitionCoordinator.activeBurst {
@@ -167,20 +199,77 @@ struct SoraApp: App {
                 }
 #endif
 
+                if showProfilePicker {
+                    ProfilePickerView(
+                        isReaderMode: profilePickerIsReaderMode,
+                        autoUnlockProfile: launchUnlockProfile
+                    ) {
+                        showProfilePicker = false
+                        presentCloudKitUpgradeNoticeIfReady()
+                    }
+                    .ignoresSafeArea()
+                    .zIndex(4)
+                }
+
                 if showSplash && !hideSplashScreen {
                     SplashScreenView(isFinished: $startupReady) {
-                        showSplash = false
+                        withAnimation(.easeInOut(duration: 0.34)) {
+                            showSplash = false
+                        }
+                        presentCloudKitUpgradeNoticeIfReady()
                     }
                         .ignoresSafeArea()
-                        .zIndex(3)
+                        .zIndex(6)
                 }
-            }
-#if os(iOS)
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-#if canImport(GoogleCast)
-                GoogleCastMiniControllerBar()
+
+                if showOnboarding, !(showSplash && !hideSplashScreen) {
+
+                    OnboardingView {
+                        showOnboarding = false
+                        presentCloudKitUpgradeNoticeIfReady()
+                    }
+                        .transition(.opacity)
+                        .zIndex(5)
+                }
+
+#if !os(tvOS)
+                if showAppHubNotice, !showOnboarding, !(showSplash && !hideSplashScreen) {
+
+                    AppHubUpdateNoticeView {
+                        withAnimation(.easeInOut(duration: 0.28)) {
+                            showAppHubNotice = false
+                        }
+                        presentCloudKitUpgradeNoticeIfReady()
+                    }
+                    .transition(.opacity)
+                    .zIndex(5)
+                }
 #endif
             }
+            .onAppear {
+
+                guard !didEvaluateLaunchPicker else { return }
+                didEvaluateLaunchPicker = true
+                showOnboarding = !onboardingCompleted
+#if (DEBUG || ECLIPSE_PERF_HARNESS) && os(iOS)
+                if EclipseDebugAutoplay.isRequested {
+                    showOnboarding = false
+                    showProfilePicker = false
+                    EclipseDebugAutoplay.scheduleLaunch()
+                    return
+                }
+#endif
+#if !os(tvOS)
+                showAppHubNotice = onboardingCompleted && !appHubNoticeSeen
+#endif
+
+                showProfilePicker = !showOnboarding && ProfileManager.shared.shouldPresentLaunchPicker
+                launchUnlockProfile = ProfileManager.shared.launchProfileRequiringUnlock
+                cloudKitUpgradeNoticePending =
+                    MediaStateSyncBootstrap.prepareCloudKitUpgradeNoticeIfNeeded()
+                presentCloudKitUpgradeNoticeIfReady()
+            }
+#if os(iOS)
             .modifier(WatchTogetherJoinPresentation())
 #endif
             .modifier(AppPerformanceOverlayPresentation(
@@ -197,11 +286,40 @@ struct SoraApp: App {
 #if !os(tvOS)
             .coordinateSpace(name: ModeSwitchTransitionCoordinator.coordinateSpaceName)
 #endif
+
+            .defaultAppStorage(ProfileSettingsStore.shared.store(for: profileManager.activeProfileID))
             .environment(\.locale, localization.locale)
             .environment(\.layoutDirection, localization.layoutDirection)
             .environmentObject(localization)
+            .alert(item: $trackerManager.authenticationNotice) { notice in
+                Alert(
+                    title: Text(notice.title),
+                    message: Text(notice.message),
+                    primaryButton: .default(Text("Log In")) {
+                        trackerManager.reconnectTracker(notice.service)
+                    },
+                    secondaryButton: .cancel()
+                )
+            }
+            .alert(
+                "Cloud Sync Changed",
+                isPresented: $showCloudKitUpgradeNotice
+            ) {
+                Button("Resume Sync") {
+                    MediaStateSyncBootstrap.markCloudKitUpgradeNoticeHandled()
+                    MediaStateSyncBootstrap.setCloudKitSyncEnabled(true)
+                }
+                Button("Keep Off", role: .cancel) {
+                    MediaStateSyncBootstrap.markCloudKitUpgradeNoticeHandled()
+                }
+            } message: {
+                Text("Earlier versions of Eclipse automatically synced your library and watch progress through iCloud on this device. That sync is now off, and no data was deleted. You can keep it off or explicitly resume syncing.")
+            }
+            .onAppear {
+                trackerManager.checkForExpiredTrackerSessions()
+            }
 #if !os(tvOS)
-            .animation(modeSwitchAnimationEnabled ? .easeInOut(duration: 0.84) : nil, value: showKanzen)
+            .animation(modeSwitchAnimationEnabled ? .timingCurve(0.2, 0.75, 0.25, 1, duration: 0.82) : nil, value: showKanzen)
             .onChange(of: showKanzen) { newValue in
                 if modeSwitchTransitionCoordinator.activeBurst == nil {
                     modeSwitchTransitionCoordinator.beginBurst(toReaderMode: newValue)
@@ -220,6 +338,32 @@ struct SoraApp: App {
                 homeHydrationComplete = true
                 warmSchedulesAfterStartup()
             }
+#if DEBUG
+            .onOpenURL { url in
+                guard url.scheme?.lowercased() == "luna",
+                      url.host?.lowercased() == "open" else { return }
+                let components = url.pathComponents.dropFirst()
+                switch components.first?.lowercased() {
+#if !os(tvOS)
+                case "reader":
+                    showKanzen = true
+                case "video":
+                    showKanzen = false
+#endif
+                case "settings":
+                    NotificationCenter.default.post(name: .eclipseDebugOpenSettings, object: nil)
+                case "tab":
+                    guard let tab = components.dropFirst().first?.lowercased() else { return }
+                    NotificationCenter.default.post(
+                        name: .eclipseDebugOpenTab,
+                        object: nil,
+                        userInfo: ["tab": tab]
+                    )
+                default:
+                    break
+                }
+            }
+#endif
 #if os(iOS)
             .onAppear {
                 MediaStateSyncBootstrap.syncOnActivation()
@@ -236,6 +380,7 @@ struct SoraApp: App {
             }
             .onChange(of: scenePhase) { newPhase in
                 if newPhase == .active {
+                    trackerManager.checkForExpiredTrackerSessions()
                     MediaStateSyncBootstrap.syncOnActivation()
                     ExperimentalCloudSyncManager.shared.syncOnActivationIfNeeded(reason: "active")
                     Task {
@@ -253,8 +398,7 @@ struct SoraApp: App {
                 lastNotificationMaintenanceDay = today
                 guard LocalNotificationManager.shared.hasNotificationSelections else { return }
                 Task {
-                    // Source caches use request-start timestamps, so a fetch
-                    // begun before midnight is correctly stale after rollover.
+
                     await LocalNotificationManager.shared.refreshSchedulesIfNeeded()
                 }
             }
@@ -263,12 +407,34 @@ struct SoraApp: App {
                 ExperimentalCloudSyncManager.shared.syncOnActivationIfNeeded(
                     reason: "foreground-periodic"
                 )
+
+                MediaStateSyncBootstrap.syncOnActivation()
             }
             .onReceive(NotificationCenter.default.publisher(for: .openScheduleFromLocalNotification)) { _ in
                 showKanzen = false
             }
 #endif
         }
+    }
+
+    private var profilePickerIsReaderMode: Bool {
+#if os(tvOS)
+        false
+#else
+        showKanzen
+#endif
+    }
+
+    private func presentCloudKitUpgradeNoticeIfReady() {
+        guard cloudKitUpgradeNoticePending,
+              !showOnboarding,
+              !showProfilePicker,
+              !(showSplash && !hideSplashScreen) else { return }
+#if !os(tvOS)
+        guard !showAppHubNotice else { return }
+#endif
+        cloudKitUpgradeNoticePending = false
+        showCloudKitUpgradeNotice = true
     }
 
 #if !os(tvOS)
@@ -305,16 +471,14 @@ struct SoraApp: App {
 
     private func warmSchedulesAfterStartup() {
 #if !os(tvOS)
-        // Reader-only launches stay lazy unless existing media notifications
-        // need maintenance. Entering Media mode calls this again.
+
         guard !showKanzen || LocalNotificationManager.shared.hasNotificationSelections else { return }
 #endif
         guard !schedulePrefetchScheduled else { return }
         schedulePrefetchScheduled = true
 
         Task(priority: .utility) {
-            // Keep schedule networking outside the startup critical path and let
-            // the splash/Home transition settle before consuming provider slots.
+
             try? await Task.sleep(nanoseconds: 750_000_000)
             guard !Task.isCancelled else { return }
 #if os(tvOS)
@@ -323,9 +487,7 @@ struct SoraApp: App {
                 dayCount: requestedDayCount
             )
 #else
-            // Both providers warm the user's selected Schedule/notification
-            // range after launch. The delay keeps that chosen cost off the
-            // startup critical path.
+
             let requestedDayCount = ScheduleWindow.current.rawValue
             let snapshot = await ScheduleViewModel.shared.notificationScheduleSnapshot(
                 dayCount: requestedDayCount
@@ -348,10 +510,66 @@ struct SoraApp: App {
     }
 }
 
+#if (DEBUG || ECLIPSE_PERF_HARNESS) && os(iOS)
+enum EclipseDebugAutoplay {
+
+    static var isRequested: Bool {
+        requestedURL != nil
+    }
+
+    private static var requestedURL: URL? {
+        guard let urlString = ProcessInfo.processInfo.environment["ECLIPSE_DEBUG_AUTOPLAY_URL"],
+              !urlString.isEmpty else { return nil }
+        return URL(string: urlString)
+    }
+
+    static func scheduleLaunch() {
+        let environment = ProcessInfo.processInfo.environment
+        guard let url = requestedURL else { return }
+
+        if let modeRaw = environment["ECLIPSE_DEBUG_UPSCALING_MODE"],
+           let mode = MPVUpscalingMode(rawValue: modeRaw) {
+            Settings.shared.mpvUpscalingMode = mode
+        }
+        if let upscalerRaw = environment["ECLIPSE_DEBUG_NEURAL_UPSCALER"],
+           let upscaler = MPVNeuralUpscaler(rawValue: upscalerRaw) {
+            Settings.shared.mpvNeuralUpscaler = upscaler
+        }
+        let animationHint = environment["ECLIPSE_DEBUG_ANIMATION_HINT"] == "1"
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
+            present(url: url, animationHint: animationHint)
+        }
+    }
+
+    private static func present(url: URL, animationHint: Bool) {
+        guard let root = UIApplication.shared.connectedScenes
+            .compactMap({ ($0 as? UIWindowScene)?.keyWindow })
+            .first?.rootViewController else {
+            Logger.shared.log("[EclipseDebugAutoplay] no root view controller", type: "Plugin")
+            return
+        }
+        var host = root
+        while let presented = host.presentedViewController {
+            host = presented
+        }
+        let preset = PlayerPreset.presets.first
+            ?? PlayerPreset(id: .sdrRec709, title: "Default", summary: "", stream: nil, commands: [])
+        let controller = PlayerViewController(url: url, preset: preset)
+        controller.isAnimationContentHint = animationHint
+        controller.playerTitleOverride = "Debug Autoplay"
+        controller.modalPresentationStyle = .fullScreen
+        Logger.shared.log(
+            "[EclipseDebugAutoplay] presenting url=\(url.absoluteString) animationHint=\(animationHint) mode=\(Settings.shared.mpvUpscalingMode.rawValue) neural=\(Settings.shared.mpvNeuralUpscaler.rawValue)",
+            type: "Plugin"
+        )
+        host.present(controller, animated: false)
+    }
+}
+#endif
+
 #if !os(tvOS)
-/// Owns reader-only state so opening the video app does not synchronously load
-/// the module registry and reader Core Data store. SwiftUI creates this root
-/// only when Kanzen is actually selected.
+
 private struct KanzenAppRoot: View {
     let onStartupReady: () -> Void
     let settings: Settings
@@ -388,7 +606,7 @@ final class ModeSwitchTransitionCoordinator: ObservableObject {
         let burst = AppModeSwitchBurst(toReaderMode: toReaderMode, origin: origin)
         activeBurst = burst
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.12) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.96) { [weak self] in
             if self?.activeBurst?.id == burst.id {
                 self?.activeBurst = nil
             }
@@ -417,7 +635,6 @@ struct AppModeSwitchBurst: Identifiable, Equatable {
     let origin: CGPoint?
 }
 
-/// A muted colour wave that follows the radial reveal of the incoming mode.
 private struct AppModeSwitchBurstOverlay: View {
     let burst: AppModeSwitchBurst
 
@@ -432,14 +649,14 @@ private struct AppModeSwitchBurstOverlay: View {
 
     private var primaryColor: Color {
         burst.toReaderMode
-            ? Color(red: 0.64, green: 0.38, blue: 0.31) // muted terracotta
-            : Color(red: 0.24, green: 0.46, blue: 0.53) // muted teal
+            ? Color(red: 0.64, green: 0.38, blue: 0.31)
+            : Color(red: 0.24, green: 0.46, blue: 0.53)
     }
 
     private var secondaryColor: Color {
         burst.toReaderMode
-            ? Color(red: 0.43, green: 0.32, blue: 0.52) // plum
-            : Color(red: 0.20, green: 0.34, blue: 0.46) // slate blue
+            ? Color(red: 0.43, green: 0.32, blue: 0.52)
+            : Color(red: 0.20, green: 0.34, blue: 0.46)
     }
 
     private var shadowColor: Color {
@@ -454,7 +671,7 @@ private struct AppModeSwitchBurstOverlay: View {
             let diameter = coverageDiameter(from: origin, in: proxy.size)
 
             ZStack {
-                // The low-luminance fill is the visual bridge between both modes.
+
                 Circle()
                     .fill(
                         RadialGradient(
@@ -489,8 +706,6 @@ private struct AppModeSwitchBurstOverlay: View {
                 )
                 .position(origin)
 
-                // A small number of soft colour ribbons make the start feel like a burst
-                // without the bright streaks or flashes of the previous transition.
                 ForEach(0..<10, id: \.self) { index in
                     AppModeSwitchWavelet(
                         index: index,
@@ -541,14 +756,13 @@ private struct AppModeSwitchBurstOverlay: View {
             hypot(origin.x, size.height - origin.y),
             hypot(size.width - origin.x, size.height - origin.y)
         )
-        // Deliberately overshoot the farthest corner so the colour field completes
-        // its sweep before it starts fading out.
+
         return (farthestCorner + 44) * 2
     }
 
     private func animate() {
         if reduceMotion {
-            // Keep a quiet colour acknowledgement without a sweeping reveal.
+
             withAnimation(.easeOut(duration: 0.24)) {
                 waveScale = 1
                 waveOpacity = 0.2
@@ -569,7 +783,7 @@ private struct AppModeSwitchBurstOverlay: View {
             leadingRingOpacity = 0
             trailingRingOpacity = 0
         }
-        withAnimation(.easeIn(duration: 0.24).delay(0.84)) {
+        withAnimation(.easeIn(duration: 0.24).delay(0.62)) {
             waveOpacity = 0
         }
     }
@@ -651,10 +865,9 @@ private struct AppModeWaveRevealModifier: AnimatableModifier {
     }
 }
 
-/// Holds the outgoing mode in place until the reveal has almost reached the screen edge.
-/// This prevents the window's default background from peeking through as a white flash.
-private struct AppModeWaveDepartureModifier: AnimatableModifier {
+private struct AppModeWaveCutoutModifier: AnimatableModifier {
     var progress: CGFloat
+    let origin: CGPoint?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -663,27 +876,78 @@ private struct AppModeWaveDepartureModifier: AnimatableModifier {
         set { progress = newValue }
     }
 
+    @ViewBuilder
     func body(content: Content) -> some View {
-        let normalizedProgress = min(max(progress, 0), 1)
-        let fadeProgress = reduceMotion
-            ? normalizedProgress
-            : min(max((normalizedProgress - 0.72) / 0.28, 0), 1)
+        if reduceMotion {
+            content.opacity(Double(1 - progress))
+        } else {
+            content.mask {
+                GeometryReader { proxy in
+                    let rootFrame = proxy.frame(in: .named(ModeSwitchTransitionCoordinator.coordinateSpaceName))
+                    let resolvedOrigin = origin.map {
+                        CGPoint(x: $0.x - rootFrame.minX, y: $0.y - rootFrame.minY)
+                    } ?? CGPoint(x: proxy.size.width - 38, y: 58)
+                    let radius = max(
+                        hypot(resolvedOrigin.x, resolvedOrigin.y),
+                        hypot(proxy.size.width - resolvedOrigin.x, resolvedOrigin.y),
+                        hypot(resolvedOrigin.x, proxy.size.height - resolvedOrigin.y),
+                        hypot(proxy.size.width - resolvedOrigin.x, proxy.size.height - resolvedOrigin.y)
+                    ) + 44
+                    let diameter = radius * 2 * min(max(progress, 0), 1)
 
-        return content.opacity(Double(1 - fadeProgress))
+                    ZStack {
+                        Rectangle()
+                        Circle()
+                            .frame(width: diameter, height: diameter)
+                            .position(resolvedOrigin)
+                            .blendMode(.destinationOut)
+                    }
+                    .compositingGroup()
+                }
+            }
+        }
     }
 }
 
+private struct AppModeKeepAliveModifier: AnimatableModifier {
+    var progress: CGFloat
+
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    func body(content: Content) -> some View {
+        content.opacity(1)
+    }
+}
+
+#if canImport(Kingfisher)
+private enum KingfisherImageCacheConfigurator {
+    private static var didConfigure = false
+    private static let memoryCostLimit = 96 * 1024 * 1024
+    private static let memoryCountLimit = 192
+
+    static func configureIfNeeded() {
+        guard !didConfigure else { return }
+        didConfigure = true
+
+        var memoryConfig = ImageCache.default.memoryStorage.config
+        memoryConfig.totalCostLimit = memoryCostLimit
+        memoryConfig.countLimit = memoryCountLimit
+        ImageCache.default.memoryStorage.config = memoryConfig
+    }
+}
+#endif
+
 private extension AnyTransition {
-    /// Media's home scene is substantially heavier than Reader's. Revealing it
-    /// through an animating full-screen mask causes dropped frames, so let it
-    /// crossfade beneath the existing wave while preserving the same departure
-    /// behavior used by the Reader transition.
+
     static var eclipseMediaModeReturn: AnyTransition {
         .asymmetric(
-            insertion: .opacity,
+            insertion: .identity,
             removal: .modifier(
-                active: AppModeWaveDepartureModifier(progress: 1),
-                identity: AppModeWaveDepartureModifier(progress: 0)
+                active: AppModeKeepAliveModifier(progress: 1),
+                identity: AppModeKeepAliveModifier(progress: 0)
             )
         )
     }
@@ -695,8 +959,8 @@ private extension AnyTransition {
                 identity: AppModeWaveRevealModifier(progress: 1, origin: origin)
             ),
             removal: .modifier(
-                active: AppModeWaveDepartureModifier(progress: 1),
-                identity: AppModeWaveDepartureModifier(progress: 0)
+                active: AppModeWaveCutoutModifier(progress: 1, origin: origin),
+                identity: AppModeWaveCutoutModifier(progress: 0, origin: origin)
             )
         )
     }

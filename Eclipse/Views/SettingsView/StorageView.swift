@@ -1,3 +1,10 @@
+//
+//  StorageView.swift
+//  Eclipse
+//
+//  Created by Francesco on 04/11/25.
+//
+
 import SwiftUI
 
 private struct StorageBreakdownItem: Identifiable, Sendable {
@@ -11,6 +18,7 @@ private struct StorageScanRequest: Sendable {
     let cachesDirectory: URL
     let downloadsDirectory: URL
     let mpvPreloadDirectory: URL
+    let nuvioPluginBytes: Int64
 }
 
 private struct StorageScanResult: Sendable {
@@ -93,6 +101,7 @@ private enum StorageScanner {
                 StorageBreakdownItem(title: "Downloads / Video Storage", sizeBytes: downloadsSize),
                 StorageBreakdownItem(title: "Subtitle Cache", sizeBytes: subtitleSize),
                 StorageBreakdownItem(title: "Service / Addon Cache", sizeBytes: cacheMetrics.serviceCache),
+                StorageBreakdownItem(title: "Plugin Provider Code", sizeBytes: request.nuvioPluginBytes),
                 StorageBreakdownItem(title: "Reader Cache", sizeBytes: cacheMetrics.readerCache)
             ]
         )
@@ -175,15 +184,19 @@ struct StorageView: View {
     @State private var scanTask: Task<StorageScanResult?, Never>?
     @State private var scanGeneration = UUID()
 
-    @AppStorage("autoClearCacheEnabled") private var autoClearCacheEnabled = false
-    @AppStorage("autoClearCacheThresholdMB") private var autoClearCacheThresholdMB: Double = 500
+    @AppStorage("autoClearCacheEnabled", store: .standard) private var autoClearCacheEnabled = false
+    @AppStorage("autoClearCacheThresholdMB", store: .standard) private var autoClearCacheThresholdMB: Double = 500
 
     @StateObject private var accentColorManager = AccentColorManager.shared
 
     private var accent: Color { accentColorManager.currentAccentColor }
 
+    private var sanitizedAutoClearCacheThresholdMB: Double {
+        CacheManager.sanitizedAutoClearThresholdMB(autoClearCacheThresholdMB)
+    }
+
     private let cacheThresholdOptions: [Double] = [100, 250, 500, 1000, 2000, 5000]
-    
+
     var body: some View {
         ScrollView {
             VStack(spacing: 22) {
@@ -263,13 +276,13 @@ struct StorageView: View {
                         if autoClearCacheEnabled {
                             GlassDivider()
 
-                            GlassDetailRow(icon: "gauge.with.dots.needle.bottom.50percent", iconColor: .yellow, title: "Threshold", subtitle: "Cache will be cleared when size exceeds \(formatThreshold(autoClearCacheThresholdMB)).") {
+                            GlassDetailRow(icon: "gauge.with.dots.needle.bottom.50percent", iconColor: .yellow, title: "Threshold", subtitle: "Cache will be cleared when size exceeds \(formatThreshold(sanitizedAutoClearCacheThresholdMB)).") {
                                 Menu {
                                     ForEach(cacheThresholdOptions, id: \.self) { value in
                                         Button {
                                             autoClearCacheThresholdMB = value
                                         } label: {
-                                            if autoClearCacheThresholdMB == value {
+                                            if sanitizedAutoClearCacheThresholdMB == value {
                                                 Label(formatThreshold(value), systemImage: "checkmark")
                                             } else {
                                                 Text(formatThreshold(value))
@@ -278,7 +291,7 @@ struct StorageView: View {
                                     }
                                 } label: {
                                     HStack(spacing: 4) {
-                                        Text(formatThreshold(autoClearCacheThresholdMB))
+                                        Text(formatThreshold(sanitizedAutoClearCacheThresholdMB))
                                             .font(.subheadline)
                                             .foregroundColor(.white.opacity(0.6))
                                         Image(systemName: "chevron.up.chevron.down")
@@ -328,7 +341,8 @@ struct StorageView: View {
         }
         .onChange(of: autoClearCacheEnabled) { enabled in
             if enabled {
-                Logger.shared.log("Auto-clear cache enabled with threshold: \(formatThreshold(autoClearCacheThresholdMB))", type: "Storage")
+                autoClearCacheThresholdMB = sanitizedAutoClearCacheThresholdMB
+                Logger.shared.log("Auto-clear cache enabled with threshold: \(formatThreshold(sanitizedAutoClearCacheThresholdMB))", type: "Storage")
             }
         }
         .alert("Clear Cache?", isPresented: $showConfirmClear) {
@@ -338,32 +352,39 @@ struct StorageView: View {
             Text("This will remove cached files. You may need to re-download some content later.")
         }
     }
-    
+
     private var formattedCacheSize: String {
         ByteCountFormatter.string(fromByteCount: cacheSizeBytes, countStyle: .file)
     }
-    
+
     private func formatThreshold(_ mb: Double) -> String {
-        if mb >= 1000 {
-            return String(format: "%.1f GB", mb / 1000)
+        let sanitized = CacheManager.sanitizedAutoClearThresholdMB(mb)
+        if sanitized >= 1000 {
+            return String(format: "%.1f GB", sanitized / 1000)
         }
-        return String(format: "%.0f MB", mb)
+        return String(format: "%.0f MB", sanitized)
     }
-    
+
     private func refreshCacheSize() {
         scanTask?.cancel()
         errorMessage = nil
         isLoading = true
         let generation = UUID()
         scanGeneration = generation
-        let request = StorageScanRequest(
-            documentsDirectory: documentsDirectory(),
-            cachesDirectory: cachesDirectory(),
-            downloadsDirectory: DownloadManager.shared.downloadsDirectory,
-            mpvPreloadDirectory: ExperimentalMPVPreloadManager.shared.cacheDirectory
-        )
+
+        let documents = documentsDirectory()
+        let caches = cachesDirectory()
+        let downloads = DownloadManager.shared.downloadsDirectory
+        let preload = ExperimentalMPVPreloadManager.shared.cacheDirectory
         let task = Task.detached(priority: .utility) {
-            StorageScanner.scan(request)
+            let request = StorageScanRequest(
+                documentsDirectory: documents,
+                cachesDirectory: caches,
+                downloadsDirectory: downloads,
+                mpvPreloadDirectory: preload,
+                nuvioPluginBytes: Self.nuvioPluginStorageBytes()
+            )
+            return StorageScanner.scan(request)
         }
         scanTask = task
 
@@ -377,26 +398,27 @@ struct StorageView: View {
             isLoading = false
 
             if autoClearCacheEnabled {
-                let thresholdBytes = Int64(autoClearCacheThresholdMB * 1_000_000)
+                let thresholdMB = sanitizedAutoClearCacheThresholdMB
+                let thresholdBytes = CacheManager.autoClearThresholdBytes(for: thresholdMB)
                 if result.cacheSizeBytes > thresholdBytes {
-                    Logger.shared.log("Cache size (\(ByteCountFormatter.string(fromByteCount: result.cacheSizeBytes, countStyle: .file))) exceeds threshold (\(formatThreshold(autoClearCacheThresholdMB))). Auto-clearing...", type: "Storage")
+                    Logger.shared.log("Cache size (\(ByteCountFormatter.string(fromByteCount: result.cacheSizeBytes, countStyle: .file))) exceeds threshold (\(formatThreshold(thresholdMB))). Auto-clearing...", type: "Storage")
                     autoClearCache()
                 }
             }
         }
     }
-    
+
     private func clearCache() {
         errorMessage = nil
         isClearing = true
         performCacheClear(logCompletion: false)
     }
-    
+
     private func autoClearCache() {
         isClearing = true
         performCacheClear(logCompletion: true)
     }
-    
+
     private func performCacheClear(logCompletion: Bool) {
         scanTask?.cancel()
         scanTask = nil
@@ -436,13 +458,22 @@ struct StorageView: View {
             refreshCacheSize()
         }
     }
-    
+
     private func cachesDirectory() -> URL {
         FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
     }
 
     private func documentsDirectory() -> URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    }
+
+    private static func nuvioPluginStorageBytes() -> Int64 {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        guard PlatformCapabilities.current.supportsNuvioPlugins else { return 0 }
+        return NuvioPluginStore.shared.codeSizeBytes()
+#else
+        return 0
+#endif
     }
 
 }

@@ -1,3 +1,9 @@
+//
+//  GeneralView.swift
+//  Kanzen
+//
+//  Created by Dawud Osman on 22/05/2025.
+//
 import SwiftUI
 import UIKit
 
@@ -16,6 +22,42 @@ struct KanzenGeneralSettingsView: View {
     @AppStorage("readerReadThresholdPercent") private var readerReadThresholdPercent: Double = 80
     @State private var readerDetailElements = ReaderDetailElement.orderedElements()
     @State private var hiddenReaderDetailElements = ReaderDetailElement.hiddenElements()
+
+    private var sanitizedReaderFontSize: Double {
+        Self.sanitizedSetting(readerFontSize, default: 16, range: 12...32)
+    }
+
+    private var sanitizedReaderLineSpacing: Double {
+        Self.sanitizedSetting(readerLineSpacing, default: 1.6, range: 1...3)
+    }
+
+    private var sanitizedReaderMargin: Double {
+        Self.sanitizedSetting(readerMargin, default: 4, range: 0...30)
+    }
+
+    private var sanitizedReaderReadThresholdPercent: Double {
+        Self.sanitizedSetting(readerReadThresholdPercent, default: 80, range: 50...100)
+    }
+
+    private func sanitizedBinding(
+        _ value: Binding<Double>,
+        default defaultValue: Double,
+        range: ClosedRange<Double>
+    ) -> Binding<Double> {
+        Binding(
+            get: { Self.sanitizedSetting(value.wrappedValue, default: defaultValue, range: range) },
+            set: { value.wrappedValue = Self.sanitizedSetting($0, default: defaultValue, range: range) }
+        )
+    }
+
+    private static func sanitizedSetting(
+        _ value: Double,
+        default defaultValue: Double,
+        range: ClosedRange<Double>
+    ) -> Double {
+        guard value.isFinite else { return defaultValue }
+        return min(max(value, range.lowerBound), range.upperBound)
+    }
 
     var body: some View {
         Form {
@@ -91,8 +133,12 @@ struct KanzenGeneralSettingsView: View {
             Section(header: Text("Reader Text")) {
                 HStack {
                     Text("Font Size")
-                    Slider(value: $readerFontSize, in: 12...32, step: 1)
-                    Text("\(Int(readerFontSize))")
+                    Slider(
+                        value: sanitizedBinding($readerFontSize, default: 16, range: 12...32),
+                        in: 12...32,
+                        step: 1
+                    )
+                    Text("\(Int(sanitizedReaderFontSize))")
                         .foregroundColor(.secondary)
                         .monospacedDigit()
                 }
@@ -124,16 +170,24 @@ struct KanzenGeneralSettingsView: View {
 
                 HStack {
                     Text("Line Spacing")
-                    Slider(value: $readerLineSpacing, in: 1...3, step: 0.1)
-                    Text(String(format: "%.1f", readerLineSpacing))
+                    Slider(
+                        value: sanitizedBinding($readerLineSpacing, default: 1.6, range: 1...3),
+                        in: 1...3,
+                        step: 0.1
+                    )
+                    Text(String(format: "%.1f", sanitizedReaderLineSpacing))
                         .foregroundColor(.secondary)
                         .monospacedDigit()
                 }
 
                 HStack {
                     Text("Margin")
-                    Slider(value: $readerMargin, in: 0...30, step: 1)
-                    Text("\(Int(readerMargin))")
+                    Slider(
+                        value: sanitizedBinding($readerMargin, default: 4, range: 0...30),
+                        in: 0...30,
+                        step: 1
+                    )
+                    Text("\(Int(sanitizedReaderMargin))")
                         .foregroundColor(.secondary)
                         .monospacedDigit()
                 }
@@ -155,8 +209,12 @@ struct KanzenGeneralSettingsView: View {
             ) {
                 HStack {
                     Text("Mark as Read")
-                    Slider(value: $readerReadThresholdPercent, in: 50...100, step: 5)
-                    Text("\(Int(readerReadThresholdPercent))%")
+                    Slider(
+                        value: sanitizedBinding($readerReadThresholdPercent, default: 80, range: 50...100),
+                        in: 50...100,
+                        step: 5
+                    )
+                    Text("\(Int(sanitizedReaderReadThresholdPercent))%")
                         .foregroundColor(.secondary)
                         .monospacedDigit()
                 }
@@ -198,8 +256,16 @@ struct KanzenGeneralSettingsView: View {
             .background(EclipseScrollTracker())
         }
         .navigationTitle(Text("Appearance"))
+        .navigationBarTitleDisplayMode(.inline)
         .eclipseSettingsStyle()
-        .onAppear(perform: reloadReaderDetailElements)
+        .preferredColorScheme(.dark)
+        .onAppear {
+            readerFontSize = sanitizedReaderFontSize
+            readerLineSpacing = sanitizedReaderLineSpacing
+            readerMargin = sanitizedReaderMargin
+            readerReadThresholdPercent = sanitizedReaderReadThresholdPercent
+            reloadReaderDetailElements()
+        }
     }
 
     private var accentColorBinding: Binding<Color> {

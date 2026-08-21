@@ -1,11 +1,5 @@
 import SwiftUI
 
-/// The branded, animated loading indicator used app-wide in place of the default
-/// system `ProgressView()` spinner.
-///
-/// Everything outside the video player and the immersive reader surface should use
-/// this instead of `ProgressView()`. It responds to `.scaleEffect` just like the
-/// system spinner, so existing sizing modifiers continue to work.
 struct EclipseLoadingIndicator: View {
     var tint: Color
     var diameter: CGFloat
@@ -17,7 +11,6 @@ struct EclipseLoadingIndicator: View {
         self.label = label
     }
 
-    /// Convenience matching the `ProgressView("Loading…")` call style.
     init(_ label: String, tint: Color = .accentColor, diameter: CGFloat = 26) {
         self.init(tint: tint, diameter: diameter, label: label)
     }
@@ -50,7 +43,7 @@ private struct EclipseLoadingSpinner: View {
 
     var body: some View {
         ZStack {
-            // Soft pulsing halo — the "flashy" glow.
+
             Circle()
                 .fill(
                     RadialGradient(
@@ -65,12 +58,10 @@ private struct EclipseLoadingSpinner: View {
                 .opacity(pulse ? 0.15 : 0.9)
                 .blendMode(.plusLighter)
 
-            // Static track ring.
             Circle()
                 .stroke(tint.opacity(0.15), lineWidth: lineWidth)
                 .frame(width: diameter, height: diameter)
 
-            // Faint counter-rotating inner arc for depth.
             Circle()
                 .trim(from: 0, to: 0.28)
                 .stroke(
@@ -80,7 +71,6 @@ private struct EclipseLoadingSpinner: View {
                 .frame(width: diameter * 0.66, height: diameter * 0.66)
                 .rotationEffect(.degrees(counterRotation))
 
-            // Main rotating corona sweep with a bright leading edge.
             Circle()
                 .trim(from: 0, to: 0.72)
                 .stroke(
@@ -105,7 +95,7 @@ private struct EclipseLoadingSpinner: View {
 
     private func start() {
         guard !reduceMotion else {
-            // Present a calm, static ring; still legible as "loading".
+
             pulse = true
             return
         }

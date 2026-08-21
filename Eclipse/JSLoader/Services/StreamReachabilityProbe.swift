@@ -4,6 +4,7 @@ enum StreamReachabilityDeadReason: Equatable {
     case notFound
     case gone
     case emptyBody
+    case unsafeAddress
     case invalidPayload(String)
 
     var summary: String {
@@ -14,6 +15,8 @@ enum StreamReachabilityDeadReason: Equatable {
             return "gone"
         case .emptyBody:
             return "empty body"
+        case .unsafeAddress:
+            return "unsafe address"
         case .invalidPayload(let detail):
             return detail
         }
@@ -114,6 +117,50 @@ enum StreamReachabilityProbe {
     static let defaultByteLimit = 8 * 1024
     static let defaultTimeout: TimeInterval = 6
 
+    static func shouldBypassActiveProbe(for url: URL) -> Bool {
+        let pathContainsOpaqueGrant = url.pathComponents.contains { component in
+            let decoded = component.removingPercentEncoding ?? component
+            guard decoded.utf8.count >= 24 else { return false }
+            var signals = 0
+            if decoded.contains(where: { $0.isLowercase }) { signals += 1 }
+            if decoded.contains(where: { $0.isUppercase }) { signals += 1 }
+            if decoded.contains(where: { $0.isNumber }) { signals += 1 }
+            if decoded.contains(where: { "-_.~=+".contains($0) }) { signals += 1 }
+            return signals >= 2
+        }
+        if pathContainsOpaqueGrant { return true }
+
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let items = components.queryItems,
+              !items.isEmpty else { return false }
+
+        let capabilityNames = [
+            "auth", "authorization", "credential", "expires", "expiry",
+            "hash", "hdnea", "hdntl", "hmac", "jwt", "key", "policy",
+            "secret", "session", "sig", "signature", "token"
+        ]
+        let exactCapabilityNames: Set<String> = [
+            "e", "exp", "h", "md5", "se", "sp", "st", "sv",
+            "x-amz-algorithm", "x-amz-credential", "x-amz-date",
+            "x-amz-expires", "x-amz-security-token", "x-amz-signature",
+            "x-goog-algorithm", "x-goog-credential", "x-goog-date",
+            "x-goog-expires", "x-goog-signature"
+        ]
+
+        for item in items {
+            let name = item.name.lowercased()
+            if exactCapabilityNames.contains(name)
+                || capabilityNames.contains(where: name.contains) {
+                return true
+            }
+            if let value = item.value,
+               value.utf8.count >= 24 {
+                return true
+            }
+        }
+        return false
+    }
+
     static func probe(
         url: URL,
         headers: [String: String],
@@ -131,18 +178,27 @@ enum StreamReachabilityProbe {
         }
 
         let resolvedLimit = max(byteLimit, 1)
-        var request = URLRequest(url: url)
-        request.timeoutInterval = timeout
-        request.cachePolicy = .reloadIgnoringLocalCacheData
-        let effectiveHeaders = CloudflareBypassManager.shared.headersByApplyingCachedBypass(headers, for: url)
-        for (name, value) in effectiveHeaders {
+        let effectiveHeaders = CloudflareBypassManager.shared.headersByApplyingCachedBypass(
+            headers,
+            for: url
+        )
+        let safeHeaders = sanitizedProbeHeaders(effectiveHeaders)
+        var request = URLRequest(url: url, timeoutInterval: timeout)
+        request.httpMethod = "GET"
+        for (name, value) in safeHeaders where
+            name.caseInsensitiveCompare("Range") != .orderedSame {
             request.setValue(value, forHTTPHeaderField: name)
         }
-        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
-        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         request.setValue("bytes=0-\(resolvedLimit - 1)", forHTTPHeaderField: "Range")
-
-        let session = URLSession.fetchData(allowRedirects: true)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = false
+        configuration.timeoutIntervalForRequest = timeout
+        configuration.timeoutIntervalForResource = timeout
+        let session = URLSession(
+            configuration: configuration,
+            delegate: FetchDelegate(allowRedirects: true),
+            delegateQueue: nil
+        )
         defer { session.finishTasksAndInvalidate() }
 
         do {
@@ -152,7 +208,7 @@ enum StreamReachabilityProbe {
             )
             guard let http = response as? HTTPURLResponse else {
                 return StreamReachabilityReport(
-                    verdict: .indeterminate(.unverifiableByEclipse("non-http-response")),
+                    verdict: .indeterminate(.transport("non-http response")),
                     statusCode: nil,
                     contentType: "",
                     byteCount: data.count
@@ -195,6 +251,56 @@ enum StreamReachabilityProbe {
                 contentType: "",
                 byteCount: 0
             )
+        }
+    }
+
+    private static func sanitizedProbeHeaders(
+        _ headers: [String: String]
+    ) -> [String: String] {
+        var accepted: [String: String] = [:]
+        var totalBytes = 0
+        for (name, value) in headers.sorted(by: {
+            let priority: [String: Int] = [
+                "authorization": 0, "cookie": 1, "referer": 2,
+                "origin": 3, "user-agent": 4
+            ]
+            let lhs = $0.key.lowercased()
+            let rhs = $1.key.lowercased()
+            let lhsPriority = priority[lhs] ?? 5
+            let rhsPriority = priority[rhs] ?? 5
+            if lhsPriority != rhsPriority { return lhsPriority < rhsPriority }
+            return lhs == rhs ? $0.key < $1.key : lhs < rhs
+        }) {
+            guard accepted.count < 64,
+                  !name.isEmpty,
+                  name.utf8.count <= 128,
+                  value.utf8.count <= 8 * 1_024,
+                  !name.contains(":"),
+                  !name.contains("\r"),
+                  !name.contains("\n"),
+                  !value.contains("\r"),
+                  !value.contains("\n"),
+                  accepted[name] == nil else { continue }
+            let size = name.utf8.count + value.utf8.count + 4
+            guard size <= 32 * 1024 - totalBytes else { continue }
+            accepted[name] = value
+            totalBytes += size
+        }
+        return accepted
+    }
+
+    static func verdictForSecurityPolicyFailure(
+        _ error: SkyStreamSecurityError
+    ) -> StreamReachabilityVerdict? {
+        switch error {
+        case .emptyURL, .malformedURL, .unsupportedScheme, .invalidHost:
+            return .confidentlyDead(.unsafeAddress)
+        case .prohibitedHost, .prohibitedAddress:
+            return .indeterminate(.unverifiableByEclipse("private-address"))
+        case .insecureTransport, .credentialsInURL, .httpsDowngrade, .tooManyRedirects:
+            return .indeterminate(.unverifiableByEclipse("unprobeable-transport"))
+        default:
+            return nil
         }
     }
 
@@ -352,7 +458,15 @@ enum StreamReachabilityProbe {
         body: Data,
         bodyText: String
     ) -> String? {
-        if contentType == "text/html"
+        let trimmed = bodyText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let bodyLooksLikeDocument = trimmed.hasPrefix("<!doctype html")
+            || trimmed.hasPrefix("<html")
+            || trimmed.hasPrefix("<?xml")
+            || trimmed.hasPrefix("{")
+            || trimmed.hasPrefix("[")
+
+        if bodyLooksLikeDocument,
+           contentType == "text/html"
             || contentType == "application/json"
             || contentType.hasSuffix("+json")
             || contentType == "application/xml"
@@ -365,7 +479,6 @@ enum StreamReachabilityProbe {
             return "returned \(contentType)"
         }
 
-        let trimmed = bodyText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if trimmed.hasPrefix("<!doctype html")
             || trimmed.hasPrefix("<html")
             || trimmed.hasPrefix("<?xml")

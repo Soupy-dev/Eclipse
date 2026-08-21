@@ -1,5 +1,3 @@
-// Theme system with customizable gradient colors
-
 import SwiftUI
 
 enum AtmosphereStyle: String, CaseIterable, Identifiable {
@@ -54,8 +52,6 @@ enum HeroBannerBehavior: String, CaseIterable, Identifiable {
 
     static let defaultValue: HeroBannerBehavior = .carousel
 
-    /// Behaviors offered in the UI. `.launch` is retained for backward compatibility
-    /// with existing saved values and backups but is no longer user-selectable.
     static let selectableCases: [HeroBannerBehavior] = [.static, .carousel]
 
     var displayName: String {
@@ -69,101 +65,100 @@ enum HeroBannerBehavior: String, CaseIterable, Identifiable {
 
 class EclipseTheme: ObservableObject {
     static let shared = EclipseTheme()
-    
-    // MARK: - Persisted Settings
+
+    private var isReloadingForProfileSwitch = false
 
 #if !os(tvOS)
     @Published var globalAppearanceEnabled: Bool {
-        didSet { UserDefaults.standard.set(globalAppearanceEnabled, forKey: "readerGlobalAppearanceEnabled") }
+        didSet { guard !isReloadingForProfileSwitch else { return }; ProfileSettingsStore.active.set(globalAppearanceEnabled, forKey: "readerGlobalAppearanceEnabled") }
     }
 #endif
 
     @Published var settingsGradientColor: Color {
-        didSet { saveColor(settingsGradientColor, key: "eclipseThemeGradientColor") }
+        didSet { guard !isReloadingForProfileSwitch else { return }; saveColor(settingsGradientColor, key: "eclipseThemeGradientColor") }
     }
 
 #if !os(tvOS)
     @Published var readerSettingsGradientColor: Color {
-        didSet { saveColor(readerSettingsGradientColor, key: "readerThemeGradientColor") }
+        didSet { guard !isReloadingForProfileSwitch else { return }; saveColor(readerSettingsGradientColor, key: "readerThemeGradientColor") }
     }
 #endif
 
     @Published var atmosphereStyle: AtmosphereStyle {
-        didSet { UserDefaults.standard.set(atmosphereStyle.rawValue, forKey: "atmosphereStyle") }
+        didSet { guard !isReloadingForProfileSwitch else { return }; ProfileSettingsStore.active.set(atmosphereStyle.rawValue, forKey: "atmosphereStyle") }
     }
 
 #if !os(tvOS)
     @Published var readerAtmosphereStyle: AtmosphereStyle {
-        didSet { UserDefaults.standard.set(readerAtmosphereStyle.rawValue, forKey: "readerAtmosphereStyle") }
+        didSet { guard !isReloadingForProfileSwitch else { return }; ProfileSettingsStore.active.set(readerAtmosphereStyle.rawValue, forKey: "readerAtmosphereStyle") }
     }
 #endif
 
     @Published var atmosphereSolidColorSource: AtmosphereSolidColorSource {
-        didSet { UserDefaults.standard.set(atmosphereSolidColorSource.rawValue, forKey: "atmosphereSolidColorSource") }
+        didSet { guard !isReloadingForProfileSwitch else { return }; ProfileSettingsStore.active.set(atmosphereSolidColorSource.rawValue, forKey: "atmosphereSolidColorSource") }
     }
 
 #if !os(tvOS)
     @Published var readerAtmosphereSolidColorSource: AtmosphereSolidColorSource {
-        didSet { UserDefaults.standard.set(readerAtmosphereSolidColorSource.rawValue, forKey: "readerAtmosphereSolidColorSource") }
+        didSet { guard !isReloadingForProfileSwitch else { return }; ProfileSettingsStore.active.set(readerAtmosphereSolidColorSource.rawValue, forKey: "readerAtmosphereSolidColorSource") }
     }
 #endif
 
     @Published var atmosphereSolidColor: Color {
-        didSet { saveColor(atmosphereSolidColor, key: "atmosphereSolidColor") }
+        didSet { guard !isReloadingForProfileSwitch else { return }; saveColor(atmosphereSolidColor, key: "atmosphereSolidColor") }
     }
 
 #if !os(tvOS)
     @Published var readerAtmosphereSolidColor: Color {
-        didSet { saveColor(readerAtmosphereSolidColor, key: "readerAtmosphereSolidColor") }
+        didSet { guard !isReloadingForProfileSwitch else { return }; saveColor(readerAtmosphereSolidColor, key: "readerAtmosphereSolidColor") }
     }
 #endif
 
-    // MARK: - Appearance (modern atmosphere)
-
     @Published var appearancePaletteRaw: String {
-        didSet { UserDefaults.standard.set(appearancePaletteRaw, forKey: AppearanceConfig.paletteKey) }
+        didSet { guard !isReloadingForProfileSwitch else { return }; ProfileSettingsStore.active.set(appearancePaletteRaw, forKey: AppearanceConfig.paletteKey) }
     }
 
 #if !os(tvOS)
     @Published var readerAppearancePaletteRaw: String {
-        didSet { UserDefaults.standard.set(readerAppearancePaletteRaw, forKey: AppearanceConfig.readerPaletteKey) }
+        didSet { guard !isReloadingForProfileSwitch else { return }; ProfileSettingsStore.active.set(readerAppearancePaletteRaw, forKey: AppearanceConfig.readerPaletteKey) }
     }
 #endif
 
     @Published var bleedStrength: Double {
-        didSet { UserDefaults.standard.set(bleedStrength, forKey: AppearanceConfig.bleedStrengthKey) }
+        didSet { guard !isReloadingForProfileSwitch else { return }; ProfileSettingsStore.active.set(bleedStrength, forKey: AppearanceConfig.bleedStrengthKey) }
     }
 
 #if !os(tvOS)
     @Published var readerBleedStrength: Double {
-        didSet { UserDefaults.standard.set(readerBleedStrength, forKey: AppearanceConfig.readerBleedStrengthKey) }
+        didSet { guard !isReloadingForProfileSwitch else { return }; ProfileSettingsStore.active.set(readerBleedStrength, forKey: AppearanceConfig.readerBleedStrengthKey) }
     }
 #endif
 
     @Published var backgroundIntensity: Double {
-        didSet { UserDefaults.standard.set(backgroundIntensity, forKey: AppearanceConfig.backgroundIntensityKey) }
+        didSet { guard !isReloadingForProfileSwitch else { return }; ProfileSettingsStore.active.set(backgroundIntensity, forKey: AppearanceConfig.backgroundIntensityKey) }
     }
 
 #if !os(tvOS)
     @Published var readerBackgroundIntensity: Double {
-        didSet { UserDefaults.standard.set(readerBackgroundIntensity, forKey: AppearanceConfig.readerBackgroundIntensityKey) }
+        didSet { guard !isReloadingForProfileSwitch else { return }; ProfileSettingsStore.active.set(readerBackgroundIntensity, forKey: AppearanceConfig.readerBackgroundIntensityKey) }
     }
 #endif
 
     @Published var atmosphereMotion: Double {
-        didSet { UserDefaults.standard.set(atmosphereMotion, forKey: AppearanceConfig.motionKey) }
+        didSet { guard !isReloadingForProfileSwitch else { return }; ProfileSettingsStore.active.set(atmosphereMotion, forKey: AppearanceConfig.motionKey) }
     }
 
 #if !os(tvOS)
     @Published var readerAtmosphereMotion: Double {
-        didSet { UserDefaults.standard.set(readerAtmosphereMotion, forKey: AppearanceConfig.readerMotionKey) }
+        didSet { guard !isReloadingForProfileSwitch else { return }; ProfileSettingsStore.active.set(readerAtmosphereMotion, forKey: AppearanceConfig.readerMotionKey) }
     }
 #endif
 
     @Published var customPaletteColors: [Color] {
         didSet {
+            guard !isReloadingForProfileSwitch else { return }
             if let data = AppearanceConfig.encodeColors(customPaletteColors) {
-                UserDefaults.standard.set(data, forKey: AppearanceConfig.customColorsKey)
+                ProfileSettingsStore.active.set(data, forKey: AppearanceConfig.customColorsKey)
             }
         }
     }
@@ -171,15 +166,14 @@ class EclipseTheme: ObservableObject {
 #if !os(tvOS)
     @Published var readerCustomPaletteColors: [Color] {
         didSet {
+            guard !isReloadingForProfileSwitch else { return }
             if let data = AppearanceConfig.encodeColors(readerCustomPaletteColors) {
-                UserDefaults.standard.set(data, forKey: AppearanceConfig.readerCustomColorsKey)
+                ProfileSettingsStore.active.set(data, forKey: AppearanceConfig.readerCustomColorsKey)
             }
         }
     }
 #endif
 
-    // MARK: - Constants
-    
     let cardCornerRadius: CGFloat = 16
 
     var backgroundBase: Color {
@@ -217,9 +211,7 @@ class EclipseTheme: ObservableObject {
         #endif
         return Color.white.opacity(0.5)
     }
-    
-    // MARK: - Presets
-    
+
     static let gradientPresets: [(name: String, color: Color)] = [
         ("Purple", Color(red: 0.25, green: 0.12, blue: 0.45)),
         ("Blue", Color(red: 0.10, green: 0.15, blue: 0.40)),
@@ -227,20 +219,18 @@ class EclipseTheme: ObservableObject {
         ("Red", Color(red: 0.38, green: 0.10, blue: 0.12)),
         ("Green", Color(red: 0.10, green: 0.28, blue: 0.14))
     ]
-    
-    // MARK: - Init
-    
+
     private init() {
         AppearanceConfig.migrateIfNeeded()
-        let styleRaw = UserDefaults.standard.string(forKey: "atmosphereStyle") ?? Self.defaultAtmosphereStyle.rawValue
-        let sourceRaw = UserDefaults.standard.string(forKey: "atmosphereSolidColorSource") ?? AtmosphereSolidColorSource.dominant.rawValue
+        let styleRaw = ProfileSettingsStore.active.string(forKey: "atmosphereStyle") ?? Self.defaultAtmosphereStyle.rawValue
+        let sourceRaw = ProfileSettingsStore.active.string(forKey: "atmosphereSolidColorSource") ?? AtmosphereSolidColorSource.dominant.rawValue
 #if !os(tvOS)
-        let readerStyleRaw = UserDefaults.standard.string(forKey: "readerAtmosphereStyle") ?? styleRaw
-        let readerSourceRaw = UserDefaults.standard.string(forKey: "readerAtmosphereSolidColorSource") ?? sourceRaw
+        let readerStyleRaw = ProfileSettingsStore.active.string(forKey: "readerAtmosphereStyle") ?? styleRaw
+        let readerSourceRaw = ProfileSettingsStore.active.string(forKey: "readerAtmosphereSolidColorSource") ?? sourceRaw
 
-        self.globalAppearanceEnabled = UserDefaults.standard.object(forKey: "readerGlobalAppearanceEnabled") == nil
+        self.globalAppearanceEnabled = ProfileSettingsStore.active.object(forKey: "readerGlobalAppearanceEnabled") == nil
             ? true
-            : UserDefaults.standard.bool(forKey: "readerGlobalAppearanceEnabled")
+            : ProfileSettingsStore.active.bool(forKey: "readerGlobalAppearanceEnabled")
 #endif
         self.settingsGradientColor = Self.loadColor(key: "eclipseThemeGradientColor") ?? Self.gradientPresets[0].color
 #if !os(tvOS)
@@ -259,7 +249,7 @@ class EclipseTheme: ObservableObject {
         self.readerAtmosphereSolidColor = Self.loadColor(key: "readerAtmosphereSolidColor") ?? Self.loadColor(key: "atmosphereSolidColor") ?? Self.gradientPresets[0].color
 #endif
 
-        let defaults = UserDefaults.standard
+        let defaults = ProfileSettingsStore.active
         self.appearancePaletteRaw = defaults.string(forKey: AppearanceConfig.paletteKey) ?? AtmospherePaletteID.defaultValue.rawValue
 #if !os(tvOS)
         self.readerAppearancePaletteRaw = defaults.string(forKey: AppearanceConfig.readerPaletteKey)
@@ -305,11 +295,83 @@ class EclipseTheme: ObservableObject {
 #endif
     }
 
-    /// Refresh the media-only theme fields after CloudKit applies shared settings.
-    /// Reader-scoped values deliberately remain untouched.
+    func reloadForActiveProfile() {
+        isReloadingForProfileSwitch = true
+        defer { isReloadingForProfileSwitch = false }
+        let defaults = ProfileSettingsStore.active
+        let styleRaw = defaults.string(forKey: "atmosphereStyle") ?? Self.defaultAtmosphereStyle.rawValue
+        let sourceRaw = defaults.string(forKey: "atmosphereSolidColorSource") ?? AtmosphereSolidColorSource.dominant.rawValue
+#if !os(tvOS)
+        let readerStyleRaw = defaults.string(forKey: "readerAtmosphereStyle") ?? styleRaw
+        let readerSourceRaw = defaults.string(forKey: "readerAtmosphereSolidColorSource") ?? sourceRaw
+
+        globalAppearanceEnabled = defaults.object(forKey: "readerGlobalAppearanceEnabled") == nil
+            ? true
+            : defaults.bool(forKey: "readerGlobalAppearanceEnabled")
+#endif
+        settingsGradientColor = Self.loadColor(key: "eclipseThemeGradientColor") ?? Self.gradientPresets[0].color
+#if !os(tvOS)
+        readerSettingsGradientColor = Self.loadColor(key: "readerThemeGradientColor")
+            ?? Self.loadColor(key: "eclipseThemeGradientColor")
+            ?? Self.gradientPresets[0].color
+#endif
+        atmosphereStyle = AtmosphereStyle(rawValue: styleRaw) ?? .gradient
+#if !os(tvOS)
+        readerAtmosphereStyle = AtmosphereStyle(rawValue: readerStyleRaw) ?? .gradient
+#endif
+        atmosphereSolidColorSource = AtmosphereSolidColorSource(rawValue: sourceRaw) ?? .dominant
+#if !os(tvOS)
+        readerAtmosphereSolidColorSource = AtmosphereSolidColorSource(rawValue: readerSourceRaw) ?? .dominant
+#endif
+        atmosphereSolidColor = Self.loadColor(key: "atmosphereSolidColor") ?? Self.gradientPresets[0].color
+#if !os(tvOS)
+        readerAtmosphereSolidColor = Self.loadColor(key: "readerAtmosphereSolidColor")
+            ?? Self.loadColor(key: "atmosphereSolidColor")
+            ?? Self.gradientPresets[0].color
+#endif
+        appearancePaletteRaw = defaults.string(forKey: AppearanceConfig.paletteKey)
+            ?? AtmospherePaletteID.defaultValue.rawValue
+#if !os(tvOS)
+        readerAppearancePaletteRaw = defaults.string(forKey: AppearanceConfig.readerPaletteKey)
+            ?? defaults.string(forKey: AppearanceConfig.paletteKey)
+            ?? AtmospherePaletteID.defaultValue.rawValue
+#endif
+        bleedStrength = defaults.object(forKey: AppearanceConfig.bleedStrengthKey) != nil
+            ? AppearanceConfig.clampBleed(defaults.double(forKey: AppearanceConfig.bleedStrengthKey))
+            : AppearanceConfig.defaultBleedStrength
+#if !os(tvOS)
+        readerBleedStrength = defaults.object(forKey: AppearanceConfig.readerBleedStrengthKey) != nil
+            ? AppearanceConfig.clampBleed(defaults.double(forKey: AppearanceConfig.readerBleedStrengthKey))
+            : bleedStrength
+#endif
+        backgroundIntensity = defaults.object(forKey: AppearanceConfig.backgroundIntensityKey) != nil
+            ? AppearanceConfig.clampIntensity(defaults.double(forKey: AppearanceConfig.backgroundIntensityKey))
+            : AppearanceConfig.defaultBackgroundIntensity
+#if !os(tvOS)
+        readerBackgroundIntensity = defaults.object(forKey: AppearanceConfig.readerBackgroundIntensityKey) != nil
+            ? AppearanceConfig.clampIntensity(defaults.double(forKey: AppearanceConfig.readerBackgroundIntensityKey))
+            : backgroundIntensity
+#endif
+        atmosphereMotion = defaults.object(forKey: AppearanceConfig.motionKey) != nil
+            ? AppearanceConfig.clampMotion(defaults.double(forKey: AppearanceConfig.motionKey))
+            : AppearanceConfig.defaultMotion
+#if !os(tvOS)
+        readerAtmosphereMotion = defaults.object(forKey: AppearanceConfig.readerMotionKey) != nil
+            ? AppearanceConfig.clampMotion(defaults.double(forKey: AppearanceConfig.readerMotionKey))
+            : atmosphereMotion
+#endif
+        customPaletteColors = AppearanceConfig.decodeColors(defaults.data(forKey: AppearanceConfig.customColorsKey))
+            ?? AppearanceConfig.defaultCustomColors
+#if !os(tvOS)
+        readerCustomPaletteColors = AppearanceConfig.decodeColors(defaults.data(forKey: AppearanceConfig.readerCustomColorsKey))
+            ?? AppearanceConfig.decodeColors(defaults.data(forKey: AppearanceConfig.customColorsKey))
+            ?? AppearanceConfig.defaultCustomColors
+#endif
+    }
+
     @MainActor
     func reloadMediaAppearanceFromDefaults() {
-        let defaults = UserDefaults.standard
+        let defaults = ProfileSettingsStore.active
         let styleRaw = defaults.string(forKey: "atmosphereStyle") ?? Self.defaultAtmosphereStyle.rawValue
         atmosphereStyle = AtmosphereStyle(rawValue: styleRaw) ?? Self.defaultAtmosphereStyle
 
@@ -339,8 +401,7 @@ class EclipseTheme: ObservableObject {
     }
 
 #if os(tvOS)
-    // tvOS has one media-only appearance scope. Keep no reader-labelled API or
-    // persisted reader state in the television binary.
+
     func scopedGradientColor() -> Color {
         settingsGradientColor
     }
@@ -356,9 +417,7 @@ class EclipseTheme: ObservableObject {
     func scopedPaletteID() -> AtmospherePaletteID {
         let palette = AtmospherePaletteID.from(appearancePaletteRaw)
 #if os(tvOS)
-        // A custom iPhone palette is a shared preference, but custom color
-        // editing/data is intentionally unavailable on Apple TV. Render a safe
-        // preset without rewriting the shared value back to CloudKit.
+
         return palette == .custom ? .defaultValue : palette
 #else
         return palette
@@ -463,8 +522,6 @@ class EclipseTheme: ObservableObject {
         return atmosphereColor(dominant: dominant)
     }
 
-    // MARK: - Appearance scoping
-
     private func usesReaderScope(_ isReaderMode: Bool?) -> Bool {
         let readerMode = isReaderMode ?? UserDefaults.standard.bool(forKey: "showKanzen")
         return readerMode && !globalAppearanceEnabled
@@ -505,8 +562,6 @@ class EclipseTheme: ObservableObject {
         }
     }
 
-    /// Build the compositor input for any screen. `dominant` is the extracted
-    /// banner/poster color (nil or near-black is treated as "no bleed").
     func atmosphereInput(
         dominant: Color?,
         hasHeroBleed: Bool,
@@ -539,9 +594,6 @@ class EclipseTheme: ObservableObject {
         )
     }
 
-    /// A single representative color of the current background, used to fade a
-    /// hero image's bottom into the backdrop (so dark posters don't leave a
-    /// black box over the multi-gradient).
     func atmosphereBackdropColor(isReaderMode: Bool? = nil) -> Color {
         let intensity = scopedBackgroundIntensity(isReaderMode: isReaderMode)
         switch atmosphereBackgroundMode(isReaderMode: isReaderMode) {
@@ -556,15 +608,11 @@ class EclipseTheme: ObservableObject {
         }
     }
 
-    /// The hero-bottom blend color: the poster's color when it is usable,
-    /// otherwise the backdrop color so the image dissolves into the background.
     func heroBlendColor(dominant: Color?, isReaderMode: Bool? = nil) -> Color {
         Self.usableDominant(dominant) ?? atmosphereBackdropColor(isReaderMode: isReaderMode)
     }
 #endif
 
-    /// Treat near-black extracted colors as "no bleed" so the app gradient is
-    /// not muddied before a real poster color is available.
     static func usableDominant(_ color: Color?) -> Color? {
         guard let color else { return nil }
         #if canImport(UIKit)
@@ -577,19 +625,17 @@ class EclipseTheme: ObservableObject {
         #endif
     }
 
-    // MARK: - Persistence
-    
     private func saveColor(_ color: Color, key: String) {
         do {
             let data = try NSKeyedArchiver.archivedData(withRootObject: UIColor(color), requiringSecureCoding: true)
-            UserDefaults.standard.set(data, forKey: key)
+            ProfileSettingsStore.active.set(data, forKey: key)
         } catch {
-            // Silently fail - default will be used next launch
+
         }
     }
-    
+
     private static func loadColor(key: String) -> Color? {
-        guard let data = UserDefaults.standard.data(forKey: key),
+        guard let data = ProfileSettingsStore.active.data(forKey: key),
               !data.isEmpty else { return nil }
         do {
             if let uiColor = try NSKeyedUnarchiver.unarchivedObject(ofClass: UIColor.self, from: data) {
@@ -600,10 +646,8 @@ class EclipseTheme: ObservableObject {
     }
 }
 
-// MARK: - View Modifiers
-
 extension View {
-    /// Apply the standard dark base background used across all screens
+
     @ViewBuilder
     func eclipseBackground(allowsAnimatedBackground: Bool = true) -> some View {
         self.background(
@@ -611,14 +655,13 @@ extension View {
                 .ignoresSafeArea()
         )
     }
-    
-    /// Apply the gradient background used in Settings screens
+
     func eclipseGradientBackground(allowsAnimatedBackground: Bool = true) -> some View {
         self.modifier(EclipseAutoGradientModifier(allowsAnimatedBackground: allowsAnimatedBackground))
     }
 
 #if !os(tvOS)
-    /// Apply the app-wide gradient used by Reader Mode/Kanzen shell screens.
+
     func kanzenGradientBackground(scrollOffset: CGFloat = 0, allowsAnimatedBackground: Bool = true) -> some View {
         self.background(
             GlobalGradientBackground(scrollOffset: scrollOffset, allowsAnimatedBackground: allowsAnimatedBackground)
@@ -626,8 +669,7 @@ extension View {
         )
     }
 #endif
-    
-    /// Hide list/scroll-view chrome (iOS 16+, unavailable on tvOS)
+
     @ViewBuilder
     func eclipseHideScrollBackground() -> some View {
         #if os(iOS)
@@ -641,7 +683,6 @@ extension View {
         #endif
     }
 
-    /// Dark toolbar color scheme (iOS 16+, unavailable on tvOS)
     @ViewBuilder
     func eclipseDarkToolbar() -> some View {
         #if os(iOS)
@@ -655,8 +696,6 @@ extension View {
         #endif
     }
 
-    /// Apply Eclipse styling to any List-based settings sub-view:
-    /// gradient background, transparent list style, dark toolbar
     func eclipseSettingsStyle(allowsAnimatedBackground: Bool = true) -> some View {
         self
             .eclipseHideScrollBackground()
@@ -664,8 +703,6 @@ extension View {
             .eclipseDarkToolbar()
     }
 
-    /// Give native List/Form settings rows the experimental glass treatment without
-    /// rewriting each settings screen into custom containers.
     @ViewBuilder
     func eclipseExperimentalSettingsRows() -> some View {
         #if os(iOS)
@@ -698,7 +735,6 @@ extension View {
         #endif
     }
 
-    /// Hide list row separators where supported (no-op on tvOS).
     @ViewBuilder
     func eclipseHideListRowSeparator() -> some View {
         #if os(iOS)
@@ -712,8 +748,6 @@ extension View {
         #endif
     }
 }
-
-// MARK: - Auto-tracking gradient modifier
 
 private struct EclipseAutoGradientModifier: ViewModifier {
     var allowsAnimatedBackground: Bool

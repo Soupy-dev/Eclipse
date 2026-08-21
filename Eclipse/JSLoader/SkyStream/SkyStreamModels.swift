@@ -1,10 +1,6 @@
 import Foundation
 import CryptoKit
 
-// MARK: - Forward-compatible JSON
-
-/// A lossless-enough JSON value used to retain fields introduced by newer
-/// SkyStream repository, manifest, and preference schema revisions.
 public indirect enum SkyStreamJSONValue: Codable, Sendable, Hashable {
     case null
     case boolean(Bool)
@@ -68,9 +64,6 @@ enum SkyStreamJSONEnvelopeError: Error, Sendable, Equatable {
     case excessiveTokenBytes
 }
 
-/// A non-allocating-in-shape preflight for untrusted JSON. `JSONDecoder` still owns complete
-/// syntax/schema validation; this scanner runs first so a small remote document cannot make it
-/// recursively materialize hundreds of thousands of enum/container nodes before field limits run.
 enum SkyStreamJSONEnvelopeValidator {
     struct Limits: Sendable, Hashable {
         let maximumDepth: Int
@@ -147,7 +140,7 @@ enum SkyStreamJSONEnvelopeValidator {
             }
 
             switch byte {
-            case 0x7b, 0x5b: // { [
+            case 0x7b, 0x5b:
                 try recordToken()
                 guard frames.count < limits.maximumDepth else {
                     throw SkyStreamJSONEnvelopeError.excessiveDepth
@@ -158,14 +151,14 @@ enum SkyStreamJSONEnvelopeValidator {
                 ))
                 index += 1
 
-            case 0x7d, 0x5d: // } ]
+            case 0x7d, 0x5d:
                 guard frames.last?.closingByte == byte else {
                     throw SkyStreamJSONEnvelopeError.malformedStructure
                 }
                 frames.removeLast()
                 index += 1
 
-            case 0x22: // quoted string/key
+            case 0x22:
                 try recordToken()
                 index += 1
                 var rawByteCount = 0
@@ -180,7 +173,7 @@ enum SkyStreamJSONEnvelopeValidator {
                     guard current >= 0x20 else {
                         throw SkyStreamJSONEnvelopeError.malformedStructure
                     }
-                    if current == 0x5c { // escape
+                    if current == 0x5c {
                         index += 1
                         guard index < bytes.count else {
                             throw SkyStreamJSONEnvelopeError.malformedStructure
@@ -210,8 +203,7 @@ enum SkyStreamJSONEnvelopeValidator {
                 try recordToken()
                 let start = index
                 while index < bytes.count, !isDelimiter(bytes[index]) {
-                    // Container openers may not be embedded in a scalar token. Let the decoder
-                    // validate exact literal/number grammar after this cheap structural check.
+
                     guard bytes[index] != 0x7b, bytes[index] != 0x5b,
                           bytes[index] != 0x22 else {
                         throw SkyStreamJSONEnvelopeError.malformedStructure
@@ -292,8 +284,6 @@ enum SkyStreamJSONValueShapePolicy {
     }
 }
 
-/// Forward-compatible fields remain round-trippable, but they are metadata—not a second unbounded
-/// object graph. The iterative walk avoids adding native recursion on top of decoded plugin data.
 enum SkyStreamAdditionalFieldPolicy {
     static func validate(_ fields: [String: SkyStreamJSONValue]) throws {
         guard fields.count <= 32 else { throw SkyStreamJSONEnvelopeError.excessiveContainerValues }
@@ -382,9 +372,6 @@ private func skyStreamEncodeAdditionalFields(
     }
 }
 
-/// SkyStream's app accepts either a list or a single string for its historical
-/// language/category aliases. Keep that compatibility at the manifest boundary
-/// while continuing to expose one canonical `[String]` shape everywhere else.
 private func skyStreamDecodeStringList<Key: CodingKey>(
     from container: KeyedDecodingContainer<Key>,
     keys: [Key]
@@ -401,10 +388,6 @@ private func skyStreamDecodeStringList<Key: CodingKey>(
     return []
 }
 
-/// Retain decodable map entries and ignore legacy scalars or malformed maps,
-/// matching SkyStream's tolerant object-list parsing. Consuming a rejected
-/// value as `SkyStreamJSONValue` advances the unkeyed container while the
-/// surrounding envelope validator continues to enforce size/depth limits.
 private func skyStreamDecodeObjectList<Element: Decodable, Key: CodingKey>(
     from container: KeyedDecodingContainer<Key>,
     key: Key
@@ -426,8 +409,6 @@ private func skyStreamDecodeObjectList<Element: Decodable, Key: CodingKey>(
     return result
 }
 
-// MARK: - Stable identifiers
-
 public enum SkyStreamStableID {
     public static let prefix = "skystream:"
     private static let encodedProviderPrefix = "encoded-"
@@ -438,9 +419,6 @@ public enum SkyStreamStableID {
         case invalidProviderID(String)
     }
 
-    /// Official package IDs require at least five characters. Eclipse also
-    /// bounds every stable-ID component to 128 ASCII characters and disallows
-    /// punctuation at either end and ambiguous empty (`..`) segments.
     public static func isValidPackageName(_ packageName: String) -> Bool {
         isValidComponent(packageName, minimumLength: 5)
             && !packageName.utf8.contains(where: { (0x41...0x5A).contains($0) })
@@ -525,11 +503,6 @@ public enum SkyStreamStableID {
         }
     }
 
-    /// SkyStream treats provider IDs as opaque non-empty strings and exposes the
-    /// exact value to JavaScript as `manifest.providerId`. Eclipse uses a separate
-    /// delimiter-safe component for persistence and source ordering. Keep legacy
-    /// IDs unchanged, but hash everything else (and reserve the hash prefix) so
-    /// spaces, Unicode, slashes, or `::` can never alter the stable-ID structure.
     private static func stableProviderComponent(_ providerID: String) -> String {
         if isValidComponent(providerID, minimumLength: 1),
            !providerID.hasPrefix(encodedProviderPrefix) {
@@ -556,18 +529,16 @@ public enum SkyStreamStableID {
     }
 }
 
-// MARK: - Repository and package manifests
-
 public struct SkyStreamRepositoryManifest: Codable, Sendable, Hashable {
     public var name: String
     public var packageName: String
     public var description: String
     public var manifestVersion: Int
-    /// Entries may be absolute or relative to the repository document URL.
+
     public var pluginLists: [String]
-    /// Repository-of-repositories entries used by SkyStream megarepos.
+
     public var includedRepositories: [String]
-    /// Enterprise/V2 repositories may place spread plugin entries directly in repo.json.
+
     public var plugins: [SkyStreamPluginListEntry]
     public var authors: [String]?
     public var iconURL: String?
@@ -584,9 +555,6 @@ public struct SkyStreamRepositoryManifest: Codable, Sendable, Hashable {
 
     private static let knownKeys = Set(CodingKeys.allCases.map(\.rawValue))
 
-    /// SkyStream treats positive repository manifest versions as
-    /// forward-compatible metadata. Executable package ABI versions are
-    /// validated separately when a `.sky` archive is installed.
     public static func isSupportedManifestVersion(_ version: Int) -> Bool {
         version > 0
     }
@@ -781,9 +749,9 @@ public struct SkyStreamPluginManifest: Codable, Sendable, Hashable, Identifiable
     public var categories: [String]
     public var domains: [SkyStreamPluginDomain]?
     public var providers: [SkyStreamPluginProvider]?
-    /// Runtime-only in the official ABI, retained when encountered for round trips.
+
     public var providerID: String?
-    /// Optional future package format markers. Version 1 is currently supported.
+
     public var manifestVersion: Int?
     public var apiVersion: Int?
     public var additionalFields: [String: SkyStreamJSONValue]
@@ -863,9 +831,7 @@ public struct SkyStreamPluginManifest: Codable, Sendable, Hashable, Identifiable
             from: container,
             keys: [.categories, .types, .tvTypes]
         )
-        // SkyStream uses `whereType<Map>()` for these lists. Published catalogs
-        // can contain legacy scalar entries, which the official app ignores
-        // instead of rejecting the plugin or its entire repository.
+
         domains = skyStreamDecodeObjectList(from: container, key: .domains)
         providers = skyStreamDecodeObjectList(from: container, key: .providers)
         providerID = try container.decodeIfPresent(String.self, forKey: .providerID)
@@ -898,8 +864,6 @@ public struct SkyStreamPluginManifest: Codable, Sendable, Hashable, Identifiable
     }
 }
 
-/// An entry from the official `plugins.json` raw array. SkyStream's CLI spreads
-/// the plugin manifest into the entry and adds `url`.
 public struct SkyStreamPluginListEntry: Codable, Sendable, Hashable, Identifiable {
     public var manifest: SkyStreamPluginManifest
     public var url: String
@@ -949,11 +913,6 @@ public struct SkyStreamPluginListEntry: Codable, Sendable, Hashable, Identifiabl
         archiveSHA256 = try container.decodeIfPresent(String.self, forKey: .archiveSHA256)
         scriptSHA256 = try container.decodeIfPresent(String.self, forKey: .scriptSHA256)
 
-        // A spread plugin-list object cannot distinguish a future manifest
-        // field from a future catalog-entry field. Keep all such fields on the
-        // embedded manifest (the source of truth) so installing from a list
-        // does not discard them. The entry mirrors them for callers that treat
-        // the list row as its own forward-compatible document.
         additionalFields = decodedManifest.additionalFields
         for key in CodingKeys.allCases {
             additionalFields.removeValue(forKey: key.rawValue)
@@ -1062,9 +1021,7 @@ public enum SkyStreamRepositoryDocument: Codable, Sendable, Hashable {
         case (nil, .some(let pluginList)):
             self = .pluginList(pluginList)
         case (.some(let repository), .some):
-            // A repository with directly embedded `plugins` intentionally also
-            // has the shape of a plugin-list envelope. SkyStream identifies it
-            // as a repository by its required repository metadata.
+
             self = .repository(repository)
         case (nil, nil):
             throw DecodingError.dataCorrupted(
@@ -1089,8 +1046,6 @@ public enum SkyStreamRepositoryDocument: Codable, Sendable, Hashable {
         try decoder.decode(Self.self, from: data)
     }
 }
-
-// MARK: - Compatibility and installed state
 
 public enum SkyStreamCompatibilityStatus: String, Codable, Sendable, Hashable, CaseIterable {
     case compatible = "Compatible"
@@ -1261,11 +1216,9 @@ public struct SkyStreamInstalledPluginState: Codable, Sendable, Hashable, Identi
     public var selectedDomainURL: String?
     public var compatibility: SkyStreamCompatibilityResult
     public var providers: [SkyStreamProviderState]
-    /// True when the archive declared `providers: []` and the stored manifest's
-    /// provider rows were obtained through the documented `getProviders` ABI.
+
     public var usesDynamicProviders: Bool?
-    /// Package-scoped localStorage values used by the documented runtime. This
-    /// remains optional for backup/persistence compatibility with older builds.
+
     public var runtimeStorage: [String: String]?
     public var preferences: [String: SkyStreamPreferenceValue]
     public var installedAt: Date
@@ -1307,10 +1260,6 @@ public struct SkyStreamInstalledPluginState: Codable, Sendable, Hashable, Identi
     }
 }
 
-// MARK: - Normalized runtime records
-
-/// Open-string wrappers keep newer official values decodable while providing
-/// stable constants for values Eclipse currently understands.
 public struct SkyStreamContentType: RawRepresentable, Codable, Sendable, Hashable {
     public let rawValue: String
     public init(rawValue: String) { self.rawValue = rawValue }
@@ -1430,9 +1379,7 @@ public struct SkyStreamSubtitleRecord: Codable, Sendable, Hashable, Identifiable
     public var additionalFields: [String: SkyStreamJSONValue]
 
     public var id: String {
-        // Subtitle headers can carry authentication and make two otherwise identical URLs
-        // playback-distinct. Include their canonical contents in the identity, but expose only
-        // a digest so SwiftUI identifiers and diagnostics never contain credential values.
+
         var components = [url, language ?? "", label ?? ""]
         for key in headers.keys.sorted(by: Self.canonicalHeaderOrder) {
             components.append(key.lowercased())
@@ -1480,10 +1427,7 @@ public struct SkyStreamStreamRecord: Codable, Sendable, Hashable, Identifiable {
     public var additionalFields: [String: SkyStreamJSONValue]
 
     public var id: String {
-        // Runtime providers sometimes return the same CDN URL more than once with different
-        // authorization/cookie values or subtitle routes. Those are playback-distinct choices,
-        // but raw credentials must not become a SwiftUI/logging identifier. Hash a canonical
-        // in-memory identity so mapper and resolver deduplication retain every usable variant.
+
         var components = [
             url,
             source ?? "",
@@ -1583,8 +1527,6 @@ public struct SkyStreamEpisodeRecord: Codable, Sendable, Hashable, Identifiable 
     public var streams: [SkyStreamStreamRecord]
     public var additionalFields: [String: SkyStreamJSONValue]
 
-    /// Episode page URLs are not unique in the documented ABI: a provider may embed streams
-    /// with an empty URL or reuse one show page for multiple explicit coordinates.
     public var id: String {
         let components = [
             url,
@@ -1775,8 +1717,7 @@ public struct SkyStreamProviderContentReference: Codable, Sendable, Hashable {
     public var schemaVersion: Int
     public var packageName: String
     public var providerID: String?
-    /// Installed payload identity. New references populate both fields so refresh never crosses
-    /// a silent plugin-code replacement; nil remains decodable for forward migration only.
+
     public var scriptSHA256: String?
     public var pluginVersion: Int?
     public var loadedItemURL: String
@@ -1814,10 +1755,7 @@ public struct SkyStreamProviderContentReference: Codable, Sendable, Hashable {
         title: String? = nil,
         year: Int? = nil
     ) {
-        // URLs are bounded provider content identifiers, not trusted playback URLs. They remain
-        // device-local because MediaStateSync removes the complete content reference before a
-        // cloud write. Keeping them avoids a full search round-trip for normal signed-URL,
-        // download, and next-episode refreshes while the resolver still re-runs load/VOD checks.
+
         self.schemaVersion = 2
         self.packageName = packageName
         self.providerID = providerID
@@ -1868,9 +1806,6 @@ public struct SkyStreamProviderContentReference: Codable, Sendable, Hashable {
             )
         }
 
-        // Version 1 mixed URLs with unbounded opaque state. Validate that legacy payload, but
-        // migrate it to a lookup-only v2 record. Version 2 URLs were created by the bounded,
-        // device-local initializer above and can safely retain the fast refresh path.
         self.init(
             packageName: decodedPackageName,
             providerID: decodedProviderID,
@@ -1993,8 +1928,6 @@ public struct SkyStreamProviderContentReference: Codable, Sendable, Hashable {
         return boundedKeys
     }
 }
-
-// MARK: - Preferences
 
 public struct SkyStreamPreferenceKind: RawRepresentable, Codable, Sendable, Hashable {
     public let rawValue: String
@@ -2135,8 +2068,6 @@ public struct SkyStreamPreferenceValue: Codable, Sendable, Hashable {
     }
 }
 
-// MARK: - Backup snapshots
-
 public struct SkyStreamRepositoryBackupSnapshot: Codable, Sendable, Hashable, Identifiable {
     public var sourceURL: String
     public var kind: SkyStreamSavedRepository.Kind
@@ -2176,8 +2107,6 @@ public struct SkyStreamRepositoryBackupSnapshot: Codable, Sendable, Hashable, Id
         case lastRefreshedAt, frozenAt, additionalFields
     }
 
-    /// `kind`, `name`, and `pluginListURLs` were added after the first backup schema shipped.
-    /// Derive them from the formerly-required repository manifest so old backups remain valid.
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         sourceURL = try container.decode(String.self, forKey: .sourceURL)
@@ -2215,8 +2144,7 @@ public struct SkyStreamRepositoryBackupSnapshot: Codable, Sendable, Hashable, Id
 
 public struct SkyStreamPluginBackupSnapshot: Codable, Sendable, Hashable, Identifiable {
     public var state: SkyStreamInstalledPluginState
-    /// The original `.sky` bytes for a full manual backup. Safe cloud backups
-    /// may leave this nil without implying deletion on restore.
+
     public var archivePayload: Data?
     public var payloadWasRedacted: Bool
     public var preferencesWereRedacted: Bool
@@ -2245,6 +2173,7 @@ public struct SkyStreamBackupSnapshot: Codable, Sendable, Hashable {
     public var plugins: [SkyStreamPluginBackupSnapshot]
     public var createdAt: Date
     public var isSafeCloudSnapshot: Bool
+    public var privateCloudConfigurationIsComplete: Bool?
     public var additionalFields: [String: SkyStreamJSONValue]
 
     public init(
@@ -2253,6 +2182,7 @@ public struct SkyStreamBackupSnapshot: Codable, Sendable, Hashable {
         plugins: [SkyStreamPluginBackupSnapshot] = [],
         createdAt: Date = Date(),
         isSafeCloudSnapshot: Bool = false,
+        privateCloudConfigurationIsComplete: Bool? = nil,
         additionalFields: [String: SkyStreamJSONValue] = [:]
     ) {
         self.schemaVersion = schemaVersion
@@ -2260,14 +2190,40 @@ public struct SkyStreamBackupSnapshot: Codable, Sendable, Hashable {
         self.plugins = plugins
         self.createdAt = createdAt
         self.isSafeCloudSnapshot = isSafeCloudSnapshot
+        self.privateCloudConfigurationIsComplete = privateCloudConfigurationIsComplete
         self.additionalFields = additionalFields
     }
 }
 
-/// Shared structural quotas for repository/plugin metadata crossing backup and cloud boundaries.
-/// Archive validation remains the package validator's responsibility; this policy prevents a
-/// bounded outer JSON document from hiding pathological per-source strings, collections, or
-/// runtime values that normal installs could never persist.
+public enum SkyStreamPrivateCloudConfigurationPolicy {
+    public static func preferencesAreCompleteAndBounded(
+        _ preferences: [String: SkyStreamPreferenceValue]
+    ) -> Bool {
+        SkyStreamBackupMetadataPolicy.preferencesAreBounded(preferences)
+            && preferences.values.allSatisfy { !$0.isRedacted }
+    }
+
+    public static func snapshotHasCompleteConfiguration(
+        _ snapshot: SkyStreamBackupSnapshot
+    ) -> Bool {
+        snapshot.privateCloudConfigurationIsComplete == true
+            && snapshot.plugins.allSatisfy {
+                !$0.preferencesWereRedacted
+                    && preferencesAreCompleteAndBounded($0.state.preferences)
+            }
+    }
+
+    public static func restoredPreferences(
+        local: [String: SkyStreamPreferenceValue],
+        incoming: [String: SkyStreamPreferenceValue],
+        incomingIsComplete: Bool
+    ) -> [String: SkyStreamPreferenceValue]? {
+        guard incomingIsComplete else { return local }
+        guard preferencesAreCompleteAndBounded(incoming) else { return nil }
+        return incoming
+    }
+}
+
 public enum SkyStreamBackupMetadataPolicy {
     public static let maximumProviderStates = 256
     public static let maximumPreferenceKeys = 256
@@ -2419,18 +2375,12 @@ public enum SkyStreamBackupMetadataPolicy {
     }
 }
 
-/// Non-iOS targets keep the user-exportable opaque backup, the larger experimental-cloud backup,
-/// and the CloudKit metadata shadow in separate files. The legacy shared name remains a read-only
-/// fallback for manual backup recovery; cloud paths must never write or delete either manual file.
 public enum SkyStreamOpaqueStorageLayout {
     public static let manualBackupFilename = "opaque-manual-backup-v1.json"
     public static let experimentalCloudBackupFilename = "opaque-cloud-backup-v1.json"
     public static let mediaStateFilename = "opaque-media-state-v1.json"
     public static let legacySharedFilename = "opaque-backup-v1.json"
 
-    /// A newer full manual import supersedes any derived experimental-cloud shadow. Removing only
-    /// that shadow makes the next upload sanitize the newly imported full document instead of
-    /// relaying stale cloud metadata; manual and CloudKit media-state files are never invalidated.
     public static func filenamesInvalidatedAfterWrite(
         isSafeCloudSnapshot: Bool
     ) -> [String] {
@@ -2438,10 +2388,6 @@ public enum SkyStreamOpaqueStorageLayout {
     }
 }
 
-/// The CloudKit media-state bridge carries only reconstructable, non-secret SkyStream metadata.
-/// Package archives remain in the existing bounded backup channel: copying even one 20 MB archive
-/// into a CKRecord would exceed CloudKit's record budget and make Apple TV a denial-of-service
-/// relay. This document deliberately stays below the media-state store's 800 KiB payload limit.
 public enum SkyStreamMediaStateDocument {
     public static let maximumPayloadBytes = 700 * 1_024
 
@@ -2450,27 +2396,24 @@ public enum SkyStreamMediaStateDocument {
         case payloadTooLarge
     }
 
-    /// `snapshot` must already have crossed the normal safe-cloud redaction boundary. This final
-    /// pass removes archive bytes, fixes the otherwise ever-changing capture timestamp, and then
-    /// validates every field Apple TV is allowed to preserve.
     public static func encodeMetadataOnly(
         _ snapshot: SkyStreamBackupSnapshot
     ) throws -> Data {
+        guard SkyStreamPrivateCloudConfigurationPolicy.snapshotHasCompleteConfiguration(snapshot) else {
+            throw ValidationError.invalidSnapshot
+        }
         var metadata = snapshot
         let canonicalDate = Date(timeIntervalSince1970: 0)
         metadata.createdAt = canonicalDate
         for index in metadata.repositories.indices {
-            // Refresh time is a device-local cache clock. Keeping it would make two devices with
-            // identical pinned repository state alternately re-upload their own timestamp.
+
             metadata.repositories[index].lastRefreshedAt = nil
             metadata.repositories[index].frozenAt = nil
         }
         for index in metadata.plugins.indices {
             metadata.plugins[index].archivePayload = nil
             metadata.plugins[index].payloadWasRedacted = true
-            // Installation bookkeeping is device-local and restore itself updates `updatedAt`.
-            // Excluding those volatile clocks prevents two devices from endlessly rewriting an
-            // otherwise identical CloudKit document after each successful merge.
+
             metadata.plugins[index].state.installedAt = canonicalDate
             metadata.plugins[index].state.updatedAt = canonicalDate
             metadata.plugins[index].state.provenance.pinnedAt = canonicalDate
@@ -2492,21 +2435,19 @@ public enum SkyStreamMediaStateDocument {
                     canonical.updatedAt = nil
                     return canonical
                 }
-            // Removed dynamic-provider rows are device-local reconciliation tombstones. Restore
-            // deliberately ignores them, so uploading their locally stamped `removedAt` values can
-            // only make equivalent devices disagree. Active state has a stable identity/order.
+
             metadata.plugins[index].state.providers = metadata.plugins[index].state.providers
                 .filter { $0.removedAt == nil }
                 .sorted { $0.id < $1.id }
-            // This bit must not reveal whether one device has a local secret or make otherwise
-            // identical public state diverge across devices.
-            metadata.plugins[index].preferencesWereRedacted = true
+
+            metadata.plugins[index].preferencesWereRedacted = false
         }
-        // Installation and repository insertion order are device-local. Canonical identity order
-        // keeps devices with the same logical state from alternately rewriting one CloudKit record.
+
         metadata.repositories.sort { $0.sourceURL < $1.sourceURL }
         metadata.plugins.sort { $0.id < $1.id }
-        guard isValid(metadata) else { throw ValidationError.invalidSnapshot }
+        guard isValid(metadata, requiresCompleteConfiguration: true) else {
+            throw ValidationError.invalidSnapshot
+        }
 
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -2525,11 +2466,16 @@ public enum SkyStreamMediaStateDocument {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         let snapshot = try decoder.decode(SkyStreamBackupSnapshot.self, from: data)
-        guard isValid(snapshot) else { throw ValidationError.invalidSnapshot }
+        guard isValid(snapshot, requiresCompleteConfiguration: false) else {
+            throw ValidationError.invalidSnapshot
+        }
         return snapshot
     }
 
-    private static func isValid(_ snapshot: SkyStreamBackupSnapshot) -> Bool {
+    private static func isValid(
+        _ snapshot: SkyStreamBackupSnapshot,
+        requiresCompleteConfiguration: Bool
+    ) -> Bool {
         guard snapshot.schemaVersion == 1,
               snapshot.isSafeCloudSnapshot,
               snapshot.repositories.count <= 64,
@@ -2539,6 +2485,13 @@ public enum SkyStreamMediaStateDocument {
               Set(snapshot.plugins.map(\.id)).count == snapshot.plugins.count else {
             return false
         }
+        let hasCompleteConfiguration = SkyStreamPrivateCloudConfigurationPolicy
+            .snapshotHasCompleteConfiguration(snapshot)
+        if snapshot.privateCloudConfigurationIsComplete == true,
+           !hasCompleteConfiguration {
+            return false
+        }
+        if requiresCompleteConfiguration && !hasCompleteConfiguration { return false }
 
         for repository in snapshot.repositories {
             guard SkyStreamBackupMetadataPolicy.isBounded(repository: repository),
@@ -2564,6 +2517,14 @@ public enum SkyStreamMediaStateDocument {
 
         for plugin in snapshot.plugins {
             let state = plugin.state
+            let preferencesAreValid = hasCompleteConfiguration
+                ? !plugin.preferencesWereRedacted
+                    && SkyStreamPrivateCloudConfigurationPolicy
+                        .preferencesAreCompleteAndBounded(state.preferences)
+                : plugin.preferencesWereRedacted
+                    && state.preferences.allSatisfy { key, value in
+                        !value.isSecret && !value.isRedacted && !containsSecretMarker(key)
+                    }
             guard plugin.archivePayload == nil,
                   plugin.payloadWasRedacted,
                   plugin.additionalFields.isEmpty,
@@ -2600,9 +2561,7 @@ public enum SkyStreamMediaStateDocument {
                           && ($0.providerID.map(SkyStreamStableID.isValidProviderID) ?? true)
                           && $0.additionalFields.isEmpty
                   }),
-                  state.preferences.allSatisfy({ key, value in
-                      !value.isSecret && !value.isRedacted && !containsSecretMarker(key)
-                  }),
+                  preferencesAreValid,
                   state.compatibility.reasons.allSatisfy(\.additionalFields.isEmpty) else {
                 return false
             }
@@ -2620,9 +2579,7 @@ public enum SkyStreamMediaStateDocument {
               components.scheme?.lowercased() == "https",
               components.user == nil,
               components.password == nil,
-              components.host?.isEmpty == false,
-              components.percentEncodedQuery == nil,
-              components.fragment == nil else { return false }
+              components.host?.isEmpty == false else { return false }
         return true
     }
 
@@ -2647,8 +2604,6 @@ public enum SkyStreamMediaStateDocument {
 public extension Notification.Name {
     static let skyStreamMetadataDidChange = Notification.Name("skyStreamMetadataDidChange")
 }
-
-// MARK: - Package validation result
 
 public struct SkyStreamValidatedPackage: Codable, Sendable, Hashable {
     public var manifest: SkyStreamPluginManifest

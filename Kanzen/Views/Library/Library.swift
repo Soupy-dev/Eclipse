@@ -1,3 +1,9 @@
+//
+//  LibraryView.swift
+//  Kanzen
+//
+//  Created by Dawud Osman on 22/05/2025.
+//
 import SwiftUI
 import CoreData
 import Kingfisher
@@ -5,6 +11,10 @@ import Kingfisher
 #if !os(tvOS)
 struct KanzenLibraryView: View {
     @ObservedObject private var libraryManager = MangaLibraryManager.shared
+    @ObservedObject private var progressManager = MangaReadingProgressManager.shared
+    @ObservedObject private var downloadManager = ReaderDownloadManager.shared
+
+    @ObservedObject private var contentFilter = ReaderContentFilter.shared
     @EnvironmentObject var moduleManager: ModuleManager
     @State private var showCreateCollection = false
     @State private var scrollOffset: CGFloat = 0
@@ -13,6 +23,7 @@ struct KanzenLibraryView: View {
     @State private var showingRenameCollection = false
     @State private var renameText = ""
     @State private var collectionToRename: MangaLibraryCollection?
+    @State private var reconnectRequest: KanzenAidokuReconnectRequest?
     private var designMetrics: ExperimentalMediaDesignMetrics { .current }
 
     private var bookmarksCollection: MangaLibraryCollection? {
@@ -21,6 +32,10 @@ struct KanzenLibraryView: View {
 
     private var userCollections: [MangaLibraryCollection] {
         libraryManager.collections.filter { $0.name != "Bookmarks" }
+    }
+
+    private func visibleItems(in collection: MangaLibraryCollection) -> [MangaLibraryItem] {
+        collection.items.filter { contentFilter.allows(libraryItem: $0) }
     }
 
     var body: some View {
@@ -50,8 +65,7 @@ struct KanzenLibraryView: View {
                             .padding(.horizontal, 16)
                     }
 
-                    // MARK: - Bookmarks
-                    if let bookmarks = bookmarksCollection, !bookmarks.items.isEmpty {
+                    if let bookmarks = bookmarksCollection, !visibleItems(in: bookmarks).isEmpty {
                         VStack(alignment: .leading, spacing: 8) {
                             Text("Bookmarks")
                                 .font(experimental ? .largeTitle : .title2)
@@ -61,11 +75,21 @@ struct KanzenLibraryView: View {
 
                             ScrollView(.horizontal, showsIndicators: false) {
                                 LazyHStack(spacing: experimental ? 16 : 12) {
-                                    ForEach(bookmarks.items.sorted(by: { $0.dateAdded < $1.dateAdded })) { item in
+                                    ForEach(visibleItems(in: bookmarks)
+                                        .sorted(by: { $0.dateAdded < $1.dateAdded })) { item in
                                         NavigationLink(destination: mangaDestination(for: item)) {
                                             bookmarkCard(item)
                                         }
                                         .contextMenu {
+                                            if !contentFilter.isKidsProfileActive,
+                                               let request = KanzenAidokuLibraryStatus.reconnectRequest(for: item) {
+                                                Button {
+                                                    reconnectRequest = request
+                                                } label: {
+                                                    Label("Reconnect Source", systemImage: "arrow.triangle.2.circlepath")
+                                                }
+                                            }
+
                                             Button(role: .destructive) {
                                                 libraryManager.removeItem(from: bookmarks.id, item: item)
                                             } label: {
@@ -79,7 +103,6 @@ struct KanzenLibraryView: View {
                         }
                     }
 
-                    // MARK: - Collections
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             Text("Collections")
@@ -131,7 +154,7 @@ struct KanzenLibraryView: View {
                         }
                     }
 
-                    if (bookmarksCollection?.items.isEmpty ?? true) && userCollections.isEmpty {
+                    if (bookmarksCollection.map { visibleItems(in: $0).isEmpty } ?? true) && userCollections.isEmpty {
                         EclipseEmptyState(
                             icon: "books.vertical",
                             title: "Your library is empty",
@@ -169,9 +192,13 @@ struct KanzenLibraryView: View {
         } message: {
             Text("Enter a new name for this collection.")
         }
+        .sheet(item: $reconnectRequest) { request in
+            KanzenAidokuMigrationSheet(
+                focusedLegacySourceID: request.legacySourceID,
+                focusedTitle: request.title
+            )
+        }
     }
-
-    // MARK: - Card Views
 
     @ViewBuilder
     private func bookmarkCard(_ item: MangaLibraryItem) -> some View {
@@ -181,9 +208,12 @@ struct KanzenLibraryView: View {
         let cardHeight = experimental ? tunedPosterSize.height : 180
 
         VStack(alignment: .leading, spacing: experimental ? 8 : 4) {
-            KFImage(URL(string: item.coverURL ?? ""))
-                .placeholder { Rectangle().fill(Color.gray.opacity(0.2)) }
-                .resizable()
+            ReaderScopedRemoteImage(
+                url: URL(string: item.coverURL ?? ""),
+                readerExtensionSourceID: item.route?.readerExtensionSourceID
+            ) {
+                Rectangle().fill(Color.gray.opacity(0.2))
+            }
                 .scaledToFill()
                 .frame(width: cardWidth, height: cardHeight)
                 .clipped()
@@ -193,6 +223,9 @@ struct KanzenLibraryView: View {
                 }
                 .overlay(alignment: .topTrailing) {
                     downloadedBadge(for: item)
+                }
+                .overlay(alignment: .bottomLeading) {
+                    reconnectBadge(for: item)
                 }
 
             Text(item.title)
@@ -207,15 +240,21 @@ struct KanzenLibraryView: View {
     private func mangaGridCard(_ item: MangaLibraryItem) -> some View {
         let experimental = ExperimentalFeatureState.isEnabledAtLaunch
         VStack(alignment: .leading, spacing: 4) {
-            KFImage(URL(string: item.coverURL ?? ""))
-                .placeholder { Rectangle().fill(Color.gray.opacity(0.2)) }
-                .resizable()
+            ReaderScopedRemoteImage(
+                url: URL(string: item.coverURL ?? ""),
+                readerExtensionSourceID: item.route?.readerExtensionSourceID
+            ) {
+                Rectangle().fill(Color.gray.opacity(0.2))
+            }
                 .scaledToFill()
                 .frame(height: 180)
                 .clipped()
                 .cornerRadius(experimental ? designMetrics.cardRadius : 16)
                 .overlay(alignment: .topLeading) {
                     unreadBadge(for: item)
+                }
+                .overlay(alignment: .bottomLeading) {
+                    reconnectBadge(for: item)
                 }
 
             Text(item.title)
@@ -228,9 +267,10 @@ struct KanzenLibraryView: View {
     @ViewBuilder
     private func collectionCard(_ collection: MangaLibraryCollection) -> some View {
         let experimental = ExperimentalFeatureState.isEnabledAtLaunch
+        let visible = visibleItems(in: collection)
         VStack(alignment: .leading, spacing: experimental ? 8 : 6) {
-            // 2x2 preview grid
-            let previews = Array(collection.items.prefix(4))
+
+            let previews = Array(visible.prefix(4))
             ZStack {
                 RoundedRectangle(cornerRadius: 16)
                     .fill(experimental ? Color.white.opacity(0.10) : EclipseTheme.shared.cardBackground)
@@ -247,9 +287,12 @@ struct KanzenLibraryView: View {
                 } else {
                     LazyVGrid(columns: [GridItem(.fixed(62)), GridItem(.fixed(62))], spacing: 4) {
                         ForEach(previews) { item in
-                            KFImage(URL(string: item.coverURL ?? ""))
-                                .placeholder { Rectangle().fill(Color.gray.opacity(0.2)) }
-                                .resizable()
+                            ReaderScopedRemoteImage(
+                                url: URL(string: item.coverURL ?? ""),
+                                readerExtensionSourceID: item.route?.readerExtensionSourceID
+                            ) {
+                                Rectangle().fill(Color.gray.opacity(0.2))
+                            }
                                 .scaledToFill()
                                 .frame(width: 62, height: 62)
                                 .clipped()
@@ -267,7 +310,7 @@ struct KanzenLibraryView: View {
                 .lineLimit(1)
                 .foregroundColor(experimental ? .white : .primary)
 
-            Text("\(collection.items.count) items")
+            Text("\(visible.count) items")
                 .font(.caption2)
                 .foregroundColor(experimental ? .white.opacity(0.62) : .secondary)
         }
@@ -276,7 +319,7 @@ struct KanzenLibraryView: View {
 
     @ViewBuilder
     private func unreadBadge(for item: MangaLibraryItem) -> some View {
-        let unread = item.unreadCount(readChapters: MangaReadingProgressManager.shared.readChapters(for: item.aniListId))
+        let unread = item.unreadCount(readChapters: progressManager.readChapters(for: item.aniListId))
         if unread > 0 {
             Text("\(unread)")
                 .font(.caption2)
@@ -291,8 +334,17 @@ struct KanzenLibraryView: View {
     }
 
     @ViewBuilder
+    private func reconnectBadge(for item: MangaLibraryItem) -> some View {
+        if KanzenAidokuLibraryStatus.needsReconnecting(item) {
+            KanzenAidokuUnavailableBadge(
+                isConfirmedAbsent: KanzenAidokuLibraryStatus.isConfirmedAbsentOnReplacement(item)
+            )
+        }
+    }
+
+    @ViewBuilder
     private func downloadedBadge(for item: MangaLibraryItem) -> some View {
-        if ReaderDownloadManager.shared.isDownloaded(route: item.route) {
+        if downloadManager.isDownloaded(route: item.route) {
             Image(systemName: "arrow.down.circle.fill")
                 .font(.caption)
                 .foregroundColor(.white)
@@ -313,8 +365,6 @@ struct KanzenLibraryView: View {
             isRefreshingSources = false
         }
     }
-
-    // MARK: - Helpers
 
     @ViewBuilder
     private func mangaDestination(for item: MangaLibraryItem) -> some View {
@@ -368,7 +418,7 @@ struct MangaLibraryDestinationView: View {
                 )
             } else {
                 if let downloaded = ReaderDownloadManager.shared.downloadedTitle(for: route) {
-                    ReaderDownloadedTitleDetailView(title: downloaded)
+                    downloadedDestination(downloaded)
                 } else {
                     MangaModuleUnavailableView(
                         title: item.title,
@@ -377,18 +427,42 @@ struct MangaLibraryDestinationView: View {
                 }
             }
 
-        case .aidoku(let sourceId, let mangaKey):
-            if (AidokuSourceManager.shared.metadata(id: sourceId) == nil || AidokuSourceManager.shared.metadata(id: sourceId)?.isEnabled == false),
+        case .readerExtension(let sourceID, let itemKey, let legacyStableKey):
+            let source = ReaderExtensionManager.shared.installedSources.first(where: { $0.id == sourceID })
+            if (source == nil || source?.enabled == false),
                let downloaded = ReaderDownloadManager.shared.downloadedTitle(for: route) {
-                ReaderDownloadedTitleDetailView(title: downloaded)
+                downloadedDestination(downloaded)
             } else {
-                AidokuMangaRouteLoaderView(
-                    sourceId: sourceId,
-                    mangaKey: mangaKey,
+                ReaderExtensionMangaRouteLoaderView(
+                    sourceID: sourceID,
+                    itemKey: itemKey,
+                    legacyStableKey: legacyStableKey,
                     title: item.title,
                     coverURL: item.coverURL
                 )
             }
+
+        case .aidoku(let sourceId, _):
+            if let downloaded = ReaderDownloadManager.shared.downloadedTitle(for: route) {
+                downloadedDestination(downloaded)
+            } else {
+                KanzenAidokuLibraryUnavailableView(
+                    title: item.title,
+                    legacySourceID: sourceId
+                )
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func downloadedDestination(_ downloaded: ReaderDownloadedTitle) -> some View {
+        if ReaderContentFilter.shared.allows(downloadedTitle: downloaded) {
+            ReaderDownloadedTitleDetailView(title: downloaded)
+        } else {
+            MangaModuleUnavailableView(
+                title: item.title,
+                message: "This title is restricted for the profile you're using."
+            )
         }
     }
 

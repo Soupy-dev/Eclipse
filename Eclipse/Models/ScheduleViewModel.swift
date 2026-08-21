@@ -1,3 +1,10 @@
+//
+//  ScheduleViewModel.swift
+//  Eclipse
+//
+//  Created by Soupy-dev
+//
+
 import Foundation
 
 enum ScheduleMode: String, CaseIterable, Identifiable, Sendable {
@@ -73,7 +80,7 @@ enum ScheduleWindow: Int, CaseIterable, Identifiable, Sendable {
     }
 
     static var current: ScheduleWindow {
-        sanitized(UserDefaults.standard.object(forKey: storageKey) as? Int)
+        sanitized(ProfileSettingsStore.active.object(forKey: storageKey) as? Int)
     }
 }
 
@@ -201,7 +208,11 @@ final class ScheduleViewModel: ObservableObject {
 
     @Published var isLoading = true
     @Published var errorMessage: String?
-    @Published var scheduleEntries: [ScheduleEntry] = []
+    @Published var scheduleEntries: [ScheduleEntry] = [] {
+        didSet { scheduleEntriesRevision &+= 1 }
+    }
+
+    @Published private(set) var scheduleEntriesRevision = 0
     @Published var dayBuckets: [DayBucket] = []
     @Published var currentDayAnchor = Date()
     private(set) var loadedScheduleMode: ScheduleMode?
@@ -320,9 +331,6 @@ final class ScheduleViewModel: ObservableObject {
         }
     }
 
-    /// Fetches both schedule sources without replacing the schedule mode or rows
-    /// currently visible to the user. Notification subscriptions must refresh
-    /// independently from whichever Schedule tab the user last selected.
     @MainActor
     func notificationScheduleSnapshot(
         dayCount: Int,
@@ -330,9 +338,7 @@ final class ScheduleViewModel: ObservableObject {
         forceRefreshSources: Set<ScheduleSource> = [],
         requireAuthoritativeSources: Set<ScheduleSource> = []
     ) async -> NotificationScheduleSnapshot {
-        // The user's selected Schedule range is also the automatic episode
-        // notification window. Callers pass it explicitly so a future path
-        // cannot silently fall back to seven days.
+
         let requestedDayCount = ScheduleWindow.sanitizedDays(dayCount)
         let needsAuthoritativeAnime = requireAuthoritativeSources.contains(.anime)
             && animeScheduleResult?.isAuthoritativeForNotifications != true
@@ -515,8 +521,7 @@ final class ScheduleViewModel: ObservableObject {
                ) {
                 return cached
             }
-            // The in-flight request may have covered a shorter range or
-            // crossed midnight. Extend/refetch rather than publishing it.
+
             return try await animeEntries(dayCount: dayCount, forceRefresh: forceRefresh)
         }
 
@@ -542,8 +547,7 @@ final class ScheduleViewModel: ObservableObject {
                 if self.animeScheduleLoadID == loadID {
                     self.animeScheduleResult = loadResult
                     self.animeScheduleDayCount = dayCount
-                    // A request that straddles midnight must not make the
-                    // previous day's window look fresh for the new day.
+
                     self.animeScheduleFetchedAt = fetchStartedAt
                     self.animeScheduleLastFailureAt = nil
                     self.animeScheduleLoadTask = nil
@@ -842,10 +846,6 @@ final class ScheduleViewModel: ObservableObject {
         return calendar
     }
 
-    // MARK: - TMDB Lookup
-
-    /// Cache keyed by schedule source and media ID so both feeds can reuse TMDB results.
-    /// Stores Optional<TMDBSearchResult> so we also cache "not found" results.
     private var tmdbCache: [String: TMDBSearchResult?] = [:]
 
     func lookupTMDBResult(for entry: ScheduleEntry) async -> TMDBSearchResult? {
@@ -903,7 +903,6 @@ final class ScheduleViewModel: ObservableObject {
             return nil
         }
 
-        // Relation fallback: walk up AniList parent/prequel chain and try TMDB on each ancestor.
         let parentCandidates = await AniListService.shared.fetchParentTitleCandidates(forMediaId: entry.sourceMediaId)
         for parent in parentCandidates {
             var parentSeen = Set<String>()
@@ -1028,9 +1027,6 @@ struct DayBucket: Identifiable {
     let items: [ScheduleEntry]
 }
 
-/// Detects truly high-frequency shows without treating four weekly episodes in
-/// a 30-day request as a daily show. Four distinct air dates must occur inside
-/// the same rolling seven-day window.
 private func hasDailyScheduleDensity(_ dates: [Date]) -> Bool {
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .current
@@ -1054,8 +1050,6 @@ private func hasDailyScheduleDensity(_ dates: [Date]) -> Bool {
     }
     return false
 }
-
-// MARK: - Trakt Western Schedule
 
 private final class TraktScheduleService {
     static let shared = TraktScheduleService()
@@ -1280,8 +1274,6 @@ private enum TraktScheduleError: LocalizedError {
     }
 }
 
-// MARK: - TVMaze Western Schedule
-
 private actor TVMazeService {
     static let shared = TVMazeService()
 
@@ -1356,9 +1348,6 @@ private actor TVMazeService {
         return scheduleEntries(from: episodesById)
     }
 
-    /// TVMaze's per-date fallback costs two requests per day. Extended ranges
-    /// instead use its one-call full feed, filter locally, and retain only the
-    /// lightweight 30-day result rather than the multi-megabyte decoded feed.
     private func fetchExtendedSchedule(dayCount: Int) async throws -> [ScheduleEntry] {
         if let cached = extendedScheduleCache,
            Calendar.current.isDate(cached.fetchedAt, inSameDayAs: Date()) {
@@ -1590,8 +1579,7 @@ fileprivate struct TVMazeShow: Decodable {
         if let webCountry = webChannel?.country {
             return webCountry.code?.uppercased() == normalizedRegion
         }
-        // A nil web-channel country represents a global streaming service;
-        // match the existing English-only global web feed behavior.
+
         return webChannel != nil && isEnglishLanguage
     }
 }

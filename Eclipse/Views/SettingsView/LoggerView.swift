@@ -1,3 +1,10 @@
+//
+//  LoggerView.swift
+//  Sora
+//
+//  Created by Francesco on 10/08/25.
+//
+
 import SwiftUI
 
 struct LogEntry: Identifiable, Sendable {
@@ -5,7 +12,7 @@ struct LogEntry: Identifiable, Sendable {
     let timestamp: Date
     let message: String
     let type: String
-    
+
     var typeColor: Color {
         switch type.lowercased() {
         case "error":
@@ -28,7 +35,7 @@ struct LogEntry: Identifiable, Sendable {
             return .white
         }
     }
-    
+
     var typeIcon: String {
         switch type.lowercased() {
         case "error":
@@ -61,21 +68,21 @@ struct LoggerView: View {
     @State private var exportItem: ExportItem?
     #endif
     @State private var exportErrorMessage: String?
-    
+
     private var filteredLogs: [LogEntry] {
         var logs = loggerManager.logs
 
         if selectedCategory != "All" {
             logs = logs.filter { $0.type == selectedCategory }
         }
-        
+
         if !searchText.isEmpty {
             logs = logs.filter {
                 $0.message.localizedCaseInsensitiveContains(searchText) ||
                 $0.type.localizedCaseInsensitiveContains(searchText)
             }
         }
-        
+
         return logs.sorted { $0.timestamp > $1.timestamp }
     }
 
@@ -83,7 +90,7 @@ struct LoggerView: View {
         let categories = Set(loggerManager.logs.map { $0.type }).sorted()
         return ["All"] + categories
     }
-    
+
     var body: some View {
         let visibleLogs = filteredLogs
         let categories = availableCategories
@@ -117,6 +124,23 @@ struct LoggerView: View {
                     }
                 }
 
+#if os(tvOS)
+
+                HStack {
+                    Button(role: .destructive) {
+                        loggerManager.clearLogs()
+                    } label: {
+                        Label("Clear All Logs", systemImage: "trash")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(loggerManager.logs.isEmpty)
+                    .accessibilityIdentifier("tv.settings.logger.clear")
+
+                    Spacer()
+                }
+                .padding(.horizontal, 60)
+#endif
+
                 if visibleLogs.isEmpty {
                     EclipseEmptyState(
                         icon: "doc.text",
@@ -146,10 +170,10 @@ struct LoggerView: View {
         .navigationTitle(NSLocalizedString("Logs", comment: ""))
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
+#if !os(tvOS)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
-                #if !os(tvOS)
                     Button(action: {
                         Task {
                             do {
@@ -163,7 +187,6 @@ struct LoggerView: View {
                     }) {
                         Label("Export Logs", systemImage: "square.and.arrow.up")
                     }
-                #endif
                     Button(action: {
                         loggerManager.clearLogs()
                     }) {
@@ -174,6 +197,9 @@ struct LoggerView: View {
                 }
             }
         }
+#else
+        .accessibilityIdentifier("tv.settings.logger.screen")
+#endif
         .alert("Export Failed", isPresented: Binding(
             get: { exportErrorMessage != nil },
             set: { _ in exportErrorMessage = nil }
@@ -209,15 +235,17 @@ struct ActivityView: UIViewControllerRepresentable {
 
 struct LogEntryRow: View {
     let log: LogEntry
+    #if !os(tvOS)
     @State private var isExpanded = false
-    
+    #endif
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: log.typeIcon)
                     .foregroundColor(log.typeColor)
                     .frame(width: 20)
-                
+
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text(log.type)
@@ -228,9 +256,9 @@ struct LogEntryRow: View {
                             .background(log.typeColor.opacity(0.2))
                             .foregroundColor(log.typeColor)
                             .cornerRadius(4)
-                        
+
                         Spacer()
-                        
+
                         Text(DateFormatter.logTimeFormatter.string(from: log.timestamp))
                             .font(.caption)
                             .foregroundColor(.white.opacity(0.5))
@@ -239,9 +267,14 @@ struct LogEntryRow: View {
                     Text(log.message)
                         .font(.body)
                         .foregroundColor(.white.opacity(0.9))
+#if os(tvOS)
+                        .lineLimit(nil)
+#else
                         .lineLimit(isExpanded ? nil : 3)
                         .animation(.easeInOut(duration: 0.2), value: isExpanded)
-                    
+#endif
+
+#if !os(tvOS)
                     if log.message.count > 100 {
                         Button(action: {
                             withAnimation(.easeInOut(duration: 0.2)) {
@@ -252,12 +285,17 @@ struct LogEntryRow: View {
                                 .font(.caption)
                         }
                     }
+#endif
                 }
             }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .contentShape(Rectangle())
+#if os(tvOS)
+
+        .focusable()
+#else
         .onTapGesture {
             if log.message.count > 100 {
                 withAnimation(.easeInOut(duration: 0.2)) {
@@ -267,29 +305,27 @@ struct LogEntryRow: View {
         }
         .contextMenu {
             Button(action: {
-#if !os(tvOS)
                 UIPasteboard.general.string = log.message
-#endif
             }) {
                 Label("Copy Log Message", systemImage: "doc.on.doc")
             }
         }
+#endif
     }
 }
 
-// MARK: - Logger Manager
 class LoggerManager: ObservableObject {
     static let shared = LoggerManager()
     private static let logLineRegex = try! NSRegularExpression(
         pattern: #"\[([^\]]+)\] \[([^\]]+)\] (.+)"#,
         options: []
     )
-    
+
     @Published var logs: [LogEntry] = []
     private let maxLogs = 1000
     private var pendingLogEntries: [LogEntry] = []
     private var logFlushScheduled = false
-    
+
     private init() {
         NotificationCenter.default.addObserver(
             self,
@@ -315,41 +351,41 @@ class LoggerManager: ObservableObject {
             }
         }
     }
-    
+
     private static func parseLogsString(_ logsString: String) -> [LogEntry] {
         let logSections = logsString.components(separatedBy: "\n----\n")
         var parsedLogs: [LogEntry] = []
-        
+
         let dateFormatter = DateFormatter()
         dateFormatter.dateFormat = "dd-MM HH:mm:ss"
-        
+
         for section in logSections {
             guard !section.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-            
+
             if let match = logLineRegex.firstMatch(
                 in: section,
                 options: [],
                 range: NSRange(section.startIndex..., in: section)
             ) {
-                
+
                 let timestampRange = Range(match.range(at: 1), in: section)!
                 let typeRange = Range(match.range(at: 2), in: section)!
                 let messageRange = Range(match.range(at: 3), in: section)!
-                
+
                 let timestampString = String(section[timestampRange])
                 let type = Logger.displayCategory(for: String(section[typeRange]))
                 let message = String(section[messageRange])
-                
+
                 if let timestamp = dateFormatter.date(from: timestampString) {
                     let logEntry = LogEntry(timestamp: timestamp, message: message, type: type)
                     parsedLogs.append(logEntry)
                 }
             }
         }
-        
+
         return parsedLogs.sorted { $0.timestamp > $1.timestamp }
     }
-    
+
     @objc private func handleLogNotification(_ notification: Notification) {
         guard let userInfo = notification.userInfo,
               let message = userInfo["message"] as? String,
@@ -374,11 +410,11 @@ class LoggerManager: ObservableObject {
             DispatchQueue.main.async(execute: enqueue)
         }
     }
-    
+
     func addLog(message: String, type: String) {
         let log = LogEntry(timestamp: Date(), message: message, type: Logger.displayCategory(for: type))
         logs.insert(log, at: 0)
-        
+
         if logs.count > maxLogs {
             logs = Array(logs.prefix(maxLogs))
         }
@@ -402,7 +438,7 @@ class LoggerManager: ObservableObject {
             }
         }
     }
-    
+
     func clearLogs() {
         pendingLogEntries.removeAll(keepingCapacity: true)
         logs.removeAll()
@@ -412,14 +448,13 @@ class LoggerManager: ObservableObject {
     }
 }
 
-// MARK: - Date Formatters
 extension DateFormatter {
     static let logFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
         return formatter
     }()
-    
+
     static let logTimeFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss"

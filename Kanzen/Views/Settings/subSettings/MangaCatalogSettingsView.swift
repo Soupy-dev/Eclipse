@@ -1,80 +1,155 @@
+//
+//  MangaCatalogSettingsView.swift
+//  Kanzen
+//
+//  Created by Eclipse on 2025.
+//
+
 import SwiftUI
 
 #if !os(tvOS)
 struct MangaCatalogSettingsView: View {
-    @EnvironmentObject private var moduleManager: ModuleManager
-    @StateObject private var aidokuManager = AidokuSourceManager.shared
+    @StateObject private var readerExtensionManager = ReaderExtensionManager.shared
+    @StateObject private var contentFilter = ReaderContentFilter.shared
+    @StateObject private var customCatalogManager = KanzenCustomCatalogManager.shared
+    @State private var errorMessage: String?
 
-    private var aidokuSources: [AidokuInstalledSource] {
-        aidokuManager.installedSources
-            .filter { aidokuManager.showMatureSources || !$0.isMature }
-            .sorted {
-                if $0.order != $1.order { return $0.order < $1.order }
-                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
-            }
+    private var sources: [ReaderExtensionInstalledSource] {
+        readerExtensionManager.installedSources.sorted {
+            if $0.sortIndex != $1.sortIndex { return $0.sortIndex < $1.sortIndex }
+            return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+        }
     }
 
     var body: some View {
+        Group {
+            if contentFilter.isKidsProfileActive {
+                restrictedView
+            } else {
+                sourceList
+            }
+        }
+        .navigationTitle("Home Sources")
+        .navigationBarTitleDisplayMode(.inline)
+        .eclipseSettingsStyle()
+        .preferredColorScheme(.dark)
+        .toolbar {
+            if !contentFilter.isKidsProfileActive {
+                EditButton()
+                    .disabled(sources.isEmpty)
+            }
+        }
+        .onChange(of: contentFilter.isKidsProfileActive) { isKids in
+            if isKids { errorMessage = nil }
+        }
+        .alert("Reader Extensions", isPresented: Binding(
+            get: { errorMessage != nil && !contentFilter.isKidsProfileActive },
+            set: { if !$0 { errorMessage = nil } }
+        )) {
+            Button("OK", role: .cancel) { errorMessage = nil }
+        } message: {
+            Text(errorMessage ?? "")
+        }
+    }
+
+    private var restrictedView: some View {
         List {
-            Section(header: Text("Aidoku Home Sources"), footer: Text("Enabled Aidoku sources appear on Discover. Legacy JS modules stay available for compatibility, but they are not shown on the Home page because they do not provide home feeds.")) {
-                if aidokuSources.isEmpty {
-                    VStack(spacing: 10) {
-                        Image(systemName: "shippingbox")
-                            .font(.largeTitle)
-                            .foregroundColor(.secondary)
-                        Text("No Aidoku sources installed")
-                            .font(.headline)
-                            .foregroundColor(.secondary)
-                        NavigationLink(destination: AidokuSourcesSettingsView().environmentObject(moduleManager)) {
-                            Text("Manage Aidoku Sources")
-                        }
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 18)
-                } else {
-                    ForEach(aidokuSources) { source in
-                        HStack(spacing: 12) {
-                            AsyncImage(url: URL(string: source.iconURLString)) { image in
-                                image.resizable().scaledToFit()
-                            } placeholder: {
-                                Image(systemName: "shippingbox")
-                                    .foregroundColor(.secondary)
-                            }
+            Section {
+                Text("Reader sources and discovery settings cannot be viewed from a kids profile. Switch to a grown-up profile to continue.")
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private var sourceList: some View {
+        List {
+            Section(
+                header: Text("Custom Catalogs"),
+                footer: Text("Save a filtered search from any Reader source and it becomes an extra row on Discover.")
+            ) {
+                NavigationLink(destination: KanzenCustomCatalogsView()) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "rectangle.stack.badge.plus")
+                            .foregroundColor(.accentColor)
                             .frame(width: 28, height: 28)
-                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(source.name)
-                                    .font(.subheadline)
-                                    .fontWeight(.medium)
-                                    .foregroundColor(source.isEnabled ? .primary : .secondary)
-                                Text(source.languages.joined(separator: ", "))
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
-                            }
-
-                            Spacer()
-
-                            Toggle("", isOn: Binding(
-                                get: { source.isEnabled },
-                                set: { _ in aidokuManager.toggle(source) }
-                            ))
-                            .labelsHidden()
-                        }
-                    }
-                    .onMove { from, to in
-                        aidokuManager.move(from: from, to: to)
+                        Text("Custom Catalogs")
+                            .font(.subheadline)
+                            .fontWeight(.medium)
+                        Spacer()
+                        Text("\(customCatalogManager.catalogs.count)")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
                     }
                 }
             }
             .eclipseExperimentalSettingsRows()
             .background(EclipseScrollTracker())
-        }
-        .navigationTitle("Home Sources")
-        .navigationBarTitleDisplayMode(.inline)
-        .eclipseSettingsStyle()
-        .toolbar {
-            EditButton()
+
+            Section(
+                header: Text("Reader Extension Home Sources"),
+                footer: Text("Enabled Reader Extensions appear on Discover. Mature sources remain hidden there unless Show Mature Sources is enabled. Legacy Kanzen JavaScript modules remain available for compatibility but do not provide home feeds.")
+            ) {
+                if sources.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: "books.vertical")
+                            .font(.largeTitle)
+                            .foregroundColor(.secondary)
+                        Text("No Reader Extensions Installed")
+                            .font(.headline)
+                            .foregroundColor(.secondary)
+                        NavigationLink(destination: ReaderExtensionsSettingsView()) {
+                            Text("Manage Reader Sources")
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 18)
+                } else {
+                    ForEach(sources) { source in
+                        HStack(spacing: 12) {
+                            Image(systemName: source.mediaType == .manga ? "books.vertical" : "text.book.closed")
+                                .foregroundColor(source.enabled ? .accentColor : .secondary)
+                                .frame(width: 28, height: 28)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(source.name)
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                    .foregroundColor(source.enabled ? .primary : .secondary)
+                                Text("\(source.effectiveLanguage.uppercased()) · \(source.mediaType == .manga ? "Manga" : "Web Novel")")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                if source.maturity == .mature && !readerExtensionManager.showMatureSources {
+                                    Text("Hidden by mature-source setting")
+                                        .font(.caption2)
+                                        .foregroundColor(.orange)
+                                }
+                            }
+
+                            Spacer()
+
+                            Toggle("", isOn: Binding(
+                                get: { source.enabled },
+                                set: {
+                                    guard !ProfileManager.shared.isKidsModeActive else { return }
+                                    do { try readerExtensionManager.setEnabled($0, for: source.id) }
+                                    catch { errorMessage = error.localizedDescription }
+                                }
+                            ))
+                            .labelsHidden()
+                        }
+                    }
+                    .onMove { offsets, destination in
+                        guard !ProfileManager.shared.isKidsModeActive else { return }
+                        do {
+                            try readerExtensionManager.moveInstalledSources(from: offsets, to: destination)
+                        } catch {
+                            errorMessage = error.localizedDescription
+                        }
+                    }
+                }
+            }
+            .eclipseExperimentalSettingsRows()
+            .background(EclipseScrollTracker())
         }
     }
 }

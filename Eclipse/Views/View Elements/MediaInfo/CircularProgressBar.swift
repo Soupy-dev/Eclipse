@@ -1,24 +1,31 @@
+//
+//  CircularProgressBar.swift
+//  Sora
+//
+//  Created by Francesco on 07/08/25.
+//
+
 import SwiftUI
 
 struct CircularProgressBar: View {
     var progress: Double
     var size: CGFloat = 30
     var lineWidth: CGFloat = 3
-    
+
     var body: some View {
         ZStack {
             Circle()
                 .stroke(lineWidth: lineWidth)
                 .opacity(0.3)
                 .foregroundColor(Color.accentColor)
-            
+
             Circle()
                 .trim(from: 0.0, to: CGFloat(min(progress, 1.0)))
                 .stroke(style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
                 .foregroundColor(Color.accentColor)
                 .rotationEffect(Angle(degrees: 270.0))
                 .animation(.linear, value: progress)
-            
+
             if progress >= 0.9 {
                 Image(systemName: "checkmark")
                     .font(.system(size: size * 0.4, weight: .bold))

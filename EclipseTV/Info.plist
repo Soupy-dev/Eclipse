@@ -31,6 +31,19 @@
 	</array>
 	<key>EclipseDistributionChannel</key>
 	<string>$(ECLIPSE_DISTRIBUTION_CHANNEL)</string>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
+	<key>EclipseSourceRevision</key>
+	<string>$(ECLIPSE_SOURCE_REVISION)</string>
+	<key>EclipseMPVKitSourceRevision</key>
+	<string>$(ECLIPSE_MPVKIT_SOURCE_REVISION)</string>
+	<!-- Mirrors the iOS target: plugin/Stremio manifests and stream URLs are frequently
+	     plain http, which ATS would otherwise reject with -1022 only on Apple TV. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
 	<key>TMDBAPIKey</key>
 	<string>$(TMDB_API_KEY)</string>
 	<key>AniListClientID</key>
@@ -51,8 +64,6 @@
 	<string>$(MAL_CLIENT_SECRET)</string>
 	<key>MALRedirectUri</key>
 	<string>$(MAL_REDIRECT_URI)</string>
-	<key>ITSAppUsesNonExemptEncryption</key>
-	<false/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UIBackgroundModes</key>

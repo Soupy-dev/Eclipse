@@ -4,11 +4,11 @@ import UIKit
 struct pageReader: UIViewControllerRepresentable {
     @ObservedObject var reader_manager: readerManager
     var pageViewConfig: pageViewMode
-    
+
     func makeCoordinator() -> Coordinator {
         return  Coordinator(reader_manager: reader_manager,pageViewConfig:    pageViewConfig)
     }
-    
+
     func makeUIViewController(context: Context) -> UIPageViewController {
         let navigationOrientation: UIPageViewController.NavigationOrientation
         switch pageViewConfig {
@@ -25,7 +25,7 @@ struct pageReader: UIViewControllerRepresentable {
         )
         controller.dataSource = context.coordinator
         controller.delegate = context.coordinator
-        
+
         DispatchQueue.main.async {
             if self.reader_manager.currControllers == nil{
                 self.reader_manager.generateCurrControllers()
@@ -48,13 +48,13 @@ struct pageReader: UIViewControllerRepresentable {
                 ReaderLogger.shared.log("index < currController count ? \(index < (self.reader_manager.currControllers?.count ?? 0))", type: "ReaderDebug")
             }
         }
-        
+
         return controller
     }
-    
+
     func updateUIViewController(_ controller: UIPageViewController, context: Context) {
         let index = reader_manager.getIndex()
-        
+
         if let currControllers = reader_manager.currControllers, index >= 0 && index < currControllers.count {
             if (reader_manager.currChapter != context.coordinator.currChapter) || (reader_manager.changeIndex == true) {
                 context.coordinator.currChapter = reader_manager.currChapter
@@ -68,7 +68,7 @@ struct pageReader: UIViewControllerRepresentable {
             }
         }
     }
-    
+
     class Coordinator: NSObject, UIPageViewControllerDataSource, UIPageViewControllerDelegate {
         func navigateForward(index: Int) -> UIViewController?
         {
@@ -80,7 +80,7 @@ struct pageReader: UIViewControllerRepresentable {
             }
             return nil
         }
-        
+
         func navigateBackward(index: Int) -> UIViewController?{
             if index > 0 {
                 return currControllers[index - 1]
@@ -91,7 +91,7 @@ struct pageReader: UIViewControllerRepresentable {
             }
             return nil
         }
-        
+
         func pageViewController(_ pageViewController: UIPageViewController, viewControllerBefore viewController: UIViewController) -> UIViewController? {
             guard let index = currControllers.firstIndex(of: viewController) else {
                 ReaderLogger.shared.log("Paged reader could not resolve previous controller; known=\(reader_manager.findControllers(currView: viewController))", type: "ReaderDebug")
@@ -106,7 +106,7 @@ struct pageReader: UIViewControllerRepresentable {
                 return navigateBackward(index: index)
             }
         }
-        
+
         func pageViewController(_ pageViewController: UIPageViewController, viewControllerAfter viewController: UIViewController) -> UIViewController? {
             guard let index = currControllers.firstIndex(of: viewController) else {
                 ReaderLogger.shared.log("Paged reader could not resolve next controller; known=\(reader_manager.findControllers(currView: viewController))", type: "ReaderDebug")
@@ -121,27 +121,27 @@ struct pageReader: UIViewControllerRepresentable {
                 return navigateForward(index: index)
             }
         }
-        
+
         func pageViewController(_ pageViewController: UIPageViewController, willTransitionTo pendingViewControllers: [UIViewController]) {
             transitioning = true
         }
-        
+
         func pageViewController(_ pageViewController: UIPageViewController, didFinishAnimating finished: Bool, previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
             if !completed  || !finished {
-                
+
             }
             transitioning = false
             guard let vC = pageViewController.viewControllers?.first else {
                 return
             }
             guard let index = currControllers.firstIndex(of: vC) else {
-                
+
                 if let nextControllers = reader_manager.nextControllers,nextControllers.contains(vC){
                     reader_manager.shiftRight()
                     currChapter = reader_manager.currChapter
                     currControllers = reader_manager.currControllers ?? []
                     reader_manager.fetchTask(bool: true)
-                    
+
                     return
                 }
                 else if let prevControllers = reader_manager.prevControllers, prevControllers.contains(vC){
@@ -150,18 +150,18 @@ struct pageReader: UIViewControllerRepresentable {
                     currChapter = reader_manager.currChapter
                     currControllers = reader_manager.currControllers ?? []
                     reader_manager.fetchTask(bool: false)
-                    
+
                     return
                 }
-                
+
                 return
             }
             currIdx = index
             reader_manager.setIndex(index)
             reader_manager.preloadAdjacentPages()
-            
+
         }
-        
+
         @ObservedObject var reader_manager: readerManager
         var currChapter: [PageData]
         var currControllers: [UIViewController]

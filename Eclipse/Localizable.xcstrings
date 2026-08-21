@@ -2014,17 +2014,6 @@
         }
       }
     },
-    "Reader mode includes Aidoku source compatibility work inspired by the Aidoku project.": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Reader mode includes Aidoku source compatibility work inspired by the Aidoku project."
-          }
-        }
-      }
-    },
     "Recalculate cache size": {
       "extractionState": "manual",
       "localizations": {

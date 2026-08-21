@@ -46,8 +46,11 @@ struct ReaderDownloadsSettingsView: View {
         .background(GlobalGradientBackground().ignoresSafeArea())
         .navigationTitle("Downloads")
         .navigationBarTitleDisplayMode(.inline)
+        .eclipseDarkToolbar()
+        .preferredColorScheme(.dark)
         .adaptiveConfirmationDialog("Delete All Reader Downloads", isPresented: $showingDeleteAll, titleVisibility: .visible) {
             Button("Delete All", role: .destructive) {
+                guard !ProfileManager.shared.isKidsModeActive else { return }
                 downloadManager.deleteAll()
             }
             Button("Cancel", role: .cancel) { }
@@ -56,6 +59,7 @@ struct ReaderDownloadsSettingsView: View {
         }
         .adaptiveConfirmationDialog("Clear Failed Reader Downloads", isPresented: $showingDeleteFailed, titleVisibility: .visible) {
             Button("Clear Failed", role: .destructive) {
+                guard !ProfileManager.shared.isKidsModeActive else { return }
                 downloadManager.deleteFailed()
             }
             Button("Cancel", role: .cancel) { }
@@ -114,8 +118,13 @@ struct ReaderDownloadsSettingsView: View {
 
     @ViewBuilder
     private var queueSection: some View {
-        let active = downloadManager.activeDownloads
-        let failed = downloadManager.failedDownloads
+
+        let active = downloadManager.activeDownloads.filter {
+            ReaderContentFilter.shared.allows(downloadItem: $0)
+        }
+        let failed = downloadManager.failedDownloads.filter {
+            ReaderContentFilter.shared.allows(downloadItem: $0)
+        }
         if active.isEmpty && failed.isEmpty {
             emptyState(
                 icon: "checkmark.circle",
@@ -147,7 +156,10 @@ struct ReaderDownloadsSettingsView: View {
 
     @ViewBuilder
     private var downloadedLibrarySection: some View {
-        let titles = downloadManager.downloadedTitles
+
+        let titles = downloadManager.downloadedTitles.filter {
+            ReaderContentFilter.shared.allows(downloadedTitle: $0)
+        }
         if titles.isEmpty {
             emptyState(
                 icon: "arrow.down.circle",
@@ -206,7 +218,12 @@ struct ReaderDownloadsSettingsView: View {
 
     private func queueRow(_ item: ReaderDownloadItem) -> some View {
         HStack(spacing: 12) {
-            poster(url: item.coverURL, width: 48, height: 72)
+            poster(
+                url: item.coverURL,
+                readerExtensionSourceID: item.route.readerExtensionSourceID,
+                width: 48,
+                height: 72
+            )
 
             VStack(alignment: .leading, spacing: 5) {
                 Text(item.mangaTitle)
@@ -282,7 +299,12 @@ struct ReaderDownloadsSettingsView: View {
 
     private func downloadedTitleCard(_ title: ReaderDownloadedTitle) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            poster(url: title.coverURL, width: nil, height: isIPad ? 220 : 176)
+            poster(
+                url: title.coverURL,
+                readerExtensionSourceID: title.route.readerExtensionSourceID,
+                width: nil,
+                height: isIPad ? 220 : 176
+            )
                 .overlay(alignment: .topTrailing) {
                     Image(systemName: "arrow.down.circle.fill")
                         .font(.title3)
@@ -305,14 +327,20 @@ struct ReaderDownloadsSettingsView: View {
         }
     }
 
-    private func poster(url: String?, width: CGFloat?, height: CGFloat) -> some View {
-        KFImage(URL(string: url ?? ""))
-            .placeholder {
+    private func poster(
+        url: String?,
+        readerExtensionSourceID: ReaderExtensionSourceID?,
+        width: CGFloat?,
+        height: CGFloat
+    ) -> some View {
+        ReaderScopedRemoteImage(
+            url: URL(string: url ?? ""),
+            readerExtensionSourceID: readerExtensionSourceID
+        ) {
                 Rectangle()
                     .fill(Color.gray.opacity(0.2))
                     .overlay(Image(systemName: "book.closed").foregroundColor(.secondary))
-            }
-            .resizable()
+        }
             .scaledToFill()
             .frame(width: width, height: height)
             .clipped()
@@ -388,12 +416,51 @@ struct ReaderDownloadedTitleDetailView: View {
     }
 
     var body: some View {
+        Group {
+            if !ReaderContentFilter.shared.allows(downloadedTitle: title) {
+                restrictedContent
+            } else {
+                downloadedTitleContent
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private var restrictedContent: some View {
+        ZStack {
+            GlobalGradientBackground().ignoresSafeArea()
+
+            VStack(spacing: 12) {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 48))
+                    .foregroundColor(.secondary.opacity(0.7))
+                Text("Not available on this profile")
+                    .font(.headline)
+                Text("This download is restricted for the profile you're using.")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 32)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 36)
+        }
+        .navigationTitle(title.title)
+        .navigationBarTitleDisplayMode(.inline)
+        .eclipseDarkToolbar()
+    }
+
+    @ViewBuilder
+    private var downloadedTitleContent: some View {
         List {
             Section {
                 HStack(spacing: 14) {
-                    KFImage(URL(string: title.coverURL ?? ""))
-                        .placeholder { Rectangle().fill(Color.gray.opacity(0.2)) }
-                        .resizable()
+                    ReaderScopedRemoteImage(
+                        url: URL(string: title.coverURL ?? ""),
+                        readerExtensionSourceID: title.route.readerExtensionSourceID
+                    ) {
+                        Rectangle().fill(Color.gray.opacity(0.2))
+                    }
                         .scaledToFill()
                         .frame(width: 72, height: 108)
                         .clipped()
@@ -413,6 +480,8 @@ struct ReaderDownloadedTitleDetailView: View {
                 }
                 .padding(.vertical, 6)
             }
+            .eclipseExperimentalSettingsRows()
+            .background(EclipseScrollTracker())
 
             Section("Downloaded Chapters") {
                 ForEach(chapters) { chapter in
@@ -437,9 +506,12 @@ struct ReaderDownloadedTitleDetailView: View {
                     }
                 }
             }
+            .eclipseExperimentalSettingsRows()
+            .background(EclipseScrollTracker())
         }
         .navigationTitle(title.title)
         .navigationBarTitleDisplayMode(.inline)
+        .eclipseSettingsStyle()
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button(role: .destructive) {
@@ -470,6 +542,10 @@ struct ReaderDownloadedTitleDetailView: View {
                 totalChapters: chapters.count,
                 latestChapterNumbers: chapters.map(\.chapterNumber)
             )
+        }
+
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+            selectedChapter = nil
         }
     }
 }

@@ -5,12 +5,14 @@ struct NuvioScraperSettingsView: View {
     let scraper: NuvioPluginScraper
     @ObservedObject var manager: NuvioPluginManager
     @StateObject private var accentColorManager = AccentColorManager.shared
+    @StateObject private var profileManager = ProfileManager.shared
 
     @State private var fields: [NuvioSettingsField] = []
     @State private var isLoading = true
     @State private var loadError: String?
 
     private var accent: Color { accentColorManager.currentAccentColor }
+    private var canAdminister: Bool { profileManager.activeProfile?.isKidsProfile != true }
 
     var body: some View {
         ScrollView {
@@ -33,6 +35,7 @@ struct NuvioScraperSettingsView: View {
                     )
                 } else {
                     fieldSections
+                        .disabled(!canAdminister)
                 }
             }
             .padding(.top, 16)

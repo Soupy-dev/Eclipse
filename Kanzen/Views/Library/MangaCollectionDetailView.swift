@@ -1,3 +1,10 @@
+//
+//  MangaCollectionDetailView.swift
+//  Kanzen
+//
+//  Created by Eclipse on 2026.
+//
+
 import SwiftUI
 import Kingfisher
 
@@ -5,14 +12,23 @@ import Kingfisher
 struct MangaCollectionDetailView: View {
     @ObservedObject var collection: MangaLibraryCollection
     @ObservedObject var libraryManager: MangaLibraryManager
+    @ObservedObject private var progressManager = MangaReadingProgressManager.shared
+    @ObservedObject private var downloadManager = ReaderDownloadManager.shared
+
+    @ObservedObject private var contentFilter = ReaderContentFilter.shared
+    @Environment(\.dismiss) private var dismiss
     @State private var isRefreshingSources = false
     @State private var refreshStatus: String?
 
     private let columns = [GridItem(.adaptive(minimum: 120), spacing: 12)]
 
+    private var visibleItems: [MangaLibraryItem] {
+        collection.items.filter { contentFilter.allows(libraryItem: $0) }
+    }
+
     var body: some View {
         Group {
-            if collection.items.isEmpty {
+            if visibleItems.isEmpty {
                 VStack(spacing: 12) {
                     Image(systemName: "books.vertical")
                         .font(.largeTitle)
@@ -33,7 +49,8 @@ struct MangaCollectionDetailView: View {
                         }
 
                         LazyVGrid(columns: columns, spacing: 12) {
-                            ForEach(collection.items) { item in
+
+                            ForEach(visibleItems) { item in
                                 NavigationLink(destination: mangaDestination(for: item)) {
                                     mangaCard(item)
                                 }
@@ -54,6 +71,10 @@ struct MangaCollectionDetailView: View {
         .navigationTitle(collection.name)
         .navigationBarTitleDisplayMode(.inline)
         .background(GlobalGradientBackground().ignoresSafeArea())
+
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+            dismiss()
+        }
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button {
@@ -74,9 +95,12 @@ struct MangaCollectionDetailView: View {
     @ViewBuilder
     private func mangaCard(_ item: MangaLibraryItem) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            KFImage(URL(string: item.coverURL ?? ""))
-                .placeholder { Rectangle().fill(Color.gray.opacity(0.2)) }
-                .resizable()
+            ReaderScopedRemoteImage(
+                url: URL(string: item.coverURL ?? ""),
+                readerExtensionSourceID: item.route?.readerExtensionSourceID
+            ) {
+                Rectangle().fill(Color.gray.opacity(0.2))
+            }
                 .scaledToFill()
                 .frame(width: 120, height: 180)
                 .clipped()
@@ -103,7 +127,7 @@ struct MangaCollectionDetailView: View {
 
     @ViewBuilder
     private func unreadBadge(for item: MangaLibraryItem) -> some View {
-        let unread = item.unreadCount(readChapters: MangaReadingProgressManager.shared.readChapters(for: item.aniListId))
+        let unread = item.unreadCount(readChapters: progressManager.readChapters(for: item.aniListId))
         if unread > 0 {
             Text("\(unread)")
                 .font(.caption2)
@@ -119,7 +143,7 @@ struct MangaCollectionDetailView: View {
 
     @ViewBuilder
     private func downloadedBadge(for item: MangaLibraryItem) -> some View {
-        if ReaderDownloadManager.shared.isDownloaded(route: item.route) {
+        if downloadManager.isDownloaded(route: item.route) {
             Image(systemName: "arrow.down.circle.fill")
                 .font(.caption)
                 .foregroundColor(.white)

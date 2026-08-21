@@ -1,5 +1,3 @@
-// Created on 27/02/26.
-
 import SwiftUI
 import AVKit
 import Kingfisher
@@ -7,6 +5,8 @@ import Kingfisher
 struct DownloadsView: View {
     @StateObject private var downloadManager = DownloadManager.shared
     @StateObject private var progressManager = ProgressManager.shared
+
+    @ObservedObject private var contentFilter = TMDBContentFilter.shared
     @State private var showingDeleteAllConfirmation = false
     @State private var showingDeleteCompletedConfirmation = false
     @State private var showingDeleteSeriesConfirmation = false
@@ -15,37 +15,111 @@ struct DownloadsView: View {
 #if os(iOS)
     @Environment(\.eclipseWindowSceneSessionIdentifier) private var presentationSceneIdentifier
 #endif
-    
+
     private enum DownloadsTab: String, CaseIterable {
         case downloads = "Downloads"
         case library = "Library"
     }
-    
-    private var activeDownloads: [DownloadItem] {
-        downloadManager.downloads.filter { $0.status == .downloading || $0.status == .queued || $0.status == .paused }
+
+    @State private var kidsBlockedDownloads: Set<DownloadIdentity> = []
+
+    @State private var kidsFilterResolved = false
+
+    @State private var kidsFilterTask: Task<Void, Never>?
+
+    private var downloadIdentities: Set<DownloadIdentity> {
+        Set(downloadManager.downloads.map { DownloadIdentity(isMovie: $0.isMovie, id: $0.tmdbId) })
     }
-    
-    private var completedDownloads: [DownloadItem] {
-        downloadManager.downloads.filter { $0.status == .completed }
-    }
-    
-    private var failedDownloads: [DownloadItem] {
-        downloadManager.downloads.filter { $0.status == .failed }
-    }
-    
-    var body: some View {
-        if #available(iOS 16.0, *) {
-            NavigationStack {
-                downloadsContent
-            }
-        } else {
-            NavigationView {
-                downloadsContent
-            }
-            .navigationViewStyle(StackNavigationViewStyle())
+
+    private func visibleToProfile(_ items: [DownloadItem]) -> [DownloadItem] {
+        guard ProfileManager.shared.isKidsModeActive else { return items }
+        guard kidsFilterResolved else { return [] }
+        return items.filter {
+            !kidsBlockedDownloads.contains(DownloadIdentity(isMovie: $0.isMovie, id: $0.tmdbId))
         }
     }
-    
+
+    private func refreshKidsDownloadFilter() {
+        kidsFilterTask?.cancel()
+        guard ProfileManager.shared.isKidsModeActive else {
+            kidsBlockedDownloads = []
+            kidsFilterResolved = true
+            return
+        }
+        kidsFilterResolved = false
+
+        var representatives: [DownloadIdentity: DownloadItem] = [:]
+        for item in downloadManager.downloads {
+            let identity = DownloadIdentity(isMovie: item.isMovie, id: item.tmdbId)
+            if let existing = representatives[identity], existing.kidsPolicyDetails != nil { continue }
+            if representatives[identity] == nil || item.kidsPolicyDetails != nil {
+                representatives[identity] = item
+            }
+        }
+
+        let initiatingProfileID = ProfileManager.shared.activeProfileID
+        kidsFilterTask = Task { @MainActor in
+            await TMDBMaturityRatingStore.shared.resolve(representatives.keys.map { (isMovie: $0.isMovie, id: $0.id) })
+
+            var blocked: Set<DownloadIdentity> = []
+            for (identity, item) in representatives {
+                guard !Task.isCancelled else { return }
+                let allowed = await TMDBContentFilter.shared.kidsPolicyAllowsPlayback(
+                    isMovie: identity.isMovie,
+                    id: identity.id,
+                    title: item.playerTitleBase,
+                    persistedDetails: item.kidsPolicyDetails
+                )
+                if !allowed { blocked.insert(identity) }
+            }
+            guard !Task.isCancelled,
+                  ProfileManager.shared.activeProfileID == initiatingProfileID else { return }
+            kidsBlockedDownloads = blocked
+            kidsFilterResolved = true
+        }
+    }
+
+    private struct DownloadIdentity: Hashable {
+        let isMovie: Bool
+        let id: Int
+    }
+
+    private var activeDownloads: [DownloadItem] {
+        visibleToProfile(downloadManager.downloads.filter { $0.status == .downloading || $0.status == .queued || $0.status == .paused })
+    }
+
+    private var completedDownloads: [DownloadItem] {
+        visibleToProfile(downloadManager.downloads.filter { $0.status == .completed })
+    }
+
+    private var failedDownloads: [DownloadItem] {
+        visibleToProfile(downloadManager.downloads.filter { $0.status == .failed })
+    }
+
+    var body: some View {
+        Group {
+            if #available(iOS 16.0, *) {
+                NavigationStack {
+                    downloadsContent
+                }
+            } else {
+                NavigationView {
+                    downloadsContent
+                }
+                .navigationViewStyle(StackNavigationViewStyle())
+            }
+        }
+        .onAppear { refreshKidsDownloadFilter() }
+        .onDisappear { kidsFilterTask?.cancel() }
+        .onChangeComp(of: downloadIdentities) { _, _ in refreshKidsDownloadFilter() }
+        .onChangeComp(of: contentFilter.isKidsProfileActive) { _, _ in refreshKidsDownloadFilter() }
+        .onChangeComp(of: contentFilter.maturityRatingRevision) { _, _ in refreshKidsDownloadFilter() }
+
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+            refreshKidsDownloadFilter()
+        }
+    }
+
     private var downloadsContent: some View {
         Group {
             if downloadManager.downloads.isEmpty {
@@ -60,7 +134,7 @@ struct DownloadsView: View {
                     .pickerStyle(.segmented)
                     .padding(.horizontal)
                     .padding(.top, 8)
-                    
+
                     switch selectedTab {
                     case .downloads:
                         downloadsList
@@ -77,7 +151,7 @@ struct DownloadsView: View {
 #endif
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
-                if !downloadManager.downloads.isEmpty {
+                if !downloadManager.downloads.isEmpty, !ProfileManager.shared.isKidsModeActive {
                     managementMenu
                 }
             }
@@ -116,9 +190,7 @@ struct DownloadsView: View {
             Text("This will remove all downloaded episodes for \(seriesToDelete?.title ?? "this series"). This action cannot be undone.")
         }
     }
-    
-    // MARK: - Empty State
-    
+
     private var emptyState: some View {
         EclipseEmptyState(
             icon: "arrow.down.circle",
@@ -127,9 +199,7 @@ struct DownloadsView: View {
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-    
-    // MARK: - Downloads List
-    
+
     @ViewBuilder
     private var downloadsList: some View {
         if activeDownloads.isEmpty && failedDownloads.isEmpty {
@@ -178,7 +248,7 @@ struct DownloadsView: View {
                     sectionHeader("Active", count: activeDownloads.count)
                 }
             }
-            
+
             if !failedDownloads.isEmpty {
                 Section {
                     ForEach(failedDownloads) { item in
@@ -207,7 +277,7 @@ struct DownloadsView: View {
                     sectionHeader("Failed", count: failedDownloads.count)
                 }
             }
-            
+
             Section {
                 storageFooter
                     .listRowBackground(Color.clear)
@@ -217,9 +287,7 @@ struct DownloadsView: View {
             .eclipseHideScrollBackground()
         }
     }
-    
-    // MARK: - Section Header
-    
+
     private func sectionHeader(_ title: String, count: Int) -> some View {
         EclipseSectionHeader(title: title, count: count)
             .padding(.horizontal)
@@ -242,13 +310,11 @@ struct DownloadsView: View {
             EclipseStatusBadge(text: "Completed", systemImage: "checkmark", tint: .green)
         }
     }
-    
-    // MARK: - Active Download Row
-    
+
     private func activeDownloadRow(_ item: DownloadItem) -> some View {
         HStack(spacing: 12) {
             posterImage(url: item.posterURL)
-            
+
             VStack(alignment: .leading, spacing: 6) {
                 Text(item.displayTitle)
                     .font(.subheadline)
@@ -302,10 +368,10 @@ struct DownloadsView: View {
             }
         }
     }
-    
+
     private func downloadActionButtons(_ item: DownloadItem) -> some View {
         HStack(spacing: 4) {
-            // Pause / Resume / Queued button
+
             Button(action: {
                 switch item.status {
                 case .downloading:
@@ -321,13 +387,10 @@ struct DownloadsView: View {
                     .foregroundColor(actionColor(for: item.status))
                     .frame(width: 32, height: 32)
             }
-            // .borderless isolates each button's tap region. Without it, SwiftUI
-            // treats the whole List row as one tap target and a tap on Pause also
-            // fires the adjacent Cancel button, deleting the download.
+
             .buttonStyle(.borderless)
             .disabled(item.status == .queued)
 
-            // Cancel / Delete button
             Button(action: {
                 downloadManager.cancelDownload(id: item.id)
             }) {
@@ -339,7 +402,7 @@ struct DownloadsView: View {
             .buttonStyle(.borderless)
         }
     }
-    
+
     private func actionIcon(for status: DownloadStatus) -> String {
         switch status {
         case .downloading: return "pause.circle.fill"
@@ -348,7 +411,7 @@ struct DownloadsView: View {
         default: return "circle"
         }
     }
-    
+
     private func actionColor(for status: DownloadStatus) -> Color {
         switch status {
         case .downloading: return .blue
@@ -357,13 +420,11 @@ struct DownloadsView: View {
         default: return .secondary
         }
     }
-    
-    // MARK: - Failed Download Row
-    
+
     private func failedDownloadRow(_ item: DownloadItem) -> some View {
         HStack(spacing: 12) {
             posterImage(url: item.posterURL)
-            
+
             VStack(alignment: .leading, spacing: 6) {
                 Text(item.displayTitle)
                     .font(.subheadline)
@@ -401,9 +462,7 @@ struct DownloadsView: View {
             }
         }
     }
-    
-    // MARK: - Completed Download Row
-    
+
     private func completedDownloadRow(_ item: DownloadItem) -> some View {
         let isWatched = item.isMovie && movieIsWatched(item)
 
@@ -412,26 +471,25 @@ struct DownloadsView: View {
         }) {
             HStack(spacing: 12) {
                 posterImage(url: item.posterURL)
-                
+
                 VStack(alignment: .leading, spacing: 4) {
                     Text(item.displayTitle)
                         .font(.subheadline)
                         .fontWeight(.semibold)
                         .lineLimit(2)
                         .foregroundColor(.white)
-                    
+
                     if !item.isMovie, let ep = item.episodeNumber, let sn = item.seasonNumber {
                         Text("S\(sn)E\(ep)")
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
-                    
+
                     HStack {
-                        let formatter = ByteCountFormatter()
-                        Text(formatter.string(fromByteCount: item.totalBytes))
+                        Text(DownloadByteCountFormatter.string(fromByteCount: item.totalBytes))
                             .font(.caption2)
                             .foregroundColor(.secondary)
-                        
+
                         if let date = item.dateCompleted {
                             Text("•")
                                 .font(.caption2)
@@ -451,9 +509,9 @@ struct DownloadsView: View {
                         }
                     }
                 }
-                
+
                 Spacer()
-                
+
                 Image(systemName: "play.circle.fill")
                     .font(.title2)
                     .foregroundColor(.white)
@@ -490,9 +548,7 @@ struct DownloadsView: View {
             }
         }
     }
-    
-    // MARK: - Poster Image
-    
+
     private func posterImage(url: String?) -> some View {
         KFImage(URL(string: url ?? ""))
             .placeholder {
@@ -513,27 +569,24 @@ struct DownloadsView: View {
                     .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
             )
     }
-    
-    // MARK: - Library View (Grouped by Show/Season)
-    
-    /// Groups completed downloads by show (tmdbId) then by season
+
     private struct ShowGroup: Identifiable {
-        let id: Int  // tmdbId
+        let id: Int
         let title: String
         let posterURL: String?
         let isMovie: Bool
         var seasons: [SeasonGroup]
     }
-    
+
     private struct SeasonGroup: Identifiable {
         var id: Int { seasonNumber }
         let seasonNumber: Int
         var episodes: [DownloadItem]
     }
-    
+
     private var groupedDownloads: [ShowGroup] {
         var showMap: [Int: ShowGroup] = [:]
-        
+
         for item in completedDownloads {
             if showMap[item.tmdbId] == nil {
                 showMap[item.tmdbId] = ShowGroup(
@@ -544,7 +597,7 @@ struct DownloadsView: View {
                     seasons: []
                 )
             }
-            
+
             let seasonNum = item.seasonNumber ?? 0
             if let index = showMap[item.tmdbId]?.seasons.firstIndex(where: { $0.seasonNumber == seasonNum }) {
                 showMap[item.tmdbId]?.seasons[index].episodes.append(item)
@@ -552,8 +605,7 @@ struct DownloadsView: View {
                 showMap[item.tmdbId]?.seasons.append(SeasonGroup(seasonNumber: seasonNum, episodes: [item]))
             }
         }
-        
-        // Sort shows by title, seasons by number, episodes by episode number
+
         return showMap.values
             .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
             .map { group in
@@ -568,7 +620,7 @@ struct DownloadsView: View {
                 return g
             }
     }
-    
+
     private var libraryView: some View {
         Group {
             if completedDownloads.isEmpty {
@@ -582,14 +634,14 @@ struct DownloadsView: View {
                 List {
                     ForEach(groupedDownloads) { show in
                         if show.isMovie {
-                            // Movies show directly
+
                             if let item = show.seasons.first?.episodes.first {
                                 completedDownloadRow(item)
                                     .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
                                     .listRowBackground(Color.clear)
                             }
                         } else {
-                            // TV Shows: navigate to full detail page
+
                             NavigationLink(destination: DownloadedShowDetailView(
                                 showTitle: show.title,
                                 tmdbId: show.id,
@@ -603,19 +655,19 @@ struct DownloadsView: View {
                             )) {
                                 HStack(spacing: 12) {
                                     posterImage(url: show.posterURL)
-                                    
+
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text(show.title)
                                             .font(.subheadline)
                                             .fontWeight(.semibold)
                                             .foregroundColor(.white)
                                             .lineLimit(2)
-                                        
+
                                         let totalEps = show.seasons.reduce(0) { $0 + $1.episodes.count }
                                         Text("\(totalEps) episode\(totalEps == 1 ? "" : "s")")
                                             .font(.caption)
                                             .foregroundColor(.secondary)
-                                        
+
                                         let watchedCount = show.seasons.flatMap(\.episodes).filter {
                                             ProgressManager.shared.isEpisodeWatched(
                                                 showId: $0.tmdbId,
@@ -634,9 +686,9 @@ struct DownloadsView: View {
                                             }
                                         }
                                     }
-                                    
+
                                     Spacer()
-                                    
+
                                     Image(systemName: "chevron.right")
                                         .font(.caption)
                                         .foregroundColor(.secondary)
@@ -654,7 +706,7 @@ struct DownloadsView: View {
                             }
                         }
                     }
-                    
+
                     Section {
                         storageFooter
                             .listRowBackground(Color.clear)
@@ -664,7 +716,7 @@ struct DownloadsView: View {
             }
         }
     }
-    
+
     private func libraryEpisodeRow(_ item: DownloadItem) -> some View {
         Button(action: { playDownloadedItem(item) }) {
             HStack(spacing: 12) {
@@ -675,22 +727,21 @@ struct DownloadsView: View {
                             .fontWeight(.semibold)
                             .foregroundColor(.white)
                     }
-                    
+
                     if let name = item.episodeName, !name.isEmpty {
                         Text(name)
                             .font(.caption)
                             .foregroundColor(.secondary)
                             .lineLimit(1)
                     }
-                    
-                    let formatter = ByteCountFormatter()
-                    Text(formatter.string(fromByteCount: item.totalBytes))
+
+                    Text(DownloadByteCountFormatter.string(fromByteCount: item.totalBytes))
                         .font(.caption2)
                         .foregroundColor(.secondary)
                 }
-                
+
                 Spacer()
-                
+
                 Image(systemName: "play.circle.fill")
                     .font(.title3)
                     .foregroundColor(.white)
@@ -706,9 +757,7 @@ struct DownloadsView: View {
             }
         }
     }
-    
-    // MARK: - Management Menu
-    
+
     private var managementMenu: some View {
         Menu {
             if activeDownloads.contains(where: { $0.status == .downloading || $0.status == .queued }) {
@@ -716,33 +765,33 @@ struct DownloadsView: View {
                     Label("Pause All", systemImage: "pause.circle")
                 }
             }
-            
+
             if activeDownloads.contains(where: { $0.status == .paused }) {
                 Button(action: { downloadManager.resumeAll() }) {
                     Label("Resume All", systemImage: "play.circle")
                 }
             }
-            
+
             if !failedDownloads.isEmpty {
                 Button(action: { downloadManager.retryAllFailed() }) {
                     Label("Retry Failed", systemImage: "arrow.clockwise")
                 }
             }
-            
+
             if !activeDownloads.isEmpty {
                 Button(role: .destructive, action: { downloadManager.cancelAllActive() }) {
                     Label("Cancel All Active", systemImage: "xmark.circle")
                 }
             }
-            
+
             Divider()
-            
+
             if !completedDownloads.isEmpty {
                 Button(role: .destructive, action: { showingDeleteCompletedConfirmation = true }) {
                     Label("Delete Completed", systemImage: "trash")
                 }
             }
-            
+
             Button(role: .destructive, action: { showingDeleteAllConfirmation = true }) {
                 Label("Delete All", systemImage: "trash.fill")
             }
@@ -750,28 +799,22 @@ struct DownloadsView: View {
             Image(systemName: "ellipsis.circle")
         }
     }
-    
-    // MARK: - Storage Footer
-    
+
     private var storageFooter: some View {
         let storageUsed = downloadManager.calculateStorageUsed()
-        let formatter = ByteCountFormatter()
-        formatter.countStyle = .file
-        
+
         return VStack(spacing: 4) {
-            Text("Storage Used: \(formatter.string(fromByteCount: storageUsed))")
+            Text("Storage Used: \(DownloadByteCountFormatter.string(fromByteCount: storageUsed))")
                 .font(.caption)
                 .foregroundColor(.secondary)
-            
+
             Text("\(completedDownloads.count) downloaded • \(activeDownloads.count) active")
                 .font(.caption2)
                 .foregroundColor(.secondary.opacity(0.7))
         }
         .frame(maxWidth: .infinity)
     }
-    
-    // MARK: - Playback
-    
+
     private static func completedDateString(from date: Date) -> String {
         let interval = Date().timeIntervalSince(date)
         if interval < 60 { return "Just now" }
@@ -803,7 +846,7 @@ struct DownloadsView: View {
             posterURL: item.posterURL
         )
     }
-    
+
     private func shareDownloadedItem(_ item: DownloadItem) {
 #if os(iOS)
         guard let fileURL = downloadManager.localFileURL(for: item) else { return }
@@ -823,19 +866,37 @@ struct DownloadsView: View {
         }
 #endif
     }
-    
-    private func playDownloadedItem(_ item: DownloadItem, from presenter: UIViewController? = nil) {
+
+    private func playDownloadedItem(
+        _ item: DownloadItem,
+        from presenter: UIViewController? = nil,
+        canonicalPlaybackContext: EpisodePlaybackContext? = nil
+    ) {
         guard let fileURL = downloadManager.localFileURL(for: item) else {
             Logger.shared.log("Downloaded file not found for: \(item.id)", type: "Download")
             return
         }
-        
+
         guard let originatingPresenter = downloadPresentationController(explicit: presenter) else {
             Logger.shared.log("Downloaded playback has no presenter", type: "Player")
             return
         }
         let subtitles = downloadManager.localSubtitleURL(for: item).map { [$0.absoluteString] } ?? []
-        let nextEpisodeRequest: ((_ seasonNumber: Int, _ episodeNumber: Int) -> Void)? = item.isMovie ? nil : { [weak originatingPresenter] seasonNumber, episodeNumber in
+        let effectiveContext = canonicalPlaybackContext ?? item.episodePlaybackContext
+        let isAnimeEpisode = !item.isMovie
+            && (item.isAnime || effectiveContext?.hasAnimeMediaId == true)
+        let effectiveMediaInfo: MediaInfo = {
+            guard !item.isMovie, let effectiveContext else { return item.mediaInfo }
+            return .episode(
+                showId: item.tmdbId,
+                seasonNumber: effectiveContext.localSeasonNumber,
+                episodeNumber: effectiveContext.localEpisodeNumber,
+                showTitle: item.playerTitleBase,
+                showPosterURL: item.posterURL,
+                isAnime: isAnimeEpisode
+            )
+        }()
+        let nextEpisodeRequest: ((_ seasonNumber: Int, _ episodeNumber: Int) -> Void)? = item.isMovie || isAnimeEpisode ? nil : { [weak originatingPresenter] seasonNumber, episodeNumber in
             guard let originatingPresenter else { return }
             guard let nextItem = nextDownloadedEpisode(
                 for: item.tmdbId,
@@ -851,7 +912,23 @@ struct DownloadsView: View {
                 self.playDownloadedItem(nextItem, from: originatingPresenter)
             }
         }
-        let localNextEpisode: DownloadItem? = item.isMovie ? nil : nextDownloadedEpisode(
+        let resolvedNextEpisodeRequest: ((ResolvedNextEpisodeTarget) -> Void)? = isAnimeEpisode ? { [weak originatingPresenter] target in
+            guard let originatingPresenter,
+                  let nextItem = downloadManager.completedEpisodeDownloadItem(
+                    tmdbId: target.showID,
+                    seasonNumber: target.episode.seasonNumber,
+                    episodeNumber: target.episode.episodeNumber,
+                    playbackContext: target.playbackContext
+                  ) else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
+                self.playDownloadedItem(
+                    nextItem,
+                    from: originatingPresenter,
+                    canonicalPlaybackContext: target.playbackContext
+                )
+            }
+        } : nil
+        let localNextEpisode: DownloadItem? = item.isMovie || isAnimeEpisode ? nil : nextDownloadedEpisode(
             for: item.tmdbId,
             requestedSeasonNumber: item.seasonNumber ?? 0,
             requestedEpisodeNumber: (item.episodeNumber ?? 0) + 1,
@@ -860,15 +937,18 @@ struct DownloadsView: View {
         let request = PlaybackRequest(
             url: fileURL,
             subtitles: subtitles,
-            mediaInfo: item.mediaInfo,
-            episodePlaybackContext: item.episodePlaybackContext,
+            mediaInfo: effectiveMediaInfo,
+
+            kidsPolicyDetails: item.kidsPolicyDetails,
+            episodePlaybackContext: effectiveContext,
             title: item.playerTitleBase,
             subtitle: item.displayTitle,
             artworkURL: item.posterURL.flatMap(URL.init(string:)),
-            isAnime: item.isAnime,
-            originalTMDBSeasonNumber: item.episodePlaybackContext?.resolvedTMDBSeasonNumber,
-            originalTMDBEpisodeNumber: item.episodePlaybackContext?.resolvedTMDBEpisodeNumber,
+            isAnime: isAnimeEpisode,
+            originalTMDBSeasonNumber: effectiveContext?.resolvedTMDBSeasonNumber,
+            originalTMDBEpisodeNumber: effectiveContext?.resolvedTMDBEpisodeNumber,
             onRequestNextEpisode: nextEpisodeRequest,
+            onRequestResolvedNextEpisode: resolvedNextEpisodeRequest,
             localNextEpisodeFallback: PlaybackEpisodeCoordinate(
                 seasonNumber: localNextEpisode?.seasonNumber,
                 episodeNumber: localNextEpisode?.episodeNumber

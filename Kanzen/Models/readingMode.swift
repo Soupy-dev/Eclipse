@@ -1,9 +1,21 @@
+//
+//  readingMode.swift
+//  Eclipse
+//
+//  Created by Dawud Osman on 17/11/2025.
+//
+//
+//  readingMode.swift
+//  Kanzen
+//
+//  Created by Dawud Osman on 04/10/2025.
+//
 enum ReadingMode: Int,CaseIterable,Identifiable {
     case LTR = 0
     case RTL = 1
     case WEBTOON =  2
     case VERTICAL = 3
-    
+
     var id: Int{ rawValue}
     var title: String {
         switch self {
@@ -23,5 +35,5 @@ enum pageViewMode: Int,CaseIterable {
     case LTR = 0
     case RTL = 1
     case Vertical = 2
-    
+
 }

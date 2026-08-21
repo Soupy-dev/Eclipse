@@ -1,11 +1,7 @@
-// Gradient background for Settings screens
-
 import SwiftUI
 #if canImport(UIKit)
 import UIKit
 #endif
-
-// MARK: - Scroll Offset Tracking
 
 struct ScrollOffsetPreferenceKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
@@ -34,7 +30,7 @@ enum ExperimentalMediaDesignPreset: String, CaseIterable, Identifiable {
     static var defaultValue: ExperimentalMediaDesignPreset { .cinematic }
 
     static var current: ExperimentalMediaDesignPreset {
-        let rawValue = UserDefaults.standard.string(forKey: storageKey)
+        let rawValue = ProfileSettingsStore.active.string(forKey: storageKey)
         return ExperimentalMediaDesignPreset(rawValue: rawValue ?? "") ?? defaultValue
     }
 }
@@ -67,7 +63,7 @@ enum ExperimentalHeroBleedLevel: String, CaseIterable, Identifiable {
     static var defaultValue: ExperimentalHeroBleedLevel { .standard }
 
     static var current: ExperimentalHeroBleedLevel {
-        let rawValue = UserDefaults.standard.string(forKey: storageKey)
+        let rawValue = ProfileSettingsStore.active.string(forKey: storageKey)
         return ExperimentalHeroBleedLevel(rawValue: rawValue ?? "") ?? defaultValue
     }
 }
@@ -92,7 +88,7 @@ enum ExperimentalHomeCardShape: String, CaseIterable, Identifiable {
     static var defaultValue: ExperimentalHomeCardShape { .automatic }
 
     static var current: ExperimentalHomeCardShape {
-        let rawValue = UserDefaults.standard.string(forKey: storageKey)
+        let rawValue = ProfileSettingsStore.active.string(forKey: storageKey)
         return ExperimentalHomeCardShape(rawValue: rawValue ?? "") ?? defaultValue
     }
 }
@@ -119,7 +115,7 @@ enum ExperimentalMultiGradientPalette: String, CaseIterable, Identifiable {
     static var defaultValue: ExperimentalMultiGradientPalette { .eclipse }
 
     static var current: ExperimentalMultiGradientPalette {
-        let rawValue = UserDefaults.standard.string(forKey: storageKey)
+        let rawValue = ProfileSettingsStore.active.string(forKey: storageKey)
         return ExperimentalMultiGradientPalette(rawValue: rawValue ?? "") ?? defaultValue
     }
 }
@@ -167,7 +163,7 @@ struct ExperimentalVisualTuning {
     var gradientColorC: Color?
 
     static var current: ExperimentalVisualTuning {
-        let defaults = UserDefaults.standard
+        let defaults = ProfileSettingsStore.active
 #if os(tvOS)
         let mediaCardScale: Double
         switch defaults.string(forKey: "tvCardDensity") ?? "standard" {
@@ -218,12 +214,12 @@ struct ExperimentalVisualTuning {
     static func saveColor(_ color: Color, key: String) {
         do {
             let data = try NSKeyedArchiver.archivedData(withRootObject: UIColor(color), requiringSecureCoding: true)
-            UserDefaults.standard.set(data, forKey: key)
+            ProfileSettingsStore.active.set(data, forKey: key)
         } catch { }
     }
 
     static func loadColor(key: String) -> Color? {
-        guard let data = UserDefaults.standard.data(forKey: key),
+        guard let data = ProfileSettingsStore.active.data(forKey: key),
               let color = loadColor(data: data) else {
             return nil
         }
@@ -419,8 +415,6 @@ struct ExperimentalMediaDesignMetrics {
         }
     }
 
-    /// The active media-card size multiplier. Widgets and other fixed-size rows
-    /// multiply their hardcoded dimensions by this so the size control affects them too.
     var mediaCardScale: CGFloat { CGFloat(tuning.mediaCardScale) }
 
     private func scaled(_ size: CGSize) -> CGSize {
@@ -447,13 +441,13 @@ struct SettingsGradientBackground: View {
     @AppStorage(HomeAnimatedBackgroundSettings.enabledKey) private var animatedBackgroundEnabled = HomeAnimatedBackgroundSettings.defaultEnabled
     @State private var isVisible = false
     var allowsAnimatedBackground: Bool = true
-    
+
     @ViewBuilder
     var body: some View {
         baseBackground
             .overlay {
                 if allowsAnimatedBackground && animatedBackgroundEnabled {
-                    EclipseAmbientMotionBackground(
+                    EclipseIsolatedAmbientMotionBackground(
                         topClearance: 0,
                         ambientColor: nil,
                         accentColor: theme.scopedGradientColor(),
@@ -507,8 +501,6 @@ struct SettingsGradientBackground: View {
     }
 }
 
-/// Drop inside any scrollable container (ScrollView/List content)
-/// to emit scroll offset for gradient tracking.
 struct EclipseScrollTracker: View {
     var body: some View {
         GeometryReader { geo in
@@ -525,7 +517,7 @@ enum HomeAnimatedBackgroundSettings {
     static let enabledKey = "homeAnimatedBackgroundEnabled"
     static let defaultEnabled = true
 
-    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+    static func isEnabled(defaults: UserDefaults = ProfileSettingsStore.active) -> Bool {
         defaults.object(forKey: enabledKey) == nil ? defaultEnabled : defaults.bool(forKey: enabledKey)
     }
 }
@@ -565,7 +557,7 @@ enum HomeAnimatedBackgroundQuality: String, CaseIterable, Identifiable {
         return quality
     }
 
-    static func current(defaults: UserDefaults = .standard) -> HomeAnimatedBackgroundQuality {
+    static func current(defaults: UserDefaults = ProfileSettingsStore.active) -> HomeAnimatedBackgroundQuality {
         resolved(defaults.string(forKey: storageKey))
     }
 }
@@ -583,8 +575,7 @@ enum HomeAnimatedBackgroundFrameRate: String, CaseIterable, Identifiable {
     static var defaultValue: HomeAnimatedBackgroundFrameRate { .fps20 }
 
     static func resolved(_ rawValue: String?) -> HomeAnimatedBackgroundFrameRate {
-        // Migrate the brief 15 FPS setting without leaving existing installs on
-        // an invalid raw value or unexpectedly opting them into 30 FPS.
+
         if rawValue == "fps15" { return .fps20 }
         guard let rawValue, let value = HomeAnimatedBackgroundFrameRate(rawValue: rawValue) else {
             return defaultValue
@@ -597,10 +588,115 @@ enum ModeSwitchAnimationSettings {
     static let enabledKey = "modeSwitchAnimationEnabled"
     static let defaultEnabled = true
 
-    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+    static func isEnabled(defaults: UserDefaults = ProfileSettingsStore.active) -> Bool {
         defaults.object(forKey: enabledKey) == nil ? defaultEnabled : defaults.bool(forKey: enabledKey)
     }
 }
+
+struct EclipseIsolatedAmbientMotionBackground: View {
+    let topClearance: CGFloat
+    let ambientColor: Color?
+    let accentColor: Color
+    let motionEnabled: Bool
+
+    var body: some View {
+#if os(iOS)
+        EclipseAmbientMotionHostingBoundary(
+            topClearance: topClearance,
+            ambientColor: ambientColor,
+            accentColor: accentColor,
+            motionEnabled: motionEnabled
+        )
+#else
+        EclipseAmbientMotionBackground(
+            topClearance: topClearance,
+            ambientColor: ambientColor,
+            accentColor: accentColor,
+            motionEnabled: motionEnabled
+        )
+#endif
+    }
+}
+
+#if os(iOS)
+private struct EclipseAmbientMotionHostedRoot: View {
+    let topClearance: CGFloat
+    let ambientColor: Color?
+    let accentColor: Color
+    let motionEnabled: Bool
+
+    var body: some View {
+        EclipseAmbientMotionBackground(
+            topClearance: topClearance,
+            ambientColor: ambientColor,
+            accentColor: accentColor,
+            motionEnabled: motionEnabled
+        )
+        .ignoresSafeArea(.all)
+    }
+}
+
+private struct EclipseAmbientConfig: Equatable {
+    let topClearance: CGFloat
+    let ambientColor: Color?
+    let accentColor: Color
+    let motionEnabled: Bool
+}
+
+private struct EclipseAmbientMotionHostingBoundary: UIViewControllerRepresentable {
+    let topClearance: CGFloat
+    let ambientColor: Color?
+    let accentColor: Color
+    let motionEnabled: Bool
+
+    private var hostedRoot: EclipseAmbientMotionHostedRoot {
+        EclipseAmbientMotionHostedRoot(
+            topClearance: topClearance,
+            ambientColor: ambientColor,
+            accentColor: accentColor,
+            motionEnabled: motionEnabled
+        )
+    }
+
+    private var currentConfig: EclipseAmbientConfig {
+        EclipseAmbientConfig(
+            topClearance: topClearance,
+            ambientColor: ambientColor,
+            accentColor: accentColor,
+            motionEnabled: motionEnabled
+        )
+    }
+
+    final class Coordinator {
+        var last: EclipseAmbientConfig?
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeUIViewController(
+        context: Context
+    ) -> UIHostingController<ProfileScopedAppStorage<EclipseAmbientMotionHostedRoot>> {
+        let controller = UIHostingController(rootView: hostedRoot.profileScopedAppStorage())
+        controller.view.backgroundColor = .clear
+        controller.view.isOpaque = false
+        controller.view.isUserInteractionEnabled = false
+        context.coordinator.last = currentConfig
+        return controller
+    }
+
+    func updateUIViewController(
+        _ controller: UIHostingController<ProfileScopedAppStorage<EclipseAmbientMotionHostedRoot>>,
+        context: Context
+    ) {
+        let config = currentConfig
+        guard config != context.coordinator.last else { return }
+        context.coordinator.last = config
+        controller.rootView = hostedRoot.profileScopedAppStorage()
+    }
+}
+#endif
 
 struct EclipseAmbientMotionBackground: View {
     let topClearance: CGFloat
@@ -860,16 +956,12 @@ struct EclipseAmbientMotionBackground: View {
         )
     }
 
-    /// An analogous, in-palette color set keeps the energetic tiers cohesive
-    /// with the selected theme instead of introducing a fixed rainbow.
     private struct CelestialPalette {
         let core: Color
         let cool: Color
         let warm: Color
         let bright: Color
     }
-
-    // MARK: Medium — animated plasma field
 
     private func drawMediumMotion(
         context: inout GraphicsContext,
@@ -886,7 +978,6 @@ struct EclipseAmbientMotionBackground: View {
         let minDim = min(width, height)
         let palette = celestialPalette()
 
-        // A restrained two-arm vortex ties the moving field back to the eclipse.
         drawVortexFilaments(
             context: &context,
             center: center,
@@ -902,7 +993,6 @@ struct EclipseAmbientMotionBackground: View {
             lineWidth: 1.2
         )
 
-        // Constant particle motion keeps Medium visibly active.
         drawStarfield(context: &context, size: size, seconds: seconds, count: 26, seedOffset: 0, speedScale: 1.0, palette: palette)
         drawOrbitingEmbers(
             context: &context,
@@ -939,8 +1029,6 @@ struct EclipseAmbientMotionBackground: View {
         )
     }
 
-    // MARK: High — cinematic kinetic scene
-
     private func drawHighMotion(
         context: inout GraphicsContext,
         size: CGSize,
@@ -956,7 +1044,6 @@ struct EclipseAmbientMotionBackground: View {
         let minDim = min(width, height)
         let palette = celestialPalette()
 
-        // Counter-rotating filaments add depth without overwhelming the scene.
         drawVortexFilaments(
             context: &context,
             center: center,
@@ -996,8 +1083,6 @@ struct EclipseAmbientMotionBackground: View {
         )
         drawMeteorBursts(context: &context, size: size, seconds: seconds, palette: palette)
     }
-
-    // MARK: Elevated-tier primitives
 
     private func drawVortexFilaments(
         context: inout GraphicsContext,
@@ -1282,8 +1367,6 @@ struct EclipseAmbientMotionBackground: View {
         }
     }
 
-    /// Radial and linear gradients do the softening here; keeping blur filters
-    /// out of the dense particle loops is what makes High practical at 30 fps.
     private func drawSoftGlow(context: inout GraphicsContext, center: CGPoint, radius: CGFloat, color: Color, coreOpacity: Double) {
         guard radius > 1, coreOpacity > 0.001 else { return }
         let rect = CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)
@@ -1427,21 +1510,21 @@ struct GlobalGradientBackground: View {
     var scrollOffset: CGFloat = 0
     var allowsAnimatedBackground: Bool = true
     var animatedBackgroundTopClearance: CGFloat = 0
-    
+
     private var gradientColor: Color {
         overrideColor ?? theme.scopedGradientColor()
     }
-    
+
     private var gradientOffset: CGFloat {
         -scrollOffset * 0.15 * CGFloat(ExperimentalVisualTuning.current.gradientScrollMotion)
     }
-    
+
     @ViewBuilder
     var body: some View {
         baseBackground
             .overlay {
                 if allowsAnimatedBackground && animatedBackgroundEnabled {
-                    EclipseAmbientMotionBackground(
+                    EclipseIsolatedAmbientMotionBackground(
                         topClearance: animatedBackgroundTopClearance,
                         ambientColor: overrideColor,
                         accentColor: gradientColor,
@@ -1839,11 +1922,6 @@ struct ExperimentalGradientBackground: View {
 
 #endif
 
-// MARK: - Eclipse Design Tokens
-//
-// A single source of truth for spacing, radius, type, and shadow so every
-// screen reads from the same scale instead of re-inventing values inline.
-
 enum EclipseSpacing {
     static let xs: CGFloat = 6
     static let s: CGFloat = 10
@@ -1853,7 +1931,7 @@ enum EclipseSpacing {
 }
 
 enum EclipseRadius {
-    /// The shared card radius, sourced from the active design metrics.
+
     static var card: CGFloat { ExperimentalMediaDesignMetrics.current.cardRadius }
     static let chip: CGFloat = 10
     static let control: CGFloat = 14
@@ -1903,17 +1981,14 @@ enum EclipseShadowTier {
 }
 
 extension View {
-    /// Apply one of the four shared elevation tiers.
+
     func eclipseShadow(_ tier: EclipseShadowTier = .standard) -> some View {
         shadow(color: Color.black.opacity(tier.opacity), radius: tier.radius, x: 0, y: tier.yOffset)
     }
 }
 
-// MARK: - Modern Atmosphere System
-
 extension Color {
-    /// Scales a color for the Background Intensity control. `intensity == 1`
-    /// returns the color unchanged; `< 1` darkens and `> 1` lifts it (clamped).
+
     func atmosphereScaled(_ intensity: Double) -> Color {
         guard intensity != 1.0 else { return self }
         #if canImport(UIKit)
@@ -1932,16 +2007,14 @@ extension Color {
     }
 }
 
-/// A curated dark multi-gradient palette. Mesh colors are kept inside a tight
-/// luminance band so the rendered background has no bright spots.
 struct AtmospherePalette: Equatable {
     let id: String
     let displayName: String
-    /// 12 colors, row-major 3 columns x 4 rows, for the iOS 18 MeshGradient.
+
     let mesh: [Color]
-    /// Vertical stops for the iOS 15-17 fallback (top to bottom).
+
     let verticalStops: [Gradient.Stop]
-    /// Soft top wash for the fallback's top-anchored radial.
+
     let topWash: Color
 
     func meshColors(intensity: Double) -> [Color] {
@@ -1983,8 +2056,6 @@ enum AtmospherePaletteID: String, CaseIterable, Identifiable {
 enum AppearancePalettes {
     private static func c(_ r: Double, _ g: Double, _ b: Double) -> Color { Color(red: r, green: g, blue: b) }
 
-    // Purple-dominant but genuinely multi-hued: indigo, violet, magenta and
-    // blue blend together so it reads as a multi-gradient, not flat purple.
     static let midnightPurple = AtmospherePalette(
         id: "midnightPurple", displayName: "Midnight Purple",
         mesh: [
@@ -2001,7 +2072,6 @@ enum AppearancePalettes {
         topWash: c(0.42, 0.22, 0.58)
     )
 
-    // Blue-dominant with teal and indigo accents.
     static let nocturne = AtmospherePalette(
         id: "nocturne", displayName: "Nocturne",
         mesh: [
@@ -2018,7 +2088,6 @@ enum AppearancePalettes {
         topWash: c(0.20, 0.42, 0.62)
     )
 
-    // Wine / magenta dominant with violet accents.
     static let velvet = AtmospherePalette(
         id: "velvet", displayName: "Velvet",
         mesh: [
@@ -2035,7 +2104,6 @@ enum AppearancePalettes {
         topWash: c(0.55, 0.20, 0.46)
     )
 
-    // Teal / green dominant drifting into violet.
     static let mutedAurora = AtmospherePalette(
         id: "mutedAurora", displayName: "Muted Aurora",
         mesh: [
@@ -2093,8 +2161,6 @@ enum AppearancePalettes {
     }
 }
 
-/// Persistence keys, clamps and one-time legacy migration for the appearance
-/// controls. Values are owned here and persisted by EclipseTheme.
 enum AppearanceConfig {
     static let paletteKey = "appearancePalette"
     static let bleedStrengthKey = "appearanceBleedStrength"
@@ -2148,9 +2214,7 @@ enum AppearanceConfig {
         #endif
     }
 
-    /// Map the previous experimental tuning keys onto the new appearance model
-    /// once, so upgrading users keep their look.
-    static func migrateIfNeeded(defaults: UserDefaults = .standard) {
+    static func migrateIfNeeded(defaults: UserDefaults = ProfileSettingsStore.active) {
         guard !defaults.bool(forKey: migratedKey) else { return }
         defaults.set(true, forKey: migratedKey)
 
@@ -2201,8 +2265,6 @@ enum AtmosphereBackgroundMode: Equatable {
     case solid
 }
 
-/// Everything required to render an atmosphere. A value type so SwiftUI can
-/// diff it cheaply and EclipseTheme can build it for any screen.
 struct AtmosphereInput: Equatable {
     var mode: AtmosphereBackgroundMode
     var palette: AtmospherePalette
@@ -2349,9 +2411,7 @@ private struct AtmosphereBleedLayer: View {
     let containerSize: CGSize
 
     var body: some View {
-        // The hero image is opaque and covers the top, so hold the bleed at
-        // near-full strength through the hero, then fade it out over the tail
-        // below - that is the part that actually reads as "color bleeding down".
+
         let tail = max(containerSize.height * 0.55, 220)
         let h = max(heroHeight + tail, 1)
         let holdEnd = min(max(heroHeight / h, 0.05), 0.9)
@@ -2372,7 +2432,6 @@ private struct AtmosphereBleedLayer: View {
     }
 }
 
-// MARK: - Scroll-attached hero banner bleed
 struct HeroBannerBleed: View {
     var color: Color
     var heroHeight: CGFloat
@@ -2386,8 +2445,7 @@ struct HeroBannerBleed: View {
         return LinearGradient(
             stops: [
                 .init(color: color.opacity(min(1, 1.00 * s)), location: 0.0),
-                // Hold full opacity through the hero so the boundary is pure color
-                // on both sides (the hero overlay also reaches full) - no seam.
+
                 .init(color: color.opacity(min(1, 1.00 * s)), location: hold),
                 .init(color: color.opacity(min(1, 0.60 * s)), location: hold + (1 - hold) * 0.28),
                 .init(color: color.opacity(min(1, 0.30 * s)), location: hold + (1 - hold) * 0.52),
@@ -2404,10 +2462,7 @@ struct HeroBannerBleed: View {
 }
 
 extension View {
-    /// Attaches a scroll-following banner bleed to the top of scroll content.
-    /// Pass `color == nil` (e.g. a near-black poster, via
-    /// `EclipseTheme.usableDominant`) to render nothing, so the app gradient
-    /// shows through unmuddied.
+
     @ViewBuilder
     func heroBannerBleed(color: Color?, heroHeight: CGFloat, tail: CGFloat, strength: Double) -> some View {
         if let color, strength > 0.001, heroHeight > 0 {

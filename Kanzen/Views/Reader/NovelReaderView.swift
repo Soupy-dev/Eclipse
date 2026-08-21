@@ -1,11 +1,20 @@
-// Novel reader using WKWebView for HTML chapter content. I robbed this from Sora lmfao
-
 import SwiftUI
 
 #if !os(tvOS)
 import WebKit
 
-// MARK: - NovelReaderView
+enum ReaderExtensionOfflineNovelHTML {
+    /// Reader Extension novel downloads are persisted as inert plain text.
+    /// Encode that text once before placing it in the reader's HTML body so
+    /// downloaded text can never be reparsed as source-provided markup.
+    static func bodyContent(for downloadedText: String, route: MangaContentRoute) -> String {
+        guard case .readerExtension = route else { return downloadedText }
+        return downloadedText
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+    }
+}
 
 struct NovelReaderView: View {
     let kanzen: KanzenEngine
@@ -22,22 +31,26 @@ struct NovelReaderView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var progressManager = MangaReadingProgressManager.shared
 
-    // Current chapter state
+    @State private var progressOwnerProfileID: UUID
+
+    private var ownerSettings: UserDefaults {
+        ProfileSettingsStore.shared.store(for: progressOwnerProfileID)
+    }
+
     @State private var currentChapter: Chapter
     @State private var htmlContent: String = ""
     @State private var isLoading: Bool = true
     @State private var loadError: String?
 
-    // UI visibility
     @State private var isHeaderVisible: Bool = true
     @State private var isSettingsExpanded: Bool = false
     @State private var readingProgress: Double = 0.0
     @State private var autoMarkedReadChapters: Set<String> = []
     @State private var windowSafeAreaInsets: UIEdgeInsets = .zero
     @State private var scrollRequest: NovelScrollRequest?
-    @AppStorage("readerReadThresholdPercent") private var readerReadThresholdPercent: Double = 80
 
-    // Reader settings (persisted)
+    @State private var readerReadThreshold: Double
+
     @State private var fontSize: CGFloat
     @State private var selectedFont: String
     @State private var fontWeight: String
@@ -46,7 +59,6 @@ struct NovelReaderView: View {
     @State private var lineSpacing: CGFloat
     @State private var margin: CGFloat
 
-    // Auto-scroll
     @State private var isAutoScrolling: Bool = false
     @State private var autoScrollSpeed: Double = 1.0
 
@@ -89,8 +101,10 @@ struct NovelReaderView: View {
         Color(hex: colorPresets[selectedColorPreset].text)
     }
 
-    private var readerReadThreshold: Double {
-        max(50, min(readerReadThresholdPercent, 100)) / 100
+    private var usesIsolatedReaderExtensionDocument: Bool {
+        guard let mangaRoute else { return false }
+        if case .readerExtension = mangaRoute { return true }
+        return false
     }
 
     init(kanzen: KanzenEngine, chapters: [Chapter], initialChapter: Chapter, mangaId: Int, mangaTitle: String, mangaCoverURL: String, mangaRoute: MangaContentRoute? = nil, mangaFormat: String? = nil, totalChapters: Int? = nil, latestChapterNumbers: [String]? = nil) {
@@ -107,17 +121,28 @@ struct NovelReaderView: View {
 
         _currentChapter = State(initialValue: initialChapter)
 
-        let defaults = UserDefaults.standard
-        _fontSize = State(initialValue: defaults.novelCGFloat(forKey: "readerFontSize") ?? 16)
+        let owner = ProfileManager.shared.activeProfileID
+        _progressOwnerProfileID = State(initialValue: owner)
+
+        let defaults = ProfileSettingsStore.shared.store(for: owner)
+        let storedThreshold = defaults.object(forKey: "readerReadThresholdPercent") as? Double ?? 80
+        let readThreshold = storedThreshold.isFinite ? min(max(storedThreshold, 50), 100) : 80
+        let fontSize = defaults.novelCGFloat(forKey: "readerFontSize", default: 16, range: 12...32)
+        let lineSpacing = defaults.novelCGFloat(forKey: "readerLineSpacing", default: 1.6, range: 1...3)
+        let margin = defaults.novelCGFloat(forKey: "readerMargin", default: 4, range: 0...30)
+        defaults.set(readThreshold, forKey: "readerReadThresholdPercent")
+        defaults.setNovelCGFloat(fontSize, forKey: "readerFontSize")
+        defaults.setNovelCGFloat(lineSpacing, forKey: "readerLineSpacing")
+        defaults.setNovelCGFloat(margin, forKey: "readerMargin")
+        _readerReadThreshold = State(initialValue: readThreshold / 100)
+        _fontSize = State(initialValue: fontSize)
         _selectedFont = State(initialValue: defaults.string(forKey: "readerFontFamily") ?? "-apple-system")
         _fontWeight = State(initialValue: defaults.string(forKey: "readerFontWeight") ?? "normal")
         _selectedColorPreset = State(initialValue: defaults.integer(forKey: "readerColorPreset"))
         _textAlignment = State(initialValue: defaults.string(forKey: "readerTextAlignment") ?? "left")
-        _lineSpacing = State(initialValue: defaults.novelCGFloat(forKey: "readerLineSpacing") ?? 1.6)
-        _margin = State(initialValue: defaults.novelCGFloat(forKey: "readerMargin") ?? 4)
+        _lineSpacing = State(initialValue: lineSpacing)
+        _margin = State(initialValue: margin)
     }
-
-    // MARK: - Body
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -140,7 +165,7 @@ struct NovelReaderView: View {
                 }
             } else {
                 ZStack {
-                    // Tap area for toggling header
+
                     Color.clear
                         .contentShape(Rectangle())
                         .onTapGesture {
@@ -163,6 +188,8 @@ struct NovelReaderView: View {
                         autoScrollSpeed: autoScrollSpeed,
                         colorPreset: colorPresets[selectedColorPreset],
                         chapterKey: currentChapter.id.uuidString,
+                        settingsStore: ownerSettings,
+                        isolatesReaderExtensionHTML: usesIsolatedReaderExtensionDocument,
                         scrollRequest: scrollRequest,
                         onProgressChanged: { progress in
                             self.readingProgress = progress
@@ -182,7 +209,6 @@ struct NovelReaderView: View {
                 }
             }
 
-            // Header overlay
             headerView
                 .opacity(isHeaderVisible ? 1 : 0)
                 .offset(y: isHeaderVisible ? 0 : -100)
@@ -190,7 +216,6 @@ struct NovelReaderView: View {
                 .animation(.easeInOut(duration: 0.4), value: isHeaderVisible)
                 .zIndex(1)
 
-            // Footer overlay
             if isHeaderVisible {
                 footerView
                     .transition(.move(edge: .bottom))
@@ -219,20 +244,21 @@ struct NovelReaderView: View {
         }
     }
 
-    // MARK: - Content Loading
-
     private func loadChapterContent() {
         isLoading = true
         loadError = nil
         htmlContent = ""
 
-        ReaderLogger.shared.log("NovelReader: loadChapterContent for chapter '\(currentChapter.chapterNumber)'", type: "ReaderDebug")
+        ReaderLogger.shared.log("NovelReader: chapter load requested", type: "ReaderDebug")
         ReaderLogger.shared.log("NovelReader: chapterData count=\(currentChapter.chapterData?.count ?? 0)", type: "ReaderDebug")
 
         if let mangaRoute,
            let downloadedText = ReaderDownloadManager.shared.text(for: mangaRoute, chapterNumber: currentChapter.chapterNumber) {
-            ReaderLogger.shared.log("NovelReader: loaded downloaded text for chapter '\(currentChapter.chapterNumber)'", type: "ReaderDownload")
-            htmlContent = downloadedText
+            ReaderLogger.shared.log("NovelReader: loaded downloaded text", type: "ReaderDownload")
+            htmlContent = ReaderExtensionOfflineNovelHTML.bodyContent(
+                for: downloadedText,
+                route: mangaRoute
+            )
             isLoading = false
             return
         }
@@ -245,7 +271,7 @@ struct NovelReaderView: View {
         }
 
         ReaderLogger.shared.log("NovelReader: chapterData.params type=\(type(of: data.params as Any))", type: "ReaderDebug")
-        ReaderLogger.shared.log("NovelReader: chapterData.scanlationGroup='\(data.scanlationGroup)', title='\(data.title)'", type: "ReaderDebug")
+        ReaderLogger.shared.log("NovelReader: chapter metadata available", type: "ReaderDebug")
 
         guard let params = data.params else {
             ReaderLogger.shared.log("NovelReader: params is nil", type: "Error")
@@ -254,10 +280,43 @@ struct NovelReaderView: View {
             return
         }
 
-        if let downloadedPayload = params as? ReaderDownloadedChapterPayload {
-            ReaderLogger.shared.log("NovelReader: downloaded text missing for chapter '\(downloadedPayload.chapterNumber)'", type: "ReaderDownload")
+        if params is ReaderDownloadedChapterPayload {
+            ReaderLogger.shared.log("NovelReader: downloaded text files missing", type: "ReaderDownload")
             loadError = "Downloaded chapter files are missing."
             isLoading = false
+            return
+        }
+
+        if let payload = params as? ReaderExtensionChapterPayload {
+            let owner = progressOwnerProfileID
+            Task { @MainActor in
+                do {
+                    let provider = try ReaderExtensionManager.shared.provider(for: payload.sourceID)
+                    let sanitizedHTML = try await provider.chapterHTML(
+                        chapterKey: payload.chapter.key,
+                        chapterTitle: payload.chapter.title
+                    )
+                    guard ProfileManager.shared.isStillActive(owner) else { return }
+                    htmlContent = sanitizedHTML
+                    isLoading = false
+                    ReaderLogger.shared.log(
+                        "NovelReader: Reader Extension chapter loaded length=\(sanitizedHTML.count)",
+                        type: "ReaderExtensions"
+                    )
+                } catch {
+                    guard ProfileManager.shared.isStillActive(owner) else { return }
+                    if case ReaderExtensionError.domainConsentRequired(let host) = error {
+                        loadError = "This source needs permission to contact \(host). Review its missing domain approvals in Reader Sources."
+                    } else {
+                        loadError = error.localizedDescription
+                    }
+                    isLoading = false
+                    ReaderLogger.shared.log(
+                        "NovelReader: Reader Extension chapter failed: \(error.localizedDescription)",
+                        type: "ReaderExtensions"
+                    )
+                }
+            }
             return
         }
 
@@ -276,8 +335,6 @@ struct NovelReaderView: View {
             }
         }
     }
-
-    // MARK: - Chapter Navigation
 
     private func goToNextChapter() {
         guard let idx = chapters.firstIndex(where: { $0.id == currentChapter.id }),
@@ -305,7 +362,8 @@ struct NovelReaderView: View {
             format: mangaFormat,
             totalChapters: totalChapters,
             latestChapterNumbers: latestChapterNumbers,
-            route: mangaRoute
+            route: mangaRoute,
+            forProfile: progressOwnerProfileID
         )
     }
 
@@ -314,8 +372,6 @@ struct NovelReaderView: View {
         autoMarkedReadChapters.insert(currentChapter.chapterNumber)
         markCurrentChapterRead()
     }
-
-    // MARK: - Header
 
     private var headerView: some View {
         VStack {
@@ -342,7 +398,6 @@ struct NovelReaderView: View {
 
                 Spacer()
 
-                // Previous chapter
                 Button { goToPreviousChapter() } label: {
                     Image(systemName: "backward.end.fill")
                         .font(.system(size: 14, weight: .bold))
@@ -354,7 +409,6 @@ struct NovelReaderView: View {
                 }
                 .disabled(chapters.firstIndex(where: { $0.id == currentChapter.id }) == 0)
 
-                // Next chapter
                 Button { goToNextChapter() } label: {
                     Image(systemName: "forward.end.fill")
                         .font(.system(size: 14, weight: .bold))
@@ -369,7 +423,6 @@ struct NovelReaderView: View {
                     return idx + 1 >= chapters.count
                 }())
 
-                // Settings toggle
                 Button {
                     withAnimation(.spring(response: 0.5, dampingFraction: 0.8)) {
                         isSettingsExpanded.toggle()
@@ -403,14 +456,12 @@ struct NovelReaderView: View {
         .ignoresSafeArea()
     }
 
-    // MARK: - Footer
-
     private var footerView: some View {
         VStack {
             Spacer()
 
             VStack(spacing: 0) {
-                // Auto-scroll toggle
+
                 HStack {
                     Spacer()
                     Button {
@@ -427,7 +478,6 @@ struct NovelReaderView: View {
                 .padding(.horizontal, 20)
                 .padding(.top, 12)
 
-                // Progress bar
                 GeometryReader { geo in
                     ZStack(alignment: .leading) {
                         Rectangle()
@@ -467,26 +517,23 @@ struct NovelReaderView: View {
         .ignoresSafeArea()
     }
 
-    // MARK: - Settings Panel
-
     @ViewBuilder
     private var settingsPanel: some View {
         VStack(spacing: 8) {
-            // Font size
+
             Menu {
                 VStack {
                     Text("Font Size: \(Int(fontSize))pt")
-                    Slider(value: Binding(get: { fontSize }, set: { fontSize = $0; UserDefaults.standard.setNovelCGFloat($0, forKey: "readerFontSize") }), in: 12...32, step: 1)
+                    Slider(value: Binding(get: { fontSize }, set: { fontSize = $0; ProfileSettingsStore.active.setNovelCGFloat($0, forKey: "readerFontSize") }), in: 12...32, step: 1)
                 }
                 .padding()
             } label: { settingsIcon("textformat.size") }
 
-            // Font family
             Menu {
                 ForEach(fontOptions, id: \.0) { font in
                     Button {
                         selectedFont = font.0
-                        UserDefaults.standard.set(font.0, forKey: "readerFontFamily")
+                        ProfileSettingsStore.active.set(font.0, forKey: "readerFontFamily")
                     } label: {
                         HStack {
                             Text(font.1)
@@ -497,12 +544,11 @@ struct NovelReaderView: View {
                 }
             } label: { settingsIcon("textformat.characters") }
 
-            // Font weight
             Menu {
                 ForEach(weightOptions, id: \.0) { weight in
                     Button {
                         fontWeight = weight.0
-                        UserDefaults.standard.set(weight.0, forKey: "readerFontWeight")
+                        ProfileSettingsStore.active.set(weight.0, forKey: "readerFontWeight")
                     } label: {
                         HStack {
                             Text(weight.1)
@@ -513,12 +559,11 @@ struct NovelReaderView: View {
                 }
             } label: { settingsIcon("bold") }
 
-            // Color theme
             Menu {
                 ForEach(0..<colorPresets.count, id: \.self) { idx in
                     Button {
                         selectedColorPreset = idx
-                        UserDefaults.standard.set(idx, forKey: "readerColorPreset")
+                        ProfileSettingsStore.active.set(idx, forKey: "readerColorPreset")
                     } label: {
                         HStack {
                             Text(colorPresets[idx].name)
@@ -529,30 +574,27 @@ struct NovelReaderView: View {
                 }
             } label: { settingsIcon("paintpalette") }
 
-            // Line spacing
             Menu {
                 VStack {
                     Text("Line Spacing: \(String(format: "%.1f", lineSpacing))")
-                    Slider(value: Binding(get: { lineSpacing }, set: { lineSpacing = $0; UserDefaults.standard.setNovelCGFloat($0, forKey: "readerLineSpacing") }), in: 1.0...3.0, step: 0.1)
+                    Slider(value: Binding(get: { lineSpacing }, set: { lineSpacing = $0; ProfileSettingsStore.active.setNovelCGFloat($0, forKey: "readerLineSpacing") }), in: 1.0...3.0, step: 0.1)
                 }
                 .padding()
             } label: { settingsIcon("arrow.left.and.right.text.vertical") }
 
-            // Margin
             Menu {
                 VStack {
                     Text("Margin: \(Int(margin))px")
-                    Slider(value: Binding(get: { margin }, set: { margin = $0; UserDefaults.standard.setNovelCGFloat($0, forKey: "readerMargin") }), in: 0...30, step: 1)
+                    Slider(value: Binding(get: { margin }, set: { margin = $0; ProfileSettingsStore.active.setNovelCGFloat($0, forKey: "readerMargin") }), in: 0...30, step: 1)
                 }
                 .padding()
             } label: { settingsIcon("rectangle.inset.filled") }
 
-            // Text alignment
             Menu {
                 ForEach(alignmentOptions, id: \.0) { alignment in
                     Button {
                         textAlignment = alignment.0
-                        UserDefaults.standard.set(alignment.0, forKey: "readerTextAlignment")
+                        ProfileSettingsStore.active.set(alignment.0, forKey: "readerTextAlignment")
                     } label: {
                         HStack {
                             Image(systemName: alignment.2)
@@ -576,15 +618,11 @@ struct NovelReaderView: View {
             .clipShape(Circle())
     }
 
-    // MARK: - Scroll to position
-
     private func scrollToPosition(_ percentage: CGFloat) {
         let clamped = min(max(percentage, 0), 1)
         readingProgress = Double(clamped)
         scrollRequest = NovelScrollRequest(percentage: clamped)
     }
-
-    // MARK: - Safe area helpers
 
     private var safeAreaTop: CGFloat {
         windowSafeAreaInsets.top
@@ -650,8 +688,6 @@ private final class NovelReaderWindowMetricsProbeView: UIView {
     }
 }
 
-// MARK: - NovelHTMLView (WKWebView wrapper)
-
 private struct NovelScrollRequest: Equatable {
     let id = UUID()
     let percentage: CGFloat
@@ -669,6 +705,9 @@ private struct NovelHTMLView: UIViewRepresentable {
     let autoScrollSpeed: Double
     let colorPreset: (name: String, background: String, text: String)
     let chapterKey: String
+
+    let settingsStore: UserDefaults
+    let isolatesReaderExtensionHTML: Bool
     let scrollRequest: NovelScrollRequest?
     var onProgressChanged: ((Double) -> Void)?
 
@@ -679,12 +718,12 @@ private struct NovelHTMLView: UIViewRepresentable {
     }
 
     class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+        private static let readerBridgeWorld = WKContentWorld.world(name: "app.eclipse.reader-extension-progress")
         var parent: NovelHTMLView
         var scrollTimer: Timer?
         var progressTimer: Timer?
         weak var webView: WKWebView?
 
-        // Change detection
         var lastHTML: String = ""
         var lastFontSize: CGFloat = 0
         var lastFontFamily: String = ""
@@ -699,12 +738,33 @@ private struct NovelHTMLView: UIViewRepresentable {
             self.parent = parent
         }
 
+        func evaluateReaderScript(
+            _ script: String,
+            in webView: WKWebView,
+            completion: ((Any?, Error?) -> Void)? = nil
+        ) {
+            if parent.isolatesReaderExtensionHTML {
+                webView.evaluateJavaScript(
+                    script,
+                    in: nil,
+                    in: Self.readerBridgeWorld
+                ) { result in
+                    switch result {
+                    case .success(let value): completion?(value, nil)
+                    case .failure(let error): completion?(nil, error)
+                    }
+                }
+            } else {
+                webView.evaluateJavaScript(script, completionHandler: completion)
+            }
+        }
+
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            // Restore saved scroll position
-            let saved = UserDefaults.standard.double(forKey: "novelScrollPos_\(parent.chapterKey)")
+
+            let saved = parent.settingsStore.double(forKey: "novelScrollPos_\(parent.chapterKey)")
             if saved > 0.01 {
                 let script = "window.scrollTo(0, document.documentElement.scrollHeight * \(saved));"
-                webView.evaluateJavaScript(script, completionHandler: nil)
+                evaluateReaderScript(script, in: webView)
             }
             startProgressTracking(webView: webView)
         }
@@ -715,14 +775,12 @@ private struct NovelHTMLView: UIViewRepresentable {
             }
         }
 
-        // MARK: Auto-scroll
-
         func startAutoScroll(_ webView: WKWebView) {
             stopAutoScroll()
             scrollTimer = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { _ in
                 let amount = self.parent.autoScrollSpeed * 0.5
-                webView.evaluateJavaScript("window.scrollBy(0, \(amount));", completionHandler: nil)
-                webView.evaluateJavaScript("(window.pageYOffset + window.innerHeight) >= document.body.scrollHeight") { result, _ in
+                self.evaluateReaderScript("window.scrollBy(0, \(amount));", in: webView)
+                self.evaluateReaderScript("(window.pageYOffset + window.innerHeight) >= document.body.scrollHeight", in: webView) { result, _ in
                     if let atBottom = result as? Bool, atBottom {
                         DispatchQueue.main.async { self.parent.isAutoScrolling = false }
                     }
@@ -734,8 +792,6 @@ private struct NovelHTMLView: UIViewRepresentable {
             scrollTimer?.invalidate()
             scrollTimer = nil
         }
-
-        // MARK: Progress tracking
 
         func startProgressTracking(webView: WKWebView) {
             stopProgressTracking()
@@ -764,9 +820,24 @@ private struct NovelHTMLView: UIViewRepresentable {
                 requestAnimationFrame(tick);
             })();
             """
-            let script = WKUserScript(source: js, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
+            let script = parent.isolatesReaderExtensionHTML
+                ? WKUserScript(
+                    source: js,
+                    injectionTime: .atDocumentEnd,
+                    forMainFrameOnly: true,
+                    in: Self.readerBridgeWorld
+                )
+                : WKUserScript(source: js, injectionTime: .atDocumentEnd, forMainFrameOnly: true)
             webView.configuration.userContentController.addUserScript(script)
-            webView.configuration.userContentController.add(self, name: "novelScrollHandler")
+            if parent.isolatesReaderExtensionHTML {
+                webView.configuration.userContentController.add(
+                    self,
+                    contentWorld: Self.readerBridgeWorld,
+                    name: "novelScrollHandler"
+                )
+            } else {
+                webView.configuration.userContentController.add(self, name: "novelScrollHandler")
+            }
         }
 
         func stopProgressTracking() {
@@ -774,7 +845,14 @@ private struct NovelHTMLView: UIViewRepresentable {
             progressTimer = nil
             if let wv = webView {
                 wv.configuration.userContentController.removeAllUserScripts()
-                wv.configuration.userContentController.removeScriptMessageHandler(forName: "novelScrollHandler")
+                if parent.isolatesReaderExtensionHTML {
+                    wv.configuration.userContentController.removeScriptMessageHandler(
+                        forName: "novelScrollHandler",
+                        contentWorld: Self.readerBridgeWorld
+                    )
+                } else {
+                    wv.configuration.userContentController.removeScriptMessageHandler(forName: "novelScrollHandler")
+                }
             }
         }
 
@@ -790,19 +868,42 @@ private struct NovelHTMLView: UIViewRepresentable {
                 return { progress: progress, scrollPos: st / sh };
             })();
             """
-            webView.evaluateJavaScript(js) { [weak self] result, _ in
+            evaluateReaderScript(js, in: webView) { [weak self] result, _ in
                 guard let self, let dict = result as? [String: Any],
                       let progress = dict["progress"] as? Double else { return }
                 if let scrollPos = dict["scrollPos"] as? Double {
-                    UserDefaults.standard.set(scrollPos, forKey: "novelScrollPos_\(self.parent.chapterKey)")
+                    self.parent.settingsStore.set(scrollPos, forKey: "novelScrollPos_\(self.parent.chapterKey)")
                 }
                 self.parent.onProgressChanged?(progress)
             }
         }
+
+        func webView(
+            _ webView: WKWebView,
+            decidePolicyFor navigationAction: WKNavigationAction,
+            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+        ) {
+            guard parent.isolatesReaderExtensionHTML else {
+                decisionHandler(.allow)
+                return
+            }
+            let url = navigationAction.request.url
+            let isInitialDocument = navigationAction.navigationType == .other
+                && (url == nil || url?.scheme?.lowercased() == "about")
+            decisionHandler(isInitialDocument ? .allow : .cancel)
+        }
     }
 
     func makeUIView(context: Context) -> WKWebView {
-        let wv = WKWebView()
+        let wv: WKWebView
+        if isolatesReaderExtensionHTML {
+            let configuration = WKWebViewConfiguration()
+            configuration.websiteDataStore = .nonPersistent()
+            configuration.defaultWebpagePreferences.allowsContentJavaScript = false
+            wv = WKWebView(frame: .zero, configuration: configuration)
+        } else {
+            wv = WKWebView()
+        }
         wv.backgroundColor = .clear
         wv.isOpaque = false
         wv.scrollView.backgroundColor = .clear
@@ -827,7 +928,7 @@ private struct NovelHTMLView: UIViewRepresentable {
                 window.scrollTo({ top: h * \(percentage), behavior: 'auto' });
             })();
             """
-            webView.evaluateJavaScript(script, completionHandler: nil)
+            c.evaluateReaderScript(script, in: webView)
         }
 
         if isAutoScrolling {
@@ -851,11 +952,15 @@ private struct NovelHTMLView: UIViewRepresentable {
 
         guard changed else { return }
 
+        let contentSecurityPolicy = isolatesReaderExtensionHTML
+            ? "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; img-src 'none'; style-src 'unsafe-inline'; font-src 'none'; media-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'; connect-src 'none'\">"
+            : ""
         let html = """
         <!DOCTYPE html>
         <html>
         <head>
             <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+            \(contentSecurityPolicy)
             <style>
                 html, body {
                     font-family: \(fontFamily), system-ui;
@@ -891,12 +996,11 @@ private struct NovelHTMLView: UIViewRepresentable {
         """
         webView.loadHTMLString(html, baseURL: nil)
 
-        // Restore scroll position after load
-        let savedPos = UserDefaults.standard.double(forKey: "novelScrollPos_\(chapterKey)")
+        let savedPos = settingsStore.double(forKey: "novelScrollPos_\(chapterKey)")
         if savedPos > 0.01 {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 let js = "window.scrollTo(0, document.documentElement.scrollHeight * \(savedPos));"
-                webView.evaluateJavaScript(js, completionHandler: nil)
+                c.evaluateReaderScript(js, in: webView)
             }
         }
 
@@ -910,8 +1014,6 @@ private struct NovelHTMLView: UIViewRepresentable {
         c.lastPreset = colorPreset.name
     }
 }
-
-// MARK: - Color hex initializer
 
 private extension Color {
     init(hex: String) {
@@ -935,12 +1037,15 @@ private extension Color {
     }
 }
 
-// MARK: - UserDefaults CGFloat helpers
-
 private extension UserDefaults {
-    func novelCGFloat(forKey key: String) -> CGFloat? {
-        guard let val = object(forKey: key) as? NSNumber else { return nil }
-        return CGFloat(val.doubleValue)
+    func novelCGFloat(
+        forKey key: String,
+        default defaultValue: CGFloat,
+        range: ClosedRange<CGFloat>
+    ) -> CGFloat {
+        guard let value = (object(forKey: key) as? NSNumber)?.doubleValue,
+              value.isFinite else { return defaultValue }
+        return min(max(CGFloat(value), range.lowerBound), range.upperBound)
     }
 
     func setNovelCGFloat(_ value: CGFloat, forKey key: String) {

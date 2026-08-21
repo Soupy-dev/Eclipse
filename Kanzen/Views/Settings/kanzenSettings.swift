@@ -1,15 +1,68 @@
+//
+//  kanzenSettings.swift
+//  Kanzen
+//
+//  Created by Dawud Osman on 16/05/2025.
+//
+
 import SwiftUI
 
 #if !os(tvOS)
 struct KanzenSettingsView: View {
     @EnvironmentObject var moduleManager: ModuleManager
+    @ObservedObject private var contentFilter = ReaderContentFilter.shared
+    @ObservedObject private var migrationCoordinator = KanzenAidokuMigrationCoordinator.shared
     @State private var autoUpdateModules = ModuleManager.isAutoUpdateEnabled
+
+    private var isAdministrable: Bool { !contentFilter.isKidsProfileActive }
+
+    private var showsSavedMangaRecovery: Bool {
+        isAdministrable && migrationCoordinator.canOpenMigrationFromSettings
+    }
+
+    private var savedMangaRecoverySubtitle: String {
+        let count = migrationCoordinator.summary.affectedEntryCount
+        guard count > 0 else { return "Review" }
+        return KanzenAidokuMigrationCopy.counted(count, "title", "titles")
+    }
 
     var body: some View {
         NavigationView {
             ScrollView {
                 VStack(spacing: 28) {
                     KanzenRootHeader("Settings")
+
+                    GlassSection(header: "Profiles") {
+                        VStack(spacing: 0) {
+                            NavigationLink(destination: ProfilesSettingsView()) {
+                                GlassSettingsRow(icon: "person.2.fill", iconColor: .mint, title: "Profiles") {
+                                    Text(ProfileManager.shared.activeProfile?.name ?? "1 profile")
+                                        .font(.subheadline)
+                                        .foregroundColor(.white.opacity(0.5))
+                                }
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
+                    if showsSavedMangaRecovery {
+                        GlassSection(header: "Saved Manga") {
+                            VStack(spacing: 0) {
+                                NavigationLink(destination: KanzenAidokuMigrationView()) {
+                                    GlassSettingsRow(
+                                        icon: "arrow.triangle.2.circlepath",
+                                        iconColor: .orange,
+                                        title: "Reconnect Saved Manga"
+                                    ) {
+                                        Text(savedMangaRecoverySubtitle)
+                                            .font(.subheadline)
+                                            .foregroundColor(.white.opacity(0.5))
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
 
                     GlassSection(header: "General") {
                         VStack(spacing: 0) {
@@ -18,51 +71,55 @@ struct KanzenSettingsView: View {
                             }
                             .buttonStyle(.plain)
 
-                            GlassDivider()
+                            if isAdministrable {
+                                GlassDivider()
 
-                            NavigationLink(destination: AidokuSourcesSettingsView().environmentObject(moduleManager)) {
-                                GlassSettingsRow(icon: "shippingbox.fill", iconColor: .orange, title: "Aidoku Sources")
+                                NavigationLink(destination: ReaderExtensionsSettingsView()) {
+                                    GlassSettingsRow(icon: "shippingbox.fill", iconColor: .orange, title: "Reader Sources")
+                                }
+                                .buttonStyle(.plain)
+
+                                GlassDivider()
+
+                                NavigationLink(destination: MangaCatalogSettingsView().environmentObject(moduleManager)) {
+                                    GlassSettingsRow(icon: "slider.horizontal.3", iconColor: .green, title: "Home Sources")
+                                }
+                                .buttonStyle(.plain)
+
+                                GlassDivider()
+
+                                NavigationLink(destination: KanzenTrackerSettingsView()) {
+                                    GlassSettingsRow(icon: "chart.bar.fill", iconColor: .pink, title: "Trackers")
+                                }
+                                .buttonStyle(.plain)
+
+                                GlassDivider()
+
+                                NavigationLink(destination: ReaderDownloadsSettingsView()) {
+                                    GlassSettingsRow(icon: "arrow.down.circle.fill", iconColor: .blue, title: "Downloads")
+                                }
+                                .buttonStyle(.plain)
                             }
-                            .buttonStyle(.plain)
-
-                            GlassDivider()
-
-                            NavigationLink(destination: MangaCatalogSettingsView().environmentObject(moduleManager)) {
-                                GlassSettingsRow(icon: "slider.horizontal.3", iconColor: .green, title: "Home Sources")
-                            }
-                            .buttonStyle(.plain)
-
-                            GlassDivider()
-
-                            NavigationLink(destination: KanzenTrackerSettingsView()) {
-                                GlassSettingsRow(icon: "chart.bar.fill", iconColor: .pink, title: "Trackers")
-                            }
-                            .buttonStyle(.plain)
-
-                            GlassDivider()
-
-                            NavigationLink(destination: ReaderDownloadsSettingsView()) {
-                                GlassSettingsRow(icon: "arrow.down.circle.fill", iconColor: .blue, title: "Downloads")
-                            }
-                            .buttonStyle(.plain)
                         }
                     }
 
-                    GlassSection(header: "Legacy JS Modules") {
-                        VStack(spacing: 0) {
-                            NavigationLink(destination: KanzenModuleView().environmentObject(moduleManager)) {
-                                GlassSettingsRow(icon: "puzzlepiece.extension.fill", iconColor: .cyan, title: "Manage Legacy Modules")
-                            }
-                            .buttonStyle(.plain)
+                    if isAdministrable {
+                        GlassSection(header: "Legacy JS Modules") {
+                            VStack(spacing: 0) {
+                                NavigationLink(destination: KanzenModuleView().environmentObject(moduleManager)) {
+                                    GlassSettingsRow(icon: "puzzlepiece.extension.fill", iconColor: .cyan, title: "Manage Legacy Modules")
+                                }
+                                .buttonStyle(.plain)
 
-                            GlassDivider()
+                                GlassDivider()
 
-                            GlassSettingsRow(icon: "arrow.triangle.2.circlepath", iconColor: .teal, title: "Auto-Update Legacy Modules") {
-                                Toggle("", isOn: $autoUpdateModules)
-                                    .labelsHidden()
-                                    .onChange(of: autoUpdateModules) { newValue in
-                                        ModuleManager.isAutoUpdateEnabled = newValue
-                                    }
+                                GlassSettingsRow(icon: "arrow.triangle.2.circlepath", iconColor: .teal, title: "Auto-Update Legacy Modules") {
+                                    Toggle("", isOn: $autoUpdateModules)
+                                        .labelsHidden()
+                                        .onChange(of: autoUpdateModules) { newValue in
+                                            ModuleManager.isAutoUpdateEnabled = newValue
+                                        }
+                                }
                             }
                         }
                     }
@@ -78,6 +135,7 @@ struct KanzenSettingsView: View {
                 .padding(.bottom, 32)
             }
             .background(GlobalGradientBackground().ignoresSafeArea())
+            .eclipseDarkToolbar()
         }
         .navigationViewStyle(StackNavigationViewStyle())
     }
@@ -85,10 +143,50 @@ struct KanzenSettingsView: View {
 
 private struct KanzenTrackerSettingsView: View {
     @StateObject private var trackerManager = TrackerManager.shared
+    @ObservedObject private var contentFilter = ReaderContentFilter.shared
     @State private var showAniListImportConfirmation = false
     @State private var showMALImportConfirmation = false
 
     var body: some View {
+        Group {
+            if contentFilter.isKidsProfileActive {
+                restrictedContent
+            } else {
+                trackerContent
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
+
+    private var restrictedContent: some View {
+        ScrollView {
+            VStack(spacing: 24) {
+                KanzenRootHeader("Trackers")
+                    .padding(.horizontal, -20)
+
+                GlassSection(header: "Accounts") {
+                    Text("This is a kids profile, so it cannot connect or disconnect trackers or import libraries. Switch to a grown-up profile to make those changes.")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.68))
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 12)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 16)
+            .padding(.bottom, 32)
+            .frame(maxWidth: isIPad ? 760 : .infinity)
+            .frame(maxWidth: .infinity)
+        }
+        .background(GlobalGradientBackground().ignoresSafeArea())
+        .navigationTitle("Trackers")
+        .navigationBarTitleDisplayMode(.inline)
+        .eclipseDarkToolbar()
+    }
+
+    private var trackerContent: some View {
         ScrollView {
             VStack(spacing: 24) {
                 KanzenRootHeader("Trackers")
@@ -96,10 +194,10 @@ private struct KanzenTrackerSettingsView: View {
 
                 GlassSection(header: "Reader Sync") {
                     VStack(spacing: 0) {
-                        GlassSettingsRow(icon: "arrow.triangle.2.circlepath", iconColor: .blue, title: "Enable Sync") {
+                        GlassSettingsRow(icon: "arrow.triangle.2.circlepath", iconColor: .blue, title: "Enable Reader Sync") {
                             Toggle("", isOn: Binding(
-                                get: { trackerManager.trackerState.syncEnabled },
-                                set: { trackerManager.setSyncEnabled($0) }
+                                get: { trackerManager.trackerState.readerSyncEnabled },
+                                set: { trackerManager.setReaderSyncEnabled($0) }
                             ))
                             .labelsHidden()
                         }
@@ -114,9 +212,9 @@ private struct KanzenTrackerSettingsView: View {
                             .labelsHidden()
                         }
 
-                        Text("Automatic Reader rating sync only sends the score after a confident AniList/MAL manga match. Notes sync only when you tap a tracker button on a Reader detail page.")
+                        Text("Reader sync is independent from Media mode. Automatic Reader rating sync only sends the score after a confident AniList/MAL manga match. Notes sync only when you tap a tracker button on a Reader detail page.")
                             .font(.caption)
-                            .foregroundColor(.secondary)
+                            .foregroundColor(.white.opacity(0.68))
                             .multilineTextAlignment(.leading)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 16)
@@ -129,8 +227,14 @@ private struct KanzenTrackerSettingsView: View {
                         trackerRow(
                             service: .anilist,
                             username: trackerManager.trackerState.getAccount(for: .anilist)?.username,
-                            onConnect: { trackerManager.startAniListAuth() },
-                            onDisconnect: { trackerManager.disconnectTracker(.anilist) }
+                            onConnect: {
+                                guard !contentFilter.isKidsProfileActive else { return }
+                                trackerManager.startAniListAuth()
+                            },
+                            onDisconnect: {
+                                guard !contentFilter.isKidsProfileActive else { return }
+                                trackerManager.disconnectTracker(.anilist)
+                            }
                         )
 
                         if trackerManager.trackerState.getAccount(for: .anilist) != nil {
@@ -148,8 +252,14 @@ private struct KanzenTrackerSettingsView: View {
                         trackerRow(
                             service: .myAnimeList,
                             username: trackerManager.trackerState.getAccount(for: .myAnimeList)?.username,
-                            onConnect: { trackerManager.startMALAuth() },
-                            onDisconnect: { trackerManager.disconnectTracker(.myAnimeList) }
+                            onConnect: {
+                                guard !contentFilter.isKidsProfileActive else { return }
+                                trackerManager.startMALAuth()
+                            },
+                            onDisconnect: {
+                                guard !contentFilter.isKidsProfileActive else { return }
+                                trackerManager.disconnectTracker(.myAnimeList)
+                            }
                         )
 
                         if trackerManager.trackerState.getAccount(for: .myAnimeList) != nil {
@@ -184,8 +294,10 @@ private struct KanzenTrackerSettingsView: View {
         .background(GlobalGradientBackground().ignoresSafeArea())
         .navigationTitle("Trackers")
         .navigationBarTitleDisplayMode(.inline)
+        .eclipseDarkToolbar()
         .alert("Import AniList Library", isPresented: $showAniListImportConfirmation) {
             Button("Import", role: .none) {
+                guard !contentFilter.isKidsProfileActive else { return }
                 trackerManager.importAniListToLibrary()
             }
             Button("Cancel", role: .cancel) { }
@@ -194,6 +306,7 @@ private struct KanzenTrackerSettingsView: View {
         }
         .alert("Import MAL Library", isPresented: $showMALImportConfirmation) {
             Button("Import", role: .none) {
+                guard !contentFilter.isKidsProfileActive else { return }
                 trackerManager.importMALToLibrary()
             }
             Button("Cancel", role: .cancel) { }
@@ -220,10 +333,11 @@ private struct KanzenTrackerSettingsView: View {
                 Text(service.displayName)
                     .font(.subheadline)
                     .fontWeight(.medium)
+                    .foregroundColor(.white)
 
                 Text(username ?? "Not connected")
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.white.opacity(0.5))
             }
 
             Spacer()
@@ -257,9 +371,10 @@ private struct KanzenTrackerSettingsView: View {
                 Text(title)
                     .font(.subheadline)
                     .fontWeight(.medium)
+                    .foregroundColor(.white)
                 Text(subtitle)
                     .font(.caption)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.white.opacity(0.5))
                     .lineLimit(2)
             }
 

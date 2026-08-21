@@ -1,3 +1,10 @@
+//
+//  MangaLibraryItem.swift
+//  Kanzen
+//
+//  Created by Eclipse on 2026.
+//
+
 import Foundation
 
 struct MangaLibraryItem: Codable, Identifiable, Equatable {
@@ -22,6 +29,8 @@ struct MangaLibraryItem: Codable, Identifiable, Equatable {
     var trackerMatchConfidence: Double? = nil
     var trackerResolvedAt: Date? = nil
 
+    var contentRating: Int? = nil
+
     var knownChapterNumbers: [String] {
         if let latestChapterNumbers, !latestChapterNumbers.isEmpty {
             return ChapterIdentityNormalizer.deduplicatedNumbers(latestChapterNumbers)
@@ -43,9 +52,6 @@ struct MangaLibraryItem: Codable, Identifiable, Equatable {
         }
     }
 
-    /// Create a library item from module search content.
-    /// Produces a stable negative ID from the module + content identifier
-    /// so it never collides with AniList IDs (which are always positive).
     static func fromModule(
         moduleId: UUID,
         contentId: String,
@@ -53,11 +59,12 @@ struct MangaLibraryItem: Codable, Identifiable, Equatable {
         coverURL: String?,
         isNovel: Bool,
         sourceName: String? = nil,
-        latestChapterNumbers: [String]? = nil
+        latestChapterNumbers: [String]? = nil,
+        contentRating: Int? = nil
     ) -> MangaLibraryItem {
         let uniqueChapterNumbers = latestChapterNumbers.map(ChapterIdentityNormalizer.deduplicatedNumbers)
         let combined = "\(moduleId.uuidString):\(contentId)"
-        // Use a stable hash; make it negative to avoid AniList ID collisions
+
         let hash = combined.utf8.reduce(into: 5381) { h, c in h = ((h &<< 5) &+ h) &+ Int(c) }
         let stableId = hash < 0 ? hash : -hash - 1
         return MangaLibraryItem(
@@ -71,21 +78,28 @@ struct MangaLibraryItem: Codable, Identifiable, Equatable {
             isNovel: isNovel,
             route: .legacyModule(moduleUUID: moduleId.uuidString, contentParams: contentId, isNovel: isNovel),
             sourceName: sourceName,
-            latestChapterNumbers: uniqueChapterNumbers
+            latestChapterNumbers: uniqueChapterNumbers,
+            contentRating: contentRating
         )
     }
 
-    static func fromAidoku(
-        sourceId: String,
-        mangaKey: String,
+    static func fromReaderExtension(
+        sourceID: ReaderExtensionSourceID,
+        itemKey: String,
+        legacyStableKey: String? = nil,
         title: String,
         coverURL: String?,
         sourceName: String? = nil,
         latestChapterNumbers: [String]? = nil,
-        format: String? = "MANGA"
+        format: String? = "MANGA",
+        contentRating: Int? = nil
     ) -> MangaLibraryItem {
         let uniqueChapterNumbers = latestChapterNumbers.map(ChapterIdentityNormalizer.deduplicatedNumbers)
-        let route = MangaContentRoute.aidoku(sourceId: sourceId, mangaKey: mangaKey)
+        let route = MangaContentRoute.readerExtension(
+            source: sourceID,
+            itemKey: itemKey,
+            legacyStableKey: legacyStableKey
+        )
         return MangaLibraryItem(
             aniListId: route.stableNegativeId,
             title: title,
@@ -94,7 +108,8 @@ struct MangaLibraryItem: Codable, Identifiable, Equatable {
             totalChapters: uniqueChapterNumbers?.count,
             route: route,
             sourceName: sourceName,
-            latestChapterNumbers: uniqueChapterNumbers
+            latestChapterNumbers: uniqueChapterNumbers,
+            contentRating: contentRating
         )
     }
 

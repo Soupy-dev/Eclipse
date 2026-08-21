@@ -1,4 +1,10 @@
-// Reworked for the modern Eclipse appearance system.
+//
+//  AlternativeUIView.swift
+//  Sora
+//
+//  Created by Francesco on 20/08/25.
+//  Reworked for the modern Eclipse appearance system.
+//
 
 import SwiftUI
 
@@ -20,9 +26,12 @@ enum AppearanceSettingsSearchTarget: String, Hashable {
     case hideSplashScreen
     case alternativeSeasonMenu
     case horizontalEpisodeList
+    case showUnairedEpisodes
     case tmdbTitleArt
     case ageRating
     case similarTitles
+    case libraryBookmarks
+    case libraryCollectionLayout
 
     var anchorID: String {
         "appearance-settings-search-\(rawValue)"
@@ -36,8 +45,10 @@ enum AppearanceSettingsSearchTarget: String, Hashable {
             return "interface"
         case .switchModeAnimation, .animatedBackground, .animationQuality, .animationFrameRate, .appPerformanceOverlay, .hideSplashScreen:
             return "motion"
-        case .alternativeSeasonMenu, .horizontalEpisodeList, .tmdbTitleArt, .ageRating, .similarTitles:
+        case .alternativeSeasonMenu, .horizontalEpisodeList, .showUnairedEpisodes, .tmdbTitleArt, .ageRating, .similarTitles:
             return "details"
+        case .libraryBookmarks, .libraryCollectionLayout:
+            return "library"
         }
     }
 }
@@ -45,15 +56,16 @@ enum AppearanceSettingsSearchTarget: String, Hashable {
 struct AlternativeUIView: View {
     let initialSearchTarget: AppearanceSettingsSearchTarget?
 
-    // Retained display options
     @AppStorage(MediaDetailPlatformDefaults.seasonMenuKey) private var useSeasonMenu = MediaDetailPlatformDefaults.prefersCompactSeasonMenu
     @AppStorage(MediaDetailPlatformDefaults.horizontalEpisodeListKey) private var horizontalEpisodeList = MediaDetailPlatformDefaults.prefersHorizontalEpisodes
+    @AppStorage(MediaDetailEpisodeVisibilitySettings.showUnairedEpisodesKey) private var showUnairedEpisodes = MediaDetailEpisodeVisibilitySettings.defaultShowUnairedEpisodes
     @AppStorage(MediaDetailTitleArtworkSettings.enabledKey) private var mediaDetailTitleArtworkEnabled = MediaDetailTitleArtworkSettings.defaultEnabled
     @AppStorage(MediaDetailAlternatePosterSettings.enabledKey) private var mediaDetailAlternatePosterEnabled = MediaDetailAlternatePosterSettings.defaultEnabled
     @AppStorage(MediaDetailAgeRatingSettings.enabledKey) private var mediaDetailAgeRatingEnabled = MediaDetailAgeRatingSettings.defaultEnabled
     @AppStorage(MediaDetailSimilarTitlesSettings.enabledKey) private var mediaDetailSimilarTitlesEnabled = MediaDetailSimilarTitlesSettings.defaultEnabled
+    @AppStorage(LibraryDisplaySettings.showBookmarksSectionKey) private var showsBookmarksSection = LibraryDisplaySettings.defaultShowBookmarksSection
+    @AppStorage(LibraryDisplaySettings.collectionLayoutKey) private var collectionLayoutRaw = LibraryCollectionLayout.defaultValue.rawValue
 
-    // Layout knobs retained for Reset Appearance; their controls now live in Home Layout.
     @AppStorage(ExperimentalMediaDesignPreset.storageKey) private var experimentalDesignPreset = ExperimentalMediaDesignPreset.defaultValue.rawValue
     @AppStorage(ExperimentalHomeCardShape.storageKey) private var experimentalHomeCardShape = ExperimentalHomeCardShape.defaultValue.rawValue
     @AppStorage(ExperimentalVisualTuning.sectionSpacingScaleKey) private var experimentalSectionSpacingScale = ExperimentalVisualTuning.defaultSectionSpacingScale
@@ -67,11 +79,11 @@ struct AlternativeUIView: View {
     @AppStorage(AppPerformanceOverlaySettings.enabledKey) private var appPerformanceOverlayEnabled = AppPerformanceOverlaySettings.defaultEnabled
 #if !os(tvOS)
     @AppStorage(ModeSwitchAnimationSettings.enabledKey) private var modeSwitchAnimationEnabled = ModeSwitchAnimationSettings.defaultEnabled
-    @AppStorage("hideSplashScreen") private var hideSplashScreen = false
+    @AppStorage("hideSplashScreen", store: ProfileSettingsStore.device) private var hideSplashScreen = false
 #endif
 
-    // Interface (modern vs classic) - restart applied gate
-    @AppStorage(ExperimentalFeatureState.enabledKey) private var modernInterfaceEnabled = true
+    @AppStorage(ExperimentalFeatureState.enabledKey, store: ProfileSettingsStore.device)
+    private var modernInterfaceEnabled = true
     @State private var showRestartAlert = false
 
     @StateObject private var accentColorManager = AccentColorManager.shared
@@ -110,8 +122,6 @@ struct AlternativeUIView: View {
             Text("The interface style is applied when Eclipse launches. Restart the app to switch between the Modern and Classic layouts.")
         }
     }
-
-    // MARK: - Appearance categories
 
     private var customizationSection: some View {
         Section {
@@ -193,6 +203,19 @@ struct AlternativeUIView: View {
             }
 
             NavigationLink {
+                AppearanceSettingsSubpage(title: "Library", sectionKey: "library", initialSearchTarget: initialSearchTarget) {
+                    librarySection
+                        .eclipseExperimentalSettingsRows()
+                }
+            } label: {
+                appearanceCategoryLabel(
+                    title: "Library",
+                    description: "Choose which sections appear and how collections are arranged.",
+                    systemImage: "books.vertical"
+                )
+            }
+
+            NavigationLink {
                 AppearanceSettingsSubpage(title: "Media Detail Layout", sectionKey: "mediaDetailLayout", initialSearchTarget: initialSearchTarget) {
                     mediaDetailSection
                         .eclipseExperimentalSettingsRows()
@@ -209,8 +232,6 @@ struct AlternativeUIView: View {
         }
     }
 
-    // MARK: - Live preview
-
     private var previewSection: some View {
         Section {
             AppearancePreviewCard()
@@ -221,8 +242,6 @@ struct AlternativeUIView: View {
 #endif
         }
     }
-
-    // MARK: - Theme
 
     private var themeSection: some View {
         Section {
@@ -317,8 +336,6 @@ struct AlternativeUIView: View {
         }
     }
 
-    // MARK: - Interface & scope
-
 #if !os(tvOS)
     private var interfaceSection: some View {
         Section {
@@ -371,8 +388,6 @@ struct AlternativeUIView: View {
         }
     }
 #endif
-
-    // MARK: - App experience
 
     private var appExperienceSection: some View {
         Section {
@@ -438,8 +453,6 @@ struct AlternativeUIView: View {
         }
     }
 
-    // MARK: - Detail pages
-
     private var detailPagesSection: some View {
         Section {
             toggleRow(
@@ -455,16 +468,24 @@ struct AlternativeUIView: View {
             )
             .id(AppearanceSettingsSearchTarget.horizontalEpisodeList.anchorID)
             toggleRow(
+                title: "Show Unaired Episodes",
+                description: "Keep future episodes visible in show and anime episode lists.",
+                isOn: $showUnairedEpisodes
+            )
+            .id(AppearanceSettingsSearchTarget.showUnairedEpisodes.anchorID)
+            toggleRow(
                 title: "TMDB Title Art",
                 description: "Use TMDB logo artwork for media titles when available.",
                 isOn: $mediaDetailTitleArtworkEnabled
             )
             .id(AppearanceSettingsSearchTarget.tmdbTitleArt.anchorID)
-            toggleRow(
-                title: "Alternate Detail Poster",
-                description: "Use a TMDB alternate poster behind title art on phone detail pages when available.",
-                isOn: $mediaDetailAlternatePosterEnabled
-            )
+            if MediaDetailAlternatePosterSettings.isSupportedOnThisDevice {
+                toggleRow(
+                    title: "Alternate Detail Poster",
+                    description: "Use a trusted text-free TMDB poster behind title art on phone detail pages; otherwise keep the regular poster.",
+                    isOn: $mediaDetailAlternatePosterEnabled
+                )
+            }
             toggleRow(
                 title: "Show Age Rating",
                 description: "Display the available content age rating on movie and series detail pages.",
@@ -476,7 +497,31 @@ struct AlternativeUIView: View {
         }
     }
 
-    // MARK: - Reset
+    private var librarySection: some View {
+        Section {
+            toggleRow(
+                title: "Show Bookmarks",
+                description: "Keep the Bookmarks section visible in Library. Hiding it does not remove any saved bookmarks.",
+                isOn: $showsBookmarksSection
+            )
+            .id(AppearanceSettingsSearchTarget.libraryBookmarks.anchorID)
+
+            settingRow(
+                title: "Collection Layout",
+                description: "Show collections in a horizontal row or a vertical grid."
+            ) {
+                Picker("", selection: $collectionLayoutRaw) {
+                    ForEach(LibraryCollectionLayout.allCases) { layout in
+                        Text(layout.displayName).tag(layout.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+            }
+            .id(AppearanceSettingsSearchTarget.libraryCollectionLayout.anchorID)
+        } header: {
+            Text("Library")
+        }
+    }
 
     private var resetSection: some View {
         Section {
@@ -500,8 +545,6 @@ struct AlternativeUIView: View {
             Text("Resets theme, layout, app experience, and per-catalog overrides to their defaults.")
         }
     }
-
-    // MARK: - Media detail layout
 
     private var mediaDetailSection: some View {
         Section {
@@ -565,8 +608,6 @@ struct AlternativeUIView: View {
 #endif
     }
 
-    // MARK: - Bindings
-
     private var backgroundStyleBinding: Binding<AtmosphereStyle> {
         Binding(
             get: {
@@ -618,8 +659,6 @@ struct AlternativeUIView: View {
     }
 #endif
 
-    // MARK: - Swatch
-
     private func paletteSwatch(_ id: AtmospherePaletteID) -> some View {
         let palette = AppearancePalettes.resolved(id: id, customColors: theme.customPaletteColors)
         let selected = theme.appearancePaletteRaw == id.rawValue
@@ -628,10 +667,10 @@ struct AlternativeUIView: View {
                 theme.appearancePaletteRaw = id.rawValue
             }
         } label: {
-            VStack(spacing: 6) {
+            VStack(spacing: isTvOS ? 10 : 6) {
                 RoundedRectangle(cornerRadius: 13, style: .continuous)
                     .fill(LinearGradient(stops: palette.verticalStops, startPoint: .top, endPoint: .bottom))
-                    .frame(width: 56, height: 56)
+                    .frame(width: isTvOS ? 120 : 56, height: isTvOS ? 120 : 56)
                     .overlay(
                         RoundedRectangle(cornerRadius: 13, style: .continuous)
                             .strokeBorder(selected ? accent : Color.white.opacity(0.14), lineWidth: selected ? 2.5 : 1)
@@ -639,17 +678,15 @@ struct AlternativeUIView: View {
                     .scaleEffect(selected ? 1.05 : 1.0)
 
                 Text(id.displayName)
-                    .font(.system(size: 11, weight: selected ? .semibold : .regular))
-                    .foregroundColor(selected ? .white : .white.opacity(0.6))
+                    .font(.system(size: isTvOS ? 25 : 11, weight: selected ? .semibold : .regular))
+                    .foregroundColor(isTvOS ? (selected ? Color.primary : Color.secondary) : (selected ? Color.white : Color.white.opacity(0.6)))
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
-                    .frame(width: 62)
+                    .frame(width: isTvOS ? 134 : 62)
             }
         }
         .buttonStyle(.plain)
     }
-
-    // MARK: - Row helpers
 
     private func appearanceCategoryLabel(
         title: String,
@@ -786,8 +823,6 @@ struct AlternativeUIView: View {
         .padding(.vertical, 4)
     }
 
-    // MARK: - Actions
-
     private func reloadMediaDetailElements() {
         mediaDetailElements = MediaDetailElement.orderedElements()
         hiddenMediaDetailElements = MediaDetailElement.hiddenElements()
@@ -857,9 +892,14 @@ struct AlternativeUIView: View {
         hideSplashScreen = false
 #endif
         mediaDetailTitleArtworkEnabled = MediaDetailTitleArtworkSettings.defaultEnabled
-        mediaDetailAlternatePosterEnabled = MediaDetailAlternatePosterSettings.defaultEnabled
+        if MediaDetailAlternatePosterSettings.isSupportedOnThisDevice {
+            mediaDetailAlternatePosterEnabled = MediaDetailAlternatePosterSettings.defaultEnabled
+        }
         mediaDetailAgeRatingEnabled = MediaDetailAgeRatingSettings.defaultEnabled
+        showUnairedEpisodes = MediaDetailEpisodeVisibilitySettings.defaultShowUnairedEpisodes
         mediaDetailSimilarTitlesEnabled = MediaDetailSimilarTitlesSettings.defaultEnabled
+        showsBookmarksSection = LibraryDisplaySettings.defaultShowBookmarksSection
+        collectionLayoutRaw = LibraryCollectionLayout.defaultValue.rawValue
         HomeCatalogLayoutStore.shared.resetAll()
     }
 }
@@ -905,8 +945,6 @@ private struct AppearanceSettingsSubpage<Content: View>: View {
         .eclipseSettingsStyle()
     }
 }
-
-// MARK: - Live preview card
 
 private struct AppearancePreviewCard: View {
     @ObservedObject private var theme = EclipseTheme.shared

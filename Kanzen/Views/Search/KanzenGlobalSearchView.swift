@@ -1,6 +1,12 @@
+//
+//  KanzenGlobalSearchView.swift
+//  Kanzen
+//
+//  Created by Eclipse on 2025.
+//
+
 import SwiftUI
 import Kingfisher
-import AidokuRunner
 
 #if !os(tvOS)
 private enum MangaSearchRecentStore {
@@ -8,7 +14,7 @@ private enum MangaSearchRecentStore {
     static let limit = 10
 
     static func load() -> [String] {
-        UserDefaults.standard.stringArray(forKey: key) ?? []
+        ProfileSettingsStore.active.stringArray(forKey: key) ?? []
     }
 
     @discardableResult
@@ -19,12 +25,12 @@ private enum MangaSearchRecentStore {
         var searches = load().filter { $0.caseInsensitiveCompare(trimmed) != .orderedSame }
         searches.insert(trimmed, at: 0)
         searches = Array(searches.prefix(limit))
-        UserDefaults.standard.set(searches, forKey: key)
+        ProfileSettingsStore.active.set(searches, forKey: key)
         return searches
     }
 
     static func clear() {
-        UserDefaults.standard.removeObject(forKey: key)
+        ProfileSettingsStore.active.removeObject(forKey: key)
     }
 }
 
@@ -40,17 +46,22 @@ private struct MangaSourceSearchOutcome {
     let error: Error?
     let elapsedMs: Int
     let wasCancelled: Bool
+    let timedOut: Bool
 
     static func success(source: MangaHomeSource, items: [MangaHomeItem], elapsedMs: Int) -> MangaSourceSearchOutcome {
-        MangaSourceSearchOutcome(source: source, items: items, error: nil, elapsedMs: elapsedMs, wasCancelled: false)
+        MangaSourceSearchOutcome(source: source, items: items, error: nil, elapsedMs: elapsedMs, wasCancelled: false, timedOut: false)
     }
 
     static func failure(source: MangaHomeSource, error: Error, elapsedMs: Int) -> MangaSourceSearchOutcome {
-        MangaSourceSearchOutcome(source: source, items: [], error: error, elapsedMs: elapsedMs, wasCancelled: false)
+        MangaSourceSearchOutcome(source: source, items: [], error: error, elapsedMs: elapsedMs, wasCancelled: false, timedOut: false)
     }
 
     static func cancelled(source: MangaHomeSource, elapsedMs: Int) -> MangaSourceSearchOutcome {
-        MangaSourceSearchOutcome(source: source, items: [], error: nil, elapsedMs: elapsedMs, wasCancelled: true)
+        MangaSourceSearchOutcome(source: source, items: [], error: nil, elapsedMs: elapsedMs, wasCancelled: true, timedOut: false)
+    }
+
+    static func timedOut(source: MangaHomeSource, elapsedMs: Int) -> MangaSourceSearchOutcome {
+        MangaSourceSearchOutcome(source: source, items: [], error: nil, elapsedMs: elapsedMs, wasCancelled: false, timedOut: true)
     }
 }
 
@@ -63,20 +74,43 @@ private final class MangaGlobalModuleSearchViewModel: ObservableObject {
     @Published var hasSearched = false
 
     private static let maxConcurrentSourceSearches = 3
+    private static let sourceTimeoutNanoseconds: UInt64 = 30_000_000_000
+    private static let overallSearchTimeoutNanoseconds: UInt64 = 60_000_000_000
     private var searchToken = UUID()
     private var pendingSearchCount = 0
     private var searchStartedAt = Date.distantPast
     private var didLogFirstSourceResult = false
-    private var activeSearchTask: Task<Void, Never>?
+    private var queuedSources: [MangaHomeSource] = []
+    private var nextSourceIndex = 0
+    private var activeSourceIDs = Set<String>()
+    private var sourceSearchTasks: [String: Task<Void, Never>] = [:]
+    private var sourceTimeoutTasks: [String: Task<Void, Never>] = [:]
+    private var searchDeadlineTask: Task<Void, Never>?
+    private var currentQuery: String?
 
-    func refreshSources(from modules: [ModuleDataContainer], aidokuManager: AidokuSourceManager) {
+    func refreshSources(from modules: [ModuleDataContainer], readerExtensionManager: ReaderExtensionManager) {
         MangaHomeSourceManager.shared.refreshSources(from: modules)
-        sources = MangaHomeSourceManager.shared.enabledSources(aidokuManager: aidokuManager, modules: modules)
-        ReaderLogger.shared.log("Global search sources refreshed aidoku=\(sources.filter(\.isAidoku).count) total=\(sources.count)", type: "ReaderSearch")
+        let refreshedSources = MangaHomeSourceManager.shared.enabledSources(
+            readerExtensionManager: readerExtensionManager,
+            modules: modules
+        )
+        guard refreshedSources != sources else { return }
+        sources = refreshedSources
+        ReaderLogger.shared.log("Global search sources refreshed extensions=\(sources.filter(\.isReaderExtension).count) total=\(sources.count)", type: "ReaderSearch")
+    }
+
+    func isShowingResults(for query: String) -> Bool {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        return !trimmed.isEmpty && currentQuery == trimmed && hasSearched
     }
 
     func resetSearch() {
         cancelCurrentSearch(reason: "reset", clearResults: true)
+    }
+
+    func restrictForKidsProfile() {
+        cancelCurrentSearch(reason: "kids-profile", clearResults: true)
+        sources = []
     }
 
     func cancelSearch(keepResults: Bool = true) {
@@ -86,13 +120,13 @@ private final class MangaGlobalModuleSearchViewModel: ObservableObject {
     private func cancelCurrentSearch(reason: String, clearResults: Bool) {
         let wasSearching = isSearching
         searchToken = UUID()
-        activeSearchTask?.cancel()
-        activeSearchTask = nil
+        cancelOutstandingSearchTasks()
         pendingSearchCount = 0
         if clearResults {
             sections = []
             failedSourceNames = []
             hasSearched = false
+            currentQuery = nil
         }
         isSearching = false
         if wasSearching {
@@ -107,18 +141,19 @@ private final class MangaGlobalModuleSearchViewModel: ObservableObject {
             return
         }
 
-        let activeSources = sources.filter(\.isAidoku)
+        let activeSources = sources.filter(\.isReaderExtension)
+        currentQuery = trimmed
         guard !activeSources.isEmpty else {
             sections = []
             failedSourceNames = []
             isSearching = false
             hasSearched = true
-            ReaderLogger.shared.log("Global search skipped no Aidoku sources queryLength=\(trimmed.count)", type: "ReaderSearch")
+            ReaderLogger.shared.log("Global search skipped no Reader Extensions queryLength=\(trimmed.count)", type: "ReaderSearch")
             return
         }
 
         let token = UUID()
-        activeSearchTask?.cancel()
+        cancelOutstandingSearchTasks()
         searchToken = token
         isSearching = true
         hasSearched = true
@@ -136,67 +171,150 @@ private final class MangaGlobalModuleSearchViewModel: ObservableObject {
             type: "ReaderSearch"
         )
 
-        activeSearchTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            await self.runSearch(activeSources: activeSources, query: trimmed, token: token)
+        queuedSources = activeSources
+        nextSourceIndex = 0
+        searchDeadlineTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: Self.overallSearchTimeoutNanoseconds)
+            } catch {
+                return
+            }
+            self?.searchDeadlineReached(token: token)
+        }
+        startQueuedSearches(query: trimmed, token: token)
+    }
+
+    private func startQueuedSearches(query: String, token: UUID) {
+        guard searchToken == token, isSearching else { return }
+
+        while activeSourceIDs.count < Self.maxConcurrentSourceSearches,
+              nextSourceIndex < queuedSources.count {
+            let source = queuedSources[nextSourceIndex]
+            nextSourceIndex += 1
+            activeSourceIDs.insert(source.id)
+
+            let sourceStartedAt = Date()
+            ReaderLogger.shared.log("Global search source started source=\(source.id)", type: "ReaderSearch")
+            sourceSearchTasks[source.id] = Task { @MainActor [weak self] in
+                let outcome = await Self.makeSearchOutcome(
+                    source: source,
+                    query: query,
+                    startedAt: sourceStartedAt
+                )
+                self?.sourceSearchFinished(outcome, query: query, token: token)
+            }
+            sourceTimeoutTasks[source.id] = Task { @MainActor [weak self] in
+                do {
+                    try await Task.sleep(nanoseconds: Self.sourceTimeoutNanoseconds)
+                } catch {
+                    return
+                }
+                self?.sourceSearchTimedOut(
+                    source: source,
+                    query: query,
+                    token: token,
+                    startedAt: sourceStartedAt
+                )
+            }
         }
     }
 
-    private func runSearch(activeSources: [MangaHomeSource], query: String, token: UUID) async {
-        await withTaskGroup(of: MangaSourceSearchOutcome.self) { group in
-            var nextIndex = 0
-
-            func enqueue(_ source: MangaHomeSource) {
-                group.addTask {
-                    let sourceStartedAt = Date()
-                    ReaderLogger.shared.log("Global search source started source=\(source.id)", type: "ReaderSearch")
-                    do {
-                        try Task.checkCancellation()
-                        let items = try await Self.searchSource(source, query: query, page: 1)
-                        try Task.checkCancellation()
-                        let elapsed = Int(Date().timeIntervalSince(sourceStartedAt) * 1000)
-                        return .success(source: source, items: items, elapsedMs: elapsed)
-                    } catch is CancellationError {
-                        let elapsed = Int(Date().timeIntervalSince(sourceStartedAt) * 1000)
-                        return .cancelled(source: source, elapsedMs: elapsed)
-                    } catch {
-                        let elapsed = Int(Date().timeIntervalSince(sourceStartedAt) * 1000)
-                        return .failure(source: source, error: error, elapsedMs: elapsed)
-                    }
-                }
-            }
-
-            let initialCount = min(Self.maxConcurrentSourceSearches, activeSources.count)
-            while nextIndex < initialCount {
-                enqueue(activeSources[nextIndex])
-                nextIndex += 1
-            }
-
-            while let outcome = await group.next() {
-                guard searchToken == token, !Task.isCancelled else {
-                    group.cancelAll()
-                    break
-                }
-
-                pendingSearchCount = max(0, pendingSearchCount - 1)
-                handleSearchOutcome(outcome, token: token)
-
-                if nextIndex < activeSources.count {
-                    enqueue(activeSources[nextIndex])
-                    nextIndex += 1
-                }
-            }
+    private static func makeSearchOutcome(
+        source: MangaHomeSource,
+        query: String,
+        startedAt: Date
+    ) async -> MangaSourceSearchOutcome {
+        do {
+            try Task.checkCancellation()
+            let items = try await searchSource(source, query: query, page: 1)
+            try Task.checkCancellation()
+            let elapsed = Int(Date().timeIntervalSince(startedAt) * 1000)
+            return .success(source: source, items: items, elapsedMs: elapsed)
+        } catch is CancellationError {
+            let elapsed = Int(Date().timeIntervalSince(startedAt) * 1000)
+            return .cancelled(source: source, elapsedMs: elapsed)
+        } catch {
+            let elapsed = Int(Date().timeIntervalSince(startedAt) * 1000)
+            return .failure(source: source, error: error, elapsedMs: elapsed)
         }
+    }
 
+    private func sourceSearchFinished(
+        _ outcome: MangaSourceSearchOutcome,
+        query: String,
+        token: UUID
+    ) {
+        guard searchToken == token, activeSourceIDs.remove(outcome.source.id) != nil else { return }
+        sourceSearchTasks.removeValue(forKey: outcome.source.id)
+        sourceTimeoutTasks.removeValue(forKey: outcome.source.id)?.cancel()
+        pendingSearchCount = max(0, pendingSearchCount - 1)
+        handleSearchOutcome(outcome, token: token)
+        startQueuedSearches(query: query, token: token)
+        finishSearchIfNeeded(token: token)
+    }
+
+    private func sourceSearchTimedOut(
+        source: MangaHomeSource,
+        query: String,
+        token: UUID,
+        startedAt: Date
+    ) {
+        guard searchToken == token, activeSourceIDs.remove(source.id) != nil else { return }
+        sourceSearchTasks.removeValue(forKey: source.id)?.cancel()
+        sourceTimeoutTasks.removeValue(forKey: source.id)
+        pendingSearchCount = max(0, pendingSearchCount - 1)
+        let elapsed = Int(Date().timeIntervalSince(startedAt) * 1000)
+        handleSearchOutcome(.timedOut(source: source, elapsedMs: elapsed), token: token)
+        startQueuedSearches(query: query, token: token)
+        finishSearchIfNeeded(token: token)
+    }
+
+    private func searchDeadlineReached(token: UUID) {
+        guard searchToken == token, isSearching else { return }
+        let unfinishedNames = queuedSources.enumerated().compactMap { index, source in
+            (activeSourceIDs.contains(source.id) || index >= nextSourceIndex) ? source.name : nil
+        }
+        failedSourceNames = Array(Set(failedSourceNames + unfinishedNames)).sorted()
+        let unfinishedCount = pendingSearchCount
+        cancelOutstandingSearchTasks()
+        pendingSearchCount = 0
+        ReaderLogger.shared.log(
+            "Global search deadline reached unfinished=\(unfinishedCount)",
+            type: "ReaderSearch"
+        )
+        completeSearch(token: token)
+    }
+
+    private func finishSearchIfNeeded(token: UUID) {
+        guard pendingSearchCount == 0,
+              activeSourceIDs.isEmpty,
+              nextSourceIndex >= queuedSources.count else { return }
+        completeSearch(token: token)
+    }
+
+    private func completeSearch(token: UUID) {
         guard searchToken == token else { return }
+        searchDeadlineTask?.cancel()
+        searchDeadlineTask = nil
         isSearching = false
         pendingSearchCount = 0
-        activeSearchTask = nil
         let elapsed = Int(Date().timeIntervalSince(searchStartedAt) * 1000)
         ReaderLogger.shared.log(
             "Global search completed sections=\(sections.count) failures=\(failedSourceNames.count) elapsedMs=\(elapsed)",
             type: "ReaderSearch"
         )
+    }
+
+    private func cancelOutstandingSearchTasks() {
+        searchDeadlineTask?.cancel()
+        searchDeadlineTask = nil
+        sourceSearchTasks.values.forEach { $0.cancel() }
+        sourceSearchTasks.removeAll()
+        sourceTimeoutTasks.values.forEach { $0.cancel() }
+        sourceTimeoutTasks.removeAll()
+        activeSourceIDs.removeAll()
+        queuedSources = []
+        nextSourceIndex = 0
     }
 
     private func handleSearchOutcome(_ outcome: MangaSourceSearchOutcome, token: UUID) {
@@ -207,10 +325,17 @@ private final class MangaGlobalModuleSearchViewModel: ObservableObject {
             return
         }
 
+        if outcome.timedOut {
+            failedSourceNames.append(outcome.source.name)
+            failedSourceNames.sort()
+            ReaderLogger.shared.log("Global search source timed out source=\(outcome.source.id) elapsedMs=\(outcome.elapsedMs)", type: "ReaderSearch")
+            return
+        }
+
         if let error = outcome.error {
             failedSourceNames.append(outcome.source.name)
             failedSourceNames.sort()
-            ReaderLogger.shared.log("Global search source failed source=\(outcome.source.id) elapsedMs=\(outcome.elapsedMs): \(error.localizedDescription)", type: "ReaderSearch")
+            ReaderLogger.shared.log("Global search source failed source=\(outcome.source.id) elapsedMs=\(outcome.elapsedMs) error=\(ReaderExtensionDiagnostics.errorCode(error))", type: "ReaderSearch")
             return
         }
 
@@ -225,43 +350,46 @@ private final class MangaGlobalModuleSearchViewModel: ObservableObject {
         sections.append(MangaModuleSearchSection(id: outcome.source.id, source: outcome.source, items: outcome.items))
     }
 
-    static func searchSource(_ source: MangaHomeSource, query: String, page: Int, filters: [AidokuRunner.FilterValue] = []) async throws -> [MangaHomeItem] {
+    static func searchSource(_ source: MangaHomeSource, query: String, page: Int, filters: [ReaderExtensionFilter] = []) async throws -> [MangaHomeItem] {
+        ReaderContentFilter.shared.filterHomeItems(
+            try await searchSourceUnfiltered(source, query: query, page: page, filters: filters)
+        )
+    }
+
+    private static func searchSourceUnfiltered(
+        _ source: MangaHomeSource,
+        query: String,
+        page: Int,
+        filters: [ReaderExtensionFilter]
+    ) async throws -> [MangaHomeItem] {
         try Task.checkCancellation()
         switch source.kind {
-        case .aidoku:
-            guard let sourceId = source.sourceId else { throw AidokuSourceError.sourceNotInstalled }
-            let normalizedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
-            let result = try await AidokuSourceManager.shared.search(
-                sourceId: sourceId,
-                query: normalizedQuery.isEmpty ? nil : normalizedQuery,
-                page: page,
+        case .readerExtension:
+            guard let sourceID = source.sourceID else { throw ReaderExtensionError.sourceNotFound }
+            let provider = try ReaderExtensionManager.shared.provider(for: sourceID)
+            let result = try await provider.search(
+                query: query.trimmingCharacters(in: .whitespacesAndNewlines),
+                page: max(page, 1),
                 filters: filters
             )
             try Task.checkCancellation()
-            return result.entries
+            return result.items
                 .prefix(MangaHomeViewModel.maxRetainedItemsPerSection)
-                .map { MangaHomeItem(sourceId: sourceId, manga: $0) }
+                .map { MangaHomeItem(sourceID: sourceID, item: $0) }
+
+        case .aidoku:
+            throw ReaderExtensionError.sourceNotFound
 
         case .legacyModule:
             guard let module = source.module else { return [] }
-            return try await withCheckedThrowingContinuation { continuation in
-                let engine = KanzenEngine()
-                do {
-                    let script = try ModuleManager.shared.getModuleScript(module: module)
-                    try engine.loadScript(script, isNovel: module.moduleData.novel == true)
-                } catch {
-                    continuation.resume(throwing: error)
-                    return
-                }
-
-                engine.searchInput(query, page: page) { rawItems in
-                    let items = (rawItems ?? [])
-                        .compactMap { MangaHomeItem(dict: $0, module: module, sectionKind: .custom) }
-                        .prefix(MangaHomeViewModel.maxRetainedItemsPerSection)
-                        .map { $0 }
-                    continuation.resume(returning: items)
-                }
-            }
+            let engine = KanzenEngine()
+            let script = try ModuleManager.shared.getModuleScript(module: module)
+            try await engine.loadScript(script, module: module)
+            let rawItems = try await engine.searchInput(query, page: page)
+            return (rawItems ?? [])
+                .compactMap { MangaHomeItem(dict: $0, module: module, sectionKind: .custom) }
+                .prefix(MangaHomeViewModel.maxRetainedItemsPerSection)
+                .map { $0 }
         }
     }
 }
@@ -269,47 +397,42 @@ private final class MangaGlobalModuleSearchViewModel: ObservableObject {
 struct KanzenGlobalSearchView: View {
     @EnvironmentObject private var moduleManager: ModuleManager
     @StateObject private var viewModel = MangaGlobalModuleSearchViewModel()
-    @StateObject private var sourceManager = MangaHomeSourceManager.shared
-    @StateObject private var aidokuManager = AidokuSourceManager.shared
+    @StateObject private var readerExtensionManager = ReaderExtensionManager.shared
+    @StateObject private var contentFilter = ReaderContentFilter.shared
     @State private var searchText = ""
     @State private var recentSearches = MangaSearchRecentStore.load()
-    @State private var scrollOffset: CGFloat = 0
     @State private var liveSearchTask: Task<Void, Never>?
 
     var body: some View {
         NavigationView {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 24) {
-                    KanzenRootHeader("Search Everything")
-                        .padding(.horizontal, -16)
+            Group {
+                if contentFilter.isKidsProfileActive {
+                    kidsRestrictedView
+                } else {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 24) {
+                            KanzenRootHeader("Search Everything")
+                                .padding(.horizontal, -16)
 
-                    KanzenModuleSearchBar(
-                        text: $searchText,
-                        placeholder: "Search",
-                        onSearch: { performSearch(recordRecent: true) }
-                    )
-                    .padding(.top, 8)
-                    .onChange(of: searchText) { newValue in
-                        scheduleLiveSearch(newValue)
+                            KanzenModuleSearchBar(
+                                text: $searchText,
+                                placeholder: "Search",
+                                onSearch: { performSearch(recordRecent: true) }
+                            )
+                            .padding(.top, 8)
+                            .onChange(of: searchText) { newValue in
+                                scheduleLiveSearch(newValue)
+                            }
+
+                            sourceCards
+                            searchStateContent
+                        }
+                        .padding(.horizontal, 16)
+                        .padding(.bottom, 32)
                     }
-
-                    sourceCards
-                    searchStateContent
                 }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 32)
-                .background(
-                    GeometryReader { geo in
-                        Color.clear.preference(
-                            key: ScrollOffsetPreferenceKey.self,
-                            value: -geo.frame(in: .named("kanzenSearchScroll")).origin.y
-                        )
-                    }
-                )
             }
-            .coordinateSpace(name: "kanzenSearchScroll")
-            .onPreferenceChange(ScrollOffsetPreferenceKey.self) { scrollOffset = $0 }
-            .background(GlobalGradientBackground(scrollOffset: scrollOffset).ignoresSafeArea())
+            .background(GlobalGradientBackground().ignoresSafeArea())
         }
         .navigationViewStyle(StackNavigationViewStyle())
         .onAppear {
@@ -318,32 +441,75 @@ struct KanzenGlobalSearchView: View {
         .onChange(of: moduleManager.modules) { _ in
             syncSources()
         }
-        .onReceive(sourceManager.objectWillChange) { _ in
-            DispatchQueue.main.async { syncSources() }
+        .onChange(of: readerExtensionManager.installedSources) { _ in
+            syncSources()
         }
-        .onReceive(aidokuManager.objectWillChange) { _ in
-            DispatchQueue.main.async { syncSources() }
+        .onChange(of: readerExtensionManager.showMatureSources) { _ in
+            syncSources()
         }
         .onDisappear {
             liveSearchTask?.cancel()
             viewModel.cancelSearch(keepResults: true)
         }
+
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+            liveSearchTask?.cancel()
+            liveSearchTask = nil
+            searchText = ""
+            recentSearches = MangaSearchRecentStore.load()
+            if ProfileManager.shared.isKidsModeActive {
+                viewModel.restrictForKidsProfile()
+            } else {
+                viewModel.resetSearch()
+                syncSources()
+            }
+        }
+        .onChange(of: contentFilter.isKidsProfileActive) { isKids in
+            liveSearchTask?.cancel()
+            liveSearchTask = nil
+            searchText = ""
+            if isKids {
+                viewModel.restrictForKidsProfile()
+            } else {
+                syncSources()
+            }
+        }
+    }
+
+    private var kidsRestrictedView: some View {
+        VStack(spacing: 0) {
+            KanzenRootHeader("Search Everything")
+            VStack(spacing: 12) {
+                Image(systemName: "lock.shield")
+                    .font(.system(size: 42))
+                    .foregroundColor(.secondary)
+                Text("Reader Search Unavailable")
+                    .font(.headline)
+                    .foregroundColor(.secondary)
+                Text("Reader sources and search cannot be viewed from a kids profile. Switch to a grown-up profile to continue.")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .padding()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
     }
 
     @ViewBuilder
     private var sourceCards: some View {
-        let aidokuSources = viewModel.sources.filter(\.isAidoku)
+        let extensionSources = viewModel.sources.filter(\.isReaderExtension)
         let experimental = ExperimentalFeatureState.isEnabledAtLaunch
-        if aidokuSources.isEmpty {
+        if extensionSources.isEmpty {
             VStack(spacing: 12) {
                 Image(systemName: "shippingbox")
                     .font(.system(size: 34))
                     .foregroundColor(experimental ? .white.opacity(0.62) : .secondary)
-                Text("No searchable Aidoku sources installed")
+                Text("No searchable Reader Extensions installed")
                     .font(.headline)
                     .foregroundColor(experimental ? .white.opacity(0.78) : .secondary)
-                NavigationLink(destination: AidokuSourcesSettingsView()) {
-                    Label("Aidoku Sources", systemImage: "plus.circle")
+                NavigationLink(destination: ReaderExtensionsSettingsView()) {
+                    Label("Reader Extensions", systemImage: "plus.circle")
                 }
                 .buttonStyle(.borderedProminent)
             }
@@ -359,8 +525,8 @@ struct KanzenGlobalSearchView: View {
             )
         } else {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 78), spacing: 14)], alignment: .leading, spacing: 14) {
-                ForEach(aidokuSources) { source in
-                    NavigationLink(destination: MangaAidokuAdvancedSearchView(source: source)) {
+                ForEach(extensionSources) { source in
+                    NavigationLink(destination: MangaReaderExtensionAdvancedSearchView(source: source)) {
                         MangaSearchSourceCard(source: source)
                     }
                     .buttonStyle(.plain)
@@ -375,6 +541,7 @@ struct KanzenGlobalSearchView: View {
             LazyVStack(alignment: .leading, spacing: 28) {
                 ForEach(viewModel.sections) { section in
                     MangaModuleSearchSectionView(section: section)
+                        .equatable()
                 }
 
                 if viewModel.isSearching {
@@ -455,7 +622,7 @@ struct KanzenGlobalSearchView: View {
                         HStack {
                             Text(query)
                                 .font(.title3)
-                                .foregroundColor(.primary)
+                                .foregroundColor(.white)
                             Spacer()
                         }
                         .padding(.horizontal, 16)
@@ -474,6 +641,12 @@ struct KanzenGlobalSearchView: View {
     }
 
     private func performSearch(recordRecent: Bool) {
+        guard !ProfileManager.shared.isKidsModeActive else {
+            viewModel.restrictForKidsProfile()
+            return
+        }
+        liveSearchTask?.cancel()
+        liveSearchTask = nil
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
             viewModel.resetSearch()
@@ -483,32 +656,50 @@ struct KanzenGlobalSearchView: View {
         if recordRecent {
             recentSearches = MangaSearchRecentStore.add(query)
         }
+
+        syncSources()
         viewModel.searchAll(query)
     }
 
     private func scheduleLiveSearch(_ value: String) {
+        guard !ProfileManager.shared.isKidsModeActive else {
+            viewModel.restrictForKidsProfile()
+            return
+        }
         liveSearchTask?.cancel()
         let query = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else {
             viewModel.resetSearch()
             return
         }
+        guard !viewModel.isShowingResults(for: query) else { return }
 
         liveSearchTask = Task {
             try? await Task.sleep(nanoseconds: 350_000_000)
             guard !Task.isCancelled else { return }
             await MainActor.run {
+                liveSearchTask = nil
+                guard searchText.trimmingCharacters(in: .whitespacesAndNewlines) == query else { return }
+                guard !viewModel.isShowingResults(for: query) else { return }
+                syncSources()
                 viewModel.searchAll(query)
             }
         }
     }
 
     private func syncSources() {
-        viewModel.refreshSources(from: moduleManager.modules, aidokuManager: aidokuManager)
+        guard !ProfileManager.shared.isKidsModeActive else {
+            viewModel.restrictForKidsProfile()
+            return
+        }
+        viewModel.refreshSources(
+            from: moduleManager.modules,
+            readerExtensionManager: readerExtensionManager
+        )
     }
 }
 
-private struct MangaModuleSearchSectionView: View {
+private struct MangaModuleSearchSectionView: View, Equatable {
     let section: MangaModuleSearchSection
     private var designMetrics: ExperimentalMediaDesignMetrics { .current }
     private var posterWidth: CGFloat {
@@ -525,7 +716,7 @@ private struct MangaModuleSearchSectionView: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 LazyHStack(spacing: experimental ? 16 : 12) {
-                    ForEach(Array(section.items.prefix(MangaHomeViewModel.maxVisibleItemsPerSection))) { item in
+                    ForEach(section.items.prefix(MangaHomeViewModel.maxVisibleItemsPerSection)) { item in
                         NavigationLink(destination: MangaSearchItemDestination(source: section.source, item: item)) {
                             MangaSearchPosterCard(item: item, width: posterWidth)
                         }
@@ -543,10 +734,16 @@ private struct MangaSearchItemDestination: View {
     let item: MangaHomeItem
 
     var body: some View {
-        if let manga = item.aidokuManga, let sourceId = source.sourceId {
-            AidokuMangaDetailView(sourceId: sourceId, initialManga: manga)
-        } else if case .aidoku(let sourceId, let mangaKey) = item.route {
-            AidokuMangaRouteLoaderView(sourceId: sourceId, mangaKey: mangaKey, title: item.title, coverURL: item.imageURL)
+        if let extensionItem = item.readerExtensionItem, let sourceID = source.sourceID {
+            ReaderExtensionMangaDetailView(sourceID: sourceID, initialItem: extensionItem)
+        } else if case .readerExtension(let sourceID, let itemKey, let legacyStableKey) = item.route {
+            ReaderExtensionMangaRouteLoaderView(
+                sourceID: sourceID,
+                itemKey: itemKey,
+                legacyStableKey: legacyStableKey,
+                title: item.title,
+                coverURL: item.imageURL
+            )
         } else if let module = source.module {
             MangaModuleContentLoaderView(
                 module: module,
@@ -569,12 +766,13 @@ private struct MangaSearchPosterCard: View {
     var body: some View {
         let experimental = ExperimentalFeatureState.isEnabledAtLaunch
         VStack(alignment: .leading, spacing: experimental ? 8 : 4) {
-            KFImage(URL(string: item.imageURL))
-                .placeholder {
+            ReaderScopedRemoteImage(
+                url: URL(string: item.imageURL),
+                readerExtensionSourceID: item.route?.readerExtensionSourceID,
+                maximumPixelSize: isIPad ? 900 : 640
+            ) {
                     Rectangle().fill(Color.gray.opacity(0.22))
-                }
-                .resizable()
-                .setProcessor(DownsamplingImageProcessor(size: CGSize(width: width, height: width * 1.45)))
+            }
                 .scaledToFill()
                 .frame(width: width, height: width * 1.45)
                 .clipped()
@@ -612,13 +810,15 @@ private struct MangaSearchSourceCard: View {
                             .stroke(Color.white.opacity(experimental ? 0.14 : 0), lineWidth: 1)
                     )
 
-                KFImage(URL(string: source.iconURL))
-                    .placeholder {
+                ReaderScopedRemoteImage(
+                    url: URL(string: source.iconURL),
+                    readerExtensionSourceID: source.sourceID,
+                    maximumPixelSize: 512
+                ) {
                         Image(systemName: "shippingbox")
                             .font(.title3)
                             .foregroundColor(.secondary)
-                    }
-                    .resizable()
+                }
                     .scaledToFit()
                     .padding(24)
             }
@@ -635,68 +835,94 @@ private struct MangaSearchSourceCard: View {
 }
 
 @MainActor
-private final class MangaAidokuAdvancedSearchViewModel: ObservableObject {
-    @Published var filters: [AidokuRunner.Filter] = []
+private final class MangaReaderExtensionAdvancedSearchViewModel: ObservableObject {
     @Published var items: [MangaHomeItem] = []
-    @Published var isLoadingFilters = false
     @Published var isSearching = false
+    @Published private(set) var isLoadingMore = false
+    @Published var hasSearched = false
     @Published var errorMessage: String?
+    @Published var paginationErrorMessage: String?
+    @Published private(set) var currentPage = 0
+    @Published private(set) var hasNextPage = false
 
-    private var searchToken = UUID()
-    private var filterTask: Task<Void, Never>?
-    private var searchTask: Task<Void, Never>?
-
-    func loadFilters(source: MangaHomeSource) {
-        guard let sourceId = source.sourceId, filters.isEmpty, !isLoadingFilters else { return }
-        filterTask?.cancel()
-        isLoadingFilters = true
-        errorMessage = nil
-        ReaderLogger.shared.log("Advanced search filters started source=\(source.id)", type: "ReaderSearch")
-
-        filterTask = Task { @MainActor in
-            let started = Date()
-            do {
-                try Task.checkCancellation()
-                filters = try await AidokuSourceManager.shared.filters(sourceId: sourceId)
-                try Task.checkCancellation()
-                isLoadingFilters = false
-                let elapsed = Int(Date().timeIntervalSince(started) * 1000)
-                ReaderLogger.shared.log("Advanced search filters loaded source=\(source.id) count=\(filters.count) elapsedMs=\(elapsed)", type: "ReaderSearch")
-            } catch is CancellationError {
-                isLoadingFilters = false
-                let elapsed = Int(Date().timeIntervalSince(started) * 1000)
-                ReaderLogger.shared.log("Advanced search filters cancelled source=\(source.id) elapsedMs=\(elapsed)", type: "ReaderSearch")
-            } catch {
-                errorMessage = error.localizedDescription
-                isLoadingFilters = false
-                let elapsed = Int(Date().timeIntervalSince(started) * 1000)
-                ReaderLogger.shared.log("Advanced search filters failed source=\(source.id) elapsedMs=\(elapsed): \(error.localizedDescription)", type: "ReaderSearch")
-            }
-        }
+    private struct AppliedSearchSnapshot {
+        let query: String
+        let filters: [ReaderExtensionFilter]
     }
 
-    func search(source: MangaHomeSource, query: String, filters: [AidokuRunner.FilterValue]) {
+    private struct SearchPage {
+        let items: [MangaHomeItem]
+        let hasNextPage: Bool
+    }
+
+    private static let maxRetainedResults = 120
+    private static let maxPageCount = 10
+
+    private var searchToken = UUID()
+    private var searchTask: Task<Void, Never>?
+    private var appliedSearchSnapshot: AppliedSearchSnapshot?
+
+    /// A catalog may only be built from a search that actually ran, so the
+    /// saved row is guaranteed to reproduce what the user just looked at.
+    var appliedCatalogDraft: (query: String, filters: [ReaderExtensionFilter])? {
+        guard hasSearched, !isSearching, errorMessage == nil, let appliedSearchSnapshot else { return nil }
+        return (appliedSearchSnapshot.query, appliedSearchSnapshot.filters)
+    }
+
+    var canLoadMore: Bool {
+        hasSearched
+            && hasNextPage
+            && currentPage > 0
+            && currentPage < Self.maxPageCount
+            && items.count < Self.maxRetainedResults
+            && !isSearching
+            && !isLoadingMore
+            && appliedSearchSnapshot != nil
+    }
+
+    var didReachResultLimit: Bool {
+        hasSearched
+            && hasNextPage
+            && (currentPage >= Self.maxPageCount || items.count >= Self.maxRetainedResults)
+    }
+
+    func search(source: MangaHomeSource, query: String, filters: [ReaderExtensionFilter]) {
         let token = UUID()
         searchTask?.cancel()
         searchToken = token
+        let snapshot = AppliedSearchSnapshot(
+            query: query.trimmingCharacters(in: .whitespacesAndNewlines),
+            filters: filters
+        )
+        appliedSearchSnapshot = snapshot
         isSearching = true
+        isLoadingMore = false
+        hasSearched = true
         errorMessage = nil
-        ReaderLogger.shared.log("Advanced search started source=\(source.id) queryLength=\(query.trimmingCharacters(in: .whitespacesAndNewlines).count) filters=\(filters.count)", type: "ReaderSearch")
+        paginationErrorMessage = nil
+        items = []
+        currentPage = 0
+        hasNextPage = false
+        ReaderLogger.shared.log("Advanced search started source=\(source.id) queryLength=\(snapshot.query.count) filters=\(snapshot.filters.count)", type: "ReaderSearch")
 
         searchTask = Task { @MainActor in
             let started = Date()
             do {
                 try Task.checkCancellation()
-                let results = try await MangaGlobalModuleSearchViewModel.searchSource(source, query: query, page: 1, filters: filters)
+                let result = try await Self.searchPage(source: source, snapshot: snapshot, page: 1)
                 try Task.checkCancellation()
                 guard searchToken == token else { return }
-                items = results
+                items = Self.merging([], with: result.items)
+                currentPage = 1
+                hasNextPage = result.hasNextPage
                 isSearching = false
+                searchTask = nil
                 let elapsed = Int(Date().timeIntervalSince(started) * 1000)
-                ReaderLogger.shared.log("Advanced search finished source=\(source.id) count=\(results.count) elapsedMs=\(elapsed)", type: "ReaderSearch")
+                ReaderLogger.shared.log("Advanced search finished source=\(source.id) page=1 count=\(items.count) hasNext=\(result.hasNextPage) elapsedMs=\(elapsed)", type: "ReaderSearch")
             } catch is CancellationError {
                 guard searchToken == token else { return }
                 isSearching = false
+                searchTask = nil
                 let elapsed = Int(Date().timeIntervalSince(started) * 1000)
                 ReaderLogger.shared.log("Advanced search cancelled source=\(source.id) elapsedMs=\(elapsed)", type: "ReaderSearch")
             } catch {
@@ -704,39 +930,114 @@ private final class MangaAidokuAdvancedSearchViewModel: ObservableObject {
                 items = []
                 errorMessage = error.localizedDescription
                 isSearching = false
+                currentPage = 0
+                hasNextPage = false
+                searchTask = nil
                 let elapsed = Int(Date().timeIntervalSince(started) * 1000)
-                ReaderLogger.shared.log("Advanced search failed source=\(source.id) elapsedMs=\(elapsed): \(error.localizedDescription)", type: "ReaderSearch")
+                ReaderLogger.shared.log("Advanced search failed source=\(source.id) elapsedMs=\(elapsed) error=\(ReaderExtensionDiagnostics.errorCode(error))", type: "ReaderSearch")
+            }
+        }
+    }
+
+    func loadMore(source: MangaHomeSource) {
+        guard canLoadMore, let snapshot = appliedSearchSnapshot else { return }
+
+        let token = searchToken
+        let nextPage = currentPage + 1
+        isLoadingMore = true
+        paginationErrorMessage = nil
+        ReaderLogger.shared.log("Advanced search load more started source=\(source.id) page=\(nextPage)", type: "ReaderSearch")
+
+        searchTask = Task { @MainActor in
+            let started = Date()
+            do {
+                try Task.checkCancellation()
+                let result = try await Self.searchPage(source: source, snapshot: snapshot, page: nextPage)
+                try Task.checkCancellation()
+                guard searchToken == token, appliedSearchSnapshot != nil else { return }
+                items = Self.merging(items, with: result.items)
+                currentPage = nextPage
+                hasNextPage = result.hasNextPage
+                isLoadingMore = false
+                searchTask = nil
+                let elapsed = Int(Date().timeIntervalSince(started) * 1000)
+                ReaderLogger.shared.log("Advanced search load more finished source=\(source.id) page=\(nextPage) received=\(result.items.count) retained=\(items.count) hasNext=\(result.hasNextPage) elapsedMs=\(elapsed)", type: "ReaderSearch")
+            } catch is CancellationError {
+                guard searchToken == token else { return }
+                isLoadingMore = false
+                searchTask = nil
+                let elapsed = Int(Date().timeIntervalSince(started) * 1000)
+                ReaderLogger.shared.log("Advanced search load more cancelled source=\(source.id) page=\(nextPage) elapsedMs=\(elapsed)", type: "ReaderSearch")
+            } catch {
+                guard searchToken == token else { return }
+                paginationErrorMessage = error.localizedDescription
+                isLoadingMore = false
+                searchTask = nil
+                let elapsed = Int(Date().timeIntervalSince(started) * 1000)
+                ReaderLogger.shared.log("Advanced search load more failed source=\(source.id) page=\(nextPage) elapsedMs=\(elapsed) error=\(ReaderExtensionDiagnostics.errorCode(error))", type: "ReaderSearch")
             }
         }
     }
 
     func cancel() {
-        let wasSearching = isSearching || isLoadingFilters
+        let wasSearching = isSearching || isLoadingMore
         searchToken = UUID()
-        filterTask?.cancel()
         searchTask?.cancel()
-        filterTask = nil
         searchTask = nil
-        isLoadingFilters = false
         isSearching = false
+        isLoadingMore = false
         if wasSearching {
             ReaderLogger.shared.log("Advanced search cancelled reason=view-disappear", type: "ReaderSearch")
         }
     }
+
+    private static func searchPage(
+        source: MangaHomeSource,
+        snapshot: AppliedSearchSnapshot,
+        page: Int
+    ) async throws -> SearchPage {
+        guard let sourceID = source.sourceID else { throw ReaderExtensionError.sourceNotFound }
+        try Task.checkCancellation()
+        let provider = try ReaderExtensionManager.shared.provider(for: sourceID)
+        let result = try await provider.search(
+            query: snapshot.query,
+            page: max(page, 1),
+            filters: snapshot.filters
+        )
+        try Task.checkCancellation()
+        let mappedItems = result.items
+            .prefix(MangaHomeViewModel.maxRetainedItemsPerSection)
+            .map { MangaHomeItem(sourceID: sourceID, item: $0) }
+        return SearchPage(
+            items: ReaderContentFilter.shared.filterHomeItems(mappedItems),
+            hasNextPage: result.hasNextPage
+        )
+    }
+
+    private static func merging(
+        _ existingItems: [MangaHomeItem],
+        with newItems: [MangaHomeItem]
+    ) -> [MangaHomeItem] {
+        var merged = Array(existingItems.prefix(Self.maxRetainedResults))
+        var retainedIDs = Set(merged.map(\.id))
+        for item in newItems where merged.count < Self.maxRetainedResults {
+            guard retainedIDs.insert(item.id).inserted else { continue }
+            merged.append(item)
+        }
+        return merged
+    }
 }
 
-private struct MangaAidokuAdvancedSearchView: View {
+private struct MangaReaderExtensionAdvancedSearchView: View {
     let source: MangaHomeSource
 
-    @StateObject private var viewModel = MangaAidokuAdvancedSearchViewModel()
+    @StateObject private var viewModel = MangaReaderExtensionAdvancedSearchViewModel()
+    @StateObject private var filterEditor = ReaderExtensionFilterEditorModel()
     @State private var searchText = ""
-    @State private var textValues: [String: String] = [:]
-    @State private var checkValues: [String: Int] = [:]
-    @State private var selectValues: [String: String] = [:]
-    @State private var sortIndexValues: [String: Int] = [:]
-    @State private var sortAscendingValues: [String: Bool] = [:]
-    @State private var multiIncludedValues: [String: Set<String>] = [:]
-    @State private var debounceTask: Task<Void, Never>?
+    @State private var hasPendingSearchChanges = false
+    @State private var catalogDraft: KanzenCustomCatalog?
+    @State private var savedCatalogTitle: String?
+    @State private var catalogErrorMessage: String?
 
     private let columns = [GridItem(.adaptive(minimum: 116), spacing: 12)]
 
@@ -746,55 +1047,191 @@ private struct MangaAidokuAdvancedSearchView: View {
                 KanzenModuleSearchBar(
                     text: $searchText,
                     placeholder: "Search \(source.name)",
-                    onSearch: performSearch
+                    onSearch: submitSearch
                 )
-                .onChange(of: searchText) { _ in scheduleSearch() }
+                .onChange(of: searchText) { _ in markSearchPending() }
 
-                filtersContent
+                Button(action: submitSearch) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "magnifyingglass")
+                        Text(searchButtonTitle)
+                    }
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(Color.white.opacity(0.16))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .disabled(isSearchBlocked)
+                .opacity(isSearchBlocked ? 0.55 : 1)
+                .accessibilityHint("Runs one search using the current title and every selected filter.")
+
+                saveAsCatalogControls
                 resultsContent
+                filtersContent
             }
             .padding(16)
         }
         .navigationTitle(source.name)
         .navigationBarTitleDisplayMode(.inline)
         .kanzenGradientBackground()
+        .environment(\.colorScheme, .dark)
+        .preferredColorScheme(.dark)
+        .toolbar {
+            ToolbarItem(placement: .navigationBarTrailing) {
+                Button(action: submitSearch) {
+                    Image(systemName: "magnifyingglass")
+                }
+                .disabled(isSearchBlocked)
+                .tint(.white)
+                .accessibilityLabel("Search with current filters")
+            }
+        }
         .task {
-            viewModel.loadFilters(source: source)
+            loadFilters()
+        }
+        .onChange(of: filterEditor.successfulLoadRevision) { _ in
+            if viewModel.hasSearched {
+                markSearchPending()
+            }
         }
         .onDisappear {
-            debounceTask?.cancel()
             viewModel.cancel()
+            filterEditor.cancel()
+        }
+        .sheet(item: $catalogDraft) { draft in
+            KanzenCustomCatalogEditorView(
+                sourceName: source.name,
+                draft: draft,
+                isRenamingExistingCatalog: false,
+                onSaved: { saved in
+                    savedCatalogTitle = saved.displayTitle
+                    catalogErrorMessage = nil
+                }
+            )
         }
     }
 
     @ViewBuilder
-    private var filtersContent: some View {
-        if viewModel.isLoadingFilters {
-            HStack(spacing: 10) {
-                EclipseLoadingIndicator()
-                Text("Loading filters...")
-                    .foregroundColor(.secondary)
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.vertical, 16)
-        } else if viewModel.filters.isEmpty {
-            Text("This source does not expose advanced filters.")
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding()
-                .background(EclipseTheme.shared.cardBackground)
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        } else {
-            VStack(alignment: .leading, spacing: 14) {
-                ForEach(viewModel.filters.indices, id: \.self) { index in
-                    filterRow(viewModel.filters[index])
+    private var saveAsCatalogControls: some View {
+        if let draft = viewModel.appliedCatalogDraft, let sourceID = source.sourceID {
+            VStack(alignment: .leading, spacing: 8) {
+                Button {
+                    presentCatalogEditor(sourceID: sourceID, draft: draft)
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "rectangle.stack.badge.plus")
+                        Text("Save as Catalog")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 11)
+                    .background(Color.white.opacity(0.10))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Saves these filters as a row on Discover for \(source.name).")
+
+                if let savedCatalogTitle {
+                    Label("Saved \u{201C}\(savedCatalogTitle)\u{201D} to Discover", systemImage: "checkmark.circle")
+                        .font(.caption)
+                        .foregroundColor(.green.opacity(0.9))
+                }
+                if let catalogErrorMessage {
+                    Label(catalogErrorMessage, systemImage: "exclamationmark.triangle")
+                        .font(.caption)
+                        .foregroundColor(.orange.opacity(0.9))
                 }
             }
-            .padding(14)
-            .background(EclipseTheme.shared.cardBackground)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         }
+    }
+
+    private func presentCatalogEditor(
+        sourceID: ReaderExtensionSourceID,
+        draft: (query: String, filters: [ReaderExtensionFilter])
+    ) {
+        savedCatalogTitle = nil
+        guard KanzenCustomCatalogManager.shared.canAddCatalog(for: sourceID) else {
+            catalogErrorMessage = KanzenCustomCatalogError
+                .sourceLimitReached(KanzenCustomCatalogManager.maximumCatalogsPerSource)
+                .localizedDescription
+            return
+        }
+        catalogErrorMessage = nil
+        catalogDraft = KanzenCustomCatalog(
+            title: "",
+            sourceID: sourceID,
+            query: draft.query,
+            filters: draft.filters
+        )
+    }
+
+    @ViewBuilder
+    private var filtersContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Text("Filters")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                Text("\(filterEditor.displayRows.count)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.white.opacity(0.62))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.white.opacity(0.08))
+                    .clipShape(Capsule())
+                Spacer(minLength: 4)
+                filterResetButton
+                filterRefreshButton
+            }
+
+            if let filterErrorMessage = filterEditor.errorMessage {
+                Label(filterErrorMessage, systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundColor(.orange.opacity(0.9))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if filterEditor.isLoading {
+                HStack(spacing: 10) {
+                    EclipseLoadingIndicator()
+                    Text("Loading filters...")
+                        .font(.subheadline)
+                        .foregroundColor(.white.opacity(0.62))
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 16)
+            } else if filterEditor.filters.isEmpty {
+                Text("This source does not expose advanced filters.")
+                    .font(.subheadline)
+                    .foregroundColor(.white.opacity(0.62))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.vertical, 8)
+            } else {
+                ReaderExtensionFilterEditorList(
+                    filters: $filterEditor.filters,
+                    onEdit: markSearchPending
+                )
+            }
+        }
+        .padding(14)
+        .background(EclipseTheme.shared.cardBackground)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.white.opacity(0.10), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     @ViewBuilder
@@ -804,7 +1241,7 @@ private struct MangaAidokuAdvancedSearchView: View {
                 EclipseLoadingIndicator()
                 Text("Searching...")
                     .font(.subheadline)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.white.opacity(0.62))
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 24)
@@ -812,257 +1249,188 @@ private struct MangaAidokuAdvancedSearchView: View {
             VStack(spacing: 10) {
                 Image(systemName: "exclamationmark.triangle")
                     .font(.largeTitle)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.orange.opacity(0.9))
                 Text(errorMessage)
                     .font(.subheadline)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(.white.opacity(0.72))
                     .multilineTextAlignment(.center)
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 24)
-        } else if viewModel.items.isEmpty {
-            EmptyView()
-        } else {
-            LazyVGrid(columns: columns, spacing: 14) {
-                ForEach(viewModel.items) { item in
-                    NavigationLink(destination: MangaSearchItemDestination(source: source, item: item)) {
-                        MangaSearchPosterCard(item: item, width: 116)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func filterRow(_ filter: AidokuRunner.Filter) -> some View {
-        switch filter.value {
-        case let .text(placeholder):
-            VStack(alignment: .leading, spacing: 6) {
-                Text(filter.title ?? "Text")
+        } else if viewModel.hasSearched, viewModel.items.isEmpty {
+            VStack(spacing: 10) {
+                Image(systemName: "magnifyingglass")
+                    .font(.largeTitle)
+                    .foregroundColor(.white.opacity(0.62))
+                Text(viewModel.hasNextPage ? "No visible results on this page" : "No results found")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                Text(viewModel.hasNextPage ? "Load another page or adjust the filters below." : "Try a different title or adjust the filters below.")
                     .font(.subheadline)
-                    .foregroundColor(.secondary)
-                TextField(placeholder ?? "", text: binding(forTextFilter: filter.id))
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .textFieldStyle(.roundedBorder)
-            }
-            .onChange(of: textValues[filter.id] ?? "") { _ in scheduleSearch() }
-
-        case let .check(name, canExclude, defaultValue):
-            let defaultState = defaultValue.map { $0 ? 1 : 2 } ?? 0
-            Button {
-                cycleCheck(filterId: filter.id, canExclude: canExclude, defaultState: defaultState)
-                scheduleSearch()
-            } label: {
-                HStack {
-                    Image(systemName: checkIcon(for: checkValues[filter.id] ?? defaultState))
-                        .frame(width: 24)
-                    Text(name ?? filter.title ?? "Option")
-                    Spacer()
-                }
-                .foregroundColor(.primary)
-                .padding(.vertical, 8)
-            }
-            .buttonStyle(.plain)
-
-        case let .select(selectFilter):
-            Picker(filter.title ?? "Select", selection: binding(forSelectFilter: filter.id, defaultValue: selectFilter.resolvedDefaultValue)) {
-                ForEach(Array(selectFilter.options.enumerated()), id: \.offset) { offset, option in
-                    Text(option).tag(selectFilter.ids?[safe: offset] ?? option)
+                    .foregroundColor(.white.opacity(0.62))
+                    .multilineTextAlignment(.center)
+                if viewModel.hasNextPage {
+                    paginationControls
                 }
             }
-            .pickerStyle(.menu)
-            .onChange(of: selectValues[filter.id] ?? selectFilter.resolvedDefaultValue) { _ in scheduleSearch() }
-
-        case let .sort(canAscend, options, defaultValue):
-            VStack(alignment: .leading, spacing: 8) {
-                Picker(filter.title ?? "Sort", selection: binding(forSortIndex: filter.id, defaultValue: defaultValue?.index ?? 0)) {
-                    ForEach(Array(options.enumerated()), id: \.offset) { index, option in
-                        Text(option).tag(index)
-                    }
-                }
-                .pickerStyle(.menu)
-
-                if canAscend {
-                    Toggle("Ascending", isOn: binding(forSortAscending: filter.id, defaultValue: defaultValue?.ascending ?? false))
-                }
-            }
-            .onChange(of: sortIndexValues[filter.id] ?? Int(defaultValue?.index ?? 0)) { _ in scheduleSearch() }
-            .onChange(of: sortAscendingValues[filter.id] ?? (defaultValue?.ascending ?? false)) { _ in scheduleSearch() }
-
-        case let .multiselect(multiSelect):
-            VStack(alignment: .leading, spacing: 10) {
-                Text(filter.title ?? "Tags")
-                    .font(.subheadline)
-                    .foregroundColor(.secondary)
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), spacing: 8)], alignment: .leading, spacing: 8) {
-                    ForEach(Array(multiSelect.options.enumerated()), id: \.offset) { offset, option in
-                        let value = multiSelect.ids?[safe: offset] ?? option
-                        let defaultValues = Set(multiSelect.defaultIncluded ?? [])
-                        let selected = (multiIncludedValues[filter.id] ?? defaultValues).contains(value)
-                        Button {
-                            toggleMulti(filterId: filter.id, value: value, defaultValues: defaultValues)
-                            scheduleSearch()
-                        } label: {
-                            Text(option)
-                                .font(.subheadline)
-                                .lineLimit(2)
-                                .multilineTextAlignment(.center)
-                                .fixedSize(horizontal: false, vertical: true)
-                                .foregroundColor(.primary)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 7)
-                                .frame(maxWidth: .infinity)
-                                .background(selected ? Color.primary.opacity(0.18) : Color.black.opacity(0.35))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        .stroke(selected ? Color.primary.opacity(0.35) : Color.clear, lineWidth: 1)
-                                )
-                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 24)
+        } else if viewModel.hasSearched {
+            VStack(spacing: 14) {
+                LazyVGrid(columns: columns, spacing: 14) {
+                    ForEach(viewModel.items) { item in
+                        NavigationLink(destination: MangaSearchItemDestination(source: source, item: item)) {
+                            MangaSearchPosterCard(item: item, width: 116)
                         }
                         .buttonStyle(.plain)
                     }
                 }
-            }
 
-        case let .note(text):
-            Text(text)
+                paginationControls
+            }
+        }
+    }
+
+    private var filterResetButton: some View {
+        Button {
+            if filterEditor.reset() {
+                markSearchPending()
+            }
+        } label: {
+            Label("Reset", systemImage: "arrow.counterclockwise")
+                .font(.caption.weight(.semibold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(Color.white.opacity(0.08))
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(!filterEditor.canReset)
+        .opacity(filterEditor.canReset ? 1 : 0.42)
+        .accessibilityHint("Restores the filter defaults loaded when this screen opened without searching.")
+    }
+
+    private var filterRefreshButton: some View {
+        Button {
+            refreshFilters()
+        } label: {
+            Label("Refresh Filters", systemImage: "arrow.clockwise")
+                .font(.caption.weight(.semibold))
+                .foregroundColor(.white)
+                .lineLimit(1)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 6)
+                .background(Color.white.opacity(0.08))
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .disabled(isFilterRefreshBlocked)
+        .opacity(isFilterRefreshBlocked ? 0.42 : 1)
+        .accessibilityHint("Reloads this source's filter choices without searching.")
+    }
+
+    @ViewBuilder
+    private var paginationControls: some View {
+        if let paginationErrorMessage = viewModel.paginationErrorMessage {
+            Label(paginationErrorMessage, systemImage: "exclamationmark.triangle")
                 .font(.caption)
-                .foregroundColor(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .foregroundColor(.orange.opacity(0.9))
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+        }
 
-        case .range:
-            HStack {
-                Text(filter.title ?? "Range")
-                Spacer()
-                Text("Unsupported")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+        if viewModel.isLoadingMore {
+            HStack(spacing: 10) {
+                EclipseLoadingIndicator()
+                Text("Loading page \(viewModel.currentPage + 1)...")
+                    .font(.subheadline)
+                    .foregroundColor(.white.opacity(0.62))
             }
-            .opacity(0.55)
-        }
-    }
-
-    private func performSearch() {
-        viewModel.search(source: source, query: searchText, filters: enabledFilters())
-    }
-
-    private func scheduleSearch() {
-        debounceTask?.cancel()
-        debounceTask = Task {
-            try? await Task.sleep(nanoseconds: 350_000_000)
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                performSearch()
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+        } else if canLoadMoreResults {
+            Button {
+                viewModel.loadMore(source: source)
+            } label: {
+                Label("Load More", systemImage: "chevron.down")
+                    .font(.headline)
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .background(Color.white.opacity(0.14))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color.white.opacity(0.14), lineWidth: 1)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
+            .buttonStyle(.plain)
+            .accessibilityHint("Loads one more page using the filters from the last applied search.")
+        } else if viewModel.didReachResultLimit {
+            Text("Result limit reached. Refine the title or filters to continue.")
+                .font(.caption)
+                .foregroundColor(.white.opacity(0.62))
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity)
+        }
+
+        if viewModel.currentPage > 0 {
+            Text("Page \(viewModel.currentPage) · \(viewModel.items.count) results")
+                .font(.caption2.weight(.semibold))
+                .foregroundColor(.white.opacity(0.50))
+                .frame(maxWidth: .infinity)
         }
     }
 
-    private func enabledFilters() -> [AidokuRunner.FilterValue] {
-        var values: [AidokuRunner.FilterValue] = []
+    private var isSearchBlocked: Bool {
+        filterEditor.isLoading || viewModel.isSearching
+    }
 
-        for (id, value) in textValues where !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            values.append(.text(id: id, value: value))
+    private var isFilterRefreshBlocked: Bool {
+        filterEditor.isLoading || viewModel.isSearching || viewModel.isLoadingMore
+    }
+
+    private var canLoadMoreResults: Bool {
+        viewModel.canLoadMore && !filterEditor.isLoading
+    }
+
+    private func loadFilters() {
+        guard let sourceID = filterSourceID() else { return }
+        filterEditor.load(sourceID: sourceID, label: source.id)
+    }
+
+    private func refreshFilters() {
+        guard !viewModel.isSearching, !viewModel.isLoadingMore else { return }
+        guard let sourceID = filterSourceID() else { return }
+        filterEditor.reload(sourceID: sourceID, label: source.id)
+    }
+
+    private func filterSourceID() -> ReaderExtensionSourceID? {
+        guard let sourceID = source.sourceID else {
+            filterEditor.reportUnavailableSource()
+            return nil
         }
-        for filter in viewModel.filters {
-            switch filter.value {
-            case let .check(_, _, defaultValue):
-                let defaultState = defaultValue.map { $0 ? 1 : 2 } ?? 0
-                let value = checkValues[filter.id] ?? defaultState
-                if value != defaultState {
-                    values.append(.check(id: filter.id, value: value))
-                }
-            case let .select(selectFilter):
-                let selected = selectValues[filter.id] ?? selectFilter.resolvedDefaultValue
-                if selected != selectFilter.resolvedDefaultValue {
-                    values.append(.select(id: filter.id, value: selected))
-                }
-            case let .sort(_, _, defaultValue):
-                let selectedIndex = sortIndexValues[filter.id] ?? Int(defaultValue?.index ?? 0)
-                let ascending = sortAscendingValues[filter.id] ?? (defaultValue?.ascending ?? false)
-                if selectedIndex != Int(defaultValue?.index ?? 0) || ascending != (defaultValue?.ascending ?? false) {
-                    values.append(.sort(.init(id: filter.id, index: selectedIndex, ascending: ascending)))
-                }
-            case let .multiselect(multiSelect):
-                let defaultIncluded = multiSelect.defaultIncluded ?? []
-                let defaultExcluded = multiSelect.defaultExcluded ?? []
-                let included = Array(multiIncludedValues[filter.id] ?? Set(defaultIncluded)).sorted()
-                let excluded = defaultExcluded.sorted()
-                if included != defaultIncluded || excluded != defaultExcluded {
-                    values.append(.multiselect(id: filter.id, included: included, excluded: excluded))
-                }
-            default:
-                break
-            }
-        }
-
-        return values
+        return sourceID
     }
 
-    private func binding(forTextFilter id: String) -> Binding<String> {
-        Binding(
-            get: { textValues[id] ?? "" },
-            set: { textValues[id] = $0 }
-        )
+    private func submitSearch() {
+        guard !isSearchBlocked else { return }
+        hasPendingSearchChanges = false
+        viewModel.search(source: source, query: searchText, filters: filterEditor.filters)
     }
 
-    private func binding(forSelectFilter id: String, defaultValue: String) -> Binding<String> {
-        Binding(
-            get: { selectValues[id] ?? defaultValue },
-            set: { selectValues[id] = $0 }
-        )
+    private var searchButtonTitle: String {
+        guard viewModel.hasSearched else { return "Apply & Search" }
+        return hasPendingSearchChanges ? "Apply Changes & Search" : "Search Again"
     }
 
-    private func binding(forSortIndex id: String, defaultValue: Int) -> Binding<Int> {
-        Binding(
-            get: { sortIndexValues[id] ?? defaultValue },
-            set: { sortIndexValues[id] = $0 }
-        )
-    }
-
-    private func binding(forSortAscending id: String, defaultValue: Bool) -> Binding<Bool> {
-        Binding(
-            get: { sortAscendingValues[id] ?? defaultValue },
-            set: { sortAscendingValues[id] = $0 }
-        )
-    }
-
-    private func cycleCheck(filterId: String, canExclude: Bool, defaultState: Int) {
-        let current = checkValues[filterId] ?? defaultState
-        switch current {
-        case 0:
-            checkValues[filterId] = 1
-        case 1:
-            checkValues[filterId] = canExclude ? 2 : 0
-        default:
-            checkValues[filterId] = 0
-        }
-    }
-
-    private func checkIcon(for state: Int) -> String {
-        switch state {
-        case 1:
-            return "checkmark.square.fill"
-        case 2:
-            return "xmark.square.fill"
-        default:
-            return "square"
-        }
-    }
-
-    private func toggleMulti(filterId: String, value: String, defaultValues: Set<String>) {
-        var values = multiIncludedValues[filterId] ?? defaultValues
-        if values.contains(value) {
-            values.remove(value)
-        } else {
-            values.insert(value)
-        }
-        multiIncludedValues[filterId] = values
+    private func markSearchPending() {
+        hasPendingSearchChanges = true
     }
 }
 
-private struct KanzenModuleSearchBar: View {
+struct KanzenModuleSearchBar: View {
     @Binding var text: String
     let placeholder: String
     let onSearch: () -> Void
@@ -1072,12 +1440,19 @@ private struct KanzenModuleSearchBar: View {
         HStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
                 .font(.title2)
-                .foregroundColor(experimental ? .white.opacity(0.72) : .secondary)
+                .foregroundColor(.white.opacity(0.72))
 
-            TextField(placeholder, text: $text, onCommit: onSearch)
+            TextField(
+                "",
+                text: $text,
+                prompt: Text(placeholder).foregroundColor(.white.opacity(0.42))
+            )
                 .font(.title2)
                 .autocapitalization(.none)
                 .disableAutocorrection(true)
+                .foregroundColor(.white)
+                .tint(.white)
+                .onSubmit(onSearch)
 
             if !text.isEmpty {
                 Button {
@@ -1085,7 +1460,7 @@ private struct KanzenModuleSearchBar: View {
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.title2)
-                        .foregroundColor(experimental ? .white.opacity(0.62) : .secondary)
+                        .foregroundColor(.white.opacity(0.62))
                 }
                 .buttonStyle(.plain)
             }
@@ -1094,24 +1469,14 @@ private struct KanzenModuleSearchBar: View {
         .padding(.vertical, 12)
         .background(
             RoundedRectangle(cornerRadius: experimental ? ExperimentalMediaDesignMetrics.current.cardRadius : 12, style: .continuous)
-                .fill(experimental ? Color.white.opacity(0.12) : Color(.secondarySystemBackground).opacity(0.92))
+                .fill(experimental ? Color.white.opacity(0.12) : EclipseTheme.shared.cardBackground)
         )
         .overlay(
             RoundedRectangle(cornerRadius: experimental ? ExperimentalMediaDesignMetrics.current.cardRadius : 12, style: .continuous)
                 .stroke(Color.white.opacity(experimental ? 0.14 : 0), lineWidth: 1)
         )
+        .environment(\.colorScheme, .dark)
     }
 }
 
-private extension Array {
-    subscript(safe index: Index) -> Element? {
-        indices.contains(index) ? self[index] : nil
-    }
-}
-
-private extension AidokuRunner.SelectFilter {
-    var resolvedDefaultValue: String {
-        defaultValue ?? ids?.first ?? options.first ?? ""
-    }
-}
 #endif

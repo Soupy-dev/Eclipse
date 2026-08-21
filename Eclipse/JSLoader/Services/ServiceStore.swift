@@ -1,3 +1,10 @@
+//
+//  CloudStore.swift
+//  Eclipse
+//
+//  Created by Dominic on 07.11.25.
+//
+
 import CoreData
 
 private actor ServiceStoreReadiness {
@@ -42,8 +49,6 @@ private actor ServiceStoreReadiness {
 public final class ServiceStore: @unchecked Sendable {
     public static let shared = ServiceStore()
 
-    // MARK: private - internal setup and update functions
-
     private var container: NSPersistentContainer? = nil
     private let readiness = ServiceStoreReadiness()
 
@@ -57,6 +62,10 @@ public final class ServiceStore: @unchecked Sendable {
         }
 
         description.type = NSSQLiteStoreType
+
+        let scopedURL = ServiceStoreScope.activeStoreURL
+        ServiceStoreScope.seedIfNeeded(at: scopedURL)
+        description.url = scopedURL
         description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
         description.setOption(true as NSNumber, forKey: NSMigratePersistentStoresAutomaticallyOption)
         description.setOption(true as NSNumber, forKey: NSInferMappingModelAutomaticallyOption)
@@ -76,12 +85,28 @@ public final class ServiceStore: @unchecked Sendable {
         }
     }
 
-    // MARK: public - status, add, get, remove, save, syncManually functions
+    func reopenStore(at url: URL, seedIfMissing: Bool = true) {
+        ServiceStoreScope.reopen(
+            container,
+            at: url,
+            label: "Services",
+            seedIfMissing: seedIfMissing
+        )
+    }
 
     public enum CloudStatus {
-        case unavailable       // container not initialized
-        case ready             // container initialized and loaded
-        case unknown           // initialization failed
+        case unavailable
+        case ready
+        case unknown
+    }
+
+    struct BackupRow {
+        let id: UUID
+        let url: String
+        let jsonMetadata: String
+        let jsScript: String
+        let isActive: Bool
+        let sortIndex: Int64
     }
 
     public func status() -> CloudStatus {
@@ -120,25 +145,33 @@ public final class ServiceStore: @unchecked Sendable {
         }
     }
 
-    /// Persists large provider scripts on a private context so callers on the
-    /// main actor can suspend instead of blocking SwiftUI while SQLite saves.
     public func storeServiceAsync(
         id: UUID,
         url: String,
         jsonMetadata: String,
         jsScript: String,
         isActive: Bool,
-        sortIndex: Int64? = nil
-    ) async {
+        sortIndex: Int64? = nil,
+        expectedScopeGeneration: Int? = nil
+    ) async -> Bool {
         guard let container else {
             Logger.shared.log("Persistent container not initialized: storeServiceAsync", type: "Storage")
-            return
+            return false
         }
 
-        await withCheckedContinuation { continuation in
+        return await withCheckedContinuation { continuation in
             container.performBackgroundTask { context in
+                if let expectedScopeGeneration,
+                   !ServiceStoreScope.isCurrent(expectedScopeGeneration) {
+                    Logger.shared.log(
+                        "Services: dropped a queued service write, the services store moved",
+                        type: "Storage"
+                    )
+                    continuation.resume(returning: false)
+                    return
+                }
                 context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
-                self.storeService(
+                let succeeded = self.storeService(
                     id: id,
                     url: url,
                     jsonMetadata: jsonMetadata,
@@ -147,7 +180,7 @@ public final class ServiceStore: @unchecked Sendable {
                     sortIndex: sortIndex,
                     in: context
                 )
-                continuation.resume()
+                continuation.resume(returning: succeeded)
             }
         }
     }
@@ -189,9 +222,39 @@ public final class ServiceStore: @unchecked Sendable {
         return result
     }
 
-    /// Fetches and decodes service metadata away from the main context. Provider
-    /// scripts can be several megabytes, so materializing them must not block a
-    /// Settings navigation transition.
+    func backupRows() throws -> [BackupRow] {
+        guard let container,
+              container.persistentStoreCoordinator.persistentStores.first != nil else {
+            throw CocoaError(.persistentStoreOperation)
+        }
+        var outcome: Result<[BackupRow], Error>!
+        container.viewContext.performAndWait {
+            outcome = Result {
+                let request: NSFetchRequest<ServiceEntity> = ServiceEntity.fetchRequest()
+                request.sortDescriptors = [NSSortDescriptor(key: "sortIndex", ascending: true)]
+                let entities = try container.viewContext.fetch(request)
+                return try entities.map { entity in
+                    guard entity.asModel != nil,
+                          let id = entity.id,
+                          let url = entity.url,
+                          let jsonMetadata = entity.jsonMetadata,
+                          let jsScript = entity.jsScript else {
+                        throw CocoaError(.coderInvalidValue)
+                    }
+                    return BackupRow(
+                        id: id,
+                        url: url,
+                        jsonMetadata: jsonMetadata,
+                        jsScript: jsScript,
+                        isActive: entity.isActive,
+                        sortIndex: entity.sortIndex
+                    )
+                }
+            }
+        }
+        return try outcome.get()
+    }
+
     public func getServicesAsync() async -> [Service] {
         guard let container else {
             Logger.shared.log("Persistent container not initialized: getServicesAsync", type: "Storage")
@@ -230,6 +293,30 @@ public final class ServiceStore: @unchecked Sendable {
         }
     }
 
+    @discardableResult
+    func removeAllServicesForAccountBoundary() -> Bool {
+        guard let container else { return false }
+        var succeeded = false
+        container.viewContext.performAndWait {
+            do {
+                let request: NSFetchRequest<ServiceEntity> = ServiceEntity.fetchRequest()
+                for entity in try container.viewContext.fetch(request) {
+                    container.viewContext.delete(entity)
+                }
+                if container.viewContext.hasChanges {
+                    try container.viewContext.save()
+                }
+                succeeded = true
+            } catch {
+                Logger.shared.log(
+                    "Services: failed to clear account-owned rows: \(error.localizedDescription)",
+                    type: "Storage"
+                )
+            }
+        }
+        return succeeded
+    }
+
     public func save() {
         guard let container = container else {
             Logger.shared.log("Persistent container not initialized: save", type: "Storage")
@@ -263,12 +350,6 @@ public final class ServiceStore: @unchecked Sendable {
         }
     }
 
-    // MARK: - SkyStream state
-
-    /// Loads the compact SkyStream metadata/provider-state document from this same persistent
-    /// store. Package archives and executable scripts deliberately remain in Application Support;
-    /// Core Data only carries the bounded Codable state needed for ordering, settings, backup,
-    /// and provenance.
     func loadSkyStreamStateData() async throws -> Data? {
         try await readiness.waitUntilReady()
         guard let container else {
@@ -287,9 +368,7 @@ public final class ServiceStore: @unchecked Sendable {
                         continuation.resume(returning: nil)
                         return
                     }
-                    // `nil` is reserved for a successful fetch with no singleton row. Treat a
-                    // partially synced/corrupt row as a load failure so callers do not mistake it
-                    // for authoritative empty state and prune the installed package payloads.
+
                     guard let json = entity.jsonState,
                           let state = json.data(using: .utf8) else {
                         throw CocoaError(.fileReadCorruptFile)
@@ -309,8 +388,7 @@ public final class ServiceStore: @unchecked Sendable {
         }
     }
 
-    /// Atomically replaces the single bounded metadata document on a background context.
-    func saveSkyStreamStateData(_ data: Data) async throws {
+    func saveSkyStreamStateData(_ data: Data, expectedScopeGeneration: Int? = nil) async throws {
         try await readiness.waitUntilReady()
         guard let container else {
             throw CocoaError(.persistentStoreOperation)
@@ -322,6 +400,15 @@ public final class ServiceStore: @unchecked Sendable {
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             container.performBackgroundTask { context in
+                if let expectedScopeGeneration,
+                   !ServiceStoreScope.isCurrent(expectedScopeGeneration) {
+                    Logger.shared.log(
+                        "SkyStream: dropped a queued state write, the services store moved",
+                        type: "Storage"
+                    )
+                    continuation.resume(throwing: CocoaError(.persistentStoreOperation))
+                    return
+                }
                 context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
                 let request: NSFetchRequest<SkyStreamStateEntity> = SkyStreamStateEntity.fetchRequest()
                 request.predicate = NSPredicate(format: "id == %@", SkyStreamStateEntity.singletonID)
@@ -346,6 +433,32 @@ public final class ServiceStore: @unchecked Sendable {
         }
     }
 
+    @discardableResult
+    func clearSkyStreamStateDataForAccountBoundary() -> Bool {
+        guard let container else { return false }
+        var succeeded = false
+        container.viewContext.performAndWait {
+            let request: NSFetchRequest<SkyStreamStateEntity> = SkyStreamStateEntity.fetchRequest()
+            request.predicate = NSPredicate(format: "id == %@", SkyStreamStateEntity.singletonID)
+            do {
+                for entity in try container.viewContext.fetch(request) {
+                    container.viewContext.delete(entity)
+                }
+                if container.viewContext.hasChanges {
+                    try container.viewContext.save()
+                }
+                succeeded = true
+            } catch {
+                Logger.shared.log(
+                    "SkyStream: failed to clear account-owned state: \(error.localizedDescription)",
+                    type: "Storage"
+                )
+            }
+        }
+        return succeeded
+    }
+
+    @discardableResult
     private func storeService(
         id: UUID,
         url: String,
@@ -354,7 +467,7 @@ public final class ServiceStore: @unchecked Sendable {
         isActive: Bool,
         sortIndex: Int64?,
         in context: NSManagedObjectContext
-    ) {
+    ) -> Bool {
         let fetchRequest: NSFetchRequest<ServiceEntity> = ServiceEntity.fetchRequest()
         fetchRequest.predicate = NSPredicate(format: "id == %@", id as CVarArg)
         fetchRequest.fetchLimit = 1
@@ -386,8 +499,10 @@ public final class ServiceStore: @unchecked Sendable {
             if context.hasChanges {
                 try context.save()
             }
+            return true
         } catch {
             Logger.shared.log("Failed to save service: \(error.localizedDescription)", type: "Storage")
+            return false
         }
     }
 

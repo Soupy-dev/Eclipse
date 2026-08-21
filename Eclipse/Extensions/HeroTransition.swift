@@ -1,8 +1,4 @@
-// matchedGeometryEffect helpers for card-to-detail hero transitions
-
 import SwiftUI
-
-// MARK: - Namespace Environment Key
 
 private struct HeroNamespaceKey: EnvironmentKey {
     static let defaultValue: Namespace.ID? = nil
@@ -21,10 +17,8 @@ extension View {
     }
 }
 
-// MARK: - Hero Source & Destination Modifiers
-
 extension View {
-    /// Apply to the source card's poster image
+
     @ViewBuilder
     func heroSource(id: String, namespace: Namespace.ID?) -> some View {
         if #available(iOS 18.0, tvOS 18.0, *), let ns = namespace {
@@ -33,8 +27,7 @@ extension View {
             self
         }
     }
-    
-    /// Apply to the destination detail view
+
     @ViewBuilder
     func heroDestination(id: String, namespace: Namespace.ID?) -> some View {
         if #available(iOS 18.0, tvOS 18.0, *), let ns = namespace {

@@ -2,12 +2,6 @@ import AVFoundation
 import Foundation
 import UniformTypeIdentifiers
 
-/// A public-API AVPlayer transport for streams that require HTTP headers.
-///
-/// AVFoundation doesn't expose arbitrary per-asset HTTP headers. This loader gives the asset a
-/// private URL scheme, handles every resulting resource request through URLSession, and rewrites
-/// HLS child URIs back through the same scheme. The delegate is intentionally retained alongside
-/// the player item because `AVAssetResourceLoader.delegate` is weak.
 final class AVPlayerResourceLoader: NSObject, @unchecked Sendable {
     struct BackedItem {
         let item: AVPlayerItem
@@ -118,8 +112,6 @@ final class AVPlayerResourceLoader: NSObject, @unchecked Sendable {
         }
     }
 
-    // MARK: - Pure request and manifest helpers
-
     static func sanitizedHTTPHeaders(_ headers: [String: String]) -> [String: String] {
         let managedOrHopByHopHeaders: Set<String> = [
             "accept-encoding", "connection", "content-length", "host", "keep-alive",
@@ -173,10 +165,6 @@ final class AVPlayerResourceLoader: NSObject, @unchecked Sendable {
         return components.url
     }
 
-    /// URLSession normally strips credential headers on a cross-origin redirect. Because this
-    /// loader reconstructs requests itself, enforce the same boundary for redirects and for HLS
-    /// children hosted by a different origin. Domain-scoped cookies managed by URLSession still
-    /// work; only caller-supplied credentials are withheld.
     static func httpHeaders(
         _ headers: [String: String],
         for destinationURL: URL,
@@ -200,9 +188,7 @@ final class AVPlayerResourceLoader: NSObject, @unchecked Sendable {
                     result[pair.key] = safeOrigin
                 }
             default:
-                // Unknown/custom headers are origin-bound by default. This
-                // includes X-Api-Key, X-Auth-Token and provider-specific token
-                // names that cannot be enumerated safely.
+
                 break
             }
         }
@@ -297,8 +283,6 @@ final class AVPlayerResourceLoader: NSObject, @unchecked Sendable {
         }
         guard var resolvedURL else { return nil }
 
-        // Signed HLS endpoints commonly put a token on the playlist URL and return bare relative
-        // segment paths. Preserve that query only when the child did not provide one of its own.
         if isRelativeReference,
            URLComponents(string: value)?.percentEncodedQuery == nil,
            let baseQuery = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)?.percentEncodedQuery,
@@ -312,8 +296,6 @@ final class AVPlayerResourceLoader: NSObject, @unchecked Sendable {
         guard let proxiedURL = proxiedURL(for: resolvedURL) else { return nil }
         return proxiedURL.absoluteString
     }
-
-    // MARK: - Loading lifecycle
 
     private func beginLoading(_ loadingRequest: AVAssetResourceLoadingRequest) -> Bool {
         guard !isInvalidated,

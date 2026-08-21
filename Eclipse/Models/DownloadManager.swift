@@ -1,12 +1,8 @@
-// Created on 27/02/26.
-
 import Foundation
 import Combine
 #if canImport(UIKit)
 import UIKit
 #endif
-
-// MARK: - Download Item Model
 
 enum DownloadStatus: String, Codable {
     case queued
@@ -22,19 +18,556 @@ enum DownloadEnqueueResult {
     case adoptedExistingFile
 }
 
-/// Non-secret transport identity retained across launches. SkyStream access material is
-/// deliberately kept out of the Codable model; this marker tells recovery which validated
-/// transport must be rebuilt from `lastContentReference` before a transfer can continue.
 enum DownloadProviderTransportKind: String, Codable {
     case skyStreamDirect
     case skyStreamHLS
 }
 
+enum ProtectedDownloadProviderKind: String, Codable {
+    case service
+    case stremio
+    case nuvio
+    case skyStream
+    case unresolvedLegacy
+}
+
+enum ProtectedDownloadTransportKind: String, Codable {
+    case direct
+    case hls
+}
+
+typealias NuvioDownloadTransportKind = ProtectedDownloadTransportKind
+
+enum ProtectedDownloadProfileAuthority: Equatable {
+    case authorized
+    case waitingForOwner
+    case bindLegacyOwner(UUID)
+}
+
+typealias NuvioDownloadProfileAuthority = ProtectedDownloadProfileAuthority
+
+struct ProtectedPersistableTransport: Codable, Equatable {
+    var streamURL: String
+    var headers: [String: String]
+    var subtitleURL: String?
+    var subtitleHeaders: [String: String]?
+    var hlsVariantURL: String?
+}
+
+typealias NuvioPersistableTransport = ProtectedPersistableTransport
+
+enum ProtectedDownloadPersistencePolicy {
+    static func inferredProviderKind(
+        explicitKind: ProtectedDownloadProviderKind? = nil,
+        hasLegacyNuvioMarker: Bool = false,
+        sourceID: String?,
+        reference: ProviderContentReference?
+    ) -> ProtectedDownloadProviderKind? {
+        if let explicitKind { return explicitKind }
+        if hasLegacyNuvioMarker
+            || sourceID?.hasPrefix("nuvio:") == true
+            || reference?.kind == .nuvio {
+            return .nuvio
+        }
+        if sourceID?.hasPrefix("service:") == true
+            || reference?.kind == .service {
+            return .service
+        }
+        if sourceID?.hasPrefix("stremio:") == true
+            || reference?.kind == .stremio {
+            return .stremio
+        }
+        return nil
+    }
+
+    static func claimsProtectedProvider(
+        explicitKind: ProtectedDownloadProviderKind? = nil,
+        hasLegacyNuvioMarker: Bool = false,
+        sourceID: String?,
+        reference: ProviderContentReference?
+    ) -> Bool {
+        inferredProviderKind(
+            explicitKind: explicitKind,
+            hasLegacyNuvioMarker: hasLegacyNuvioMarker,
+            sourceID: sourceID,
+            reference: reference
+        ) != nil
+    }
+
+    static func claimsNuvio(
+        sourceID: String?,
+        reference: ProviderContentReference?
+    ) -> Bool {
+        sourceID?.hasPrefix("nuvio:") == true || reference?.kind == .nuvio
+    }
+
+    static func transportKind(for streamURL: String) -> ProtectedDownloadTransportKind {
+        streamURL.lowercased().contains(".m3u8") ? .hls : .direct
+    }
+
+    static func profileAuthority(
+        ownerProfileID: UUID?,
+        activeProfileID: UUID
+    ) -> ProtectedDownloadProfileAuthority {
+        guard let ownerProfileID else { return .bindLegacyOwner(activeProfileID) }
+        return ownerProfileID == activeProfileID ? .authorized : .waitingForOwner
+    }
+
+    static func sanitizedForPersistence(
+        claimsNuvio: Bool,
+        transport: ProtectedPersistableTransport
+    ) -> ProtectedPersistableTransport {
+        guard claimsNuvio else { return transport }
+        return ProtectedPersistableTransport(
+            streamURL: "",
+            headers: [:],
+            subtitleURL: nil,
+            subtitleHeaders: nil,
+            hlsVariantURL: nil
+        )
+    }
+
+    static func sanitizedForPersistence(
+        claimsProtectedProvider: Bool,
+        transport: ProtectedPersistableTransport
+    ) -> ProtectedPersistableTransport {
+        sanitizedForPersistence(
+            claimsNuvio: claimsProtectedProvider,
+            transport: transport
+        )
+    }
+
+    static func requiresFreshResolution(claimsNuvio: Bool, streamURL: String) -> Bool {
+        claimsNuvio && streamURL.isEmpty
+    }
+
+    static func requiresFreshResolution(
+        claimsProtectedProvider: Bool,
+        streamURL: String
+    ) -> Bool {
+        claimsProtectedProvider && streamURL.isEmpty
+    }
+
+    static func requiresReselectionAfterRelaunch(
+        providerKind: ProtectedDownloadProviderKind?,
+        hasAuthoritativeReference: Bool,
+        streamURL: String
+    ) -> Bool {
+        (providerKind == .service
+            || providerKind == .stremio
+            || providerKind == .unresolvedLegacy)
+            && !hasAuthoritativeReference
+            && streamURL.isEmpty
+    }
+
+    static func mayAdoptRestoredBackgroundTask(claimsNuvio: Bool) -> Bool {
+        !claimsNuvio
+    }
+
+    static func mayAdoptRestoredBackgroundTask(claimsProtectedProvider: Bool) -> Bool {
+        !claimsProtectedProvider
+    }
+
+    static func mayClaimDirectTaskCallback(
+        claimsNuvio: Bool,
+        registeredProtectedTaskIdentifier: Int?,
+        callbackTaskIdentifier: Int
+    ) -> Bool {
+        !claimsNuvio || registeredProtectedTaskIdentifier == callbackTaskIdentifier
+    }
+
+    static func mayClaimDirectTaskCallback(
+        claimsProtectedProvider: Bool,
+        registeredProtectedTaskIdentifier: Int?,
+        callbackTaskIdentifier: Int
+    ) -> Bool {
+        !claimsProtectedProvider
+            || registeredProtectedTaskIdentifier == callbackTaskIdentifier
+    }
+
+    static func validatedEnqueueAuthorityIsCurrent(
+        ownerProfileID: UUID,
+        capturedScopeGeneration: Int,
+        activeProfileID: UUID,
+        currentScopeGeneration: Int
+    ) -> Bool {
+        ownerProfileID == activeProfileID
+            && capturedScopeGeneration == currentScopeGeneration
+    }
+
+    /// Identifies only the old Stremio rows that carried no provider marker at
+    /// all. Matching is exact against the active profile's configured addon
+    /// origins so an ordinary Service/manual URL cannot acquire LAN authority.
+    static func legacyStremioSourceID(
+        serviceBaseURL: String,
+        configuredAddons: [UUID: String]
+    ) -> String? {
+        let candidate = StremioClient.normalizedConfiguredURL(from: serviceBaseURL)
+        guard candidate.utf8.count <= 16_384,
+              let components = URLComponents(string: candidate),
+              let scheme = components.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              components.host?.isEmpty == false,
+              components.user == nil,
+              components.password == nil else {
+            return nil
+        }
+        let matches = configuredAddons.compactMap { addonID, rawURL -> UUID? in
+            StremioClient.normalizedConfiguredURL(from: rawURL) == candidate
+                ? addonID
+                : nil
+        }
+        guard matches.count == 1, let addonID = matches.first else { return nil }
+        return "stremio:\(addonID.uuidString)"
+    }
+}
+
+typealias NuvioDownloadPersistencePolicy = ProtectedDownloadPersistencePolicy
+
+enum ProtectedDownloadAttemptLifecycle {
+    static func mayReleaseAttempt(mainFinished: Bool, subtitleSessionCount: Int) -> Bool {
+        mainFinished && subtitleSessionCount == 0
+    }
+}
+
+typealias NuvioDownloadAttemptLifecycle = ProtectedDownloadAttemptLifecycle
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+enum NuvioDownloadAuthorityState: Equatable {
+    case notNuvio
+    case authorized
+    case invalid
+
+    static func classify(
+        sourceID: String?,
+        reference: ProviderContentReference?
+    ) -> Self {
+        let sourceClaimsNuvio = sourceID?.hasPrefix("nuvio:") == true
+        let referenceClaimsNuvio = reference?.kind == .nuvio
+        guard sourceClaimsNuvio || referenceClaimsNuvio else { return .notNuvio }
+        guard sourceClaimsNuvio,
+              referenceClaimsNuvio,
+              let sourceID,
+              let reference,
+              reference.sourceID == sourceID,
+              reference.nuvio?.sourceID == sourceID,
+              reference.nuvio?.isStructurallyValid == true else {
+            return .invalid
+        }
+        return .authorized
+    }
+}
+
+enum ProtectedDownloadAuthorityState: Equatable {
+    case notProtected
+    case authorized(ProtectedDownloadProviderKind)
+    case legacyService
+    case legacyStremio
+    case invalid
+
+    static func classify(
+        explicitKind: ProtectedDownloadProviderKind?,
+        hasLegacyNuvioMarker: Bool,
+        sourceID: String?,
+        reference: ProviderContentReference?
+    ) -> Self {
+        let sourceClaimsNuvio = sourceID?.hasPrefix("nuvio:") == true
+        let referenceClaimsNuvio = reference?.kind == .nuvio
+        let sourceClaimsService = sourceID?.hasPrefix("service:") == true
+        let referenceClaimsService = reference?.kind == .service
+        let sourceClaimsStremio = sourceID?.hasPrefix("stremio:") == true
+        let referenceClaimsStremio = reference?.kind == .stremio
+        let claimsNuvio = explicitKind == .nuvio
+            || hasLegacyNuvioMarker
+            || sourceClaimsNuvio
+            || referenceClaimsNuvio
+        let claimsService = explicitKind == .service
+            || sourceClaimsService
+            || referenceClaimsService
+        let claimsStremio = explicitKind == .stremio
+            || sourceClaimsStremio
+            || referenceClaimsStremio
+
+        if explicitKind == .unresolvedLegacy {
+            return .invalid
+        }
+
+        if explicitKind == .skyStream {
+            guard !claimsNuvio,
+                  !claimsService,
+                  !claimsStremio,
+                  let reference,
+                  reference.kind == .skyStream,
+                  reference.sourceID == sourceID,
+                  reference.skyStream?.sourceID == sourceID,
+                  reference.skyStream?.isStructurallyValid == true else {
+                return .invalid
+            }
+            return .authorized(.skyStream)
+        }
+
+        let claimedKinds = [claimsNuvio, claimsService, claimsStremio].filter { $0 }.count
+        guard claimedKinds > 0 else { return .notProtected }
+        guard claimedKinds == 1 else { return .invalid }
+
+        if claimsNuvio {
+            guard sourceClaimsNuvio,
+                  referenceClaimsNuvio,
+                  let sourceID,
+                  let reference,
+                  reference.sourceID == sourceID,
+                  reference.nuvio?.sourceID == sourceID,
+                  reference.nuvio?.isStructurallyValid == true else {
+                return .invalid
+            }
+            return .authorized(.nuvio)
+        }
+
+        if claimsStremio {
+            guard sourceClaimsStremio else { return .invalid }
+            guard let reference else { return .legacyStremio }
+            guard referenceClaimsStremio,
+                  reference.sourceID == sourceID,
+                  reference.hasValidStremioSelection else {
+                return .invalid
+            }
+            return .authorized(.stremio)
+        }
+
+        guard sourceClaimsService else { return .invalid }
+        guard let reference else { return .legacyService }
+        guard referenceClaimsService,
+              reference.sourceID == sourceID,
+              reference.serviceHref?.isEmpty == false else {
+            return .invalid
+        }
+        return .authorized(.service)
+    }
+}
+#endif
+
+struct ProtectedDownloadTransportPlan: Equatable {
+    let authoritativeURL: URL
+    let authoritativeHeaders: [String: String]
+    let dispatchURL: URL
+    let dispatchHeaders: [String: String]
+    let mayUseResumeData: Bool
+    let mustRegenerateHLSCheckpoint: Bool
+
+    static func protectedAttempt(
+        authoritativeURL: URL,
+        authoritativeHeaders: [String: String],
+        proxyURL: URL
+    ) -> Self {
+        Self(
+            authoritativeURL: authoritativeURL,
+            authoritativeHeaders: authoritativeHeaders,
+            dispatchURL: proxyURL,
+            dispatchHeaders: [:],
+            mayUseResumeData: false,
+            mustRegenerateHLSCheckpoint: true
+        )
+    }
+
+    static func ordinary(
+        url: URL,
+        headers: [String: String]
+    ) -> Self {
+        Self(
+            authoritativeURL: url,
+            authoritativeHeaders: headers,
+            dispatchURL: url,
+            dispatchHeaders: headers,
+            mayUseResumeData: true,
+            mustRegenerateHLSCheckpoint: false
+        )
+    }
+}
+
+typealias NuvioDownloadTransportPlan = ProtectedDownloadTransportPlan
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+private final class NuvioDownloadChallengeCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var capturedURL: URL?
+
+    func record(_ url: URL) {
+        lock.lock()
+        capturedURL = url
+        lock.unlock()
+    }
+
+    var url: URL? {
+        lock.lock()
+        defer { lock.unlock() }
+        return capturedURL
+    }
+}
+
+private final class NuvioBoundedSubtitleFetch: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    struct Output {
+        let data: Data
+        let response: HTTPURLResponse
+    }
+
+    private enum FetchError: LocalizedError {
+        case invalidResponse
+        case rejectedStatus(Int)
+        case rejectedContentType(String)
+        case responseTooLarge
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidResponse:
+                return "The subtitle server returned an invalid response."
+            case .rejectedStatus(let status):
+                return "The subtitle server returned HTTP \(status)."
+            case .rejectedContentType:
+                return "The subtitle server returned unsupported content."
+            case .responseTooLarge:
+                return "The subtitle exceeded Eclipse's 5 MB safety limit."
+            }
+        }
+    }
+
+    private let maximumBytes: Int
+    private let completion: (Result<Output, Error>) -> Void
+    private let lock = NSLock()
+    private var completed = false
+    private var receivedData = Data()
+    private var receivedResponse: HTTPURLResponse?
+    private var task: URLSessionDataTask?
+    private lazy var session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 60
+        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: configuration, delegate: self, delegateQueue: nil)
+    }()
+
+    init(maximumBytes: Int = 5_000_000, completion: @escaping (Result<Output, Error>) -> Void) {
+        self.maximumBytes = max(1, maximumBytes)
+        self.completion = completion
+        super.init()
+    }
+
+    func start(_ request: URLRequest) {
+        let task = session.dataTask(with: request)
+        lock.lock()
+        self.task = task
+        lock.unlock()
+        task.resume()
+    }
+
+    func cancel() {
+        lock.lock()
+        let task = self.task
+        lock.unlock()
+        task?.cancel()
+        finish(.failure(URLError(.cancelled)))
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        dataTask: URLSessionDataTask,
+        didReceive response: URLResponse,
+        completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
+    ) {
+        guard let http = response as? HTTPURLResponse else {
+            completionHandler(.cancel)
+            finish(.failure(FetchError.invalidResponse))
+            return
+        }
+        guard (200...299).contains(http.statusCode) else {
+            completionHandler(.cancel)
+            finish(.failure(FetchError.rejectedStatus(http.statusCode)))
+            return
+        }
+        if response.expectedContentLength > Int64(maximumBytes) {
+            completionHandler(.cancel)
+            finish(.failure(FetchError.responseTooLarge))
+            return
+        }
+        let mimeType = (response.mimeType ?? "application/octet-stream").lowercased()
+        let acceptedTypes: Set<String> = [
+            "text/plain", "text/vtt", "text/webvtt", "text/srt", "text/x-srt",
+            "text/ass", "text/x-ass", "text/ssa", "text/x-ssa",
+            "application/octet-stream", "application/vtt", "application/webvtt",
+            "application/x-subrip", "application/ass", "application/x-ass",
+            "application/ssa", "application/x-ssa", "application/ttml+xml",
+            "application/xml"
+        ]
+        let accepted = acceptedTypes.contains(mimeType)
+        guard accepted else {
+            completionHandler(.cancel)
+            finish(.failure(FetchError.rejectedContentType(mimeType)))
+            return
+        }
+        lock.lock()
+        receivedResponse = http
+        lock.unlock()
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        lock.lock()
+        let exceedsLimit = receivedData.count > maximumBytes - data.count
+        if !exceedsLimit {
+            receivedData.append(data)
+        }
+        lock.unlock()
+        if exceedsLimit {
+            dataTask.cancel()
+            finish(.failure(FetchError.responseTooLarge))
+        }
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+        finish(.failure(FetchError.rejectedStatus(response.statusCode)))
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if let error {
+            finish(.failure(error))
+            return
+        }
+        lock.lock()
+        let response = receivedResponse
+        let data = receivedData
+        lock.unlock()
+        guard let response else {
+            finish(.failure(FetchError.invalidResponse))
+            return
+        }
+        finish(.success(Output(data: data, response: response)))
+    }
+
+    private func finish(_ result: Result<Output, Error>) {
+        lock.lock()
+        guard !completed else {
+            lock.unlock()
+            return
+        }
+        completed = true
+        task = nil
+        lock.unlock()
+        session.invalidateAndCancel()
+        completion(result)
+    }
+}
+#endif
+
 enum AutoModeDownloadValidationResult: Equatable {
     case valid
     case invalid(reason: String)
-    /// The probe hit a Cloudflare/DDoS-Guard wall. Carries the challenged URL so the caller
-    /// can run the interactive bypass and retry — the same recovery the streaming path gets.
+
     case cloudflareChallenge(url: URL)
     case cancelled
 }
@@ -46,6 +579,42 @@ enum AutoModeDownloadEnqueueResult {
     case cancelled
 }
 
+enum DownloadByteCountFormatter {
+    private static let unitNames = ["bytes", "KB", "MB", "GB", "TB", "PB"]
+    private static let unitBase = 1_000.0
+    private static let displayLocale = Locale(identifier: "en_US_POSIX")
+
+    static func string(fromByteCount byteCount: Int64) -> String {
+        let nonnegativeByteCount = max(byteCount, 0)
+        guard nonnegativeByteCount >= 1_000 else {
+            let unit = nonnegativeByteCount == 1 ? "byte" : "bytes"
+            return "\(nonnegativeByteCount) \(unit)"
+        }
+
+        var value = Double(nonnegativeByteCount)
+        var unitIndex = 0
+        while unitIndex < unitNames.count - 1, value >= unitBase {
+            value /= unitBase
+            unitIndex += 1
+        }
+
+        if unitIndex < unitNames.count - 1, value >= 999.995 {
+            value /= unitBase
+            unitIndex += 1
+        }
+
+        let formatter = NumberFormatter()
+        formatter.locale = displayLocale
+        formatter.numberStyle = .decimal
+        formatter.usesGroupingSeparator = false
+        formatter.minimumFractionDigits = 0
+        formatter.maximumFractionDigits = 2
+        let number = formatter.string(from: NSNumber(value: value))
+            ?? String(format: "%.2f", locale: displayLocale, value)
+        return "\(number) \(unitNames[unitIndex])"
+    }
+}
+
 struct DownloadItem: Codable, Identifiable {
     let id: String
     let tmdbId: Int
@@ -53,42 +622,50 @@ struct DownloadItem: Codable, Identifiable {
     let title: String
     let displayTitle: String
     let posterURL: String?
-    let seasonNumber: Int?
-    let episodeNumber: Int?
+    var seasonNumber: Int?
+    var episodeNumber: Int?
     let episodeName: String?
     var streamURL: String
     var headers: [String: String]
     var subtitleURL: String?
     var subtitleHeaders: [String: String]?
-    let serviceBaseURL: String
-    /// Provider identity retained so an expired signed CDN URL can be re-extracted instead of
-    /// opening an unsolvable verification page on the CDN itself. Optional for old metadata.
+    var serviceBaseURL: String
+
     var sourceId: String? = nil
     var serviceContentHref: String? = nil
-    /// Generalized source identity used for provider-owned URL refresh. The legacy
-    /// `sourceId`/`serviceContentHref` pair remains populated for existing Services.
+
     var lastSourceId: String? = nil
-    /// Bounded provider state that can re-run resolution without retaining JavaScript values,
-    /// cookies, request headers, or a signed playable URL.
+
     var lastContentReference: ProviderContentReference? = nil
     var providerTransportKind: DownloadProviderTransportKind? = nil
-    /// Validator-proven whole-object size for finite typed direct media. This value is not a
-    /// credential and is enforced as both a hard transfer ceiling and final-size invariant.
+
+    /// Provider URLs and credentials are deliberately not persisted. These
+    /// non-secret markers retain enough authority to re-resolve safely.
+    var protectedProviderKind: ProtectedDownloadProviderKind? = nil
+    var protectedTransportKind: ProtectedDownloadTransportKind? = nil
+    var protectedOwnerProfileID: UUID? = nil
+
+    /// Legacy Nuvio-only marker names are retained for backward-compatible
+    /// decoding. New snapshots also carry the provider-neutral markers above.
+    var nuvioTransportKind: NuvioDownloadTransportKind? = nil
+    var nuvioOwnerProfileID: UUID? = nil
+
     var validatedExpectedContentLength: Int64? = nil
     var streamName: String? = nil
-    let episodePlaybackContext: EpisodePlaybackContext?
+    var originalAudioLanguage: String? = nil
+
+    var kidsPolicyDetails: KidsPolicyDetails? = nil
+    var episodePlaybackContext: EpisodePlaybackContext?
     var status: DownloadStatus
     var progress: Double
     var totalBytes: Int64
     var downloadedBytes: Int64
     var localFileName: String?
     var subtitleFileName: String?
-    /// Stable destinations reserved before a transfer starts. These remain optional so
-    /// metadata written by older Eclipse builds continues to decode without migration.
+
     var reservedVideoFileName: String? = nil
     var reservedSubtitleFileName: String? = nil
-    /// Persisted CDN backoff gate so a process suspension during Retry-After does not leave the
-    /// item permanently paused or immediately hammer the host on relaunch.
+
     var retryNotBefore: Date? = nil
     var rateLimitRetryCount: Int? = nil
     var error: String?
@@ -96,24 +673,49 @@ struct DownloadItem: Codable, Identifiable {
     var dateCompleted: Date?
     let isAnime: Bool
 
-    // HLS resume checkpoint (nil for non-HLS or downloads with no progress yet).
-    var hlsResumeSegmentIndex: Int?   // segments fully written to the partial file
-    var hlsResumeByteCount: Int64?    // partial byte length at that checkpoint
-    var hlsVariantURL: String?        // pinned variant playlist for an identical resume
-    var hlsTotalSegments: Int?        // segment count, used to validate a resume
-    
+    var hlsResumeSegmentIndex: Int?
+    var hlsResumeByteCount: Int64?
+    var hlsVariantURL: String?
+    var hlsTotalSegments: Int?
+
+    var effectiveProtectedProviderKind: ProtectedDownloadProviderKind? {
+        if protectedProviderKind == nil,
+           providerTransportKind == .skyStreamDirect,
+           lastContentReference?.kind == .skyStream {
+            return .skyStream
+        }
+        return ProtectedDownloadPersistencePolicy.inferredProviderKind(
+            explicitKind: protectedProviderKind,
+            hasLegacyNuvioMarker: nuvioTransportKind != nil || nuvioOwnerProfileID != nil,
+            sourceID: lastSourceId ?? sourceId,
+            reference: lastContentReference
+        )
+    }
+
+    var effectiveProtectedTransportKind: ProtectedDownloadTransportKind? {
+        protectedTransportKind ?? nuvioTransportKind
+    }
+
+    var effectiveProtectedOwnerProfileID: UUID? {
+        protectedOwnerProfileID ?? nuvioOwnerProfileID
+    }
+
+    var claimsProtectedProviderTransport: Bool {
+        effectiveProtectedProviderKind != nil
+    }
+
     var isHLS: Bool {
         providerTransportKind == .skyStreamHLS
+            || protectedTransportKind == .hls
+            || nuvioTransportKind == .hls
             || streamURL.lowercased().contains(".m3u8")
     }
-    
+
     var formattedSize: String {
-        let formatter = ByteCountFormatter()
-        formatter.countStyle = .file
         if totalBytes > 0 {
-            return "\(formatter.string(fromByteCount: downloadedBytes)) / \(formatter.string(fromByteCount: totalBytes))"
+            return "\(DownloadByteCountFormatter.string(fromByteCount: downloadedBytes)) / \(DownloadByteCountFormatter.string(fromByteCount: totalBytes))"
         } else if downloadedBytes > 0 {
-            return formatter.string(fromByteCount: downloadedBytes)
+            return DownloadByteCountFormatter.string(fromByteCount: downloadedBytes)
         }
         return ""
     }
@@ -148,7 +750,7 @@ struct DownloadItem: Codable, Identifiable {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed?.isEmpty == false ? trimmed : nil
     }
-    
+
     var mediaInfo: MediaInfo {
         if isMovie {
             return .movie(id: tmdbId, title: playerTitleBase, posterURL: posterURL, isAnime: isAnime)
@@ -165,10 +767,514 @@ struct DownloadItem: Codable, Identifiable {
     }
 }
 
-// MARK: - Download Manager
+enum DownloadMetadataPersistencePolicy {
+    enum Bounds {
+        /// This file is local restore input, not a trusted database. A normal
+        /// library is far smaller; this leaves generous legacy headroom while
+        /// bounding the allocation made before decoding.
+        static let fileBytes = 8 * 1_024 * 1_024
+        static let items = 2_000
+        static let identifierBytes = 512
+        static let titleBytes = 8 * 1_024
+        static let urlBytes = 64 * 1_024
+        static let headerCount = 64
+        static let headerValueBytes = 8 * 1_024
+        static let headerAggregateBytes = 32 * 1_024
+        static let relativePathBytes = 4 * 1_024
+        static let byteCount: Int64 = 1 << 50
+    }
+
+    struct NormalizedItems {
+        let items: [DownloadItem]
+        let wasChanged: Bool
+    }
+
+    private struct LossyDecodedItems: Decodable {
+        let items: [DownloadItem]
+        let droppedCount: Int
+
+        init(from decoder: Decoder) throws {
+            var container = try decoder.unkeyedContainer()
+            var decoded: [DownloadItem] = []
+            decoded.reserveCapacity(min(container.count ?? 0, Bounds.items))
+            var dropped = 0
+            while !container.isAtEnd {
+                // Taking a child decoder advances the outer array even when
+                // that individual DownloadItem is corrupt, so one damaged row
+                // cannot make every valid/completed row disappear.
+                let itemDecoder = try container.superDecoder()
+                do {
+                    decoded.append(try DownloadItem(from: itemDecoder))
+                } catch {
+                    dropped += 1
+                }
+            }
+            items = decoded
+            droppedCount = dropped
+        }
+    }
+
+    static func fileMetadataIsWithinLimit(size: UInt64, isRegularFile: Bool) -> Bool {
+        isRegularFile && size <= UInt64(Bounds.fileBytes)
+    }
+
+    /// Counts top-level object values without constructing a JSON object
+    /// graph. Download metadata is always an array of objects; rejecting any
+    /// other top-level element shape lets us enforce the item cap pre-decode.
+    static func metadataJSONPassesPreflight(
+        _ data: Data,
+        maximumItems: Int = Bounds.items
+    ) -> Bool {
+        guard data.count <= Bounds.fileBytes, maximumItems >= 0 else { return false }
+        var arrayDepth = 0
+        var objectDepth = 0
+        var itemCount = 0
+        var inString = false
+        var escaped = false
+        var sawRoot = false
+        var closedRoot = false
+
+        for byte in data {
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if byte == 0x5C {
+                    escaped = true
+                } else if byte == 0x22 {
+                    inString = false
+                }
+                continue
+            }
+
+            if byte == 0x22 {
+                guard sawRoot, !closedRoot, objectDepth > 0 else { return false }
+                inString = true
+                continue
+            }
+            if byte == 0x20 || byte == 0x09 || byte == 0x0A || byte == 0x0D {
+                continue
+            }
+            if closedRoot { return false }
+
+            switch byte {
+            case 0x5B: // [
+                if !sawRoot {
+                    sawRoot = true
+                    arrayDepth = 1
+                } else {
+                    guard objectDepth > 0 else { return false }
+                    arrayDepth += 1
+                }
+            case 0x5D: // ]
+                guard sawRoot, arrayDepth > 0 else { return false }
+                arrayDepth -= 1
+                if arrayDepth == 0 {
+                    guard objectDepth == 0 else { return false }
+                    closedRoot = true
+                }
+            case 0x7B: // {
+                guard sawRoot, arrayDepth > 0 else { return false }
+                if arrayDepth == 1 && objectDepth == 0 {
+                    itemCount += 1
+                    guard itemCount <= maximumItems else { return false }
+                }
+                objectDepth += 1
+            case 0x7D: // }
+                guard objectDepth > 0 else { return false }
+                objectDepth -= 1
+            case 0x2C, 0x3A: // comma, colon
+                guard sawRoot, arrayDepth > 0 else { return false }
+            default:
+                // Scalar tokens are valid only inside an item object. The
+                // decoder remains responsible for full JSON grammar checks.
+                guard sawRoot, arrayDepth > 0, objectDepth > 0 else { return false }
+            }
+        }
+
+        return sawRoot && closedRoot && !inString && arrayDepth == 0 && objectDepth == 0
+    }
+
+    static func normalizedLoadedItems(_ loaded: [DownloadItem]) -> NormalizedItems {
+        var wasChanged = loaded.count > Bounds.items
+        var normalized: [DownloadItem] = []
+        normalized.reserveCapacity(min(loaded.count, Bounds.items))
+
+        for raw in loaded.prefix(Bounds.items) {
+            guard var item = normalizedItem(raw, changed: &wasChanged) else {
+                wasChanged = true
+                continue
+            }
+            // A protected provider's old diagnostic can contain its signed
+            // URL. Runtime code now emits tokens, and restored legacy text is
+            // replaced before it can be persisted again or shown/logged.
+            if item.claimsProtectedProviderTransport, item.error != nil {
+                item.error = item.status == .failed
+                    ? "The provider download must be retried."
+                    : nil
+                wasChanged = true
+            }
+            normalized.append(item)
+        }
+        return NormalizedItems(items: normalized, wasChanged: wasChanged)
+    }
+
+    static func decodeAndNormalizeLoadedItems(from data: Data) throws -> NormalizedItems {
+        let decoded = try JSONDecoder().decode(LossyDecodedItems.self, from: data)
+        let normalized = normalizedLoadedItems(decoded.items)
+        return NormalizedItems(
+            items: normalized.items,
+            wasChanged: normalized.wasChanged || decoded.droppedCount > 0
+        )
+    }
+
+    private static func normalizedItem(
+        _ raw: DownloadItem,
+        changed: inout Bool
+    ) -> DownloadItem? {
+        guard boundedRequired(raw.id, maximumBytes: Bounds.identifierBytes, identifier: true),
+              boundedRequired(raw.title, maximumBytes: Bounds.titleBytes, rejectControls: true),
+              boundedRequired(raw.displayTitle, maximumBytes: Bounds.titleBytes, rejectControls: true),
+              boundedOptional(raw.posterURL, maximumBytes: Bounds.urlBytes, rejectControls: true),
+              boundedOptional(raw.episodeName, maximumBytes: Bounds.titleBytes, rejectControls: true),
+              (-Int(Int32.max)...Int(Int32.max)).contains(raw.tmdbId) else {
+            return nil
+        }
+
+        var item = raw
+        item.seasonNumber = boundedNumber(item.seasonNumber, range: 0...100_000, changed: &changed)
+        item.episodeNumber = boundedNumber(item.episodeNumber, range: 0...100_000, changed: &changed)
+        item.streamURL = boundedTransportString(item.streamURL, maximumBytes: Bounds.urlBytes, changed: &changed)
+        item.headers = sanitizedHeaders(item.headers, changed: &changed)
+        item.subtitleURL = boundedTransportOptional(item.subtitleURL, maximumBytes: Bounds.urlBytes, changed: &changed)
+        if let subtitleHeaders = item.subtitleHeaders {
+            let sanitized = sanitizedHeaders(subtitleHeaders, changed: &changed)
+            item.subtitleHeaders = sanitized.isEmpty ? nil : sanitized
+        }
+        item.serviceBaseURL = boundedTransportString(
+            item.serviceBaseURL,
+            maximumBytes: Bounds.urlBytes,
+            changed: &changed
+        )
+        item.sourceId = boundedOptionalValue(
+            item.sourceId,
+            maximumBytes: 320,
+            rejectControls: true,
+            changed: &changed
+        )
+        item.serviceContentHref = boundedOptionalValue(
+            item.serviceContentHref,
+            maximumBytes: 8 * 1_024,
+            rejectControls: true,
+            changed: &changed
+        )
+        item.lastSourceId = boundedOptionalValue(
+            item.lastSourceId,
+            maximumBytes: 320,
+            rejectControls: true,
+            changed: &changed
+        )
+        item.validatedExpectedContentLength = boundedPositiveInt64(
+            item.validatedExpectedContentLength,
+            changed: &changed
+        )
+        item.streamName = boundedOptionalValue(item.streamName, maximumBytes: Bounds.titleBytes, changed: &changed)
+        item.originalAudioLanguage = boundedOptionalValue(
+            item.originalAudioLanguage,
+            maximumBytes: 512,
+            changed: &changed
+        )
+
+        if let details = item.kidsPolicyDetails {
+            let genres = Array(details.genreIds.prefix(256))
+            let overview = boundedOptionalValue(
+                details.overview,
+                maximumBytes: 16 * 1_024,
+                changed: &changed
+            )
+            if genres.count != details.genreIds.count { changed = true }
+            item.kidsPolicyDetails = KidsPolicyDetails(
+                isAdult: details.isAdult,
+                genreIds: genres,
+                overview: overview
+            )
+        }
+        item.episodePlaybackContext = normalizedPlaybackContext(
+            item.episodePlaybackContext,
+            changed: &changed
+        )
+
+        if !item.progress.isFinite {
+            item.progress = 0
+            changed = true
+        } else {
+            let clamped = min(max(item.progress, 0), 1)
+            if clamped != item.progress { changed = true }
+            item.progress = clamped
+        }
+        if item.totalBytes < 0 || item.totalBytes > Bounds.byteCount {
+            item.totalBytes = 0
+            changed = true
+        }
+        if item.downloadedBytes < 0 || item.downloadedBytes > Bounds.byteCount {
+            item.downloadedBytes = 0
+            changed = true
+        }
+        if item.totalBytes > 0, item.downloadedBytes > item.totalBytes {
+            item.downloadedBytes = item.totalBytes
+            changed = true
+        }
+
+        item.localFileName = normalizedRelativePath(item.localFileName, changed: &changed)
+        item.subtitleFileName = normalizedRelativePath(item.subtitleFileName, changed: &changed)
+        item.reservedVideoFileName = normalizedRelativePath(item.reservedVideoFileName, changed: &changed)
+        item.reservedSubtitleFileName = normalizedRelativePath(item.reservedSubtitleFileName, changed: &changed)
+
+        if let retry = item.retryNotBefore,
+           !retry.timeIntervalSince1970.isFinite || retry > Date().addingTimeInterval(30 * 24 * 60 * 60) {
+            item.retryNotBefore = nil
+            changed = true
+        }
+        item.rateLimitRetryCount = boundedNumber(
+            item.rateLimitRetryCount,
+            range: 0...100,
+            changed: &changed
+        )
+        item.error = boundedOptionalValue(
+            item.error,
+            maximumBytes: 2 * 1_024,
+            rejectControls: true,
+            changed: &changed
+        )
+        if !item.dateAdded.timeIntervalSince1970.isFinite {
+            item.dateAdded = Date()
+            changed = true
+        }
+        if let completed = item.dateCompleted, !completed.timeIntervalSince1970.isFinite {
+            item.dateCompleted = nil
+            changed = true
+        }
+
+        item.hlsResumeSegmentIndex = boundedNumber(
+            item.hlsResumeSegmentIndex,
+            range: 0...10_000_000,
+            changed: &changed
+        )
+        if let byteCount = item.hlsResumeByteCount,
+           byteCount < 0 || byteCount > Bounds.byteCount {
+            item.hlsResumeByteCount = nil
+            changed = true
+        }
+        item.hlsVariantURL = boundedTransportOptional(
+            item.hlsVariantURL,
+            maximumBytes: Bounds.urlBytes,
+            changed: &changed
+        )
+        item.hlsTotalSegments = boundedNumber(
+            item.hlsTotalSegments,
+            range: 0...10_000_000,
+            changed: &changed
+        )
+        if let index = item.hlsResumeSegmentIndex,
+           let total = item.hlsTotalSegments,
+           index > total {
+            item.hlsResumeSegmentIndex = nil
+            changed = true
+        }
+        return item
+    }
+
+    private static func normalizedPlaybackContext(
+        _ context: EpisodePlaybackContext?,
+        changed: inout Bool
+    ) -> EpisodePlaybackContext? {
+        guard let context else { return nil }
+        guard (0...100_000).contains(context.localSeasonNumber),
+              (0...100_000).contains(context.localEpisodeNumber) else {
+            changed = true
+            return nil
+        }
+        func boundedID(_ value: Int?) -> Int? {
+            guard let value, (-2_000_000_000...2_000_000_000).contains(value) else { return nil }
+            return value
+        }
+        func boundedCoordinate(_ value: Int?) -> Int? {
+            guard let value, (-100_000...100_000).contains(value) else { return nil }
+            return value
+        }
+        let normalized = EpisodePlaybackContext(
+            localSeasonNumber: context.localSeasonNumber,
+            localEpisodeNumber: context.localEpisodeNumber,
+            anilistMediaId: boundedID(context.anilistMediaId),
+            canonicalAniListMediaId: boundedID(context.canonicalAniListMediaId),
+            malMediaId: boundedID(context.malMediaId),
+            kitsuMediaId: boundedID(context.kitsuMediaId),
+            tmdbSeasonNumber: boundedCoordinate(context.tmdbSeasonNumber),
+            tmdbEpisodeNumber: boundedCoordinate(context.tmdbEpisodeNumber),
+            tmdbEpisodeOffset: boundedCoordinate(context.tmdbEpisodeOffset),
+            animeAbsoluteEpisodeNumber: boundedCoordinate(context.animeAbsoluteEpisodeNumber),
+            animeSeasonEpisodeCount: boundedCoordinate(context.animeSeasonEpisodeCount),
+            isSpecial: context.isSpecial,
+            titleOnlySearch: context.titleOnlySearch
+        )
+        if normalized != context { changed = true }
+        return normalized
+    }
+
+    private static func sanitizedHeaders(
+        _ raw: [String: String],
+        changed: inout Bool
+    ) -> [String: String] {
+        let validNameCharacters = CharacterSet(
+            charactersIn: "!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        )
+        var result: [String: String] = [:]
+        var names = Set<String>()
+        var aggregateBytes = 0
+        for (name, value) in raw.sorted(by: {
+            $0.key.lowercased() == $1.key.lowercased()
+                ? $0.key < $1.key
+                : $0.key.lowercased() < $1.key.lowercased()
+        }) {
+            let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            let normalizedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            let lowercaseName = normalizedName.lowercased()
+            let entryBytes = normalizedName.utf8.count + normalizedValue.utf8.count + 4
+            guard result.count < Bounds.headerCount,
+                  !normalizedName.isEmpty,
+                  normalizedName.utf8.count <= 128,
+                  normalizedName.unicodeScalars.allSatisfy({
+                      $0.value < 128 && validNameCharacters.contains($0)
+                  }),
+                  !names.contains(lowercaseName),
+                  normalizedValue.utf8.count <= Bounds.headerValueBytes,
+                  normalizedValue.unicodeScalars.allSatisfy({
+                      $0.value == 9 || ($0.value >= 32 && $0.value != 127)
+                  }),
+                  entryBytes <= Bounds.headerAggregateBytes - aggregateBytes else {
+                changed = true
+                continue
+            }
+            if normalizedName != name || normalizedValue != value { changed = true }
+            names.insert(lowercaseName)
+            result[normalizedName] = normalizedValue
+            aggregateBytes += entryBytes
+        }
+        if result.count != raw.count { changed = true }
+        return result
+    }
+
+    private static func boundedRequired(
+        _ value: String,
+        maximumBytes: Int,
+        identifier: Bool = false,
+        rejectControls: Bool = false
+    ) -> Bool {
+        guard !value.isEmpty, value.utf8.count <= maximumBytes else { return false }
+        if identifier {
+            return !value.unicodeScalars.contains(where: {
+                $0.value < 32 || $0.value == 127 || $0.value == 47 || $0.value == 92
+            })
+        }
+        return !rejectControls || !containsHTTPControl(value)
+    }
+
+    private static func boundedOptional(
+        _ value: String?,
+        maximumBytes: Int,
+        rejectControls: Bool = false
+    ) -> Bool {
+        guard let value else { return true }
+        guard value.utf8.count <= maximumBytes else { return false }
+        return !rejectControls || !containsHTTPControl(value)
+    }
+
+    private static func boundedTransportString(
+        _ value: String,
+        maximumBytes: Int,
+        changed: inout Bool
+    ) -> String {
+        guard value.utf8.count <= maximumBytes, !containsHTTPControl(value) else {
+            changed = true
+            return ""
+        }
+        return value
+    }
+
+    private static func boundedTransportOptional(
+        _ value: String?,
+        maximumBytes: Int,
+        changed: inout Bool
+    ) -> String? {
+        guard let value else { return nil }
+        let bounded = boundedTransportString(value, maximumBytes: maximumBytes, changed: &changed)
+        return bounded.isEmpty ? nil : bounded
+    }
+
+    private static func boundedOptionalValue(
+        _ value: String?,
+        maximumBytes: Int,
+        rejectControls: Bool = false,
+        changed: inout Bool
+    ) -> String? {
+        guard let value else { return nil }
+        guard value.utf8.count <= maximumBytes,
+              !rejectControls || !containsHTTPControl(value) else {
+            changed = true
+            return nil
+        }
+        return value
+    }
+
+    private static func boundedNumber(
+        _ value: Int?,
+        range: ClosedRange<Int>,
+        changed: inout Bool
+    ) -> Int? {
+        guard let value else { return nil }
+        guard range.contains(value) else {
+            changed = true
+            return nil
+        }
+        return value
+    }
+
+    private static func boundedPositiveInt64(
+        _ value: Int64?,
+        changed: inout Bool
+    ) -> Int64? {
+        guard let value else { return nil }
+        guard value > 0, value <= Bounds.byteCount else {
+            changed = true
+            return nil
+        }
+        return value
+    }
+
+    private static func normalizedRelativePath(
+        _ value: String?,
+        changed: inout Bool
+    ) -> String? {
+        guard let value else { return nil }
+        guard value.utf8.count <= Bounds.relativePathBytes,
+              !value.hasPrefix("/"),
+              !value.contains("\\"),
+              !value.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 }),
+              let normalized = DownloadPathIdentityPolicy.normalizedRelativePath(value) else {
+            changed = true
+            return nil
+        }
+        if normalized != value { changed = true }
+        return normalized
+    }
+
+    private static func containsHTTPControl(_ value: String) -> Bool {
+        value.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 })
+    }
+}
 
 final class DownloadManager: NSObject, ObservableObject {
     static let shared = DownloadManager()
+    private static let animeProviderAliasesKey = "downloadAnimeProviderAliasesV1"
 
     private enum RefreshedDownloadTransport {
         case direct(url: URL, headers: [String: String], expectedContentLength: Int64?)
@@ -180,56 +1286,96 @@ final class DownloadManager: NSObject, ObservableObject {
     private struct RefreshedDownloadSource {
         let transport: RefreshedDownloadTransport
         let streamName: String?
+        let subtitleURL: String?
+        let subtitleHeaders: [String: String]?
         let serviceContentHref: String?
         let lastSourceId: String
         let lastContentReference: ProviderContentReference
+        let stremioConfiguredOriginAuthority: SkyStreamPinnedOriginAuthority?
+
+        init(
+            transport: RefreshedDownloadTransport,
+            streamName: String?,
+            subtitleURL: String?,
+            subtitleHeaders: [String: String]?,
+            serviceContentHref: String?,
+            lastSourceId: String,
+            lastContentReference: ProviderContentReference,
+            stremioConfiguredOriginAuthority: SkyStreamPinnedOriginAuthority? = nil
+        ) {
+            self.transport = transport
+            self.streamName = streamName
+            self.subtitleURL = subtitleURL
+            self.subtitleHeaders = subtitleHeaders
+            self.serviceContentHref = serviceContentHref
+            self.lastSourceId = lastSourceId
+            self.lastContentReference = lastContentReference
+            self.stremioConfiguredOriginAuthority = stremioConfiguredOriginAuthority
+        }
 
         var directURL: URL? {
             guard case .direct(let url, _, _) = transport else { return nil }
             return url
         }
     }
-    
+
     @Published private(set) var downloads: [DownloadItem] = []
-    
+
     private var backgroundSession: URLSession!
     private var activeTasks: [String: URLSessionDownloadTask] = [:]
-    /// Terminal callbacks can arrive after a task was cancelled and its stable download ID was
-    /// reused. Task identifiers are unique within this background session, so retain invalidated
-    /// identifiers until `didCompleteWithError` confirms that attempt is fully drained.
+
     private var invalidatedDirectTaskIdentifiers = Set<Int>()
     private var pendingResumeDataTaskIdentifiers: [String: Int] = [:]
     private var resumeDataStore: [String: Data] = [:]
     private var lastProgressUpdate: [String: Date] = [:]
     private var lastHLSCheckpointSave: [String: Date] = [:]
     private var activeHLSDownloaders: [String: HLSDownloader] = [:]
-    /// A stable download ID can be removed and immediately re-enqueued while the prior HLS
-    /// worker is still delivering cancellation/progress callbacks. Bind every callback to one
-    /// in-memory attempt so an abandoned worker cannot mutate or release its replacement.
+
     private var activeHLSAttemptIDs: [String: UUID] = [:]
     private var invalidatedHLSAttemptIDs = Set<UUID>()
 #if os(iOS) && !targetEnvironment(macCatalyst)
-    /// Validator-issued route graphs and their loopback capabilities exist only in memory.
-    /// Persisted downloads retain the bounded provider reference and transport kind instead.
+
     private var skyStreamHLSDescriptors: [String: SkyStreamValidatedPlaybackDescriptor] = [:]
     private var skyStreamHLSProxyURLs: [String: URL] = [:]
     private var skyStreamHLSPinnedVariantURLs: [String: URL] = [:]
     private var skyStreamRestoringDownloadIDs = Set<String>()
-    /// Direct transfers repeat uncached URL/DNS policy immediately before creating their
-    /// background task. Pending IDs reserve queue slots so re-entrant queue processing cannot
-    /// start duplicate validations or let more transfers exceed the user's concurrency setting.
-    private var skyStreamDirectValidationPendingIDs = Set<String>()
-    private var skyStreamDirectDispatchApprovedIDs = Set<String>()
+
+    private struct ProtectedProviderDownloadAttempt {
+        let attemptID: UUID
+        let providerKind: ProtectedDownloadProviderKind
+        let authorityURL: String
+        let authorityHeaders: [String: String]
+        let authorityReference: ProviderContentReference?
+        let stremioConfiguredOriginAuthority: SkyStreamPinnedOriginAuthority?
+        let mainProxyURL: URL
+        var subtitleProxyURLs = Set<URL>()
+        var mainTaskIdentifier: Int?
+        var hlsVariantProxyURL: URL?
+        var mainFinished = false
+    }
+
+    private var protectedProviderAttempts: [String: ProtectedProviderDownloadAttempt] = [:]
+    private var stremioConfiguredOriginAuthorities: [String: SkyStreamPinnedOriginAuthority] = [:]
+    private var persistenceLoadedDownloadIDs = Set<String>()
+    private var nuvioSubtitleFetches: [String: NuvioBoundedSubtitleFetch] = [:]
+    private var nuvioRestoringDownloadIDs = Set<String>()
+    private var nuvioAutoValidationProxyURLs: [UUID: URL] = [:]
+    private var observedNuvioTransportProfileID: UUID?
 #endif
-    /// Download IDs whose confirmed Cloudflare/DDoS-Guard response is currently being
-    /// re-verified. Accessed on the main thread so a transport failure can only open one solve.
+
+    private var nuvioDispatchValidationPendingIDs = Set<String>()
+    private var nuvioDispatchApprovedIDs = Set<String>()
+    private var nuvioDispatchValidationTokens: [String: UUID] = [:]
+
     private var cloudflareRecoveringDownloadIDs = Set<String>()
     private var mediaSourceRecoveryAttempts: [String: (count: Int, lastAttempt: Date)] = [:]
+
+    private var animeProviderAliasesByTMDBID: [Int: [Int: Int]] = [:]
     private var scheduledQueueWakeWorkItem: DispatchWorkItem?
     #if canImport(UIKit)
     private var lifecycleObservers: [NSObjectProtocol] = []
     #endif
-    
+
     private let maxConcurrentDownloads = 2
     private let maxConcurrentHLSDownloads = 1
     private let minimumFreeBytesForHLS: Int64 = 750 * 1024 * 1024
@@ -241,7 +1387,7 @@ final class DownloadManager: NSObject, ObservableObject {
     private var backgroundHLSPipelineEnabled: Bool {
         UserDefaults.standard.bool(forKey: "backgroundHLSPipelineEnabled")
     }
-    
+
     private var persistenceURL: URL {
         downloadsDirectory.appendingPathComponent(".downloads_metadata.json")
     }
@@ -250,7 +1396,7 @@ final class DownloadManager: NSObject, ObservableObject {
         fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Downloads")
     }
-    
+
     var downloadsDirectory: URL {
         let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let dir = documents.appendingPathComponent("Downloads", isDirectory: true)
@@ -259,34 +1405,45 @@ final class DownloadManager: NSObject, ObservableObject {
         }
         return dir
     }
-    
-    /// Background session completion handler set by AppDelegate/SceneDelegate
+
     var backgroundCompletionHandler: (() -> Void)?
-    
+
     private override init() {
         super.init()
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        observedNuvioTransportProfileID = ProfileManager.shared.activeProfileID
+#endif
+
+        if let data = UserDefaults.standard.data(forKey: Self.animeProviderAliasesKey),
+           let decoded = try? JSONDecoder().decode([Int: [Int: Int]].self, from: data) {
+            animeProviderAliasesByTMDBID = decoded
+        }
 
         #if canImport(UIKit)
         UIDevice.current.isBatteryMonitoringEnabled = true
         #endif
-        
+
         let config = URLSessionConfiguration.background(withIdentifier: "app.eclipse.soupy.downloads")
         config.isDiscretionary = false
         config.sessionSendsLaunchEvents = true
         config.allowsCellularAccess = true
         config.httpMaximumConnectionsPerHost = 4
         backgroundSession = URLSession(configuration: config, delegate: self, delegateQueue: nil)
-        
+
         migrateLegacyDownloadsDirectoryIfNeeded()
         loadDownloads()
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        persistenceLoadedDownloadIDs = Set(downloads.map(\.id))
+        migrateLegacyStremioDownloadsIfNeeded(permitsOneLiveAttempt: false)
+#endif
         ensureDownloadPathReservations()
         migrateTrackedDownloadsToPublicLayout()
+        backfillKidsPolicyDetailsIfNeeded()
         observeAppLifecycle()
-        
-        // Keep user-visible imports intact; only stale hidden partials are pruned.
+
         cleanOrphanedFiles()
-        
-        // Resume any downloads that were marked as downloading (app was killed)
+
         resumeInterruptedDownloads()
     }
 
@@ -296,6 +1453,9 @@ final class DownloadManager: NSObject, ObservableObject {
             NotificationCenter.default.removeObserver(observer)
         }
         #endif
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        invalidateAllProtectedProviderAttempts()
+#endif
     }
 
     private func observeAppLifecycle() {
@@ -309,6 +1469,63 @@ final class DownloadManager: NSObject, ObservableObject {
                 self?.processQueue()
             }
         )
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        lifecycleObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.didEnterBackgroundNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.suspendProtectedProviderAttempts(
+                    message: "Waiting for app to reopen",
+                    processWhenPossible: false
+                )
+            }
+        )
+        lifecycleObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: UIApplication.willTerminateNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.suspendProtectedProviderAttempts(
+                    message: "Waiting for app to reopen",
+                    processWhenPossible: false
+                )
+            }
+        )
+        lifecycleObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: .activeProfileDidChange,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                guard let self else { return }
+                let currentProfileID = ProfileManager.shared.activeProfileID
+                guard currentProfileID != self.observedNuvioTransportProfileID else { return }
+                self.observedNuvioTransportProfileID = currentProfileID
+                self.suspendProtectedProviderAttempts(
+                    message: "Refreshing protected download access",
+                    processWhenPossible: true
+                )
+            }
+        )
+        lifecycleObservers.append(
+            NotificationCenter.default.addObserver(
+                forName: .mediaStateWillChangeCurrentUser,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.suspendProtectedProviderAttempts(
+                    message: "Refreshing protected download access",
+                    processWhenPossible: false
+                )
+                DispatchQueue.main.async { [weak self] in
+                    self?.processQueue()
+                }
+            }
+        )
+#endif
         #endif
     }
 
@@ -319,32 +1536,114 @@ final class DownloadManager: NSObject, ObservableObject {
             DispatchQueue.main.async(execute: work)
         }
     }
-    
-    // MARK: - Public API
-    
+
     var activeDownloads: [DownloadItem] {
         downloads.filter { $0.status == .downloading || $0.status == .queued }
     }
-    
+
     var completedDownloads: [DownloadItem] {
         downloads.filter { $0.status == .completed }
     }
-    
+
     var failedDownloads: [DownloadItem] {
         downloads.filter { $0.status == .failed }
     }
-    
+
     var activeDownloadCount: Int {
         downloads.filter { $0.status == .downloading }.count
     }
 
-    /// Performs a bounded network preflight for Auto Mode before an item is enqueued.
-    /// Direct files must deliver enough real bytes to rule out tiny error payloads. HLS
-    /// streams are checked as a playlist plus one media segment because playlists are
-    /// legitimately small. Nothing from the probe is persisted to the downloads folder.
+    func registerAnimeProviderAliases(
+        tmdbId: Int,
+        canonicalProviderIDByStoredID aliases: [Int: Int]
+    ) {
+        guard tmdbId > 0, !aliases.isEmpty else { return }
+        var merged = animeProviderAliasesByTMDBID[tmdbId] ?? [:]
+        for (storedID, canonicalID) in aliases
+        where storedID != 0 && canonicalID != 0 && storedID != canonicalID {
+            merged[storedID] = canonicalID
+        }
+        guard merged != animeProviderAliasesByTMDBID[tmdbId] else { return }
+        animeProviderAliasesByTMDBID[tmdbId] = merged
+        if let data = try? JSONEncoder().encode(animeProviderAliasesByTMDBID) {
+            UserDefaults.standard.set(data, forKey: Self.animeProviderAliasesKey)
+        }
+    }
+
+    @MainActor
+    func reconcileAnimeStructuralContexts(
+        tmdbId: Int,
+        canonicalContexts: [EpisodePlaybackContext],
+        canonicalProviderIDByStoredID aliases: [Int: Int]
+    ) {
+        guard tmdbId > 0, !canonicalContexts.isEmpty else { return }
+        registerAnimeProviderAliases(
+            tmdbId: tmdbId,
+            canonicalProviderIDByStoredID: aliases
+        )
+
+        var didChange = false
+        for index in downloads.indices {
+            guard !downloads[index].isMovie,
+                  downloads[index].tmdbId == tmdbId,
+                  downloads[index].isAnime
+                    || downloads[index].episodePlaybackContext?.hasAnimeMediaId == true else {
+                continue
+            }
+
+            let storedContext: EpisodePlaybackContext? = {
+                if let context = downloads[index].episodePlaybackContext { return context }
+                guard let season = downloads[index].seasonNumber,
+                      let providerID = AnimeSyntheticSeasonKey.providerID(from: season),
+                      let episode = downloads[index].episodeNumber else { return nil }
+                return EpisodePlaybackContext(
+                    localSeasonNumber: season,
+                    localEpisodeNumber: episode,
+                    anilistMediaId: providerID,
+                    tmdbSeasonNumber: nil,
+                    tmdbEpisodeNumber: nil,
+                    tmdbEpisodeOffset: nil,
+                    animeAbsoluteEpisodeNumber: nil,
+                    animeSeasonEpisodeCount: nil,
+                    isSpecial: true,
+                    titleOnlySearch: false
+                )
+            }()
+            guard let storedContext,
+                  let canonical = canonicalContexts.first(where: {
+                      AnimeEpisodeIdentityPolicy.isSameEpisode(
+                          storedContext,
+                          $0,
+                          providerAliases: aliases
+                      )
+                  }) else {
+                continue
+            }
+
+            if downloads[index].seasonNumber != canonical.localSeasonNumber
+                || downloads[index].episodeNumber != canonical.localEpisodeNumber
+                || downloads[index].episodePlaybackContext != canonical {
+                downloads[index].seasonNumber = canonical.localSeasonNumber
+                downloads[index].episodeNumber = canonical.localEpisodeNumber
+                downloads[index].episodePlaybackContext = canonical
+                didChange = true
+            }
+        }
+
+        if didChange {
+            saveDownloads()
+            Logger.shared.log(
+                "DownloadManager: reconciled canonical anime contexts tmdbId=\(tmdbId)",
+                type: "Download"
+            )
+        }
+    }
+
     func validateAutoModeDownload(
         streamURL: String,
-        headers: [String: String]
+        headers: [String: String],
+        streamIsHLS: Bool? = nil,
+        diagnosticURL: URL? = nil
     ) async -> AutoModeDownloadValidationResult {
         guard let url = URL(string: streamURL),
               let scheme = url.scheme?.lowercased(),
@@ -352,8 +1651,8 @@ final class DownloadManager: NSObject, ObservableObject {
             return .invalid(reason: "The source returned an invalid download URL.")
         }
 
-        let isHLS = streamURL.lowercased().contains(".m3u8")
-        let host = url.host ?? "unknown host"
+        let isHLS = streamIsHLS ?? streamURL.lowercased().contains(".m3u8")
+        let host = diagnosticURL?.host ?? url.host ?? "unknown host"
         let maximumAttempts = 2
 
         for attempt in 1...maximumAttempts {
@@ -379,11 +1678,8 @@ final class DownloadManager: NSObject, ObservableObject {
 
                 let failure = autoModeValidationFailure(from: error)
 
-                // A Cloudflare wall isn't a bad source — it's one interactive solve away from
-                // working. Flag it (like the streaming fetch does) and hand the challenged URL
-                // back so the caller can show the bypass and retry THIS source, instead of
-                // dead-ending it as invalid and silently skipping to a worse candidate.
-                if let challengeURL = failure.cloudflareChallengeURL {
+                if let rawChallengeURL = failure.cloudflareChallengeURL {
+                    let challengeURL = diagnosticURL ?? rawChallengeURL
                     await CloudflareBypassManager.shared.flagPendingVerification(for: challengeURL)
                     Logger.shared.log(
                         "Auto Mode download hit Cloudflare wall host=\(challengeURL.host ?? "unknown") — routing to verification",
@@ -416,8 +1712,6 @@ final class DownloadManager: NSObject, ObservableObject {
         return .invalid(reason: "The download stream could not be verified.")
     }
 
-    /// Auto Mode's authoritative enqueue path. Existing/adoptable files are resolved
-    /// before touching the network; new downloads are only enqueued after validation.
     @MainActor
     func enqueueValidatedAutoModeDownload(
         tmdbId: Int,
@@ -438,6 +1732,7 @@ final class DownloadManager: NSObject, ObservableObject {
         lastSourceId: String? = nil,
         lastContentReference: ProviderContentReference? = nil,
         streamName: String? = nil,
+        originalAudioLanguage: String? = nil,
         isAnime: Bool,
         episodePlaybackContext: EpisodePlaybackContext? = nil,
         cancellationRequested: @escaping @MainActor () -> Bool = { false }
@@ -454,7 +1749,7 @@ final class DownloadManager: NSObject, ObservableObject {
         let id = isMovie
             ? "dl_movie_\(tmdbId)"
             : "dl_ep_\(tmdbId)_s\(seasonNumber ?? 0)_e\(episodeNumber ?? 0)"
-        let candidate = DownloadItem(
+        var candidate = DownloadItem(
             id: id,
             tmdbId: tmdbId,
             isMovie: isMovie,
@@ -474,6 +1769,7 @@ final class DownloadManager: NSObject, ObservableObject {
             lastSourceId: recoveryMetadata.sourceId,
             lastContentReference: recoveryMetadata.reference,
             streamName: streamName,
+            originalAudioLanguage: originalAudioLanguage,
             episodePlaybackContext: episodePlaybackContext,
             status: .queued,
             progress: 0,
@@ -486,13 +1782,156 @@ final class DownloadManager: NSObject, ObservableObject {
             dateCompleted: nil,
             isAnime: isAnime
         )
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        if let providerKind = ProtectedDownloadPersistencePolicy.inferredProviderKind(
+            sourceID: candidate.lastSourceId,
+            reference: candidate.lastContentReference
+        ) {
+            candidate.protectedProviderKind = providerKind
+            candidate.protectedOwnerProfileID = ProfileManager.shared.activeProfileID
+            candidate.protectedTransportKind = ProtectedDownloadPersistencePolicy.transportKind(
+                for: candidate.streamURL
+            )
+            if providerKind == .nuvio {
+                candidate.nuvioOwnerProfileID = candidate.protectedOwnerProfileID
+                candidate.nuvioTransportKind = candidate.protectedTransportKind
+            }
+        }
+#endif
 
         if let existingResult = existingAutoModeDownloadOutcome(for: candidate) {
             return .accepted(existingResult)
         }
 
-        let validation = await validateAutoModeDownload(streamURL: streamURL, headers: headers)
+        var validationStreamURL = streamURL
+        var validationHeaders = headers
+        var validationProxyURL: URL?
+        var validationProxyToken: UUID?
+        var validationIsHLS: Bool?
+        var validationDiagnosticURL: URL?
+        var challengeCapture: NuvioDownloadChallengeCapture?
+        var validatedProtectedOwnerProfileID: UUID?
+        var validatedProtectedScopeGeneration: Int?
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        var validationNeedsProtectedProxy = false
+        var protectedValidationURLString = streamURL
+        var protectedValidationHeaders = headers
+        var protectedValidationStremioAuthority: SkyStreamPinnedOriginAuthority?
+        switch ProtectedDownloadAuthorityState.classify(
+            explicitKind: candidate.protectedProviderKind,
+            hasLegacyNuvioMarker: candidate.nuvioTransportKind != nil,
+            sourceID: candidate.lastSourceId,
+            reference: candidate.lastContentReference
+        ) {
+        case .notProtected:
+            break
+        case .invalid:
+            return .invalid(reason: "The provider download recovery reference is invalid.")
+        case .authorized(let providerKind):
+            validationNeedsProtectedProxy = true
+            validatedProtectedOwnerProfileID = candidate.effectiveProtectedOwnerProfileID
+            validatedProtectedScopeGeneration = ServiceStoreScope.generation
+            if providerKind == .nuvio {
+                guard let reference = candidate.lastContentReference?.nuvio,
+                      nuvioDownloadReferenceMatchesItem(reference, item: candidate) else {
+                    return .invalid(reason: "The Nuvio download reference no longer matches this title.")
+                }
+            }
+            if providerKind == .stremio {
+                guard let reference = candidate.lastContentReference,
+                      reference.hasValidStremioSelection,
+                      let ownerProfileID = validatedProtectedOwnerProfileID,
+                      let scopeGeneration = validatedProtectedScopeGeneration else {
+                    return .invalid(reason: "The Stremio download reference is invalid.")
+                }
+                guard let resolved = await StremioAddonManager.shared.resolveDownloadTransport(
+                    reference: reference,
+                    ownerProfileID: ownerProfileID,
+                    serviceStoreGeneration: scopeGeneration
+                ) else {
+                    return .invalid(reason: "The Stremio addon could not refresh this download stream.")
+                }
+                guard !cancellationRequested(),
+                      ProtectedDownloadPersistencePolicy.validatedEnqueueAuthorityIsCurrent(
+                          ownerProfileID: ownerProfileID,
+                          capturedScopeGeneration: scopeGeneration,
+                          activeProfileID: ProfileManager.shared.activeProfileID,
+                          currentScopeGeneration: ServiceStoreScope.generation
+                      ) else {
+                    return .cancelled
+                }
+                protectedValidationURLString = resolved.streamURL
+                protectedValidationHeaders = Self.stremioDownloadHeaders(resolved.headers)
+                protectedValidationStremioAuthority = resolved.configuredOriginAuthority
+            }
+        case .legacyService:
+            validationNeedsProtectedProxy = true
+            validatedProtectedOwnerProfileID = candidate.effectiveProtectedOwnerProfileID
+            validatedProtectedScopeGeneration = ServiceStoreScope.generation
+        case .legacyStremio:
+            return .invalid(reason: "This legacy Stremio download must be selected again.")
+        }
+
+        if validationNeedsProtectedProxy {
+            guard let originalURL = URL(string: protectedValidationURLString),
+                  protectedProviderTransportMayStart else {
+                return .invalid(reason: "The protected provider download route is unavailable right now.")
+            }
+            let capture = NuvioDownloadChallengeCapture()
+            guard let proxyURL = MPVHeaderProxy.shared.makeProxyURL(
+                for: originalURL,
+                headers: protectedValidationHeaders,
+                logType: "ProviderDownloadValidation",
+                traceID: String(UUID().uuidString.prefix(8)),
+                stremioAuthority: protectedValidationStremioAuthority,
+                onConfirmedCloudflareChallenge: { url, _, _, _ in
+                    capture.record(url)
+                }
+            ) else {
+                return .invalid(reason: "Eclipse could not create a protected provider validation route.")
+            }
+            challengeCapture = capture
+            validationProxyURL = proxyURL
+            let proxyToken = UUID()
+            validationProxyToken = proxyToken
+            nuvioAutoValidationProxyURLs[proxyToken] = proxyURL
+            validationStreamURL = proxyURL.absoluteString
+            validationHeaders = [:]
+            validationIsHLS = ProtectedDownloadPersistencePolicy.transportKind(
+                for: protectedValidationURLString
+            ) == .hls
+            validationDiagnosticURL = originalURL
+        }
+#endif
+
+        let validation = await validateAutoModeDownload(
+            streamURL: validationStreamURL,
+            headers: validationHeaders,
+            streamIsHLS: validationIsHLS,
+            diagnosticURL: validationDiagnosticURL
+        )
+        if let validationProxyURL {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            if let validationProxyToken {
+                nuvioAutoValidationProxyURLs.removeValue(forKey: validationProxyToken)
+            }
+#endif
+            MPVHeaderProxy.shared.invalidateSession(for: validationProxyURL)
+        }
         guard !cancellationRequested() else { return .cancelled }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        if let validatedProtectedOwnerProfileID {
+            guard let validatedProtectedScopeGeneration,
+                  ProtectedDownloadPersistencePolicy.validatedEnqueueAuthorityIsCurrent(
+                      ownerProfileID: validatedProtectedOwnerProfileID,
+                      capturedScopeGeneration: validatedProtectedScopeGeneration,
+                      activeProfileID: ProfileManager.shared.activeProfileID,
+                      currentScopeGeneration: ServiceStoreScope.generation
+                  ) else {
+                return .cancelled
+            }
+        }
+#endif
 
         switch validation {
         case .valid:
@@ -514,7 +1953,12 @@ final class DownloadManager: NSObject, ObservableObject {
                 serviceContentHref: serviceContentHref,
                 lastSourceId: recoveryMetadata.sourceId,
                 lastContentReference: recoveryMetadata.reference,
+                protectedOwnerProfileID: validatedProtectedOwnerProfileID,
+                nuvioOwnerProfileID: candidate.protectedProviderKind == .nuvio
+                    ? validatedProtectedOwnerProfileID
+                    : nil,
                 streamName: streamName,
+                originalAudioLanguage: originalAudioLanguage,
                 isAnime: isAnime,
                 episodePlaybackContext: episodePlaybackContext
             )
@@ -522,16 +1966,16 @@ final class DownloadManager: NSObject, ObservableObject {
         case .invalid(let reason):
             return .invalid(reason: reason)
         case .cloudflareChallenge(let url):
-            return .cloudflareChallenge(url: url)
+            return .cloudflareChallenge(
+                url: challengeCapture?.url ?? validationDiagnosticURL ?? url
+            )
         case .cancelled:
             return .cancelled
         }
     }
 
 #if os(iOS) && !targetEnvironment(macCatalyst)
-    /// SkyStream's download entry point accepts only the resolver's unforgeable VOD descriptor.
-    /// Direct media uses the validator's finite URL, while a deliberately narrow MPEG-TS HLS
-    /// shape is packaged exclusively through the descriptor-backed loopback route graph.
+
     @MainActor
     func enqueueValidatedSkyStreamDownload(
         tmdbId: Int,
@@ -543,6 +1987,7 @@ final class DownloadManager: NSObject, ObservableObject {
         episodeNumber: Int?,
         episodeName: String?,
         resolved: SkyStreamResolvedStream,
+        originalAudioLanguage: String? = nil,
         isAnime: Bool,
         episodePlaybackContext: EpisodePlaybackContext? = nil,
         cancellationRequested: @escaping @MainActor () -> Bool = { false }
@@ -577,7 +2022,7 @@ final class DownloadManager: NSObject, ObservableObject {
                 return .invalid(reason: reason)
             }
             transportKind = .skyStreamHLS
-            // The actual signed route graph is installed below and never enters Codable state.
+
             streamURL = ""
             headers = [:]
             serviceBaseURL = ""
@@ -594,13 +2039,10 @@ final class DownloadManager: NSObject, ObservableObject {
             episodeNumber: episodeNumber
         )
         if transportKind == .skyStreamHLS {
-            // Install before enqueueing because `enqueueDownload` starts the queue synchronously.
+
             skyStreamHLSDescriptors[downloadID] = descriptor
         }
 
-        // Validator-issued subtitle routes are URL-policy checked, but not fetched or bounded.
-        // The legacy sidecar downloader has no byte ceiling or typed lifetime coordination, so
-        // omitting them is safer than treating an arbitrary response as a finite subtitle file.
         let result = enqueueDownload(
             tmdbId: tmdbId,
             isMovie: isMovie,
@@ -624,12 +2066,13 @@ final class DownloadManager: NSObject, ObservableObject {
                 ? descriptor.finiteContentLength
                 : nil,
             streamName: resolved.displayName,
+            originalAudioLanguage: originalAudioLanguage,
             isAnime: isAnime,
             episodePlaybackContext: episodePlaybackContext
         )
         if transportKind == .skyStreamHLS {
             if case .enqueued = result {
-                // The queue now owns the in-memory descriptor.
+
             } else {
                 clearSkyStreamDownloadRuntimeState(id: downloadID, discardDescriptor: true)
             }
@@ -637,10 +2080,6 @@ final class DownloadManager: NSObject, ObservableObject {
         return .accepted(result)
     }
 
-    /// The legacy packager concatenates one MPEG-TS rendition. It cannot preserve byte ranges,
-    /// rendition groups, discontinuities, encryption state, or fragmented-MP4 initialization.
-    /// Reject every such shape before creating a loopback capability so unsupported manifests
-    /// cannot silently produce a corrupt file.
     static func skyStreamHLSRejectionReason(
         _ descriptor: SkyStreamValidatedPlaybackDescriptor
     ) -> String? {
@@ -790,8 +2229,7 @@ final class DownloadManager: NSObject, ObservableObject {
               legacySourceId.utf8.count <= 320,
               let legacyServiceHref,
               !legacyServiceHref.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            // Retain a valid identity even when no safe refresh payload exists. Recovery remains
-            // disabled until a matching bounded reference is provided.
+
             return (boundedSourceId, nil)
         }
         let reference = ProviderContentReference.service(
@@ -814,15 +2252,18 @@ final class DownloadManager: NSObject, ObservableObject {
                   let href = reference.serviceHref else { return false }
             return !href.isEmpty && href.utf8.count <= 8 * 1_024
         case .stremio:
-            guard sourceId.hasPrefix("stremio:"),
-                  let contentID = reference.stremioContentID else { return false }
-            return !contentID.isEmpty && contentID.utf8.count <= 2 * 1_024
+            return sourceId.hasPrefix("stremio:")
+                && reference.hasValidStremioSelection
         case .skyStream:
             return reference.skyStream?.sourceID == sourceId
                 && reference.skyStream?.isStructurallyValid == true
+        case .nuvio:
+            return sourceId.hasPrefix("nuvio:")
+                && reference.nuvio?.sourceID == sourceId
+                && reference.nuvio?.isStructurallyValid == true
         }
     }
-    
+
     @discardableResult
     @MainActor
     func enqueueDownload(
@@ -845,7 +2286,10 @@ final class DownloadManager: NSObject, ObservableObject {
         lastContentReference: ProviderContentReference? = nil,
         providerTransportKind: DownloadProviderTransportKind? = nil,
         validatedExpectedContentLength: Int64? = nil,
+        protectedOwnerProfileID: UUID? = nil,
+        nuvioOwnerProfileID: UUID? = nil,
         streamName: String? = nil,
+        originalAudioLanguage: String? = nil,
         isAnime: Bool,
         episodePlaybackContext: EpisodePlaybackContext? = nil
     ) -> DownloadEnqueueResult {
@@ -884,6 +2328,7 @@ final class DownloadManager: NSObject, ObservableObject {
             providerTransportKind: providerTransportKind,
             validatedExpectedContentLength: validatedExpectedContentLength,
             streamName: streamName,
+            originalAudioLanguage: originalAudioLanguage,
             episodePlaybackContext: episodePlaybackContext,
             status: .queued,
             progress: 0,
@@ -896,8 +2341,51 @@ final class DownloadManager: NSObject, ObservableObject {
             dateCompleted: nil,
             isAnime: isAnime
         )
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        if let providerKind = ProtectedDownloadPersistencePolicy.inferredProviderKind(
+            sourceID: item.lastSourceId,
+            reference: item.lastContentReference
+        ) {
+            item.protectedProviderKind = providerKind
+            item.protectedOwnerProfileID = protectedOwnerProfileID
+                ?? nuvioOwnerProfileID
+                ?? ProfileManager.shared.activeProfileID
+            item.protectedTransportKind = ProtectedDownloadPersistencePolicy.transportKind(
+                for: item.streamURL
+            )
+            if providerKind == .nuvio {
+                item.nuvioOwnerProfileID = item.protectedOwnerProfileID
+                item.nuvioTransportKind = item.protectedTransportKind
+            }
+        } else if providerTransportKind == .skyStreamDirect,
+                  item.lastContentReference?.kind == .skyStream {
+            item.protectedProviderKind = .skyStream
+            item.protectedOwnerProfileID = protectedOwnerProfileID
+                ?? ProfileManager.shared.activeProfileID
+            item.protectedTransportKind = .direct
+        }
+#endif
 
-        // Check if already downloading, paused, completed, or manually present in Files.
+#if os(iOS)
+        if !isMovie,
+           let seasonNumber,
+           let episodeNumber,
+           episodePlaybackContext != nil,
+           let equivalent = matchingEpisodeDownloadItem(
+               tmdbId: tmdbId,
+               seasonNumber: seasonNumber,
+               episodeNumber: episodeNumber,
+               playbackContext: episodePlaybackContext,
+               accepting: { candidate in
+                   candidate.status == .downloading || candidate.status == .queued || candidate.status == .paused
+                       || (candidate.status == .completed && self.localFileURL(for: candidate) != nil)
+               }
+           ) {
+            Logger.shared.log("Download already exists by provider identity: \(equivalent.id)", type: "Download")
+            return .alreadyExists
+        }
+#endif
+
         if let existing = downloads.first(where: { $0.id == id }) {
             switch existing.status {
             case .completed:
@@ -909,6 +2397,9 @@ final class DownloadManager: NSObject, ObservableObject {
                     Logger.shared.log("Adopted existing download file for missing metadata path: \(displayTitle)", type: "Download")
                     return .adoptedExistingFile
                 }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                clearProtectedProviderDownloadRuntimeState(id: id, scrubTransport: false)
+#endif
                 downloads.removeAll { $0.id == id }
             case .downloading, .queued, .paused:
                 Logger.shared.log("Download already exists: \(id) status=\(existing.status.rawValue)", type: "Download")
@@ -919,6 +2410,9 @@ final class DownloadManager: NSObject, ObservableObject {
                     return .adoptedExistingFile
                 }
                 deleteDownloadFiles(for: existing, includePartial: true, removingIDs: Set([id]))
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                clearProtectedProviderDownloadRuntimeState(id: id, scrubTransport: false)
+#endif
                 downloads.removeAll { $0.id == id }
             }
         } else if adoptExistingDownloadedFileIfPresent(for: item) {
@@ -929,17 +2423,82 @@ final class DownloadManager: NSObject, ObservableObject {
         item = itemByReservingVideoDestination(item)
         downloads.append(item)
         saveDownloads()
+        captureKidsPolicyDetails(forDownload: id, tmdbId: tmdbId, isMovie: isMovie)
         processQueue()
-        
+
         Logger.shared.log("Enqueued download: \(displayTitle) id=\(id)", type: "Download")
         return .enqueued
     }
-    
+
+    private func captureKidsPolicyDetails(forDownload id: String, tmdbId: Int, isMovie: Bool) {
+        Task { [weak self] in
+            let details: KidsPolicyDetails
+            do {
+                if isMovie {
+                    let detail = try await TMDBService.shared.getMovieDetails(id: tmdbId)
+                    details = KidsPolicyDetails(
+                        isAdult: detail.adult,
+                        genreIds: detail.genres.map(\.id),
+                        overview: detail.overview
+                    )
+                } else {
+                    let detail = try await TMDBService.shared.getTVShowDetails(id: tmdbId)
+                    details = KidsPolicyDetails(
+                        isAdult: detail.adult,
+                        genreIds: detail.genres.map(\.id),
+                        overview: detail.overview
+                    )
+                }
+            } catch {
+                Logger.shared.log(
+                    "Download \(id) stored without kids-policy details: \(error.localizedDescription)",
+                    type: "Download"
+                )
+                return
+            }
+            self?.performOnMain { [weak self] in
+                guard let self,
+                      let index = downloads.firstIndex(where: { $0.id == id }) else { return }
+                downloads[index].kidsPolicyDetails = details
+                saveDownloads()
+            }
+        }
+    }
+
+    private func backfillKidsPolicyDetailsIfNeeded() {
+        for item in downloads where item.status == .completed && item.kidsPolicyDetails == nil {
+            captureKidsPolicyDetails(forDownload: item.id, tmdbId: item.tmdbId, isMovie: item.isMovie)
+        }
+    }
+
     func pauseDownload(id: String) {
         performOnMain { [weak self] in
             guard let self,
                   let index = downloads.firstIndex(where: { $0.id == id }),
                   downloads[index].status == .downloading else { return }
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            let isProtectedProvider = downloads[index].claimsProtectedProviderTransport
+            if isProtectedProvider {
+                if let task = activeTasks.removeValue(forKey: id) {
+                    invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
+                    task.cancel()
+                }
+                if let downloader = activeHLSDownloaders.removeValue(forKey: id) {
+                    if let attemptID = activeHLSAttemptIDs.removeValue(forKey: id) {
+                        invalidatedHLSAttemptIDs.insert(attemptID)
+                    }
+                    downloader.cancel()
+                }
+                clearProtectedProviderDownloadRuntimeState(id: id, scrubTransport: true)
+                guard let currentIndex = downloads.firstIndex(where: { $0.id == id }) else { return }
+                downloads[currentIndex].status = .paused
+                saveDownloads()
+                processQueue()
+                Logger.shared.log("Paused protected provider download: \(id)", type: "Download")
+                return
+            }
+#endif
 
             if let task = activeTasks[id] {
                 let pausedTaskIdentifier = task.taskIdentifier
@@ -960,11 +2519,9 @@ final class DownloadManager: NSObject, ObservableObject {
                 activeTasks.removeValue(forKey: id)
                 invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
             } else if let downloader = activeHLSDownloaders[id] {
-                // HLS downloads do not support resume; cancel and restart on resume.
-                // Keep the HLS lane occupied until cancellation is confirmed.
+
                 downloader.cancel()
             }
-
             guard let currentIndex = downloads.firstIndex(where: { $0.id == id }) else {
                 return
             }
@@ -989,8 +2546,7 @@ final class DownloadManager: NSObject, ObservableObject {
             downloads[index].retryNotBefore = nil
             downloads[index].rateLimitRetryCount = nil
             downloads[index].error = nil
-            // HLS downloads resume from the last checkpointed segment when one exists;
-            // otherwise they restart from scratch.
+
             if downloads[index].isHLS && downloads[index].hlsResumeSegmentIndex == nil {
                 downloads[index].progress = 0
                 downloads[index].downloadedBytes = 0
@@ -1018,6 +2574,7 @@ final class DownloadManager: NSObject, ObservableObject {
             }
 #if os(iOS) && !targetEnvironment(macCatalyst)
             clearSkyStreamDownloadRuntimeState(id: id, discardDescriptor: true)
+            clearProtectedProviderDownloadRuntimeState(id: id, scrubTransport: false)
 #endif
             resumeDataStore.removeValue(forKey: id)
             pendingResumeDataTaskIdentifiers.removeValue(forKey: id)
@@ -1028,11 +2585,12 @@ final class DownloadManager: NSObject, ObservableObject {
             Logger.shared.log("Cancelled download: \(id)", type: "Download")
         }
     }
-    
+
     func removeDownload(id: String, deleteFile: Bool) {
         let removal = {
 #if os(iOS) && !targetEnvironment(macCatalyst)
             self.clearSkyStreamDownloadRuntimeState(id: id, discardDescriptor: true)
+            self.clearProtectedProviderDownloadRuntimeState(id: id, scrubTransport: false)
 #endif
             if let task = self.activeTasks.removeValue(forKey: id) {
                 self.invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
@@ -1043,8 +2601,7 @@ final class DownloadManager: NSObject, ObservableObject {
                 if let attemptID = self.activeHLSAttemptIDs[id] {
                     self.invalidatedHLSAttemptIDs.insert(attemptID)
                 }
-                // Retain the lane until this exact worker confirms cancellation. Starting a
-                // replacement against the same canonical partial path before then can mix bytes.
+
                 downloader.cancel()
             }
             if let item = self.downloads.first(where: { $0.id == id }) {
@@ -1061,7 +2618,7 @@ final class DownloadManager: NSObject, ObservableObject {
             DispatchQueue.main.sync(execute: removal)
         }
     }
-    
+
     func deleteAllForShow(tmdbId: Int) {
         let removal = {
             let matchingIds = Set(self.downloads.filter {
@@ -1071,6 +2628,7 @@ final class DownloadManager: NSObject, ObservableObject {
             for item in self.downloads where matchingIds.contains(item.id) {
 #if os(iOS) && !targetEnvironment(macCatalyst)
                 self.clearSkyStreamDownloadRuntimeState(id: item.id, discardDescriptor: true)
+                self.clearProtectedProviderDownloadRuntimeState(id: item.id, scrubTransport: false)
 #endif
                 self.deleteDownloadFiles(for: item, includePartial: false, removingIDs: matchingIds)
             }
@@ -1091,6 +2649,7 @@ final class DownloadManager: NSObject, ObservableObject {
             for item in self.downloads where completedIds.contains(item.id) {
 #if os(iOS) && !targetEnvironment(macCatalyst)
                 self.clearSkyStreamDownloadRuntimeState(id: item.id, discardDescriptor: true)
+                self.clearProtectedProviderDownloadRuntimeState(id: item.id, scrubTransport: false)
 #endif
                 self.deleteDownloadFiles(for: item, includePartial: false, removingIDs: completedIds)
             }
@@ -1103,9 +2662,9 @@ final class DownloadManager: NSObject, ObservableObject {
             DispatchQueue.main.sync(execute: removal)
         }
     }
-    
+
     func deleteAll() {
-        // Cancel all active tasks
+
         for (_, task) in activeTasks {
             invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
             task.cancel()
@@ -1123,27 +2682,29 @@ final class DownloadManager: NSObject, ObservableObject {
         skyStreamHLSProxyURLs.removeAll()
         skyStreamHLSPinnedVariantURLs.removeAll()
         skyStreamHLSDescriptors.removeAll()
-        skyStreamDirectValidationPendingIDs.removeAll()
-        skyStreamDirectDispatchApprovedIDs.removeAll()
+        invalidateAllProtectedProviderAttempts()
+        nuvioRestoringDownloadIDs.removeAll()
 #endif
+        nuvioDispatchValidationPendingIDs.removeAll()
+        nuvioDispatchApprovedIDs.removeAll()
+        nuvioDispatchValidationTokens.removeAll()
         resumeDataStore.removeAll()
-        
-        // Wipe the entire downloads directory to guarantee no orphans remain
+
         let dir = downloadsDirectory
         if let contents = try? fileManager.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) {
             for fileURL in contents {
-                // Preserve the metadata JSON itself; it gets overwritten below
+
                 if fileURL.lastPathComponent == ".downloads_metadata.json" { continue }
                 try? fileManager.removeItem(at: fileURL)
             }
         }
-        
+
         DispatchQueue.main.async {
             self.downloads.removeAll()
             self.saveDownloads()
         }
     }
-    
+
     func pauseAll() {
         let active = downloads.filter { $0.status == .downloading || $0.status == .queued }
         for item in active {
@@ -1158,38 +2719,38 @@ final class DownloadManager: NSObject, ObservableObject {
         }
         saveDownloads()
     }
-    
+
     func resumeAll() {
         let paused = downloads.filter { $0.status == .paused }
         for item in paused {
             resumeDownload(id: item.id)
         }
     }
-    
+
     func retryAllFailed() {
         let failed = downloads.filter { $0.status == .failed }
         for item in failed {
             resumeDownload(id: item.id)
         }
     }
-    
+
     func cancelAllActive() {
         let active = downloads.filter { $0.status == .downloading || $0.status == .queued || $0.status == .paused }
         for item in active {
             cancelDownload(id: item.id)
         }
     }
-    
+
     func localFileURL(for item: DownloadItem) -> URL? {
         guard let fileName = item.localFileName else { return nil }
         return existingDownloadFileURL(relativePath: fileName)
     }
-    
+
     func localSubtitleURL(for item: DownloadItem) -> URL? {
         guard let fileName = item.subtitleFileName else { return nil }
         return existingDownloadFileURL(relativePath: fileName)
     }
-    
+
     func isDownloaded(tmdbId: Int, isMovie: Bool, seasonNumber: Int? = nil, episodeNumber: Int? = nil) -> Bool {
         let id: String
         if isMovie {
@@ -1237,31 +2798,119 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
 #if os(iOS)
-    /// Resolves an episode download across both Eclipse's local anime numbering and the
-    /// original TMDB coordinates used by Home/Trakt rows.
+
     func completedEpisodeDownloadItem(
         tmdbId: Int,
         seasonNumber: Int,
         episodeNumber: Int,
         playbackContext: EpisodePlaybackContext?
     ) -> DownloadItem? {
-        if let exact = completedDownloadItem(
+        matchingEpisodeDownloadItem(
+            tmdbId: tmdbId,
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber,
+            playbackContext: playbackContext
+        ) { item in
+            item.status == .completed && self.localFileURL(for: item) != nil
+        }
+    }
+
+    func activeEpisodeDownloadItem(
+        tmdbId: Int,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        playbackContext: EpisodePlaybackContext?
+    ) -> DownloadItem? {
+        matchingEpisodeDownloadItem(
+            tmdbId: tmdbId,
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber,
+            playbackContext: playbackContext
+        ) { item in
+            item.status == .downloading || item.status == .queued || item.status == .paused
+        }
+    }
+
+    private func matchingEpisodeDownloadItem(
+        tmdbId: Int,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        playbackContext: EpisodePlaybackContext?,
+        accepting: (DownloadItem) -> Bool
+    ) -> DownloadItem? {
+        func canonicalProviderID(_ rawID: Int) -> Int {
+            animeProviderAliasesByTMDBID[tmdbId]?[rawID] ?? rawID
+        }
+        let requestedHasProviderIdentity = playbackContext?.anilistMediaId != nil
+            || playbackContext?.kitsuMediaId != nil
+        let exactID = Self.downloadID(
             tmdbId: tmdbId,
             isMovie: false,
             seasonNumber: seasonNumber,
             episodeNumber: episodeNumber
-        ) {
-            return exact
+        )
+        let exactCoordinateItem = downloads.first {
+            $0.id == exactID && accepting($0)
+        }
+
+        func matchesExactTMDBIdentity(_ candidate: DownloadItem) -> Bool? {
+            guard let candidateContext = candidate.episodePlaybackContext,
+                  let candidateSeason = candidateContext.resolvedTMDBSeasonNumber,
+                  let candidateEpisode = candidateContext.resolvedTMDBEpisodeNumber else {
+                return nil
+            }
+            let requestedSeason = playbackContext?.resolvedTMDBSeasonNumber ?? seasonNumber
+            let requestedEpisode = playbackContext?.resolvedTMDBEpisodeNumber ?? episodeNumber
+            return candidateSeason == requestedSeason && candidateEpisode == requestedEpisode
+        }
+
+        func matchesProviderIdentity(_ candidate: DownloadItem) -> Bool {
+            guard let playbackContext else { return false }
+
+            if let candidateContext = candidate.episodePlaybackContext {
+                return AnimeEpisodeIdentityPolicy.isSameEpisode(
+                    playbackContext,
+                    candidateContext,
+                    providerAliases: animeProviderAliasesByTMDBID[tmdbId] ?? [:]
+                )
+            }
+
+            if let requestedAniListID = playbackContext.anilistMediaId,
+               let candidateSeason = candidate.seasonNumber,
+               let candidateProviderID = AnimeSyntheticSeasonKey.providerID(from: candidateSeason),
+               canonicalProviderID(candidateProviderID) == canonicalProviderID(requestedAniListID) {
+                return candidate.episodeNumber == playbackContext.localEpisodeNumber
+            }
+            return false
+        }
+
+        if let exactCoordinateItem {
+            if requestedHasProviderIdentity {
+                if matchesProviderIdentity(exactCoordinateItem) {
+                    return exactCoordinateItem
+                }
+
+                if exactCoordinateItem.episodePlaybackContext == nil {
+                    return exactCoordinateItem
+                }
+            } else if matchesExactTMDBIdentity(exactCoordinateItem) != false {
+
+                return exactCoordinateItem
+            }
         }
 
         let requestedTMDBSeason = playbackContext?.resolvedTMDBSeasonNumber ?? seasonNumber
         let requestedTMDBEpisode = playbackContext?.resolvedTMDBEpisodeNumber ?? episodeNumber
 
-        return completedDownloads.first { candidate in
+        return downloads.first { candidate in
             guard !candidate.isMovie,
                   candidate.tmdbId == tmdbId,
-                  localFileURL(for: candidate) != nil else {
+                  accepting(candidate) else {
                 return false
+            }
+
+            if requestedHasProviderIdentity {
+                return matchesProviderIdentity(candidate)
             }
 
             if let candidateContext = candidate.episodePlaybackContext,
@@ -1269,23 +2918,11 @@ final class DownloadManager: NSObject, ObservableObject {
                candidateContext.resolvedTMDBEpisodeNumber == requestedTMDBEpisode {
                 return true
             }
-
-            guard let playbackContext,
-                  let candidateContext = candidate.episodePlaybackContext else {
-                return false
-            }
-
-            let sameAniListEntry = playbackContext.anilistMediaId != nil &&
-                playbackContext.anilistMediaId == candidateContext.anilistMediaId
-            let sameKitsuEntry = playbackContext.kitsuMediaId != nil &&
-                playbackContext.kitsuMediaId == candidateContext.kitsuMediaId
-            return (sameAniListEntry || sameKitsuEntry) &&
-                candidateContext.localEpisodeNumber == playbackContext.localEpisodeNumber
+            return false
         }
     }
 #endif
 
-    /// Total storage used by downloads
     func calculateStorageUsed() -> Int64 {
         var total: Int64 = 0
         for item in downloads where item.status == .completed {
@@ -1409,9 +3046,6 @@ final class DownloadManager: NSObject, ObservableObject {
         }
     }
 
-    /// Backfills stable destinations without changing paths already tracked by older
-    /// metadata. Existing local/subtitle paths always win; queued legacy items are then
-    /// assigned in metadata order so the first claimant keeps the friendly name.
     private func ensureDownloadPathReservations() {
         guard !downloads.isEmpty else { return }
 
@@ -1567,8 +3201,7 @@ final class DownloadManager: NSObject, ObservableObject {
         }
 
         if fileManager.fileExists(atPath: targetURL.path) {
-            // A destination appearing between reservation and migration belongs to
-            // somebody else. Keep the source intact rather than adopting/replacing it.
+
             return relativePathForDownloadFile(sourceURL)
         }
 
@@ -1620,18 +3253,28 @@ final class DownloadManager: NSObject, ObservableObject {
 
         let update = {
             if let index = self.downloads.firstIndex(where: { $0.id == item.id }) {
+
+                if adoptedItem.kidsPolicyDetails == nil {
+                    adoptedItem.kidsPolicyDetails = self.downloads[index].kidsPolicyDetails
+                }
                 self.downloads[index] = adoptedItem
             } else {
                 self.downloads.append(adoptedItem)
             }
             self.saveDownloads()
+            if adoptedItem.kidsPolicyDetails == nil {
+                self.captureKidsPolicyDetails(
+                    forDownload: adoptedItem.id,
+                    tmdbId: adoptedItem.tmdbId,
+                    isMovie: adoptedItem.isMovie
+                )
+            }
         }
 
         if Thread.isMainThread {
             update()
         } else {
-            // Claim before returning so a concurrent enqueue cannot adopt the same
-            // previously-unowned file in the gap before metadata is updated.
+
             DispatchQueue.main.sync(execute: update)
         }
 
@@ -1639,9 +3282,7 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private func findExistingVideoFile(for item: DownloadItem) -> URL? {
-        // An item's own tracked paths are authoritative, including paths that are still
-        // in the legacy Application Support directory. Never let a friendly-name scan
-        // steal another item's file before checking these.
+
         if let tracked = downloads.first(where: { $0.id == item.id }) {
             for path in uniqueStrings([tracked.localFileName, tracked.reservedVideoFileName].compactMap { $0 }) {
                 if let url = existingDownloadFileURL(relativePath: path) {
@@ -2257,14 +3898,39 @@ final class DownloadManager: NSObject, ObservableObject {
             || headerValue("User-Agent", in: base) != headerValue("User-Agent", in: effective)
     }
 
+    static func shouldInheritDownloadHeadersForSubtitle(
+        streamURL: URL,
+        subtitleURL: URL
+    ) -> Bool {
+        func normalizedHTTPOrigin(_ url: URL) -> (scheme: String, host: String, port: Int)? {
+            guard let rawScheme = url.scheme?.lowercased(),
+                  rawScheme == "http" || rawScheme == "https",
+                  let rawHost = url.host?.lowercased(),
+                  !rawHost.isEmpty else {
+                return nil
+            }
+            let port = url.port ?? (rawScheme == "https" ? 443 : 80)
+            return (rawScheme, rawHost, port)
+        }
+
+        guard let streamOrigin = normalizedHTTPOrigin(streamURL),
+              let subtitleOrigin = normalizedHTTPOrigin(subtitleURL) else {
+            return false
+        }
+        return streamOrigin.scheme == subtitleOrigin.scheme
+            && streamOrigin.host == subtitleOrigin.host
+            && streamOrigin.port == subtitleOrigin.port
+    }
+
     private func effectiveSubtitleHeaders(for item: DownloadItem, subtitleURL: URL, streamURL: URL) -> [String: String] {
-        let streamHost = streamURL.host?.lowercased()
-        let subtitleHost = subtitleURL.host?.lowercased()
         let baseHeaders: [String: String]
 
         if let subtitleHeaders = item.subtitleHeaders {
             baseHeaders = subtitleHeaders
-        } else if streamHost != nil, streamHost == subtitleHost {
+        } else if Self.shouldInheritDownloadHeadersForSubtitle(
+            streamURL: streamURL,
+            subtitleURL: subtitleURL
+        ) {
             baseHeaders = item.headers
         } else {
             baseHeaders = [:]
@@ -2294,6 +3960,13 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private func validateAutoModeDirectDownload(url: URL, headers: [String: String]) async throws {
+        guard !StreamReachabilityProbe.shouldBypassActiveProbe(for: url) else {
+            Logger.shared.log(
+                "Auto Mode download preflight skipped reason=capability-url host=\(url.host ?? "none")",
+                type: "Download"
+            )
+            return
+        }
         let probe = try await autoModeProbe(
             url: url,
             headers: headers,
@@ -2330,11 +4003,16 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private func validateAutoModeHLSDownload(url: URL, headers: [String: String]) async throws {
+        guard !StreamReachabilityProbe.shouldBypassActiveProbe(for: url) else {
+            Logger.shared.log(
+                "Auto Mode HLS preflight skipped reason=capability-url host=\(url.host ?? "none")",
+                type: "Download"
+            )
+            return
+        }
         var playlistURL = url
         var playlistText = try await fetchAutoModePlaylist(url: playlistURL, headers: headers)
 
-        // Resolve nested master playlists the same way the downloader does: highest
-        // advertised bandwidth wins. Bound the depth so malformed loops fail quickly.
         for _ in 0..<3 where playlistText.contains("#EXT-X-STREAM-INF") {
             let variants = autoModeHLSVariants(in: playlistText, baseURL: playlistURL)
             guard let selected = variants.max(by: { $0.bandwidth < $1.bandwidth }) else {
@@ -2344,6 +4022,13 @@ final class DownloadManager: NSObject, ObservableObject {
                 )
             }
             playlistURL = selected.url
+            guard !StreamReachabilityProbe.shouldBypassActiveProbe(for: playlistURL) else {
+                Logger.shared.log(
+                    "Auto Mode HLS variant preflight skipped reason=capability-url host=\(playlistURL.host ?? "none")",
+                    type: "Download"
+                )
+                return
+            }
             playlistText = try await fetchAutoModePlaylist(url: playlistURL, headers: headers)
         }
 
@@ -2360,6 +4045,14 @@ final class DownloadManager: NSObject, ObservableObject {
                 message: "The HLS playlist did not contain any downloadable media segments.",
                 isRetryable: false
             )
+        }
+
+        guard !StreamReachabilityProbe.shouldBypassActiveProbe(for: firstSegmentURL) else {
+            Logger.shared.log(
+                "Auto Mode HLS segment preflight skipped reason=capability-url host=\(firstSegmentURL.host ?? "none")",
+                type: "Download"
+            )
+            return
         }
 
         let segmentProbe = try await autoModeProbe(
@@ -2480,10 +4173,6 @@ final class DownloadManager: NSObject, ObservableObject {
             return "The source returned \(contentType.isEmpty ? "an error page" : contentType) instead of media data."
         }
 
-        // Anti-scraping CDNs (e.g. owocdn/kwik behind AnimePahe) deliberately serve valid video
-        // segments mislabeled as image/jpeg. Playback ignores the header and reads the bytes, which
-        // is why streaming works. Only reject when the payload is *actually* an image — not merely
-        // labeled as one — otherwise Auto Mode downloads fail on sources that stream fine.
         if contentType.hasPrefix("image/"), payloadLooksLikeImage(probe.data) {
             return "The source returned \(contentType) instead of media data."
         }
@@ -2502,23 +4191,19 @@ final class DownloadManager: NSObject, ObservableObject {
         return nil
     }
 
-    /// True only when the bytes actually begin with a known image container signature. A media
-    /// segment mislabeled `image/jpeg` by an anti-scraping CDN starts with a TS sync byte or an
-    /// MP4 `ftyp` box instead, so this returns false and the download is allowed to proceed.
     private func payloadLooksLikeImage(_ data: Data) -> Bool {
         let bytes = [UInt8](data.prefix(12))
         guard bytes.count >= 3 else { return false }
 
-        // JPEG: FF D8 FF
         if bytes[0] == 0xFF, bytes[1] == 0xD8, bytes[2] == 0xFF { return true }
-        // PNG: 89 50 4E 47 0D 0A 1A 0A
+
         if bytes.count >= 8, bytes[0] == 0x89, bytes[1] == 0x50, bytes[2] == 0x4E, bytes[3] == 0x47,
            bytes[4] == 0x0D, bytes[5] == 0x0A, bytes[6] == 0x1A, bytes[7] == 0x0A { return true }
-        // GIF: "GIF8" (full four bytes — 0x47 alone collides with the TS sync byte)
+
         if bytes.count >= 4, bytes[0] == 0x47, bytes[1] == 0x49, bytes[2] == 0x46, bytes[3] == 0x38 { return true }
-        // BMP: "BM"
+
         if bytes[0] == 0x42, bytes[1] == 0x4D { return true }
-        // WEBP: "RIFF"...."WEBP"
+
         if bytes.count >= 12, bytes[0] == 0x52, bytes[1] == 0x49, bytes[2] == 0x46, bytes[3] == 0x46,
            bytes[8] == 0x57, bytes[9] == 0x45, bytes[10] == 0x42, bytes[11] == 0x50 { return true }
 
@@ -2535,7 +4220,6 @@ final class DownloadManager: NSObject, ObservableObject {
             }
         }
 
-        // A 206 Content-Length describes only the sampled range, not the full file.
         guard response.statusCode != 206, response.expectedContentLength >= 0 else { return nil }
         return response.expectedContentLength
     }
@@ -2602,9 +4286,7 @@ final class DownloadManager: NSObject, ObservableObject {
     }
 
     private func formattedValidationByteCount(_ bytes: Int64) -> String {
-        let formatter = ByteCountFormatter()
-        formatter.countStyle = .file
-        return formatter.string(fromByteCount: max(bytes, 0))
+        DownloadByteCountFormatter.string(fromByteCount: bytes)
     }
 
     private func autoModeValidationFailure(from error: Error) -> AutoModeDownloadValidationFailure {
@@ -2622,18 +4304,31 @@ final class DownloadManager: NSObject, ObservableObject {
                 .resourceUnavailable
             ]
             return AutoModeDownloadValidationFailure(
-                message: "The download stream could not be reached: \(urlError.localizedDescription)",
+                message: "The download stream could not be reached (network error \(urlError.code.rawValue)).",
                 isRetryable: retryableCodes.contains(urlError.code)
             )
         }
         return AutoModeDownloadValidationFailure(
-            message: "The download stream could not be verified: \(error.localizedDescription)",
+            message: "The download stream could not be verified.",
             isRetryable: true
         )
     }
-    
-    // MARK: - Queue Processing
-    
+
+    private func boundedTransportErrorToken(_ error: Error) -> String {
+        let nsError = error as NSError
+        let safeDomain = String(nsError.domain.unicodeScalars.filter { scalar in
+            scalar.isASCII && (
+                CharacterSet.alphanumerics.contains(scalar)
+                    || scalar == "." || scalar == "-" || scalar == "_"
+            )
+        }.prefix(64))
+        return "\(safeDomain.isEmpty ? "network" : safeDomain):\(nsError.code)"
+    }
+
+    private func boundedDownloadFailureMessage(_ error: Error) -> String {
+        "Download failed due to a network or file error (\(boundedTransportErrorToken(error)))."
+    }
+
     private func processQueue() {
         guard Thread.isMainThread else {
             DispatchQueue.main.async { [weak self] in
@@ -2642,16 +4337,17 @@ final class DownloadManager: NSObject, ObservableObject {
             return
         }
 
-        let currentlyDownloading = downloads.filter { $0.status == .downloading }.count
 #if os(iOS) && !targetEnvironment(macCatalyst)
-        let reservedDirectValidations = skyStreamDirectValidationPendingIDs.count
-#else
-        let reservedDirectValidations = 0
+        migrateLegacyStremioDownloadsIfNeeded(permitsOneLiveAttempt: true)
 #endif
-        var slotsAvailable = maxConcurrentDownloads - currentlyDownloading - reservedDirectValidations
-        
+
+        let currentlyDownloading = downloads.filter { $0.status == .downloading }.count
+
+        let reservedValidations = nuvioDispatchValidationPendingIDs.count
+        var slotsAvailable = maxConcurrentDownloads - currentlyDownloading - reservedValidations
+
         guard slotsAvailable > 0 else { return }
-        
+
         let now = Date()
         let delayedRetryDates = downloads.compactMap { item -> Date? in
             guard item.status == .queued,
@@ -2667,15 +4363,24 @@ final class DownloadManager: NSObject, ObservableObject {
                   $0.retryNotBefore == nil || $0.retryNotBefore! <= now else {
                 return false
             }
-#if os(iOS) && !targetEnvironment(macCatalyst)
-            return !skyStreamDirectValidationPendingIDs.contains($0.id)
-#else
-            return true
-#endif
+            return !nuvioDispatchValidationPendingIDs.contains($0.id)
         }
 
         for item in queued {
             guard slotsAvailable > 0 else { break }
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            let protectedAuthority = Self.protectedAuthorityState(for: item)
+            if protectedAuthority != .notProtected, !protectedProviderTransportMayStart {
+                setQueuedMessage(id: item.id, message: "Waiting for app to reopen")
+                continue
+            }
+            if protectedAuthority != .notProtected,
+               !protectedOwnerMatchesActiveProfile(item) {
+                setQueuedMessage(id: item.id, message: "Waiting for the download's profile")
+                continue
+            }
+#endif
 
             if item.isHLS {
                 if activeHLSDownloaders.count >= maxConcurrentHLSDownloads {
@@ -2717,21 +4422,102 @@ final class DownloadManager: NSObject, ObservableObject {
             execute: workItem
         )
     }
-    
+
     private func startDownload(_ item: DownloadItem) {
 #if os(iOS) && !targetEnvironment(macCatalyst)
         if item.providerTransportKind == .skyStreamHLS {
             startValidatedSkyStreamHLSDownload(item)
             return
         }
-        if item.providerTransportKind == .skyStreamDirect,
-           item.streamURL.isEmpty {
-            restoreValidatedSkyStreamDownload(item)
+#endif
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        let protectedAuthority = Self.protectedAuthorityState(for: item)
+        switch protectedAuthority {
+        case .notProtected:
+            break
+        case .invalid:
+            markFailed(
+                id: item.id,
+                error: "The provider download recovery reference is invalid. Please select the source again."
+            )
             return
+        case .authorized(let providerKind):
+            guard protectedOwnerMatchesActiveProfile(item) else {
+                setQueuedMessage(id: item.id, message: "Waiting for the download's profile")
+                return
+            }
+            if providerKind == .nuvio, authorizedNuvioReference(for: item) == nil {
+                markFailed(id: item.id, error: "The Nuvio download reference no longer matches this title.")
+                return
+            }
+            if providerKind == .stremio,
+               item.lastContentReference?.hasValidStremioSelection != true {
+                markFailed(id: item.id, error: "The Stremio download reference is no longer valid.")
+                return
+            }
+            guard protectedProviderTransportMayStart else {
+                setQueuedMessage(id: item.id, message: "Waiting for app to reopen")
+                return
+            }
+            if ProtectedDownloadPersistencePolicy.requiresFreshResolution(
+                claimsProtectedProvider: true,
+                streamURL: item.streamURL
+            ) || (providerKind == .stremio
+                && stremioConfiguredOriginAuthorities[item.id] == nil) {
+                restoreProtectedProviderDownload(item, providerKind: providerKind)
+                return
+            }
+            if nuvioDispatchApprovedIDs.remove(item.id) == nil {
+                beginValidatedNuvioDispatch(item)
+                return
+            }
+        case .legacyService:
+            guard protectedOwnerMatchesActiveProfile(item) else {
+                setQueuedMessage(id: item.id, message: "Waiting for the download's profile")
+                return
+            }
+            guard protectedProviderTransportMayStart else {
+                setQueuedMessage(id: item.id, message: "Waiting for app to reopen")
+                return
+            }
+            guard !item.streamURL.isEmpty else {
+                markFailed(
+                    id: item.id,
+                    error: "This legacy Service download must be selected again to refresh access securely."
+                )
+                return
+            }
+            if nuvioDispatchApprovedIDs.remove(item.id) == nil {
+                beginValidatedNuvioDispatch(item)
+                return
+            }
+        case .legacyStremio:
+            guard protectedOwnerMatchesActiveProfile(item) else {
+                setQueuedMessage(id: item.id, message: "Waiting for the download's profile")
+                return
+            }
+            guard protectedProviderTransportMayStart else {
+                setQueuedMessage(id: item.id, message: "Waiting for app to reopen")
+                return
+            }
+            guard !item.streamURL.isEmpty,
+                  stremioConfiguredOriginAuthorities[item.id] != nil else {
+                markFailed(
+                    id: item.id,
+                    error: "This legacy Stremio download must be selected again to refresh access securely."
+                )
+                return
+            }
+            if nuvioDispatchApprovedIDs.remove(item.id) == nil {
+                beginValidatedNuvioDispatch(item)
+                return
+            }
         }
-        if item.providerTransportKind == .skyStreamDirect,
-           skyStreamDirectDispatchApprovedIDs.remove(item.id) == nil {
-            beginValidatedSkyStreamDirectDispatch(item)
+#else
+        if item.lastContentReference?.kind == .nuvio,
+           nuvioDispatchApprovedIDs.remove(item.id) == nil {
+            beginValidatedNuvioDispatch(item)
             return
         }
 #endif
@@ -2739,46 +4525,91 @@ final class DownloadManager: NSObject, ObservableObject {
             markFailed(id: item.id, error: "Invalid stream URL")
             return
         }
-        
-        // Route HLS streams to the guarded TS packager so VLC/mpv playback stays compatible.
+
+        let effectiveHeaders = effectiveHeaders(item.headers, for: url)
+        let refreshedCloudflareHeaders = cloudflareHeaderRefreshChanged(
+            base: item.headers,
+            effective: effectiveHeaders
+        )
+        var transportPlan = NuvioDownloadTransportPlan.ordinary(
+            url: url,
+            headers: effectiveHeaders
+        )
+        var protectedNuvioAttemptID: UUID?
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        if protectedAuthority != .notProtected && protectedAuthority != .invalid {
+            guard let protected = beginNuvioProtectedAttempt(
+                for: item,
+                originalURL: url,
+                effectiveHeaders: effectiveHeaders
+            ) else {
+                markFailed(id: item.id, error: "Eclipse could not create a protected provider download route.")
+                return
+            }
+            transportPlan = protected.plan
+            protectedNuvioAttemptID = protected.attemptID
+        }
+#endif
+
         if item.isHLS {
             if let delayReason = hlsStartDelayReason() {
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                if let protectedNuvioAttemptID {
+                    invalidateNuvioProtectedAttempt(
+                        id: item.id,
+                        expectedAttemptID: protectedNuvioAttemptID
+                    )
+                }
+#endif
                 setQueuedMessage(id: item.id, message: delayReason)
                 Logger.shared.log("HLS queued instead of starting: \(delayReason)", type: "Download")
                 return
             }
-            startHLSDownload(item)
+            let currentItem = downloads.first(where: { $0.id == item.id }) ?? item
+            startHLSDownload(
+                currentItem,
+                streamURLOverride: protectedNuvioAttemptID == nil ? nil : transportPlan.dispatchURL,
+                headersOverride: protectedNuvioAttemptID == nil ? nil : transportPlan.dispatchHeaders,
+                pinnedVariantOverride: nil,
+                persistResolvedVariant: protectedNuvioAttemptID == nil,
+                protectedNuvioAttemptID: protectedNuvioAttemptID
+            )
             return
         }
-        
-        let effectiveHeaders = effectiveHeaders(item.headers, for: url)
-        let refreshedCloudflareHeaders = cloudflareHeaderRefreshChanged(base: item.headers, effective: effectiveHeaders)
 
-        var request = URLRequest(url: url)
-        for (key, value) in effectiveHeaders {
+        var request = URLRequest(url: transportPlan.dispatchURL)
+        for (key, value) in transportPlan.dispatchHeaders {
             request.setValue(value, forHTTPHeaderField: key)
         }
         if item.providerTransportKind == .skyStreamDirect {
-            // The validator proves `finiteContentLength` against identity bytes. Prevent
-            // transparent content encoding from invalidating that size invariant—or allowing
-            // the wire representation to differ from the bytes that were actually validated.
+
             request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         }
-        
+
         let task: URLSessionDownloadTask
-        if let resumeData = resumeDataStore[item.id], !refreshedCloudflareHeaders {
+        if transportPlan.mayUseResumeData,
+           let resumeData = resumeDataStore[item.id],
+           !refreshedCloudflareHeaders {
             task = backgroundSession.downloadTask(withResumeData: resumeData)
             resumeDataStore.removeValue(forKey: item.id)
         } else {
-            if resumeDataStore.removeValue(forKey: item.id) != nil, refreshedCloudflareHeaders {
-                Logger.shared.log("Restarting download with refreshed Cloudflare headers: \(item.displayTitle)", type: "Download")
+            if resumeDataStore.removeValue(forKey: item.id) != nil {
+                let reason = transportPlan.mayUseResumeData
+                    ? "refreshed Cloudflare headers"
+                    : "a fresh protected Nuvio route"
+                Logger.shared.log("Restarting download with \(reason): \(item.displayTitle)", type: "Download")
             }
             task = backgroundSession.downloadTask(with: request)
         }
-        
+
         task.taskDescription = item.id
         activeTasks[item.id] = task
-        
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        if let protectedNuvioAttemptID {
+            registerNuvioMainTask(task, id: item.id, attemptID: protectedNuvioAttemptID)
+        }
+#endif
+
         if let index = downloads.firstIndex(where: { $0.id == item.id }) {
             downloads[index].status = .downloading
             if refreshedCloudflareHeaders {
@@ -2788,83 +4619,132 @@ final class DownloadManager: NSObject, ObservableObject {
             }
             saveDownloads()
         }
-        
+
         task.resume()
-        
-        // Also download subtitle if available
-        if let subtitleURLString = item.subtitleURL, let subtitleURL = URL(string: subtitleURLString) {
-            let subtitleHeaders = effectiveSubtitleHeaders(for: item, subtitleURL: subtitleURL, streamURL: url)
-            downloadSubtitle(for: item.id, from: subtitleURL, headers: subtitleHeaders)
-        }
-        
+
+        startDownloadSubtitle(
+            for: item,
+            originalStreamURL: url,
+            protectedNuvioAttemptID: protectedNuvioAttemptID
+        )
+
         Logger.shared.log("Started download: \(item.displayTitle)", type: "Download")
     }
 
-#if os(iOS) && !targetEnvironment(macCatalyst)
-    private func beginValidatedSkyStreamDirectDispatch(_ item: DownloadItem) {
+    private enum DispatchValidationOutcome {
+        case approved
+        case rejected
+    }
+
+    private static func fragmentStrippedDispatchComparisonString(for url: URL) -> String {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url.absoluteString
+        }
+        components.fragment = nil
+        return components.url?.absoluteString ?? url.absoluteString
+    }
+
+    private func beginValidatedNuvioDispatch(_ item: DownloadItem) {
         guard Thread.isMainThread else {
             DispatchQueue.main.async { [weak self] in
-                self?.beginValidatedSkyStreamDirectDispatch(item)
+                self?.beginValidatedNuvioDispatch(item)
             }
             return
         }
-        guard skyStreamDirectValidationPendingIDs.insert(item.id).inserted,
-              let url = URL(string: item.streamURL),
-              !item.streamURL.isEmpty else {
-            if item.streamURL.isEmpty {
-                skyStreamDirectValidationPendingIDs.remove(item.id)
-                markFailed(id: item.id, error: "The validated download route is unavailable.")
-            }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        let authority = Self.protectedAuthorityState(for: item)
+        let stremioAuthority = item.effectiveProtectedProviderKind == .stremio
+            ? stremioConfiguredOriginAuthorities[item.id]
+            : nil
+        guard authority != .notProtected,
+              authority != .invalid,
+              protectedProviderTransportMayStart,
+              protectedOwnerMatchesActiveProfile(item),
+              item.effectiveProtectedProviderKind != .stremio
+                || stremioAuthority != nil,
+              item.effectiveProtectedProviderKind != .nuvio
+                || authorizedNuvioReference(for: item) != nil else {
+            setQueuedMessage(id: item.id, message: "Waiting for protected download access")
+            return
+        }
+#endif
+        guard nuvioDispatchValidationPendingIDs.insert(item.id).inserted else { return }
+        let validationToken = UUID()
+        nuvioDispatchValidationTokens[item.id] = validationToken
+        guard let url = URL(string: item.streamURL) else {
+            nuvioDispatchValidationPendingIDs.remove(item.id)
+            nuvioDispatchValidationTokens.removeValue(forKey: item.id)
+            markFailed(id: item.id, error: "Invalid stream URL")
             return
         }
 
         let expectedURL = item.streamURL
         let expectedHeaders = item.headers
-        let expectedLength = item.validatedExpectedContentLength
+        let expectedSourceID = item.lastSourceId
         let expectedReference = item.lastContentReference
+        let comparisonURLString = Self.fragmentStrippedDispatchComparisonString(for: url)
         Task { [weak self] in
-            let approved: Bool
-            do {
-                let checked = try await SkyStreamRemoteURLPolicy.shared
-                    .validateForNetworkDispatch(url.absoluteString, purpose: .streamRoot)
-                approved = checked.url.absoluteString == url.absoluteString
-            } catch {
-                approved = false
-            }
+            let outcome: DispatchValidationOutcome
+            let scheme = url.scheme?.lowercased()
+            outcome = (scheme == "http" || scheme == "https")
+                && url.host?.isEmpty == false
+                && url.absoluteString == comparisonURLString
+                ? .approved
+                : .rejected
 
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                self.skyStreamDirectValidationPendingIDs.remove(item.id)
+                guard self.nuvioDispatchValidationTokens[item.id] == validationToken else {
+                    self.processQueue()
+                    return
+                }
+                self.nuvioDispatchValidationTokens.removeValue(forKey: item.id)
+                self.nuvioDispatchValidationPendingIDs.remove(item.id)
                 guard let current = self.downloads.first(where: { $0.id == item.id }),
                       current.status == .queued,
-                      current.providerTransportKind == .skyStreamDirect,
                       current.streamURL == expectedURL,
                       current.headers == expectedHeaders,
-                      current.validatedExpectedContentLength == expectedLength,
+                      current.lastSourceId == expectedSourceID,
                       current.lastContentReference == expectedReference else {
                     self.processQueue()
                     return
                 }
-                guard approved else {
-                    self.markFailed(
-                        id: item.id,
-                        error: "The validated download route no longer resolves safely."
-                    )
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                let currentAuthority = Self.protectedAuthorityState(for: current)
+                guard currentAuthority != .notProtected,
+                      currentAuthority != .invalid,
+                      self.protectedProviderTransportMayStart,
+                      self.protectedOwnerMatchesActiveProfile(current),
+                      current.effectiveProtectedProviderKind != .stremio
+                        || self.stremioConfiguredOriginAuthorities[current.id]
+                            == stremioAuthority,
+                      current.effectiveProtectedProviderKind != .nuvio
+                        || self.authorizedNuvioReference(for: current) != nil else {
+                    self.processQueue()
                     return
                 }
-                self.skyStreamDirectDispatchApprovedIDs.insert(item.id)
-                self.startDownload(current)
+#endif
+                switch outcome {
+                case .approved:
+                    self.nuvioDispatchApprovedIDs.insert(item.id)
+                    self.startDownload(current)
+                case .rejected:
+                    self.markFailed(
+                        id: item.id,
+                        error: "This download source no longer resolves to an authorized address."
+                    )
+                }
             }
         }
     }
-#endif
-    
+
     private func startHLSDownload(
         _ item: DownloadItem,
         streamURLOverride: URL? = nil,
         headersOverride: [String: String]? = nil,
         pinnedVariantOverride: URL? = nil,
-        persistResolvedVariant: Bool = true
+        persistResolvedVariant: Bool = true,
+        protectedNuvioAttemptID: UUID? = nil
     ) {
         guard let url = streamURLOverride ?? URL(string: item.streamURL) else {
             markFailed(id: item.id, error: "Invalid stream URL")
@@ -2874,7 +4754,7 @@ final class DownloadManager: NSObject, ObservableObject {
         if backgroundHLSPipelineEnabled {
             Logger.shared.log("Background HLS experiment enabled; using guarded single-lane TS packager", type: "Download")
         }
-        
+
         let securedItem = itemBySecuringFinalVideoDestination(item, fileExtension: "ts")
         let fileName = videoRelativePath(for: securedItem, fileExtension: "ts")
         if let index = downloads.firstIndex(where: { $0.id == item.id }),
@@ -2918,7 +4798,14 @@ final class DownloadManager: NSObject, ObservableObject {
                   !self.invalidatedHLSAttemptIDs.contains(attemptID) else { return }
             if let index = self.downloads.firstIndex(where: { $0.id == item.id }) {
 #if os(iOS) && !targetEnvironment(macCatalyst)
-                if persistResolvedVariant {
+                if let protectedNuvioAttemptID {
+                    self.recordNuvioHLSVariantProxyURL(
+                        variantURL,
+                        id: item.id,
+                        attemptID: protectedNuvioAttemptID
+                    )
+                    self.downloads[index].hlsVariantURL = nil
+                } else if persistResolvedVariant {
                     self.downloads[index].hlsVariantURL = variantURL.absoluteString
                 } else {
                     self.skyStreamHLSPinnedVariantURLs[item.id] = variantURL
@@ -2944,9 +4831,7 @@ final class DownloadManager: NSObject, ObservableObject {
             if segmentsWritten > 0 {
                 self.downloads[index].rateLimitRetryCount = nil
             }
-            // In-memory state is always current for instant pause/resume; throttle the
-            // disk write to a couple of seconds. On a hard kill we lose at most the last
-            // throttle window, and the partial is truncated back to the saved checkpoint.
+
             let now = Date()
             if let last = self.lastHLSCheckpointSave[item.id], now.timeIntervalSince(last) < 2.0 {
                 return
@@ -2964,7 +4849,7 @@ final class DownloadManager: NSObject, ObservableObject {
                 self.downloads[index].progress = progress
             }
         }
-        
+
         downloader.onCompletion = { [weak self] result in
             guard let self = self else { return }
 
@@ -2977,7 +4862,6 @@ final class DownloadManager: NSObject, ObservableObject {
                     self.processQueue()
                     return
                 }
-
                 switch result {
                 case .success(let fileURL):
                     if let index = self.downloads.firstIndex(where: { $0.id == item.id }) {
@@ -2985,14 +4869,13 @@ final class DownloadManager: NSObject, ObservableObject {
                         self.downloads[index].progress = 1.0
                         self.downloads[index].localFileName = fileName
                         self.downloads[index].dateCompleted = Date()
-                        
+
                         if let attrs = try? self.fileManager.attributesOfItem(atPath: fileURL.path),
                            let size = attrs[.size] as? Int64 {
                             self.downloads[index].totalBytes = size
                             self.downloads[index].downloadedBytes = size
                         }
 
-                        // Checkpoint no longer needed once the file is finalized.
                         self.downloads[index].hlsResumeSegmentIndex = nil
                         self.downloads[index].hlsResumeByteCount = nil
 
@@ -3000,6 +4883,12 @@ final class DownloadManager: NSObject, ObservableObject {
                         self.saveDownloads()
                     }
 #if os(iOS) && !targetEnvironment(macCatalyst)
+                    if let protectedNuvioAttemptID {
+                        self.finishNuvioMainTransport(
+                            id: item.id,
+                            attemptID: protectedNuvioAttemptID
+                        )
+                    }
                     self.clearSkyStreamDownloadRuntimeState(
                         id: item.id,
                         discardDescriptor: true
@@ -3010,6 +4899,14 @@ final class DownloadManager: NSObject, ObservableObject {
                     Logger.shared.log("HLS download completed: \(item.displayTitle) -> \(fileName)", type: "Download")
 
                 case .failure(let error):
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                    if let protectedNuvioAttemptID {
+                        self.invalidateNuvioProtectedAttempt(
+                            id: item.id,
+                            expectedAttemptID: protectedNuvioAttemptID
+                        )
+                    }
+#endif
                     if let hlsError = error as? HLSError {
                         switch hlsError {
                         case .cancelled:
@@ -3030,33 +4927,42 @@ final class DownloadManager: NSObject, ObservableObject {
                             self.recoverDownloadAfterMediaRejection(
                                 id: item.id,
                                 statusCode: statusCode,
-                                challengedURL: nil,
+                                challengedURL: protectedNuvioAttemptID == nil
+                                    ? nil
+                                    : URL(string: item.streamURL),
                                 rejectedCookieHeader: nil,
                                 isInteractiveChallenge: false
                             )
                         case .cloudflareVerificationRequired(let challengeURL, let rejectedCookieHeader):
                             self.recoverDownloadAfterConfirmedChallenge(
                                 id: item.id,
-                                challengedURL: challengeURL,
+                                challengedURL: protectedNuvioAttemptID == nil
+                                    ? challengeURL
+                                    : (URL(string: item.streamURL) ?? challengeURL),
                                 rejectedCookieHeader: rejectedCookieHeader
                             )
                         default:
-                            self.markFailed(id: item.id, error: error.localizedDescription)
+                            self.markFailed(
+                                id: item.id,
+                                error: self.boundedDownloadFailureMessage(error)
+                            )
                         }
                     } else {
-                        self.markFailed(id: item.id, error: error.localizedDescription)
+                        self.markFailed(
+                            id: item.id,
+                            error: self.boundedDownloadFailureMessage(error)
+                        )
                     }
                 }
             }
         }
-        
+
         activeHLSDownloaders[item.id] = downloader
         activeHLSAttemptIDs[item.id] = attemptID
-        
+
         if let index = downloads.firstIndex(where: { $0.id == item.id }) {
             downloads[index].status = .downloading
-            // Only zero progress on a genuine fresh start. When resuming we keep the
-            // checkpointed progress/bytes so the bar doesn't snap back to zero.
+
             if resumeSegment == 0 {
                 downloads[index].progress = 0
                 downloads[index].downloadedBytes = 0
@@ -3066,13 +4972,14 @@ final class DownloadManager: NSObject, ObservableObject {
         }
 
         downloader.start()
-        
-        // Also download subtitle if available
-        if let subtitleURLString = item.subtitleURL, let subtitleURL = URL(string: subtitleURLString) {
-            let subtitleHeaders = effectiveSubtitleHeaders(for: item, subtitleURL: subtitleURL, streamURL: url)
-            downloadSubtitle(for: item.id, from: subtitleURL, headers: subtitleHeaders)
-        }
-        
+
+        let originalStreamURL = URL(string: item.streamURL) ?? url
+        startDownloadSubtitle(
+            for: item,
+            originalStreamURL: originalStreamURL,
+            protectedNuvioAttemptID: protectedNuvioAttemptID
+        )
+
         Logger.shared.log("Started HLS download: \(item.displayTitle)", type: "Download")
     }
 
@@ -3103,9 +5010,7 @@ final class DownloadManager: NSObject, ObservableObject {
             resetSkyStreamHLSCheckpoint(id: item.id)
         } else if proxyURL == nil,
                   (item.hlsResumeSegmentIndex ?? 0) > 0 {
-            // A checkpoint can only be resumed through the exact live route capability that
-            // produced it. A recreated session has different opaque route IDs and may resolve a
-            // different ABR rendition, so restarting is the only safe behavior.
+
             resetSkyStreamHLSCheckpoint(id: item.id)
         }
 
@@ -3187,6 +5092,93 @@ final class DownloadManager: NSObject, ObservableObject {
         }
     }
 
+    private func restoreProtectedProviderDownload(
+        _ item: DownloadItem,
+        providerKind: ProtectedDownloadProviderKind
+    ) {
+        let expectedReferenceKind: ProviderContentReference.Kind
+        switch providerKind {
+        case .service:
+            expectedReferenceKind = .service
+        case .stremio:
+            expectedReferenceKind = .stremio
+        case .nuvio:
+            expectedReferenceKind = .nuvio
+        case .skyStream:
+            expectedReferenceKind = .skyStream
+        case .unresolvedLegacy:
+            return
+        }
+        let authority = Self.protectedAuthorityState(for: item)
+        let needsFreshTransport = item.streamURL.isEmpty
+            || (providerKind == .stremio
+                && stremioConfiguredOriginAuthorities[item.id] == nil)
+        guard authority == .authorized(providerKind),
+              protectedProviderTransportMayStart,
+              protectedOwnerMatchesActiveProfile(item),
+              providerKind != .nuvio || authorizedNuvioReference(for: item) != nil,
+              needsFreshTransport,
+              nuvioRestoringDownloadIDs.insert(item.id).inserted else {
+            return
+        }
+        let expectedReference = item.lastContentReference
+        let expectedSourceID = item.lastSourceId
+        let expectedOwnerProfileID = item.effectiveProtectedOwnerProfileID
+        let expectedStreamURL = item.streamURL
+        let expectedScopeGeneration = ServiceStoreScope.generation
+        if let index = downloads.firstIndex(where: { $0.id == item.id }),
+           downloads[index].status == .queued {
+            downloads[index].error = "Refreshing protected download access"
+            saveDownloads()
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.nuvioRestoringDownloadIDs.remove(item.id) }
+            let refreshed = await self.refreshDownloadSource(id: item.id)
+            guard let index = self.downloads.firstIndex(where: { $0.id == item.id }),
+                  self.downloads[index].status == .queued,
+                  self.downloads[index].streamURL == expectedStreamURL,
+                  self.downloads[index].lastContentReference == expectedReference,
+                  self.downloads[index].lastSourceId == expectedSourceID,
+                  self.downloads[index].effectiveProtectedOwnerProfileID == expectedOwnerProfileID,
+                  Self.protectedAuthorityState(for: self.downloads[index]) == .authorized(providerKind) else {
+                self.processQueue()
+                return
+            }
+            guard self.protectedProviderTransportMayStart,
+                  self.protectedOwnerMatchesActiveProfile(self.downloads[index]),
+                  ServiceStoreScope.isCurrent(expectedScopeGeneration) else {
+                self.downloads[index].error = "Waiting for the download's profile"
+                self.saveDownloads()
+                return
+            }
+            guard let refreshed,
+                  refreshed.lastContentReference.kind == expectedReferenceKind,
+                  self.installRefreshedDownloadSource(
+                      refreshed,
+                      id: item.id,
+                      resetTransferProgress: true
+                  ) != nil else {
+                self.scheduleSystemBackoffDownloadRetry(
+                    id: item.id,
+                    message: "The provider could not refresh protected download access."
+                )
+                return
+            }
+            guard let refreshedIndex = self.downloads.firstIndex(where: { $0.id == item.id }),
+                  self.protectedOwnerMatchesActiveProfile(self.downloads[refreshedIndex]),
+                  ServiceStoreScope.isCurrent(expectedScopeGeneration) else {
+                self.scrubProtectedProviderTransportInMemory(id: item.id)
+                self.saveDownloads()
+                return
+            }
+            self.downloads[refreshedIndex].error = nil
+            self.saveDownloads()
+            self.processQueue()
+        }
+    }
+
     private func resetSkyStreamHLSCheckpoint(id: String) {
         guard let index = downloads.firstIndex(where: { $0.id == id }) else { return }
         downloads[index].hlsResumeSegmentIndex = nil
@@ -3203,8 +5195,6 @@ final class DownloadManager: NSObject, ObservableObject {
         id: String,
         discardDescriptor: Bool
     ) {
-        skyStreamDirectValidationPendingIDs.remove(id)
-        skyStreamDirectDispatchApprovedIDs.remove(id)
         if let proxyURL = skyStreamHLSProxyURLs.removeValue(forKey: id) {
             MPVHeaderProxy.shared.invalidateSession(for: proxyURL)
         }
@@ -3212,6 +5202,517 @@ final class DownloadManager: NSObject, ObservableObject {
         if discardDescriptor {
             skyStreamHLSDescriptors.removeValue(forKey: id)
         }
+    }
+
+    private var nuvioProtectedTransportMayStart: Bool {
+#if canImport(UIKit)
+        UIApplication.shared.applicationState == .active
+#else
+        true
+#endif
+    }
+
+    private var protectedProviderTransportMayStart: Bool {
+        nuvioProtectedTransportMayStart
+    }
+
+    private static func protectedAuthorityState(
+        for item: DownloadItem
+    ) -> ProtectedDownloadAuthorityState {
+        ProtectedDownloadAuthorityState.classify(
+            explicitKind: item.protectedProviderKind,
+            hasLegacyNuvioMarker: item.nuvioTransportKind != nil
+                || item.nuvioOwnerProfileID != nil,
+            sourceID: item.lastSourceId,
+            reference: item.lastContentReference
+        )
+    }
+
+    private func protectedOwnerMatchesActiveProfile(_ item: DownloadItem) -> Bool {
+        ProtectedDownloadPersistencePolicy.profileAuthority(
+            ownerProfileID: item.effectiveProtectedOwnerProfileID,
+            activeProfileID: ProfileManager.shared.activeProfileID
+        ) == .authorized
+    }
+
+    private func nuvioOwnerMatchesActiveProfile(_ item: DownloadItem) -> Bool {
+        protectedOwnerMatchesActiveProfile(item)
+    }
+
+    private func authorizedNuvioReference(
+        for item: DownloadItem
+    ) -> NuvioProviderContentReference? {
+        guard NuvioDownloadAuthorityState.classify(
+            sourceID: item.lastSourceId,
+            reference: item.lastContentReference
+        ) == .authorized,
+              let reference = item.lastContentReference?.nuvio,
+              nuvioDownloadReferenceMatchesItem(reference, item: item) else {
+            return nil
+        }
+        return reference
+    }
+
+    /// Migrates the pre-reference Stremio shape by exact configured-addon
+    /// identity. Rows read from disk are scrubbed and require reselection;
+    /// only a genuinely live, newly-created legacy row may finish one fresh
+    /// foreground proxy attempt before its transport is discarded.
+    private func migrateLegacyStremioDownloadsIfNeeded(
+        permitsOneLiveAttempt: Bool
+    ) {
+        let candidateIndices = downloads.indices.filter { index in
+            let item = downloads[index]
+            return item.effectiveProtectedProviderKind == nil
+                && item.lastContentReference == nil
+                && item.lastSourceId == nil
+                && item.sourceId == nil
+                && item.serviceContentHref == nil
+                && !item.serviceBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        guard !candidateIndices.isEmpty else { return }
+
+        let configuredAddons = StremioAddonStore.shared.getAddons().reduce(
+            into: [UUID: String]()
+        ) { result, addon in
+            if result[addon.id] == nil { result[addon.id] = addon.configuredURL }
+        }
+
+        var changed = false
+        for index in candidateIndices {
+            let item = downloads[index]
+            let sourceID = ProtectedDownloadPersistencePolicy.legacyStremioSourceID(
+                serviceBaseURL: item.serviceBaseURL,
+                configuredAddons: configuredAddons
+            )
+            let configuredURL = sourceID.flatMap { sourceID -> String? in
+                guard let addonID = UUID(
+                    uuidString: String(sourceID.dropFirst("stremio:".count))
+                ) else { return nil }
+                return configuredAddons[addonID]
+            }
+            downloads[index].lastSourceId = sourceID
+            downloads[index].protectedProviderKind = configuredURL == nil
+                ? .unresolvedLegacy
+                : .stremio
+            downloads[index].protectedOwnerProfileID = ProfileManager.shared.activeProfileID
+            downloads[index].protectedTransportKind = ProtectedDownloadPersistencePolicy
+                .transportKind(for: item.streamURL)
+            downloads[index].providerTransportKind = nil
+            changed = true
+
+            let mayUseLiveTransport = permitsOneLiveAttempt
+                && configuredURL != nil
+                && !persistenceLoadedDownloadIDs.contains(item.id)
+                && protectedProviderTransportMayStart
+                && !item.streamURL.isEmpty
+            if mayUseLiveTransport,
+               let configuredURL,
+               let authority = try? SkyStreamPinnedOriginAuthority.stremio(
+                    configuredBaseURL: configuredURL
+               ) {
+                stremioConfiguredOriginAuthorities[item.id] = authority
+            } else {
+                if let task = activeTasks.removeValue(forKey: item.id) {
+                    invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
+                    task.cancel()
+                }
+                scrubProtectedProviderTransportInMemory(id: item.id)
+                if downloads[index].status != .completed {
+                    downloads[index].status = .failed
+                    downloads[index].error =
+                        "This legacy provider download must be selected again to refresh access securely."
+                }
+            }
+        }
+        if changed { saveDownloadsSynchronously() }
+    }
+
+    private func beginNuvioProtectedAttempt(
+        for item: DownloadItem,
+        originalURL: URL,
+        effectiveHeaders: [String: String]
+    ) -> (plan: NuvioDownloadTransportPlan, attemptID: UUID)? {
+        let providerKind: ProtectedDownloadProviderKind
+        switch Self.protectedAuthorityState(for: item) {
+        case .authorized(let kind):
+            providerKind = kind
+        case .legacyService:
+            providerKind = .service
+        case .legacyStremio:
+            providerKind = .stremio
+        case .notProtected, .invalid:
+            return nil
+        }
+        if providerKind == .nuvio, authorizedNuvioReference(for: item) == nil {
+            return nil
+        }
+        let authorityReference = Self.protectedAuthorityState(for: item) == .legacyService
+            || Self.protectedAuthorityState(for: item) == .legacyStremio
+                ? nil
+                : item.lastContentReference
+        let stremioAuthority = providerKind == .stremio
+            ? stremioConfiguredOriginAuthorities[item.id]
+            : nil
+        guard protectedProviderTransportMayStart,
+              providerKind != .stremio || stremioAuthority != nil,
+              protectedOwnerMatchesActiveProfile(item),
+              let current = downloads.first(where: { $0.id == item.id }),
+              current.status == .queued,
+              current.streamURL == item.streamURL,
+              current.headers == item.headers,
+              current.lastSourceId == item.lastSourceId,
+              current.lastContentReference == item.lastContentReference else {
+            return nil
+        }
+
+        invalidateNuvioProtectedAttempt(id: item.id)
+        resumeDataStore.removeValue(forKey: item.id)
+        pendingResumeDataTaskIdentifiers.removeValue(forKey: item.id)
+        if item.isHLS {
+            resetProtectedProviderHLSCheckpoint(id: item.id)
+        }
+
+        let attemptID = UUID()
+        guard let proxyURL = MPVHeaderProxy.shared.makeProxyURL(
+            for: originalURL,
+            headers: effectiveHeaders,
+            logType: "ProviderDownload",
+            traceID: "provider-dl-\(String(attemptID.uuidString.prefix(8)))",
+            stremioAuthority: stremioAuthority,
+            onConfirmedCloudflareChallenge: { [weak self] url, rejectedCookie, interactive, status in
+                self?.handleNuvioProxyRejection(
+                    id: item.id,
+                    attemptID: attemptID,
+                    url: url,
+                    rejectedCookieHeader: rejectedCookie,
+                    isInteractive: interactive,
+                    statusCode: status
+                )
+            }
+        ) else {
+            return nil
+        }
+
+        guard let latest = downloads.first(where: { $0.id == item.id }),
+              latest.status == .queued,
+              latest.streamURL == item.streamURL,
+              latest.headers == item.headers,
+              latest.lastSourceId == item.lastSourceId,
+              latest.lastContentReference == item.lastContentReference,
+              protectedOwnerMatchesActiveProfile(latest),
+              latest.effectiveProtectedProviderKind == providerKind else {
+            MPVHeaderProxy.shared.invalidateSession(for: proxyURL)
+            return nil
+        }
+
+        protectedProviderAttempts[item.id] = ProtectedProviderDownloadAttempt(
+            attemptID: attemptID,
+            providerKind: providerKind,
+            authorityURL: originalURL.absoluteString,
+            authorityHeaders: item.headers,
+            authorityReference: authorityReference,
+            stremioConfiguredOriginAuthority: stremioAuthority,
+            mainProxyURL: proxyURL
+        )
+        return (
+            NuvioDownloadTransportPlan.protectedAttempt(
+                authoritativeURL: originalURL,
+                authoritativeHeaders: item.headers,
+                proxyURL: proxyURL
+            ),
+            attemptID
+        )
+    }
+
+    private func registerNuvioMainTask(
+        _ task: URLSessionDownloadTask,
+        id: String,
+        attemptID: UUID
+    ) {
+        guard var attempt = protectedProviderAttempts[id],
+              attempt.attemptID == attemptID else { return }
+        attempt.mainTaskIdentifier = task.taskIdentifier
+        protectedProviderAttempts[id] = attempt
+    }
+
+    private func makeNuvioSubtitleProxyURL(
+        id: String,
+        attemptID: UUID,
+        subtitleURL: URL,
+        headers: [String: String]
+    ) -> URL? {
+        guard let attempt = protectedProviderAttempts[id],
+              attempt.attemptID == attemptID else { return nil }
+        guard let proxyURL = MPVHeaderProxy.shared.makeProxyURL(
+            for: subtitleURL,
+            headers: headers,
+            logType: "ProviderDownloadSubtitle",
+            traceID: "provider-sub-\(String(attemptID.uuidString.prefix(8)))",
+            stremioAuthority: attempt.stremioConfiguredOriginAuthority,
+            onConfirmedCloudflareChallenge: { [weak self] url, rejectedCookie, interactive, status in
+                self?.handleNuvioProxyRejection(
+                    id: id,
+                    attemptID: attemptID,
+                    url: url,
+                    rejectedCookieHeader: rejectedCookie,
+                    isInteractive: interactive,
+                    statusCode: status
+                )
+            }
+        ) else { return nil }
+        guard var current = protectedProviderAttempts[id],
+              current.attemptID == attemptID else {
+            MPVHeaderProxy.shared.invalidateSession(for: proxyURL)
+            return nil
+        }
+        current.subtitleProxyURLs.insert(proxyURL)
+        protectedProviderAttempts[id] = current
+        return proxyURL
+    }
+
+    private func recordNuvioHLSVariantProxyURL(
+        _ url: URL,
+        id: String,
+        attemptID: UUID
+    ) {
+        guard var attempt = protectedProviderAttempts[id],
+              attempt.attemptID == attemptID else { return }
+        attempt.hlsVariantProxyURL = url
+        protectedProviderAttempts[id] = attempt
+    }
+
+    private func nuvioAttemptIsCurrent(id: String, attemptID: UUID) -> Bool {
+        if Thread.isMainThread {
+            return protectedProviderAttempts[id]?.attemptID == attemptID
+        }
+        return DispatchQueue.main.sync {
+            protectedProviderAttempts[id]?.attemptID == attemptID
+        }
+    }
+
+    private func finishNuvioSubtitleProxy(
+        id: String,
+        attemptID: UUID,
+        proxyURL: URL
+    ) {
+        MPVHeaderProxy.shared.invalidateSession(for: proxyURL)
+        performOnMain { [weak self] in
+            guard let self,
+                  var attempt = protectedProviderAttempts[id],
+                  attempt.attemptID == attemptID else { return }
+            attempt.subtitleProxyURLs.remove(proxyURL)
+            nuvioSubtitleFetches.removeValue(forKey: id)
+            if NuvioDownloadAttemptLifecycle.mayReleaseAttempt(
+                mainFinished: attempt.mainFinished,
+                subtitleSessionCount: attempt.subtitleProxyURLs.count
+            ) {
+                protectedProviderAttempts.removeValue(forKey: id)
+            } else {
+                protectedProviderAttempts[id] = attempt
+            }
+        }
+    }
+
+    private func finishNuvioMainTransport(id: String, attemptID: UUID) {
+        guard var attempt = protectedProviderAttempts[id],
+              attempt.attemptID == attemptID else { return }
+        MPVHeaderProxy.shared.invalidateSession(for: attempt.mainProxyURL)
+        if let variantURL = attempt.hlsVariantProxyURL {
+            MPVHeaderProxy.shared.invalidateSession(for: variantURL)
+        }
+        attempt.mainFinished = true
+        attempt.mainTaskIdentifier = nil
+        attempt.hlsVariantProxyURL = nil
+        resumeDataStore.removeValue(forKey: id)
+        pendingResumeDataTaskIdentifiers.removeValue(forKey: id)
+        nuvioDispatchApprovedIDs.remove(id)
+        stremioConfiguredOriginAuthorities.removeValue(forKey: id)
+        if NuvioDownloadAttemptLifecycle.mayReleaseAttempt(
+            mainFinished: attempt.mainFinished,
+            subtitleSessionCount: attempt.subtitleProxyURLs.count
+        ) {
+            protectedProviderAttempts.removeValue(forKey: id)
+        } else {
+            protectedProviderAttempts[id] = attempt
+        }
+    }
+
+    private func handleNuvioProxyRejection(
+        id: String,
+        attemptID: UUID,
+        url: URL,
+        rejectedCookieHeader: String?,
+        isInteractive: Bool,
+        statusCode: Int
+    ) {
+        performOnMain { [weak self] in
+            guard let self,
+                  protectedProviderAttempts[id]?.attemptID == attemptID else { return }
+            recoverDownloadAfterMediaRejection(
+                id: id,
+                statusCode: statusCode,
+                challengedURL: url,
+                rejectedCookieHeader: rejectedCookieHeader,
+                isInteractiveChallenge: isInteractive
+            )
+        }
+    }
+
+    private func invalidateNuvioProtectedAttempt(
+        id: String,
+        expectedAttemptID: UUID? = nil
+    ) {
+        guard let attempt = protectedProviderAttempts[id],
+              expectedAttemptID == nil || attempt.attemptID == expectedAttemptID else { return }
+        protectedProviderAttempts.removeValue(forKey: id)
+        MPVHeaderProxy.shared.invalidateSession(for: attempt.mainProxyURL)
+        if let variantURL = attempt.hlsVariantProxyURL {
+            MPVHeaderProxy.shared.invalidateSession(for: variantURL)
+        }
+        for proxyURL in attempt.subtitleProxyURLs {
+            MPVHeaderProxy.shared.invalidateSession(for: proxyURL)
+        }
+        if let subtitleFetch = nuvioSubtitleFetches.removeValue(forKey: id) {
+            subtitleFetch.cancel()
+        }
+        resumeDataStore.removeValue(forKey: id)
+        pendingResumeDataTaskIdentifiers.removeValue(forKey: id)
+        nuvioDispatchApprovedIDs.remove(id)
+        stremioConfiguredOriginAuthorities.removeValue(forKey: id)
+    }
+
+    private func invalidateAllProtectedProviderAttempts() {
+        for id in Array(protectedProviderAttempts.keys) {
+            invalidateNuvioProtectedAttempt(id: id)
+        }
+        for proxyURL in nuvioAutoValidationProxyURLs.values {
+            MPVHeaderProxy.shared.invalidateSession(for: proxyURL)
+        }
+        nuvioAutoValidationProxyURLs.removeAll()
+        stremioConfiguredOriginAuthorities.removeAll()
+    }
+
+    private func clearProtectedProviderDownloadRuntimeState(id: String, scrubTransport: Bool) {
+        nuvioDispatchValidationPendingIDs.remove(id)
+        nuvioDispatchValidationTokens.removeValue(forKey: id)
+        nuvioDispatchApprovedIDs.remove(id)
+        nuvioRestoringDownloadIDs.remove(id)
+        stremioConfiguredOriginAuthorities.removeValue(forKey: id)
+        invalidateNuvioProtectedAttempt(id: id)
+        resumeDataStore.removeValue(forKey: id)
+        pendingResumeDataTaskIdentifiers.removeValue(forKey: id)
+        if scrubTransport {
+            resetProtectedProviderHLSCheckpoint(id: id)
+            scrubProtectedProviderTransportInMemory(id: id)
+        }
+    }
+
+    private func suspendProtectedProviderAttempts(
+        message: String,
+        processWhenPossible: Bool
+    ) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        let protectedIDs = Set(protectedProviderAttempts.keys).union(
+            downloads.compactMap { $0.claimsProtectedProviderTransport ? $0.id : nil }
+        )
+        for proxyURL in nuvioAutoValidationProxyURLs.values {
+            MPVHeaderProxy.shared.invalidateSession(for: proxyURL)
+        }
+        nuvioAutoValidationProxyURLs.removeAll()
+        for id in protectedIDs {
+            nuvioDispatchValidationPendingIDs.remove(id)
+            nuvioDispatchValidationTokens.removeValue(forKey: id)
+            nuvioDispatchApprovedIDs.remove(id)
+            nuvioRestoringDownloadIDs.remove(id)
+            stremioConfiguredOriginAuthorities.removeValue(forKey: id)
+            if let task = activeTasks.removeValue(forKey: id) {
+                invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
+                task.cancel()
+            }
+            if let downloader = activeHLSDownloaders.removeValue(forKey: id) {
+                if let hlsAttemptID = activeHLSAttemptIDs.removeValue(forKey: id) {
+                    invalidatedHLSAttemptIDs.insert(hlsAttemptID)
+                }
+                downloader.cancel()
+            }
+            invalidateNuvioProtectedAttempt(id: id)
+            resetProtectedProviderHLSCheckpoint(id: id)
+            scrubProtectedProviderTransportInMemory(id: id)
+            if let index = downloads.firstIndex(where: { $0.id == id }),
+               downloads[index].status == .downloading {
+                downloads[index].status = .queued
+                downloads[index].error = message
+            }
+        }
+        if !protectedIDs.isEmpty { saveDownloads() }
+        if processWhenPossible, protectedProviderTransportMayStart {
+            processQueue()
+        }
+    }
+
+    private func resetNuvioHLSCheckpoint(id: String) {
+        guard let index = downloads.firstIndex(where: { $0.id == id }) else { return }
+        let transferIsCompleted = downloads[index].status == .completed
+        downloads[index].hlsResumeSegmentIndex = nil
+        downloads[index].hlsResumeByteCount = nil
+        downloads[index].hlsVariantURL = nil
+        downloads[index].hlsTotalSegments = nil
+        if !transferIsCompleted {
+            downloads[index].progress = 0
+            downloads[index].downloadedBytes = 0
+            downloads[index].totalBytes = 0
+        }
+        lastHLSCheckpointSave.removeValue(forKey: id)
+    }
+
+    private func resetProtectedProviderHLSCheckpoint(id: String) {
+        resetNuvioHLSCheckpoint(id: id)
+    }
+
+    private func scrubNuvioTransportInMemory(id: String) {
+        guard let index = downloads.firstIndex(where: { $0.id == id }),
+              NuvioDownloadPersistencePolicy.claimsNuvio(
+                  sourceID: downloads[index].lastSourceId,
+                  reference: downloads[index].lastContentReference
+              ) else { return }
+        if downloads[index].nuvioTransportKind == nil, !downloads[index].streamURL.isEmpty {
+            downloads[index].nuvioTransportKind = NuvioDownloadPersistencePolicy.transportKind(
+                for: downloads[index].streamURL
+            )
+        }
+        downloads[index].streamURL = ""
+        downloads[index].headers = [:]
+        downloads[index].subtitleURL = nil
+        downloads[index].subtitleHeaders = nil
+        downloads[index].serviceBaseURL = ""
+        downloads[index].sourceId = nil
+        downloads[index].serviceContentHref = nil
+        downloads[index].hlsVariantURL = nil
+        resumeDataStore.removeValue(forKey: id)
+        pendingResumeDataTaskIdentifiers.removeValue(forKey: id)
+    }
+
+    private func scrubProtectedProviderTransportInMemory(id: String) {
+        guard let index = downloads.firstIndex(where: { $0.id == id }),
+              downloads[index].claimsProtectedProviderTransport else { return }
+        if downloads[index].protectedTransportKind == nil,
+           !downloads[index].streamURL.isEmpty {
+            downloads[index].protectedTransportKind = ProtectedDownloadPersistencePolicy
+                .transportKind(for: downloads[index].streamURL)
+        }
+        if downloads[index].effectiveProtectedProviderKind == .nuvio {
+            downloads[index].nuvioTransportKind = downloads[index].protectedTransportKind
+        }
+        downloads[index].streamURL = ""
+        downloads[index].headers = [:]
+        downloads[index].subtitleURL = nil
+        downloads[index].subtitleHeaders = nil
+        downloads[index].serviceBaseURL = ""
+        downloads[index].sourceId = nil
+        downloads[index].serviceContentHref = nil
+        downloads[index].hlsVariantURL = nil
+        resumeDataStore.removeValue(forKey: id)
+        pendingResumeDataTaskIdentifiers.removeValue(forKey: id)
     }
 #endif
 
@@ -3277,20 +5778,157 @@ final class DownloadManager: NSObject, ObservableObject {
             self.saveDownloads()
         }
     }
-    
-    /// Known video file extensions that VLC/mpv can play
+
     private static let knownVideoExtensions: Set<String> = [
         "mp4", "mkv", "webm", "mov", "avi", "wmv", "flv", "ts", "m2ts",
         "mpg", "mpeg", "ogv", "3gp", "m4v", "vob", "divx", "asf", "rm",
         "rmvb", "f4v", "mts"
     ]
-    
-    /// Known subtitle file extensions supported by the players
+
     private static let knownSubtitleExtensions: Set<String> = [
         "srt", "vtt", "ass", "ssa", "sub", "idx", "sup", "smi", "mks", "dfxp", "ttml"
     ]
-    
-    private func downloadSubtitle(for downloadId: String, from url: URL, headers: [String: String]) {
+
+    private func startDownloadSubtitle(
+        for item: DownloadItem,
+        originalStreamURL: URL,
+        protectedNuvioAttemptID: UUID?
+    ) {
+        guard let subtitleURLString = item.subtitleURL,
+              let subtitleURL = URL(string: subtitleURLString) else { return }
+        let subtitleHeaders = effectiveSubtitleHeaders(
+            for: item,
+            subtitleURL: subtitleURL,
+            streamURL: originalStreamURL
+        )
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        if let protectedNuvioAttemptID {
+            guard let proxyURL = makeNuvioSubtitleProxyURL(
+                id: item.id,
+                attemptID: protectedNuvioAttemptID,
+                subtitleURL: subtitleURL,
+                headers: subtitleHeaders
+            ) else {
+                Logger.shared.log(
+                    "Nuvio subtitle skipped because its protected route could not start id=\(item.id)",
+                    type: "Download"
+                )
+                return
+            }
+            downloadProtectedNuvioSubtitle(
+                for: item.id,
+                from: proxyURL,
+                extensionSourceURL: subtitleURL,
+                attemptID: protectedNuvioAttemptID
+            )
+            return
+        }
+#endif
+        downloadSubtitle(for: item.id, from: subtitleURL, headers: subtitleHeaders)
+    }
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    private func downloadProtectedNuvioSubtitle(
+        for downloadId: String,
+        from proxyURL: URL,
+        extensionSourceURL: URL,
+        attemptID: UUID
+    ) {
+        guard protectedProviderAttempts[downloadId]?.attemptID == attemptID,
+              let item = downloads.first(where: { $0.id == downloadId }),
+              nuvioOwnerMatchesActiveProfile(item) else {
+            finishNuvioSubtitleProxy(id: downloadId, attemptID: attemptID, proxyURL: proxyURL)
+            return
+        }
+        var request = URLRequest(url: proxyURL)
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        let fetch = NuvioBoundedSubtitleFetch(maximumBytes: 5_000_000) { [weak self] result in
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                defer {
+                    self.finishNuvioSubtitleProxy(
+                        id: downloadId,
+                        attemptID: attemptID,
+                        proxyURL: proxyURL
+                    )
+                }
+                guard self.nuvioAttemptIsCurrent(id: downloadId, attemptID: attemptID),
+                      let item = self.downloads.first(where: { $0.id == downloadId }),
+                      self.nuvioOwnerMatchesActiveProfile(item) else { return }
+                guard case .success(let output) = result, !output.data.isEmpty else {
+                    if case .failure(let error) = result,
+                       (error as? URLError)?.code != .cancelled {
+                        Logger.shared.log(
+                            "Nuvio subtitle skipped id=\(downloadId)"
+                                + " reason=\(self.boundedTransportErrorToken(error))",
+                            type: "Download"
+                        )
+                    }
+                    return
+                }
+
+                var ext = extensionSourceURL.pathExtension.lowercased()
+                if ext.isEmpty || !Self.knownSubtitleExtensions.contains(ext) {
+                    let contentType = output.response.mimeType?.lowercased() ?? ""
+                    if contentType.contains("vtt") || contentType.contains("webvtt") {
+                        ext = "vtt"
+                    } else if contentType.contains("ass") || contentType.contains("ssa") {
+                        ext = "ass"
+                    } else if contentType.contains("ttml") {
+                        ext = "ttml"
+                    } else {
+                        ext = "srt"
+                    }
+                }
+                let fileName = self.reserveFinalSubtitleFileName(
+                    downloadID: downloadId,
+                    fileExtension: ext
+                )
+                let destination = self.downloadFileURL(relativePath: fileName)
+                self.ensureParentDirectoryExists(for: destination)
+                if self.isRegularFile(at: destination),
+                   !self.downloadOwnsTrackedPath(
+                       downloadID: downloadId,
+                       relativePath: fileName,
+                       subtitle: true
+                   ) {
+                    Logger.shared.log(
+                        "Protected provider subtitle destination became occupied id=\(downloadId)",
+                        type: "Download"
+                    )
+                    return
+                }
+                do {
+                    try output.data.write(to: destination, options: .atomic)
+                    guard self.nuvioAttemptIsCurrent(id: downloadId, attemptID: attemptID),
+                          let index = self.downloads.firstIndex(where: { $0.id == downloadId }),
+                          self.nuvioOwnerMatchesActiveProfile(self.downloads[index]) else {
+                        try? self.fileManager.removeItem(at: destination)
+                        return
+                    }
+                    self.downloads[index].subtitleFileName = fileName
+                    self.downloads[index].reservedSubtitleFileName = fileName
+                    self.saveDownloads()
+                    Logger.shared.log("Downloaded protected provider subtitle id=\(downloadId)", type: "Download")
+                } catch {
+                    Logger.shared.log(
+                        "Failed to save protected provider subtitle id=\(downloadId) reason=\(self.boundedTransportErrorToken(error))",
+                        type: "Download"
+                    )
+                }
+            }
+        }
+        nuvioSubtitleFetches[downloadId]?.cancel()
+        nuvioSubtitleFetches[downloadId] = fetch
+        fetch.start(request)
+    }
+#endif
+
+    private func downloadSubtitle(
+        for downloadId: String,
+        from url: URL,
+        headers: [String: String]
+    ) {
         var request = URLRequest(url: url)
         for (key, value) in headers {
             request.setValue(value, forHTTPHeaderField: key)
@@ -3306,11 +5944,10 @@ final class DownloadManager: NSObject, ObservableObject {
                     return
                 }
             }
-            
-            // Determine subtitle extension from URL, Content-Type, or default to srt
+
             var ext = url.pathExtension.lowercased()
             if ext.isEmpty || !Self.knownSubtitleExtensions.contains(ext) {
-                // Try Content-Type header
+
                 if let httpResp = response as? HTTPURLResponse,
                    let contentType = httpResp.value(forHTTPHeaderField: "Content-Type")?.lowercased() {
                     if contentType.contains("vtt") || contentType.contains("webvtt") {
@@ -3399,9 +6036,18 @@ final class DownloadManager: NSObject, ObservableObject {
             processQueue()
             return
         }
+        var retryAuthorityURL = URL(string: downloads[index].streamURL)
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        retryAuthorityURL = protectedProviderAttempts[id]
+            .flatMap { URL(string: $0.authorityURL) } ?? retryAuthorityURL
+        if downloads[index].claimsProtectedProviderTransport {
+            clearProtectedProviderDownloadRuntimeState(id: id, scrubTransport: true)
+        }
+#endif
 
         if let task = activeTasks.removeValue(forKey: id) {
             invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
+            task.cancel()
         }
         activeHLSDownloaders.removeValue(forKey: id)
         let retryCount = (downloads[index].rateLimitRetryCount ?? 0) + 1
@@ -3412,7 +6058,7 @@ final class DownloadManager: NSObject, ObservableObject {
                 recoverDownloadAfterMediaRejection(
                     id: id,
                     statusCode: 429,
-                    challengedURL: URL(string: downloads[index].streamURL),
+                    challengedURL: retryAuthorityURL,
                     rejectedCookieHeader: nil,
                     isInteractiveChallenge: false
                 )
@@ -3421,7 +6067,8 @@ final class DownloadManager: NSObject, ObservableObject {
             }
             return
         }
-        let delay = min(max(retryAfterSeconds ?? 8, 8), 30)
+        let finiteRetryAfter = retryAfterSeconds.flatMap { $0.isFinite ? $0 : nil }
+        let delay = min(max(finiteRetryAfter ?? 8, 8), 30)
         let retryDate = Date().addingTimeInterval(delay)
         downloads[index].status = .queued
         downloads[index].retryNotBefore = retryDate
@@ -3440,20 +6087,24 @@ final class DownloadManager: NSObject, ObservableObject {
             processQueue()
             return
         }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        if downloads[index].claimsProtectedProviderTransport {
+            clearProtectedProviderDownloadRuntimeState(id: id, scrubTransport: true)
+        }
+#endif
+        if let task = activeTasks.removeValue(forKey: id) {
+            invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
+            task.cancel()
+        }
         activeHLSDownloaders.removeValue(forKey: id)
         downloads[index].status = .queued
-        // Disk/thermal/capacity conditions do not change merely because processQueue is called
-        // again. A persisted delay prevents a failed segment from being fetched in a tight loop;
-        // foreground/storage lifecycle events may still call processQueue after the delay.
+
         downloads[index].retryNotBefore = Date().addingTimeInterval(60)
         downloads[index].error = message
         saveDownloads()
         processQueue()
     }
 
-    /// An explicit challenge first attempts provider re-extraction because media CDNs commonly
-    /// return terminal error pages with no solvable widget. The browser is only opened if the
-    /// response was positively identified as an interactive challenge and re-extraction failed.
     private func recoverDownloadAfterConfirmedChallenge(
         id: String,
         challengedURL: URL,
@@ -3503,9 +6154,19 @@ final class DownloadManager: NSObject, ObservableObject {
             if downloads[index].providerTransportKind == .skyStreamHLS {
                 clearSkyStreamDownloadRuntimeState(id: id, discardDescriptor: true)
             }
+            if downloads[index].claimsProtectedProviderTransport {
+                clearProtectedProviderDownloadRuntimeState(id: id, scrubTransport: true)
+            }
 #endif
             downloads[index].status = .paused
             downloads[index].error = "Refreshing expired media source"
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            let recoveringProtectedOwnerProfileID = downloads[index]
+                .claimsProtectedProviderTransport
+                ? downloads[index].effectiveProtectedOwnerProfileID
+                : nil
+            let recoveringServiceScopeGeneration = ServiceStoreScope.generation
+#endif
             saveDownloads()
             processQueue()
 
@@ -3517,10 +6178,28 @@ final class DownloadManager: NSObject, ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 var refreshed = await refreshDownloadSource(id: id)
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                if let recoveringProtectedOwnerProfileID,
+                   (ProfileManager.shared.activeProfileID != recoveringProtectedOwnerProfileID
+                    || !ServiceStoreScope.isCurrent(recoveringServiceScopeGeneration)) {
+                    if let currentIndex = downloads.firstIndex(where: { $0.id == id }) {
+                        downloads[currentIndex].status = .queued
+                        downloads[currentIndex].error = "Waiting for the download's profile"
+                        scrubProtectedProviderTransportInMemory(id: id)
+                    }
+                    cloudflareRecoveringDownloadIDs.remove(id)
+                    saveDownloads()
+                    processQueue()
+                    return
+                }
+#endif
                 var solvedMediaChallenge = false
                 let rejectedStreamURL = downloads.first(where: { $0.id == id })?.streamURL
-                let permitsLegacyInteractiveSolve = downloads.first(where: { $0.id == id })?
-                    .lastContentReference?.kind != .skyStream
+                let recoveryKind = downloads.first(where: { $0.id == id })?
+                    .lastContentReference?.kind
+                let permitsLegacyInteractiveSolve = recoveryKind != .skyStream
+                    && recoveryKind != .nuvio
+                    && recoveryKind != .stremio
 
                 if isInteractiveChallenge,
                    permitsLegacyInteractiveSolve,
@@ -3559,8 +6238,7 @@ final class DownloadManager: NSObject, ObservableObject {
                     )
                     processQueue()
                 } else if solvedMediaChallenge {
-                    // Legacy items lack provider metadata. A positively solved media-host
-                    // challenge can still retry the retained URL with its replacement session.
+
                     downloads[currentIndex].status = .queued
                     downloads[currentIndex].error = nil
                     cloudflareRecoveringDownloadIDs.remove(id)
@@ -3589,10 +6267,30 @@ final class DownloadManager: NSObject, ObservableObject {
         resetTransferProgress: Bool
     ) -> (changed: Bool, kind: String)? {
         guard let index = downloads.firstIndex(where: { $0.id == id }) else { return nil }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        let refreshReplacesProtectedTransport = refreshed.lastContentReference.kind == .nuvio
+            || refreshed.lastContentReference.kind == .service
+            || refreshed.lastContentReference.kind == .stremio
+            || (refreshed.lastContentReference.kind == .skyStream
+                && downloads[index].effectiveProtectedProviderKind == .skyStream)
+        if refreshReplacesProtectedTransport {
+            guard protectedOwnerMatchesActiveProfile(downloads[index]) else { return nil }
+            if refreshed.lastContentReference.kind == .stremio,
+               refreshed.stremioConfiguredOriginAuthority == nil {
+                return nil
+            }
+            invalidateNuvioProtectedAttempt(id: id)
+        }
+#endif
         let previousURL = downloads[index].streamURL
         let previousWasHLS = downloads[index].isHLS
         let changed: Bool
         let kind: String
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        if refreshed.lastContentReference.kind != .stremio {
+            stremioConfiguredOriginAuthorities.removeValue(forKey: id)
+        }
+#endif
 
         switch refreshed.transport {
         case .direct(let url, let headers, let expectedContentLength):
@@ -3605,6 +6303,44 @@ final class DownloadManager: NSObject, ObservableObject {
             downloads[index].headers = headers
             if refreshed.lastContentReference.kind == .skyStream {
                 downloads[index].providerTransportKind = .skyStreamDirect
+                downloads[index].protectedProviderKind = .skyStream
+                downloads[index].protectedTransportKind = ProtectedDownloadPersistencePolicy.transportKind(
+                    for: url.absoluteString
+                )
+                if downloads[index].protectedOwnerProfileID == nil {
+                    downloads[index].protectedOwnerProfileID = ProfileManager.shared.activeProfileID
+                }
+                downloads[index].subtitleURL = refreshed.subtitleURL
+                downloads[index].subtitleHeaders = refreshed.subtitleHeaders
+            } else if refreshed.lastContentReference.kind == .nuvio
+                || refreshed.lastContentReference.kind == .service
+                || refreshed.lastContentReference.kind == .stremio {
+                downloads[index].providerTransportKind = nil
+                let providerKind: ProtectedDownloadProviderKind
+                switch refreshed.lastContentReference.kind {
+                case .nuvio: providerKind = .nuvio
+                case .stremio: providerKind = .stremio
+                default: providerKind = .service
+                }
+                downloads[index].protectedProviderKind = providerKind
+                downloads[index].protectedTransportKind = ProtectedDownloadPersistencePolicy.transportKind(
+                    for: url.absoluteString
+                )
+                if providerKind == .nuvio {
+                    downloads[index].nuvioTransportKind = downloads[index].protectedTransportKind
+                    downloads[index].nuvioOwnerProfileID = downloads[index]
+                        .effectiveProtectedOwnerProfileID
+                }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                if providerKind == .stremio,
+                   let authority = refreshed.stremioConfiguredOriginAuthority {
+                    stremioConfiguredOriginAuthorities[id] = authority
+                } else {
+                    stremioConfiguredOriginAuthorities.removeValue(forKey: id)
+                }
+#endif
+                downloads[index].subtitleURL = refreshed.subtitleURL
+                downloads[index].subtitleHeaders = refreshed.subtitleHeaders
             }
             downloads[index].validatedExpectedContentLength = expectedContentLength
             changed = previousWasHLS || previousURL != url.absoluteString
@@ -3632,7 +6368,7 @@ final class DownloadManager: NSObject, ObservableObject {
 
         if resetTransferProgress,
            (changed || downloads[index].isHLS
-                || downloads[index].lastContentReference?.kind == .skyStream) {
+                || downloads[index].claimsProtectedProviderTransport) {
             downloads[index].hlsResumeSegmentIndex = nil
             downloads[index].hlsResumeByteCount = nil
             downloads[index].hlsVariantURL = nil
@@ -3670,9 +6406,13 @@ final class DownloadManager: NSObject, ObservableObject {
             case .skyStream:
                 return reference.skyStream?.isStructurallyValid == true
             case .stremio:
-                // Existing Stremio re-resolution is ID-based but is not yet exposed as a
-                // download refresh adapter. Do not guess a fresh stream here.
+                return reference.hasValidStremioSelection
+            case .nuvio:
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                return reference.nuvio?.isStructurallyValid == true
+#else
                 return false
+#endif
             }
         }
         return item.sourceId?.hasPrefix("service:") == true
@@ -3695,11 +6435,95 @@ final class DownloadManager: NSObject, ObservableObject {
                 return nil
 #endif
             case .stremio:
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                return await refreshStremioDownloadSource(item: item, reference: reference)
+#else
                 return nil
+#endif
+            case .nuvio:
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                return await refreshNuvioDownloadSource(item: item, reference: reference)
+#else
+                return nil
+#endif
             }
         }
         return await refreshServiceDownloadSource(id: id)
     }
+
+    private static func stremioDownloadHeaders(
+        _ headers: [String: String]
+    ) -> [String: String] {
+        var result = headers
+        if !result.keys.contains(where: {
+            $0.caseInsensitiveCompare("User-Agent") == .orderedSame
+        }) {
+            result["User-Agent"] = URLSession.randomUserAgent
+        }
+        return result
+    }
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    @MainActor
+    private func refreshStremioDownloadSource(
+        item: DownloadItem,
+        reference: ProviderContentReference
+    ) async -> RefreshedDownloadSource? {
+        guard reference.kind == .stremio,
+              reference.sourceID == item.lastSourceId,
+              reference.hasValidStremioSelection,
+              Self.protectedAuthorityState(for: item) == .authorized(.stremio),
+              let ownerProfileID = item.effectiveProtectedOwnerProfileID,
+              ownerProfileID == ProfileManager.shared.activeProfileID else {
+            return nil
+        }
+        let scopeGeneration = ServiceStoreScope.generation
+        guard let resolved = await StremioAddonManager.shared.resolveDownloadTransport(
+            reference: reference,
+            ownerProfileID: ownerProfileID,
+            serviceStoreGeneration: scopeGeneration
+        ),
+              !Task.isCancelled,
+              ownerProfileID == ProfileManager.shared.activeProfileID,
+              ServiceStoreScope.isCurrent(scopeGeneration),
+              resolved.refreshedReference.sourceID == reference.sourceID,
+              resolved.refreshedReference.hasValidStremioSelection,
+              let streamURL = URL(string: resolved.streamURL),
+              let scheme = streamURL.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              streamURL.user == nil,
+              streamURL.password == nil else {
+            return nil
+        }
+
+        let subtitleURL: String?
+        if let rawSubtitle = resolved.subtitleURL,
+           let parsed = URL(string: rawSubtitle),
+           let subtitleScheme = parsed.scheme?.lowercased(),
+           subtitleScheme == "http" || subtitleScheme == "https",
+           parsed.user == nil,
+           parsed.password == nil {
+            subtitleURL = parsed.absoluteString
+        } else {
+            subtitleURL = nil
+        }
+
+        return RefreshedDownloadSource(
+            transport: .direct(
+                url: streamURL,
+                headers: Self.stremioDownloadHeaders(resolved.headers),
+                expectedContentLength: nil
+            ),
+            streamName: item.streamName,
+            subtitleURL: subtitleURL,
+            subtitleHeaders: nil,
+            serviceContentHref: nil,
+            lastSourceId: reference.sourceID,
+            lastContentReference: resolved.refreshedReference,
+            stremioConfiguredOriginAuthority: resolved.configuredOriginAuthority
+        )
+    }
+#endif
 
     @MainActor
     private func refreshServiceDownloadSource(id: String) async -> RefreshedDownloadSource? {
@@ -3762,9 +6586,22 @@ final class DownloadManager: NSObject, ObservableObject {
         for (key, value) in selected.headers {
             headers[key] = value
         }
+        let refreshedSubtitleURL = extraction.subtitles?
+            .compactMap { rawValue -> String? in
+                guard let url = URL(string: rawValue),
+                      ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
+                    return nil
+                }
+                return url.absoluteString
+            }
+            .first
         return RefreshedDownloadSource(
             transport: .direct(url: url, headers: headers, expectedContentLength: nil),
             streamName: selected.label,
+            subtitleURL: refreshedSubtitleURL,
+            subtitleHeaders: refreshedSubtitleURL == item.subtitleURL
+                ? item.subtitleHeaders
+                : nil,
             serviceContentHref: contentHref,
             lastSourceId: sourceId,
             lastContentReference: .service(sourceID: sourceId, href: contentHref)
@@ -3787,7 +6624,8 @@ final class DownloadManager: NSObject, ObservableObject {
         do {
             let refreshed = try await SkyStreamResolver.shared.refresh(
                 skyReference,
-                mode: .downloadRefresh
+                mode: .downloadRefresh,
+                originalAudioLanguage: item.originalAudioLanguage
             )
             guard !Task.isCancelled,
                   let resolved = refreshed.first,
@@ -3837,6 +6675,8 @@ final class DownloadManager: NSObject, ObservableObject {
             return RefreshedDownloadSource(
                 transport: transport,
                 streamName: resolved.displayName,
+                subtitleURL: nil,
+                subtitleHeaders: nil,
                 serviceContentHref: nil,
                 lastSourceId: reference.sourceID,
                 lastContentReference: refreshedReference
@@ -3851,6 +6691,98 @@ final class DownloadManager: NSObject, ObservableObject {
             )
             return nil
         }
+    }
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+
+    @MainActor
+    private func refreshNuvioDownloadSource(
+        item: DownloadItem,
+        reference: ProviderContentReference
+    ) async -> RefreshedDownloadSource? {
+        guard reference.kind == .nuvio,
+              let nuvioReference = reference.nuvio,
+              reference.sourceID == nuvioReference.sourceID,
+              nuvioDownloadReferenceMatchesItem(nuvioReference, item: item),
+              nuvioOwnerMatchesActiveProfile(item) else {
+            return nil
+        }
+        let ownerProfileID = item.nuvioOwnerProfileID
+        let scopeGeneration = ServiceStoreScope.generation
+
+        let streams = await NuvioPluginManager.shared.resolveStreams(
+            scraperID: nuvioReference.scraperID,
+            tmdbId: nuvioReference.tmdbID,
+            mediaType: nuvioReference.mediaType,
+            season: nuvioReference.season,
+            episode: nuvioReference.episode
+        )
+        guard !Task.isCancelled,
+              ServiceStoreScope.isCurrent(scopeGeneration),
+              ProfileManager.shared.activeProfileID == ownerProfileID else { return nil }
+
+        let previousLabel = item.streamName ?? item.title
+        let preferred = streams.first { $0.displayName == previousLabel } ?? streams.first
+        guard let chosen = preferred,
+              chosen.isDirectHTTP,
+              chosen.scraperId == nuvioReference.scraperID,
+              let url = URL(string: chosen.url) else {
+            Logger.shared.log(
+                "Nuvio: download refresh produced no playable stream source=\(reference.sourceID)",
+                type: "Download"
+            )
+            return nil
+        }
+
+        let subtitle = chosen.subtitles?.first(where: {
+            URL(string: $0.url).map { ["http", "https"].contains($0.scheme?.lowercased() ?? "") } == true
+        })
+        return RefreshedDownloadSource(
+            transport: .direct(
+                url: url,
+                headers: chosen.sanitizedHeaders ?? [:],
+                expectedContentLength: nil
+            ),
+            streamName: chosen.displayName,
+            subtitleURL: subtitle?.url,
+            subtitleHeaders: subtitle?.sanitizedHeaders,
+            serviceContentHref: nil,
+            lastSourceId: reference.sourceID,
+            lastContentReference: reference
+        )
+    }
+#endif
+
+    private func nuvioDownloadReferenceMatchesItem(
+        _ reference: NuvioProviderContentReference,
+        item: DownloadItem
+    ) -> Bool {
+        guard reference.isStructurallyValid else { return false }
+        if item.isMovie {
+            return reference.mediaType == "movie"
+        }
+        guard reference.mediaType == "tv",
+              let referenceSeason = reference.season,
+              let referenceEpisode = reference.episode,
+              referenceSeason >= 0,
+              referenceEpisode > 0 else {
+            return false
+        }
+
+        var acceptedCoordinates = Set<String>()
+        if let season = item.seasonNumber, let episode = item.episodeNumber {
+            acceptedCoordinates.insert("\(season):\(episode)")
+        }
+        if let context = item.episodePlaybackContext {
+            if let season = context.resolvedTMDBSeasonNumber,
+               let episode = context.resolvedTMDBEpisodeNumber {
+                acceptedCoordinates.insert("\(season):\(episode)")
+            }
+            if let absolute = context.animeAbsoluteEpisodeNumber, absolute > 0 {
+                acceptedCoordinates.insert("1:\(absolute)")
+            }
+        }
+        return acceptedCoordinates.contains("\(referenceSeason):\(referenceEpisode)")
     }
 
     private func skyDownloadReferenceMatchesItem(
@@ -3959,6 +6891,7 @@ final class DownloadManager: NSObject, ObservableObject {
                     languageHints: [],
                     metadata: metadata + [url],
                     sourceId: sourceId,
+                    originalAudioLanguage: item.originalAudioLanguage,
                     isAnime: item.isAnime
                 ) else { continue }
                 candidates.append((
@@ -3972,16 +6905,29 @@ final class DownloadManager: NSObject, ObservableObject {
             var index = 0
             while index < streams.count {
                 let value = streams[index]
+                let url: String
+                let label: String
                 if value.lowercased().hasPrefix("http") {
-                    candidates.append((value, [:], "Stream", value))
+                    url = value
+                    label = "Stream"
                     index += 1
                 } else if index + 1 < streams.count,
                           streams[index + 1].lowercased().hasPrefix("http") {
-                    candidates.append((streams[index + 1], [:], value, value))
+                    url = streams[index + 1]
+                    label = value
                     index += 2
                 } else {
                     index += 1
+                    continue
                 }
+                guard !StreamLanguageFilter.shouldHide(
+                    languageHints: [],
+                    metadata: [label, url],
+                    sourceId: sourceId,
+                    originalAudioLanguage: item.originalAudioLanguage,
+                    isAnime: item.isAnime
+                ) else { continue }
+                candidates.append((url, [:], label, value))
             }
         }
 
@@ -4031,17 +6977,27 @@ final class DownloadManager: NSObject, ObservableObject {
             result[pair.key] = value
         }
     }
-    
+
     private func markFailed(id: String, error: String) {
         performOnMain { [weak self] in
             guard let self else { return }
             if let task = activeTasks.removeValue(forKey: id) {
                 invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
+                task.cancel()
             }
             if let index = downloads.firstIndex(where: { $0.id == id }) {
 #if os(iOS) && !targetEnvironment(macCatalyst)
                 if downloads[index].providerTransportKind == .skyStreamHLS {
                     clearSkyStreamDownloadRuntimeState(id: id, discardDescriptor: true)
+                }
+                if downloads[index].claimsProtectedProviderTransport {
+                    if let downloader = activeHLSDownloaders.removeValue(forKey: id) {
+                        if let attemptID = activeHLSAttemptIDs.removeValue(forKey: id) {
+                            invalidatedHLSAttemptIDs.insert(attemptID)
+                        }
+                        downloader.cancel()
+                    }
+                    clearProtectedProviderDownloadRuntimeState(id: id, scrubTransport: true)
                 }
 #endif
                 downloads[index].status = .failed
@@ -4052,15 +7008,36 @@ final class DownloadManager: NSObject, ObservableObject {
             Logger.shared.log("Download failed: \(id) - \(error)", type: "Download")
         }
     }
-    
+
     private func resumeInterruptedDownloads() {
         backgroundSession.getAllTasks { [weak self] tasks in
             guard let self else { return }
             self.performOnMain { [weak self] in
                 guard let self else { return }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                self.migrateLegacyStremioDownloadsIfNeeded(permitsOneLiveAttempt: false)
+#endif
                 var retainedTaskIDs = Set<String>()
 
                 for case let task as URLSessionDownloadTask in tasks {
+                    if let id = task.taskDescription,
+                       let index = downloads.firstIndex(where: { $0.id == id }),
+                       !ProtectedDownloadPersistencePolicy.mayAdoptRestoredBackgroundTask(
+                           claimsProtectedProvider: downloads[index]
+                               .claimsProtectedProviderTransport
+                       ) {
+                        invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
+                        task.cancel()
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                        invalidateNuvioProtectedAttempt(id: id)
+                        scrubProtectedProviderTransportInMemory(id: id)
+#endif
+                        if downloads[index].status == .downloading {
+                            downloads[index].status = .queued
+                            downloads[index].error = "Refreshing protected download access"
+                        }
+                        continue
+                    }
                     guard task.state == .running || task.state == .suspended,
                           let id = task.taskDescription,
                           let index = downloads.firstIndex(where: { $0.id == id }),
@@ -4073,7 +7050,7 @@ final class DownloadManager: NSObject, ObservableObject {
                         continue
                     }
                     guard retainedTaskIDs.insert(id).inserted else {
-                        // A prior crash must never leave two writers targeting one download ID.
+
                         invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
                         task.cancel()
                         continue
@@ -4081,8 +7058,7 @@ final class DownloadManager: NSObject, ObservableObject {
                     if let newlyStartedTask = activeTasks[id],
                        newlyStartedTask !== task,
                        newlyStartedTask.taskIdentifier != task.taskIdentifier {
-                        // Prefer the OS-retained task, which may already contain substantial
-                        // progress, and stop a task that raced this launch-time reconciliation.
+
                         invalidatedDirectTaskIdentifiers.insert(newlyStartedTask.taskIdentifier)
                         newlyStartedTask.cancel()
                     }
@@ -4094,9 +7070,6 @@ final class DownloadManager: NSObject, ObservableObject {
                     }
                 }
 
-                // A task may have been enqueued after `getAllTasks` captured its snapshot but
-                // before this main-thread reconciliation ran. Treat the manager's live map as
-                // retained too so it is not queued a second time.
                 retainedTaskIDs.formUnion(activeTasks.keys)
 
                 for index in downloads.indices
@@ -4109,13 +7082,7 @@ final class DownloadManager: NSObject, ObservableObject {
             }
         }
     }
-    
-    // MARK: - Orphan Cleanup
-    
-    /// Finds stale hidden partials off the launch-critical main thread, then
-    /// rechecks current download state immediately before removing anything.
-    /// The public Downloads tree can be large, so recursive enumeration must
-    /// not delay the first app frame.
+
     private func cleanOrphanedFiles() {
         let directory = downloadsDirectory
         DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -4165,7 +7132,7 @@ final class DownloadManager: NSObject, ObservableObject {
                 .filter { $0.isHLS && $0.status != .completed }
                 .flatMap { hlsPartialFileCandidates(for: $0).map(canonicalAbsolutePath) }
         )
-        
+
         var removedCount = 0
         var freedBytes: Int64 = 0
         for candidate in candidates where !activePartialPaths.contains(canonicalAbsolutePath(candidate.url)) {
@@ -4179,19 +7146,20 @@ final class DownloadManager: NSObject, ObservableObject {
             removeEmptyDownloadDirectories(startingAt: candidate.url.deletingLastPathComponent())
             removedCount += 1
         }
-        
+
         if removedCount > 0 {
-            let formatter = ByteCountFormatter()
-            formatter.countStyle = .file
-            Logger.shared.log("Cleaned \(removedCount) orphaned file(s), freed \(formatter.string(fromByteCount: freedBytes))", type: "Download")
+            Logger.shared.log(
+                "Cleaned \(removedCount) orphaned file(s), freed \(DownloadByteCountFormatter.string(fromByteCount: freedBytes))",
+                type: "Download"
+            )
         }
     }
-    
-    // MARK: - Persistence
 
-    private static func persistedDownloadItem(_ item: DownloadItem) -> DownloadItem {
+    static func persistedDownloadItem(_ item: DownloadItem) -> DownloadItem {
         var persisted = item
         let containedSkyStreamMetadata = item.lastContentReference?.kind == .skyStream
+        let protectedProviderKind = item.effectiveProtectedProviderKind
+        let containedProtectedProviderMetadata = protectedProviderKind != nil
         let recovery = validatedRecoveryMetadata(
             legacySourceId: item.sourceId,
             legacyServiceHref: item.serviceContentHref,
@@ -4201,10 +7169,57 @@ final class DownloadManager: NSObject, ObservableObject {
         persisted.lastSourceId = recovery.sourceId
         persisted.lastContentReference = recovery.reference
 
-        if containedSkyStreamMetadata || item.providerTransportKind != nil {
-            // Sky access is always reconstructed from the bounded content reference. Signed
-            // URLs, credential headers, loopback capabilities, subtitle routes, and variant
-            // pins never cross the persistence boundary, including for queued/paused items.
+        if let protectedProviderKind {
+            persisted.protectedProviderKind = protectedProviderKind
+            persisted.protectedOwnerProfileID = item.effectiveProtectedOwnerProfileID
+        }
+        if containedProtectedProviderMetadata,
+           persisted.protectedTransportKind == nil,
+           !item.streamURL.isEmpty {
+            persisted.protectedTransportKind = ProtectedDownloadPersistencePolicy.transportKind(
+                for: item.streamURL
+            )
+        }
+        if protectedProviderKind == .nuvio {
+            persisted.nuvioOwnerProfileID = persisted.protectedOwnerProfileID
+            persisted.nuvioTransportKind = persisted.protectedTransportKind
+        }
+
+        let persistedTransport = ProtectedDownloadPersistencePolicy.sanitizedForPersistence(
+            claimsProtectedProvider: containedProtectedProviderMetadata,
+            transport: ProtectedPersistableTransport(
+                streamURL: persisted.streamURL,
+                headers: persisted.headers,
+                subtitleURL: persisted.subtitleURL,
+                subtitleHeaders: persisted.subtitleHeaders,
+                hlsVariantURL: persisted.hlsVariantURL
+            )
+        )
+        persisted.streamURL = persistedTransport.streamURL
+        persisted.headers = persistedTransport.headers
+        persisted.subtitleURL = persistedTransport.subtitleURL
+        persisted.subtitleHeaders = persistedTransport.subtitleHeaders
+        persisted.hlsVariantURL = persistedTransport.hlsVariantURL
+        if containedProtectedProviderMetadata {
+            persisted.serviceBaseURL = ""
+            persisted.sourceId = nil
+            persisted.serviceContentHref = nil
+            persisted.error = persisted.status == .failed
+                ? "The provider download must be retried."
+                : nil
+            persisted.hlsResumeSegmentIndex = nil
+            persisted.hlsResumeByteCount = nil
+            persisted.hlsTotalSegments = nil
+            if persisted.status != .completed {
+                persisted.progress = 0
+                persisted.downloadedBytes = 0
+                persisted.totalBytes = 0
+            }
+        }
+
+        if !containedProtectedProviderMetadata,
+           containedSkyStreamMetadata || item.providerTransportKind != nil {
+
             persisted.streamURL = ""
             persisted.headers = [:]
             persisted.subtitleURL = nil
@@ -4213,53 +7228,138 @@ final class DownloadManager: NSObject, ObservableObject {
         }
         return persisted
     }
-    
+
     private func saveDownloads() {
-        // Capture the current downloads array on the calling thread (main) to avoid
-        // a data race when encoding on the background write queue.
-        let snapshot = self.downloads.map(Self.persistedDownloadItem)
+
+        let rawSnapshot = self.downloads.map(Self.persistedDownloadItem)
+        guard rawSnapshot.count <= DownloadMetadataPersistencePolicy.Bounds.items else {
+            Logger.shared.log("Download metadata item count exceeded its storage bound", type: "Download")
+            return
+        }
+        let snapshot = DownloadMetadataPersistencePolicy.normalizedLoadedItems(rawSnapshot).items
         accessQueue.async(flags: .barrier) { [weak self] in
             guard let self = self else { return }
             do {
                 let data = try JSONEncoder().encode(snapshot)
+                guard data.count <= DownloadMetadataPersistencePolicy.Bounds.fileBytes else {
+                    Logger.shared.log("Download metadata snapshot exceeded its storage bound", type: "Download")
+                    return
+                }
                 try data.write(to: self.persistenceURL, options: .atomic)
             } catch {
-                Logger.shared.log("Failed to save downloads: \(error)", type: "Download")
+                Logger.shared.log("Failed to save download metadata", type: "Download")
             }
         }
     }
-    
+
+    /// Used only by credential-scrubbing migrations that must reach disk
+    /// before any legacy background task can be inspected or resumed.
+    private func saveDownloadsSynchronously() {
+        let rawSnapshot = downloads.map(Self.persistedDownloadItem)
+        guard rawSnapshot.count <= DownloadMetadataPersistencePolicy.Bounds.items else {
+            Logger.shared.log("Download metadata item count exceeded its storage bound", type: "Download")
+            return
+        }
+        let snapshot = DownloadMetadataPersistencePolicy.normalizedLoadedItems(rawSnapshot).items
+        accessQueue.sync(flags: .barrier) {
+            do {
+                let data = try JSONEncoder().encode(snapshot)
+                guard data.count <= DownloadMetadataPersistencePolicy.Bounds.fileBytes else {
+                    Logger.shared.log(
+                        "Download metadata snapshot exceeded its storage bound",
+                        type: "Download"
+                    )
+                    return
+                }
+                try data.write(to: persistenceURL, options: .atomic)
+            } catch {
+                Logger.shared.log("Failed to save download metadata", type: "Download")
+            }
+        }
+    }
+
     private func loadDownloads() {
         guard fileManager.fileExists(atPath: persistenceURL.path) else { return }
         do {
-            let data = try Data(contentsOf: persistenceURL)
-            let loaded = try JSONDecoder().decode([DownloadItem].self, from: data)
-            let normalized = loaded.map(Self.persistedDownloadItem)
-            // Set synchronously so that cleanOrphanedFiles() and resumeInterruptedDownloads()
-            // see the correct data immediately after this call.
+            let attributes = try fileManager.attributesOfItem(atPath: persistenceURL.path)
+            guard let fileType = attributes[.type] as? FileAttributeType,
+                  let fileSize = attributes[.size] as? NSNumber,
+                  DownloadMetadataPersistencePolicy.fileMetadataIsWithinLimit(
+                      size: fileSize.uint64Value,
+                      isRegularFile: fileType == .typeRegular
+                  ) else {
+                Logger.shared.log("Download metadata was oversized or not a regular file", type: "Download")
+                return
+            }
+            let handle = try FileHandle(forReadingFrom: persistenceURL)
+            defer { try? handle.close() }
+            guard let data = try handle.read(
+                upToCount: DownloadMetadataPersistencePolicy.Bounds.fileBytes + 1
+            ),
+                  DownloadMetadataPersistencePolicy.metadataJSONPassesPreflight(data) else {
+                Logger.shared.log("Download metadata failed its bounded preflight", type: "Download")
+                return
+            }
+            let bounded = try DownloadMetadataPersistencePolicy.decodeAndNormalizeLoadedItems(
+                from: data
+            )
+            var migrated = bounded.items
+            var migratedProtectedMetadata = bounded.wasChanged
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            for index in migrated.indices where migrated[index].claimsProtectedProviderTransport {
+                let providerKind = migrated[index].effectiveProtectedProviderKind
+                if migrated[index].protectedProviderKind == nil {
+                    migrated[index].protectedProviderKind = providerKind
+                    migratedProtectedMetadata = true
+                }
+                if migrated[index].protectedOwnerProfileID == nil {
+                    migrated[index].protectedOwnerProfileID = migrated[index].nuvioOwnerProfileID
+                        ?? ProfileManager.shared.activeProfileID
+                    migratedProtectedMetadata = true
+                }
+                if migrated[index].protectedTransportKind == nil,
+                   !migrated[index].streamURL.isEmpty {
+                    migrated[index].protectedTransportKind = ProtectedDownloadPersistencePolicy.transportKind(
+                        for: migrated[index].streamURL
+                    )
+                    migratedProtectedMetadata = true
+                }
+                if providerKind == .nuvio {
+                    migrated[index].nuvioOwnerProfileID = migrated[index].protectedOwnerProfileID
+                    migrated[index].nuvioTransportKind = migrated[index].protectedTransportKind
+                }
+                if migrated[index].status == .downloading {
+                    migrated[index].status = .queued
+                    migrated[index].error = "Refreshing protected download access"
+                    migratedProtectedMetadata = true
+                }
+            }
+#endif
+            let normalized = migrated.map(Self.persistedDownloadItem)
+
             self.downloads = normalized
-            if loaded.contains(where: { item in
+            if migratedProtectedMetadata || bounded.items.contains(where: { item in
                 (item.lastContentReference?.kind == .skyStream
-                    || item.providerTransportKind != nil)
+                    || item.providerTransportKind != nil
+                    || item.claimsProtectedProviderTransport)
                     && (!item.streamURL.isEmpty
                         || !item.headers.isEmpty
                         || item.subtitleURL != nil
                         || item.subtitleHeaders != nil
-                        || item.hlsVariantURL != nil)
+                        || item.hlsVariantURL != nil
+                        || (item.claimsProtectedProviderTransport
+                            && (item.hlsResumeSegmentIndex != nil
+                            || item.hlsResumeByteCount != nil
+                            || item.hlsTotalSegments != nil)))
             }) {
-                // Rewrite legacy Sky metadata immediately so merely launching the app removes
-                // access material left by an older build.
+
                 saveDownloads()
             }
         } catch {
-            Logger.shared.log("Failed to load downloads: \(error)", type: "Download")
+            Logger.shared.log("Failed to load download metadata", type: "Download")
         }
     }
 
-    /// Returns true only for the exact background transfer currently owning this stable download
-    /// ID. On a background-session relaunch, delegate delivery can race `getAllTasks`; in that
-    /// one case an otherwise-unclaimed persisted running/queued item adopts the OS-retained task.
-    /// Explicitly cancelled attempts are never eligible for adoption.
     private func claimDirectDownloadTaskIfCurrent(
         _ task: URLSessionDownloadTask,
         downloadID: String
@@ -4270,12 +7370,29 @@ final class DownloadManager: NSObject, ObservableObject {
             return false
         }
 
+        guard let item = downloads.first(where: { $0.id == downloadID }) else {
+            return false
+        }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        let claimsProtectedProvider = item.claimsProtectedProviderTransport
+        let registeredProtectedTaskIdentifier = protectedProviderAttempts[downloadID]?
+            .mainTaskIdentifier
+        guard ProtectedDownloadPersistencePolicy.mayClaimDirectTaskCallback(
+            claimsProtectedProvider: claimsProtectedProvider,
+            registeredProtectedTaskIdentifier: registeredProtectedTaskIdentifier,
+            callbackTaskIdentifier: task.taskIdentifier
+        ) else {
+            invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
+            task.cancel()
+            return false
+        }
+#endif
+
         if let active = activeTasks[downloadID] {
             return active === task || active.taskIdentifier == task.taskIdentifier
         }
 
-        guard let item = downloads.first(where: { $0.id == downloadID }),
-              !item.isHLS,
+        guard !item.isHLS,
               item.status == .downloading || item.status == .queued,
               item.retryNotBefore.map({ $0 <= Date() }) ?? true,
               !cloudflareRecoveringDownloadIDs.contains(downloadID) else {
@@ -4293,8 +7410,7 @@ final class DownloadManager: NSObject, ObservableObject {
 private struct AutoModeDownloadValidationFailure: Error {
     let message: String
     let isRetryable: Bool
-    /// Set when the failure is a Cloudflare/DDoS-Guard wall; carries the challenged URL so the
-    /// caller can trigger the interactive bypass instead of dead-ending the source.
+
     var cloudflareChallengeURL: URL? = nil
 }
 
@@ -4304,9 +7420,6 @@ private struct DownloadStreamProbeResult {
     let reachedByteLimit: Bool
 }
 
-/// A small streaming probe that never writes to disk and stops as soon as the caller's
-/// byte limit is reached. This also protects against servers that ignore Range and try to
-/// send the entire movie during validation.
 private final class DownloadStreamProbe: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let byteLimit: Int
     private let redirectHeaders: [String: String]
@@ -4464,6 +7577,10 @@ private final class DownloadStreamProbe: NSObject, URLSessionDataDelegate, @unch
         newRequest request: URLRequest,
         completionHandler: @escaping (URLRequest?) -> Void
     ) {
+        guard let destination = request.url else {
+            completionHandler(nil)
+            return
+        }
         var redirectedRequest = request
         for (key, value) in redirectHeaders {
             let lowercasedKey = key.lowercased()
@@ -4473,11 +7590,16 @@ private final class DownloadStreamProbe: NSObject, URLSessionDataDelegate, @unch
                 redirectedRequest.setValue(value, forHTTPHeaderField: key)
             }
         }
+
+        guard let scheme = destination.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              destination.host?.isEmpty == false else {
+            completionHandler(nil)
+            return
+        }
         completionHandler(redirectedRequest)
     }
 }
-
-// MARK: - URLSession Delegate
 
 extension DownloadManager: URLSessionDownloadDelegate {
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
@@ -4486,6 +7608,20 @@ extension DownloadManager: URLSessionDownloadDelegate {
             guard self.claimDirectDownloadTaskIfCurrent(downloadTask, downloadID: downloadId) else {
                 return
             }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+            let protectedNuvioAttemptID: UUID?
+            let authoritativeNuvioURL: URL?
+            if let attempt = self.protectedProviderAttempts[downloadId],
+               attempt.mainTaskIdentifier == downloadTask.taskIdentifier {
+                protectedNuvioAttemptID = attempt.attemptID
+                authoritativeNuvioURL = URL(string: attempt.authorityURL)
+            } else {
+                protectedNuvioAttemptID = nil
+                authoritativeNuvioURL = nil
+            }
+#else
+            let authoritativeNuvioURL: URL? = nil
+#endif
 
             if let httpResponse = downloadTask.response as? HTTPURLResponse {
             let body = self.downloadBodyPreview(from: location)
@@ -4495,7 +7631,8 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 body: body,
                 headers: responseHeaders
             ) {
-                let challengeURL = httpResponse.url
+                let challengeURL = authoritativeNuvioURL
+                    ?? httpResponse.url
                     ?? downloadTask.currentRequest?.url
                     ?? downloadTask.originalRequest?.url
                 if let challengeURL {
@@ -4523,7 +7660,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 self.recoverDownloadAfterMediaRejection(
                     id: downloadId,
                     statusCode: httpResponse.statusCode,
-                    challengedURL: httpResponse.url,
+                    challengedURL: authoritativeNuvioURL ?? httpResponse.url,
                     rejectedCookieHeader: nil,
                     isInteractiveChallenge: false
                 )
@@ -4560,13 +7697,15 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 return
             }
         }
-        
-        // Determine file extension from response MIME type or URL
+
         let ext: String
-        let urlExt = (downloadTask.currentRequest?.url?.pathExtension ?? downloadTask.originalRequest?.url?.pathExtension ?? "").lowercased()
+        let urlExt = (authoritativeNuvioURL?.pathExtension
+            ?? downloadTask.currentRequest?.url?.pathExtension
+            ?? downloadTask.originalRequest?.url?.pathExtension
+            ?? "").lowercased()
         if let mimeType = downloadTask.response?.mimeType?.lowercased() {
             switch mimeType {
-            // Video formats
+
             case "video/mp4":                                       ext = "mp4"
             case "video/x-matroska":                                ext = "mkv"
             case "video/webm":                                      ext = "webm"
@@ -4578,19 +7717,19 @@ extension DownloadManager: URLSessionDownloadDelegate {
             case "video/3gpp":                                       ext = "3gp"
             case "video/ogg":                                        ext = "ogv"
             case "video/mpeg":                                       ext = "mpg"
-            // HLS manifests
+
             case "application/x-mpegurl", "application/vnd.apple.mpegurl": ext = "m3u8"
-            // Generic binary - trust the URL extension if it's a known video format
+
             case "application/octet-stream":
                 ext = Self.knownVideoExtensions.contains(urlExt) ? urlExt : (urlExt.isEmpty ? "mp4" : urlExt)
             default:
-                // Unknown MIME - prefer URL extension if it's a known format
+
                 ext = Self.knownVideoExtensions.contains(urlExt) ? urlExt : "mp4"
             }
         } else {
             ext = Self.knownVideoExtensions.contains(urlExt) ? urlExt : (urlExt.isEmpty ? "mp4" : urlExt)
         }
-        
+
             let fileName = self.reserveFinalVideoFileName(downloadID: downloadId, fileExtension: ext)
             let destURL = self.downloadFileURL(relativePath: fileName)
             self.ensureParentDirectoryExists(for: destURL)
@@ -4616,21 +7755,26 @@ extension DownloadManager: URLSessionDownloadDelegate {
                     self.downloads[index].progress = 1.0
                     self.downloads[index].localFileName = fileName
                     self.downloads[index].dateCompleted = Date()
-                    
-                    // Get final file size
+
                     if let attrs = try? self.fileManager.attributesOfItem(atPath: destURL.path),
                        let size = attrs[.size] as? Int64 {
                         self.downloads[index].totalBytes = size
                         self.downloads[index].downloadedBytes = size
                     }
 
-                    // Completed Sky files are local-only. Drop the signed URL and credentials
-                    // from the live model immediately as well as from the persisted snapshot.
                     self.downloads[index] = Self.persistedDownloadItem(self.downloads[index])
                     self.saveDownloads()
                     if let task = self.activeTasks.removeValue(forKey: downloadId) {
                         self.invalidatedDirectTaskIdentifiers.insert(task.taskIdentifier)
                     }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                    if let protectedNuvioAttemptID {
+                        self.finishNuvioMainTransport(
+                            id: downloadId,
+                            attemptID: protectedNuvioAttemptID
+                        )
+                    }
+#endif
                     self.processQueue()
                 }
 
@@ -4646,7 +7790,7 @@ extension DownloadManager: URLSessionDownloadDelegate {
             DispatchQueue.main.sync(execute: finishCurrentAttempt)
         }
     }
-    
+
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
         guard let downloadId = downloadTask.taskDescription else { return }
         let responseWasSuccessful = (downloadTask.response as? HTTPURLResponse)
@@ -4675,7 +7819,6 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 return
             }
 
-            // Throttle progress updates to max every 0.5 seconds to reduce UI churn.
             let now = Date()
             if let lastUpdate = self.lastProgressUpdate[downloadId],
                now.timeIntervalSince(lastUpdate) < 0.5 {
@@ -4685,21 +7828,19 @@ extension DownloadManager: URLSessionDownloadDelegate {
             self.downloads[index].progress = progress
             self.downloads[index].downloadedBytes = totalBytesWritten
             self.downloads[index].totalBytes = totalBytesExpectedToWrite
-            // A CDN error page can contain bytes too. Only successful response data proves
-            // that the source recovered and should reset the persisted 429 retry budget.
+
             if responseWasSuccessful && totalBytesWritten > 0 {
                 self.downloads[index].rateLimitRetryCount = nil
             }
         }
     }
-    
+
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let downloadId = task.taskDescription,
               let downloadTask = task as? URLSessionDownloadTask else { return }
 
         DispatchQueue.main.async {
-            // This is the terminal callback, so an explicitly abandoned attempt can finally
-            // release its tombstone. It must never be allowed to adopt a replacement item.
+
             if self.invalidatedDirectTaskIdentifiers.remove(task.taskIdentifier) != nil {
                 return
             }
@@ -4709,6 +7850,15 @@ extension DownloadManager: URLSessionDownloadDelegate {
             if let error = error as NSError? {
                 if error.code == NSURLErrorCancelled {
                     self.activeTasks.removeValue(forKey: downloadId)
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                    if let item = self.downloads.first(where: { $0.id == downloadId }),
+                       item.claimsProtectedProviderTransport {
+                        self.clearProtectedProviderDownloadRuntimeState(
+                            id: downloadId,
+                            scrubTransport: true
+                        )
+                    }
+#endif
                     if let index = self.downloads.firstIndex(where: { $0.id == downloadId }),
                        self.downloads[index].status == .downloading {
                         self.downloads[index].status = .queued
@@ -4718,19 +7868,22 @@ extension DownloadManager: URLSessionDownloadDelegate {
                     }
                     return
                 }
-                self.markFailed(id: downloadId, error: error.localizedDescription)
+                self.markFailed(
+                    id: downloadId,
+                    error: self.boundedDownloadFailureMessage(error)
+                )
                 self.invalidatedDirectTaskIdentifiers.remove(task.taskIdentifier)
             }
         }
     }
-    
+
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         DispatchQueue.main.async {
             self.backgroundCompletionHandler?()
             self.backgroundCompletionHandler = nil
         }
     }
-    
+
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         guard let downloadId = task.taskDescription,
               let downloadTask = task as? URLSessionDownloadTask else {
@@ -4741,24 +7894,23 @@ extension DownloadManager: URLSessionDownloadDelegate {
         DispatchQueue.main.async {
             guard self.claimDirectDownloadTaskIfCurrent(downloadTask, downloadID: downloadId),
                   let item = self.downloads.first(where: { $0.id == downloadId }) else {
-                // A stale task must not follow another provider's route or inherit its headers.
+
                 completionHandler(nil)
                 return
             }
 
-            // The SkyStream validator already resolved and checked the final direct-media URL.
-            // A later redirect is a changed route, not part of that proof. Refuse it and let the
-            // normal signed-URL recovery path re-run the provider/validator instead of leaking
-            // request headers or following a newly private destination.
             if item.lastContentReference?.kind == .skyStream {
                 completionHandler(nil)
                 return
             }
 
-            // Re-attach custom headers that get stripped on redirect by background sessions.
+            guard let destination = request.url else {
+                completionHandler(nil)
+                return
+            }
+
             var updatedRequest = request
-            let targetURL = updatedRequest.url ?? URL(string: item.streamURL)
-            let refreshedHeaders = targetURL.map { self.effectiveHeaders(item.headers, for: $0) } ?? item.headers
+            let refreshedHeaders = self.effectiveHeaders(item.headers, for: destination)
             for (key, value) in refreshedHeaders {
                 let lowerKey = key.lowercased()
                 if lowerKey == "cookie" || lowerKey == "user-agent" {
@@ -4766,6 +7918,13 @@ extension DownloadManager: URLSessionDownloadDelegate {
                 } else if updatedRequest.value(forHTTPHeaderField: key) == nil {
                     updatedRequest.setValue(value, forHTTPHeaderField: key)
                 }
+            }
+
+            guard let scheme = destination.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https",
+                  destination.host?.isEmpty == false else {
+                completionHandler(nil)
+                return
             }
             completionHandler(updatedRequest)
         }

@@ -1,3 +1,10 @@
+//
+//  ScheduleView.swift
+//  Eclipse
+//
+//  Created by Soupy-dev
+//
+
 import SwiftUI
 import Combine
 import Kingfisher
@@ -8,17 +15,77 @@ struct ScheduleView: View {
     @AppStorage(ScheduleWindow.storageKey) private var scheduleWindowDays = ScheduleWindow.defaultValue.rawValue
     @StateObject private var viewModel: ScheduleViewModel
     @StateObject private var accentColorManager = AccentColorManager.shared
+
+    @ObservedObject private var contentFilter = TMDBContentFilter.shared
 #if !os(tvOS)
     @StateObject private var notificationManager = LocalNotificationManager.shared
     @Environment(\.eclipseWindowSceneSessionIdentifier) private var windowSceneSessionIdentifier
     @Environment(\.scenePhase) private var scenePhase
 #endif
-    
+
     @State private var selectedTMDBResult: TMDBSearchResult?
     @State private var showingMediaDetail = false
     @State private var showNoTMDBAlert = false
     @State private var noTMDBAlertTitle = ""
     @State private var loadingItemId: String?
+
+    @State private var kidsBlockedScheduleIds: Set<Int> = []
+
+    @State private var resolvedKidsScheduleIds: Set<Int> = []
+
+    @State private var kidsScheduleFilterGeneration = 0
+
+    private func visibleToProfile(_ entries: [ScheduleEntry]) -> [ScheduleEntry] {
+        guard ProfileManager.shared.isKidsModeActive else { return entries }
+        return entries.filter { entry in
+
+            guard let tmdbId = entry.tmdbId else { return false }
+
+            guard resolvedKidsScheduleIds.contains(tmdbId) else { return false }
+            return !kidsBlockedScheduleIds.contains(tmdbId)
+        }
+    }
+
+    private func refreshKidsScheduleFilter(_ entries: [ScheduleEntry]) {
+        kidsScheduleFilterGeneration &+= 1
+        let generation = kidsScheduleFilterGeneration
+        guard ProfileManager.shared.isKidsModeActive else {
+            kidsBlockedScheduleIds = []
+            resolvedKidsScheduleIds = []
+            return
+        }
+
+        let titlesById: [Int: String] = entries.reduce(into: [:]) { titles, entry in
+            guard let tmdbId = entry.tmdbId else { return }
+            let variants = [entry.title, entry.englishTitle, entry.romajiTitle, entry.nativeTitle]
+                .compactMap { $0 }
+                .joined(separator: " ")
+            titles[tmdbId, default: ""] += variants + " "
+        }
+        let ids = Set(titlesById.keys)
+        Task { @MainActor in
+
+            await TMDBMaturityRatingStore.shared.resolve(ids.map { (isMovie: false, id: $0) })
+
+            guard generation == kidsScheduleFilterGeneration else { return }
+            kidsBlockedScheduleIds = Set(
+                ids.filter { id in
+                    guard TMDBMaturityRatingStore.shared.isAllowedForKids(isMovie: false, id: id) else {
+                        return true
+                    }
+                    guard TMDBContentFilter.kidsTextHeuristicsAllow(title: titlesById[id] ?? "") else {
+                        return true
+                    }
+
+                    return TMDBMaturityRatingStore.shared.kidsDetailPolicyAllows(
+                        isMovie: false,
+                        id: id
+                    ) != true
+                }
+            )
+            resolvedKidsScheduleIds = ids
+        }
+    }
     @State private var selectedScheduleDate: Date?
     @State private var selectedScheduleMode: ScheduleMode
 #if !os(tvOS)
@@ -27,7 +94,7 @@ struct ScheduleView: View {
     @State private var mediaDetailNotificationTarget: LocalNotificationNavigationTarget?
     @State private var isApplyingNotificationNavigation = false
 #endif
-    
+
     private let isActive: Bool
     private let dayChangeTimer = Timer.publish(every: 300, on: .main, in: .common).autoconnect()
     private var scheduleWindow: ScheduleWindow {
@@ -39,11 +106,11 @@ struct ScheduleView: View {
 
     init(isActive: Bool = true) {
         self.isActive = isActive
-        let savedMode = UserDefaults.standard.string(forKey: "defaultScheduleMode")
+        let savedMode = ProfileSettingsStore.active.string(forKey: "defaultScheduleMode")
         _selectedScheduleMode = State(initialValue: ScheduleMode.sanitized(savedMode))
         _viewModel = StateObject(wrappedValue: ScheduleViewModel.shared)
     }
-    
+
     var body: some View {
 #if os(tvOS)
         scheduleContent
@@ -60,15 +127,20 @@ struct ScheduleView: View {
         }
 #endif
     }
-    
+
     private var scheduleContent: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             SettingsGradientBackground().ignoresSafeArea()
-            
+
             mainScheduleView
         }
+#if os(tvOS)
+
+        .navigationTitle("")
+#else
         .navigationTitle("Schedule")
+#endif
         .task(id: scheduleLoadTaskID) {
             guard isActive else { return }
             guard viewModel.scheduleEntries.isEmpty
@@ -80,20 +152,37 @@ struct ScheduleView: View {
         .refreshable {
             await viewModel.loadSchedule(mode: selectedScheduleMode, localTimeZone: showLocalScheduleTime, forceRefresh: true)
         }
-        .onChange(of: selectedScheduleMode) { _ in
+        .onChangeComp(of: viewModel.scheduleEntriesRevision) { _, _ in
+            refreshKidsScheduleFilter(viewModel.scheduleEntries)
+        }
+
+        .onAppear {
+            refreshKidsScheduleFilter(viewModel.scheduleEntries)
+        }
+        .onChangeComp(of: contentFilter.isKidsProfileActive) { _, _ in
+            refreshKidsScheduleFilter(viewModel.scheduleEntries)
+        }
+        .onChangeComp(of: contentFilter.maturityRatingRevision) { _, _ in
+            refreshKidsScheduleFilter(viewModel.scheduleEntries)
+        }
+
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+            refreshKidsScheduleFilter(viewModel.scheduleEntries)
+        }
+        .onChangeComp(of: selectedScheduleMode) { _, _ in
 #if !os(tvOS)
             guard !isApplyingNotificationNavigation else { return }
 #endif
             selectedScheduleDate = nil
         }
-        .onChange(of: scheduleWindowDays) { newValue in
+        .onChangeComp(of: scheduleWindowDays) { _, newValue in
             let sanitized = ScheduleWindow.sanitizedDays(newValue)
             if sanitized != newValue {
                 scheduleWindowDays = sanitized
             }
             selectedScheduleDate = nil
         }
-        .onChange(of: isActive) { active in
+        .onChangeComp(of: isActive) { _, active in
             guard active else { return }
 #if !os(tvOS)
             if scenePhase == .active,
@@ -109,7 +198,7 @@ struct ScheduleView: View {
                 selectedScheduleMode = defaultMode
             }
         }
-        .onChange(of: showLocalScheduleTime) { newValue in
+        .onChangeComp(of: showLocalScheduleTime) { _, newValue in
             viewModel.regroupBuckets(localTimeZone: newValue)
         }
         .onReceive(dayChangeTimer) { _ in
@@ -123,11 +212,11 @@ struct ScheduleView: View {
             guard isActive, scenePhase == .active else { return }
             Task { await applyPendingNotificationNavigationIfNeeded() }
         }
-        .onChange(of: windowSceneSessionIdentifier) { _ in
+        .onChangeComp(of: windowSceneSessionIdentifier) { _, _ in
             guard isActive, scenePhase == .active else { return }
             Task { await applyPendingNotificationNavigationIfNeeded() }
         }
-        .onChange(of: scenePhase) { phase in
+        .onChangeComp(of: scenePhase) { _, phase in
             guard isActive, phase == .active else { return }
             Task { await applyPendingNotificationNavigationIfNeeded() }
         }
@@ -347,7 +436,7 @@ struct ScheduleView: View {
             .replacingOccurrences(of: "[^a-z0-9]+", with: "", options: .regularExpression)
     }
 #endif
-    
+
     private var loadingView: some View {
         VStack(spacing: 16) {
             EclipseLoadingIndicator()
@@ -358,7 +447,7 @@ struct ScheduleView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-    
+
     private func errorView(_ message: String) -> some View {
         EclipseEmptyState(
             icon: "exclamationmark.triangle",
@@ -382,8 +471,12 @@ struct ScheduleView: View {
         )
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-    
+
+    @ViewBuilder
     private var mainScheduleView: some View {
+#if os(tvOS)
+        tvScheduleView
+#else
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 scheduleModePickerSection
@@ -406,7 +499,356 @@ struct ScheduleView: View {
             .padding(.top)
             .padding(.bottom, 100)
         }
+#endif
     }
+
+#if os(tvOS)
+
+    private var tvScheduleView: some View {
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 24) {
+                tvScheduleHeader
+
+                if viewModel.isLoading {
+                    loadingView
+                        .frame(minHeight: 520)
+                } else if let errorMessage = viewModel.errorMessage {
+                    errorView(errorMessage)
+                        .frame(minHeight: 520)
+                } else if viewModel.dayBuckets.allSatisfy({ visibleToProfile($0.items).isEmpty }) {
+                    emptyStateView
+                        .frame(minHeight: 520)
+                } else {
+                    tvDayPickerSection
+                    tvSelectedDaySection
+                }
+            }
+            .padding(.horizontal, 74)
+            .padding(.top, 10)
+            .padding(.bottom, 90)
+        }
+        .scrollClipDisabled()
+    }
+
+    private var tvScheduleHeader: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline, spacing: 18) {
+                Text("Schedule")
+                    .font(.system(size: 46, weight: .bold, design: .rounded))
+                    .foregroundColor(.white)
+
+                Text("See what’s airing next")
+                    .font(.title3)
+                    .foregroundColor(.white.opacity(0.62))
+            }
+
+            HStack(spacing: 20) {
+                HStack(spacing: 20) {
+                    ForEach(ScheduleMode.allCases) { mode in
+                        Button {
+                            selectedScheduleMode = mode
+                        } label: {
+                            Text(mode.displayName)
+                                .font(.system(size: 27, weight: .semibold))
+                                .foregroundColor(selectedScheduleMode == mode ? .black : .white)
+                                .frame(width: 176)
+                                .frame(height: 62)
+                                .background(
+                                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                        .fill(
+                                            selectedScheduleMode == mode
+                                                ? accentColorManager.currentAccentColor
+                                                : Color.white.opacity(0.10)
+                                        )
+                                )
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                        .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+                                )
+                        }
+                        .buttonStyle(.card)
+                        .accessibilityIdentifier("schedule.mode.\(mode.rawValue)")
+                    }
+                }
+
+                Spacer(minLength: 30)
+
+                Label(
+                    showLocalScheduleTime ? "Times shown locally" : "Times shown in UTC",
+                    systemImage: "clock"
+                )
+                .font(.headline)
+                .foregroundColor(.white.opacity(0.72))
+
+                HStack(spacing: 14) {
+                    tvTimeZoneButton(title: "Local", usesLocalTime: true)
+                    tvTimeZoneButton(title: "UTC", usesLocalTime: false)
+                }
+
+                tvRefreshButton
+            }
+
+            .padding(.vertical, 14)
+            .focusSection()
+        }
+    }
+
+    private var tvRefreshButton: some View {
+        Button {
+            guard !viewModel.isLoading else { return }
+            Task {
+                await viewModel.loadSchedule(mode: selectedScheduleMode, localTimeZone: showLocalScheduleTime, forceRefresh: true)
+            }
+        } label: {
+            Label("Refresh", systemImage: "arrow.clockwise")
+                .font(.headline.weight(.semibold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 22)
+                .frame(height: 52)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(Color.white.opacity(0.10))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.card)
+        .accessibilityIdentifier("schedule.refresh")
+    }
+
+    private var tvDayPickerSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 14) {
+                Text("Choose a day")
+                    .font(.title2.weight(.bold))
+                    .foregroundColor(.white)
+
+                Text("\(scheduleWindow.rawValue)-day window")
+                    .font(.body)
+                    .foregroundColor(.white.opacity(0.55))
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                LazyHStack(spacing: 18) {
+                    ForEach(viewModel.dayBuckets) { bucket in
+                        tvDayChip(bucket)
+                    }
+                }
+
+                .padding(.horizontal, 18)
+                .padding(.vertical, 18)
+            }
+            .scrollClipDisabled()
+            .focusSection()
+            .padding(.horizontal, -18)
+        }
+    }
+
+    private func tvTimeZoneButton(title: String, usesLocalTime: Bool) -> some View {
+        let selected = showLocalScheduleTime == usesLocalTime
+        return Button {
+            showLocalScheduleTime = usesLocalTime
+        } label: {
+            Text(title)
+                .font(.headline.weight(.semibold))
+                .foregroundColor(selected ? .black : .white)
+                .frame(width: 104, height: 52)
+                .background(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(selected ? accentColorManager.currentAccentColor : Color.white.opacity(0.10))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+                )
+        }
+        .buttonStyle(.card)
+        .accessibilityIdentifier("schedule.timezone.\(usesLocalTime ? "local" : "utc")")
+    }
+
+    private func tvDayChip(_ bucket: DayBucket) -> some View {
+        let selected = selectedBucket.map {
+            scheduleCalendar.isDate($0.date, inSameDayAs: bucket.date)
+        } ?? false
+        let isToday = scheduleCalendar.isDate(bucket.date, inSameDayAs: Date())
+        let count = visibleToProfile(bucket.items).count
+
+        return Button {
+            selectedScheduleDate = bucket.date
+        } label: {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(alignment: .firstTextBaseline, spacing: 10) {
+                    Text(shortDay(bucket.date))
+                        .font(.system(size: 23, weight: .semibold))
+
+                    Spacer(minLength: 4)
+
+                    Text(dayNumber(bucket.date))
+                        .font(.system(size: 34, weight: .bold, design: .rounded))
+                }
+
+                Text(count == 1 ? "1 airing" : "\(count) airing")
+                    .font(.system(size: 22, weight: .medium))
+                    .opacity(0.72)
+            }
+            .foregroundColor(selected ? .black : .white)
+            .padding(.horizontal, 18)
+            .frame(width: 212, height: 104)
+            .background(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(selected ? accentColorManager.currentAccentColor : Color.white.opacity(0.09))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(
+                        isToday && !selected
+                            ? accentColorManager.currentAccentColor.opacity(0.85)
+                            : Color.white.opacity(0.12),
+                        lineWidth: isToday && !selected ? 3 : 1
+                    )
+            )
+        }
+        .buttonStyle(.card)
+        .accessibilityIdentifier("schedule.day.\(Int(bucket.date.timeIntervalSince1970))")
+    }
+
+    private var tvSelectedDaySection: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let bucket = selectedBucket {
+                let items = visibleToProfile(bucket.items)
+
+                HStack(alignment: .firstTextBaseline) {
+                    Text(formattedDay(bucket.date))
+                        .font(.system(size: 34, weight: .bold, design: .rounded))
+                        .foregroundColor(.white)
+
+                    Text(items.count == 1 ? "1 episode" : "\(items.count) episodes")
+                        .font(.title3.weight(.medium))
+                        .foregroundColor(.white.opacity(0.52))
+
+                    Spacer()
+                }
+
+                if items.isEmpty {
+                    Text("No episodes scheduled")
+                        .font(.title3)
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, minHeight: 220, alignment: .center)
+                        .background(EclipseTheme.shared.cardBackground)
+                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                } else {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        LazyHStack(alignment: .top, spacing: 30) {
+                            ForEach(items) { item in
+                                tvScheduleItemCard(item: item)
+                            }
+                        }
+
+                        .padding(.horizontal, 22)
+                        .padding(.vertical, 24)
+                    }
+                    .scrollClipDisabled()
+                    .focusSection()
+                    .padding(.horizontal, -22)
+                }
+            }
+        }
+    }
+
+    private func tvScheduleItemCard(item: ScheduleEntry) -> some View {
+        Button {
+            openScheduleItem(item)
+        } label: {
+            tvScheduleItemContent(item: item)
+        }
+        .buttonStyle(.card)
+        .opacity(loadingItemId == item.id ? 0.55 : 1)
+        .overlay {
+            if loadingItemId == item.id {
+                EclipseLoadingIndicator()
+                    .tint(.white)
+            }
+        }
+        .accessibilityIdentifier("schedule.episode.\(item.id)")
+    }
+
+    private func tvScheduleItemContent(item: ScheduleEntry) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            tvScheduleArtwork(item: item)
+
+            Text(item.title)
+                .font(.title3.weight(.semibold))
+                .foregroundColor(.white)
+                .lineLimit(2)
+                .frame(width: 240, alignment: .leading)
+                .frame(minHeight: 58, alignment: .topLeading)
+
+            tvScheduleMetadata(item: item)
+        }
+        .padding(12)
+        .background(tvScheduleCardBackground)
+        .overlay(tvScheduleCardBorder)
+    }
+
+    private func tvScheduleArtwork(item: ScheduleEntry) -> some View {
+        let timeIcon = item.isStreamingRelease ? "play.circle.fill" : "clock.fill"
+        let timeLabel = formattedTime(for: item)
+
+        return ZStack(alignment: .bottomLeading) {
+            schedulePoster(
+                urlString: item.coverImage,
+                width: 240,
+                height: 342,
+                cornerRadius: 18
+            )
+
+            LinearGradient(
+                colors: [.clear, .black.opacity(0.82)],
+                startPoint: .center,
+                endPoint: .bottom
+            )
+            .frame(width: 240, height: 150)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+            Label(timeLabel, systemImage: timeIcon)
+                .font(.headline.weight(.semibold))
+                .foregroundColor(.white)
+                .padding(.horizontal, 13)
+                .padding(.vertical, 9)
+        }
+    }
+
+    private func tvScheduleMetadata(item: ScheduleEntry) -> some View {
+        HStack(spacing: 8) {
+            formatTypeBadge(for: item)
+
+            Text(episodeOnlyLabel(for: item))
+                .font(.body.weight(.medium))
+                .foregroundColor(.white.opacity(0.72))
+
+            Spacer(minLength: 4)
+
+            if let countdown = countdownLabel(for: item) {
+                Text(countdown)
+                    .font(.callout.weight(.semibold))
+                    .foregroundColor(accentColorManager.currentAccentColor)
+            }
+        }
+        .frame(width: 240)
+    }
+
+    private var tvScheduleCardBackground: some View {
+        RoundedRectangle(cornerRadius: 22, style: .continuous)
+            .fill(Color.white.opacity(0.07))
+    }
+
+    private var tvScheduleCardBorder: some View {
+        RoundedRectangle(cornerRadius: 22, style: .continuous)
+            .strokeBorder(Color.white.opacity(0.10), lineWidth: 1)
+    }
+#endif
 
     private var selectedBucket: DayBucket? {
         let calendar = scheduleCalendar
@@ -423,12 +865,36 @@ struct ScheduleView: View {
                 .font(.caption.weight(.semibold))
                 .foregroundColor(.secondary)
 
+#if os(tvOS)
+            HStack(spacing: 12) {
+                ForEach(ScheduleMode.allCases) { mode in
+                    Button {
+                        selectedScheduleMode = mode
+                    } label: {
+                        Text(mode.displayName)
+                            .font(.headline)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 56)
+                            .background(
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .fill(
+                                        selectedScheduleMode == mode
+                                            ? accentColorManager.currentAccentColor.opacity(0.8)
+                                            : Color.white.opacity(0.07)
+                                    )
+                            )
+                    }
+                    .buttonStyle(.card)
+                }
+            }
+#else
             Picker("Schedule", selection: $selectedScheduleMode) {
                 ForEach(ScheduleMode.allCases) { mode in
                     Text(mode.displayName).tag(mode)
                 }
             }
             .pickerStyle(.segmented)
+#endif
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -455,7 +921,11 @@ struct ScheduleView: View {
                 Text("UTC").tag(false)
             }
             .pickerStyle(.segmented)
+#if os(tvOS)
+            .frame(width: 280)
+#else
             .frame(width: 150)
+#endif
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
@@ -489,12 +959,16 @@ struct ScheduleView: View {
                 Text(dayNumber(bucket.date))
                     .font(.system(size: 20, weight: .bold))
 
-                Text("\(bucket.items.count)")
+                Text("\(visibleToProfile(bucket.items).count)")
                     .font(.caption2.weight(.semibold))
                     .foregroundColor(selected ? .black.opacity(0.65) : .white.opacity(0.5))
             }
             .foregroundColor(selected ? .black : .white)
+#if os(tvOS)
+            .frame(width: 112, height: 96)
+#else
             .frame(width: 64, height: 80)
+#endif
             .background(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(selected ? accentColorManager.currentAccentColor : Color.white.opacity(0.07))
@@ -524,13 +998,13 @@ struct ScheduleView: View {
 
                     Spacer()
 
-                    Text("\(bucket.items.count) airing")
+                    Text("\(visibleToProfile(bucket.items).count) airing")
                         .font(.caption.weight(.medium))
                         .foregroundColor(.secondary)
                 }
                 .padding(.horizontal)
 
-                if bucket.items.isEmpty {
+                if visibleToProfile(bucket.items).isEmpty {
                     Text("No episodes scheduled")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
@@ -541,7 +1015,7 @@ struct ScheduleView: View {
                         .padding(.horizontal)
                 } else {
                     LazyVStack(spacing: 10) {
-                        ForEach(bucket.items) { item in
+                        ForEach(visibleToProfile(bucket.items)) { item in
                             scheduleItemCard(item: item)
                         }
                     }
@@ -552,28 +1026,11 @@ struct ScheduleView: View {
             }
         }
     }
-    
+
     private func scheduleItemCard(item: ScheduleEntry) -> some View {
         HStack(spacing: 4) {
             Button {
-                guard loadingItemId == nil else { return }
-#if !os(tvOS)
-                mediaDetailNotificationTarget = nil
-#endif
-                loadingItemId = item.id
-                Task {
-                    let result = await viewModel.lookupTMDBResult(for: item)
-                    await MainActor.run {
-                        loadingItemId = nil
-                        if let result = result {
-                            selectedTMDBResult = result
-                            showingMediaDetail = true
-                        } else {
-                            noTMDBAlertTitle = item.title
-                            showNoTMDBAlert = true
-                        }
-                    }
-                }
+                openScheduleItem(item)
             } label: {
                 compactScheduleItemContent(item: item)
             }
@@ -599,7 +1056,28 @@ struct ScheduleView: View {
         .glassCard(cornerRadius: EclipseRadius.card)
         .animation(.easeInOut(duration: 0.2), value: loadingItemId)
     }
-    
+
+    private func openScheduleItem(_ item: ScheduleEntry) {
+        guard loadingItemId == nil else { return }
+#if !os(tvOS)
+        mediaDetailNotificationTarget = nil
+#endif
+        loadingItemId = item.id
+        Task {
+            let result = await viewModel.lookupTMDBResult(for: item)
+            await MainActor.run {
+                loadingItemId = nil
+                if let result {
+                    selectedTMDBResult = result
+                    showingMediaDetail = true
+                } else {
+                    noTMDBAlertTitle = item.title
+                    showNoTMDBAlert = true
+                }
+            }
+        }
+    }
+
     private func compactScheduleItemContent(item: ScheduleEntry) -> some View {
         HStack(spacing: 12) {
             schedulePoster(urlString: item.coverImage)
@@ -721,7 +1199,12 @@ struct ScheduleView: View {
 #endif
 
     @ViewBuilder
-    private func schedulePoster(urlString: String?) -> some View {
+    private func schedulePoster(
+        urlString: String?,
+        width: CGFloat = 58 * iPadScaleSmall,
+        height: CGFloat = 84 * iPadScaleSmall,
+        cornerRadius: CGFloat = 10
+    ) -> some View {
         Group {
             if let urlString, let url = URL(string: urlString) {
                 KFImage(url)
@@ -736,15 +1219,13 @@ struct ScheduleView: View {
                     .overlay(Image(systemName: "tv").foregroundColor(.white.opacity(0.4)))
             }
         }
-        .frame(width: 58 * iPadScaleSmall, height: 84 * iPadScaleSmall)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .frame(width: width, height: height)
+        .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
+            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                 .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
         )
     }
-
-    // MARK: - Helpers
 
     private func episodeOnlyLabel(for item: ScheduleEntry) -> String {
         if item.source != .anime {
@@ -797,7 +1278,7 @@ struct ScheduleView: View {
         if hours < 24 { return "in \(hours)h" }
         return "in \(hours / 24)d"
     }
-    
+
     private var scheduleCalendar: Calendar {
         var calendar = Calendar.current
         calendar.timeZone = showLocalScheduleTime ? .current : TimeZone(secondsFromGMT: 0)!
@@ -827,12 +1308,12 @@ struct ScheduleView: View {
         formatter.timeZone = scheduleCalendar.timeZone
         return formatter.string(from: date)
     }
-    
+
     private func formattedDay(_ date: Date) -> String {
         let calendar = scheduleCalendar
         let today = calendar.startOfDay(for: Date())
         let compareDate = calendar.startOfDay(for: date)
-        
+
         if compareDate == today {
             return "Today"
         } else if let tomorrow = calendar.date(byAdding: .day, value: 1, to: today), compareDate == tomorrow {
@@ -844,7 +1325,7 @@ struct ScheduleView: View {
             return formatter.string(from: date)
         }
     }
-    
+
     private func formattedTime(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.timeStyle = .short

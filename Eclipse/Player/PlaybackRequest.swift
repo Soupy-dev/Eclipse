@@ -1,17 +1,11 @@
 import Foundation
 
-/// Renderer-neutral intent for the selection that should be active when playback begins.
-///
-/// MPV track identifiers and AVFoundation media-selection options are renderer-specific and
-/// cannot be mapped reliably. Language plus the explicit subtitle-enabled state are the common
-/// public contract, so a fallback can preserve the user's intent instead of re-reading settings
-/// that may have changed after the request was created.
 struct PlaybackMediaSelectionIntent: Equatable {
     let preferredAudioLanguage: String?
     let preferredSubtitleLanguage: String?
     let subtitlesEnabled: Bool
 
-    static func currentDefaults(isAnime: Bool, defaults: UserDefaults = .standard) -> Self {
+    static func currentDefaults(isAnime: Bool, defaults: UserDefaults = ProfileSettingsStore.active) -> Self {
         Self(
             preferredAudioLanguage: isAnime
                 ? normalizedLanguage(defaults.string(forKey: "preferredAnimeAudioLanguage") ?? "jpn")
@@ -47,7 +41,6 @@ struct PlaybackMediaSelectionIntent: Equatable {
     }
 }
 
-/// Pure language matching used by AVFoundation selection and external-subtitle menus.
 enum PlaybackLanguageSelectionPolicy {
     struct Option: Equatable {
         let languageTag: String?
@@ -88,8 +81,7 @@ enum PlaybackLanguageSelectionPolicy {
                     .filter { !$0.isEmpty }
             )
             return preferredNames.contains { term in
-                // Short language codes must match a complete token. Substring matching would,
-                // for example, treat `es` as Spanish when it merely appears inside "Japanese".
+
                 term.count <= 3 ? nameTokens.contains(term) : name.contains(term)
             }
         }
@@ -113,7 +105,7 @@ struct PlaybackEpisodeCoordinate: Equatable {
     init?(seasonNumber: Int?, episodeNumber: Int?) {
         guard let seasonNumber,
               let episodeNumber,
-              seasonNumber >= 0,
+              seasonNumber >= 0 || AnimeSyntheticSeasonKey.isSynthetic(seasonNumber),
               episodeNumber > 0 else { return nil }
         self.seasonNumber = seasonNumber
         self.episodeNumber = episodeNumber
@@ -123,14 +115,11 @@ struct PlaybackEpisodeCoordinate: Equatable {
 enum PlayerServicesButtonSettings {
     static let key = "showPlayerServicesButton"
 
-    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+    static func isEnabled(defaults: UserDefaults = ProfileSettingsStore.active) -> Bool {
         defaults.object(forKey: key) == nil ? false : defaults.bool(forKey: key)
     }
 }
 
-/// Metadata needed to reopen the manual Services picker from either in-app player.
-/// This intentionally carries media identity, not the currently playing provider, so changing
-/// sources never inherits Auto Mode from the stream that originally launched playback.
 struct PlayerServicesSelectionContext {
     let mediaTitle: String
     let seasonTitleOverride: String?
@@ -175,7 +164,11 @@ struct PlayerServicesSelectionContext {
             seasonTitleOverride = resolvedIsAnime ? requestTitle.nilIfEmpty : nil
             originalTitle = request.servicesOriginalTitle
             selectedEpisode = TMDBEpisode(
-                id: showID * 1_000_000 + max(0, seasonNumber) * 10_000 + max(1, episodeNumber),
+                id: RemoteMediaNumericBoundary.syntheticIdentifier([
+                    (showID, 1_000_000),
+                    (max(0, seasonNumber), 10_000),
+                    (max(1, episodeNumber), 1)
+                ]),
                 name: request.subtitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
                 overview: nil,
                 stillPath: nil,
@@ -207,8 +200,6 @@ private extension String {
     var nilIfEmpty: String? { isEmpty ? nil : self }
 }
 
-/// A renderer-neutral launch description. Keeping headers, subtitles, resume position, and media
-/// identity together prevents fallback from reconstructing a subtly different playback request.
 struct PlaybackRequest {
     let url: URL
     let preset: PlayerPreset
@@ -218,6 +209,8 @@ struct PlaybackRequest {
     let subtitleHeadersByURL: [String: [String: String]]?
     let mediaSelectionIntent: PlaybackMediaSelectionIntent
     let mediaInfo: MediaInfo?
+
+    let kidsPolicyDetails: KidsPolicyDetails?
     let mediaYear: Int?
     let imdbID: String?
     let episodePlaybackContext: EpisodePlaybackContext?
@@ -246,6 +239,7 @@ struct PlaybackRequest {
         subtitleHeadersByURL: [String: [String: String]]? = nil,
         mediaSelectionIntent: PlaybackMediaSelectionIntent? = nil,
         mediaInfo: MediaInfo? = nil,
+        kidsPolicyDetails: KidsPolicyDetails? = nil,
         mediaYear: Int? = nil,
         imdbID: String? = nil,
         episodePlaybackContext: EpisodePlaybackContext? = nil,
@@ -276,6 +270,7 @@ struct PlaybackRequest {
         self.mediaSelectionIntent = mediaSelectionIntent
             ?? PlaybackMediaSelectionIntent.currentDefaults(isAnime: isAnime)
         self.mediaInfo = mediaInfo
+        self.kidsPolicyDetails = kidsPolicyDetails
         self.mediaYear = mediaYear.flatMap { (1800...3000).contains($0) ? $0 : nil }
         self.imdbID = imdbID
         self.episodePlaybackContext = episodePlaybackContext
@@ -321,6 +316,47 @@ struct PlaybackRequest {
             subtitleHeadersByURL: subtitleHeadersByURL,
             mediaSelectionIntent: mediaSelectionIntent,
             mediaInfo: mediaInfo,
+            kidsPolicyDetails: kidsPolicyDetails,
+            mediaYear: mediaYear,
+            imdbID: imdbID,
+            episodePlaybackContext: episodePlaybackContext,
+            launchContext: launchContext,
+            resumePosition: resumePosition,
+            title: title,
+            subtitle: subtitle,
+            artworkURL: artworkURL,
+            isAnime: isAnime,
+            isAnimation: isAnimation,
+            originalTMDBSeasonNumber: originalTMDBSeasonNumber,
+            originalTMDBEpisodeNumber: originalTMDBEpisodeNumber,
+            servicesOriginalTitle: servicesOriginalTitle,
+            servicesOriginalAudioLanguage: servicesOriginalAudioLanguage,
+            onRequestNextEpisode: onRequestNextEpisode,
+            onRequestResolvedNextEpisode: onRequestResolvedNextEpisode,
+            onPlaybackStartupFailure: onPlaybackStartupFailure,
+            localNextEpisodeFallback: localNextEpisodeFallback
+        )
+    }
+
+    func replacingResolvedTransport(
+        url: URL,
+        headers: [String: String],
+        subtitles: [String],
+        subtitleNames: [String]?,
+        subtitleHeadersByURL: [String: [String: String]]?,
+        launchContext: PlaybackLaunchContext,
+        resumePosition: Double?
+    ) -> PlaybackRequest {
+        PlaybackRequest(
+            url: url,
+            preset: preset,
+            headers: headers,
+            subtitles: subtitles,
+            subtitleNames: subtitleNames,
+            subtitleHeadersByURL: subtitleHeadersByURL,
+            mediaSelectionIntent: mediaSelectionIntent,
+            mediaInfo: mediaInfo,
+            kidsPolicyDetails: kidsPolicyDetails,
             mediaYear: mediaYear,
             imdbID: imdbID,
             episodePlaybackContext: episodePlaybackContext,

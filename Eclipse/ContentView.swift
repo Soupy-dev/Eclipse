@@ -1,3 +1,10 @@
+//
+//  ContentView.swift
+//  Sora
+//
+//  Created by Francesco on 07/08/25.
+//
+
 import SwiftUI
 
 @MainActor
@@ -9,8 +16,8 @@ private enum SkyStreamAutoUpdateState {
 private func autoUpdateSkyStreamSourcesIfNeeded() async {
 #if os(iOS) && !targetEnvironment(macCatalyst)
     guard PlatformCapabilities.current.supportsSkyStreamPlugins,
-          UserDefaults.standard.object(forKey: "autoUpdateServicesEnabled") == nil
-            || UserDefaults.standard.bool(forKey: "autoUpdateServicesEnabled") else {
+          ProfileSettingsStore.services.object(forKey: "autoUpdateServicesEnabled") == nil
+            || ProfileSettingsStore.services.bool(forKey: "autoUpdateServicesEnabled") else {
         return
     }
 
@@ -24,8 +31,6 @@ private func autoUpdateSkyStreamSourcesIfNeeded() async {
     SkyStreamAutoUpdateState.isRunning = true
     defer { SkyStreamAutoUpdateState.isRunning = false }
 
-    // The manager loads Core Data lazily. Bound the wait so source maintenance never delays
-    // the rest of ContentView's background checks indefinitely on a damaged store.
     let manager = SkyStreamPluginManager.shared
     for _ in 0..<40 where !manager.isLoaded {
         do {
@@ -49,11 +54,11 @@ struct ContentView: View {
     private enum AppTab: Hashable {
         case home, schedule, downloads, library, search
     }
-    
+
     @ObservedObject private var downloadManager = DownloadManager.shared
-    @AppStorage("githubReleaseShowAlertPending") private var githubReleaseShowAlertPending = false
-    @AppStorage("githubReleaseLatestVersion") private var githubReleaseLatestVersion = ""
-    @AppStorage("githubReleaseURL") private var githubReleaseURL = ""
+    @AppStorage("githubReleaseShowAlertPending", store: .standard) private var githubReleaseShowAlertPending = false
+    @AppStorage("githubReleaseLatestVersion", store: .standard) private var githubReleaseLatestVersion = ""
+    @AppStorage("githubReleaseURL", store: .standard) private var githubReleaseURL = ""
 
     @State private var selectedTab: AppTab = .home
     @State private var showingSettings = false
@@ -66,7 +71,7 @@ struct ContentView: View {
     @Environment(\.eclipseWindowSceneSessionIdentifier) private var windowSceneSessionIdentifier
     @Namespace private var heroNamespace
     private let onStartupReady: () -> Void
-    
+
     init(onStartupReady: @escaping () -> Void = {}) {
         self.onStartupReady = onStartupReady
         configureTabBarAppearance()
@@ -75,27 +80,27 @@ struct ContentView: View {
     private var playerCoversInterface: Bool {
         playerInterfaceCoverage.isCovered(in: windowSceneSessionIdentifier)
     }
-    
+
     private func configureTabBarAppearance() {
         #if !os(tvOS)
         let appearance = UITabBarAppearance()
         appearance.configureWithOpaqueBackground()
         appearance.backgroundColor = UIColor(red: 0.06, green: 0.06, blue: 0.06, alpha: 0.92)
         appearance.shadowColor = .clear
-        
+
         let itemAppearance = UITabBarItemAppearance()
         itemAppearance.normal.iconColor = UIColor.gray
         itemAppearance.normal.titleTextAttributes = [.foregroundColor: UIColor.gray]
-        
+
         appearance.stackedLayoutAppearance = itemAppearance
         appearance.inlineLayoutAppearance = itemAppearance
         appearance.compactInlineLayoutAppearance = itemAppearance
-        
+
         UITabBar.appearance().standardAppearance = appearance
         UITabBar.appearance().scrollEdgeAppearance = appearance
         #endif
     }
-    
+
     var body: some View {
         Group {
 #if compiler(>=6.0)
@@ -103,12 +108,12 @@ struct ContentView: View {
                 ZStack {
                     modernTabView
                         .heroNamespace(heroNamespace)
-                        .overlay(alignment: .topTrailing) {
-                            if (selectedTab == .home || selectedTab == .schedule) && !showingSettings {
-                                FloatingSettingsOverlay(showingSettings: $showingSettings)
-                            }
-                        }
-                    
+                        .appHub(
+                            showingSettings: $showingSettings,
+                            isSuppressed: showingSettings || playerCoversInterface,
+                            tvPlacementActive: selectedTab == .home || selectedTab == .schedule
+                        )
+
                     if showingSettings {
                         settingsFullScreen
                             .zIndex(1)
@@ -122,12 +127,12 @@ struct ContentView: View {
                 ZStack {
                     olderTabView
                         .heroNamespace(heroNamespace)
-                        .overlay {
-                            if (selectedTab == .home || selectedTab == .schedule) && !showingSettings {
-                                FloatingSettingsOverlay(showingSettings: $showingSettings)
-                            }
-                        }
-                    
+                        .appHub(
+                            showingSettings: $showingSettings,
+                            isSuppressed: showingSettings || playerCoversInterface,
+                            tvPlacementActive: selectedTab == .home || selectedTab == .schedule
+                        )
+
                     if showingSettings {
                         settingsFullScreen
                             .zIndex(1)
@@ -142,12 +147,12 @@ struct ContentView: View {
             ZStack {
                 olderTabView
                     .heroNamespace(heroNamespace)
-                    .overlay {
-                        if (selectedTab == .home || selectedTab == .schedule) && !showingSettings {
-                            FloatingSettingsOverlay(showingSettings: $showingSettings)
-                        }
-                    }
-                
+                    .appHub(
+                        showingSettings: $showingSettings,
+                        isSuppressed: showingSettings || playerCoversInterface,
+                        tvPlacementActive: selectedTab == .home || selectedTab == .schedule
+                    )
+
                 if showingSettings {
                     settingsFullScreen
                         .zIndex(1)
@@ -205,6 +210,25 @@ struct ContentView: View {
             openPendingNotificationRouteIfNeeded()
 #endif
         }
+#if DEBUG
+        .onReceive(NotificationCenter.default.publisher(for: .eclipseDebugOpenSettings)) { _ in
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
+                showingSettings = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .eclipseDebugOpenTab)) { notification in
+            guard let raw = notification.userInfo?["tab"] as? String else { return }
+            showingSettings = false
+            switch raw {
+            case "home": selectedTab = .home
+            case "schedule": selectedTab = .schedule
+            case "downloads": selectedTab = .downloads
+            case "library": selectedTab = .library
+            case "search": selectedTab = .search
+            default: break
+            }
+        }
+#endif
         .alert("Update Available", isPresented: $showingReleaseAlert) {
             Button("Later", role: .cancel) {
                 consumeUpdateAlert()
@@ -231,8 +255,7 @@ struct ContentView: View {
     }
 
     private func runBackgroundAutoChecks() async {
-        // Let first render and the splash transition settle before hourly service
-        // maintenance and daily source probes compete for CPU/network slots.
+
         do {
             try await Task.sleep(nanoseconds: 6_000_000_000)
         } catch {
@@ -274,22 +297,22 @@ struct ContentView: View {
                     onStartupReady: onStartupReady
                 )
             }
-            
+
             Tab("Schedule", systemImage: "calendar", value: AppTab.schedule) {
                 ScheduleView(isActive: selectedTab == .schedule)
             }
-            
+
             Tab("Downloads", systemImage: "arrow.down.circle.fill", value: AppTab.downloads) {
                 DownloadsView()
             }
 #if !os(tvOS)
             .badge(downloadManager.activeDownloadCount > 0 ? downloadManager.activeDownloadCount : 0)
 #endif
-            
+
             Tab("Library", systemImage: "books.vertical.fill", value: AppTab.library) {
                 LibraryView()
             }
-            
+
             Tab("Search", systemImage: "magnifyingglass", value: AppTab.search, role: .search) {
                 SearchView()
             }
@@ -299,7 +322,7 @@ struct ContentView: View {
 #endif
     }
 #endif
-    
+
     private var settingsFullScreen: some View {
         ZStack {
             EclipseTheme.shared.backgroundBase
@@ -404,14 +427,14 @@ struct ContentView: View {
                     Text("Home")
                 }
                 .tag(AppTab.home)
-            
+
             ScheduleView(isActive: selectedTab == .schedule)
                 .tabItem {
                     Image(systemName: "calendar")
                     Text("Schedule")
                 }
                 .tag(AppTab.schedule)
-            
+
             DownloadsView()
                 .tabItem {
                     Image(systemName: "arrow.down.circle.fill")
@@ -421,14 +444,14 @@ struct ContentView: View {
 #if !os(tvOS)
                 .badge(downloadManager.activeDownloadCount > 0 ? downloadManager.activeDownloadCount : 0)
 #endif
-            
+
             LibraryView()
                 .tabItem {
                     Image(systemName: "books.vertical.fill")
                     Text("Library")
                 }
                 .tag(AppTab.library)
-            
+
             SearchView()
                 .tabItem {
                     Image(systemName: "magnifyingglass")
@@ -553,6 +576,10 @@ struct WatchTogetherJoinPresentation: ViewModifier {
     @State private var request: WatchTogetherJoinRequest?
     @State private var playerInterfaceCoverage = PlayerInterfaceCoverageState()
     @State private var dismissAfterPlayerCloses = false
+    @State private var sessionEndedWhilePresented = false
+    @State private var showingLeaveConfirmation = false
+    @State private var showingDisabledJoinPrompt = false
+    @State private var showingWaitingForHostNotice = false
     @Environment(\.eclipseWindowSceneSessionIdentifier) private var windowSceneSessionIdentifier
 
     private var playerCoversInterface: Bool {
@@ -571,10 +598,11 @@ struct WatchTogetherJoinPresentation: ViewModifier {
                 consumePendingRequestIfNeeded()
             }
             .onReceive(NotificationCenter.default.publisher(for: .watchTogetherSessionCleared)) { _ in
+                showingLeaveConfirmation = false
                 guard request != nil else { return }
+                sessionEndedWhilePresented = true
                 if playerCoversInterface {
-                    // Keep an already-playing video alive when SharePlay ends, then discard the
-                    // session-owned detail route once the user closes the player.
+
                     dismissAfterPlayerCloses = true
                 } else {
                     request = nil
@@ -588,23 +616,82 @@ struct WatchTogetherJoinPresentation: ViewModifier {
                     dismissAfterPlayerCloses = false
                 }
             }
-            .fullScreenCover(item: $request) { request in
+            .onReceive(NotificationCenter.default.publisher(for: .watchTogetherDisabledJoinAttempted)) { _ in
+                showingDisabledJoinPrompt = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .watchTogetherWaitingForHost)) { _ in
+                guard request == nil, !showingLeaveConfirmation else { return }
+                showingWaitingForHostNotice = true
+            }
+            .fullScreenCover(
+                item: $request,
+                onDismiss: {
+                    guard request == nil else { return }
+                    if sessionEndedWhilePresented {
+                        sessionEndedWhilePresented = false
+                    } else {
+                        showingLeaveConfirmation = true
+                    }
+                }
+            ) { request in
                 MediaDetailView(
                     searchResult: request.searchResult,
                     watchTogetherAutoPlay: request.media
                 )
                 .id(request.id)
             }
+            .alert("Leave Watch Together?", isPresented: $showingLeaveConfirmation) {
+                Button("Leave Session", role: .destructive) {
+                    WatchTogetherCoordinator.shared.leaveSession()
+                }
+                Button("Rejoin", role: .cancel) {
+                    showingLeaveConfirmation = false
+                    consumePendingRequestIfNeeded()
+                }
+            } message: {
+                Text("You closed the shared title while SharePlay is still active. Leaving stops syncing with the group on this device.")
+            }
+            .alert("Watch Together is Off", isPresented: $showingDisabledJoinPrompt) {
+                if ProfileManager.shared.isKidsModeActive {
+                    Button("OK", role: .cancel) {
+                        WatchTogetherCoordinator.shared.declinePendingDisabledSession()
+                    }
+                } else {
+                    Button("Turn On & Join") {
+                        WatchTogetherCoordinator.shared.joinPendingDisabledSession()
+                    }
+                    Button("Not Now", role: .cancel) {
+                        WatchTogetherCoordinator.shared.declinePendingDisabledSession()
+                    }
+                }
+            } message: {
+                Text(
+                    ProfileManager.shared.isKidsModeActive
+                        ? "Watch Together is turned off for this profile, so the invitation was not joined."
+                        : "You accepted a SharePlay invitation, but Watch Together is turned off in Settings."
+                )
+            }
+            .alert("Waiting for the Host", isPresented: $showingWaitingForHostNotice) {
+                Button("Keep Waiting", role: .cancel) {}
+                Button("Leave Session", role: .destructive) {
+                    WatchTogetherCoordinator.shared.leaveSession()
+                }
+            } message: {
+                Text("You joined the Watch Together session, but the host's Eclipse hasn't responded yet. Ask them to open Eclipse with their video playing.")
+            }
     }
 
     private func consumePendingRequestIfNeeded() {
-        guard request == nil else { return }
-        if let pendingRequest = WatchTogetherCoordinator.shared.takePendingJoinRequest(
+        guard !showingLeaveConfirmation else { return }
+        guard let pendingRequest = WatchTogetherCoordinator.shared.takePendingJoinRequest(
             forSceneSessionIdentifier: windowSceneSessionIdentifier
-        ) {
-            dismissAfterPlayerCloses = false
-            request = pendingRequest
+        ) else { return }
+        if let presented = request {
+            guard pendingRequest.id != presented.id, !playerCoversInterface else { return }
         }
+        dismissAfterPlayerCloses = false
+        sessionEndedWhilePresented = false
+        request = pendingRequest
     }
 }
 #endif
@@ -620,9 +707,9 @@ private enum ExperimentalMediaTab: Hashable {
 
 struct ExperimentalContentView: View {
     @ObservedObject private var downloadManager = DownloadManager.shared
-    @AppStorage("githubReleaseShowAlertPending") private var githubReleaseShowAlertPending = false
-    @AppStorage("githubReleaseLatestVersion") private var githubReleaseLatestVersion = ""
-    @AppStorage("githubReleaseURL") private var githubReleaseURL = ""
+    @AppStorage("githubReleaseShowAlertPending", store: .standard) private var githubReleaseShowAlertPending = false
+    @AppStorage("githubReleaseLatestVersion", store: .standard) private var githubReleaseLatestVersion = ""
+    @AppStorage("githubReleaseURL", store: .standard) private var githubReleaseURL = ""
 
     @State private var selectedTab: ExperimentalMediaTab = .home
     @State private var showingSettings = false
@@ -672,11 +759,11 @@ struct ExperimentalContentView: View {
 
             experimentalTabView
                 .heroNamespace(heroNamespace)
-                .overlay(alignment: .topTrailing) {
-                    if (selectedTab == .home || selectedTab == .schedule) && !showingSettings {
-                        FloatingSettingsOverlay(showingSettings: $showingSettings)
-                    }
-                }
+                .appHub(
+                    showingSettings: $showingSettings,
+                    isSuppressed: showingSettings || playerCoversInterface,
+                    tvPlacementActive: selectedTab == .home || selectedTab == .schedule
+                )
 
             if showingSettings {
                 experimentalSettingsFullScreen
@@ -726,6 +813,25 @@ struct ExperimentalContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .openScheduleFromLocalNotification)) { _ in
             openPendingNotificationRouteIfNeeded()
         }
+#if DEBUG
+        .onReceive(NotificationCenter.default.publisher(for: .eclipseDebugOpenSettings)) { _ in
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
+                showingSettings = true
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .eclipseDebugOpenTab)) { notification in
+            guard let raw = notification.userInfo?["tab"] as? String else { return }
+            showingSettings = false
+            switch raw {
+            case "home": selectedTab = .home
+            case "schedule": selectedTab = .schedule
+            case "downloads": selectedTab = .downloads
+            case "library": selectedTab = .library
+            case "search": selectedTab = .search
+            default: break
+            }
+        }
+#endif
         .alert("Update Available", isPresented: $showingReleaseAlert) {
             Button("Later", role: .cancel) { consumeUpdateAlert() }
             Button("Open Release") {
@@ -816,7 +922,7 @@ struct ExperimentalContentView: View {
     }
 
     private func runBackgroundAutoChecks() async {
-        // Keep launch maintenance outside first render and the splash transition.
+
         do {
             try await Task.sleep(nanoseconds: 6_000_000_000)
         } catch {
@@ -886,6 +992,10 @@ struct ExperimentalContentView: View {
 
 extension Notification.Name {
     static let openScheduleFromLocalNotification = Notification.Name("openScheduleFromLocalNotification")
+#if DEBUG
+    static let eclipseDebugOpenSettings = Notification.Name("eclipseDebugOpenSettings")
+    static let eclipseDebugOpenTab = Notification.Name("eclipseDebugOpenTab")
+#endif
 }
 
 #Preview {

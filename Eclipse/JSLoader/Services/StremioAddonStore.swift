@@ -1,3 +1,10 @@
+//
+//  StremioAddonStore.swift
+//  Eclipse
+//
+//  Created by Soupy on 2026.
+//
+
 import CoreData
 #if os(tvOS)
 import Security
@@ -9,16 +16,20 @@ enum StremioConfiguredURLVault {
         let resolvedURL: String
     }
 
-    static func protect(_ configuredURL: String, addonID: UUID) -> ProtectedValue {
+    static func protect(
+        _ configuredURL: String,
+        addonID: UUID,
+        profileID: UUID? = nil
+    ) -> ProtectedValue {
 #if os(tvOS)
         if isKeychainReference(configuredURL) {
             return ProtectedValue(
                 persistedURL: configuredURL,
-                resolvedURL: load(addonID: addonID) ?? configuredURL
+                resolvedURL: load(addonID: addonID, profileID: profileID) ?? configuredURL
             )
         }
 
-        let didStore = store(configuredURL, addonID: addonID)
+        let didStore = store(configuredURL, addonID: addonID, profileID: profileID)
         if !didStore {
             Logger.shared.log(
                 "Stremio: Could not store configured URL securely addon=\(addonID.uuidString)",
@@ -49,17 +60,81 @@ enum StremioConfiguredURLVault {
 #endif
     }
 
-    static func resolve(addonID: UUID, persistedURL: String) -> String {
+    static func resolve(addonID: UUID, persistedURL: String, profileID: UUID? = nil) -> String {
 #if os(tvOS)
-        return load(addonID: addonID) ?? persistedURL
+        return loadExact(account: account(addonID: addonID, profileID: profileID)) ?? persistedURL
 #else
         return persistedURL
 #endif
     }
 
-    static func remove(addonID: UUID) {
+    static func remove(addonID: UUID, profileID: UUID? = nil) {
 #if os(tvOS)
-        SecItemDelete(query(addonID: addonID) as CFDictionary)
+        SecItemDelete(query(addonID: addonID, profileID: profileID) as CFDictionary)
+#endif
+    }
+
+    static func removeAllAccountsForAccountBoundary() {
+#if os(tvOS)
+        SecItemDelete([
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service
+        ] as CFDictionary)
+#endif
+    }
+
+    static func removeScoped(addonID: UUID, profileID: UUID) {
+#if os(tvOS)
+        let account = addonID.uuidString
+            + ServiceStoreScope.scopedVaultAccountSuffix(forProfile: profileID)
+        SecItemDelete([
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ] as CFDictionary)
+#endif
+    }
+
+    static func transactionSnapshotValue(addonID: UUID, scopedProfileID: UUID?) -> String? {
+#if os(tvOS)
+        let suffix = scopedProfileID.map(ServiceStoreScope.scopedVaultAccountSuffix(forProfile:)) ?? ""
+        return loadExact(account: addonID.uuidString + suffix)
+#else
+        return nil
+#endif
+    }
+
+    static func restoreTransactionSnapshotValue(
+        _ value: String?,
+        addonID: UUID,
+        scopedProfileID: UUID?
+    ) {
+#if os(tvOS)
+        let suffix = scopedProfileID.map(ServiceStoreScope.scopedVaultAccountSuffix(forProfile:)) ?? ""
+        let account = addonID.uuidString + suffix
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+        guard let value, let data = value.data(using: .utf8) else {
+            SecItemDelete(query as CFDictionary)
+            return
+        }
+        let updates: [String: Any] = [kSecValueData as String: data]
+        let status = SecItemUpdate(query as CFDictionary, updates as CFDictionary)
+        guard status == errSecItemNotFound else { return }
+        query[kSecValueData as String] = data
+        query[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        _ = SecItemAdd(query as CFDictionary, nil)
+#endif
+    }
+
+    static func isUnresolvedReference(_ value: String) -> Bool {
+#if os(tvOS)
+        return isKeychainReference(value)
+#else
+        return false
 #endif
     }
 
@@ -74,25 +149,48 @@ enum StremioConfiguredURLVault {
         value.lowercased().hasPrefix("eclipse-keychain://stremio-addon/")
     }
 
-    private static func query(addonID: UUID) -> [String: Any] {
+    private static func account(addonID: UUID, profileID: UUID? = nil) -> String {
+        let suffix = profileID.map(ServiceStoreScope.vaultAccountSuffix(forProfile:))
+            ?? ServiceStoreScope.vaultAccountSuffix
+        return addonID.uuidString + suffix
+    }
+
+    private static func query(addonID: UUID, profileID: UUID? = nil) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: addonID.uuidString
+            kSecAttrAccount as String: account(addonID: addonID, profileID: profileID)
         ]
     }
 
-    private static func store(_ value: String, addonID: UUID) -> Bool {
+    private static func store(_ value: String, addonID: UUID, profileID: UUID? = nil) -> Bool {
         guard let data = value.data(using: .utf8) else { return false }
-        var item = query(addonID: addonID)
+        var item = query(addonID: addonID, profileID: profileID)
         SecItemDelete(item as CFDictionary)
         item[kSecValueData as String] = data
         item[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
     }
 
-    private static func load(addonID: UUID) -> String? {
-        var item = query(addonID: addonID)
+    private static func load(addonID: UUID, profileID: UUID? = nil) -> String? {
+        if let value = loadExact(account: account(addonID: addonID, profileID: profileID)) {
+            return value
+        }
+
+        let suffix = profileID.map(ServiceStoreScope.vaultAccountSuffix(forProfile:))
+            ?? ServiceStoreScope.vaultAccountSuffix
+        guard !suffix.isEmpty,
+              let shared = loadExact(account: addonID.uuidString) else { return nil }
+        _ = store(shared, addonID: addonID, profileID: profileID)
+        return shared
+    }
+
+    private static func loadExact(account: String) -> String? {
+        var item: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
         item[kSecReturnData as String] = true
         item[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
@@ -106,6 +204,14 @@ enum StremioConfiguredURLVault {
 final class StremioAddonStore {
     static let shared = StremioAddonStore()
 
+    struct BackupRow {
+        let id: UUID
+        let configuredURL: String
+        let manifestJSON: String
+        let isActive: Bool
+        let sortIndex: Int64
+    }
+
     private var container: NSPersistentContainer? = nil
 
     private init() {
@@ -117,6 +223,9 @@ final class StremioAddonStore {
         }
 
         description.type = NSSQLiteStoreType
+        let scopedURL = ServiceStoreScope.activeStoreURL
+        ServiceStoreScope.seedIfNeeded(at: scopedURL)
+        description.url = scopedURL
         description.setOption(true as NSNumber, forKey: NSPersistentHistoryTrackingKey)
 
         container?.loadPersistentStores { _, error in
@@ -132,7 +241,14 @@ final class StremioAddonStore {
         }
     }
 
-    // MARK: - CRUD
+    func reopenStore(at url: URL, seedIfMissing: Bool = true) {
+        ServiceStoreScope.reopen(
+            container,
+            at: url,
+            label: "Stremio",
+            seedIfMissing: seedIfMissing
+        )
+    }
 
     func storeAddon(id: UUID, configuredURL: String, manifestJSON: String, isActive: Bool, sortIndex: Int64? = nil) {
         guard let container = container else {
@@ -229,6 +345,37 @@ final class StremioAddonStore {
         return result
     }
 
+    func backupRows() throws -> [BackupRow] {
+        guard let container,
+              container.persistentStoreCoordinator.persistentStores.first != nil else {
+            throw CocoaError(.persistentStoreOperation)
+        }
+        var outcome: Result<[BackupRow], Error>!
+        container.viewContext.performAndWait {
+            outcome = Result {
+                let request: NSFetchRequest<StremioAddonEntity> = StremioAddonEntity.fetchRequest()
+                request.sortDescriptors = [NSSortDescriptor(key: "sortIndex", ascending: true)]
+                let entities = try container.viewContext.fetch(request)
+                return try entities.map { entity in
+                    guard entity.asModel != nil,
+                          let id = entity.id,
+                          let configuredURL = entity.configuredURL,
+                          let manifestJSON = entity.manifestJSON else {
+                        throw CocoaError(.coderInvalidValue)
+                    }
+                    return BackupRow(
+                        id: id,
+                        configuredURL: configuredURL,
+                        manifestJSON: manifestJSON,
+                        isActive: entity.isActive,
+                        sortIndex: entity.sortIndex
+                    )
+                }
+            }
+        }
+        return try outcome.get()
+    }
+
     func remove(_ addon: StremioAddon) {
         guard let container = container else { return }
 
@@ -251,9 +398,11 @@ final class StremioAddonStore {
         }
     }
 
-    func removeAll() {
-        guard let container = container else { return }
+    @discardableResult
+    func removeAll() -> Bool {
+        guard let container = container else { return false }
         let existingIDs = getEntities().compactMap(\.id)
+        var succeeded = false
 
         container.viewContext.performAndWait {
             let request = NSFetchRequest<NSFetchRequestResult>(entityName: "StremioAddonEntity")
@@ -273,10 +422,12 @@ final class StremioAddonStore {
                     try container.viewContext.save()
                 }
                 existingIDs.forEach { StremioConfiguredURLVault.remove(addonID: $0) }
+                succeeded = true
             } catch {
                 Logger.shared.log("Stremio: Remove all addons failed: \(error.localizedDescription)", type: "Storage")
             }
         }
+        return succeeded
     }
 
     func save() {

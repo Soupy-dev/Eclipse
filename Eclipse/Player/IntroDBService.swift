@@ -1,8 +1,4 @@
-// Created on 28/02/26.
-
 import Foundation
-
-// MARK: - TheIntroDB API Response Models
 
 private struct IntroDBResponse: Codable {
     let tmdb_id: Int?
@@ -19,8 +15,6 @@ private struct IntroDBSegment: Codable {
     let confidence: Double?
     let submission_count: Int?
 }
-
-// MARK: - IntroDB.app API Response Models
 
 private struct IntroDBAppResponse: Decodable {
     let imdbId: String?
@@ -215,11 +209,11 @@ private struct IntroDBAppSegment: Decodable {
                 return value
             }
             if let value = try? container.decodeIfPresent(Double.self, forKey: key) {
-                return Int(value.rounded())
+                return Int(exactly: value.rounded())
             }
             if let raw = try? container.decodeIfPresent(String.self, forKey: key),
                let value = Double(raw.trimmingCharacters(in: .whitespacesAndNewlines)) {
-                return Int(value.rounded())
+                return Int(exactly: value.rounded())
             }
         }
         return nil
@@ -241,13 +235,14 @@ private struct IntroDBAppSegment: Decodable {
     }
 
     private func formatDebugNumber(_ value: Double) -> String {
-        value.truncatingRemainder(dividingBy: 1) == 0
-            ? String(Int(value))
-            : String(format: "%.3f", value)
+        guard value.isFinite else { return String(value) }
+        if value.truncatingRemainder(dividingBy: 1) == 0,
+           let integer = Int(exactly: value) {
+            return String(integer)
+        }
+        return String(format: "%.3f", value)
     }
 }
-
-// MARK: - TheIntroDB Service
 
 final class IntroDBService {
     static let shared = IntroDBService()
@@ -262,7 +257,6 @@ final class IntroDBService {
         self.session = URLSession(configuration: config)
     }
 
-    /// Fetches skip-time segments from TheIntroDB using TMDB ID.
     func fetchSkipTimes(tmdbId: Int, seasonNumber: Int?, episodeNumber: Int?, episodeDuration: Double) async throws -> [SkipSegment] {
         var urlString = "\(baseURL)/media?tmdb_id=\(tmdbId)"
         if let season = seasonNumber {
@@ -271,9 +265,11 @@ final class IntroDBService {
         if let episode = episodeNumber {
             urlString += "&episode=\(episode)"
         }
-        let durationIsUsable = episodeDuration.isFinite && episodeDuration > 0
-        if durationIsUsable {
-            urlString += "&duration_ms=\(Int((episodeDuration * 1000).rounded()))"
+        let durationMilliseconds = Int(exactly: (episodeDuration * 1000).rounded())
+        if episodeDuration.isFinite,
+           episodeDuration > 0,
+           let durationMilliseconds {
+            urlString += "&duration_ms=\(durationMilliseconds)"
         }
 
         guard let url = URL(string: urlString) else {
@@ -300,7 +296,6 @@ final class IntroDBService {
         var segments: [SkipSegment] = []
         let maxDuration = episodeDuration.isFinite && episodeDuration > 0 ? episodeDuration : nil
 
-        // Parse intro segments
         if let intros = decoded.intro {
             for seg in intros {
                 if let parsed = parseSegment(seg, type: .intro, maxDuration: maxDuration) {
@@ -309,7 +304,6 @@ final class IntroDBService {
             }
         }
 
-        // Parse recap segments
         if let recaps = decoded.recap {
             for seg in recaps {
                 if let parsed = parseSegment(seg, type: .recap, maxDuration: maxDuration) {
@@ -318,7 +312,6 @@ final class IntroDBService {
             }
         }
 
-        // Parse credits to map to .outro (functionally equivalent - "Skip Outro")
         if let credits = decoded.credits {
             for seg in credits {
                 if let parsed = parseSegment(seg, type: .outro, maxDuration: maxDuration) {
@@ -327,7 +320,6 @@ final class IntroDBService {
             }
         }
 
-        // Parse preview segments
         if let previews = decoded.preview {
             for seg in previews {
                 if let parsed = parseSegment(seg, type: .preview, maxDuration: maxDuration) {
@@ -345,9 +337,6 @@ final class IntroDBService {
         return segments
     }
 
-    /// Converts a TheIntroDB segment (milliseconds, nullable) into a SkipSegment (seconds).
-    /// Intro/recap ranges may omit the start when they begin at 0, but need an end.
-    /// Credits/preview ranges need a start and may omit the end when they run to media end.
     private func parseSegment(_ seg: IntroDBSegment, type: SkipType, maxDuration: Double?) -> SkipSegment? {
         let startSec: Double
         if let rawStart = seg.start_ms {
@@ -378,11 +367,10 @@ final class IntroDBService {
 
     private func formatSeconds(_ value: Double) -> String {
         guard value.isFinite else { return "nil" }
-        return "\(Int(value.rounded()))"
+        let rounded = value.rounded()
+        return Int(exactly: rounded).map(String.init) ?? String(rounded)
     }
 }
-
-// MARK: - IntroDB.app Service
 
 final class IntroDBAppService {
     static let shared = IntroDBAppService()
@@ -397,8 +385,6 @@ final class IntroDBAppService {
         self.session = URLSession(configuration: config)
     }
 
-    /// Fetches skip-time segments from introdb.app using IMDb ID.
-    /// No API key is required for read access.
     func fetchSkipTimes(imdbId: String, seasonNumber: Int?, episodeNumber: Int?, episodeDuration: Double) async throws -> [SkipSegment] {
         let cleanIMDbId = imdbId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanIMDbId.isEmpty else { return [] }
@@ -510,14 +496,15 @@ final class IntroDBAppService {
     private func dedupe(_ segments: [SkipSegment]) -> [SkipSegment] {
         var seen = Set<String>()
         return segments.filter { segment in
-            let key = "\(segment.type.rawValue)-\(Int(segment.startTime.rounded()))-\(Int(segment.endTime.rounded()))"
+            let key = "\(segment.type.rawValue)-\(formatSeconds(segment.startTime))-\(formatSeconds(segment.endTime))"
             return seen.insert(key).inserted
         }
     }
 
     private func formatSeconds(_ value: Double) -> String {
         guard value.isFinite else { return "nil" }
-        return "\(Int(value.rounded()))"
+        let rounded = value.rounded()
+        return Int(exactly: rounded).map(String.init) ?? String(rounded)
     }
 }
 

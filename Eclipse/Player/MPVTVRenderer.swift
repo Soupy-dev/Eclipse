@@ -7,9 +7,6 @@ import QuartzCore
 import UIKit
 import MPVKitSampleBufferGPL
 
-/// Small tvOS-only adapter over MPVKit's gpu-next/MoltenVK renderer. The existing iOS
-/// `MPVNativeRenderer` stays isolated so remote-control behavior does not become another branch in
-/// its touch-oriented controller.
 @MainActor
 final class MPVTVRenderer {
     enum State: Equatable {
@@ -52,6 +49,7 @@ final class MPVTVRenderer {
     private var didReportFatalFailure = false
     private var lastTrackSignature = ""
     private var lastVideoConfigurationSignature = ""
+    private var lastKnownOutputDrawableSize: CGSize = .zero
     private var lifecycleGeneration: UInt64 = 0
     private var lastLoggedPictureInPictureDiagnosticsSignature = ""
     private var lastLoggedPictureInPicturePressureTotal = 0
@@ -63,9 +61,40 @@ final class MPVTVRenderer {
         renderer.pictureInPictureDisplayLayer
     }
 
+    private static func shaderCacheDirectory() -> String? {
+        guard let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        let directory = caches.appendingPathComponent("mpv-shader-cache", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            return nil
+        }
+        return directory.path
+    }
+
     init() {
-        let prefersSurround = UserDefaults.standard.object(forKey: "mpvSurroundSoundEnabled") as? Bool ?? true
-        let defaultSubtitleLanguage = UserDefaults.standard.string(forKey: "defaultSubtitleLanguage") ?? "eng"
+        let prefersSurround = ProfileSettingsStore.active.object(forKey: "mpvSurroundSoundEnabled") as? Bool ?? true
+        let defaultSubtitleLanguage = ProfileSettingsStore.active.string(forKey: "defaultSubtitleLanguage") ?? "eng"
+        var additionalOptions = [
+            "audio-channels": prefersSurround ? "auto" : "stereo",
+            "slang": defaultSubtitleLanguage,
+            "cache": "yes",
+            "cache-pause-wait": "5",
+            "demuxer-thread": "yes",
+            "demuxer-max-bytes": "80M",
+            "demuxer-readahead-secs": "10",
+            "vd-lavc-software-fallback": "yes",
+            "vulkan-async-compute": "no",
+            "vulkan-async-transfer": "no",
+            "vulkan-queue-count": "1",
+            "vulkan-swap-mode": "fifo"
+        ]
+        if let shaderCacheDir = Self.shaderCacheDirectory() {
+            additionalOptions["gpu-shader-cache"] = "yes"
+            additionalOptions["gpu-shader-cache-dir"] = shaderCacheDir
+        }
         let options = MPVGPUPlayerRendererOptions(
             maximumPiPFrameSize: CGSize(width: 1920, height: 1080),
             preferredPiPFramesPerSecond: 30,
@@ -76,20 +105,7 @@ final class MPVTVRenderer {
             pictureInPictureBackendPreference: .automatic,
             maximumInFlightPictureInPictureFrames: 3,
             pictureInPicturePreparationTimeout: 1,
-            additionalMPVOptions: [
-                "audio-channels": prefersSurround ? "auto" : "stereo",
-                "slang": defaultSubtitleLanguage,
-                "cache": "yes",
-                "cache-pause-wait": "5",
-                "demuxer-thread": "yes",
-                "demuxer-max-bytes": "80M",
-                "demuxer-readahead-secs": "10",
-                "vd-lavc-software-fallback": "yes",
-                "vulkan-async-compute": "no",
-                "vulkan-async-transfer": "no",
-                "vulkan-queue-count": "1",
-                "vulkan-swap-mode": "fifo"
-            ]
+            additionalMPVOptions: additionalOptions
         )
         renderer = MPVGPUPlayerRenderer(
             inlineLayer: MPVGPUPlayerMetalLayer(),
@@ -98,14 +114,17 @@ final class MPVTVRenderer {
         )
         view.host(renderer.inlineLayer)
         view.onLayoutChange = { [weak self] bounds, scale in
+            self?.lastKnownOutputDrawableSize = CGSize(
+                width: bounds.width * scale,
+                height: bounds.height * scale
+            )
             self?.renderer.updateInlineLayerLayout(bounds: bounds, contentsScale: scale)
         }
     }
 
     func start(_ request: PlaybackRequest) throws {
         if state == .stopping {
-            // MPVKit teardown is deliberately asynchronous. Never make a caller believe a new
-            // request started while the previous handle and GPU work are still draining.
+
             Logger.shared.log(
                 "[MPVTVRenderer] start rejected reason=teardown-in-progress renderer={\(pictureInPictureDebugSnapshot())}",
                 type: "MPV"
@@ -241,9 +260,6 @@ final class MPVTVRenderer {
                 ?? [:]
             let headers = AVPlayerResourceLoader.sanitizedHTTPHeaders(rawHeaders)
 
-            // MPV can load ordinary remote and local subtitles directly, including large bitmap
-            // formats such as PGS. Only credential-bearing tracks need a bounded local bridge,
-            // because MPV's subtitle API does not accept per-track request headers.
             guard !headers.isEmpty,
                   ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {
                 resolvedURLs[index] = rawValue
@@ -324,7 +340,7 @@ final class MPVTVRenderer {
 
     var canStartPictureInPicture: Bool {
         AVPictureInPictureController.isPictureInPictureSupported()
-            && (UserDefaults.standard.object(forKey: "mpvPictureInPictureEnabled") as? Bool ?? true)
+            && (ProfileSettingsStore.active.object(forKey: "mpvPictureInPictureEnabled") as? Bool ?? true)
     }
 
     func preparePictureInPicture() async throws {
@@ -373,8 +389,6 @@ final class MPVTVRenderer {
         }
     }
 
-    /// Completes only after MPVKit has restored a current-generation inline frame. A stop or a
-    /// replacement lifecycle invalidates the result even if the native restore finishes later.
     @discardableResult
     func endPictureInPictureAndWait(
         restoringInlinePlayback: Bool = true
@@ -556,8 +570,8 @@ final class MPVTVRenderer {
     }
 
     private func applySubtitleDefaults() {
-        let fontSize = UserDefaults.standard.double(forKey: "subtitles_fontSize")
-        let strokeWidth = UserDefaults.standard.object(forKey: "subtitles_strokeWidth") as? Double ?? 1
+        let fontSize = ProfileSettingsStore.active.double(forKey: "subtitles_fontSize")
+        let strokeWidth = ProfileSettingsStore.active.object(forKey: "subtitles_strokeWidth") as? Double ?? 1
         let foregroundColor = archivedColor(forKey: "subtitles_foregroundColor", fallback: .white)
         let strokeColor = archivedColor(forKey: "subtitles_strokeColor", fallback: .black)
         renderer.applySubtitleStyle(MPVMetalSampleBufferSubtitleStyle(
@@ -565,51 +579,96 @@ final class MPVTVRenderer {
             strokeColor: strokeColor.cgColor,
             strokeWidth: CGFloat(max(0, min(strokeWidth, 4))),
             fontSize: CGFloat(fontSize > 0 ? fontSize : 38),
-            isVisible: UserDefaults.standard.bool(forKey: "enableSubtitlesByDefault")
+            isVisible: ProfileSettingsStore.active.bool(forKey: "enableSubtitlesByDefault")
         ))
-        let offset = UserDefaults.standard.object(forKey: "playerSubtitleOverlayBottomConstant") == nil
+        let offset = ProfileSettingsStore.active.object(forKey: "playerSubtitleOverlayBottomConstant") == nil
             ? -6
-            : UserDefaults.standard.double(forKey: "playerSubtitleOverlayBottomConstant")
+            : ProfileSettingsStore.active.double(forKey: "playerSubtitleOverlayBottomConstant")
         let position = max(0, min(100, 100 + (offset + 6)))
-        let captionBackground = UserDefaults.standard.bool(forKey: "subtitles_closedCaptionBackground")
+        let captionBackground = ProfileSettingsStore.active.bool(forKey: "subtitles_closedCaptionBackground")
         _ = renderer.command(["set", "sub-pos", String(format: "%.0f", position)])
         _ = renderer.command(["set", "sub-border-style", captionBackground ? "background-box" : "outline-and-shadow"])
         _ = renderer.command(["set", "sub-back-color", captionBackground ? "0.0/0.0/0.0/0.75" : "0.0/0.0/0.0/0.0"])
     }
 
     private func archivedColor(forKey key: String, fallback: UIColor) -> UIColor {
-        guard let data = UserDefaults.standard.data(forKey: key),
+        guard let data = ProfileSettingsStore.active.data(forKey: key),
               let color = try? NSKeyedUnarchiver.unarchivedObject(ofClass: UIColor.self, from: data) else {
             return fallback
         }
         return color
     }
 
+    private var contentIsAnimation: Bool {
+        guard let request else { return false }
+        return request.isAnime
+            || request.isAnimation
+            || request.episodePlaybackContext?.hasAnimeMediaId == true
+    }
+
+    private func outputScale(_ diagnostics: MPVGPUPlayerRendererDiagnostics) -> Double? {
+        let size = lastKnownOutputDrawableSize
+        guard size.width > 1, size.height > 1 else { return nil }
+        guard diagnostics.videoWidth > 0, diagnostics.videoHeight > 0 else { return nil }
+        return min(
+            Double(size.width) / Double(diagnostics.videoWidth),
+            Double(size.height) / Double(diagnostics.videoHeight)
+        )
+    }
+
+    private func resolvedNeuralUpscaler(_ diagnostics: MPVGPUPlayerRendererDiagnostics) -> MPVNeuralUpscaler {
+        MPVScalerPolicy.tvNeuralUpscaler(
+            selected: Settings.shared.mpvNeuralUpscalerTV,
+            isAnimation: contentIsAnimation,
+            supportsConvolutional: MPVUserShaderLibrary.supportsConvolutionalUpscalers,
+            sourceHeight: Int(diagnostics.videoHeight),
+            outputScale: outputScale(diagnostics)
+        )
+    }
+
     private func applyVideoConfiguration(_ diagnostics: MPVGPUPlayerRendererDiagnostics) {
-        // Upscaling is deliberately disabled on Apple TV until sustained 4K hardware validation.
-        // A shared iOS preference must not silently activate an unvalidated TV renderer path.
+
         let transfer = diagnostics.videoTransferFunction.lowercased()
         let primaries = diagnostics.videoColorPrimaries.lowercased()
         let sourceIsHDR = diagnostics.videoSignalPeak > 1
             || transfer.contains("pq") || transfer.contains("2084") || transfer.contains("hlg")
             || primaries.contains("2020")
-        // Apple TV always follows source metadata and the system Match Content
-        // policy. iOS-only HDR overrides must never silently affect TV output.
+
         let requestsHDR = sourceIsHDR
-        let signature = "off|false|\(requestsHDR)"
+        let neural = resolvedNeuralUpscaler(diagnostics)
+        let neuralPath = MPVUserShaderLibrary.shaderPath(for: neural)
+        let memoryGB = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824.0
+        let s = MPVScalerPolicy.tvScalers(
+            neuralActive: neuralPath != nil,
+            qualityChroma: MPVScalerPolicy.tvSupportsQualityChroma(memoryGB: memoryGB)
+        )
+        let qualityScaling = s.qualityScaling ? "yes" : "no"
+        let signature = "\(neural.rawValue)|\(s.scale)|\(s.cscale)|\(s.deband)|\(qualityScaling)|\(neuralPath ?? "none")|\(requestsHDR)"
         guard signature != lastVideoConfigurationSignature else { return }
         lastVideoConfigurationSignature = signature
 
-        _ = renderer.command(["set", "scale", "bilinear"])
-        _ = renderer.command(["set", "cscale", "bilinear"])
-        _ = renderer.command(["set", "dscale", "mitchell"])
-        _ = renderer.command(["set", "deband", "no"])
+        _ = renderer.command(["set", "scale", s.scale])
+        _ = renderer.command(["set", "cscale", s.cscale])
+        _ = renderer.command(["set", "dscale", s.dscale])
+        _ = renderer.command(["set", "deband", s.deband])
+        _ = renderer.command(["set", "sigmoid-upscaling", qualityScaling])
+        _ = renderer.command(["set", "correct-downscaling", qualityScaling])
+        _ = renderer.command(["set", "linear-downscaling", qualityScaling])
+        if let neuralPath {
+            _ = renderer.command(["change-list", "glsl-shaders", "set", neuralPath])
+        } else {
+            _ = renderer.command(["change-list", "glsl-shaders", "clr", ""])
+        }
         _ = renderer.command(["set", "target-colorspace-hint", requestsHDR ? "yes" : "no"])
+        Logger.shared.log(
+            "[MPVTVRenderer] video config neural=\(neural.rawValue) selected=\(Settings.shared.mpvNeuralUpscalerTV.rawValue) animation=\(contentIsAnimation) shader=\(neuralPath.map { ($0 as NSString).lastPathComponent } ?? "none") scale=\(s.scale) cscale=\(s.cscale) deband=\(s.deband) srcH=\(Int(diagnostics.videoHeight)) hdr=\(requestsHDR)",
+            type: "MPV"
+        )
     }
 
     private func resolvedDefaultSpeed() -> Double {
         PlaybackSpeedPolicy.normalized(
-            UserDefaults.standard.double(forKey: "defaultPlaybackSpeed")
+            ProfileSettingsStore.active.double(forKey: "defaultPlaybackSpeed")
         )
     }
 
@@ -822,7 +881,7 @@ private final class MPVTVAudioSession {
 
     private func reapplyPreferredChannels() {
         let session = AVAudioSession.sharedInstance()
-        let surroundEnabled = UserDefaults.standard.object(forKey: "mpvSurroundSoundEnabled") as? Bool ?? true
+        let surroundEnabled = ProfileSettingsStore.active.object(forKey: "mpvSurroundSoundEnabled") as? Bool ?? true
         let maximum = max(1, session.maximumOutputNumberOfChannels)
         let desired = surroundEnabled && session.supportsMultichannelContent ? maximum : min(2, maximum)
         guard desired != session.preferredOutputNumberOfChannels else { return }

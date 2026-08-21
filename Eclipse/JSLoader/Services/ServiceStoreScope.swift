@@ -418,6 +418,58 @@ enum ServiceStoreScope {
         let sortIndex: Int64
     }
 
+    static func replaceSources(
+        services: [RestoredService],
+        addons: [RestoredAddon],
+        forProfile profileID: UUID
+    ) {
+        let url = storeURL(for: profileID).standardizedFileURL
+        guard url == activeStoreURL.standardizedFileURL else {
+            restoreSources(services: services, addons: addons, forProfile: profileID)
+            return
+        }
+
+        let serviceStore = ServiceStore.shared
+        for existing in serviceStore.getServices() {
+            serviceStore.remove(existing)
+        }
+        for service in services {
+            guard let script = securedScriptForRestore(
+                service.jsScript,
+                serviceID: service.id,
+                profileID: profileID
+            ) else { continue }
+            serviceStore.storeService(
+                id: service.id,
+                url: service.url,
+                jsonMetadata: service.jsonMetadata,
+                jsScript: script,
+                isActive: service.isActive,
+                sortIndex: service.sortIndex
+            )
+        }
+
+        let stremioStore = StremioAddonStore.shared
+        stremioStore.removeAll()
+        for addon in addons {
+            guard !StremioConfiguredURLVault.isUnresolvedReference(addon.configuredURL) else {
+                continue
+            }
+            stremioStore.storeAddon(
+                id: addon.id,
+                configuredURL: addon.configuredURL,
+                manifestJSON: addon.manifestJSON,
+                isActive: addon.isActive,
+                sortIndex: addon.sortIndex
+            )
+        }
+
+        Task { @MainActor in
+            ServiceManager.shared.loadServicesFromCloud()
+            StremioAddonManager.shared.loadAddons()
+        }
+    }
+
     static func restoreSources(
         services: [RestoredService],
         addons: [RestoredAddon],

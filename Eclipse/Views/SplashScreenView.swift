@@ -1,12 +1,8 @@
-// Animated moon splash screen that hides the cold boot loading.
-
 import SwiftUI
 
 struct SplashScreenView: View {
     @Binding var isFinished: Bool
     var onDismissed: () -> Void = {}
-
-    // MARK: - Entrance state
 
     @State private var moonScale: CGFloat = 0.28
     @State private var moonOpacity: Double = 0
@@ -21,8 +17,6 @@ struct SplashScreenView: View {
     @State private var minimumTimeElapsed = false
     @State private var dismissing = false
 
-    // MARK: - Ambient motion
-
     @State private var ambientStarted = false
     @State private var haloScale: CGFloat = 0.9
     @State private var haloBreath: Double = 0.45
@@ -33,7 +27,6 @@ struct SplashScreenView: View {
     @State private var backgroundShift: CGFloat = -36
     @State private var loadingPulse = false
 
-    // Minimum display time so the animation does not flash.
     private let minimumDuration: Double = 1.6
 
     var body: some View {
@@ -289,8 +282,6 @@ struct SplashScreenView: View {
         }
     }
 
-    // MARK: - Animate in
-
     private func runEntrance() {
         withAnimation(.spring(response: 0.72, dampingFraction: 0.78)) {
             moonScale = 1.0
@@ -345,8 +336,6 @@ struct SplashScreenView: View {
             loadingPulse = true
         }
     }
-
-    // MARK: - Dismiss (fires as soon as BOTH conditions are met)
 
     private func tryDismiss() {
         guard minimumTimeElapsed, isFinished, !dismissing else { return }

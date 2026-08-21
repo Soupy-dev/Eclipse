@@ -1,9 +1,16 @@
+//
+//  resized.swift
+//  Sora
+//
+//  Created by Francesco on 07/08/25.
+//
+
 import UIKit
 
 extension UIImage {
     func resized(to size: CGSize, contentMode: ContentMode = .scaleAspectFit) -> UIImage? {
         let aspectSize: CGSize
-        
+
         switch contentMode {
         case .scaleAspectFill:
             let aspectRatio = self.size.width / self.size.height
@@ -20,13 +27,13 @@ extension UIImage {
                 aspectSize = CGSize(width: size.height * aspectRatio, height: size.height)
             }
         }
-        
+
         let renderer = UIGraphicsImageRenderer(size: aspectSize)
         return renderer.image { _ in
             self.draw(in: CGRect(origin: .zero, size: aspectSize))
         }
     }
-    
+
     enum ContentMode {
         case scaleAspectFit
         case scaleAspectFill

@@ -186,7 +186,8 @@ struct AppHubOverlay: View {
             actionFrames = frames
         }
         .task(id: interactionToken) {
-            let delay = isExpanded ? AppHubMetrics.expandedIdleDelay : AppHubMetrics.idleDelay
+            let wasExpanded = isExpanded
+            let delay = wasExpanded ? AppHubMetrics.expandedIdleDelay : AppHubMetrics.idleDelay
             do {
                 try await Task.sleep(nanoseconds: delay)
             } catch {
@@ -194,6 +195,7 @@ struct AppHubOverlay: View {
             }
             guard !Task.isCancelled else { return }
 
+            guard isExpanded == wasExpanded else { return }
             guard dragIntent == .undecided, activatingActionID == nil else { return }
             withAnimation(.easeOut(duration: 0.5)) {
                 isIdle = true

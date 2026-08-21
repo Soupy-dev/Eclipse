@@ -1,5 +1,3 @@
-// Language selection for in-app subtitle and audio preferences
-
 import SwiftUI
 
 struct PlayerLanguageSelectionView: View {

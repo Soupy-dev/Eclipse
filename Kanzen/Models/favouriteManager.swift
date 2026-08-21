@@ -1,3 +1,16 @@
+//
+//  favouriteManager.swift
+//  Eclipse
+//
+//  Created by Dawud Osman on 17/11/2025.
+//
+
+//
+//  favouriteManager.swift
+//  Kanzen
+//
+//  Created by Dawud Osman on 18/10/2025.
+//
 import SwiftUI
 import CoreData
 

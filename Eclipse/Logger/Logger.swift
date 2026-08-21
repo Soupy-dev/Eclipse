@@ -1,3 +1,10 @@
+//
+//  Logging.swift
+//  Sora
+//
+//  Created by seiike on 16/01/2025.
+//
+
 import Foundation
 #if canImport(UIKit)
 import UIKit
@@ -9,20 +16,19 @@ class Logger: @unchecked Sendable {
     enum ExportError: Error {
         case encodingFailed
     }
-    
+
     struct LogEntry {
         let message: String
         let type: String
         let timestamp: Date
     }
-    
+
     private let queue = DispatchQueue(label: "me.cranci.sora.logger", attributes: .concurrent)
     private let fileQueue = DispatchQueue(label: "me.cranci.sora.logger.file")
     private var logs: [LogEntry] = []
     private let logFileURL: URL
     private let sessionMarkerURL: URL
-    // Accessed only from fileQueue. Keeping the handle open avoids an
-    // open/seek/fsync/close cycle for every MPV, tracker, and stream log.
+
     private var logFileHandle: FileHandle?
     private var logFileBytes = 0
     private lazy var diskDateFormatter: DateFormatter = {
@@ -30,7 +36,7 @@ class Logger: @unchecked Sendable {
         formatter.dateFormat = "dd-MM HH:mm:ss"
         return formatter
     }()
-    // Accessed only from the barrier-backed logger queue.
+
     private lazy var debugDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.dateFormat = "dd-MM HH:mm:ss"
@@ -48,44 +54,46 @@ class Logger: @unchecked Sendable {
     private var lastEntryForRepeat: LogEntry?
     private var repeatCount = 0
 
-    private static let sensitiveURLRegex = try! NSRegularExpression(
+    private static let sensitiveURLRegex: NSRegularExpression? = try? NSRegularExpression(
         pattern: #"(?i)(?:https?|stremio)://[^\s<>\"'\)\]]+"#
     )
-    private static let sensitiveValuePatterns: [(regex: NSRegularExpression, replacement: String)] = [
+
+    private static let sensitiveValueSpecifications: [(pattern: String, replacement: String)] = [
         (
-            try! NSRegularExpression(
-                pattern: #"(?i)\b(authorization|proxy-authorization)\b[\"']?\s*[:=]\s*[\"']?(?:bearer\s+|basic\s+)?[^\"'\s,;}\]\r\n]+"#
-            ),
+            #"(?i)\b(authorization|proxy-authorization)\b[\"']?\s*[:=]\s*[\"']?(?:bearer\s+|basic\s+)?[^\"'\s,;}\]\r\n]+"#,
             "$1=<redacted>"
         ),
         (
-            try! NSRegularExpression(
-                pattern: #"(?i)\b(authorization|proxy-authorization)\b\s+(?:bearer|basic)\s+[^\s,;}\]\r\n]+"#
-            ),
+            #"(?i)\b(authorization|proxy-authorization)\b\s+(?:bearer|basic)\s+[^\s,;}\]\r\n]+"#,
             "$1=<redacted>"
         ),
         (
-            try! NSRegularExpression(
-                pattern: #"(?i)\b(cookie|set-cookie)\b[\"']?\s*[:=]\s*[\"']?[^\"'\r\n]+"#
-            ),
+            #"(?i)\b(cookie|set-cookie)\b[\"']?\s*[:=]\s*[\"']?[^\"'\r\n]+"#,
             "$1=<redacted>"
         ),
         (
-            try! NSRegularExpression(
-                pattern: #"(?i)\b(access[_-]?token|refresh[_-]?token|id[_-]?token|token|api[_-]?key|x-api-key|client[_-]?secret|password|passwd)\b[\"']?\s*[:=]\s*[\"']?[^\"'\s,;}&\]\r\n]+"#
-            ),
+            #"(?i)\b(access[_-]?token|refresh[_-]?token|id[_-]?token|token|api[_-]?key|x-api-key|client[_-]?secret|password|passwd)\b[\"']?\s*[:=]\s*[\"']?[^\"'\s,;}&\]\r\n]+"#,
             "$1=<redacted>"
         ),
         (
-            try! NSRegularExpression(
-                pattern: #"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"#
-            ),
+            #"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+"#,
             "Bearer <redacted>"
         )
     ]
-    
+
+    private static let sensitiveValuePatterns: [(regex: NSRegularExpression, replacement: String)] =
+        sensitiveValueSpecifications.compactMap { specification in
+            guard let regex = try? NSRegularExpression(pattern: specification.pattern) else { return nil }
+            return (regex, specification.replacement)
+        }
+
+    private static var redactionIsComplete: Bool {
+        sensitiveURLRegex != nil
+            && sensitiveValuePatterns.count == sensitiveValueSpecifications.count
+    }
+
     private init() {
-        // Use Documents folder for persistent logs (easier to access)
+
         let documentsURL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         logFileURL = documentsURL.appendingPathComponent("player-logs.txt")
         sessionMarkerURL = documentsURL.appendingPathComponent("app-session.marker")
@@ -108,10 +116,6 @@ class Logger: @unchecked Sendable {
         }
     }
 
-    /// Removes secrets before a message can reach memory, disk, debug output,
-    /// notifications, exports, or crash-adjacent diagnostics. HTTP and Stremio
-    /// URLs are reduced to their origin because provider tokens can be stored
-    /// in opaque path segments as well as conventional query items.
     static func redactedSensitiveMessage(_ message: String, maximumLength: Int? = nil) -> String {
         let lowercaseMessage = message.lowercased()
         let mightContainSensitiveValue = lowercaseMessage.contains("://")
@@ -129,6 +133,10 @@ class Logger: @unchecked Sendable {
                 return String(message.prefix(maximumLength)) + "...<truncated>"
             }
             return message
+        }
+
+        guard redactionIsComplete, let sensitiveURLRegex else {
+            return "<redacted: log redaction is unavailable in this build>"
         }
 
         var result = message
@@ -168,11 +176,10 @@ class Logger: @unchecked Sendable {
         }
         return result
     }
-    
+
     func log(_ message: String, type: String = "General") {
         let timestamp = Date()
 
-        // Crash diagnostics must survive hard crashes immediately.
         if Self.isCrashDiagnosticType(type) || Self.isCrashDiagnosticMessage(message) {
             let normalizedMessage = Self.redactedSensitiveMessage(message)
                 .replacingOccurrences(of: "\n", with: " ")
@@ -200,10 +207,9 @@ class Logger: @unchecked Sendable {
             }
             return
         }
-        
+
         queue.async(flags: .barrier) {
-            // URL parsing and the redaction regexes are intentionally kept off
-            // UI, player, and networking caller threads for ordinary logs.
+
             let normalizedMessage = Self.redactedSensitiveMessage(message)
                 .replacingOccurrences(of: "\n", with: " ")
             let entry = LogEntry(message: normalizedMessage, type: type, timestamp: timestamp)
@@ -243,7 +249,7 @@ class Logger: @unchecked Sendable {
             }
         }
     }
-    
+
     func getLogs() -> String {
         var result = ""
         queue.sync {
@@ -251,7 +257,7 @@ class Logger: @unchecked Sendable {
         }
         return result
     }
-    
+
     func getLogsAsync(category: String? = nil) async -> String {
         return await withCheckedContinuation { continuation in
             queue.async {
@@ -267,7 +273,7 @@ class Logger: @unchecked Sendable {
             }
         }
     }
-    
+
     func clearLogs() {
         queue.async(flags: .barrier) {
             self.logs.removeAll()
@@ -285,7 +291,7 @@ class Logger: @unchecked Sendable {
             CrashReportManager.shared.clearCrashReport()
         }
     }
-    
+
     func clearLogsAsync() async {
         await withCheckedContinuation { continuation in
             queue.async(flags: .barrier) {
@@ -306,7 +312,7 @@ class Logger: @unchecked Sendable {
             }
         }
     }
-    
+
     func exportLogsToTempFile(category: String? = nil) async throws -> URL {
         let selectedCategory = category.flatMap { value -> String? in
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -314,12 +320,10 @@ class Logger: @unchecked Sendable {
         }
         let logs = await getLogsAsync(category: selectedCategory)
         var content = logs.isEmpty ? "No logs available." : logs
-#if !os(macOS)
         if let crashReport = CrashReportManager.shared.latestCrashReportText(),
            !crashReport.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             content += "\n\n==== Last Native Crash Report ====\n\n\(crashReport)"
         }
-#endif
         guard let data = content.data(using: .utf8) else {
             throw ExportError.encodingFailed
         }
@@ -341,7 +345,7 @@ class Logger: @unchecked Sendable {
         }
         .joined(separator: "\n----\n")
     }
-    
+
     private func debugLog(_ entry: LogEntry) {
 #if DEBUG
         let formattedMessage = "[\(debugDateFormatter.string(from: entry.timestamp))] [\(Self.displayCategory(for: entry.type))] \(entry.message)"
@@ -627,9 +631,6 @@ class Logger: @unchecked Sendable {
         let pattern = #"\[([^\]]+)\] \[([^\]]+)\] (.+)"#
         let regex = try? NSRegularExpression(pattern: pattern)
 
-        // Walk backward and stop once the newest maxLogEntries valid records
-        // are decoded. This preserves the exact retained history while
-        // avoiding thousands of DateFormatter/regex parses at launch.
         var parsedNewestFirst: [LogEntry] = []
         parsedNewestFirst.reserveCapacity(maxLogEntries)
         for line in content.split(separator: "\n").reversed() {

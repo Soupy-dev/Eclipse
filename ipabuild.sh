@@ -40,22 +40,70 @@ fi
 
 cd build
 
-if [ -d "DerivedData$PLATFORM" ]; then
-    rm -rf "DerivedData$PLATFORM"
+DERIVED_DATA_PATH="$WORKING_LOCATION/build/DerivedData-$PLATFORM"
+SOURCE_PACKAGES_DIR="$WORKING_LOCATION/build/SourcePackages-$PLATFORM"
+rm -rf "$DERIVED_DATA_PATH" "$SOURCE_PACKAGES_DIR"
+
+XCODE_CONTAINER=(-project "$WORKING_LOCATION/$PROJECT_NAME.xcodeproj")
+
+MPVKIT_CHECKOUT="$WORKING_LOCATION/../MPVKit"
+MPVKIT_LOCAL_RUNTIME="$MPVKIT_CHECKOUT/dist/release"
+if [ -d "$MPVKIT_LOCAL_RUNTIME/Libmpv.xcframework" ] \
+    || [ -d "$MPVKIT_LOCAL_RUNTIME/xcframework/Libmpv.xcframework" ]; then
+    # MPVKit's manifest can auto-discover this directory, but SwiftPM's manifest
+    # cache does not observe artifact contents. Bind resolution and archive to
+    # the same reviewed local runtime that the native-export audit examines.
+    export MPVKIT_LOCAL_ARTIFACTS_DIR="dist/release"
 fi
 
-# Google Cast is iOS-only and is supplied by CocoaPods. tvOS intentionally
-# continues to build directly from the Xcode project without Cast linkage.
+xcodebuild -resolvePackageDependencies \
+    "${XCODE_CONTAINER[@]}" \
+    -scheme "$SCHEME" \
+    -derivedDataPath "$DERIVED_DATA_PATH" \
+    -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_DIR" \
+    -skipPackagePluginValidation \
+    -skipMacroValidation
+
 if [ "$PLATFORM" = "ios" ]; then
-    if ! command -v pod >/dev/null 2>&1; then
-        echo "Error: CocoaPods is required for iOS builds (install it, then run pod install)."
+    LIBMPV_SLICE='*Libmpv.xcframework/ios-arm64/Libmpv.framework/Libmpv'
+else
+    LIBMPV_SLICE='*Libmpv.xcframework/tvos-arm64_arm64e/Libmpv.framework/Libmpv'
+fi
+
+LIBMPV_BINARY=""
+for ARTIFACT_ROOT in "$MPVKIT_CHECKOUT/dist/release" "$SOURCE_PACKAGES_DIR/artifacts"; do
+    if [ ! -d "$ARTIFACT_ROOT" ]; then
+        continue
+    fi
+    LIBMPV_BINARY="$(find "$ARTIFACT_ROOT" -path "$LIBMPV_SLICE" -type f -print -quit)"
+    if [ -n "$LIBMPV_BINARY" ]; then
+        break
+    fi
+done
+
+if [ -z "$LIBMPV_BINARY" ]; then
+    echo "Error: The resolved MPVKit runtime does not contain the $PLATFORM Libmpv device slice."
+    exit 1
+fi
+
+LIBMPV_SYMBOLS="$WORKING_LOCATION/build/libmpv-$PLATFORM-symbols.txt"
+xcrun nm -gU "$LIBMPV_BINARY" > "$LIBMPV_SYMBOLS" 2>/dev/null || true
+for SYMBOL in \
+    mpv_apple_pip_api_version \
+    mpv_apple_pip_get_capabilities \
+    mpv_apple_pip_set_callback \
+    mpv_apple_pip_set_mode \
+    mpv_apple_pip_submit_target \
+    mpv_apple_pip_disable_and_drain \
+    mpv_apple_audiounit_recovery_count
+do
+    if ! grep -Eq "[[:space:]]_?${SYMBOL}$" "$LIBMPV_SYMBOLS"; then
+        echo "Error: The resolved $PLATFORM Libmpv artifact is missing required native export '$SYMBOL'."
+        echo "Rebuild the reviewed private MPVKit runtime in ../MPVKit/dist/release before packaging."
         exit 1
     fi
-    (cd "$WORKING_LOCATION" && pod install)
-    XCODE_CONTAINER=(-workspace "$WORKING_LOCATION/$PROJECT_NAME.xcworkspace")
-else
-    XCODE_CONTAINER=(-project "$WORKING_LOCATION/$PROJECT_NAME.xcodeproj")
-fi
+done
+rm -f "$LIBMPV_SYMBOLS"
 
 # Create archive (required for proper IPA structure)
 ARCHIVE_PATH="$WORKING_LOCATION/build/$APPLICATION_NAME$OUTPUT_SUFFIX.xcarchive"
@@ -68,6 +116,9 @@ xcodebuild archive \
     -archivePath "$ARCHIVE_PATH" \
     -destination "$XCODE_DESTINATION" \
     -sdk "$SDK" \
+    -derivedDataPath "$DERIVED_DATA_PATH" \
+    -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_DIR" \
+    -disableAutomaticPackageResolution \
     -skipPackagePluginValidation \
     -skipMacroValidation \
     CODE_SIGN_IDENTITY="" \
@@ -98,14 +149,42 @@ fi
 if [ "$PLATFORM" = "ios" ]; then
     "$WORKING_LOCATION/scripts/validate-ios-privacy-manifest.sh" "$APP_PATH"
 else
-    # tvOS deliberately omits the disk-space/file-timestamp required-reason
-    # declarations the iOS validator enforces, so it gets a lighter check.
     MANIFEST_PATH="$APP_PATH/PrivacyInfo.xcprivacy"
     if [ ! -f "$MANIFEST_PATH" ]; then
         echo "Error: PrivacyInfo.xcprivacy is missing from the tvOS app bundle."
         exit 1
     fi
     plutil -lint "$MANIFEST_PATH" >/dev/null
+    python3 - "$MANIFEST_PATH" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    manifest = plistlib.load(handle)
+
+if manifest.get("NSPrivacyTracking") is not False:
+    raise SystemExit("error: tvOS privacy manifest must declare NSPrivacyTracking=false.")
+if manifest.get("NSPrivacyCollectedDataTypes") != []:
+    raise SystemExit("error: tvOS privacy manifest must contain an empty NSPrivacyCollectedDataTypes array.")
+
+required = {
+    "NSPrivacyAccessedAPICategoryUserDefaults": {"CA92.1"},
+    "NSPrivacyAccessedAPICategorySystemBootTime": {"35F9.1"},
+    "NSPrivacyAccessedAPICategoryFileTimestamp": {"C617.1"},
+    "NSPrivacyAccessedAPICategoryDiskSpace": {"E174.1"},
+}
+declared = {
+    entry.get("NSPrivacyAccessedAPIType"): set(entry.get("NSPrivacyAccessedAPITypeReasons", []))
+    for entry in manifest.get("NSPrivacyAccessedAPITypes", [])
+    if isinstance(entry, dict)
+}
+for category, reasons in required.items():
+    missing = reasons - declared.get(category, set())
+    if missing:
+        raise SystemExit(
+            f"error: tvOS privacy manifest is missing {category} reason(s) {', '.join(sorted(missing))}."
+        )
+PY
     echo "tvOS privacy manifest validation passed"
 fi
 

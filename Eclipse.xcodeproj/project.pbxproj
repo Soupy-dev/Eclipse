@@ -7,45 +7,31 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		CASTPODS0000000000000001 /* libPods-Eclipse.a in Frameworks */ = {isa = PBXBuildFile; fileRef = CASTPODS0000000000000002 /* libPods-Eclipse.a */; };
-		MACBF0100000000000000001 /* EclipseMacApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = MACFR0100000000000000001 /* EclipseMacApp.swift */; };
-		MACBF0200000000000000002 /* MacRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = MACFR0200000000000000002 /* MacRootView.swift */; };
-		MACBF0300000000000000003 /* MacPlayback.swift in Sources */ = {isa = PBXBuildFile; fileRef = MACFR0300000000000000003 /* MacPlayback.swift */; };
-		MACBF0400000000000000004 /* MacReader.swift in Sources */ = {isa = PBXBuildFile; fileRef = MACFR0400000000000000004 /* MacReader.swift */; };
-		MACBF0500000000000000005 /* MacSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = MACFR0500000000000000005 /* MacSettings.swift */; };
-		MACBF0A00000000000000000A /* MacCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = MACFR0A00000000000000000A /* MacCatalog.swift */; };
-		MACBF0B00000000000000000B /* MacServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = MACFR0B00000000000000000B /* MacServices.swift */; };
-		MACBF0C00000000000000000C /* MacCloudLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = MACFR0C00000000000000000C /* MacCloudLibrary.swift */; };
-		MACBF0D00000000000000000D /* MacTrackers.swift in Sources */ = {isa = PBXBuildFile; fileRef = MACFR0D00000000000000000D /* MacTrackers.swift */; };
-		MACBF0E00000000000000000E /* MacAidoku.swift in Sources */ = {isa = PBXBuildFile; fileRef = MACFR0E00000000000000000E /* MacAidoku.swift */; };
-		MACBF0F00000000000000000F /* AidokuRunner in Frameworks */ = {isa = PBXBuildFile; productRef = AD0000222FD9000000AD0022 /* AidokuRunner */; };
-		MACBF10000000000000000010 /* ZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = AD0000232FD9000000AD0023 /* ZIPFoundation */; };
-		MACBF11000000000000000011 /* MacLegacyServices.swift in Sources */ = {isa = PBXBuildFile; fileRef = MACFR11000000000000000011 /* MacLegacyServices.swift */; };
-		MACBF12000000000000000012 /* JSController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F072742E4B2D9000EF90EB /* JSController.swift */; };
-		MACBF13000000000000000013 /* JSController-Search.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F072702E4B2D9000EF90EB /* JSController-Search.swift */; };
-		MACBF14000000000000000014 /* JSController-Details.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F072712E4B2D9000EF90EB /* JSController-Details.swift */; };
-		MACBF15000000000000000015 /* JSController-Streams.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F072732E4B2D9000EF90EB /* JSController-Streams.swift */; };
-		MACBF16000000000000000016 /* JSController-NetworkFetch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13B2E5732E7597B9009F3271 /* JSController-NetworkFetch.swift */; };
-		MACBF17000000000000000017 /* JavaScriptCore+Extensions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F0726F2E4B2D9000EF90EB /* JavaScriptCore+Extensions.swift */; };
-		MACBF18000000000000000018 /* CloudflareBypassManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFB000012FE7000000CFB001 /* CloudflareBypassManager.swift */; };
-		MACBF19000000000000000019 /* URLSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F072902E4B2D9100EF90EB /* URLSession.swift */; };
-		MACBF1A00000000000000001A /* Logger.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F072942E4B2D9100EF90EB /* Logger.swift */; };
-		MACBF1B00000000000000001B /* SoraCore in Frameworks */ = {isa = PBXBuildFile; productRef = 13A46D022EF5945700423BC6 /* SoraCore */; };
-		MACBF1C00000000000000001C /* MacAniListCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = MACFR1C00000000000000001C /* MacAniListCatalog.swift */; };
-		MACBF1D00000000000000001D /* MacScheduleSources.swift in Sources */ = {isa = PBXBuildFile; fileRef = MACFR1D00000000000000001D /* MacScheduleSources.swift */; };
-		MACBF1E00000000000000001E /* MacCachedImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = MACFR1E00000000000000001E /* MacCachedImage.swift */; };
-		MACBF0600000000000000006 /* PlatformCapabilities.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVFR00010000000000000001 /* PlatformCapabilities.swift */; };
-		MACBF0700000000000000007 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13F072622E4B2D3700EF90EB /* Assets.xcassets */; };
-		MACBF0800000000000000008 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = MACFR0800000000000000008 /* PrivacyInfo.xcprivacy */; };
-		MACBF0900000000000000009 /* MPVKit-GPL in Frameworks */ = {isa = PBXBuildFile; productRef = 136C25C52EFE950300E37A6E /* MPVKit-GPL */; };
 		TVUTBF0100000000000000001 /* PlatformCapabilitiesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVUTFR0100000000000000001 /* PlatformCapabilitiesTests.swift */; };
 		TVUTBF0200000000000000002 /* MediaStateMergeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVUTFR0200000000000000002 /* MediaStateMergeTests.swift */; };
 		TVUTBF0300000000000000003 /* ServiceCompatibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVUTFR0300000000000000003 /* ServiceCompatibilityTests.swift */; };
 		TVUTBF0500000000000000005 /* NextEpisodeResolverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVUTFR0400000000000000004 /* NextEpisodeResolverTests.swift */; };
 		TVUTBF0600000000000000006 /* DownloadPathIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = TVUTFR0500000000000000005 /* DownloadPathIdentityTests.swift */; };
 		12F745102EB52DFC00889684 /* SkyStreamSecurityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12F7450E2EB52DFC00889684 /* SkyStreamSecurityTests.swift */; };
-		12F745112EB52DFC00889684 /* SkyStreamContentReferenceV1.json in Resources */ = {isa = PBXBuildFile; fileRef = 12F7450F2EB52DFC00889684 /* SkyStreamContentReferenceV1.json */; };
-		12F745122EB52DFC00889684 /* SkyStreamMagicProxyV2.json in Resources */ = {isa = PBXBuildFile; fileRef = 12F7451F2EB52DFC00889684 /* SkyStreamMagicProxyV2.json */; };
+		A11E57102F00000000000001 /* AnimeStructurePolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11E570E2F00000000000001 /* AnimeStructurePolicyTests.swift */; };
+		BPSTBF0000000000000001 /* BackupProfileSnapshotTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BPSTFR0000000000000001 /* BackupProfileSnapshotTests.swift */; };
+		NUVCMPTSTBF000000000001 /* NuvioRepositoryCompletenessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = NUVCMPTSTFR000000000001 /* NuvioRepositoryCompletenessTests.swift */; };
+		A11E57202F00000000000001 /* UserDefaultsSuiteSemanticsProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11E571E2F00000000000001 /* UserDefaultsSuiteSemanticsProbe.swift */; };
+		A11E57302F00000000000001 /* SettingsScopeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11E572E2F00000000000001 /* SettingsScopeTests.swift */; };
+		A11E57412F00000000000009 /* KanzenReaderModeDefaultTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11E57402F00000000000009 /* KanzenReaderModeDefaultTests.swift */; };
+		A11E5751000000000000CAT2 /* KanzenCustomCatalogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11E5750000000000000CAT1 /* KanzenCustomCatalogTests.swift */; };
+		A11E5771000000000MIGT2 /* KanzenAidokuMigrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11E5770000000000MIGT1 /* KanzenAidokuMigrationTests.swift */; };
+		A11E5761000000000PRET2 /* KanzenCatalogPresetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11E5760000000000PRET1 /* KanzenCatalogPresetTests.swift */; };
+		SRPTESTBF000000000000001 /* StreamReachabilityVerdictTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = SRPTESTFR000000000000001 /* StreamReachabilityVerdictTests.swift */; };
+		WTSYNCTESTBF000000000001 /* WatchTogetherProtocolTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = WTSYNCTESTFR000000000001 /* WatchTogetherProtocolTests.swift */; };
+		SCLRPTSTBF00000000000001 /* MPVScalerPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = SCLRPTSTFR00000000000001 /* MPVScalerPolicyTests.swift */; };
+		SCLRPTSTTVB0000000000001 /* MPVScalerPolicyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = SCLRPTSTFR00000000000001 /* MPVScalerPolicyTests.swift */; };
+		A11E57402F00000000000001 /* ProfileLaunchGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11E573E2F00000000000001 /* ProfileLaunchGateTests.swift */; };
+		A11E57502F00000000000001 /* MaturityRatingRegionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11E574E2F00000000000001 /* MaturityRatingRegionTests.swift */; };
+		A11E57602F00000000000001 /* MediaStateMergeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11E575E2F00000000000001 /* MediaStateMergeTests.swift */; };
+		ALTPOSTBF000000000000001 /* TMDBAlternatePosterTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = ALTPOSTFR000000000000001 /* TMDBAlternatePosterTests.swift */; };
+		RXCTSTBF0000000000000001 /* ReaderExtensionCoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RXCTSTFR0000000000000001 /* ReaderExtensionCoreTests.swift */; };
+		RXCMPTSTBF00000000000001 /* ReaderExtensionCompatibilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = RXCMPTSTFR00000000000001 /* ReaderExtensionCompatibilityTests.swift */; };
 		12F7451D2EB52DFC00889684 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = TVTSFR0100000000000000001 /* XCTest.framework */; };
 		DLPATHBF100000000000000001 /* DownloadPathIdentityPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = DLPATHFR000000000000000001 /* DownloadPathIdentityPolicy.swift */; };
 		DLPATHBF200000000000000002 /* DownloadPathIdentityPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = DLPATHFR000000000000000001 /* DownloadPathIdentityPolicy.swift */; };
@@ -82,7 +68,6 @@
 		TVBF00070000000000000007 /* Localizable.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = TVFR00090000000000000009 /* Localizable.xcstrings */; };
 		TVBF00080000000000000008 /* TVAssets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = TVFR00080000000000000008 /* TVAssets.xcassets */; };
 		TVBF00100000000000000010 /* Kingfisher in Frameworks */ = {isa = PBXBuildFile; productRef = 13A46CFF2EF5944C00423BC6 /* Kingfisher */; };
-		TVBF00110000000000000011 /* SoraCore in Frameworks */ = {isa = PBXBuildFile; productRef = 13A46D022EF5945700423BC6 /* SoraCore */; };
 		TVBF00120000000000000012 /* MPVKit-GPL in Frameworks */ = {isa = PBXBuildFile; productRef = 136C25C52EFE950300E37A6E /* MPVKit-GPL */; };
 		TVBF00130000000000000013 /* CrashReporter in Frameworks */ = {isa = PBXBuildFile; productRef = C0A5A0042FD1000000C0A504 /* CrashReporter */; };
 		A1B2C3012FA0000100A1B2C1 /* EclipseTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3002FA0000100A1B2C0 /* EclipseTheme.swift */; };
@@ -94,6 +79,10 @@
 		CC2222202FC0000000CC2220 /* HomeWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC2222002FC0000000CC2200 /* HomeWidgets.swift */; };
 		CC3333302FC0000000CC3330 /* DiscoverDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC3333002FC0000000CC3300 /* DiscoverDetailView.swift */; };
 		CC4444402FC0000000CC4440 /* SplashScreenView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC4444002FC0000000CC4400 /* SplashScreenView.swift */; };
+		ONBD0000000000000000A001 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ONBD0000000000000000F001 /* OnboardingView.swift */; };
+		SPMA0000000000000000A001 /* SplashMotionAtoms.swift in Sources */ = {isa = PBXBuildFile; fileRef = SPMA0000000000000000F001 /* SplashMotionAtoms.swift */; };
+		SPMA0000000000000000A002 /* SplashMotionAtoms.swift in Sources */ = {isa = PBXBuildFile; fileRef = SPMA0000000000000000F001 /* SplashMotionAtoms.swift */; };
+		ONBD0000000000000000A002 /* OnboardingView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ONBD0000000000000000F001 /* OnboardingView.swift */; };
 		12201F512EBE918D0033073C /* ServiceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12201F502EBE91870033073C /* ServiceStore.swift */; };
 		CASTFIX12EBE918D0033073C /* ServiceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12201F502EBE91870033073C /* ServiceStore.swift */; };
 		12201F542EBE922D0033073C /* ServiceModels.xcdatamodeld in Sources */ = {isa = PBXBuildFile; fileRef = 12201F522EBE922D0033073C /* ServiceModels.xcdatamodeld */; };
@@ -103,11 +92,21 @@
 		5E3333312F60000000AE3331 /* StremioAddonStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E3333302F60000000AE3330 /* StremioAddonStore.swift */; };
 		5E4444412F60000000AE4441 /* StremioAddonManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E4444402F60000000AE4440 /* StremioAddonManager.swift */; };
 		SKYIOSBF0000000000000001 /* SkyStreamModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000001 /* SkyStreamModels.swift */; };
+		NUVIOSBF00000000000001 /* NuvioPluginModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = NUVFR0000000000000000001 /* NuvioPluginModels.swift */; };
+		NUVIOSBF00000000000002 /* NuvioPluginStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = NUVFR0000000000000000002 /* NuvioPluginStore.swift */; };
+		NSRDIOSBF0000000000001 /* NuvioSecretRedactor.swift in Sources */ = {isa = PBXBuildFile; fileRef = NSRDFR000000000000001 /* NuvioSecretRedactor.swift */; };
+		NUVIOSBF00000000000003 /* NuvioPluginRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = NUVFR0000000000000000003 /* NuvioPluginRuntime.swift */; };
+		NUVIOSBF00000000000004 /* NuvioPluginManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = NUVFR0000000000000000004 /* NuvioPluginManager.swift */; };
+		NUVIOSBF00000000000005 /* NuvioPluginManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = NUVFR0000000000000000005 /* NuvioPluginManagerView.swift */; };
+		NUVIOSBF00000000000006 /* NuvioScraperSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = NUVFR0000000000000000006 /* NuvioScraperSettingsView.swift */; };
+		NUVIOSBF00000000000007 /* NuvioContentReference.swift in Sources */ = {isa = PBXBuildFile; fileRef = NUVFR0000000000000000007 /* NuvioContentReference.swift */; };
+		NUVTVBF000000000000007 /* NuvioContentReference.swift in Sources */ = {isa = PBXBuildFile; fileRef = NUVFR0000000000000000007 /* NuvioContentReference.swift */; };
 		SKYIOSBF0000000000000002 /* SkyStreamPackageValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000002 /* SkyStreamPackageValidator.swift */; };
 		SKYIOSBF0000000000000003 /* SkyStreamPluginManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000003 /* SkyStreamPluginManager.swift */; };
 		SKYIOSBF0000000000000004 /* SkyStreamRepositoryManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000004 /* SkyStreamRepositoryManager.swift */; };
 		SKYIOSBF0000000000000005 /* SkyStreamRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000005 /* SkyStreamRuntime.swift */; };
 		SKYIOSBF0000000000000006 /* SkyStreamSecurity.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000006 /* SkyStreamSecurity.swift */; };
+		SKYTVBF00000000000000006 /* SkyStreamSecurity.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000006 /* SkyStreamSecurity.swift */; };
 		SKYIOSBF0000000000000007 /* SkyStreamStateEntity.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000007 /* SkyStreamStateEntity.swift */; };
 		SKYIOSBF0000000000000008 /* SkyStreamVODValidator.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000008 /* SkyStreamVODValidator.swift */; };
 		SKYIOSBF0000000000000009 /* SkyStreamManagerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000009 /* SkyStreamManagerView.swift */; };
@@ -118,19 +117,21 @@
 		SKYTVBF00000000000000004 /* SkyStreamRepositoryManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000004 /* SkyStreamRepositoryManager.swift */; };
 		SKYTVBF00000000000000007 /* SkyStreamStateEntity.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000007 /* SkyStreamStateEntity.swift */; };
 		SKYTVBF0000000000000000B /* ProviderContentReference.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR0000000000000000000B /* ProviderContentReference.swift */; };
-		SKYMACBF0000000000000001 /* SkyStreamModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000001 /* SkyStreamModels.swift */; };
-		SKYMACBF0000000000000003 /* SkyStreamPluginManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000003 /* SkyStreamPluginManager.swift */; };
-		SKYMACBF0000000000000004 /* SkyStreamRepositoryManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR00000000000000000004 /* SkyStreamRepositoryManager.swift */; };
-		SKYMACBF000000000000000B /* ProviderContentReference.swift in Sources */ = {isa = PBXBuildFile; fileRef = SKYFR0000000000000000000B /* ProviderContentReference.swift */; };
 		SKYSOUPBF000000000000001 /* SwiftSoup in Frameworks */ = {isa = PBXBuildFile; productRef = SKYSOUPPROD0000000000001 /* SwiftSoup */; };
+		RDRLEGALBUILD000000000001 /* ReaderExtensionLicenses in Resources */ = {isa = PBXBuildFile; fileRef = RDRLEGALFILEREF00000001 /* ReaderExtensionLicenses */; };
+		OSSLEGALIOSBUILD000000001 /* OpenSourceLicenses in Resources */ = {isa = PBXBuildFile; fileRef = OSSLEGALFILEREF000000001 /* OpenSourceLicenses */; };
 		129CC90C2EBA920C00D2D84B /* Bundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 129CC90B2EBA920A00D2D84B /* Bundle.swift */; };
 		12DF1FC22F040D6700E80375 /* AdaptiveConfirmationDialog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12DF1FC12F040D6500E80375 /* AdaptiveConfirmationDialog.swift */; };
-		12E7AF5E2EB7FDB7003B7664 /* FakeWebKit in Frameworks */ = {isa = PBXBuildFile; productRef = 12E7AF5D2EB7FDB7003B7664 /* FakeWebKit */; };
 		12E7AF602EB80775003B7664 /* Platform.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12E7AF5F2EB80771003B7664 /* Platform.swift */; };
 		1324E7BB2E940BD70036B5F5 /* PlayerPreset.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1324E7B32E940BD70036B5F5 /* PlayerPreset.swift */; };
+		SHDRLIBIOSBUILD000000001 /* MPVUserShaderLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = SHDRLIBFILEREF0000000001 /* MPVUserShaderLibrary.swift */; };
+		SHDRLIBTVBUILD0000000001 /* MPVUserShaderLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = SHDRLIBFILEREF0000000001 /* MPVUserShaderLibrary.swift */; };
+		SCLRPOLIOSBUILD000000001 /* MPVScalerPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = SCLRPOLFILEREF0000000001 /* MPVScalerPolicy.swift */; };
+		SCLRPOLTVBUILD0000000001 /* MPVScalerPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = SCLRPOLFILEREF0000000001 /* MPVScalerPolicy.swift */; };
+		SHDRDIRIOSBUILD000000001 /* Shaders in Resources */ = {isa = PBXBuildFile; fileRef = SHDRDIRFILEREF0000000001 /* Shaders */; };
+		SHDRDIRTVBUILD0000000001 /* Shaders in Resources */ = {isa = PBXBuildFile; fileRef = SHDRDIRFILEREF0000000001 /* Shaders */; };
 		1324E7BC2E940BD70036B5F5 /* MPVNativeRenderer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1324E7B42E940BD70036B5F5 /* MPVNativeRenderer.swift */; };
 		1324E7BD2E940BD70036B5F5 /* PlayerViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1324E7B52E940BD70036B5F5 /* PlayerViewController.swift */; };
-		CASTSRC00000000000000001 /* GoogleCastCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = CASTSRC00000000000000002 /* GoogleCastCoordinator.swift */; };
 		7BC72B40F59C41D6B2D8EB9B /* WatchTogetherCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6BCFA99B6F2344E8850E02AD /* WatchTogetherCoordinator.swift */; };
 		1324E7BE2E940BD70036B5F5 /* SampleBufferDisplayView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1324E7B62E940BD70036B5F5 /* SampleBufferDisplayView.swift */; };
 		1324E7BF2E940BD70036B5F5 /* MusicProgressSlider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1324E7B82E940BD70036B5F5 /* MusicProgressSlider.swift */; };
@@ -143,25 +144,35 @@
 		13830AF22E55F51300B3CDE4 /* AlternativeUIView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13830AF12E55F51300B3CDE4 /* AlternativeUIView.swift */; };
 		14CC00040000000000CC0004 /* HomeLayoutView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14CC00030000000000CC0003 /* HomeLayoutView.swift */; };
 		14CC00020000000000CC0002 /* HomeCatalogLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14CC00010000000000CC0001 /* HomeCatalogLayout.swift */; };
+		UPNX00020000000000000002 /* UpNextResolutionCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = UPNX00010000000000000001 /* UpNextResolutionCache.swift */; };
+		UPNX00030000000000000003 /* UpNextResolutionCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = UPNX00010000000000000001 /* UpNextResolutionCache.swift */; };
 		13830AF42E55F5FF00B3CDE4 /* AccentColorManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13830AF32E55F5FF00B3CDE4 /* AccentColorManager.swift */; };
 		139509A22E7DDAE100CB60D4 /* PlayerSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 139509A12E7DDAE100CB60D4 /* PlayerSettingsView.swift */; };
 		BB7777912F20000000BB7791 /* PlayerLanguageSelectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB7777902F20000000BB7790 /* PlayerLanguageSelectionView.swift */; };
 		F9A1B2D22F90000100A1B2D2 /* MPVHeaderProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9A1B2D12F90000100A1B2D1 /* MPVHeaderProxy.swift */; };
+		F9A1B2D32F90000100A1B2D3 /* MPVHeaderProxy.swift in Sources */ = {isa = PBXBuildFile; fileRef = F9A1B2D12F90000100A1B2D1 /* MPVHeaderProxy.swift */; };
 		C0A5A0052FD1000000C0A505 /* CrashReporter in Frameworks */ = {isa = PBXBuildFile; productRef = C0A5A0042FD1000000C0A504 /* CrashReporter */; };
 		AD0000012FD9000000AD0001 /* ReaderLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD0000102FD9000000AD0010 /* ReaderLogger.swift */; };
 		AD0000022FD9000000AD0002 /* ReaderLoggerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD0000112FD9000000AD0011 /* ReaderLoggerView.swift */; };
 		AD0000032FD9000000AD0003 /* AidokuSourceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD0000122FD9000000AD0012 /* AidokuSourceManager.swift */; };
 		AD0000042FD9000000AD0004 /* AidokuMangaDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD0000132FD9000000AD0013 /* AidokuMangaDetailView.swift */; };
 		AD0000052FD9000000AD0005 /* AidokuSourcesSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD0000142FD9000000AD0014 /* AidokuSourcesSettingsView.swift */; };
+		RXMODBF0000000000000001 /* ReaderExtensionModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = RXMODFR0000000000000001 /* ReaderExtensionModels.swift */; };
+		RXNATBF0000000000000001 /* ReaderExtensionNativeProviders.swift in Sources */ = {isa = PBXBuildFile; fileRef = RXNATFR0000000000000001 /* ReaderExtensionNativeProviders.swift */; };
+		RXNOVBF0000000000000001 /* ReaderExtensionNovelSanitizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = RXNOVFR0000000000000001 /* ReaderExtensionNovelSanitizer.swift */; };
+		RXPERBF0000000000000001 /* ReaderExtensionPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = RXPERFR0000000000000001 /* ReaderExtensionPersistence.swift */; };
+		RXPRVBF0000000000000001 /* ReaderExtensionProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = RXPRVFR0000000000000001 /* ReaderExtensionProvider.swift */; };
+		RXSECBF0000000000000001 /* ReaderExtensionSecurity.swift in Sources */ = {isa = PBXBuildFile; fileRef = RXSECFR0000000000000001 /* ReaderExtensionSecurity.swift */; };
+		RXAPPBF0000000000000001 /* ReaderExtensionAppBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = RXAPPFR0000000000000001 /* ReaderExtensionAppBridge.swift */; };
+		RXJS0BF0000000000000001 /* ReaderExtensionJavaScriptRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = RXJS0FR0000000000000001 /* ReaderExtensionJavaScriptRuntime.swift */; };
+		RXMGRBF0000000000000001 /* ReaderExtensionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = RXMGRFR0000000000000001 /* ReaderExtensionManager.swift */; };
+		RXCMPBF0000000000000001 /* ReaderExtensionCompatibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = RXCMPFR0000000000000001 /* ReaderExtensionCompatibility.swift */; };
 		A5D100022FE1000000A5D002 /* ReaderDownloadManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5D100012FE1000000A5D001 /* ReaderDownloadManager.swift */; };
 		A5D100042FE1000000A5D004 /* ReaderDownloadsSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5D100032FE1000000A5D003 /* ReaderDownloadsSettingsView.swift */; };
-		AD0000062FD9000000AD0006 /* AidokuRunner in Frameworks */ = {isa = PBXBuildFile; productRef = AD0000222FD9000000AD0022 /* AidokuRunner */; };
 		AD0000072FD9000000AD0007 /* ZIPFoundation in Frameworks */ = {isa = PBXBuildFile; productRef = AD0000232FD9000000AD0023 /* ZIPFoundation */; };
 		AD0000332FDA000000AD0033 /* Nuke in Frameworks */ = {isa = PBXBuildFile; productRef = AD0000322FDA000000AD0032 /* Nuke */; };
 		AD0000432FDB000000AD0043 /* AsyncDisplayKit in Frameworks */ = {isa = PBXBuildFile; productRef = AD0000422FDB000000AD0042 /* AsyncDisplayKit */; };
-		13A46CFD2EF5943400423BC6 /* FakeWebKit in Frameworks */ = {isa = PBXBuildFile; productRef = 13A46CFC2EF5943400423BC6 /* FakeWebKit */; };
 		13A46D002EF5944C00423BC6 /* Kingfisher in Frameworks */ = {isa = PBXBuildFile; productRef = 13A46CFF2EF5944C00423BC6 /* Kingfisher */; };
-		13A46D032EF5945700423BC6 /* SoraCore in Frameworks */ = {isa = PBXBuildFile; productRef = 13A46D022EF5945700423BC6 /* SoraCore */; };
 		13B2E5742E7597B9009F3271 /* JSController-NetworkFetch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13B2E5732E7597B9009F3271 /* JSController-NetworkFetch.swift */; };
 		CFB000022FE7000000CFB002 /* CloudflareBypassManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = CFB000012FE7000000CFB001 /* CloudflareBypassManager.swift */; };
 		13B6F3452EA4C6BC00DECD2B /* ProgressManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13B6F3442EA4C6BC00DECD2B /* ProgressManager.swift */; };
@@ -207,6 +218,8 @@
 		13F0729E2E4B2D9200EF90EB /* JSController-Details.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F072712E4B2D9000EF90EB /* JSController-Details.swift */; };
 		13F0729F2E4B2D9200EF90EB /* ServiceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F072722E4B2D9000EF90EB /* ServiceManager.swift */; };
 		14CC00060000000000CC0006 /* AutoModeStreamSelection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 14CC00050000000000CC0005 /* AutoModeStreamSelection.swift */; };
+		SRPIOSBF0000000000000001 /* StreamReachabilityProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = SRPFR00000000000000000001 /* StreamReachabilityProbe.swift */; };
+		SRPTVBF00000000000000001 /* StreamReachabilityProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = SRPFR00000000000000000001 /* StreamReachabilityProbe.swift */; };
 		13F072A02E4B2D9200EF90EB /* JSController-Streams.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F072732E4B2D9000EF90EB /* JSController-Streams.swift */; };
 		13F072A12E4B2D9200EF90EB /* JSController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F072742E4B2D9000EF90EB /* JSController.swift */; };
 		13F072A22E4B2D9200EF90EB /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 13F072772E4B2D9000EF90EB /* SettingsView.swift */; };
@@ -253,12 +266,40 @@
 		DD1111152FB0000000DD1115 /* HLSDownloader.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD1111142FB0000000DD1114 /* HLSDownloader.swift */; };
 		DD2222222FB0000000DD2222 /* DownloadsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD2222202FB0000000DD2220 /* DownloadsView.swift */; };
 		DD4444442FB0000000DD4444 /* DownloadedShowDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD4444402FB0000000DD4440 /* DownloadedShowDetailView.swift */; };
+		AF00000000000000000000A1 /* AppHub.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF00000000000000000000A2 /* AppHub.swift */; };
 		DD3333332FB0000000DD3333 /* FloatingSearchButton.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD3333302FB0000000DD3330 /* FloatingSearchButton.swift */; };
 		AA1111112F10000000AA1111 /* TrackerManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA1111102F10000000AA1110 /* TrackerManager.swift */; };
 		AA2222222F10000000AA2222 /* TrackerModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA2222202F10000000AA2220 /* TrackerModels.swift */; };
 		AA3333332F10000000AA3333 /* TrackersSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA3333302F10000000AA3330 /* TrackersSettingsView.swift */; };
 		AA4444442F10000000AA4444 /* ScheduleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA4444402F10000000AA4440 /* ScheduleView.swift */; };
 		AA5555552F10000000AA5555 /* CatalogManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA5555502F10000000AA5550 /* CatalogManager.swift */; };
+		PROBF0100000000000000001 /* ProfileManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = PROFR0100000000000000001 /* ProfileManager.swift */; };
+		PSSBF0100000000000000001 /* ProfileSettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = PSSFR0100000000000000001 /* ProfileSettingsStore.swift */; };
+		KPGBF0100000000000000001 /* KidsPlaybackGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = KPGFR0100000000000000001 /* KidsPlaybackGate.swift */; };
+		SSCBF0100000000000000001 /* ServiceStoreScope.swift in Sources */ = {isa = PBXBuildFile; fileRef = SSCFR0100000000000000001 /* ServiceStoreScope.swift */; };
+		STSBF0100000000000000001 /* SettingsScope.swift in Sources */ = {isa = PBXBuildFile; fileRef = STSFR0100000000000000001 /* SettingsScope.swift */; };
+		PSABF0100000000000000001 /* ProfileScopedAppStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = PSAFR0100000000000000001 /* ProfileScopedAppStorage.swift */; };
+		PSRBF0100000000000000001 /* ProfileScopedStoreRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = PSRFR0100000000000000001 /* ProfileScopedStoreRegistry.swift */; };
+		MATBF0100000000000000001 /* MaturityRating.swift in Sources */ = {isa = PBXBuildFile; fileRef = MATFR0100000000000000001 /* MaturityRating.swift */; };
+		KIDBF0100000000000000001 /* KidsHomeCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = KIDFR0100000000000000001 /* KidsHomeCatalog.swift */; };
+		KIDBF0200000000000000002 /* KidsHomeCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = KIDFR0100000000000000001 /* KidsHomeCatalog.swift */; };
+		MATBF0200000000000000002 /* MaturityRating.swift in Sources */ = {isa = PBXBuildFile; fileRef = MATFR0100000000000000001 /* MaturityRating.swift */; };
+		MATBF0300000000000000003 /* TMDBMaturityRatingStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = MATFR0300000000000000003 /* TMDBMaturityRatingStore.swift */; };
+		MATBF0400000000000000004 /* TMDBMaturityRatingStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = MATFR0300000000000000003 /* TMDBMaturityRatingStore.swift */; };
+		RCFBF0100000000000000001 /* ReaderContentFilter.swift in Sources */ = {isa = PBXBuildFile; fileRef = RCFFR0100000000000000001 /* ReaderContentFilter.swift */; };
+		SHMBF0100000000000000001 /* SharedMediaModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = SHMFR0100000000000000001 /* SharedMediaModels.swift */; };
+		SHMBF0200000000000000002 /* SharedMediaModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = SHMFR0100000000000000001 /* SharedMediaModels.swift */; };
+		PROBF0200000000000000002 /* ProfileManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = PROFR0100000000000000001 /* ProfileManager.swift */; };
+		PSSBF0200000000000000002 /* ProfileSettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = PSSFR0100000000000000001 /* ProfileSettingsStore.swift */; };
+		KPGBF0200000000000000002 /* KidsPlaybackGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = KPGFR0100000000000000001 /* KidsPlaybackGate.swift */; };
+		SSCBF0200000000000000002 /* ServiceStoreScope.swift in Sources */ = {isa = PBXBuildFile; fileRef = SSCFR0100000000000000001 /* ServiceStoreScope.swift */; };
+		STSBF0200000000000000002 /* SettingsScope.swift in Sources */ = {isa = PBXBuildFile; fileRef = STSFR0100000000000000001 /* SettingsScope.swift */; };
+		PSABF0200000000000000002 /* ProfileScopedAppStorage.swift in Sources */ = {isa = PBXBuildFile; fileRef = PSAFR0100000000000000001 /* ProfileScopedAppStorage.swift */; };
+		PSRBF0200000000000000002 /* ProfileScopedStoreRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = PSRFR0100000000000000001 /* ProfileScopedStoreRegistry.swift */; };
+		PROBF0500000000000000005 /* MediaStateSyncTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = PROFR0300000000000000003 /* MediaStateSyncTransport.swift */; };
+		PROBF0600000000000000006 /* MediaStateSyncTransport.swift in Sources */ = {isa = PBXBuildFile; fileRef = PROFR0300000000000000003 /* MediaStateSyncTransport.swift */; };
+		PROBF0300000000000000003 /* ProfilesSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = PROFR0200000000000000002 /* ProfilesSettingsView.swift */; };
+		PROBF0400000000000000004 /* ProfilesSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = PROFR0200000000000000002 /* ProfilesSettingsView.swift */; };
 		AA6666662F10000000AA6666 /* CatalogsSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA6666602F10000000AA6660 /* CatalogsSettingsView.swift */; };
 		AA7777712F10000000AA7771 /* HomeViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA7777702F10000000AA7770 /* HomeViewModel.swift */; };
 		BB9999912F50000000BB9991 /* RecommendationEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB9999902F50000000BB9990 /* RecommendationEngine.swift */; };
@@ -269,10 +310,18 @@
 		FF1111112F30000000FF1111 /* AniListMangaService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF1111102F30000000FF1110 /* AniListMangaService.swift */; };
 		FF2222222F30000000FF2222 /* MangaCatalogManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF2222202F30000000FF2220 /* MangaCatalogManager.swift */; };
 		FF3333332F30000000FF3333 /* MangaHomeViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF3333302F30000000FF3330 /* MangaHomeViewModel.swift */; };
+		KCC2000000000000000CAT02 /* KanzenCustomCatalogsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = KCC2000000000000000CAT01 /* KanzenCustomCatalogsView.swift */; };
+		KCB1000000000000000BLD02 /* KanzenCatalogBuilderView.swift in Sources */ = {isa = PBXBuildFile; fileRef = KCB1000000000000000BLD01 /* KanzenCatalogBuilderView.swift */; };
+		KCC1000000000000000CAT02 /* KanzenCustomCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = KCC1000000000000000CAT01 /* KanzenCustomCatalog.swift */; };
+		KAM1000000000000000MIG02 /* KanzenAidokuMigration.swift in Sources */ = {isa = PBXBuildFile; fileRef = KAM1000000000000000MIG01 /* KanzenAidokuMigration.swift */; };
+		KMG1000000000000000VW02 /* KanzenAidokuMigrationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = KMG1000000000000000VW01 /* KanzenAidokuMigrationView.swift */; };
+		KMG2000000000000000PR02 /* KanzenAidokuMigrationPrompt.swift in Sources */ = {isa = PBXBuildFile; fileRef = KMG2000000000000000PR01 /* KanzenAidokuMigrationPrompt.swift */; };
+		KCP1000000000000000PRE02 /* KanzenCatalogPresets.swift in Sources */ = {isa = PBXBuildFile; fileRef = KCP1000000000000000PRE01 /* KanzenCatalogPresets.swift */; };
 		FF4444442F30000000FF4444 /* MangaSourceFinder.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF4444402F30000000FF4440 /* MangaSourceFinder.swift */; };
 		FF5555552F30000000FF5555 /* KanzenHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF5555502F30000000FF5550 /* KanzenHomeView.swift */; };
 		FF5555562F30000000FF5556 /* KanzenHistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF5555512F30000000FF5551 /* KanzenHistoryView.swift */; };
 		FF6666662F30000000FF6666 /* KanzenGlobalSearchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF6666602F30000000FF6660 /* KanzenGlobalSearchView.swift */; };
+		KFE1000000000000000EDT02 /* ReaderExtensionFilterEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = KFE1000000000000000EDT01 /* ReaderExtensionFilterEditor.swift */; };
 		FF7777712F30000000FF7771 /* MangaDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF7777702F30000000FF7770 /* MangaDetailView.swift */; };
 		FF8888812F30000000FF8881 /* MangaCatalogSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF8888802F30000000FF8880 /* MangaCatalogSettingsView.swift */; };
 		FAA111012F40000000FAA111 /* MangaLibraryItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = FAA111002F40000000FAA110 /* MangaLibraryItem.swift */; };
@@ -322,31 +371,25 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		CASTPODS0000000000000002 /* libPods-Eclipse.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; path = "libPods-Eclipse.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		12F7450E2EB52DFC00889684 /* SkyStreamSecurityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyStreamSecurityTests.swift; sourceTree = "<group>"; };
-		12F7450F2EB52DFC00889684 /* SkyStreamContentReferenceV1.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = SkyStreamContentReferenceV1.json; sourceTree = "<group>"; };
-		12F7451F2EB52DFC00889684 /* SkyStreamMagicProxyV2.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; path = SkyStreamMagicProxyV2.json; sourceTree = "<group>"; };
+		A11E570E2F00000000000001 /* AnimeStructurePolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimeStructurePolicyTests.swift; sourceTree = "<group>"; };
+		BPSTFR0000000000000001 /* BackupProfileSnapshotTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackupProfileSnapshotTests.swift; sourceTree = "<group>"; };
+		NUVCMPTSTFR000000000001 /* NuvioRepositoryCompletenessTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioRepositoryCompletenessTests.swift; sourceTree = "<group>"; };
+		RXCTSTFR0000000000000001 /* ReaderExtensionCoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderExtensionCoreTests.swift; sourceTree = "<group>"; };
+		RXCMPTSTFR00000000000001 /* ReaderExtensionCompatibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderExtensionCompatibilityTests.swift; sourceTree = "<group>"; };
+		A11E571E2F00000000000001 /* UserDefaultsSuiteSemanticsProbe.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserDefaultsSuiteSemanticsProbe.swift; sourceTree = "<group>"; };
+		A11E572E2F00000000000001 /* SettingsScopeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsScopeTests.swift; sourceTree = "<group>"; };
+		A11E57402F00000000000009 /* KanzenReaderModeDefaultTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanzenReaderModeDefaultTests.swift; sourceTree = "<group>"; };
+		A11E5750000000000000CAT1 /* KanzenCustomCatalogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanzenCustomCatalogTests.swift; sourceTree = "<group>"; };
+		A11E5770000000000MIGT1 /* KanzenAidokuMigrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanzenAidokuMigrationTests.swift; sourceTree = "<group>"; };
+		A11E5760000000000PRET1 /* KanzenCatalogPresetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KanzenCatalogPresetTests.swift; sourceTree = "<group>"; };
+		SRPTESTFR000000000000001 /* StreamReachabilityVerdictTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamReachabilityVerdictTests.swift; sourceTree = "<group>"; };
+		WTSYNCTESTFR000000000001 /* WatchTogetherProtocolTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchTogetherProtocolTests.swift; sourceTree = "<group>"; };
+		SCLRPTSTFR00000000000001 /* MPVScalerPolicyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MPVScalerPolicyTests.swift; sourceTree = "<group>"; };
+		A11E573E2F00000000000001 /* ProfileLaunchGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProfileLaunchGateTests.swift; sourceTree = "<group>"; };
+		A11E574E2F00000000000001 /* MaturityRatingRegionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MaturityRatingRegionTests.swift; sourceTree = "<group>"; };
+		A11E575E2F00000000000001 /* MediaStateMergeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaStateMergeTests.swift; sourceTree = "<group>"; };
 		12F7451E2EB52DFC00889684 /* Tests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = Tests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		CASTPODS0000000000000003 /* EclipsePodsDebug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Configurations/EclipsePodsDebug.xcconfig; sourceTree = "<group>"; };
-		CASTPODS0000000000000004 /* EclipsePodsRelease.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Configurations/EclipsePodsRelease.xcconfig; sourceTree = "<group>"; };
-		MACFR0100000000000000001 /* EclipseMacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EclipseMacApp.swift; sourceTree = "<group>"; };
-		MACFR0200000000000000002 /* MacRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacRootView.swift; sourceTree = "<group>"; };
-		MACFR0300000000000000003 /* MacPlayback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacPlayback.swift; sourceTree = "<group>"; };
-		MACFR0400000000000000004 /* MacReader.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacReader.swift; sourceTree = "<group>"; };
-		MACFR0500000000000000005 /* MacSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacSettings.swift; sourceTree = "<group>"; };
-		MACFR0A00000000000000000A /* MacCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacCatalog.swift; sourceTree = "<group>"; };
-		MACFR0B00000000000000000B /* MacServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacServices.swift; sourceTree = "<group>"; };
-		MACFR0C00000000000000000C /* MacCloudLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacCloudLibrary.swift; sourceTree = "<group>"; };
-		MACFR0D00000000000000000D /* MacTrackers.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacTrackers.swift; sourceTree = "<group>"; };
-		MACFR0E00000000000000000E /* MacAidoku.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacAidoku.swift; sourceTree = "<group>"; };
-		MACFR11000000000000000011 /* MacLegacyServices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacLegacyServices.swift; sourceTree = "<group>"; };
-		MACFR1C00000000000000001C /* MacAniListCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacAniListCatalog.swift; sourceTree = "<group>"; };
-		MACFR1D00000000000000001D /* MacScheduleSources.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacScheduleSources.swift; sourceTree = "<group>"; };
-		MACFR1E00000000000000001E /* MacCachedImage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacCachedImage.swift; sourceTree = "<group>"; };
-		MACFR0600000000000000006 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-		MACFR0700000000000000007 /* EclipseMac.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = EclipseMac.entitlements; sourceTree = "<group>"; };
-		MACFR0800000000000000008 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
-		MACPR0100000000000000001 /* Eclipse.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Eclipse.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		TVUTFR0100000000000000001 /* PlatformCapabilitiesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlatformCapabilitiesTests.swift; sourceTree = "<group>"; };
 		TVUTFR0200000000000000002 /* MediaStateMergeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaStateMergeTests.swift; sourceTree = "<group>"; };
 		TVUTFR0300000000000000003 /* ServiceCompatibilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceCompatibilityTests.swift; sourceTree = "<group>"; };
@@ -386,7 +429,10 @@
 		CC2222002FC0000000CC2200 /* HomeWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeWidgets.swift; sourceTree = "<group>"; };
 		CC3333002FC0000000CC3300 /* DiscoverDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiscoverDetailView.swift; sourceTree = "<group>"; };
 		CC4444002FC0000000CC4400 /* SplashScreenView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplashScreenView.swift; sourceTree = "<group>"; };
+		ONBD0000000000000000F001 /* OnboardingView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnboardingView.swift; sourceTree = "<group>"; };
+		SPMA0000000000000000F001 /* SplashMotionAtoms.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplashMotionAtoms.swift; sourceTree = "<group>"; };
 		12201F502EBE91870033073C /* ServiceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServiceStore.swift; sourceTree = "<group>"; };
+		SSCFR0100000000000000001 /* ServiceStoreScope.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ServiceStoreScope.swift; sourceTree = "<group>"; };
 		12201F532EBE922D0033073C /* ServiceModels.xcdatamodel */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcdatamodel; path = ServiceModels.xcdatamodel; sourceTree = "<group>"; };
 		5E1111102F60000000AE1110 /* StremioModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StremioModels.swift; sourceTree = "<group>"; };
 		5E2222202F70000000AE2220 /* StremioConfigureView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StremioConfigureView.swift; sourceTree = "<group>"; };
@@ -394,6 +440,14 @@
 		5E3333302F60000000AE3330 /* StremioAddonStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StremioAddonStore.swift; sourceTree = "<group>"; };
 		5E4444402F60000000AE4440 /* StremioAddonManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StremioAddonManager.swift; sourceTree = "<group>"; };
 		SKYFR00000000000000000001 /* SkyStreamModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyStreamModels.swift; sourceTree = "<group>"; };
+		NUVFR0000000000000000001 /* NuvioPluginModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioPluginModels.swift; sourceTree = "<group>"; };
+		NUVFR0000000000000000002 /* NuvioPluginStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioPluginStore.swift; sourceTree = "<group>"; };
+		NSRDFR000000000000001 /* NuvioSecretRedactor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioSecretRedactor.swift; sourceTree = "<group>"; };
+		NUVFR0000000000000000003 /* NuvioPluginRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioPluginRuntime.swift; sourceTree = "<group>"; };
+		NUVFR0000000000000000004 /* NuvioPluginManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioPluginManager.swift; sourceTree = "<group>"; };
+		NUVFR0000000000000000005 /* NuvioPluginManagerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioPluginManagerView.swift; sourceTree = "<group>"; };
+		NUVFR0000000000000000006 /* NuvioScraperSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioScraperSettingsView.swift; sourceTree = "<group>"; };
+		NUVFR0000000000000000007 /* NuvioContentReference.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioContentReference.swift; sourceTree = "<group>"; };
 		SKYFR00000000000000000002 /* SkyStreamPackageValidator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyStreamPackageValidator.swift; sourceTree = "<group>"; };
 		SKYFR00000000000000000003 /* SkyStreamPluginManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyStreamPluginManager.swift; sourceTree = "<group>"; };
 		SKYFR00000000000000000004 /* SkyStreamRepositoryManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkyStreamRepositoryManager.swift; sourceTree = "<group>"; };
@@ -411,9 +465,13 @@
 		12DF1FC12F040D6500E80375 /* AdaptiveConfirmationDialog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AdaptiveConfirmationDialog.swift; sourceTree = "<group>"; };
 		12E7AF5F2EB80771003B7664 /* Platform.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Platform.swift; sourceTree = "<group>"; };
 		1324E7B32E940BD70036B5F5 /* PlayerPreset.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = PlayerPreset.swift; sourceTree = "<group>"; };
+		SHDRLIBFILEREF0000000001 /* MPVUserShaderLibrary.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MPVUserShaderLibrary.swift; sourceTree = "<group>"; };
+		SCLRPOLFILEREF0000000001 /* MPVScalerPolicy.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MPVScalerPolicy.swift; sourceTree = "<group>"; };
+		SHDRDIRFILEREF0000000001 /* Shaders */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Shaders; sourceTree = "<group>"; };
+		RDRLEGALFILEREF00000001 /* ReaderExtensionLicenses */ = {isa = PBXFileReference; lastKnownFileType = folder; name = ReaderExtensionLicenses; path = Legal/ReaderExtensions; sourceTree = "<group>"; };
+		OSSLEGALFILEREF000000001 /* OpenSourceLicenses */ = {isa = PBXFileReference; lastKnownFileType = folder; name = OpenSourceLicenses; path = Legal/OpenSourceLicenses; sourceTree = "<group>"; };
 		1324E7B42E940BD70036B5F5 /* MPVNativeRenderer.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MPVNativeRenderer.swift; sourceTree = "<group>"; };
 		1324E7B52E940BD70036B5F5 /* PlayerViewController.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = PlayerViewController.swift; sourceTree = "<group>"; };
-		CASTSRC00000000000000002 /* GoogleCastCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GoogleCastCoordinator.swift; sourceTree = "<group>"; };
 		6BCFA99B6F2344E8850E02AD /* WatchTogetherCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatchTogetherCoordinator.swift; sourceTree = "<group>"; };
 		1324E7B62E940BD70036B5F5 /* SampleBufferDisplayView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SampleBufferDisplayView.swift; sourceTree = "<group>"; };
 		1324E7B82E940BD70036B5F5 /* MusicProgressSlider.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MusicProgressSlider.swift; sourceTree = "<group>"; };
@@ -476,6 +534,7 @@
 		13F072712E4B2D9000EF90EB /* JSController-Details.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = "JSController-Details.swift"; sourceTree = "<group>"; };
 		13F072722E4B2D9000EF90EB /* ServiceManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ServiceManager.swift; sourceTree = "<group>"; };
 		14CC00050000000000CC0005 /* AutoModeStreamSelection.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AutoModeStreamSelection.swift; sourceTree = "<group>"; };
+		SRPFR00000000000000000001 /* StreamReachabilityProbe.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = StreamReachabilityProbe.swift; sourceTree = "<group>"; };
 		13F072732E4B2D9000EF90EB /* JSController-Streams.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = "JSController-Streams.swift"; sourceTree = "<group>"; };
 		13F072742E4B2D9000EF90EB /* JSController.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = JSController.swift; sourceTree = "<group>"; };
 		13F072772E4B2D9000EF90EB /* SettingsView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
@@ -505,6 +564,7 @@
 		13F072962E4B2D9100EF90EB /* LevenshteinDistance.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = LevenshteinDistance.swift; sourceTree = "<group>"; };
 		13F072992E4B2D9200EF90EB /* TMDBModels.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = TMDBModels.swift; sourceTree = "<group>"; };
 		13F0729A2E4B2D9200EF90EB /* TMDBService.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = TMDBService.swift; sourceTree = "<group>"; };
+		ALTPOSTFR000000000000001 /* TMDBAlternatePosterTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TMDBAlternatePosterTests.swift; sourceTree = "<group>"; };
 		13F072C12E4B2D9200EF90EB /* AniListService.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AniListService.swift; sourceTree = "<group>"; };
 		13F187A42E6F38CE00747F7E /* LibraryManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = LibraryManager.swift; sourceTree = "<group>"; };
 		13F187A62E6F38CE00747F7E /* LibraryItem.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = LibraryItem.swift; sourceTree = "<group>"; };
@@ -518,11 +578,25 @@
 		14BBB0043FFF111100AAAAAA /* BackupManagementView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = BackupManagementView.swift; sourceTree = "<group>"; };
 		14BBB0063FFF111100AAAAAA /* BackupManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = BackupManager.swift; sourceTree = "<group>"; };
 		14CC00010000000000CC0001 /* HomeCatalogLayout.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = HomeCatalogLayout.swift; sourceTree = "<group>"; };
+		UPNX00010000000000000001 /* UpNextResolutionCache.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = UpNextResolutionCache.swift; sourceTree = "<group>"; };
 		AA1111102F10000000AA1110 /* TrackerManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = TrackerManager.swift; sourceTree = "<group>"; };
 		AA2222202F10000000AA2220 /* TrackerModels.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = TrackerModels.swift; sourceTree = "<group>"; };
 		AA3333302F10000000AA3330 /* TrackersSettingsView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = TrackersSettingsView.swift; sourceTree = "<group>"; };
 		AA4444402F10000000AA4440 /* ScheduleView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ScheduleView.swift; sourceTree = "<group>"; };
 		AA5555502F10000000AA5550 /* CatalogManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = CatalogManager.swift; sourceTree = "<group>"; };
+		PROFR0100000000000000001 /* ProfileManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ProfileManager.swift; sourceTree = "<group>"; };
+		PSSFR0100000000000000001 /* ProfileSettingsStore.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ProfileSettingsStore.swift; sourceTree = "<group>"; };
+		KPGFR0100000000000000001 /* KidsPlaybackGate.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KidsPlaybackGate.swift; sourceTree = "<group>"; };
+		STSFR0100000000000000001 /* SettingsScope.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SettingsScope.swift; sourceTree = "<group>"; };
+		PSAFR0100000000000000001 /* ProfileScopedAppStorage.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ProfileScopedAppStorage.swift; sourceTree = "<group>"; };
+		PSRFR0100000000000000001 /* ProfileScopedStoreRegistry.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ProfileScopedStoreRegistry.swift; sourceTree = "<group>"; };
+		MATFR0100000000000000001 /* MaturityRating.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MaturityRating.swift; sourceTree = "<group>"; };
+		KIDFR0100000000000000001 /* KidsHomeCatalog.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KidsHomeCatalog.swift; sourceTree = "<group>"; };
+		MATFR0300000000000000003 /* TMDBMaturityRatingStore.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = TMDBMaturityRatingStore.swift; sourceTree = "<group>"; };
+		RCFFR0100000000000000001 /* ReaderContentFilter.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ReaderContentFilter.swift; sourceTree = "<group>"; };
+		SHMFR0100000000000000001 /* SharedMediaModels.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = SharedMediaModels.swift; sourceTree = "<group>"; };
+		PROFR0300000000000000003 /* MediaStateSyncTransport.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MediaStateSyncTransport.swift; sourceTree = "<group>"; };
+		PROFR0200000000000000002 /* ProfilesSettingsView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ProfilesSettingsView.swift; sourceTree = "<group>"; };
 		AA7777702F10000000AA7770 /* HomeViewModel.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = HomeViewModel.swift; sourceTree = "<group>"; };
 		AA8888802F10000000AA8880 /* ScheduleViewModel.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ScheduleViewModel.swift; sourceTree = "<group>"; };
 		A9F100002FF1000000A9F100 /* LocalNotificationManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = LocalNotificationManager.swift; sourceTree = "<group>"; };
@@ -535,14 +609,23 @@
 		DD1111142FB0000000DD1114 /* HLSDownloader.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = HLSDownloader.swift; sourceTree = "<group>"; };
 		DD2222202FB0000000DD2220 /* DownloadsView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = DownloadsView.swift; sourceTree = "<group>"; };
 		DD4444402FB0000000DD4440 /* DownloadedShowDetailView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = DownloadedShowDetailView.swift; sourceTree = "<group>"; };
+		AF00000000000000000000A2 /* AppHub.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AppHub.swift; sourceTree = "<group>"; };
 		DD3333302FB0000000DD3330 /* FloatingSearchButton.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = FloatingSearchButton.swift; sourceTree = "<group>"; };
 		FF1111102F30000000FF1110 /* AniListMangaService.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AniListMangaService.swift; sourceTree = "<group>"; };
 		FF2222202F30000000FF2220 /* MangaCatalogManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MangaCatalogManager.swift; sourceTree = "<group>"; };
 		FF3333302F30000000FF3330 /* MangaHomeViewModel.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MangaHomeViewModel.swift; sourceTree = "<group>"; };
+		KCC2000000000000000CAT01 /* KanzenCustomCatalogsView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KanzenCustomCatalogsView.swift; sourceTree = "<group>"; };
+		KCB1000000000000000BLD01 /* KanzenCatalogBuilderView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KanzenCatalogBuilderView.swift; sourceTree = "<group>"; };
+		KCC1000000000000000CAT01 /* KanzenCustomCatalog.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KanzenCustomCatalog.swift; sourceTree = "<group>"; };
+		KAM1000000000000000MIG01 /* KanzenAidokuMigration.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KanzenAidokuMigration.swift; sourceTree = "<group>"; };
+		KMG1000000000000000VW01 /* KanzenAidokuMigrationView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KanzenAidokuMigrationView.swift; sourceTree = "<group>"; };
+		KMG2000000000000000PR01 /* KanzenAidokuMigrationPrompt.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KanzenAidokuMigrationPrompt.swift; sourceTree = "<group>"; };
+		KCP1000000000000000PRE01 /* KanzenCatalogPresets.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KanzenCatalogPresets.swift; sourceTree = "<group>"; };
 		FF4444402F30000000FF4440 /* MangaSourceFinder.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MangaSourceFinder.swift; sourceTree = "<group>"; };
 		FF5555502F30000000FF5550 /* KanzenHomeView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KanzenHomeView.swift; sourceTree = "<group>"; };
 		FF5555512F30000000FF5551 /* KanzenHistoryView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KanzenHistoryView.swift; sourceTree = "<group>"; };
 		FF6666602F30000000FF6660 /* KanzenGlobalSearchView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = KanzenGlobalSearchView.swift; sourceTree = "<group>"; };
+		KFE1000000000000000EDT01 /* ReaderExtensionFilterEditor.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ReaderExtensionFilterEditor.swift; sourceTree = "<group>"; };
 		FF7777702F30000000FF7770 /* MangaDetailView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MangaDetailView.swift; sourceTree = "<group>"; };
 		FF8888802F30000000FF8880 /* MangaCatalogSettingsView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MangaCatalogSettingsView.swift; sourceTree = "<group>"; };
 		FAA111002F40000000FAA110 /* MangaLibraryItem.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = MangaLibraryItem.swift; sourceTree = "<group>"; };
@@ -558,6 +641,16 @@
 		AD0000122FD9000000AD0012 /* AidokuSourceManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AidokuSourceManager.swift; sourceTree = "<group>"; };
 		AD0000132FD9000000AD0013 /* AidokuMangaDetailView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AidokuMangaDetailView.swift; sourceTree = "<group>"; };
 		AD0000142FD9000000AD0014 /* AidokuSourcesSettingsView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AidokuSourcesSettingsView.swift; sourceTree = "<group>"; };
+		RXMODFR0000000000000001 /* ReaderExtensionModels.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ReaderExtensionModels.swift; sourceTree = "<group>"; };
+		RXNATFR0000000000000001 /* ReaderExtensionNativeProviders.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ReaderExtensionNativeProviders.swift; sourceTree = "<group>"; };
+		RXNOVFR0000000000000001 /* ReaderExtensionNovelSanitizer.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ReaderExtensionNovelSanitizer.swift; sourceTree = "<group>"; };
+		RXPERFR0000000000000001 /* ReaderExtensionPersistence.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ReaderExtensionPersistence.swift; sourceTree = "<group>"; };
+		RXPRVFR0000000000000001 /* ReaderExtensionProvider.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ReaderExtensionProvider.swift; sourceTree = "<group>"; };
+		RXSECFR0000000000000001 /* ReaderExtensionSecurity.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ReaderExtensionSecurity.swift; sourceTree = "<group>"; };
+		RXAPPFR0000000000000001 /* ReaderExtensionAppBridge.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ReaderExtensionAppBridge.swift; sourceTree = "<group>"; };
+		RXJS0FR0000000000000001 /* ReaderExtensionJavaScriptRuntime.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ReaderExtensionJavaScriptRuntime.swift; sourceTree = "<group>"; };
+		RXMGRFR0000000000000001 /* ReaderExtensionManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ReaderExtensionManager.swift; sourceTree = "<group>"; };
+		RXCMPFR0000000000000001 /* ReaderExtensionCompatibility.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ReaderExtensionCompatibility.swift; sourceTree = "<group>"; };
 		A5D100012FE1000000A5D001 /* ReaderDownloadManager.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ReaderDownloadManager.swift; sourceTree = "<group>"; };
 		A5D100032FE1000000A5D003 /* ReaderDownloadsSettingsView.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = ReaderDownloadsSettingsView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -568,17 +661,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				12F7451D2EB52DFC00889684 /* XCTest.framework in Frameworks */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		MACPH0200000000000000002 /* Frameworks */ = {
-			isa = PBXFrameworksBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				MACBF0900000000000000009 /* MPVKit-GPL in Frameworks */,
-				MACBF0F00000000000000000F /* AidokuRunner in Frameworks */,
-				MACBF10000000000000000010 /* ZIPFoundation in Frameworks */,
-				MACBF1B00000000000000001B /* SoraCore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -603,7 +685,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				TVBF00100000000000000010 /* Kingfisher in Frameworks */,
-				TVBF00110000000000000011 /* SoraCore in Frameworks */,
 				TVBF00120000000000000012 /* MPVKit-GPL in Frameworks */,
 				TVBF00130000000000000013 /* CrashReporter in Frameworks */,
 			);
@@ -613,15 +694,10 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				CASTPODS0000000000000001 /* libPods-Eclipse.a in Frameworks */,
 				SKYSOUPBF000000000000001 /* SwiftSoup in Frameworks */,
 				13A46D002EF5944C00423BC6 /* Kingfisher in Frameworks */,
-				12E7AF5E2EB7FDB7003B7664 /* FakeWebKit in Frameworks */,
-				13A46D032EF5945700423BC6 /* SoraCore in Frameworks */,
-				13A46CFD2EF5943400423BC6 /* FakeWebKit in Frameworks */,
 				136C25C62EFE950300E37A6E /* MPVKit-GPL in Frameworks */,
 				C0A5A0052FD1000000C0A505 /* CrashReporter in Frameworks */,
-				AD0000062FD9000000AD0006 /* AidokuRunner in Frameworks */,
 				AD0000072FD9000000AD0007 /* ZIPFoundation in Frameworks */,
 				AD0000332FDA000000AD0033 /* Nuke in Frameworks */,
 				AD0000432FDB000000AD0043 /* AsyncDisplayKit in Frameworks */,
@@ -635,6 +711,24 @@
 			isa = PBXGroup;
 			children = (
 				12F7450E2EB52DFC00889684 /* SkyStreamSecurityTests.swift */,
+				A11E570E2F00000000000001 /* AnimeStructurePolicyTests.swift */,
+				BPSTFR0000000000000001 /* BackupProfileSnapshotTests.swift */,
+				NUVCMPTSTFR000000000001 /* NuvioRepositoryCompletenessTests.swift */,
+				A11E571E2F00000000000001 /* UserDefaultsSuiteSemanticsProbe.swift */,
+				A11E572E2F00000000000001 /* SettingsScopeTests.swift */,
+				A11E57402F00000000000009 /* KanzenReaderModeDefaultTests.swift */,
+				A11E5750000000000000CAT1 /* KanzenCustomCatalogTests.swift */,
+				A11E5770000000000MIGT1 /* KanzenAidokuMigrationTests.swift */,
+				A11E5760000000000PRET1 /* KanzenCatalogPresetTests.swift */,
+				SRPTESTFR000000000000001 /* StreamReachabilityVerdictTests.swift */,
+				WTSYNCTESTFR000000000001 /* WatchTogetherProtocolTests.swift */,
+				SCLRPTSTFR00000000000001 /* MPVScalerPolicyTests.swift */,
+				A11E573E2F00000000000001 /* ProfileLaunchGateTests.swift */,
+				A11E574E2F00000000000001 /* MaturityRatingRegionTests.swift */,
+				A11E575E2F00000000000001 /* MediaStateMergeTests.swift */,
+				ALTPOSTFR000000000000001 /* TMDBAlternatePosterTests.swift */,
+				RXCTSTFR0000000000000001 /* ReaderExtensionCoreTests.swift */,
+				RXCMPTSTFR00000000000001 /* ReaderExtensionCompatibilityTests.swift */,
 				12F7451A2EB52DFC00889684 /* Fixtures */,
 			);
 			path = Tests;
@@ -643,34 +737,8 @@
 		12F7451A2EB52DFC00889684 /* Fixtures */ = {
 			isa = PBXGroup;
 			children = (
-				12F7450F2EB52DFC00889684 /* SkyStreamContentReferenceV1.json */,
-				12F7451F2EB52DFC00889684 /* SkyStreamMagicProxyV2.json */,
 			);
 			path = Fixtures;
-			sourceTree = "<group>";
-		};
-		MACGR0100000000000000001 /* EclipseMac */ = {
-			isa = PBXGroup;
-			children = (
-				MACFR0100000000000000001 /* EclipseMacApp.swift */,
-				MACFR0200000000000000002 /* MacRootView.swift */,
-				MACFR0300000000000000003 /* MacPlayback.swift */,
-				MACFR0400000000000000004 /* MacReader.swift */,
-				MACFR0500000000000000005 /* MacSettings.swift */,
-				MACFR0A00000000000000000A /* MacCatalog.swift */,
-				MACFR0B00000000000000000B /* MacServices.swift */,
-				MACFR0C00000000000000000C /* MacCloudLibrary.swift */,
-				MACFR0D00000000000000000D /* MacTrackers.swift */,
-				MACFR0E00000000000000000E /* MacAidoku.swift */,
-				MACFR11000000000000000011 /* MacLegacyServices.swift */,
-				MACFR1C00000000000000001C /* MacAniListCatalog.swift */,
-				MACFR1D00000000000000001D /* MacScheduleSources.swift */,
-				MACFR1E00000000000000001E /* MacCachedImage.swift */,
-				MACFR0600000000000000006 /* Info.plist */,
-				MACFR0700000000000000007 /* EclipseMac.entitlements */,
-				MACFR0800000000000000008 /* PrivacyInfo.xcprivacy */,
-			);
-			path = EclipseMac;
 			sourceTree = "<group>";
 		};
 		TVUTGR0100000000000000001 /* EclipseTVTests */ = {
@@ -710,14 +778,15 @@
 		1324E7B22E940BD70036B5F5 /* Player */ = {
 			isa = PBXGroup;
 			children = (
-				CASTSRC00000000000000002 /* GoogleCastCoordinator.swift */,
 				TVFR00400000000000000040 /* PlaybackLaunchContext.swift */,
 				SKYFR0000000000000000000B /* ProviderContentReference.swift */,
+				NUVFR0000000000000000007 /* NuvioContentReference.swift */,
 				TVFR00410000000000000041 /* AVPlayerResourceLoader.swift */,
 				TVFR00420000000000000042 /* NextEpisodeResolver.swift */,
 				TVFR00300000000000000030 /* PlaybackEngine.swift */,
 				TVFR00310000000000000031 /* PlaybackRequest.swift */,
 				TVFR00320000000000000032 /* PlaybackCoordinator.swift */,
+				KPGFR0100000000000000001 /* KidsPlaybackGate.swift */,
 				TVFR00330000000000000033 /* MPVTVRenderer.swift */,
 				TVFR00340000000000000034 /* TVMPVPlayerViewController.swift */,
 				1324E7B72E940BD70036B5F5 /* Elements */,
@@ -727,6 +796,9 @@
 				1324E7B52E940BD70036B5F5 /* PlayerViewController.swift */,
 				6BCFA99B6F2344E8850E02AD /* WatchTogetherCoordinator.swift */,
 				1324E7B42E940BD70036B5F5 /* MPVNativeRenderer.swift */,
+				SHDRLIBFILEREF0000000001 /* MPVUserShaderLibrary.swift */,
+				SCLRPOLFILEREF0000000001 /* MPVScalerPolicy.swift */,
+				SHDRDIRFILEREF0000000001 /* Shaders */,
 				F9A1B2D12F90000100A1B2D1 /* MPVHeaderProxy.swift */,
 				1324E7B62E940BD70036B5F5 /* SampleBufferDisplayView.swift */,
 				CC8888802FA0000000CC8880 /* AniSkipService.swift */,
@@ -774,6 +846,7 @@
 			children = (
 				13E1ED9A2ED9E65F00087629 /* KanzenModule */,
 				AD0000152FD9000000AD0015 /* Aidoku */,
+				RXGRP000000000000000001 /* ReaderExtensions */,
 				13E1ED9F2ED9E65F00087629 /* mangaModel.xcdatamodeld */,
 				13E1EDA12ED9E65F00087629 /* Models */,
 				13E1EDA82ED9E65F00087629 /* KanzenEngine */,
@@ -788,6 +861,22 @@
 				AD0000122FD9000000AD0012 /* AidokuSourceManager.swift */,
 			);
 			path = Aidoku;
+			sourceTree = "<group>";
+		};
+		RXGRP000000000000000001 /* ReaderExtensions */ = {
+			isa = PBXGroup;
+			children = (
+				RXMODFR0000000000000001 /* ReaderExtensionModels.swift */,
+				RXNATFR0000000000000001 /* ReaderExtensionNativeProviders.swift */,
+				RXNOVFR0000000000000001 /* ReaderExtensionNovelSanitizer.swift */,
+				RXPERFR0000000000000001 /* ReaderExtensionPersistence.swift */,
+				RXPRVFR0000000000000001 /* ReaderExtensionProvider.swift */,
+				RXSECFR0000000000000001 /* ReaderExtensionSecurity.swift */,
+				RXJS0FR0000000000000001 /* ReaderExtensionJavaScriptRuntime.swift */,
+				RXMGRFR0000000000000001 /* ReaderExtensionManager.swift */,
+				RXCMPFR0000000000000001 /* ReaderExtensionCompatibility.swift */,
+			);
+			path = ReaderExtensions;
 			sourceTree = "<group>";
 		};
 		13E1ED9A2ED9E65F00087629 /* KanzenModule */ = {
@@ -819,6 +908,7 @@
 			isa = PBXGroup;
 			children = (
 				13E1EDA22ED9E65F00087629 /* mangaData.swift */,
+				RXAPPFR0000000000000001 /* ReaderExtensionAppBridge.swift */,
 				13E1EDA32ED9E65F00087629 /* readingMode.swift */,
 				13E1EDA42ED9E65F00087629 /* readerManager.swift */,
 				13E1EDA52ED9E65F00087629 /* favouriteManager.swift */,
@@ -826,10 +916,14 @@
 				FF1111102F30000000FF1110 /* AniListMangaService.swift */,
 				FF2222202F30000000FF2220 /* MangaCatalogManager.swift */,
 				FF3333302F30000000FF3330 /* MangaHomeViewModel.swift */,
+				KCC1000000000000000CAT01 /* KanzenCustomCatalog.swift */,
+				KAM1000000000000000MIG01 /* KanzenAidokuMigration.swift */,
+				KCP1000000000000000PRE01 /* KanzenCatalogPresets.swift */,
 				FF4444402F30000000FF4440 /* MangaSourceFinder.swift */,
 				FAA111002F40000000FAA110 /* MangaLibraryItem.swift */,
 				FBB222002F40000000FBB220 /* MangaLibraryCollection.swift */,
 				FCC333002F40000000FCC330 /* MangaLibraryManager.swift */,
+				RCFFR0100000000000000001 /* ReaderContentFilter.swift */,
 				ABB999002F50000000ABB990 /* MangaReadingProgressManager.swift */,
 				A5D100012FE1000000A5D001 /* ReaderDownloadManager.swift */,
 			);
@@ -890,9 +984,19 @@
 			path = Controllers;
 			sourceTree = "<group>";
 		};
+		KMG0000000000000000GRP1 /* Migration */ = {
+			isa = PBXGroup;
+			children = (
+				KMG1000000000000000VW01 /* KanzenAidokuMigrationView.swift */,
+				KMG2000000000000000PR01 /* KanzenAidokuMigrationPrompt.swift */,
+			);
+			path = Migration;
+			sourceTree = "<group>";
+		};
 		13E1EDB52ED9E65F00087629 /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				KMG0000000000000000GRP1 /* Migration */,
 				13E1EDB62ED9E65F00087629 /* Reader */,
 				13E1EDBF2ED9E65F00087629 /* Settings */,
 				13E1EDC32ED9E65F00087629 /* MainMenu.swift */,
@@ -956,6 +1060,8 @@
 			children = (
 				13E1EDC22ED9E65F00087629 /* kanzenGeneralSettings.swift */,
 				FF8888802F30000000FF8880 /* MangaCatalogSettingsView.swift */,
+				KCC2000000000000000CAT01 /* KanzenCustomCatalogsView.swift */,
+				KCB1000000000000000BLD01 /* KanzenCatalogBuilderView.swift */,
 				AD0000142FD9000000AD0014 /* AidokuSourcesSettingsView.swift */,
 				A5D100032FE1000000A5D003 /* ReaderDownloadsSettingsView.swift */,
 			);
@@ -989,6 +1095,7 @@
 			isa = PBXGroup;
 			children = (
 				FF6666602F30000000FF6660 /* KanzenGlobalSearchView.swift */,
+				KFE1000000000000000EDT01 /* ReaderExtensionFilterEditor.swift */,
 			);
 			path = Search;
 			sourceTree = "<group>";
@@ -1013,10 +1120,7 @@
 		13F072522E4B2D3300EF90EB = {
 			isa = PBXGroup;
 			children = (
-				CASTPODS0000000000000003 /* EclipsePodsDebug.xcconfig */,
-				CASTPODS0000000000000004 /* EclipsePodsRelease.xcconfig */,
 				12F745192EB52DFC00889684 /* Tests */,
-				MACGR0100000000000000001 /* EclipseMac */,
 				TVGR00010000000000000001 /* EclipseTV */,
 				TVUTGR0100000000000000001 /* EclipseTVTests */,
 				TVUIGR0100000000000000001 /* EclipseTVUITests */,
@@ -1032,9 +1136,7 @@
 		13F0725C2E4B2D3300EF90EB /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				CASTPODS0000000000000002 /* libPods-Eclipse.a */,
 				12F7451E2EB52DFC00889684 /* Tests.xctest */,
-				MACPR0100000000000000001 /* Eclipse.app */,
 				13F0725B2E4B2D3300EF90EB /* Eclipse.app */,
 				TVFR00070000000000000007 /* Eclipse.app */,
 				TVUTPR0100000000000000001 /* Eclipse-tvOSTests.xctest */,
@@ -1048,6 +1150,8 @@
 			children = (
 				13B6F3472EA4C82600DECD2B /* Info.plist */,
 				IOSPRIVFR000000000000001 /* PrivacyInfo.xcprivacy */,
+				RDRLEGALFILEREF00000001 /* ReaderExtensionLicenses */,
+				OSSLEGALFILEREF000000001 /* OpenSourceLicenses */,
 				1324E7B22E940BD70036B5F5 /* Player */,
 				13F5B5902E73090000565E75 /* Models */,
 				1375466E2E5F078B00B29944 /* Tracking */,
@@ -1072,6 +1176,7 @@
 			children = (
 				13F072BD2E4B2ED600EF90EB /* Services */,
 				SKYGR00000000000000000001 /* SkyStream */,
+				NUVGR0000000000000000001 /* Nuvio */,
 				13F0726F2E4B2D9000EF90EB /* JavaScriptCore+Extensions.swift */,
 				13B2E5732E7597B9009F3271 /* JSController-NetworkFetch.swift */,
 				CFB000012FE7000000CFB001 /* CloudflareBypassManager.swift */,
@@ -1081,6 +1186,18 @@
 				13F072742E4B2D9000EF90EB /* JSController.swift */,
 			);
 			path = JSLoader;
+			sourceTree = "<group>";
+		};
+		NUVGR0000000000000000001 /* Nuvio */ = {
+			isa = PBXGroup;
+			children = (
+				NUVFR0000000000000000001 /* NuvioPluginModels.swift */,
+				NUVFR0000000000000000002 /* NuvioPluginStore.swift */,
+				NSRDFR000000000000001 /* NuvioSecretRedactor.swift */,
+				NUVFR0000000000000000003 /* NuvioPluginRuntime.swift */,
+				NUVFR0000000000000000004 /* NuvioPluginManager.swift */,
+			);
+			path = Nuvio;
 			sourceTree = "<group>";
 		};
 		SKYGR00000000000000000001 /* SkyStream */ = {
@@ -1113,6 +1230,8 @@
 				DD4444402FB0000000DD4440 /* DownloadedShowDetailView.swift */,
 				CC3333002FC0000000CC3300 /* DiscoverDetailView.swift */,
 				CC4444002FC0000000CC4400 /* SplashScreenView.swift */,
+				ONBD0000000000000000F001 /* OnboardingView.swift */,
+				SPMA0000000000000000F001 /* SplashMotionAtoms.swift */,
 				13F072C42E4B364B00EF90EB /* SettingsView */,
 				13F0727F2E4B2D9000EF90EB /* View Elements */,
 			);
@@ -1129,6 +1248,7 @@
 				13F072892E4B2D9000EF90EB /* NormalPlayer.swift */,
 				13F0728A2E4B2D9000EF90EB /* FallbackImageView.swift */,
 				13F0728B2E4B2D9000EF90EB /* ServicesResultsSheet.swift */,
+				AF00000000000000000000A2 /* AppHub.swift */,
 				DD3333302FB0000000DD3330 /* FloatingSearchButton.swift */,
 				A1B2C3042FA0000100A1B2C4 /* GlassCardGroup.swift */,
 				A1B2C3062FA0000100A1B2C6 /* GradientBackground.swift */,
@@ -1230,6 +1350,7 @@
 				13F0729A2E4B2D9200EF90EB /* TMDBService.swift */,
 				13F072C12E4B2D9200EF90EB /* AniListService.swift */,
 				13F5B5942E730CB200565E75 /* TMDBContentFilter.swift */,
+				MATFR0300000000000000003 /* TMDBMaturityRatingStore.swift */,
 			);
 			path = TMDB;
 			sourceTree = "<group>";
@@ -1246,9 +1367,11 @@
 			isa = PBXGroup;
 			children = (
 				12201F502EBE91870033073C /* ServiceStore.swift */,
+				SSCFR0100000000000000001 /* ServiceStoreScope.swift */,
 				13F0726E2E4B2D9000EF90EB /* ServicesEntity.swift */,
 				13F072722E4B2D9000EF90EB /* ServiceManager.swift */,
 				14CC00050000000000CC0005 /* AutoModeStreamSelection.swift */,
+				SRPFR00000000000000000001 /* StreamReachabilityProbe.swift */,
 				12201F522EBE922D0033073C /* ServiceModels.xcdatamodeld */,
 				5E1111102F60000000AE1110 /* StremioModels.swift */,
 				5E2222202F60000000AE2220 /* StremioClient.swift */,
@@ -1262,9 +1385,12 @@
 			isa = PBXGroup;
 			children = (
 				13631B312E4F1A200035C39F /* ServiceSettingsView.swift */,
+				NUVFR0000000000000000005 /* NuvioPluginManagerView.swift */,
+				NUVFR0000000000000000006 /* NuvioScraperSettingsView.swift */,
 				139509A12E7DDAE100CB60D4 /* PlayerSettingsView.swift */,
 				BB7777902F20000000BB7790 /* PlayerLanguageSelectionView.swift */,
 				13830AF12E55F51300B3CDE4 /* AlternativeUIView.swift */,
+				PROFR0200000000000000002 /* ProfilesSettingsView.swift */,
 				14CC00030000000000CC0003 /* HomeLayoutView.swift */,
 				13F072792E4B2D9000EF90EB /* ServicesView.swift */,
 				5E2222202F70000000AE2220 /* StremioConfigureView.swift */,
@@ -1306,11 +1432,21 @@
 				13F5B5932E730B0200565E75 /* Library */,
 				14BBB0063FFF111100AAAAAA /* BackupManager.swift */,
 				14CC00010000000000CC0001 /* HomeCatalogLayout.swift */,
+				UPNX00010000000000000001 /* UpNextResolutionCache.swift */,
 				13C6F3452EA4C6BC00DECD2B /* CacheManager.swift */,
 				DD1111102FB0000000DD1110 /* DownloadManager.swift */,
 				DLPATHFR000000000000000001 /* DownloadPathIdentityPolicy.swift */,
 				DD1111142FB0000000DD1114 /* HLSDownloader.swift */,
 				AA5555502F10000000AA5550 /* CatalogManager.swift */,
+				PROFR0100000000000000001 /* ProfileManager.swift */,
+				PSSFR0100000000000000001 /* ProfileSettingsStore.swift */,
+				STSFR0100000000000000001 /* SettingsScope.swift */,
+				PSAFR0100000000000000001 /* ProfileScopedAppStorage.swift */,
+				PSRFR0100000000000000001 /* ProfileScopedStoreRegistry.swift */,
+				MATFR0100000000000000001 /* MaturityRating.swift */,
+				KIDFR0100000000000000001 /* KidsHomeCatalog.swift */,
+				SHMFR0100000000000000001 /* SharedMediaModels.swift */,
+				PROFR0300000000000000003 /* MediaStateSyncTransport.swift */,
 				AA7777702F10000000AA7770 /* HomeViewModel.swift */,
 				AA8888802F10000000AA8880 /* ScheduleViewModel.swift */,
 				A9F100002FF1000000A9F100 /* LocalNotificationManager.swift */,
@@ -1352,29 +1488,6 @@
 			productName = Tests;
 			productReference = 12F7451E2EB52DFC00889684 /* Tests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
-		};
-		MACTG0100000000000000001 /* Eclipse-macOS */ = {
-			isa = PBXNativeTarget;
-			buildConfigurationList = MACCL0100000000000000001 /* Build configuration list for PBXNativeTarget "Eclipse-macOS" */;
-			buildPhases = (
-				MACPH0100000000000000001 /* Sources */,
-				MACPH0200000000000000002 /* Frameworks */,
-				MACPH0300000000000000003 /* Resources */,
-			);
-			buildRules = (
-			);
-			dependencies = (
-			);
-			name = "Eclipse-macOS";
-			packageProductDependencies = (
-				136C25C52EFE950300E37A6E /* MPVKit-GPL */,
-				AD0000222FD9000000AD0022 /* AidokuRunner */,
-				AD0000232FD9000000AD0023 /* ZIPFoundation */,
-				13A46D022EF5945700423BC6 /* SoraCore */,
-			);
-			productName = Eclipse;
-			productReference = MACPR0100000000000000001 /* Eclipse.app */;
-			productType = "com.apple.product-type.application";
 		};
 		TVUTTG0100000000000000001 /* Eclipse-tvOSTests */ = {
 			isa = PBXNativeTarget;
@@ -1429,7 +1542,6 @@
 			name = "Eclipse-tvOS";
 			packageProductDependencies = (
 				13A46CFF2EF5944C00423BC6 /* Kingfisher */,
-				13A46D022EF5945700423BC6 /* SoraCore */,
 				136C25C52EFE950300E37A6E /* MPVKit-GPL */,
 				C0A5A0042FD1000000C0A504 /* CrashReporter */,
 			);
@@ -1442,11 +1554,9 @@
 			buildConfigurationList = 13F0726A2E4B2D3700EF90EB /* Build configuration list for PBXNativeTarget "Eclipse" */;
 			buildPhases = (
 				129CC90A2EBA1FEA00D2D84B /* Load Build Config */,
-				CASTPODS0000000000000005 /* [CP] Check Pods Manifest.lock */,
 				13F072572E4B2D3300EF90EB /* Sources */,
 				13F072582E4B2D3300EF90EB /* Frameworks */,
 				13F072592E4B2D3300EF90EB /* Resources */,
-				CASTPODS0000000000000006 /* [CP] Copy Pods Resources */,
 				12F745372EB539F000889684 /* Embed Frameworks */,
 			);
 			buildRules = (
@@ -1455,13 +1565,9 @@
 			);
 			name = Eclipse;
 			packageProductDependencies = (
-				12E7AF5D2EB7FDB7003B7664 /* FakeWebKit */,
-				13A46CFC2EF5943400423BC6 /* FakeWebKit */,
 				13A46CFF2EF5944C00423BC6 /* Kingfisher */,
-				13A46D022EF5945700423BC6 /* SoraCore */,
 				136C25C52EFE950300E37A6E /* MPVKit-GPL */,
 				C0A5A0042FD1000000C0A504 /* CrashReporter */,
-				AD0000222FD9000000AD0022 /* AidokuRunner */,
 				AD0000232FD9000000AD0023 /* ZIPFoundation */,
 				AD0000322FDA000000AD0032 /* Nuke */,
 				AD0000422FDB000000AD0042 /* AsyncDisplayKit */,
@@ -1484,9 +1590,6 @@
 					12F7450D2EB52DFC00889684 = {
 						CreatedOnToolsVersion = 26.0;
 						TestTargetID = 13F0725A2E4B2D3300EF90EB;
-					};
-					MACTG0100000000000000001 = {
-						CreatedOnToolsVersion = 26.0;
 					};
 					13F0725A2E4B2D3300EF90EB = {
 						CreatedOnToolsVersion = 15.2;
@@ -1514,12 +1617,9 @@
 			);
 			mainGroup = 13F072522E4B2D3300EF90EB;
 			packageReferences = (
-				13A46CFB2EF5943400423BC6 /* XCRemoteSwiftPackageReference "FakeWebKit" */,
 				13A46CFE2EF5944C00423BC6 /* XCRemoteSwiftPackageReference "Kingfisher" */,
-				13A46D012EF5945700423BC6 /* XCRemoteSwiftPackageReference "SoraCore" */,
 				136C25C42EFE950300E37A6E /* XCLocalSwiftPackageReference "MPVKit" */,
 				C0A5A0032FD1000000C0A503 /* XCRemoteSwiftPackageReference "plcrashreporter" */,
-				AD0000202FD9000000AD0020 /* XCRemoteSwiftPackageReference "AidokuRunner" */,
 				AD0000212FD9000000AD0021 /* XCRemoteSwiftPackageReference "ZIPFoundation" */,
 				AD0000312FDA000000AD0031 /* XCRemoteSwiftPackageReference "Nuke" */,
 				AD0000412FDB000000AD0041 /* XCRemoteSwiftPackageReference "Texture" */,
@@ -1529,7 +1629,6 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				MACTG0100000000000000001 /* Eclipse-macOS */,
 				13F0725A2E4B2D3300EF90EB /* Eclipse */,
 				12F7450D2EB52DFC00889684 /* Tests */,
 				TVTG00010000000000000001 /* Eclipse-tvOS */,
@@ -1544,17 +1643,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				12F745112EB52DFC00889684 /* SkyStreamContentReferenceV1.json in Resources */,
-				12F745122EB52DFC00889684 /* SkyStreamMagicProxyV2.json in Resources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		MACPH0300000000000000003 /* Resources */ = {
-			isa = PBXResourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				MACBF0700000000000000007 /* Assets.xcassets in Resources */,
-				MACBF0800000000000000008 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1563,6 +1651,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				TVBF00060000000000000006 /* Assets.xcassets in Resources */,
+				SHDRDIRTVBUILD0000000001 /* Shaders in Resources */,
 				TVBF00080000000000000008 /* TVAssets.xcassets in Resources */,
 				TVBF00070000000000000007 /* Localizable.xcstrings in Resources */,
 				TVBF00050000000000000005 /* PrivacyInfo.xcprivacy in Resources */,
@@ -1576,6 +1665,9 @@
 				13F072632E4B2D3700EF90EB /* Assets.xcassets in Resources */,
 				AD10000B2FE1000000AD100B /* Localizable.xcstrings in Resources */,
 				13E1EDDA2ED9E65F00087629 /* bundle.js in Resources */,
+				RDRLEGALBUILD000000000001 /* ReaderExtensionLicenses in Resources */,
+				OSSLEGALIOSBUILD000000001 /* OpenSourceLicenses in Resources */,
+				SHDRDIRIOSBUILD000000001 /* Shaders in Resources */,
 				IOSPRIVBF000000000000001 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -1583,41 +1675,6 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		CASTPODS0000000000000005 /* [CP] Check Pods Manifest.lock */ = {
-			isa = PBXShellScriptBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputPaths = (
-				"${PODS_PODFILE_DIR_PATH}/Podfile.lock",
-				"${PODS_ROOT}/Manifest.lock",
-			);
-			name = "[CP] Check Pods Manifest.lock";
-			outputPaths = (
-				"$(DERIVED_FILE_DIR)/Pods-Eclipse-checkManifestLockResult.txt",
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n  echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install'.\" >&2\n  exit 1\nfi\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
-			showEnvVarsInLog = 0;
-		};
-		CASTPODS0000000000000006 /* [CP] Copy Pods Resources */ = {
-			isa = PBXShellScriptBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-			);
-			inputFileListPaths = (
-				"${PODS_ROOT}/Target Support Files/Pods-Eclipse/Pods-Eclipse-resources-${CONFIGURATION}-input-files.xcfilelist",
-			);
-			name = "[CP] Copy Pods Resources";
-			outputFileListPaths = (
-				"${PODS_ROOT}/Target Support Files/Pods-Eclipse/Pods-Eclipse-resources-${CONFIGURATION}-output-files.xcfilelist",
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-			shellPath = /bin/sh;
-			shellScript = "\"${PODS_ROOT}/Target Support Files/Pods-Eclipse/Pods-Eclipse-resources.sh\"\n";
-			showEnvVarsInLog = 0;
-		};
 		129CC90A2EBA1FEA00D2D84B /* Load Build Config */ = {
 			isa = PBXShellScriptBuildPhase;
 			alwaysOutOfDate = 1;
@@ -1646,41 +1703,24 @@
 			buildActionMask = 2147483647;
 			files = (
 				12F745102EB52DFC00889684 /* SkyStreamSecurityTests.swift in Sources */,
-			);
-			runOnlyForDeploymentPostprocessing = 0;
-		};
-		MACPH0100000000000000001 /* Sources */ = {
-			isa = PBXSourcesBuildPhase;
-			buildActionMask = 2147483647;
-			files = (
-				SKYMACBF0000000000000001 /* SkyStreamModels.swift in Sources */,
-				SKYMACBF0000000000000003 /* SkyStreamPluginManager.swift in Sources */,
-				SKYMACBF0000000000000004 /* SkyStreamRepositoryManager.swift in Sources */,
-				SKYMACBF000000000000000B /* ProviderContentReference.swift in Sources */,
-				MACBF0100000000000000001 /* EclipseMacApp.swift in Sources */,
-				MACBF0200000000000000002 /* MacRootView.swift in Sources */,
-				MACBF0300000000000000003 /* MacPlayback.swift in Sources */,
-				MACBF0400000000000000004 /* MacReader.swift in Sources */,
-				MACBF0500000000000000005 /* MacSettings.swift in Sources */,
-				MACBF0A00000000000000000A /* MacCatalog.swift in Sources */,
-				MACBF0B00000000000000000B /* MacServices.swift in Sources */,
-				MACBF0C00000000000000000C /* MacCloudLibrary.swift in Sources */,
-				MACBF0D00000000000000000D /* MacTrackers.swift in Sources */,
-				MACBF0E00000000000000000E /* MacAidoku.swift in Sources */,
-				MACBF11000000000000000011 /* MacLegacyServices.swift in Sources */,
-				MACBF12000000000000000012 /* JSController.swift in Sources */,
-				MACBF13000000000000000013 /* JSController-Search.swift in Sources */,
-				MACBF14000000000000000014 /* JSController-Details.swift in Sources */,
-				MACBF15000000000000000015 /* JSController-Streams.swift in Sources */,
-				MACBF16000000000000000016 /* JSController-NetworkFetch.swift in Sources */,
-				MACBF17000000000000000017 /* JavaScriptCore+Extensions.swift in Sources */,
-				MACBF18000000000000000018 /* CloudflareBypassManager.swift in Sources */,
-				MACBF19000000000000000019 /* URLSession.swift in Sources */,
-				MACBF1A00000000000000001A /* Logger.swift in Sources */,
-				MACBF1C00000000000000001C /* MacAniListCatalog.swift in Sources */,
-				MACBF1D00000000000000001D /* MacScheduleSources.swift in Sources */,
-				MACBF1E00000000000000001E /* MacCachedImage.swift in Sources */,
-				MACBF0600000000000000006 /* PlatformCapabilities.swift in Sources */,
+				A11E57102F00000000000001 /* AnimeStructurePolicyTests.swift in Sources */,
+				BPSTBF0000000000000001 /* BackupProfileSnapshotTests.swift in Sources */,
+				NUVCMPTSTBF000000000001 /* NuvioRepositoryCompletenessTests.swift in Sources */,
+				A11E57202F00000000000001 /* UserDefaultsSuiteSemanticsProbe.swift in Sources */,
+				A11E57302F00000000000001 /* SettingsScopeTests.swift in Sources */,
+				A11E57412F00000000000009 /* KanzenReaderModeDefaultTests.swift in Sources */,
+				A11E5751000000000000CAT2 /* KanzenCustomCatalogTests.swift in Sources */,
+				A11E5771000000000MIGT2 /* KanzenAidokuMigrationTests.swift in Sources */,
+				A11E5761000000000PRET2 /* KanzenCatalogPresetTests.swift in Sources */,
+				SRPTESTBF000000000000001 /* StreamReachabilityVerdictTests.swift in Sources */,
+				WTSYNCTESTBF000000000001 /* WatchTogetherProtocolTests.swift in Sources */,
+				SCLRPTSTBF00000000000001 /* MPVScalerPolicyTests.swift in Sources */,
+				A11E57402F00000000000001 /* ProfileLaunchGateTests.swift in Sources */,
+				A11E57502F00000000000001 /* MaturityRatingRegionTests.swift in Sources */,
+				A11E57602F00000000000001 /* MediaStateMergeTests.swift in Sources */,
+				ALTPOSTBF000000000000001 /* TMDBAlternatePosterTests.swift in Sources */,
+				RXCTSTBF0000000000000001 /* ReaderExtensionCoreTests.swift in Sources */,
+				RXCMPTSTBF00000000000001 /* ReaderExtensionCompatibilityTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1693,6 +1733,7 @@
 				TVUTBF0300000000000000003 /* ServiceCompatibilityTests.swift in Sources */,
 				TVUTBF0500000000000000005 /* NextEpisodeResolverTests.swift in Sources */,
 				TVUTBF0600000000000000006 /* DownloadPathIdentityTests.swift in Sources */,
+				SCLRPTSTTVB0000000000001 /* MPVScalerPolicyTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1708,7 +1749,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				F9A1B2D32F90000100A1B2D3 /* MPVHeaderProxy.swift in Sources */,
 				SKYTVBF00000000000000001 /* SkyStreamModels.swift in Sources */,
+				NUVTVBF000000000000007 /* NuvioContentReference.swift in Sources */,
+				SKYTVBF00000000000000006 /* SkyStreamSecurity.swift in Sources */,
 				SKYTVBF00000000000000003 /* SkyStreamPluginManager.swift in Sources */,
 				SKYTVBF00000000000000004 /* SkyStreamRepositoryManager.swift in Sources */,
 				SKYTVBF00000000000000007 /* SkyStreamStateEntity.swift in Sources */,
@@ -1721,6 +1765,8 @@
 				TVBF00330000000000000033 /* PlaybackRequest.swift in Sources */,
 				TVBF00350000000000000035 /* PlaybackCoordinator.swift in Sources */,
 				TVBF00370000000000000037 /* MPVTVRenderer.swift in Sources */,
+				SHDRLIBTVBUILD0000000001 /* MPVUserShaderLibrary.swift in Sources */,
+				SCLRPOLTVBUILD0000000001 /* MPVScalerPolicy.swift in Sources */,
 				TVBF00390000000000000039 /* TVMPVPlayerViewController.swift in Sources */,
 				TVBF00210000000000000021 /* MediaStateModels.swift in Sources */,
 				TVBF00230000000000000023 /* MediaStateSync.swift in Sources */,
@@ -1788,6 +1834,21 @@
 				AA3333332F10000000AA3333 /* TrackersSettingsView.swift in Sources */,
 				AA4444442F10000000AA4444 /* ScheduleView.swift in Sources */,
 				AA5555552F10000000AA5555 /* CatalogManager.swift in Sources */,
+				PROBF0200000000000000002 /* ProfileManager.swift in Sources */,
+				PSSBF0200000000000000002 /* ProfileSettingsStore.swift in Sources */,
+				KPGBF0200000000000000002 /* KidsPlaybackGate.swift in Sources */,
+				STSBF0200000000000000002 /* SettingsScope.swift in Sources */,
+				PSABF0200000000000000002 /* ProfileScopedAppStorage.swift in Sources */,
+				PSRBF0200000000000000002 /* ProfileScopedStoreRegistry.swift in Sources */,
+				SSCBF0200000000000000002 /* ServiceStoreScope.swift in Sources */,
+				MATBF0200000000000000002 /* MaturityRating.swift in Sources */,
+				KIDBF0200000000000000002 /* KidsHomeCatalog.swift in Sources */,
+				MATBF0400000000000000004 /* TMDBMaturityRatingStore.swift in Sources */,
+				SHMBF0200000000000000002 /* SharedMediaModels.swift in Sources */,
+				PROBF0600000000000000006 /* MediaStateSyncTransport.swift in Sources */,
+				PROBF0400000000000000004 /* ProfilesSettingsView.swift in Sources */,
+				ONBD0000000000000000A002 /* OnboardingView.swift in Sources */,
+				SPMA0000000000000000A002 /* SplashMotionAtoms.swift in Sources */,
 				AA6666662F10000000AA6666 /* CatalogsSettingsView.swift in Sources */,
 				AA7777712F10000000AA7771 /* HomeViewModel.swift in Sources */,
 				AA8888812F10000000AA8881 /* ScheduleViewModel.swift in Sources */,
@@ -1804,6 +1865,7 @@
 				13F072A12E4B2D9200EF90EB /* JSController.swift in Sources */,
 				13F0729F2E4B2D9200EF90EB /* ServiceManager.swift in Sources */,
 				14CC00060000000000CC0006 /* AutoModeStreamSelection.swift in Sources */,
+				SRPTVBF00000000000000001 /* StreamReachabilityProbe.swift in Sources */,
 				CASTFIX12EBE918D0033073C /* ServiceStore.swift in Sources */,
 				5E1111112F60000000AE1111 /* StremioModels.swift in Sources */,
 				5E2222212F60000000AE2221 /* StremioClient.swift in Sources */,
@@ -1811,6 +1873,7 @@
 				5E4444412F60000000AE4441 /* StremioAddonManager.swift in Sources */,
 				13F187AC2E6F38CE00747F7E /* LibraryManager.swift in Sources */,
 				14CC00020000000000CC0002 /* HomeCatalogLayout.swift in Sources */,
+				UPNX00020000000000000002 /* UpNextResolutionCache.swift in Sources */,
 				A1B2C3012FA0000100A1B2C1 /* EclipseTheme.swift in Sources */,
 				A1B2C3032FA0000100A1B2C3 /* HeroTransition.swift in Sources */,
 				EC10AD1300000000EC10AD13 /* EclipseLoadingIndicator.swift in Sources */,
@@ -1823,7 +1886,25 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				RXMODBF0000000000000001 /* ReaderExtensionModels.swift in Sources */,
+				RXNATBF0000000000000001 /* ReaderExtensionNativeProviders.swift in Sources */,
+				RXNOVBF0000000000000001 /* ReaderExtensionNovelSanitizer.swift in Sources */,
+				RXPERBF0000000000000001 /* ReaderExtensionPersistence.swift in Sources */,
+				RXPRVBF0000000000000001 /* ReaderExtensionProvider.swift in Sources */,
+				RXSECBF0000000000000001 /* ReaderExtensionSecurity.swift in Sources */,
+				RXAPPBF0000000000000001 /* ReaderExtensionAppBridge.swift in Sources */,
+				RXJS0BF0000000000000001 /* ReaderExtensionJavaScriptRuntime.swift in Sources */,
+				RXMGRBF0000000000000001 /* ReaderExtensionManager.swift in Sources */,
+				RXCMPBF0000000000000001 /* ReaderExtensionCompatibility.swift in Sources */,
 				SKYIOSBF0000000000000001 /* SkyStreamModels.swift in Sources */,
+				NUVIOSBF00000000000001 /* NuvioPluginModels.swift in Sources */,
+				NUVIOSBF00000000000002 /* NuvioPluginStore.swift in Sources */,
+				NSRDIOSBF0000000000001 /* NuvioSecretRedactor.swift in Sources */,
+				NUVIOSBF00000000000003 /* NuvioPluginRuntime.swift in Sources */,
+				NUVIOSBF00000000000004 /* NuvioPluginManager.swift in Sources */,
+				NUVIOSBF00000000000005 /* NuvioPluginManagerView.swift in Sources */,
+				NUVIOSBF00000000000006 /* NuvioScraperSettingsView.swift in Sources */,
+				NUVIOSBF00000000000007 /* NuvioContentReference.swift in Sources */,
 				SKYIOSBF0000000000000002 /* SkyStreamPackageValidator.swift in Sources */,
 				SKYIOSBF0000000000000003 /* SkyStreamPluginManager.swift in Sources */,
 				SKYIOSBF0000000000000004 /* SkyStreamRepositoryManager.swift in Sources */,
@@ -1871,6 +1952,7 @@
 				DD1111152FB0000000DD1115 /* HLSDownloader.swift in Sources */,
 				DD2222222FB0000000DD2222 /* DownloadsView.swift in Sources */,
 				DD4444442FB0000000DD4444 /* DownloadedShowDetailView.swift in Sources */,
+				AF00000000000000000000A1 /* AppHub.swift in Sources */,
 				DD3333332FB0000000DD3333 /* FloatingSearchButton.swift in Sources */,
 				F9A1B2D22F90000100A1B2D2 /* MPVHeaderProxy.swift in Sources */,
 				13F072AF2E4B2D9200EF90EB /* StretchyHeader.swift in Sources */,
@@ -1907,7 +1989,6 @@
 				1324E7C12E940BD70036B5F5 /* PiPController.swift in Sources */,
 				13F072AB2E4B2D9200EF90EB /* Movie-Details.swift in Sources */,
 				1324E7BD2E940BD70036B5F5 /* PlayerViewController.swift in Sources */,
-				CASTSRC00000000000000001 /* GoogleCastCoordinator.swift in Sources */,
 				7BC72B40F59C41D6B2D8EB9B /* WatchTogetherCoordinator.swift in Sources */,
 				1324E7BE2E940BD70036B5F5 /* SampleBufferDisplayView.swift in Sources */,
 				13E1EDD32ED9E65F00087629 /* mangaModel.xcdatamodeld in Sources */,
@@ -1930,6 +2011,8 @@
 				13F072AA2E4B2D9200EF90EB /* CircularProgressBar.swift in Sources */,
 				13F072B52E4B2D9200EF90EB /* URLSession.swift in Sources */,
 				1324E7BC2E940BD70036B5F5 /* MPVNativeRenderer.swift in Sources */,
+				SHDRLIBIOSBUILD000000001 /* MPVUserShaderLibrary.swift in Sources */,
+				SCLRPOLIOSBUILD000000001 /* MPVScalerPolicy.swift in Sources */,
 				13E1EDE12ED9E66000087629 /* readerManagerView.swift in Sources */,
 				1324E7BF2E940BD70036B5F5 /* MusicProgressSlider.swift in Sources */,
 				13E1EDD92ED9E65F00087629 /* pageData.swift in Sources */,
@@ -1951,6 +2034,20 @@
 				AA3333332F10000000AA3333 /* TrackersSettingsView.swift in Sources */,
 				AA4444442F10000000AA4444 /* ScheduleView.swift in Sources */,
 				AA5555552F10000000AA5555 /* CatalogManager.swift in Sources */,
+				PROBF0100000000000000001 /* ProfileManager.swift in Sources */,
+				PSSBF0100000000000000001 /* ProfileSettingsStore.swift in Sources */,
+				KPGBF0100000000000000001 /* KidsPlaybackGate.swift in Sources */,
+				STSBF0100000000000000001 /* SettingsScope.swift in Sources */,
+				PSABF0100000000000000001 /* ProfileScopedAppStorage.swift in Sources */,
+				PSRBF0100000000000000001 /* ProfileScopedStoreRegistry.swift in Sources */,
+				SSCBF0100000000000000001 /* ServiceStoreScope.swift in Sources */,
+				MATBF0100000000000000001 /* MaturityRating.swift in Sources */,
+				KIDBF0100000000000000001 /* KidsHomeCatalog.swift in Sources */,
+				MATBF0300000000000000003 /* TMDBMaturityRatingStore.swift in Sources */,
+				RCFBF0100000000000000001 /* ReaderContentFilter.swift in Sources */,
+				SHMBF0100000000000000001 /* SharedMediaModels.swift in Sources */,
+				PROBF0500000000000000005 /* MediaStateSyncTransport.swift in Sources */,
+				PROBF0300000000000000003 /* ProfilesSettingsView.swift in Sources */,
 				AA6666662F10000000AA6666 /* CatalogsSettingsView.swift in Sources */,
 				AA7777712F10000000AA7771 /* HomeViewModel.swift in Sources */,
 				AA8888812F10000000AA8881 /* ScheduleViewModel.swift in Sources */,
@@ -1962,6 +2059,8 @@
 				CC2222202FC0000000CC2220 /* HomeWidgets.swift in Sources */,
 				CC3333302FC0000000CC3330 /* DiscoverDetailView.swift in Sources */,
 				CC4444402FC0000000CC4440 /* SplashScreenView.swift in Sources */,
+				ONBD0000000000000000A001 /* OnboardingView.swift in Sources */,
+				SPMA0000000000000000A001 /* SplashMotionAtoms.swift in Sources */,
 				13F072B32E4B2D9200EF90EB /* ServicesResultsSheet.swift in Sources */,
 				13F072A52E4B2D9200EF90EB /* HomeView.swift in Sources */,
 				13E1EDDC2ED9E65F00087629 /* JavaScriptCore.swift in Sources */,
@@ -1971,6 +2070,7 @@
 				13F072A12E4B2D9200EF90EB /* JSController.swift in Sources */,
 				13F0729F2E4B2D9200EF90EB /* ServiceManager.swift in Sources */,
 				14CC00060000000000CC0006 /* AutoModeStreamSelection.swift in Sources */,
+				SRPIOSBF0000000000000001 /* StreamReachabilityProbe.swift in Sources */,
 				12201F512EBE918D0033073C /* ServiceStore.swift in Sources */,
 				5E1111112F60000000AE1111 /* StremioModels.swift in Sources */,
 				5E2222212F60000000AE2221 /* StremioClient.swift in Sources */,
@@ -1982,15 +2082,24 @@
 				14BBB0033FFF111100AAAAAA /* BackupManagementView.swift in Sources */,
 				14BBB0053FFF111100AAAAAA /* BackupManager.swift in Sources */,
 				14CC00020000000000CC0002 /* HomeCatalogLayout.swift in Sources */,
+				UPNX00030000000000000003 /* UpNextResolutionCache.swift in Sources */,
 				FF1111112F30000000FF1111 /* AniListMangaService.swift in Sources */,
 				FF2222222F30000000FF2222 /* MangaCatalogManager.swift in Sources */,
 				FF3333332F30000000FF3333 /* MangaHomeViewModel.swift in Sources */,
+				KCC1000000000000000CAT02 /* KanzenCustomCatalog.swift in Sources */,
+				KAM1000000000000000MIG02 /* KanzenAidokuMigration.swift in Sources */,
+				KMG1000000000000000VW02 /* KanzenAidokuMigrationView.swift in Sources */,
+				KMG2000000000000000PR02 /* KanzenAidokuMigrationPrompt.swift in Sources */,
+				KCP1000000000000000PRE02 /* KanzenCatalogPresets.swift in Sources */,
 				FF4444442F30000000FF4444 /* MangaSourceFinder.swift in Sources */,
 				FF5555552F30000000FF5555 /* KanzenHomeView.swift in Sources */,
 				FF5555562F30000000FF5556 /* KanzenHistoryView.swift in Sources */,
 				FF6666662F30000000FF6666 /* KanzenGlobalSearchView.swift in Sources */,
+				KFE1000000000000000EDT02 /* ReaderExtensionFilterEditor.swift in Sources */,
 				FF7777712F30000000FF7771 /* MangaDetailView.swift in Sources */,
 				FF8888812F30000000FF8881 /* MangaCatalogSettingsView.swift in Sources */,
+				KCC2000000000000000CAT02 /* KanzenCustomCatalogsView.swift in Sources */,
+				KCB1000000000000000BLD02 /* KanzenCatalogBuilderView.swift in Sources */,
 				AD0000032FD9000000AD0003 /* AidokuSourceManager.swift in Sources */,
 				AD0000042FD9000000AD0004 /* AidokuMangaDetailView.swift in Sources */,
 				AD0000052FD9000000AD0005 /* AidokuSourcesSettingsView.swift in Sources */,
@@ -2040,7 +2149,6 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "${DEVELOPMENT_TEAM}";
-				FRAMEWORK_SEARCH_PATHS = "$(inherited) \"$(PROJECT_DIR)/Pods/google-cast-sdk/GoogleCastSDK-ios-4.8.4_static_xcframework\" \"$(BUILD_DIR)/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)/XCFrameworkIntermediates/google-cast-sdk\"";
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks";
@@ -2062,7 +2170,6 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "${DEVELOPMENT_TEAM}";
-				FRAMEWORK_SEARCH_PATHS = "$(inherited) \"$(PROJECT_DIR)/Pods/google-cast-sdk/GoogleCastSDK-ios-4.8.4_static_xcframework\" \"$(BUILD_DIR)/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)/XCFrameworkIntermediates/google-cast-sdk\"";
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks @loader_path/Frameworks";
@@ -2073,74 +2180,6 @@
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Eclipse.app/Eclipse";
-			};
-			name = Release;
-		};
-		MACCF0100000000000000001 /* Debug */ = {
-			isa = XCBuildConfiguration;
-			baseConfigurationReference = 129CC9062EBA1D4600D2D84B /* Build.xcconfig */;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = MacAppIcon;
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = EclipseMac/EclipseMac.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 12;
-				DEVELOPMENT_TEAM = "${DEVELOPMENT_TEAM}";
-				ENABLE_HARDENED_RUNTIME = YES;
-				ENABLE_PREVIEWS = YES;
-				FRAMEWORK_SEARCH_PATHS = "";
-				GENERATE_INFOPLIST_FILE = NO;
-				HEADER_SEARCH_PATHS = "";
-				INFOPLIST_FILE = EclipseMac/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				LIBRARY_SEARCH_PATHS = "";
-				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.2.0;
-				ONLY_ACTIVE_ARCH = YES;
-				OTHER_LDFLAGS = "";
-				PRODUCT_BUNDLE_IDENTIFIER = "${BUNDLE_IDENTIFIER}";
-				PRODUCT_NAME = Eclipse;
-				PROVISIONING_PROFILE = "";
-				PROVISIONING_PROFILE_SPECIFIER = "";
-				SDKROOT = macosx;
-				SUPPORTED_PLATFORMS = macosx;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) DEBUG ECLIPSE_MACOS ECLIPSE_APP_STORE";
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
-			};
-			name = Debug;
-		};
-		MACCF0200000000000000002 /* Release */ = {
-			isa = XCBuildConfiguration;
-			baseConfigurationReference = 129CC9062EBA1D4600D2D84B /* Build.xcconfig */;
-			buildSettings = {
-				ASSETCATALOG_COMPILER_APPICON_NAME = MacAppIcon;
-				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_ENTITLEMENTS = EclipseMac/EclipseMac.entitlements;
-				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 12;
-				DEAD_CODE_STRIPPING = YES;
-				DEVELOPMENT_TEAM = "${DEVELOPMENT_TEAM}";
-				ENABLE_HARDENED_RUNTIME = YES;
-				FRAMEWORK_SEARCH_PATHS = "";
-				GENERATE_INFOPLIST_FILE = NO;
-				HEADER_SEARCH_PATHS = "";
-				ICLOUD_CONTAINER_ENVIRONMENT = Production;
-				INFOPLIST_FILE = EclipseMac/Info.plist;
-				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
-				LIBRARY_SEARCH_PATHS = "";
-				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.2.0;
-				OTHER_LDFLAGS = "";
-				PRODUCT_BUNDLE_IDENTIFIER = "${BUNDLE_IDENTIFIER}";
-				PRODUCT_NAME = Eclipse;
-				PROVISIONING_PROFILE = "";
-				PROVISIONING_PROFILE_SPECIFIER = "";
-				SDKROOT = macosx;
-				SUPPORTED_PLATFORMS = macosx;
-				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "$(inherited) ECLIPSE_MACOS ECLIPSE_APP_STORE";
-				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
 			};
 			name = Release;
 		};
@@ -2161,7 +2200,7 @@
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 3;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Eclipse.app/Eclipse";
-				TVOS_DEPLOYMENT_TARGET = 17.0;
+				TVOS_DEPLOYMENT_TARGET = 17.5;
 			};
 			name = Debug;
 		};
@@ -2182,7 +2221,7 @@
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 3;
 				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Eclipse.app/Eclipse";
-				TVOS_DEPLOYMENT_TARGET = 17.0;
+				TVOS_DEPLOYMENT_TARGET = 17.5;
 			};
 			name = Release;
 		};
@@ -2202,7 +2241,7 @@
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 3;
 				TEST_TARGET_NAME = "Eclipse-tvOS";
-				TVOS_DEPLOYMENT_TARGET = 17.0;
+				TVOS_DEPLOYMENT_TARGET = 17.5;
 			};
 			name = Debug;
 		};
@@ -2222,7 +2261,7 @@
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 3;
 				TEST_TARGET_NAME = "Eclipse-tvOS";
-				TVOS_DEPLOYMENT_TARGET = 17.0;
+				TVOS_DEPLOYMENT_TARGET = 17.5;
 			};
 			name = Release;
 		};
@@ -2253,7 +2292,7 @@
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 3;
-				TVOS_DEPLOYMENT_TARGET = 17.0;
+				TVOS_DEPLOYMENT_TARGET = 17.5;
 			};
 			name = Debug;
 		};
@@ -2284,7 +2323,7 @@
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 3;
-				TVOS_DEPLOYMENT_TARGET = 17.0;
+				TVOS_DEPLOYMENT_TARGET = 17.5;
 			};
 			name = Release;
 		};
@@ -2412,7 +2451,7 @@
 		};
 		13F0726B2E4B2D3700EF90EB /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = CASTPODS0000000000000003 /* EclipsePodsDebug.xcconfig */;
+			baseConfigurationReference = 129CC9062EBA1D4600D2D84B /* Build.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
@@ -2470,15 +2509,21 @@
 		};
 		13F0726C2E4B2D3700EF90EB /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = CASTPODS0000000000000004 /* EclipsePodsRelease.xcconfig */;
+			baseConfigurationReference = 129CC9062EBA1D4600D2D84B /* Build.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_IDENTITY = "$(ECLIPSE_IOS_CODE_SIGN_IDENTITY)";
+				CODE_SIGN_STYLE = "$(ECLIPSE_IOS_CODE_SIGN_STYLE)";
 				CURRENT_PROJECT_VERSION = 12;
 				DEAD_CODE_STRIPPING = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
-				DEVELOPMENT_TEAM = "${DEVELOPMENT_TEAM}";
+				DEVELOPMENT_TEAM = "$(ECLIPSE_IOS_DEVELOPMENT_TEAM)";
+				ECLIPSE_IOS_BUNDLE_IDENTIFIER = "${BUNDLE_IDENTIFIER}";
+				ECLIPSE_IOS_CODE_SIGN_IDENTITY = "Apple Development";
+				ECLIPSE_IOS_CODE_SIGN_STYLE = Automatic;
+				ECLIPSE_IOS_DEVELOPMENT_TEAM = ANMK3Y568U;
+				ECLIPSE_IOS_PROVISIONING_PROFILE_SPECIFIER = "";
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_HARDENED_RUNTIME = NO;
 				ENABLE_INCOMING_NETWORK_CONNECTIONS = NO;
@@ -2514,8 +2559,9 @@
 				/* Do not change or else TestFlight will have issues. Use ECLIPSE_RELEASE_VERSION for GitHub updater releases. */
 				MARKETING_VERSION = 2.1.1;
 				OTHER_LDFLAGS = "$(inherited)";
-				PRODUCT_BUNDLE_IDENTIFIER = "${BUNDLE_IDENTIFIER}";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(ECLIPSE_IOS_BUNDLE_IDENTIFIER)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "$(ECLIPSE_IOS_PROVISIONING_PROFILE_SPECIFIER)";
 				SDKROOT = auto;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SUPPORTS_MACCATALYST = YES;
@@ -2534,15 +2580,6 @@
 			buildConfigurations = (
 				12F745172EB52DFC00889684 /* Debug */,
 				12F745182EB52DFC00889684 /* Release */,
-			);
-			defaultConfigurationIsVisible = 0;
-			defaultConfigurationName = Release;
-		};
-		MACCL0100000000000000001 /* Build configuration list for PBXNativeTarget "Eclipse-macOS" */ = {
-			isa = XCConfigurationList;
-			buildConfigurations = (
-				MACCF0100000000000000001 /* Debug */,
-				MACCF0200000000000000002 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
@@ -2602,14 +2639,6 @@
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCRemoteSwiftPackageReference section */
-		13A46CFB2EF5943400423BC6 /* XCRemoteSwiftPackageReference "FakeWebKit" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/undeaDD/FakeWebKit";
-			requirement = {
-				branch = main;
-				kind = branch;
-			};
-		};
 		13A46CFE2EF5944C00423BC6 /* XCRemoteSwiftPackageReference "Kingfisher" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/onevcat/Kingfisher";
@@ -2618,28 +2647,12 @@
 				minimumVersion = 8.6.2;
 			};
 		};
-		13A46D012EF5945700423BC6 /* XCRemoteSwiftPackageReference "SoraCore" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/cranci1/SoraCore";
-			requirement = {
-				branch = main;
-				kind = branch;
-			};
-		};
 		C0A5A0032FD1000000C0A503 /* XCRemoteSwiftPackageReference "plcrashreporter" */ = {
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/microsoft/plcrashreporter.git";
 			requirement = {
 				kind = upToNextMajorVersion;
 				minimumVersion = 1.12.2;
-			};
-		};
-		AD0000202FD9000000AD0020 /* XCRemoteSwiftPackageReference "AidokuRunner" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/Aidoku/AidokuRunner";
-			requirement = {
-				branch = main;
-				kind = branch;
 			};
 		};
 		AD0000212FD9000000AD0021 /* XCRemoteSwiftPackageReference "ZIPFoundation" */ = {
@@ -2677,39 +2690,20 @@
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
-		12E7AF5D2EB7FDB7003B7664 /* FakeWebKit */ = {
-			isa = XCSwiftPackageProductDependency;
-			productName = FakeWebKit;
-		};
 		136C25C52EFE950300E37A6E /* MPVKit-GPL */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 136C25C42EFE950300E37A6E /* XCLocalSwiftPackageReference "MPVKit" */;
 			productName = "MPVKit-GPL";
-		};
-		13A46CFC2EF5943400423BC6 /* FakeWebKit */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 13A46CFB2EF5943400423BC6 /* XCRemoteSwiftPackageReference "FakeWebKit" */;
-			productName = FakeWebKit;
 		};
 		13A46CFF2EF5944C00423BC6 /* Kingfisher */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 13A46CFE2EF5944C00423BC6 /* XCRemoteSwiftPackageReference "Kingfisher" */;
 			productName = Kingfisher;
 		};
-		13A46D022EF5945700423BC6 /* SoraCore */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 13A46D012EF5945700423BC6 /* XCRemoteSwiftPackageReference "SoraCore" */;
-			productName = SoraCore;
-		};
 		C0A5A0042FD1000000C0A504 /* CrashReporter */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = C0A5A0032FD1000000C0A503 /* XCRemoteSwiftPackageReference "plcrashreporter" */;
 			productName = CrashReporter;
-		};
-		AD0000222FD9000000AD0022 /* AidokuRunner */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = AD0000202FD9000000AD0020 /* XCRemoteSwiftPackageReference "AidokuRunner" */;
-			productName = AidokuRunner;
 		};
 		AD0000232FD9000000AD0023 /* ZIPFoundation */ = {
 			isa = XCSwiftPackageProductDependency;

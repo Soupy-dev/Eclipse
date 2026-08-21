@@ -16,19 +16,26 @@ struct TVRootView: View {
     @State private var searchPath = NavigationPath()
     @State private var settingsPath = NavigationPath()
     @State private var showingAniListFallbackAlert = false
+    @State private var playerInterfaceCoverage = PlayerInterfaceCoverageState()
     @StateObject private var nextEpisodeRouter = TVNextEpisodeRoutingCenter.shared
     @Environment(\.scenePhase) private var scenePhase
     @Namespace private var heroNamespace
 
+    private var playerCoversInterface: Bool {
+
+        playerInterfaceCoverage.isCovered(in: nil)
+    }
+
     var body: some View {
         TabView(selection: $selectedTab) {
             NavigationStack(path: $homePath) {
-                HomeView()
+                HomeView(isActive: selectedTab == .home && !playerCoversInterface)
             }
             .tabItem { Label("Home", systemImage: "house.fill") }
             .tag(Tab.home)
 
             NavigationStack(path: $schedulePath) {
+
                 ScheduleView(isActive: selectedTab == .schedule)
             }
             .tabItem { Label("Schedule", systemImage: "calendar") }
@@ -63,6 +70,9 @@ struct TVRootView: View {
             }
         }
         .onAppear { publishScenePhase(scenePhase) }
+        .onReceive(NotificationCenter.default.publisher(for: .playerInterfaceCoverageDidChange)) { notification in
+            playerInterfaceCoverage.consume(notification)
+        }
         .onReceive(NotificationCenter.default.publisher(for: .animeMetadataDidSwitchToMALFallback)) { _ in
             showingAniListFallbackAlert = true
         }
@@ -82,7 +92,7 @@ struct TVRootView: View {
                 originalTMDBEpisodeNumber: target.originalTMDBEpisodeNumber,
                 specialTitleOnlySearch: target.playbackContext?.titleOnlySearch == true,
                 episodePlaybackContext: target.playbackContext,
-                autoModeOnly: UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"),
+                autoModeOnly: AutoModeSettings.isEnabled(),
                 onResolvedPlaybackRequest: { request in
                     nextEpisodeRouter.present(request, for: target)
                 },
@@ -115,8 +125,7 @@ struct TVRootView: View {
     }
 
     private func warmSchedulesAfterStartup() async {
-        // Keep the user's selected Schedule range outside the first-render
-        // path while still warming both providers after launch.
+
         try? await Task.sleep(nanoseconds: 750_000_000)
         guard !Task.isCancelled else { return }
         let requestedDayCount = ScheduleWindow.current.rawValue

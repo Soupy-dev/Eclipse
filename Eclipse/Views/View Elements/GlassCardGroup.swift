@@ -1,16 +1,12 @@
-// Translucent glass card group container with thin separators
-
 import SwiftUI
-
-// MARK: - Glass Card Group
 
 struct GlassCardGroup<Content: View>: View {
     let content: Content
-    
+
     init(@ViewBuilder content: () -> Content) {
         self.content = content()
     }
-    
+
     var body: some View {
         content
             .background(cardBackground)
@@ -64,14 +60,12 @@ struct GlassCardGroup<Content: View>: View {
     }
 }
 
-// MARK: - Settings Row
-
 struct GlassSettingsRow<Trailing: View>: View {
     let icon: String
     let iconColor: Color
     let title: String
     let trailing: Trailing
-    
+
     init(
         icon: String,
         iconColor: Color = .white,
@@ -83,17 +77,17 @@ struct GlassSettingsRow<Trailing: View>: View {
         self.title = title
         self.trailing = trailing()
     }
-    
+
     var body: some View {
         HStack(spacing: 12) {
             settingsIcon
-            
+
             Text(title)
                 .font(rowTitleFont)
-                .foregroundColor(.white)
-            
+                .foregroundColor(isTvOS ? Color.primary : Color.white)
+
             Spacer()
-            
+
             trailing
         }
         .padding(.horizontal, 14)
@@ -145,35 +139,40 @@ struct GlassSettingsRow<Trailing: View>: View {
     }
 
     private var rowVerticalPadding: CGFloat {
-        ExperimentalFeatureState.isEnabledAtLaunch ? 12 : 13
+        isTvOS ? 14 : (ExperimentalFeatureState.isEnabledAtLaunch ? 12 : 13)
     }
 }
 
-// Convenience for NavigationLink rows with chevron
 extension GlassSettingsRow where Trailing == AnyView {
     init(icon: String, iconColor: Color = .white, title: String) {
         self.icon = icon
         self.iconColor = iconColor
         self.title = title
+#if os(tvOS)
+        self.trailing = AnyView(
+            Image(systemName: "chevron.right")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(Color.secondary)
+        )
+#else
         self.trailing = AnyView(
             Image(systemName: "chevron.right")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundColor(Color.white.opacity(0.3))
         )
+#endif
     }
 }
-
-// MARK: - Glass Section
 
 struct GlassSection<Content: View>: View {
     let header: String?
     let content: Content
-    
+
     init(header: String? = nil, @ViewBuilder content: () -> Content) {
         self.header = header
         self.content = content()
     }
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             if let header = header {
@@ -183,7 +182,7 @@ struct GlassSection<Content: View>: View {
                     .foregroundColor(EclipseTheme.shared.sectionHeaderColor)
                     .padding(.horizontal, 18)
             }
-            
+
             GlassCardGroup {
                 content
             }
@@ -192,11 +191,8 @@ struct GlassSection<Content: View>: View {
     }
 }
 
-// MARK: - Glass Divider
-
 struct GlassDivider: View {
-    /// Leading inset. Defaults to 54 so the rule starts after a row icon;
-    /// pass 16 for icon-less rows.
+
     var leadingInset: CGFloat = 54
 
     var body: some View {
@@ -207,13 +203,6 @@ struct GlassDivider: View {
     }
 }
 
-// MARK: - Shared settings row pieces
-//
-// Building blocks for glass settings sub-menus so every screen shares the same
-// row anatomy as the main Settings page (icon bubble, white title, secondary
-// detail). Use these instead of native List rows when rebuilding a sub-menu.
-
-/// The rounded icon bubble used on the left of settings rows.
 struct GlassRowIcon: View {
     let icon: String
     var iconColor: Color = .white
@@ -246,8 +235,6 @@ struct GlassRowIcon: View {
     }
 }
 
-/// A settings row with an optional icon, a title, an optional multi-line
-/// subtitle and optional trailing content.
 struct GlassDetailRow<Trailing: View>: View {
     let icon: String?
     let iconColor: Color
@@ -278,12 +265,12 @@ struct GlassDetailRow<Trailing: View>: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
                     .font(ExperimentalFeatureState.isEnabledAtLaunch ? .body.weight(.medium) : .body)
-                    .foregroundColor(.white)
+                    .foregroundColor(isTvOS ? Color.primary : Color.white)
 
                 if let subtitle {
                     Text(subtitle)
                         .font(.caption)
-                        .foregroundColor(.white.opacity(0.5))
+                        .foregroundColor(isTvOS ? Color.secondary : Color.white.opacity(0.5))
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -294,12 +281,11 @@ struct GlassDetailRow<Trailing: View>: View {
             trailing()
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .padding(.vertical, isTvOS ? 14 : 12)
         .contentShape(Rectangle())
     }
 }
 
-/// A glass slider row with a title, optional subtitle and a live value readout.
 struct GlassSliderRow: View {
     let title: String
     var subtitle: String? = nil
@@ -355,7 +341,6 @@ struct GlassSliderRow: View {
     }
 }
 
-/// A selectable (checkmark) row used by inline pickers like language or mode.
 struct GlassSelectionRow: View {
     var icon: String? = nil
     var iconColor: Color = .white
@@ -375,11 +360,11 @@ struct GlassSelectionRow: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(title)
                         .font(ExperimentalFeatureState.isEnabledAtLaunch ? .body.weight(.medium) : .body)
-                        .foregroundColor(.white)
+                        .foregroundColor(isTvOS ? Color.primary : Color.white)
                     if let subtitle {
                         Text(subtitle)
                             .font(.caption)
-                            .foregroundColor(.white.opacity(0.5))
+                            .foregroundColor(isTvOS ? Color.secondary : Color.white.opacity(0.5))
                             .multilineTextAlignment(.leading)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -389,19 +374,18 @@ struct GlassSelectionRow: View {
 
                 if isSelected {
                     Image(systemName: "checkmark")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: isTvOS ? 24 : 15, weight: .semibold))
                         .foregroundColor(accent)
                 }
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 12)
+            .padding(.vertical, isTvOS ? 14 : 12)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
 }
 
-/// Caption text shown beneath a `GlassSection`, mirroring a List section footer.
 struct GlassSectionFooter: View {
     let text: String
 
@@ -411,8 +395,8 @@ struct GlassSectionFooter: View {
 
     var body: some View {
         Text(text)
-            .font(.caption)
-            .foregroundColor(.white.opacity(0.45))
+            .font(isTvOS ? .system(size: 27) : .caption)
+            .foregroundColor(.white.opacity(isTvOS ? 0.6 : 0.45))
             .multilineTextAlignment(.leading)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 18)
@@ -420,19 +404,13 @@ struct GlassSectionFooter: View {
     }
 }
 
-// MARK: - Shared design-system components
-//
-// Reusable pieces consumed by Home, Media Detail, Downloads, Schedule and the
-// libraries so every screen shares one card / badge / empty-state language.
-
 extension View {
-    /// Wrap content in the shared glass treatment at the token card radius.
+
     func glassCard(cornerRadius: CGFloat? = nil) -> some View {
         applyLiquidGlassBackground(cornerRadius: cornerRadius ?? EclipseRadius.card)
     }
 }
 
-/// A consistent section header (title + optional count + optional chevron).
 struct EclipseSectionHeader: View {
     let title: String
     var count: Int? = nil
@@ -466,7 +444,6 @@ struct EclipseSectionHeader: View {
     }
 }
 
-/// A small status / format pill (Downloading, Paused, OVA, etc.).
 struct EclipseStatusBadge: View {
     let text: String
     var systemImage: String? = nil
@@ -476,20 +453,19 @@ struct EclipseStatusBadge: View {
         HStack(spacing: 4) {
             if let systemImage {
                 Image(systemName: systemImage)
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.system(size: isTvOS ? 20 : 10, weight: .bold))
             }
             Text(text)
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: isTvOS ? 22 : 11, weight: .semibold))
                 .lineLimit(1)
         }
         .foregroundColor(.white)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.horizontal, isTvOS ? 14 : 8)
+        .padding(.vertical, isTvOS ? 7 : 4)
         .background(Capsule().fill(tint.opacity(0.85)))
     }
 }
 
-/// A consistent empty-state block with an optional call to action.
 struct EclipseEmptyState: View {
     let icon: String
     let title: String
@@ -504,16 +480,23 @@ struct EclipseEmptyState: View {
                 .foregroundColor(.white.opacity(0.5))
 
             Text(title)
-                .font(.system(size: 19, weight: .semibold))
+                .font(.system(size: isTvOS ? 34 : 19, weight: .semibold))
                 .foregroundColor(.white)
                 .multilineTextAlignment(.center)
 
             Text(message)
-                .font(.system(size: 14))
+                .font(.system(size: isTvOS ? 27 : 14))
                 .foregroundColor(.white.opacity(0.6))
                 .multilineTextAlignment(.center)
 
             if let actionTitle, let action {
+#if os(tvOS)
+                Button(action: action) {
+                    Text(actionTitle)
+                        .font(.system(size: 29, weight: .semibold))
+                }
+                .padding(.top, 6)
+#else
                 Button(action: action) {
                     Text(actionTitle)
                         .font(.system(size: 14, weight: .semibold))
@@ -523,6 +506,7 @@ struct EclipseEmptyState: View {
                         .background(Capsule().fill(Color.white.opacity(0.12)))
                 }
                 .buttonStyle(.plain)
+#endif
             }
         }
         .frame(maxWidth: .infinity)
@@ -531,7 +515,26 @@ struct EclipseEmptyState: View {
     }
 }
 
-/// A circular progress ring with a centered percentage, for downloads.
+#if os(tvOS)
+struct TVGlassRowButtonStyle: ButtonStyle {
+    @Environment(\.isFocused) private var isFocused
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.white.opacity(isFocused ? 0.22 : 0.10))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(Color.white.opacity(isFocused ? 0.4 : 0.12), lineWidth: 1)
+            )
+            .scaleEffect(isFocused ? 1.01 : 1.0)
+            .animation(.easeOut(duration: 0.15), value: isFocused)
+    }
+}
+#endif
+
 struct DownloadProgressRing: View {
     var progress: Double
     var tint: Color = .white

@@ -40,8 +40,23 @@ af3a25fccea0230dfe33be912cfb86af76c0eb75c7789a70ab458c28d7a1a688  dart/manga/mul
 0f8b122f3950af18a036d7dc974596f7c6c0ac85f358fae4321c15d90b3eb957  dart/manga/multisrc/nepnep/nepnep.dart
 0af7df8715e44970bd86cbb0e333a4c7ca10e39f097db3902c14b575c506f2fe  dart/manga/multisrc/nepnep/sources.dart
 
-Neither audited upstream revision contains a NOTICE file. The complete Apache
-License 2.0 text governing these works is bundled beside this notice as
+Reader Extension compatibility-test fixtures
+Repository: https://github.com/m2k3a/mangayomi-extensions
+Pinned revision: 790e12d23d1c7c204bdc8a52d42a82605d68a8db
+Immutable source: https://github.com/m2k3a/mangayomi-extensions/tree/790e12d23d1c7c204bdc8a52d42a82605d68a8db
+License at revision: https://github.com/m2k3a/mangayomi-extensions/blob/790e12d23d1c7c204bdc8a52d42a82605d68a8db/LICENSE
+
+The following real provider scripts are included only as resources of the
+Tests.xctest compatibility suite; they are not members of either application
+target and are not bundled in a released app binary:
+10cc986783b0ce1b3db820cea3cad4d3895b90952cfa87343bf7e4d9b4681175  Tests/Fixtures/ReaderExtension-asurascans.js
+f92c938e9ebf7518860a8267a079b41caa01ec90c268114613b387f3de4fdb97  Tests/Fixtures/ReaderExtension-comix.js
+5dbc552eb37a5d90fef5fa421abeb4f093298e41a03e20c816913cfac79bd82b  Tests/Fixtures/ReaderExtension-mangadex.js
+07b2a2190383e10f23db3f3bac8b28565c57ad813037d3cf7f1a1d75a9e04979  Tests/Fixtures/ReaderExtension-mangafire.js
+77fd999daeb9312022fd0bc559180a4d9845cec58b4edf0f220a27ac106147b2  Tests/Fixtures/ReaderExtension-weebcentral.js
+
+None of the audited upstream revisions contains a NOTICE file. The complete
+Apache License 2.0 text governing these works is bundled beside this notice as
 LICENSE-APACHE-2.0.txt. Modified Swift source files retain prominent provenance
 headers and refer back to this notice.
 

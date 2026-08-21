@@ -96,6 +96,7 @@ struct ReaderLoggerView: View {
         #endif
         .background(GlobalGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
+        .preferredColorScheme(.dark)
         .toolbar {
             ToolbarItem(placement: .navigationBarTrailing) {
                 Menu {
@@ -135,6 +136,7 @@ struct ReaderLoggerView: View {
 #if !os(tvOS)
         .sheet(item: $exportItem) { item in
             ActivityView(items: [item.url])
+                .preferredColorScheme(.dark)
         }
 #endif
     }

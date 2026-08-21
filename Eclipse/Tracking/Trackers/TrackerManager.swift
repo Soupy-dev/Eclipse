@@ -1,73 +1,275 @@
+//
+//  TrackerManager.swift
+//  Eclipse
+//
+//  Created by Soupy-dev
+//
+
 import Foundation
 import Combine
 import AuthenticationServices
 import Security
 import UIKit
+import CryptoKit
+
+enum TrackerCredentialStoragePolicy {
+    static let primarySynchronizable = false
+    static let legacySynchronizable = true
+}
 
 private enum TrackerCredentialVault {
     private struct Credentials: Codable {
         let accessToken: String
         let refreshToken: String?
         let expiresAt: Date?
+
+        let username: String?
+        let userId: String?
     }
 
     private static let service = "app.Eclipse.Soupy.tracker-credentials"
+    private static let maximumCredentialBytes = 128 * 1_024
+    private static let maximumIdentityBytes = 1_024
+    private static let maximumEncodedCredentialBytes = 384 * 1_024
 
-    static func store(_ account: TrackerAccount) -> Bool {
+    enum HydrationResult {
+        case found(TrackerAccount, identityIsKeychainBound: Bool)
+
+        case absent
+        case temporarilyUnavailable(OSStatus)
+    }
+
+    enum IdentityBoundDiscoveryResult {
+        case found(TrackerAccount)
+
+        case notRecoverable
+        case temporarilyUnavailable(OSStatus)
+    }
+
+    static func store(_ account: TrackerAccount, profileID: UUID) -> Bool {
         let credentials = Credentials(
             accessToken: account.accessToken,
             refreshToken: account.refreshToken,
-            expiresAt: account.expiresAt
+            expiresAt: account.expiresAt,
+            username: account.username,
+            userId: account.userId
         )
         guard !credentials.accessToken.isEmpty,
-              let data = try? JSONEncoder().encode(credentials) else { return false }
+              credentials.accessToken.utf8.count <= maximumCredentialBytes,
+              (credentials.refreshToken?.utf8.count ?? 0) <= maximumCredentialBytes,
+              !account.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              !account.userId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              account.username.utf8.count <= maximumIdentityBytes,
+              account.userId.utf8.count <= maximumIdentityBytes,
+              let data = try? JSONEncoder().encode(credentials),
+              data.count <= maximumEncodedCredentialBytes else { return false }
 
-        let lookup = query(for: account.service)
+        let lookup = query(
+            for: account.service,
+            profileID: profileID,
+            synchronizable: TrackerCredentialStoragePolicy.primarySynchronizable
+        )
         let updatedValues: [String: Any] = [
             kSecValueData as String: data,
             kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         ]
         let updateStatus = SecItemUpdate(lookup as CFDictionary, updatedValues as CFDictionary)
         if updateStatus == errSecSuccess {
+            _ = removeLegacySynchronizable(account.service, profileID: profileID)
             return true
         }
         guard updateStatus == errSecItemNotFound else { return false }
 
         var attributes = lookup
         attributes.merge(updatedValues) { _, new in new }
-        return SecItemAdd(attributes as CFDictionary, nil) == errSecSuccess
+        guard SecItemAdd(attributes as CFDictionary, nil) == errSecSuccess else { return false }
+        _ = removeLegacySynchronizable(account.service, profileID: profileID)
+        return true
     }
 
-    static func hydrate(_ account: TrackerAccount) -> TrackerAccount? {
-        var attributes = query(for: account.service)
+    static func hydrate(_ account: TrackerAccount, profileID: UUID) -> HydrationResult {
+        switch hydrate(
+            account,
+            profileID: profileID,
+            synchronizable: TrackerCredentialStoragePolicy.primarySynchronizable
+        ) {
+        case .found(let hydrated, let identityIsKeychainBound):
+            return .found(hydrated, identityIsKeychainBound: identityIsKeychainBound)
+        case .temporarilyUnavailable(let status):
+            return .temporarilyUnavailable(status)
+        case .absent:
+            break
+        }
+
+        let legacy = hydrate(
+            account,
+            profileID: profileID,
+            synchronizable: TrackerCredentialStoragePolicy.legacySynchronizable
+        )
+        guard case .found(let hydrated, let identityIsKeychainBound) = legacy else {
+            return legacy
+        }
+
+        if store(hydrated, profileID: profileID) {
+            return .found(hydrated, identityIsKeychainBound: identityIsKeychainBound)
+        }
+        return .temporarilyUnavailable(errSecNotAvailable)
+    }
+
+    private static func hydrate(
+        _ account: TrackerAccount,
+        profileID: UUID,
+        synchronizable: Bool
+    ) -> HydrationResult {
+        var attributes = query(
+            for: account.service,
+            profileID: profileID,
+            synchronizable: synchronizable
+        )
         attributes[kSecReturnData as String] = true
         attributes[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
-        guard SecItemCopyMatching(attributes as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data,
+        let status = SecItemCopyMatching(attributes as CFDictionary, &result)
+        guard status == errSecSuccess else {
+            return status == errSecItemNotFound
+                ? .absent
+                : .temporarilyUnavailable(status)
+        }
+        guard let data = result as? Data,
+              data.count <= maximumEncodedCredentialBytes,
               let credentials = try? JSONDecoder().decode(Credentials.self, from: data),
-              !credentials.accessToken.isEmpty else {
-            return nil
+              !credentials.accessToken.isEmpty,
+              credentials.accessToken.utf8.count <= maximumCredentialBytes,
+              (credentials.refreshToken?.utf8.count ?? 0) <= maximumCredentialBytes else {
+
+            return .temporarilyUnavailable(errSecDecode)
         }
 
-        var hydrated = account
-        hydrated.accessToken = credentials.accessToken
-        hydrated.refreshToken = credentials.refreshToken
-        hydrated.expiresAt = credentials.expiresAt
-        hydrated.isConnected = true
-        return hydrated
+        let hasStoredUsername = credentials.username != nil
+        let hasStoredUserId = credentials.userId != nil
+        guard hasStoredUsername == hasStoredUserId else {
+
+            return .temporarilyUnavailable(errSecDecode)
+        }
+
+        let identityIsKeychainBound = hasStoredUsername && hasStoredUserId
+        let username: String
+        let userId: String
+        if identityIsKeychainBound {
+            guard let storedUsername = credentials.username,
+                  let storedUserId = credentials.userId,
+                  !storedUsername.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !storedUserId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  storedUsername.utf8.count <= maximumIdentityBytes,
+                  storedUserId.utf8.count <= maximumIdentityBytes else {
+                return .temporarilyUnavailable(errSecDecode)
+            }
+            username = storedUsername
+            userId = storedUserId
+        } else {
+
+            guard !account.username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !account.userId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  account.username.utf8.count <= maximumIdentityBytes,
+                  account.userId.utf8.count <= maximumIdentityBytes else {
+                return .temporarilyUnavailable(errSecDecode)
+            }
+            username = account.username
+            userId = account.userId
+        }
+
+        return .found(
+            TrackerAccount(
+                service: account.service,
+                username: username,
+                accessToken: credentials.accessToken,
+                refreshToken: credentials.refreshToken,
+                expiresAt: credentials.expiresAt,
+                userId: userId,
+                isConnected: true
+            ),
+            identityIsKeychainBound: identityIsKeychainBound
+        )
     }
 
-    static func remove(_ serviceType: TrackerService) {
-        SecItemDelete(query(for: serviceType) as CFDictionary)
+    static func discoverIdentityBound(
+        _ serviceType: TrackerService,
+        profileID: UUID
+    ) -> IdentityBoundDiscoveryResult {
+        let placeholder = TrackerAccount(
+            service: serviceType,
+            username: "",
+            accessToken: "",
+            refreshToken: nil,
+            expiresAt: nil,
+            userId: "",
+            isConnected: true
+        )
+        switch hydrate(placeholder, profileID: profileID) {
+        case .found(let account, let identityIsKeychainBound):
+            return identityIsKeychainBound ? .found(account) : .notRecoverable
+        case .absent:
+            return .notRecoverable
+        case .temporarilyUnavailable(let status):
+            return .temporarilyUnavailable(status)
+        }
     }
 
-    private static func query(for serviceType: TrackerService) -> [String: Any] {
+    @discardableResult
+    static func remove(_ serviceType: TrackerService, profileID: UUID) -> Bool {
+        let synchronizedStatus = SecItemDelete(
+            query(
+                for: serviceType,
+                profileID: profileID,
+                synchronizable: TrackerCredentialStoragePolicy.legacySynchronizable
+            ) as CFDictionary
+        )
+        let legacyStatus = SecItemDelete(
+            query(
+                for: serviceType,
+                profileID: profileID,
+                synchronizable: TrackerCredentialStoragePolicy.primarySynchronizable
+            ) as CFDictionary
+        )
+        return deletionSucceeded(synchronizedStatus) && deletionSucceeded(legacyStatus)
+    }
+
+    static func accountName(for serviceType: TrackerService, profileID: UUID) -> String {
+        guard profileID != ProfileManager.defaultProfileID else { return serviceType.rawValue }
+        return "\(serviceType.rawValue)#\(ProfileScopedStorage.token(for: profileID))"
+    }
+
+    private static func query(
+        for serviceType: TrackerService,
+        profileID: UUID,
+        synchronizable: Bool
+    ) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: serviceType.rawValue
+            kSecAttrAccount as String: accountName(for: serviceType, profileID: profileID),
+            kSecAttrSynchronizable as String: synchronizable
         ]
+    }
+
+    @discardableResult
+    private static func removeLegacySynchronizable(
+        _ serviceType: TrackerService,
+        profileID: UUID
+    ) -> Bool {
+        deletionSucceeded(
+            SecItemDelete(
+                query(
+                    for: serviceType,
+                    profileID: profileID,
+                    synchronizable: TrackerCredentialStoragePolicy.legacySynchronizable
+                ) as CFDictionary
+            )
+        )
+    }
+
+    private static func deletionSucceeded(_ status: OSStatus) -> Bool {
+        status == errSecSuccess || status == errSecItemNotFound
     }
 }
 
@@ -75,6 +277,124 @@ private enum TrackerRequestProvider: Hashable {
     case anilist
     case myAnimeList
     case trakt
+}
+
+struct TrackerRateLimitHeaderPolicy {
+    static let maximumDelay: TimeInterval = 120
+
+    static func retryDelay(_ rawValue: String?, fallback: TimeInterval = 5) -> TimeInterval {
+        guard let rawValue,
+              let parsed = TimeInterval(rawValue),
+              parsed.isFinite else {
+            return fallback
+        }
+        return min(max(parsed, 1), maximumDelay)
+    }
+
+    static func minimumSpacing(_ rawLimit: String?) -> TimeInterval? {
+        guard let rawLimit,
+              let limit = Double(rawLimit),
+              limit.isFinite,
+              limit > 0 else {
+            return nil
+        }
+        let calculated = 60 / limit
+        guard calculated.isFinite else { return nil }
+        return min(max(calculated, 0.8), maximumDelay)
+    }
+
+    static func resetDelay(_ rawReset: String?, now: Date) -> TimeInterval? {
+        guard let rawReset,
+              let reset = TimeInterval(rawReset),
+              reset.isFinite else {
+            return nil
+        }
+        let delay = reset - now.timeIntervalSince1970
+        guard delay.isFinite, delay > 0, delay <= maximumDelay else { return nil }
+        return delay
+    }
+
+    static func sleepNanoseconds(for delay: TimeInterval) -> UInt64? {
+        guard delay.isFinite,
+              delay >= 0,
+              delay <= maximumDelay else {
+            return nil
+        }
+        let nanoseconds = (delay * 1_000_000_000).rounded(.up)
+        guard nanoseconds.isFinite else { return nil }
+        return UInt64(exactly: nanoseconds)
+    }
+
+    static func displaySeconds(for delay: TimeInterval) -> Int? {
+        guard delay.isFinite,
+              delay >= 0,
+              delay <= maximumDelay else {
+            return nil
+        }
+        return Int(exactly: delay.rounded(.up))
+    }
+}
+
+struct TrackerWatchSyncDedupeRegistration: Equatable {
+    fileprivate let key: String
+    fileprivate let attemptID: UUID
+}
+
+struct TrackerWatchSyncDedupeGate {
+    private enum Entry {
+        case inFlight(startedAt: Date, attemptID: UUID)
+        case completed(at: Date)
+
+        var date: Date {
+            switch self {
+            case .inFlight(let startedAt, _): startedAt
+            case .completed(let completedAt): completedAt
+            }
+        }
+    }
+
+    private var entries: [String: Entry] = [:]
+
+    mutating func begin(
+        key: String,
+        now: Date,
+        completedInterval: TimeInterval,
+        staleInFlightInterval: TimeInterval
+    ) -> TrackerWatchSyncDedupeRegistration? {
+        entries = entries.filter { _, entry in
+            switch entry {
+            case .inFlight:
+                return now.timeIntervalSince(entry.date) < staleInFlightInterval
+            case .completed:
+                return now.timeIntervalSince(entry.date) < completedInterval
+            }
+        }
+
+        guard entries[key] == nil else { return nil }
+        let registration = TrackerWatchSyncDedupeRegistration(
+            key: key,
+            attemptID: UUID()
+        )
+        entries[key] = .inFlight(
+            startedAt: now,
+            attemptID: registration.attemptID
+        )
+        return registration
+    }
+
+    mutating func finish(
+        registration: TrackerWatchSyncDedupeRegistration,
+        succeeded: Bool,
+        now: Date
+    ) {
+        guard case .inFlight(_, let attemptID) = entries[registration.key],
+              attemptID == registration.attemptID else { return }
+        if succeeded {
+            entries[registration.key] = .completed(at: now)
+        } else {
+            entries.removeValue(forKey: registration.key)
+        }
+    }
 }
 
 private actor TrackerRequestScheduler {
@@ -93,38 +413,39 @@ private actor TrackerRequestScheduler {
         nextAllowedAt[provider] = slot.addingTimeInterval(minimumSpacing[provider] ?? 1)
 
         let delay = slot.timeIntervalSince(now)
-        if delay > 0.001 {
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        if delay > 0.001,
+           let nanoseconds = TrackerRateLimitHeaderPolicy.sleepNanoseconds(for: delay) {
+            try? await Task.sleep(nanoseconds: nanoseconds)
         }
     }
 
     func recordResponse(provider: TrackerRequestProvider, response: HTTPURLResponse) -> TimeInterval? {
         if provider == .anilist,
-           let limitValue = response.value(forHTTPHeaderField: "X-RateLimit-Limit"),
-           let limit = Double(limitValue),
-           limit > 0 {
-            minimumSpacing[provider] = max(60.0 / limit, 0.8)
+           let spacing = TrackerRateLimitHeaderPolicy.minimumSpacing(
+            response.value(forHTTPHeaderField: "X-RateLimit-Limit")
+           ) {
+            minimumSpacing[provider] = spacing
         }
 
-        let retryAfter = response.value(forHTTPHeaderField: "Retry-After")
-            .flatMap(TimeInterval.init)
-
         if response.statusCode == 429 {
-            let pause = min(max(retryAfter ?? 5, 1), 120)
+            let pause = TrackerRateLimitHeaderPolicy.retryDelay(
+                response.value(forHTTPHeaderField: "Retry-After")
+            )
             nextAllowedAt[provider] = max(nextAllowedAt[provider] ?? .distantPast, Date().addingTimeInterval(pause))
             return pause
         }
 
+        let now = Date()
         if provider == .anilist,
            let remainingValue = response.value(forHTTPHeaderField: "X-RateLimit-Remaining"),
            let remaining = Int(remainingValue),
            remaining <= 1,
-           let resetValue = response.value(forHTTPHeaderField: "X-RateLimit-Reset"),
-           let reset = TimeInterval(resetValue) {
-            let resetDate = Date(timeIntervalSince1970: reset)
-            if resetDate > Date() {
-                nextAllowedAt[provider] = max(nextAllowedAt[provider] ?? .distantPast, resetDate)
-            }
+           let resetDelay = TrackerRateLimitHeaderPolicy.resetDelay(
+            response.value(forHTTPHeaderField: "X-RateLimit-Reset"),
+            now: now
+           ) {
+            let resetDate = now.addingTimeInterval(resetDelay)
+            nextAllowedAt[provider] = max(nextAllowedAt[provider] ?? .distantPast, resetDate)
         }
 
         return nil
@@ -133,11 +454,60 @@ private actor TrackerRequestScheduler {
 
 private struct AniListRatingSyncResponse {
     let statusCode: Int
-    let bodyPreview: String
+    let diagnostic: String
     let graphQLError: String?
 
     var succeeded: Bool {
         (200...299).contains(statusCode) && graphQLError == nil
+    }
+}
+
+enum TrackerRemoteProgressBoundary {
+    static let maximumRemoteEntryCount = 100_000
+    static let maximumPageCount = 1_000
+
+    static func positiveIdentifier(_ value: Int?) -> Int? {
+        guard let value, ProgressPersistencePolicy.validPositiveIdentifier(value) else {
+            return nil
+        }
+        return value
+    }
+
+    static func watchedEpisodeCount(
+        progress: Int,
+        totalEpisodes: Int?,
+        status: String
+    ) -> Int? {
+        guard (0...ProgressPersistencePolicy.maximumBulkEpisodeMutationCount).contains(progress),
+              totalEpisodes.map({
+                  (0...ProgressPersistencePolicy.maximumBulkEpisodeMutationCount).contains($0)
+              }) ?? true else {
+            return nil
+        }
+        let completed = status.trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() == "completed"
+        return completed ? max(progress, totalEpisodes ?? 0) : progress
+    }
+
+    static func pageCallCount(itemCount: Int, pageSize: Int) -> Int? {
+        guard itemCount >= 0,
+              itemCount <= maximumRemoteEntryCount,
+              pageSize > 0 else { return nil }
+        guard itemCount > 0 else { return 0 }
+        let quotient = itemCount / pageSize
+        let remainder = itemCount % pageSize
+        let pages = quotient + (remainder == 0 ? 0 : 1)
+        return pages <= maximumPageCount ? pages : nil
+    }
+
+    static func isAllowedMALPageURL(_ url: URL) -> Bool {
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return false
+        }
+        return components.scheme?.lowercased() == "https"
+            && components.host?.lowercased() == "api.myanimelist.net"
+            && components.port == nil
+            && components.path == "/v2/users/@me/animelist"
     }
 }
 
@@ -148,6 +518,36 @@ private struct RemoteAnimeProgress {
     let status: String
     let progress: Int
     let totalEpisodes: Int?
+}
+
+private extension RemoteAnimeProgress {
+    init?(
+        validatingAniListID anilistId: Int?,
+        malID malId: Int?,
+        title: String,
+        status: String,
+        progress: Int,
+        totalEpisodes: Int?
+    ) {
+        let safeAniListID = TrackerRemoteProgressBoundary.positiveIdentifier(anilistId)
+        let safeMALID = TrackerRemoteProgressBoundary.positiveIdentifier(malId)
+        guard (anilistId == nil || safeAniListID != nil),
+              (malId == nil || safeMALID != nil),
+              safeAniListID != nil || safeMALID != nil,
+              TrackerRemoteProgressBoundary.watchedEpisodeCount(
+                progress: progress,
+                totalEpisodes: totalEpisodes,
+                status: status
+              ) != nil else {
+            return nil
+        }
+        self.anilistId = safeAniListID
+        self.malId = safeMALID
+        self.title = String(title.prefix(1_024))
+        self.status = String(status.prefix(64))
+        self.progress = progress
+        self.totalEpisodes = totalEpisodes
+    }
 }
 
 #if !os(tvOS)
@@ -174,6 +574,10 @@ private struct MangaTrackerMatch {
 
 private struct TrackerSyncToolPlan {
     let action: TrackerSyncToolAction
+
+    let owner: UUID
+
+    var accountSnapshots: [TrackerAccount] = []
     let preview: TrackerSyncPreview
     var animeEntries: [RemoteAnimeProgress] = []
 #if !os(tvOS)
@@ -181,12 +585,242 @@ private struct TrackerSyncToolPlan {
 #endif
 }
 
+private struct TraktHistoryWriteReceipt: Codable {
+    let owner: UUID
+    let watchedAt: Date
+    var lastAttemptAt: Date
+    var confirmedAt: Date?
+
+    var receiptID: UUID?
+}
+
+enum TraktHistoryReceiptDecision: Equatable {
+    case suppressConfirmed
+    case waitForReconciliation
+    case reconcile
+}
+
+struct TraktHistoryReceiptReconciliationPolicy {
+    static func canonicalMinute(_ date: Date) -> Date {
+        let seconds = date.timeIntervalSince1970
+        guard seconds.isFinite else { return date }
+        return Date(timeIntervalSince1970: floor(seconds / 60) * 60)
+    }
+
+    static func containsReceipt(
+        watchedAt: Date,
+        historyWatchedAt: [Date]
+    ) -> Bool {
+        let receiptMinute = canonicalMinute(watchedAt)
+        return historyWatchedAt.contains {
+            canonicalMinute($0) == receiptMinute
+        }
+    }
+
+    static func decision(
+        lastAttemptAt: Date,
+        confirmedAt: Date?,
+        now: Date,
+        reconciliationDelay: TimeInterval,
+        confirmedInterval: TimeInterval
+    ) -> TraktHistoryReceiptDecision {
+        if let confirmedAt,
+           now.timeIntervalSince(confirmedAt) < confirmedInterval {
+            return .suppressConfirmed
+        }
+        if now.timeIntervalSince(lastAttemptAt) < reconciliationDelay {
+            return .waitForReconciliation
+        }
+        return .reconcile
+    }
+}
+
+private enum TraktHistoryWriteAttemptDisposition {
+    case send
+    case reconcile
+    case suppressConfirmed
+    case deferPending
+
+    var ownsInFlightClaim: Bool {
+        switch self {
+        case .send, .reconcile:
+            return true
+        case .suppressConfirmed, .deferPending:
+            return false
+        }
+    }
+}
+
+private struct TraktHistoryWriteAttempt {
+    let key: String
+    let watchedAt: Date
+    let receiptID: UUID
+    let disposition: TraktHistoryWriteAttemptDisposition
+}
+
+private enum TraktHistoryReconciliationResult {
+    case found
+    case absent(account: TrackerAccount)
+    case unavailable
+}
+
+private struct TraktHistoryEntry: Decodable {
+    let watchedAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case watchedAt = "watched_at"
+    }
+}
+
+struct TrackerPrivateCloudExportAuthority: Equatable {
+    let profileID: UUID
+    let rosterGeneration: UInt64
+    let operationGeneration: UInt64
+    let accountBoundaryGeneration: UInt64
+    let serviceGenerations: [TrackerService: UInt64]
+}
+
+enum TrackerPrivateCloudCredentialMaterialization {
+    case found(TrackerAccount)
+    case unavailable
+}
+
+enum TrackerPrivateCloudExportPolicy {
+    static func incomingCredentialIsAuthoritative(_ account: TrackerAccount) -> Bool {
+        account.isConnected && !account.accessToken.isEmpty
+    }
+
+    static func preferredCredentialBearingAccount(
+        incoming: TrackerAccount,
+        local: TrackerAccount?,
+        credentialsAndRosterAreAuthoritative: Bool
+    ) -> TrackerAccount? {
+        if credentialsAndRosterAreAuthoritative,
+           incomingCredentialIsAuthoritative(incoming) {
+            return incoming
+        }
+        guard let local,
+              local.isConnected,
+              !local.accessToken.isEmpty else {
+            return incomingCredentialIsAuthoritative(incoming) ? incoming : nil
+        }
+        return local
+    }
+
+    static func disconnectedTombstone(_ account: TrackerAccount) -> TrackerAccount {
+        var tombstone = account
+        tombstone.isConnected = false
+        tombstone.accessToken = ""
+        tombstone.refreshToken = nil
+        tombstone.expiresAt = nil
+        return tombstone
+    }
+
+    static func omittedConnectedAccounts(
+        existing: [TrackerAccount],
+        incoming: [TrackerAccount],
+        credentialsAndRosterAreAuthoritative: Bool
+    ) -> [TrackerAccount] {
+        guard credentialsAndRosterAreAuthoritative else { return [] }
+        let incomingServices = Set(incoming.map(\.service))
+        return existing.filter {
+            $0.isConnected && !incomingServices.contains($0.service)
+        }
+    }
+
+    static func materializedState(
+        from state: TrackerState,
+        hydrate: (TrackerAccount) -> TrackerPrivateCloudCredentialMaterialization
+    ) -> TrackerState? {
+        var materialized = state
+        var accounts: [TrackerAccount] = []
+        accounts.reserveCapacity(state.accounts.count)
+
+        for original in state.accounts {
+            guard original.isConnected else {
+                var disconnected = original
+                disconnected.accessToken = ""
+                disconnected.refreshToken = nil
+                disconnected.expiresAt = nil
+                accounts.append(disconnected)
+                continue
+            }
+
+            guard case .found(let hydrated) = hydrate(original),
+                  hydrated.service == original.service,
+                  hydrated.isConnected,
+                  !hydrated.accessToken.isEmpty else {
+                return nil
+            }
+            accounts.append(hydrated)
+        }
+
+        materialized.accounts = accounts
+        return materialized
+    }
+
+    static func authorityRemainedCurrent(
+        before: TrackerPrivateCloudExportAuthority,
+        after: TrackerPrivateCloudExportAuthority,
+        profileStillExists: Bool,
+        cleanupIsPending: Bool
+    ) -> Bool {
+        before == after && profileStillExists && !cleanupIsPending
+    }
+}
+
+enum TrackerPrivateCloudRestoreTransaction {
+    static func apply(
+        services: [TrackerService] = TrackerService.allCases,
+        previous: [TrackerService: TrackerAccount],
+        incoming: [TrackerService: TrackerAccount],
+        applyCredential: (TrackerService, TrackerAccount?) -> Bool,
+        persistTargetState: () -> Bool,
+        authorityIsCurrent: () -> Bool,
+        restoreCredential: (TrackerService, TrackerAccount?) -> Bool,
+        restorePreviousState: () -> Bool
+    ) -> Bool {
+        func rollback() -> Bool {
+            var succeeded = true
+            for service in services.reversed() {
+                succeeded = restoreCredential(service, previous[service]) && succeeded
+            }
+            return restorePreviousState() && succeeded
+        }
+
+        for service in services {
+            guard authorityIsCurrent(),
+                  applyCredential(service, incoming[service]) else {
+                _ = rollback()
+                return false
+            }
+        }
+        guard authorityIsCurrent(), persistTargetState(), authorityIsCurrent() else {
+            _ = rollback()
+            return false
+        }
+        return true
+    }
+}
+
 final class TrackerManager: NSObject, ObservableObject {
     static let shared = TrackerManager()
+    private static let pendingCredentialDeletionDefaultsKey = "trackerPendingCredentialDeletions.v1"
+    private static let pendingDiscardedProfileCleanupDefaultsKey = "trackerPendingDiscardedProfileCleanup.v1"
+    private static let traktHistoryWriteReceiptsDefaultsKey = "traktHistoryWriteReceipts.v1"
+    private static let maximumTrackerDeletionJournalBytes = 256 * 1_024
+    private static let maximumCredentialDeletionMarkerCount = 512
+    private static let maximumDiscardedProfileCleanupMarkerCount = 512
+    private static let maximumTraktHistoryWriteReceiptBytes = 512 * 1_024
+    private static let maximumTraktHistoryWriteReceiptCount = 512
+    private static let maximumTrackerIdentityBytes = 1_024
+    private static let maximumTrackerCredentialBytes = 128 * 1_024
+    static let maximumPersistedTrackerStateBytes = 8 * 1_024 * 1_024
 
     @Published var trackerState: TrackerState = TrackerState()
     @Published var isAuthenticating = false
     @Published var authError: String?
+    @Published var authenticationNotice: TrackerAuthenticationNotice?
     @Published var isRunningSyncTool = false
     @Published var syncToolStatus: String?
     @Published var syncToolPreview: TrackerSyncPreview?
@@ -201,21 +835,104 @@ final class TrackerManager: NSObject, ObservableObject {
     private var cachedSyncToolPlan: TrackerSyncToolPlan?
     private var syncToolTask: Task<Void, Never>?
 
-    private let trackerStateURL: URL
+    private var trackerStateURL: URL
+    private var activeProfileID: UUID
     private let trackerStatePersistenceQueue = DispatchQueue(
         label: "app.eclipse.soupy.tracker-state-persistence",
         qos: .utility
     )
     private var webAuthSession: ASWebAuthenticationSession?
+
+    private var unreadableTrackerStateProfileIDs = Set<UUID>()
+
+    private var credentialHydrationPendingProfileIDs = Set<UUID>()
+
+    private struct PendingTrackerStatePersistence {
+        let id: UUID
+        let accountBoundaryGeneration: UInt64
+        var state: TrackerState
+    }
+    private var pendingTrackerStatePersistence: [UUID: PendingTrackerStatePersistence] = [:]
+
+    private var pendingCredentialOnlyAccounts: [UUID: [TrackerService: TrackerAccount]] = [:]
+
+    private var pendingCredentialDeletions: [UUID: Set<TrackerService>] = [:]
+
+    private var accountBoundaryGenerations: [UUID: UInt64] = [:]
+
+    private var trackerServiceGenerations: [UUID: [TrackerService: UInt64]] = [:]
+
+    private var tentativelyPreservedAccountBoundaryProfileIDs = Set<UUID>()
+
+    private var accountBoundaryQuarantinedProfileIDs = Set<UUID>()
+
+    private var accountBoundaryRecoveryBlocksAllTrackerOperations = false
+
+    private var pendingDiscardedProfileCleanupIDs = Set<UUID>()
+
+    private var credentialDeletionJournalIsUnreadable = false
+    private var discardedProfileCleanupJournalIsUnreadable = false
+
+    private var unpersistedCredentialDeletionAuthority: [UUID: Set<TrackerService>] = [:]
+    private var unpersistedDiscardedProfileCleanupIDs = Set<UUID>()
+
+    private var trackerStateReloadPendingAfterDeletionJournalRecovery = false
+    private let trackerStateStatusLock = NSLock()
+
+    private let credentialDeletionPersistenceLock = NSLock()
+    private struct TrackerProfileOperationAuthority {
+        let owner: UUID
+        let operationGeneration: UInt64
+    }
+
+    private struct TrackerOperationAuthority {
+        let owner: UUID
+        let operationGeneration: UInt64
+        let accountBoundaryGeneration: UInt64
+        let serviceGeneration: UInt64
+        let progressAuthority: ProgressManager.ProfileMutationAuthority?
+        let service: TrackerService
+        let userId: String
+        let accessToken: String
+        let refreshToken: String?
+
+        func matches(_ account: TrackerAccount) -> Bool {
+            service == account.service
+                && userId == account.userId
+                && accessToken == account.accessToken
+                && refreshToken == account.refreshToken
+        }
+
+        func replacingCredential(with account: TrackerAccount) -> TrackerOperationAuthority {
+            TrackerOperationAuthority(
+                owner: owner,
+                operationGeneration: operationGeneration,
+                accountBoundaryGeneration: accountBoundaryGeneration,
+                serviceGeneration: serviceGeneration,
+                progressAuthority: progressAuthority,
+                service: account.service,
+                userId: account.userId,
+                accessToken: account.accessToken,
+                refreshToken: account.refreshToken
+            )
+        }
+    }
+
+    private struct WebAuthenticationAuthority {
+        let id: UUID
+        let owner: UUID
+        let service: TrackerService
+        let accountBoundaryGeneration: UInt64
+        let serviceGeneration: UInt64
+    }
+    private var webAuthenticationAuthority: WebAuthenticationAuthority?
 #if os(tvOS)
     private var traktDeviceAuthTask: Task<Void, Never>?
 #endif
 
-    // Cache for TMDB ID -> AniList ID mappings to support anime syncing
     private var anilistIdCache: [Int: Int] = [:]
     private let anilistIdCacheQueue = DispatchQueue(label: "app.eclipse.soupy.anilistIdCache")
 
-    // Cross-provider ID caches keep sync tools from resolving the same IDs repeatedly.
     private var malToAniListAnimeIdCache: [Int: Int] = [:]
     private var aniListToMALAnimeIdCache: [Int: Int] = [:]
 #if !os(tvOS)
@@ -230,24 +947,85 @@ final class TrackerManager: NSObject, ObservableObject {
     private let malListPageLimit = 1000
     private let largeSyncAPICallThreshold = 90
     private let tokenRefreshLeeway: TimeInterval = 5 * 60
-    
-    // Cache for (TMDB ID, season number) -> AniList ID for anime with multiple AniList entries per season
-    private var anilistSeasonIdCache: [String: Int] = [:] // key format: "tmdbId_seasonNumber"
+
+    private var anilistSeasonIdCache: [String: Int] = [:]
     private let anilistSeasonIdCacheQueue = DispatchQueue(label: "app.eclipse.soupy.anilistSeasonIdCache")
 
-    // Prevent tracker sync bursts during local backup restore.
-    private var syncSuppressedDuringBackupRestore = false
+    private var backupRestoreSyncSuppressionCount = 0
+    // Revokes queued tracker operations across every profile activation and
+    // both boundaries of a restore-suppression window. The latter matters for
+    // work captured while nested restore code is still suppressed.
+    private var trackerOperationGeneration: UInt64 = 0
     private let backupRestoreSyncQueue = DispatchQueue(label: "app.eclipse.soupy.backupRestoreSync")
-    private var recentWatchSyncKeys: [String: Date] = [:]
+    private var watchSyncDedupeGate = TrackerWatchSyncDedupeGate()
     private let recentWatchSyncQueue = DispatchQueue(label: "app.eclipse.soupy.recentWatchSync")
     private let watchSyncDedupeInterval: TimeInterval = 60
     private var recentTraktPlaybackSyncKeys: [String: Date] = [:]
     private let recentTraktPlaybackSyncQueue = DispatchQueue(label: "app.eclipse.soupy.recentTraktPlaybackSync")
     private let traktPlaybackSyncInterval: TimeInterval = 30
+    private var traktHistoryWriteReceipts: [String: TraktHistoryWriteReceipt] = [:]
+    private var traktHistoryWritesInFlight: [String: UUID] = [:]
+    private let traktHistoryWriteReceiptQueue = DispatchQueue(label: "app.eclipse.soupy.traktHistoryWriteReceipts")
+
+    private var traktHistoryReceiptJournalIsUnreadable = false
+    private var traktHistoryReceiptJournalNeedsPersistence = false
+    private let traktHistoryReceiptFutureTolerance: TimeInterval = 5 * 60
+    private let traktHistoryReceiptTimeToLive: TimeInterval = 60 * 60 * 24 * 7
+    private let traktHistoryReconciliationDelay: TimeInterval = 2 * 60
+    private let traktHistoryReconciliationPageLimit = 100
+    private let traktHistoryReconciliationMaximumPages = 5
+    private let traktHistoryReconciliationMaximumPageBytes = 512 * 1_024
     private var traktMediaIdCache: [String: Int] = [:]
     private let traktMediaIdCacheQueue = DispatchQueue(label: "app.eclipse.soupy.traktMediaIdCache")
-    private var traktTokenRefreshTask: Task<TrackerAccount, Error>?
-    private var traktContinueWatchingCache: (accountUserId: String, fetchedAt: Date, items: [ContinueWatchingItem])?
+
+    private struct TraktTokenRefreshAttempt {
+        let id: UUID
+        let accountBoundaryGeneration: UInt64
+        let serviceGeneration: UInt64
+        let userId: String
+        let accessToken: String
+        let refreshToken: String
+        let task: Task<TrackerAccount, Error>
+
+        func matches(
+            account: TrackerAccount,
+            refreshToken: String,
+            accountBoundaryGeneration: UInt64,
+            serviceGeneration: UInt64
+        ) -> Bool {
+            self.accountBoundaryGeneration == accountBoundaryGeneration
+                && self.serviceGeneration == serviceGeneration
+                && userId == account.userId
+                && accessToken == account.accessToken
+                && self.refreshToken == refreshToken
+        }
+    }
+    private var traktTokenRefreshTasks: [UUID: TraktTokenRefreshAttempt] = [:]
+
+    private struct MALTokenRefreshAttempt {
+        let id: UUID
+        let accountBoundaryGeneration: UInt64
+        let serviceGeneration: UInt64
+        let userId: String
+        let accessToken: String
+        let refreshToken: String
+        let task: Task<TrackerAccount, Error>
+
+        func matches(
+            account: TrackerAccount,
+            refreshToken: String,
+            accountBoundaryGeneration: UInt64,
+            serviceGeneration: UInt64
+        ) -> Bool {
+            self.accountBoundaryGeneration == accountBoundaryGeneration
+                && self.serviceGeneration == serviceGeneration
+                && userId == account.userId
+                && accessToken == account.accessToken
+                && self.refreshToken == refreshToken
+        }
+    }
+    private var malTokenRefreshTasks: [UUID: MALTokenRefreshAttempt] = [:]
+    private var traktContinueWatchingCache: (owner: UUID, accountUserId: String, fetchedAt: Date, items: [ContinueWatchingItem])?
     private let traktContinueWatchingCacheQueue = DispatchQueue(label: "app.eclipse.soupy.traktContinueWatchingCache")
     private let traktContinueWatchingCacheTTL: TimeInterval = 90
     private var traktCommentsCache: [String: (fetchedAt: Date, items: [TraktCommentReview])] = [:]
@@ -257,7 +1035,7 @@ final class TrackerManager: NSObject, ObservableObject {
     private let traktFeatureCacheTTL: TimeInterval = 10 * 60
     private var traktScrobbleLastActionByKey: [String: TraktScrobbleAction] = [:]
     private var traktScrobbleLastStampByKey: [String: (action: TraktScrobbleAction, progress: Double, sentAt: Date)] = [:]
-    private var traktScrobblePendingByKey: [String: (action: TraktScrobbleAction, progress: Double, queuedAt: Date)] = [:]
+    private var traktScrobblePendingByKey: [String: (id: UUID, action: TraktScrobbleAction, progress: Double, queuedAt: Date)] = [:]
     private var traktScrobbleFailureStampByKey: [String: (action: TraktScrobbleAction, progress: Double, failedAt: Date)] = [:]
     private let traktScrobbleQueue = DispatchQueue(label: "app.eclipse.soupy.traktScrobbleDedupe")
     private let traktScrobbleMinimumInterval: TimeInterval = 8
@@ -265,7 +1043,6 @@ final class TrackerManager: NSObject, ObservableObject {
     private let traktScrobbleFailureCooldown: TimeInterval = 60
     private let traktScrobbleProgressWindow: Double = 1.5
 
-    // OAuth config is supplied by ignored local build settings.
     private func bundledCredential(_ key: String) -> String {
         let raw = Bundle.main.object(forInfoDictionaryKey: key) as? String ?? ""
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -300,6 +1077,32 @@ final class TrackerManager: NSObject, ObservableObject {
     private var pendingMALCodeVerifier: String?
     private var pendingTraktOAuthState: String?
 
+    static func trackerAccountsAreStructurallyValid(
+        _ accounts: [TrackerAccount]
+    ) -> Bool {
+        guard accounts.count <= TrackerService.allCases.count,
+              Set(accounts.map(\.service)).count == accounts.count else {
+            return false
+        }
+
+        return accounts.allSatisfy { account in
+            let username = account.username.trimmingCharacters(in: .whitespacesAndNewlines)
+            let userId = account.userId.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !username.isEmpty,
+                  !userId.isEmpty,
+                  account.username.utf8.count <= maximumTrackerIdentityBytes,
+                  account.userId.utf8.count <= maximumTrackerIdentityBytes,
+                  account.accessToken.utf8.count <= maximumTrackerCredentialBytes else {
+                return false
+            }
+            if let refreshToken = account.refreshToken,
+               refreshToken.utf8.count > maximumTrackerCredentialBytes {
+                return false
+            }
+            return true
+        }
+    }
+
     private var traktClientId: String {
         bundledCredential("TraktClientID")
     }
@@ -312,64 +1115,2867 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     override private init() {
-        let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        self.trackerStateURL = documentsDirectory.appendingPathComponent("TrackerState.json")
+        self.activeProfileID = ProfileManager.shared.activeProfileID
+        self.trackerStateURL = Self.stateURL(for: ProfileManager.shared.activeProfileID)
         super.init()
-        loadTrackerState()
+        loadTraktHistoryWriteReceipts()
+        loadPendingCredentialDeletionMarkers()
+        loadPendingDiscardedProfileCleanupMarkers()
+        retryPendingDiscardedProfileCleanup()
+        let quarantinedProfileIDs = completeCommittedAccountBoundaryCleanupBeforeLoadingState()
+        retryPendingCredentialDeletions()
+        if accountBoundaryRecoveryBlocksStateAccess() {
+            if trackerDeletionJournalsBlockOperations() {
+                markTrackerStateReloadPendingAfterDeletionJournalRecovery()
+            }
+            trackerState = TrackerState()
+        } else if quarantinedProfileIDs.contains(activeProfileID)
+                    || discardedProfileCleanupIsPending(activeProfileID) {
+
+            markTrackerStateUnreadable(activeProfileID)
+            trackerState = TrackerState()
+        } else {
+            loadTrackerState()
+        }
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(profileRosterDidChange),
+            name: .profileListDidChange,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(retryActiveProfileCredentialHydration),
+            name: UIApplication.protectedDataDidBecomeAvailableNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(retryActiveProfileCredentialHydration),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+#if os(iOS)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(experimentalCloudRestoreRecoveryDidComplete),
+            name: .experimentalCloudRestoreRecoveryDidComplete,
+            object: nil
+        )
+#endif
     }
 
-    // MARK: - State Management
+    private static func stateURL(for profileID: UUID) -> URL {
+        let documentsDirectory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        guard profileID != ProfileManager.defaultProfileID else {
+            return documentsDirectory.appendingPathComponent("TrackerState.json")
+        }
+        return documentsDirectory.appendingPathComponent(
+            ProfileScopedStorage.documentFileName(
+                base: "TrackerState",
+                fileExtension: "json",
+                profileID: profileID
+            )
+        )
+    }
 
-    private func loadTrackerState() {
-        if let data = try? Data(contentsOf: trackerStateURL),
-           var state = try? JSONDecoder().decode(TrackerState.self, from: data) {
-            var migratedPlaintextCredentials = false
-            state.accounts = state.accounts.compactMap { account in
-                if !account.accessToken.isEmpty {
-                    guard TrackerCredentialVault.store(account) else {
-                        // Do not silently sign the user out if the Keychain is temporarily
-                        // unavailable (for example, before first unlock after a reboot).
-                        return account
-                    }
-                    migratedPlaintextCredentials = true
-                }
-                return TrackerCredentialVault.hydrate(account)
+    private static func trackerDeletionJournalURL(fileName: String) -> URL? {
+        guard let applicationSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first else { return nil }
+        let directory = applicationSupport.appendingPathComponent("Eclipse", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            return directory.appendingPathComponent(fileName, isDirectory: false)
+        } catch {
+            return nil
+        }
+    }
+
+    private static var credentialDeletionJournalURL: URL? {
+        trackerDeletionJournalURL(fileName: "TrackerCredentialDeletions.json")
+    }
+
+    private static var discardedProfileCleanupJournalURL: URL? {
+        trackerDeletionJournalURL(fileName: "TrackerDiscardedProfileCleanup.json")
+    }
+
+    func switchProfile(to profileID: UUID) {
+        guard profileID != activeProfileID else { return }
+        abandonPendingTraktScrobbles(for: activeProfileID)
+        invalidateTrackerOperationAuthority()
+        flushPendingWrites(forProfile: activeProfileID)
+        activeProfileID = profileID
+        trackerStateURL = Self.stateURL(for: profileID)
+        trackerState = TrackerState()
+        invalidateTraktContinueWatchingCache()
+        cachedSyncToolPlan = nil
+        syncToolTask?.cancel()
+        authError = nil
+        authenticationNotice = nil
+        if trackerDeletionJournalsBlockOperations() {
+            markTrackerStateReloadPendingAfterDeletionJournalRecovery()
+        }
+        if accountBoundaryRecoveryBlocksStateAccess()
+            || accountBoundaryIsQuarantined(profileID)
+            || discardedProfileCleanupIsPending(profileID) {
+            if !accountBoundaryRecoveryBlocksStateAccess() {
+                markTrackerStateUnreadable(profileID)
             }
-            self.trackerState = state
-            if migratedPlaintextCredentials {
-                saveTrackerState()
+            return
+        }
+        if let pending = pendingTrackerState(forProfile: profileID) {
+
+            trackerState = pending
+        } else {
+            loadTrackerState(forProfile: profileID)
+        }
+    }
+
+    func flushPendingWrites(forProfile outgoing: UUID) {
+        saveTrackerState(forProfile: outgoing)
+    }
+
+    func trackerState(forProfile profileID: UUID) -> TrackerState? {
+        guard !accountBoundaryRecoveryBlocksStateAccess(),
+              !accountBoundaryIsQuarantined(profileID),
+              !discardedProfileCleanupIsPending(profileID),
+              !trackerStateIsUnreadable(profileID) else { return nil }
+        guard profileID != activeProfileID else { return trackerState }
+        if let pending = pendingTrackerState(forProfile: profileID) {
+            return pending
+        }
+        return readPersistedTrackerState(forProfile: profileID)
+    }
+
+    func trackerStateForPrivateCloudExport(forProfile profileID: UUID) -> TrackerState? {
+        guard ProfileManager.shared.rosterStoreIsReadable,
+              ProfileManager.shared.profile(with: profileID) != nil,
+              !accountBoundaryRecoveryBlocksStateAccess(),
+              !accountBoundaryIsQuarantined(profileID),
+              !discardedProfileCleanupIsPending(profileID),
+              !isDiscarded(profileID),
+              !isBackupRestoreSyncSuppressed(),
+              let before = privateCloudExportAuthority(forProfile: profileID),
+              let source = trackerState(forProfile: profileID),
+              Self.trackerAccountsAreStructurallyValid(source.accounts),
+              let materialized = TrackerPrivateCloudExportPolicy.materializedState(
+                from: source,
+                hydrate: { [weak self] account in
+                    guard let self else { return .unavailable }
+                    switch self.hydrateTrackerCredential(
+                        account,
+                        profileID: profileID
+                    ) {
+                    case .found(let hydrated, _):
+                        return .found(hydrated)
+                    case .absent, .temporarilyUnavailable:
+                        return .unavailable
+                    }
+                }
+              ),
+              Self.trackerAccountsAreStructurallyValid(materialized.accounts),
+              let encoded = try? JSONEncoder().encode(materialized),
+              encoded.count <= Self.maximumPersistedTrackerStateBytes,
+              let after = privateCloudExportAuthority(forProfile: profileID),
+              TrackerPrivateCloudExportPolicy.authorityRemainedCurrent(
+                before: before,
+                after: after,
+                profileStillExists: ProfileManager.shared.profile(with: profileID) != nil,
+                cleanupIsPending: accountBoundaryRecoveryBlocksStateAccess()
+                    || accountBoundaryIsQuarantined(profileID)
+                    || discardedProfileCleanupIsPending(profileID)
+                    || isDiscarded(profileID)
+                    || isBackupRestoreSyncSuppressed()
+              ) else {
+            Logger.shared.log(
+                "TrackerManager: private-cloud credential capture was unavailable for profile \(profileID)",
+                type: "Tracker"
+            )
+            return nil
+        }
+        return materialized
+    }
+
+    private func privateCloudExportAuthority(
+        forProfile profileID: UUID
+    ) -> TrackerPrivateCloudExportAuthority? {
+        guard ProfileManager.shared.rosterStoreIsReadable,
+              ProfileManager.shared.profile(with: profileID) != nil,
+              !trackerDeletionJournalsBlockOperations(),
+              !accountBoundaryIsQuarantined(profileID),
+              !discardedProfileCleanupIsPending(profileID),
+              !isDiscarded(profileID) else {
+            return nil
+        }
+        return TrackerPrivateCloudExportAuthority(
+            profileID: profileID,
+            rosterGeneration: ProfileManager.shared.rosterGeneration,
+            operationGeneration: trackerOperationGenerationSnapshot(),
+            accountBoundaryGeneration: accountBoundaryGeneration(for: profileID),
+            serviceGenerations: Dictionary(
+                uniqueKeysWithValues: TrackerService.allCases.map { service in
+                    (service, trackerServiceGeneration(for: service, profileID: profileID))
+                }
+            )
+        )
+    }
+
+    private enum PrivateCloudTrackerStateFileSnapshot {
+        case missing
+        case present(Data)
+    }
+
+    private func privateCloudTrackerStateFileSnapshot(
+        forProfile profileID: UUID
+    ) -> PrivateCloudTrackerStateFileSnapshot? {
+        let url = Self.stateURL(for: profileID)
+        return trackerStatePersistenceQueue.sync {
+            guard FileManager.default.fileExists(atPath: url.path) else { return .missing }
+            guard let data = try? Data(contentsOf: url, options: [.mappedIfSafe]),
+                  data.count <= Self.maximumPersistedTrackerStateBytes else { return nil }
+            return .present(data)
+        }
+    }
+
+    private func persistPrivateCloudTrackerState(
+        _ state: TrackerState,
+        forProfile profileID: UUID
+    ) -> Bool {
+        var redacted = state
+        redacted.accounts = state.accounts.map { account in
+            var account = account
+            account.accessToken = ""
+            account.refreshToken = nil
+            account.expiresAt = nil
+            return account
+        }
+        guard let encoded = try? JSONEncoder().encode(redacted),
+              encoded.count <= Self.maximumPersistedTrackerStateBytes else { return false }
+        let url = Self.stateURL(for: profileID)
+        return trackerStatePersistenceQueue.sync {
+            do {
+                try encoded.write(to: url, options: .atomic)
+                return try Data(contentsOf: url, options: [.mappedIfSafe]) == encoded
+            } catch {
+                return false
             }
         }
     }
 
-    func saveTrackerState() {
-        var stateToPersist = trackerState
-        stateToPersist.accounts = stateToPersist.accounts.map { account in
-            if account.isConnected {
-                // Only redact credentials after they have reached the Keychain. Keeping
-                // the in-memory snapshot on a failed Keychain write avoids destructive
-                // sign-out on the next launch.
-                guard TrackerCredentialVault.store(account) else { return account }
-            } else {
-                TrackerCredentialVault.remove(account.service)
+    private func restorePrivateCloudTrackerStateFile(
+        _ snapshot: PrivateCloudTrackerStateFileSnapshot,
+        forProfile profileID: UUID
+    ) -> Bool {
+        let url = Self.stateURL(for: profileID)
+        return trackerStatePersistenceQueue.sync {
+            do {
+                switch snapshot {
+                case .missing:
+                    if FileManager.default.fileExists(atPath: url.path) {
+                        try FileManager.default.removeItem(at: url)
+                    }
+                    return !FileManager.default.fileExists(atPath: url.path)
+                case .present(let data):
+                    try data.write(to: url, options: .atomic)
+                    return try Data(contentsOf: url, options: [.mappedIfSafe]) == data
+                }
+            } catch {
+                return false
             }
+        }
+    }
+
+    private func privateCloudTrackerCredentialSnapshot(
+        state: TrackerState?,
+        profileID: UUID
+    ) -> [TrackerService: TrackerAccount]? {
+        var result: [TrackerService: TrackerAccount] = [:]
+        for service in TrackerService.allCases {
+            if let account = state?.accounts.first(where: {
+                $0.service == service && $0.isConnected
+            }) {
+                switch TrackerCredentialVault.hydrate(account, profileID: profileID) {
+                case .found(let hydrated, _):
+                    result[service] = hydrated
+                    continue
+                case .temporarilyUnavailable:
+                    return nil
+                case .absent:
+                    break
+                }
+            }
+            switch TrackerCredentialVault.discoverIdentityBound(service, profileID: profileID) {
+            case .found(let account):
+                result[service] = account
+            case .notRecoverable:
+                break
+            case .temporarilyUnavailable:
+                return nil
+            }
+        }
+        return result
+    }
+
+    private func privateCloudTrackerCredentialMatches(
+        _ expected: TrackerAccount?,
+        service: TrackerService,
+        profileID: UUID
+    ) -> Bool {
+        switch (expected, TrackerCredentialVault.discoverIdentityBound(service, profileID: profileID)) {
+        case (.none, .notRecoverable):
+            return true
+        case (.some(let expected), .found(let actual)):
+            return expected.service == actual.service
+                && expected.username == actual.username
+                && expected.accessToken == actual.accessToken
+                && expected.refreshToken == actual.refreshToken
+                && expected.expiresAt == actual.expiresAt
+                && expected.userId == actual.userId
+                && expected.isConnected == actual.isConnected
+        case (.none, .found), (.none, .temporarilyUnavailable),
+             (.some, .notRecoverable), (.some, .temporarilyUnavailable):
+            return false
+        }
+    }
+
+    private func replacePrivateCloudTrackerCredential(
+        _ account: TrackerAccount?,
+        service: TrackerService,
+        profileID: UUID
+    ) -> Bool {
+        let mutated: Bool
+        if let account {
+            mutated = account.service == service
+                && TrackerCredentialVault.store(account, profileID: profileID)
+        } else {
+            mutated = TrackerCredentialVault.remove(service, profileID: profileID)
+        }
+        return mutated && privateCloudTrackerCredentialMatches(
+            account,
+            service: service,
+            profileID: profileID
+        )
+    }
+
+    private func applyPrivateCloudTrackerState(
+        _ incoming: TrackerState,
+        forProfile profileID: UUID,
+        permitsUnrosteredProfile: Bool
+    ) -> Bool {
+        guard permitsUnrosteredProfile
+                || ProfileManager.shared.profile(with: profileID) != nil,
+              let previousStateFile = privateCloudTrackerStateFileSnapshot(
+                forProfile: profileID
+              ) else { return false }
+        let previousState = trackerState(forProfile: profileID)
+        let rosterGeneration = ProfileManager.shared.rosterGeneration
+        let operationGeneration = trackerOperationGenerationSnapshot()
+        let accountGeneration = accountBoundaryGeneration(for: profileID)
+        let serviceGenerations = Dictionary(
+            uniqueKeysWithValues: TrackerService.allCases.map {
+                ($0, trackerServiceGeneration(for: $0, profileID: profileID))
+            }
+        )
+        let pending = retainPendingTrackerState(incoming, forProfile: profileID)
+        credentialDeletionPersistenceLock.lock()
+        guard let previousCredentials = privateCloudTrackerCredentialSnapshot(
+            state: previousState,
+            profileID: profileID
+        ) else {
+            credentialDeletionPersistenceLock.unlock()
+            clearPendingTrackerState(forProfile: profileID, matching: pending.id)
+            return false
+        }
+        let incomingCredentials = Dictionary(
+            uniqueKeysWithValues: incoming.accounts.compactMap { account in
+                account.isConnected ? (account.service, account) : nil
+            }
+        )
+        let authorityIsCurrent = {
+            self.isBackupRestoreSyncSuppressed()
+                && !self.trackerDeletionJournalsBlockOperations()
+                && !self.accountBoundaryIsQuarantined(profileID)
+                && !self.discardedProfileCleanupIsPending(profileID)
+                && !self.isDiscarded(profileID)
+                && ProfileManager.shared.rosterGeneration == rosterGeneration
+                && (permitsUnrosteredProfile
+                    || ProfileManager.shared.profile(with: profileID) != nil)
+                && Self.trackerOperationAuthorityIsCurrent(
+                    authorityGeneration: operationGeneration,
+                    currentGeneration: self.trackerOperationGenerationSnapshot()
+                )
+                && self.accountBoundaryGenerationIsCurrent(
+                    accountGeneration,
+                    for: profileID
+                )
+                && serviceGenerations.allSatisfy {
+                    self.trackerServiceGenerationIsCurrent(
+                        $0.value,
+                        service: $0.key,
+                        profileID: profileID
+                    )
+                }
+                && self.pendingTrackerStateAuthorityIsCurrent(
+                    pending,
+                    forProfile: profileID
+                )
+        }
+        let succeeded = TrackerPrivateCloudRestoreTransaction.apply(
+            previous: previousCredentials,
+            incoming: incomingCredentials,
+            applyCredential: { service, account in
+                self.replacePrivateCloudTrackerCredential(
+                    account,
+                    service: service,
+                    profileID: profileID
+                )
+            },
+            persistTargetState: {
+                self.persistPrivateCloudTrackerState(incoming, forProfile: profileID)
+            },
+            authorityIsCurrent: authorityIsCurrent,
+            restoreCredential: { service, account in
+                self.replacePrivateCloudTrackerCredential(
+                    account,
+                    service: service,
+                    profileID: profileID
+                )
+            },
+            restorePreviousState: {
+                self.restorePrivateCloudTrackerStateFile(
+                    previousStateFile,
+                    forProfile: profileID
+                )
+            }
+        )
+        credentialDeletionPersistenceLock.unlock()
+        clearPendingTrackerState(forProfile: profileID, matching: pending.id)
+        for service in TrackerService.allCases {
+            _ = invalidateTrackerServiceAuthority(service, profileID: profileID)
+        }
+        guard succeeded else { return false }
+        clearCredentialHydrationPending(profileID)
+        if profileID == activeProfileID {
+            trackerState = incoming
+            invalidateTraktContinueWatchingCache()
+            cachedSyncToolPlan = nil
+        }
+        return true
+    }
+
+    @discardableResult
+    func applyRestoredTrackerState(
+        _ incoming: TrackerState,
+        forProfile profileID: UUID,
+        credentialsAndRosterAreAuthoritative: Bool = false,
+        permitsUnrosteredProfile: Bool = false
+    ) -> Bool {
+        guard isBackupRestoreSyncSuppressed(),
+              !trackerDeletionJournalsBlockOperations(),
+              !accountBoundaryIsQuarantined(profileID),
+              !discardedProfileCleanupIsPending(profileID),
+              !isDiscarded(profileID),
+              Self.trackerAccountsAreStructurallyValid(incoming.accounts),
+              !credentialsAndRosterAreAuthoritative
+                || incoming.accounts.allSatisfy({
+                    !$0.isConnected
+                        || TrackerPrivateCloudExportPolicy.incomingCredentialIsAuthoritative($0)
+                }) else {
+            Logger.shared.log(
+                "TrackerManager: refused malformed tracker-account metadata while restoring profile \(profileID)",
+                type: "Error"
+            )
+            return false
+        }
+        if credentialsAndRosterAreAuthoritative {
+            return applyPrivateCloudTrackerState(
+                incoming,
+                forProfile: profileID,
+                permitsUnrosteredProfile: permitsUnrosteredProfile
+            )
+        }
+        let existing = trackerState(forProfile: profileID)
+        var restored = incoming
+        restored.accounts = incoming.accounts.compactMap { account -> TrackerAccount? in
+            guard account.isConnected else {
+                _ = removeTrackerCredentialOutcome(
+                    account.service,
+                    profileID: profileID
+                )
+                return TrackerPrivateCloudExportPolicy.disconnectedTombstone(account)
+            }
+
+            let localConnectedAccount = existing?.accounts.first {
+                $0.service == account.service && $0.isConnected
+            }
+            if let preferred = TrackerPrivateCloudExportPolicy.preferredCredentialBearingAccount(
+                incoming: account,
+                local: localConnectedAccount,
+                credentialsAndRosterAreAuthoritative: credentialsAndRosterAreAuthoritative
+            ) {
+                return preferred
+            }
+            if var localDeletion = existing?.accounts.first(where: {
+                $0.service == account.service && !$0.isConnected
+            }) {
+                let outcome = removeTrackerCredentialOutcome(
+                    account.service,
+                    profileID: profileID
+                )
+                if !outcome.removed
+                    || credentialDeletionIsPending(account.service, profileID: profileID) {
+                    localDeletion.accessToken = ""
+                    localDeletion.refreshToken = nil
+                    localDeletion.expiresAt = nil
+                    return localDeletion
+                }
+            }
+
+            if let local = localConnectedAccount {
+                switch hydrateTrackerCredential(local, profileID: profileID) {
+                case .found(let hydrated, _):
+                    return hydrated
+                case .absent:
+
+                    break
+                case .temporarilyUnavailable(let status):
+                    markCredentialHydrationPending(profileID)
+                    Logger.shared.log(
+                        "TrackerManager: deferred restored \(account.service.rawValue) credential hydration for profile \(profileID) (Keychain status \(status))",
+                        type: "Tracker"
+                    )
+                    return local
+                }
+            }
+
+            switch hydrateTrackerCredential(account, profileID: profileID) {
+            case .found(let hydrated, let identityIsKeychainBound):
+                guard identityIsKeychainBound else {
+                    Logger.shared.log(
+                        "TrackerManager: skipped restored \(account.service.rawValue) metadata for profile \(profileID); the legacy Keychain credential has no locally bound provider identity",
+                        type: "Error"
+                    )
+                    return nil
+                }
+                return hydrated
+            case .absent:
+                return nil
+            case .temporarilyUnavailable(let status):
+
+                Logger.shared.log(
+                    "TrackerManager: skipped unbound restored \(account.service.rawValue) metadata for profile \(profileID) while Keychain was unavailable (status \(status))",
+                    type: "Error"
+                )
+                return nil
+            }
+        }
+
+        let omittedConnectedAccounts = TrackerPrivateCloudExportPolicy.omittedConnectedAccounts(
+            existing: existing?.accounts ?? [],
+            incoming: incoming.accounts,
+            credentialsAndRosterAreAuthoritative: credentialsAndRosterAreAuthoritative
+        )
+        if credentialsAndRosterAreAuthoritative {
+            for local in omittedConnectedAccounts {
+                _ = removeTrackerCredentialOutcome(local.service, profileID: profileID)
+                restored.accounts.append(
+                    TrackerPrivateCloudExportPolicy.disconnectedTombstone(local)
+                )
+            }
+        }
+
+        let incomingServices = Set(incoming.accounts.map(\.service))
+        for local in existing?.accounts ?? [] where !credentialsAndRosterAreAuthoritative
+            && local.isConnected && !incomingServices.contains(local.service) {
+            if !local.accessToken.isEmpty {
+                restored.accounts.append(local)
+                continue
+            }
+            switch hydrateTrackerCredential(local, profileID: profileID) {
+            case .found(let hydrated, _):
+                restored.accounts.append(hydrated)
+            case .absent:
+                break
+            case .temporarilyUnavailable(let status):
+                markCredentialHydrationPending(profileID)
+                restored.accounts.append(local)
+                Logger.shared.log(
+                    "TrackerManager: deferred preservation of local \(local.service.rawValue) credentials while restoring profile \(profileID) (Keychain status \(status))",
+                    type: "Tracker"
+                )
+            }
+        }
+
+        guard preserveUnreadableTrackerStateBeforeRestore(profileID) else {
+            Logger.shared.log(
+                "TrackerManager: refused to overwrite unreadable tracker-state bytes during restore for profile \(profileID)",
+                type: "Error"
+            )
+            return false
+        }
+        clearUnreadableTrackerState(profileID)
+
+        guard profileID != activeProfileID else {
+            trackerState = restored
+            saveTrackerState(forProfile: profileID)
+            return true
+        }
+
+        queueTrackerStatePersistence(restored, forProfile: profileID)
+        return true
+    }
+
+    private var discardedProfileIDs = Set<UUID>()
+    private let discardedProfileLock = NSLock()
+
+    private func markDiscarded(_ profileID: UUID) {
+        discardedProfileLock.lock()
+        discardedProfileIDs.insert(profileID)
+        discardedProfileLock.unlock()
+    }
+
+    private func isDiscarded(_ profileID: UUID) -> Bool {
+        discardedProfileLock.lock()
+        defer { discardedProfileLock.unlock() }
+        return discardedProfileIDs.contains(profileID)
+    }
+
+    private func trackerStateIsUnreadable(_ profileID: UUID) -> Bool {
+        trackerStateStatusLock.lock()
+        defer { trackerStateStatusLock.unlock() }
+        return unreadableTrackerStateProfileIDs.contains(profileID)
+    }
+
+    private func preserveUnreadableTrackerStateBeforeRestore(_ profileID: UUID) -> Bool {
+        guard trackerStateIsUnreadable(profileID) else { return true }
+        let source = Self.stateURL(for: profileID)
+        guard FileManager.default.fileExists(atPath: source.path) else { return true }
+        let documentsDirectory = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        )[0]
+        let rescue = documentsDirectory.appendingPathComponent(
+            "TrackerState-\(ProfileScopedStorage.token(for: profileID))-unreadable-\(UUID().uuidString.lowercased()).json"
+        )
+        do {
+            try FileManager.default.copyItem(at: source, to: rescue)
+            return true
+        } catch {
+            Logger.shared.log(
+                "TrackerManager: could not preserve unreadable tracker-state bytes: \(error.localizedDescription)",
+                type: "Error"
+            )
+            return false
+        }
+    }
+
+    private func accountBoundaryIsQuarantined(_ profileID: UUID) -> Bool {
+        trackerStateStatusLock.lock()
+        defer { trackerStateStatusLock.unlock() }
+        return accountBoundaryQuarantinedProfileIDs.contains(profileID)
+    }
+
+    private func accountBoundaryRecoveryGloballyBlocksOperations() -> Bool {
+        trackerStateStatusLock.lock()
+        defer { trackerStateStatusLock.unlock() }
+        return accountBoundaryRecoveryBlocksAllTrackerOperations
+    }
+
+    private func trackerDeletionJournalsBlockOperations() -> Bool {
+        trackerStateStatusLock.lock()
+        defer { trackerStateStatusLock.unlock() }
+        return credentialDeletionJournalIsUnreadable
+            || discardedProfileCleanupJournalIsUnreadable
+            || pendingCredentialDeletions.values.contains(where: { !$0.isEmpty })
+            || !unpersistedCredentialDeletionAuthority.isEmpty
+            || !unpersistedDiscardedProfileCleanupIDs.isEmpty
+    }
+
+    private func trackerDeletionJournalSourcesAreUnreadable() -> Bool {
+        trackerStateStatusLock.lock()
+        defer { trackerStateStatusLock.unlock() }
+        return credentialDeletionJournalIsUnreadable
+            || discardedProfileCleanupJournalIsUnreadable
+    }
+
+    private func markTrackerStateReloadPendingAfterDeletionJournalRecovery() {
+        trackerStateStatusLock.lock()
+        trackerStateReloadPendingAfterDeletionJournalRecovery = true
+        trackerStateStatusLock.unlock()
+    }
+
+    private func consumeTrackerStateReloadPendingAfterDeletionJournalRecovery() -> Bool {
+        trackerStateStatusLock.lock()
+        defer { trackerStateStatusLock.unlock() }
+        guard trackerStateReloadPendingAfterDeletionJournalRecovery else { return false }
+        trackerStateReloadPendingAfterDeletionJournalRecovery = false
+        return true
+    }
+
+    private func accountBoundaryRecoveryBlocksStateAccess() -> Bool {
+        if trackerDeletionJournalsBlockOperations() {
+            return true
+        }
+        return accountBoundaryRecoveryGloballyBlocksOperations()
+            && !isBackupRestoreSyncSuppressed()
+    }
+
+    private func accountBoundaryRecoveryBlocksNetworkOperations() -> Bool {
+        if trackerDeletionJournalsBlockOperations()
+            || accountBoundaryRecoveryGloballyBlocksOperations() {
+            return true
+        }
+#if os(iOS)
+        return MediaStateAccountBoundaryRecoveryGate.isBlockingSync
+#else
+        return false
+#endif
+    }
+
+    private func setAccountBoundaryRecoveryGlobalBlock(_ blocked: Bool) {
+        trackerStateStatusLock.lock()
+        accountBoundaryRecoveryBlocksAllTrackerOperations = blocked
+        trackerStateStatusLock.unlock()
+    }
+
+    private func trackerProfileAcceptsOperations(_ profileID: UUID) -> Bool {
+        !accountBoundaryRecoveryBlocksNetworkOperations()
+            && !accountBoundaryIsQuarantined(profileID)
+            && !discardedProfileCleanupIsPending(profileID)
+            && !isDiscarded(profileID)
+    }
+
+    private func trackerReconnectIsAllowed(
+        _ service: TrackerService,
+        owner: UUID
+    ) -> Bool {
+        guard trackerProfileAcceptsOperations(owner) else {
+            authError = "\(service.displayName) cannot reconnect until account cleanup finishes."
+            isAuthenticating = false
+            return false
+        }
+        return true
+    }
+
+    private func markAccountBoundaryQuarantined(_ profileID: UUID) {
+        trackerStateStatusLock.lock()
+        accountBoundaryQuarantinedProfileIDs.insert(profileID)
+        unreadableTrackerStateProfileIDs.insert(profileID)
+        trackerStateStatusLock.unlock()
+    }
+
+    private func clearAccountBoundaryQuarantine(_ profileID: UUID) {
+        trackerStateStatusLock.lock()
+        accountBoundaryQuarantinedProfileIDs.remove(profileID)
+        unreadableTrackerStateProfileIDs.remove(profileID)
+        trackerStateStatusLock.unlock()
+    }
+
+    private func markTrackerStateUnreadable(_ profileID: UUID) {
+        trackerStateStatusLock.lock()
+        unreadableTrackerStateProfileIDs.insert(profileID)
+        trackerStateStatusLock.unlock()
+    }
+
+    private func clearUnreadableTrackerState(_ profileID: UUID) {
+        trackerStateStatusLock.lock()
+        unreadableTrackerStateProfileIDs.remove(profileID)
+        trackerStateStatusLock.unlock()
+    }
+
+    private func markCredentialHydrationPending(_ profileID: UUID) {
+        trackerStateStatusLock.lock()
+        credentialHydrationPendingProfileIDs.insert(profileID)
+        trackerStateStatusLock.unlock()
+    }
+
+    private func clearCredentialHydrationPending(_ profileID: UUID) {
+        trackerStateStatusLock.lock()
+        credentialHydrationPendingProfileIDs.remove(profileID)
+        trackerStateStatusLock.unlock()
+    }
+
+    private func credentialHydrationIsPending(_ profileID: UUID) -> Bool {
+        trackerStateStatusLock.lock()
+        defer { trackerStateStatusLock.unlock() }
+        return credentialHydrationPendingProfileIDs.contains(profileID)
+    }
+
+    private func retainPendingTrackerState(_ state: TrackerState, forProfile profileID: UUID) -> PendingTrackerStatePersistence {
+        trackerStateStatusLock.lock()
+        let pending = PendingTrackerStatePersistence(
+            id: UUID(),
+            accountBoundaryGeneration: accountBoundaryGenerations[profileID] ?? 0,
+            state: state
+        )
+        pendingTrackerStatePersistence[profileID] = pending
+        trackerStateStatusLock.unlock()
+        return pending
+    }
+
+    private func accountBoundaryGeneration(for profileID: UUID) -> UInt64 {
+        trackerStateStatusLock.lock()
+        defer { trackerStateStatusLock.unlock() }
+        return accountBoundaryGenerations[profileID] ?? 0
+    }
+
+    private func accountBoundaryGenerationIsCurrent(_ generation: UInt64, for profileID: UUID) -> Bool {
+        trackerStateStatusLock.lock()
+        defer { trackerStateStatusLock.unlock() }
+        return (accountBoundaryGenerations[profileID] ?? 0) == generation
+    }
+
+    private func trackerServiceGeneration(
+        for service: TrackerService,
+        profileID: UUID
+    ) -> UInt64 {
+        trackerStateStatusLock.lock()
+        defer { trackerStateStatusLock.unlock() }
+        return trackerServiceGenerations[profileID]?[service] ?? 0
+    }
+
+    private func trackerServiceGenerationIsCurrent(
+        _ generation: UInt64,
+        service: TrackerService,
+        profileID: UUID
+    ) -> Bool {
+        trackerStateStatusLock.lock()
+        defer { trackerStateStatusLock.unlock() }
+        return (trackerServiceGenerations[profileID]?[service] ?? 0) == generation
+    }
+
+    @discardableResult
+    private func invalidateTrackerServiceAuthority(
+        _ service: TrackerService,
+        profileID: UUID
+    ) -> UInt64 {
+        trackerStateStatusLock.lock()
+        let next = (trackerServiceGenerations[profileID]?[service] ?? 0) &+ 1
+        trackerServiceGenerations[profileID, default: [:]][service] = next
+        trackerStateStatusLock.unlock()
+        return next
+    }
+
+    private func operationAuthority(
+        for account: TrackerAccount,
+        owner: UUID,
+        progressAuthority: ProgressManager.ProfileMutationAuthority? = nil,
+        operationGeneration: UInt64? = nil
+    ) -> TrackerOperationAuthority {
+        TrackerOperationAuthority(
+            owner: owner,
+            operationGeneration: operationGeneration ?? trackerOperationGenerationSnapshot(),
+            accountBoundaryGeneration: accountBoundaryGeneration(for: owner),
+            serviceGeneration: trackerServiceGeneration(
+                for: account.service,
+                profileID: owner
+            ),
+            progressAuthority: progressAuthority,
+            service: account.service,
+            userId: account.userId,
+            accessToken: account.accessToken,
+            refreshToken: account.refreshToken
+        )
+    }
+
+    private func profileOperationAuthority(
+        for owner: UUID
+    ) -> TrackerProfileOperationAuthority {
+        TrackerProfileOperationAuthority(
+            owner: owner,
+            operationGeneration: trackerOperationGenerationSnapshot()
+        )
+    }
+
+    private func profileOperationAuthorityIsCurrent(
+        _ authority: TrackerProfileOperationAuthority
+    ) -> Bool {
+        activeProfileID == authority.owner
+            && ProfileManager.shared.isStillActive(authority.owner)
+            && trackerOperationAuthorityIsCurrent(authority.operationGeneration)
+    }
+
+    private func beginAuthenticationAuthority(
+        for service: TrackerService,
+        owner: UUID
+    ) -> WebAuthenticationAuthority {
+#if !os(tvOS)
+        webAuthSession?.cancel()
+#endif
+        webAuthSession = nil
+        if service == .myAnimeList {
+            malTokenRefreshTasks[owner]?.task.cancel()
+            malTokenRefreshTasks[owner] = nil
+        } else if service == .trakt {
+            traktTokenRefreshTasks[owner]?.task.cancel()
+            traktTokenRefreshTasks[owner] = nil
+        }
+        let authority = WebAuthenticationAuthority(
+            id: UUID(),
+            owner: owner,
+            service: service,
+            accountBoundaryGeneration: accountBoundaryGeneration(for: owner),
+            serviceGeneration: invalidateTrackerServiceAuthority(
+                service,
+                profileID: owner
+            )
+        )
+        webAuthenticationAuthority = authority
+        return authority
+    }
+
+    private func authenticationAuthorityIsCurrent(
+        _ authority: WebAuthenticationAuthority
+    ) -> Bool {
+        guard let current = webAuthenticationAuthority else { return false }
+        return current.id == authority.id
+            && current.owner == authority.owner
+            && current.service == authority.service
+            && current.accountBoundaryGeneration == authority.accountBoundaryGeneration
+            && current.serviceGeneration == authority.serviceGeneration
+            && accountBoundaryGenerationIsCurrent(
+                authority.accountBoundaryGeneration,
+                for: authority.owner
+            )
+            && trackerServiceGenerationIsCurrent(
+                authority.serviceGeneration,
+                service: authority.service,
+                profileID: authority.owner
+            )
+    }
+
+    private func finishAuthenticationAuthority(
+        _ authority: WebAuthenticationAuthority
+    ) {
+        guard webAuthenticationAuthority?.id == authority.id else { return }
+        webAuthenticationAuthority = nil
+        webAuthSession = nil
+    }
+
+    private func authenticationAuthority(
+        owner: UUID,
+        service: TrackerService,
+        accountBoundaryGeneration: UInt64?,
+        serviceGeneration: UInt64?,
+        authenticationID: UUID?
+    ) -> WebAuthenticationAuthority {
+        if let accountBoundaryGeneration,
+           let serviceGeneration,
+           let authenticationID {
+            return WebAuthenticationAuthority(
+                id: authenticationID,
+                owner: owner,
+                service: service,
+                accountBoundaryGeneration: accountBoundaryGeneration,
+                serviceGeneration: serviceGeneration
+            )
+        }
+
+        return beginAuthenticationAuthority(for: service, owner: owner)
+    }
+
+    private func operationAuthorityIsCurrent(
+        _ authority: TrackerOperationAuthority,
+        requireSameCredential: Bool = true
+    ) async -> Bool {
+        guard activeProfileID == authority.owner,
+              ProfileManager.shared.isStillActive(authority.owner),
+              trackerOperationAuthorityIsCurrent(authority.operationGeneration),
+              authority.progressAuthority.map(
+                  ProgressManager.shared.profileMutationAuthorityIsCurrent
+              ) ?? true,
+              !accountBoundaryIsQuarantined(authority.owner),
+              !discardedProfileCleanupIsPending(authority.owner),
+              accountBoundaryGenerationIsCurrent(
+                  authority.accountBoundaryGeneration,
+                  for: authority.owner
+              ),
+              trackerServiceGenerationIsCurrent(
+                  authority.serviceGeneration,
+                  service: authority.service,
+                  profileID: authority.owner
+              ) else {
+            return false
+        }
+        do {
+            let expected = TrackerAccount(
+                service: authority.service,
+                username: "authority",
+                accessToken: authority.accessToken,
+                refreshToken: authority.refreshToken,
+                expiresAt: nil,
+                userId: authority.userId,
+                isConnected: true
+            )
+            try await requireTrackerAccountStillConnected(
+                expected,
+                owner: authority.owner,
+                requireSameCredential: requireSameCredential
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    static func resolvedPlaybackOperationOwner(
+        requiredOwner: UUID?,
+        progressAuthorityOwner: UUID?,
+        progressAuthorityIsCurrent: Bool,
+        trackerProfileID: UUID,
+        activeProfileID: UUID
+    ) -> UUID? {
+        guard progressAuthorityOwner == nil || progressAuthorityIsCurrent else {
+            return nil
+        }
+        let owner = requiredOwner ?? progressAuthorityOwner ?? activeProfileID
+        guard progressAuthorityOwner == nil || progressAuthorityOwner == owner,
+              trackerProfileID == owner,
+              activeProfileID == owner else {
+            return nil
+        }
+        return owner
+    }
+
+    private func resolvedPlaybackOperationOwner(
+        requiredOwner: UUID?,
+        progressAuthority: ProgressManager.ProfileMutationAuthority?
+    ) -> UUID? {
+        let activeOwner = ProfileManager.shared.activeProfileID
+        return Self.resolvedPlaybackOperationOwner(
+            requiredOwner: requiredOwner,
+            progressAuthorityOwner: progressAuthority?.profileID,
+            progressAuthorityIsCurrent: progressAuthority.map(
+                ProgressManager.shared.profileMutationAuthorityIsCurrent
+            ) ?? true,
+            trackerProfileID: activeProfileID,
+            activeProfileID: activeOwner
+        )
+    }
+
+    @discardableResult
+    private func invalidateAccountBoundary(for profileID: UUID) -> UInt64 {
+        trackerStateStatusLock.lock()
+        let next = (accountBoundaryGenerations[profileID] ?? 0) &+ 1
+        accountBoundaryGenerations[profileID] = next
+        trackerStateStatusLock.unlock()
+        return next
+    }
+
+    private func pendingTrackerStateEntry(forProfile profileID: UUID) -> PendingTrackerStatePersistence? {
+        trackerStateStatusLock.lock()
+        defer { trackerStateStatusLock.unlock() }
+        return pendingTrackerStatePersistence[profileID]
+    }
+
+    private func pendingTrackerState(forProfile profileID: UUID) -> TrackerState? {
+        pendingTrackerStateEntry(forProfile: profileID)?.state
+    }
+
+    private func pendingTrackerStateAuthorityIsCurrent(
+        _ pending: PendingTrackerStatePersistence,
+        forProfile profileID: UUID
+    ) -> Bool {
+        trackerStateStatusLock.lock()
+        defer { trackerStateStatusLock.unlock() }
+        return pendingTrackerStatePersistence[profileID]?.id == pending.id
+            && (accountBoundaryGenerations[profileID] ?? 0)
+                == pending.accountBoundaryGeneration
+    }
+
+    @discardableResult
+    private func updatePendingTrackerState(
+        _ state: TrackerState,
+        forProfile profileID: UUID,
+        matching id: UUID
+    ) -> Bool {
+        trackerStateStatusLock.lock()
+        let matched = pendingTrackerStatePersistence[profileID]?.id == id
+        if matched {
+            pendingTrackerStatePersistence[profileID]?.state = state
+        }
+        trackerStateStatusLock.unlock()
+        return matched
+    }
+
+    private func clearPendingTrackerState(forProfile profileID: UUID, matching id: UUID) {
+        trackerStateStatusLock.lock()
+        if pendingTrackerStatePersistence[profileID]?.id == id {
+            pendingTrackerStatePersistence.removeValue(forKey: profileID)
+        }
+        trackerStateStatusLock.unlock()
+    }
+
+    private func allPendingTrackerStateEntries() -> [(UUID, PendingTrackerStatePersistence)] {
+        trackerStateStatusLock.lock()
+        defer { trackerStateStatusLock.unlock() }
+        return Array(pendingTrackerStatePersistence)
+    }
+
+    private func retainPendingCredentialOnlyAccount(_ account: TrackerAccount, forProfile profileID: UUID) {
+        trackerStateStatusLock.lock()
+        pendingCredentialOnlyAccounts[profileID, default: [:]][account.service] = account
+        trackerStateStatusLock.unlock()
+    }
+
+    private func allPendingCredentialOnlyAccounts() -> [(UUID, TrackerAccount)] {
+        trackerStateStatusLock.lock()
+        defer { trackerStateStatusLock.unlock() }
+        return pendingCredentialOnlyAccounts.flatMap { profileID, accounts in
+            accounts.values.map { (profileID, $0) }
+        }
+    }
+
+    private func pendingCredentialOnlyAccountIsCurrent(
+        _ account: TrackerAccount,
+        forProfile profileID: UUID
+    ) -> Bool {
+        trackerStateStatusLock.lock()
+        defer { trackerStateStatusLock.unlock() }
+        guard let pending = pendingCredentialOnlyAccounts[profileID]?[account.service] else {
+            return false
+        }
+        return pending.username == account.username
+            && pending.userId == account.userId
+            && pending.accessToken == account.accessToken
+            && pending.refreshToken == account.refreshToken
+            && pending.expiresAt == account.expiresAt
+            && pending.isConnected == account.isConnected
+    }
+
+    private func clearPendingCredentialOnlyAccount(
+        matching account: TrackerAccount,
+        forProfile profileID: UUID
+    ) {
+        trackerStateStatusLock.lock()
+        if let pending = pendingCredentialOnlyAccounts[profileID]?[account.service],
+           pending.username == account.username,
+           pending.userId == account.userId,
+           pending.accessToken == account.accessToken,
+           pending.refreshToken == account.refreshToken,
+           pending.expiresAt == account.expiresAt,
+           pending.isConnected == account.isConnected {
+            pendingCredentialOnlyAccounts[profileID]?.removeValue(forKey: account.service)
+            if pendingCredentialOnlyAccounts[profileID]?.isEmpty == true {
+                pendingCredentialOnlyAccounts.removeValue(forKey: profileID)
+            }
+        }
+        trackerStateStatusLock.unlock()
+    }
+
+    private func scrubPendingPersistenceForDisconnect(
+        _ service: TrackerService,
+        profileID: UUID
+    ) {
+        trackerStateStatusLock.lock()
+        if let pending = pendingTrackerStatePersistence[profileID] {
+            var state = pending.state
+            if let index = state.accounts.firstIndex(where: { $0.service == service }) {
+                state.accounts[index].isConnected = false
+                state.accounts[index].accessToken = ""
+                state.accounts[index].refreshToken = nil
+                state.accounts[index].expiresAt = nil
+            }
+            pendingTrackerStatePersistence[profileID] = PendingTrackerStatePersistence(
+                id: UUID(),
+                accountBoundaryGeneration: pending.accountBoundaryGeneration,
+                state: state
+            )
+        }
+        pendingCredentialOnlyAccounts[profileID]?.removeValue(forKey: service)
+        if pendingCredentialOnlyAccounts[profileID]?.isEmpty == true {
+            pendingCredentialOnlyAccounts.removeValue(forKey: profileID)
+        }
+        trackerStateStatusLock.unlock()
+    }
+
+    private enum StringMarkerJournalProbe {
+        case absent
+        case valid([String])
+        case unreadable
+
+        var values: [String]? {
+            guard case .valid(let values) = self else { return nil }
+            return values
+        }
+
+        var isUnreadable: Bool {
+            if case .unreadable = self { return true }
+            return false
+        }
+    }
+
+    private static func markerJournalErrorIsFileNotFound(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        guard nsError.domain == NSCocoaErrorDomain else { return false }
+        return nsError.code == CocoaError.Code.fileNoSuchFile.rawValue
+            || nsError.code == CocoaError.Code.fileReadNoSuchFile.rawValue
+    }
+
+    private struct MarkerJournalPersistenceResult {
+        let defaultsSucceeded: Bool
+        let sidecarSucceeded: Bool
+
+        var published: Bool {
+            defaultsSucceeded || sidecarSucceeded
+        }
+
+        var cleared: Bool {
+            defaultsSucceeded && sidecarSucceeded
+        }
+    }
+
+    private func probeDefaultsStringMarkerJournal(
+        key: String,
+        maximumCount: Int,
+        validator: (String) -> Bool
+    ) -> StringMarkerJournalProbe {
+        let defaults = UserDefaults.standard
+        guard let object = defaults.object(forKey: key) else { return .absent }
+        guard let values = object as? [String], values.count <= maximumCount else {
+            return .unreadable
+        }
+        var totalBytes = 0
+        for value in values {
+            let byteCount = value.utf8.count
+            guard byteCount <= Self.maximumTrackerDeletionJournalBytes,
+                  totalBytes <= Self.maximumTrackerDeletionJournalBytes - byteCount,
+                  validator(value) else {
+                return .unreadable
+            }
+            totalBytes += byteCount
+        }
+        return .valid(values)
+    }
+
+    private func probeSidecarStringMarkerJournal(
+        url: URL?,
+        maximumCount: Int,
+        validator: (String) -> Bool
+    ) -> StringMarkerJournalProbe {
+
+        guard let url else { return .unreadable }
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            guard attributes[.type] as? FileAttributeType == .typeRegular,
+                  let fileSize = (attributes[.size] as? NSNumber)?.intValue,
+                  fileSize <= Self.maximumTrackerDeletionJournalBytes else {
+                return .unreadable
+            }
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            let data = try handle.read(
+                upToCount: Self.maximumTrackerDeletionJournalBytes + 1
+            ) ?? Data()
+            guard data.count <= Self.maximumTrackerDeletionJournalBytes,
+                  let values = try? JSONDecoder().decode([String].self, from: data),
+                  values.count <= maximumCount else {
+                return .unreadable
+            }
+            var totalBytes = 0
+            for value in values {
+                let byteCount = value.utf8.count
+                guard byteCount <= Self.maximumTrackerDeletionJournalBytes,
+                      totalBytes <= Self.maximumTrackerDeletionJournalBytes - byteCount,
+                      validator(value) else {
+                    return .unreadable
+                }
+                totalBytes += byteCount
+            }
+            return .valid(values)
+        } catch {
+            if Self.markerJournalErrorIsFileNotFound(error) {
+                return .absent
+            }
+            return .unreadable
+        }
+    }
+
+    private func persistStringMarkerJournal(
+        values: [String],
+        defaultsKey: String,
+        sidecarURL: URL?,
+        maximumCount: Int
+    ) -> MarkerJournalPersistenceResult {
+        guard values.count <= maximumCount,
+              let encoded = try? JSONEncoder().encode(values),
+              encoded.count <= Self.maximumTrackerDeletionJournalBytes else {
+            return MarkerJournalPersistenceResult(
+                defaultsSucceeded: false,
+                sidecarSucceeded: false
+            )
+        }
+
+        let defaults = UserDefaults.standard
+        defaults.set(values, forKey: defaultsKey)
+        let defaultsSucceeded = defaults.synchronize()
+
+        var sidecarSucceeded = false
+        if let sidecarURL {
+            do {
+                if values.isEmpty {
+                    try FileManager.default.removeItem(at: sidecarURL)
+                } else {
+                    try encoded.write(to: sidecarURL, options: .atomic)
+                }
+                sidecarSucceeded = true
+            } catch {
+                sidecarSucceeded = values.isEmpty
+                    && Self.markerJournalErrorIsFileNotFound(error)
+            }
+        }
+        return MarkerJournalPersistenceResult(
+            defaultsSucceeded: defaultsSucceeded,
+            sidecarSucceeded: sidecarSucceeded
+        )
+    }
+
+    private func parsedCredentialDeletionMarker(
+        _ marker: String
+    ) -> (profileID: UUID, service: TrackerService)? {
+        guard marker.utf8.count <= 128 else { return nil }
+        let parts = marker.split(separator: "|", omittingEmptySubsequences: false)
+        guard parts.count == 2,
+              let profileID = UUID(uuidString: String(parts[0])),
+              let service = TrackerService(rawValue: String(parts[1])) else { return nil }
+        return (profileID, service)
+    }
+
+    private func credentialDeletionIsPending(_ service: TrackerService, profileID: UUID) -> Bool {
+        trackerStateStatusLock.lock()
+        defer { trackerStateStatusLock.unlock() }
+        return pendingCredentialDeletions[profileID]?.contains(service) == true
+    }
+
+    @discardableResult
+    private func markCredentialDeletionPending(
+        _ service: TrackerService,
+        profileID: UUID
+    ) -> Bool {
+        credentialDeletionPersistenceLock.lock()
+        defer { credentialDeletionPersistenceLock.unlock() }
+        return markCredentialDeletionPendingLocked(service, profileID: profileID)
+    }
+
+    private func markCredentialDeletionPendingLocked(
+        _ service: TrackerService,
+        profileID: UUID
+    ) -> Bool {
+        trackerStateStatusLock.lock()
+        pendingCredentialDeletions[profileID, default: []].insert(service)
+        let markers = serializedPendingCredentialDeletionMarkersLocked()
+        guard !credentialDeletionJournalIsUnreadable,
+              markers.count <= Self.maximumCredentialDeletionMarkerCount else {
+            unpersistedCredentialDeletionAuthority[profileID, default: []].insert(service)
+            trackerStateStatusLock.unlock()
+            return false
+        }
+        trackerStateStatusLock.unlock()
+
+        let persistence = persistStringMarkerJournal(
+            values: markers,
+            defaultsKey: Self.pendingCredentialDeletionDefaultsKey,
+            sidecarURL: Self.credentialDeletionJournalURL,
+            maximumCount: Self.maximumCredentialDeletionMarkerCount
+        )
+        trackerStateStatusLock.lock()
+        if persistence.published {
+            unpersistedCredentialDeletionAuthority[profileID]?.remove(service)
+            if unpersistedCredentialDeletionAuthority[profileID]?.isEmpty == true {
+                unpersistedCredentialDeletionAuthority.removeValue(forKey: profileID)
+            }
+        } else {
+            unpersistedCredentialDeletionAuthority[profileID, default: []].insert(service)
+        }
+        trackerStateStatusLock.unlock()
+
+        return persistence.published
+    }
+
+    @discardableResult
+    private func clearCredentialDeletionPending(
+        _ service: TrackerService,
+        profileID: UUID
+    ) -> Bool {
+        credentialDeletionPersistenceLock.lock()
+        defer { credentialDeletionPersistenceLock.unlock() }
+        return clearCredentialDeletionPendingLocked(service, profileID: profileID)
+    }
+
+    private func clearCredentialDeletionPendingLocked(
+        _ service: TrackerService,
+        profileID: UUID
+    ) -> Bool {
+        trackerStateStatusLock.lock()
+        let wasPending = pendingCredentialDeletions[profileID]?.contains(service) == true
+        guard wasPending else {
+            unpersistedCredentialDeletionAuthority[profileID]?.remove(service)
+            if unpersistedCredentialDeletionAuthority[profileID]?.isEmpty == true {
+                unpersistedCredentialDeletionAuthority.removeValue(forKey: profileID)
+            }
+            trackerStateStatusLock.unlock()
+            return true
+        }
+        guard !credentialDeletionJournalIsUnreadable else {
+            trackerStateStatusLock.unlock()
+            return false
+        }
+
+        let markers: [String] = pendingCredentialDeletions.flatMap { candidateProfileID, services in
+            services.compactMap { candidateService -> String? in
+                guard candidateProfileID != profileID || candidateService != service else {
+                    return nil
+                }
+                return "\(candidateProfileID.uuidString.lowercased())|\(candidateService.rawValue)"
+            }
+        }.sorted()
+        guard markers.count <= Self.maximumCredentialDeletionMarkerCount else {
+            trackerStateStatusLock.unlock()
+            return false
+        }
+        trackerStateStatusLock.unlock()
+        let persistence = persistStringMarkerJournal(
+            values: markers,
+            defaultsKey: Self.pendingCredentialDeletionDefaultsKey,
+            sidecarURL: Self.credentialDeletionJournalURL,
+            maximumCount: Self.maximumCredentialDeletionMarkerCount
+        )
+        guard persistence.cleared else {
+
+            trackerStateStatusLock.lock()
+            let rollbackMarkers = serializedPendingCredentialDeletionMarkersLocked()
+            trackerStateStatusLock.unlock()
+            _ = persistStringMarkerJournal(
+                values: rollbackMarkers,
+                defaultsKey: Self.pendingCredentialDeletionDefaultsKey,
+                sidecarURL: Self.credentialDeletionJournalURL,
+                maximumCount: Self.maximumCredentialDeletionMarkerCount
+            )
+            return false
+        }
+        trackerStateStatusLock.lock()
+        pendingCredentialDeletions[profileID]?.remove(service)
+        if pendingCredentialDeletions[profileID]?.isEmpty == true {
+            pendingCredentialDeletions.removeValue(forKey: profileID)
+        }
+        unpersistedCredentialDeletionAuthority[profileID]?.remove(service)
+        if unpersistedCredentialDeletionAuthority[profileID]?.isEmpty == true {
+            unpersistedCredentialDeletionAuthority.removeValue(forKey: profileID)
+        }
+        trackerStateStatusLock.unlock()
+        return true
+    }
+
+    private func serializedPendingCredentialDeletionMarkersLocked() -> [String] {
+        pendingCredentialDeletions.flatMap { profileID, services in
+            services.map { "\(profileID.uuidString.lowercased())|\($0.rawValue)" }
+        }.sorted()
+    }
+
+    private func loadPendingCredentialDeletionMarkers() {
+        credentialDeletionPersistenceLock.lock()
+        defer { credentialDeletionPersistenceLock.unlock() }
+        let validator = { [weak self] (marker: String) -> Bool in
+            self?.parsedCredentialDeletionMarker(marker) != nil
+        }
+        let defaultsProbe = probeDefaultsStringMarkerJournal(
+            key: Self.pendingCredentialDeletionDefaultsKey,
+            maximumCount: Self.maximumCredentialDeletionMarkerCount,
+            validator: validator
+        )
+        let sidecarProbe = probeSidecarStringMarkerJournal(
+            url: Self.credentialDeletionJournalURL,
+            maximumCount: Self.maximumCredentialDeletionMarkerCount,
+            validator: validator
+        )
+        let journalIsUnreadable = defaultsProbe.isUnreadable || sidecarProbe.isUnreadable
+        let markers = (defaultsProbe.values ?? []) + (sidecarProbe.values ?? [])
+        var loaded: [UUID: Set<TrackerService>] = [:]
+        for marker in markers {
+            guard let parsed = parsedCredentialDeletionMarker(marker) else { continue }
+            loaded[parsed.profileID, default: []].insert(parsed.service)
+        }
+        trackerStateStatusLock.lock()
+        let wasUnreadable = credentialDeletionJournalIsUnreadable
+        for (profileID, services) in loaded {
+            pendingCredentialDeletions[profileID, default: []].formUnion(services)
+        }
+        credentialDeletionJournalIsUnreadable = journalIsUnreadable
+        let canonical = serializedPendingCredentialDeletionMarkersLocked()
+        trackerStateStatusLock.unlock()
+
+        if journalIsUnreadable {
+            if !wasUnreadable {
+                Logger.shared.log(
+                    "TrackerManager: credential-deletion journal is malformed, oversized, or unavailable; tracker operations remain fail-closed and existing bytes were preserved",
+                    type: "Error"
+                )
+            }
+            return
+        }
+        if wasUnreadable {
+            Logger.shared.log(
+                "TrackerManager: credential-deletion journal became readable; retrying its preserved deletion authority",
+                type: "Tracker"
+            )
+        }
+        if !canonical.isEmpty {
+
+            let persistence = persistStringMarkerJournal(
+                values: canonical,
+                defaultsKey: Self.pendingCredentialDeletionDefaultsKey,
+                sidecarURL: Self.credentialDeletionJournalURL,
+                maximumCount: Self.maximumCredentialDeletionMarkerCount
+            )
+            if persistence.published {
+                trackerStateStatusLock.lock()
+                for marker in canonical {
+                    guard let parsed = parsedCredentialDeletionMarker(marker) else { continue }
+                    unpersistedCredentialDeletionAuthority[parsed.profileID]?
+                        .remove(parsed.service)
+                    if unpersistedCredentialDeletionAuthority[parsed.profileID]?.isEmpty == true {
+                        unpersistedCredentialDeletionAuthority.removeValue(
+                            forKey: parsed.profileID
+                        )
+                    }
+                }
+                trackerStateStatusLock.unlock()
+            }
+        }
+    }
+
+    private func allPendingCredentialDeletions() -> [(UUID, TrackerService)] {
+        trackerStateStatusLock.lock()
+        defer { trackerStateStatusLock.unlock() }
+        return pendingCredentialDeletions.flatMap { profileID, services in
+            services.map { (profileID, $0) }
+        }
+    }
+
+    private func resolveUnpersistedCredentialDeletionAuthority(
+        _ service: TrackerService,
+        profileID: UUID
+    ) {
+        trackerStateStatusLock.lock()
+        unpersistedCredentialDeletionAuthority[profileID]?.remove(service)
+        if unpersistedCredentialDeletionAuthority[profileID]?.isEmpty == true {
+            unpersistedCredentialDeletionAuthority.removeValue(forKey: profileID)
+        }
+        trackerStateStatusLock.unlock()
+    }
+
+    private func loadPendingDiscardedProfileCleanupMarkers() {
+
+        trackerStateStatusLock.lock()
+        let validator = { (value: String) -> Bool in
+            value.utf8.count <= 64 && UUID(uuidString: value) != nil
+        }
+        let defaultsProbe = probeDefaultsStringMarkerJournal(
+            key: Self.pendingDiscardedProfileCleanupDefaultsKey,
+            maximumCount: Self.maximumDiscardedProfileCleanupMarkerCount,
+            validator: validator
+        )
+        let sidecarProbe = probeSidecarStringMarkerJournal(
+            url: Self.discardedProfileCleanupJournalURL,
+            maximumCount: Self.maximumDiscardedProfileCleanupMarkerCount,
+            validator: validator
+        )
+        let journalIsUnreadable = defaultsProbe.isUnreadable || sidecarProbe.isUnreadable
+        let values = (defaultsProbe.values ?? []) + (sidecarProbe.values ?? [])
+        let loaded = Set(values.compactMap(UUID.init(uuidString:)))
+        let wasUnreadable = discardedProfileCleanupJournalIsUnreadable
+        pendingDiscardedProfileCleanupIDs.formUnion(loaded)
+        discardedProfileCleanupJournalIsUnreadable = journalIsUnreadable
+        let canonical = pendingDiscardedProfileCleanupIDs
+            .map { $0.uuidString.lowercased() }
+            .sorted()
+        if !journalIsUnreadable, !canonical.isEmpty {
+            let persisted = persistPendingDiscardedProfileCleanupMarkersLocked()
+            if persisted {
+                unpersistedDiscardedProfileCleanupIDs.subtract(
+                    pendingDiscardedProfileCleanupIDs
+                )
+            }
+        }
+        trackerStateStatusLock.unlock()
+        discardedProfileLock.lock()
+        discardedProfileIDs.formUnion(loaded)
+        discardedProfileLock.unlock()
+
+        if journalIsUnreadable {
+            if !wasUnreadable {
+                Logger.shared.log(
+                    "TrackerManager: discarded-profile cleanup journal is malformed, oversized, or unavailable; tracker operations remain fail-closed and existing bytes were preserved",
+                    type: "Error"
+                )
+            }
+            return
+        }
+        if wasUnreadable {
+            Logger.shared.log(
+                "TrackerManager: discarded-profile cleanup journal became readable; retrying its preserved cleanup authority",
+                type: "Tracker"
+            )
+        }
+    }
+
+    private func persistPendingDiscardedProfileCleanupMarkersLocked(
+        requiresAllStores: Bool = false
+    ) -> Bool {
+        guard !discardedProfileCleanupJournalIsUnreadable else { return false }
+        let values = pendingDiscardedProfileCleanupIDs
+            .map { $0.uuidString.lowercased() }
+            .sorted()
+        guard values.count <= Self.maximumDiscardedProfileCleanupMarkerCount else {
+            return false
+        }
+        let persistence = persistStringMarkerJournal(
+            values: values,
+            defaultsKey: Self.pendingDiscardedProfileCleanupDefaultsKey,
+            sidecarURL: Self.discardedProfileCleanupJournalURL,
+            maximumCount: Self.maximumDiscardedProfileCleanupMarkerCount
+        )
+
+        return requiresAllStores || values.isEmpty
+            ? persistence.cleared
+            : persistence.published
+    }
+
+    @discardableResult
+    private func markDiscardedProfileCleanupPending(_ profileID: UUID) -> Bool {
+        trackerStateStatusLock.lock()
+        pendingDiscardedProfileCleanupIDs.insert(profileID)
+        let succeeded = persistPendingDiscardedProfileCleanupMarkersLocked()
+        if succeeded {
+            unpersistedDiscardedProfileCleanupIDs.remove(profileID)
+        } else {
+            unpersistedDiscardedProfileCleanupIDs.insert(profileID)
+        }
+        trackerStateStatusLock.unlock()
+        discardedProfileLock.lock()
+        discardedProfileIDs.insert(profileID)
+        discardedProfileLock.unlock()
+        return succeeded
+    }
+
+    @discardableResult
+    private func clearDiscardedProfileCleanupPending(_ profileID: UUID) -> Bool {
+        trackerStateStatusLock.lock()
+        let previous = pendingDiscardedProfileCleanupIDs
+        pendingDiscardedProfileCleanupIDs.remove(profileID)
+        let succeeded = persistPendingDiscardedProfileCleanupMarkersLocked(
+            requiresAllStores: true
+        )
+        if !succeeded {
+            pendingDiscardedProfileCleanupIDs = previous
+            _ = persistPendingDiscardedProfileCleanupMarkersLocked()
+        } else {
+            unpersistedDiscardedProfileCleanupIDs.remove(profileID)
+        }
+        trackerStateStatusLock.unlock()
+        return succeeded
+    }
+
+    private func discardedProfileCleanupIsPending(_ profileID: UUID) -> Bool {
+        trackerStateStatusLock.lock()
+        defer { trackerStateStatusLock.unlock() }
+        return pendingDiscardedProfileCleanupIDs.contains(profileID)
+    }
+
+    private struct CredentialRemovalOutcome {
+        let removed: Bool
+
+        let deletionIsDurablyProtected: Bool
+    }
+
+    private func removeTrackerCredentialOutcome(
+        _ service: TrackerService,
+        profileID: UUID,
+        pendingAuthority: PendingTrackerStatePersistence? = nil
+    ) -> CredentialRemovalOutcome {
+        credentialDeletionPersistenceLock.lock()
+        defer { credentialDeletionPersistenceLock.unlock() }
+        if let pendingAuthority,
+           !pendingTrackerStateAuthorityIsCurrent(
+               pendingAuthority,
+               forProfile: profileID
+           ) {
+            return CredentialRemovalOutcome(
+                removed: false,
+                deletionIsDurablyProtected: false
+            )
+        }
+        return removeTrackerCredentialOutcomeLocked(service, profileID: profileID)
+    }
+
+    private func removeTrackerCredentialOutcomeLocked(
+        _ service: TrackerService,
+        profileID: UUID
+    ) -> CredentialRemovalOutcome {
+        let removed = TrackerCredentialVault.remove(service, profileID: profileID)
+        if removed {
+
+            resolveUnpersistedCredentialDeletionAuthority(
+                service,
+                profileID: profileID
+            )
+            _ = clearCredentialDeletionPendingLocked(service, profileID: profileID)
+            return CredentialRemovalOutcome(
+                removed: true,
+                deletionIsDurablyProtected: true
+            )
+        } else {
+            return CredentialRemovalOutcome(
+                removed: false,
+                deletionIsDurablyProtected: markCredentialDeletionPendingLocked(
+                    service,
+                    profileID: profileID
+                )
+            )
+        }
+    }
+
+    @discardableResult
+    private func removeTrackerCredential(
+        _ service: TrackerService,
+        profileID: UUID,
+        pendingAuthority: PendingTrackerStatePersistence? = nil
+    ) -> Bool {
+        removeTrackerCredentialOutcome(
+            service,
+            profileID: profileID,
+            pendingAuthority: pendingAuthority
+        ).removed
+    }
+
+    private func storeTrackerCredential(
+        _ account: TrackerAccount,
+        profileID: UUID,
+        pendingAuthority: PendingTrackerStatePersistence? = nil,
+        pendingCredentialOnlyAuthority: TrackerAccount? = nil
+    ) -> Bool {
+        credentialDeletionPersistenceLock.lock()
+        defer { credentialDeletionPersistenceLock.unlock() }
+        if let pendingAuthority,
+           !pendingTrackerStateAuthorityIsCurrent(
+               pendingAuthority,
+               forProfile: profileID
+           ) {
+            return false
+        }
+        if let pendingCredentialOnlyAuthority,
+           !pendingCredentialOnlyAccountIsCurrent(
+               pendingCredentialOnlyAuthority,
+               forProfile: profileID
+           ) {
+            return false
+        }
+        guard !trackerDeletionJournalsBlockOperations() else { return false }
+        if credentialDeletionIsPending(account.service, profileID: profileID) {
+            guard removeTrackerCredentialOutcomeLocked(
+                    account.service,
+                    profileID: profileID
+                  ).removed,
+                  !credentialDeletionIsPending(account.service, profileID: profileID) else {
+                return false
+            }
+        }
+        return TrackerCredentialVault.store(account, profileID: profileID)
+    }
+
+    private func hydrateTrackerCredential(
+        _ account: TrackerAccount,
+        profileID: UUID,
+        pendingAuthority: PendingTrackerStatePersistence? = nil
+    ) -> TrackerCredentialVault.HydrationResult {
+        credentialDeletionPersistenceLock.lock()
+        defer { credentialDeletionPersistenceLock.unlock() }
+        if let pendingAuthority,
+           !pendingTrackerStateAuthorityIsCurrent(
+               pendingAuthority,
+               forProfile: profileID
+           ) {
+            return .temporarilyUnavailable(errSecInteractionNotAllowed)
+        }
+        guard !trackerDeletionJournalsBlockOperations() else {
+            return .temporarilyUnavailable(errSecInteractionNotAllowed)
+        }
+        if credentialDeletionIsPending(account.service, profileID: profileID) {
+            guard removeTrackerCredentialOutcomeLocked(
+                    account.service,
+                    profileID: profileID
+                  ).removed else {
+                return .temporarilyUnavailable(errSecInteractionNotAllowed)
+            }
+            return .absent
+        }
+        return TrackerCredentialVault.hydrate(account, profileID: profileID)
+    }
+
+    private func recoverIdentityBoundCredentialRows(
+        in state: inout TrackerState,
+        profileID: UUID
+    ) -> (changed: Bool, unavailable: Bool) {
+        guard !trackerDeletionJournalsBlockOperations() else {
+            return (false, true)
+        }
+        var changed = false
+        var unavailable = false
+        let representedServices = Set(state.accounts.map(\.service))
+
+        for service in TrackerService.allCases where !representedServices.contains(service) {
+            credentialDeletionPersistenceLock.lock()
+            if credentialDeletionIsPending(service, profileID: profileID) {
+                let outcome = removeTrackerCredentialOutcomeLocked(
+                    service,
+                    profileID: profileID
+                )
+                credentialDeletionPersistenceLock.unlock()
+                if !outcome.removed {
+                    unavailable = true
+                }
+                continue
+            }
+            let discovery = TrackerCredentialVault.discoverIdentityBound(
+                service,
+                profileID: profileID
+            )
+            credentialDeletionPersistenceLock.unlock()
+            switch discovery {
+            case .found(let account):
+                state.accounts.append(account)
+                changed = true
+            case .notRecoverable:
+                break
+            case .temporarilyUnavailable:
+                unavailable = true
+            }
+        }
+        return (changed, unavailable)
+    }
+
+    @objc private func profileRosterDidChange() {
+        let liveProfileIDs = Set(ProfileManager.shared.profiles.map(\.id))
+        discardedProfileLock.lock()
+        let revived = discardedProfileIDs.intersection(liveProfileIDs)
+        discardedProfileLock.unlock()
+        guard !revived.isEmpty else { return }
+        for profileID in revived where discardedProfileCleanupIsPending(profileID) {
+            _ = performDiscardedProfileCleanup(profileID)
+        }
+        let safeToRevive = revived.filter { !discardedProfileCleanupIsPending($0) }
+        discardedProfileLock.lock()
+        discardedProfileIDs.subtract(safeToRevive)
+        discardedProfileLock.unlock()
+        Logger.shared.log(
+            "TrackerManager: \(safeToRevive.count) previously discarded profile(s) completed cleanup and are writable again",
+            type: "Tracker"
+        )
+    }
+
+    @discardableResult
+    private func performDiscardedProfileCleanup(_ profileID: UUID) -> Bool {
+        guard !trackerDeletionJournalSourcesAreUnreadable() else { return false }
+        let stateURL = Self.stateURL(for: profileID)
+        let removedStateFile = trackerStatePersistenceQueue.sync {
+            do {
+                if FileManager.default.fileExists(atPath: stateURL.path) {
+                    try FileManager.default.removeItem(at: stateURL)
+                }
+                return true
+            } catch {
+                return false
+            }
+        }
+
+        var cleanupIsDurablyProtected = removedStateFile
+        for service in TrackerService.allCases {
+            let outcome = removeTrackerCredentialOutcome(service, profileID: profileID)
+            cleanupIsDurablyProtected = outcome.deletionIsDurablyProtected
+                && cleanupIsDurablyProtected
+        }
+        cleanupIsDurablyProtected = clearTraktHistoryWriteReceipts(for: profileID)
+            && cleanupIsDurablyProtected
+
+        guard cleanupIsDurablyProtected else { return false }
+        clearUnreadableTrackerState(profileID)
+        clearCredentialHydrationPending(profileID)
+        if let pending = pendingTrackerStateEntry(forProfile: profileID) {
+            clearPendingTrackerState(forProfile: profileID, matching: pending.id)
+        }
+        trackerStateStatusLock.lock()
+        pendingCredentialOnlyAccounts.removeValue(forKey: profileID)
+        trackerStateStatusLock.unlock()
+        return clearDiscardedProfileCleanupPending(profileID)
+    }
+
+    private func retryPendingDiscardedProfileCleanup() {
+        guard !trackerDeletionJournalSourcesAreUnreadable() else { return }
+        trackerStateStatusLock.lock()
+        let profileIDs = pendingDiscardedProfileCleanupIDs
+        trackerStateStatusLock.unlock()
+        for profileID in profileIDs {
+            if performDiscardedProfileCleanup(profileID),
+               ProfileManager.shared.profile(with: profileID) != nil {
+                discardedProfileLock.lock()
+                discardedProfileIDs.remove(profileID)
+                discardedProfileLock.unlock()
+            }
+        }
+    }
+
+    func discardStore(forProfile profileID: UUID) {
+        guard profileID != activeProfileID else { return }
+
+        _ = invalidateAccountBoundary(for: profileID)
+        traktTokenRefreshTasks[profileID]?.task.cancel()
+        traktTokenRefreshTasks[profileID] = nil
+        malTokenRefreshTasks[profileID]?.task.cancel()
+        malTokenRefreshTasks[profileID] = nil
+        trackerStateStatusLock.lock()
+        let preservesForTentativeBoundary = tentativelyPreservedAccountBoundaryProfileIDs
+            .contains(profileID)
+        trackerStateStatusLock.unlock()
+        guard !preservesForTentativeBoundary else { return }
+        let journalWasPublished = markDiscardedProfileCleanupPending(profileID)
+        let cleanupSucceeded = performDiscardedProfileCleanup(profileID)
+        if !cleanupSucceeded {
+
+            let retryWasPublished = markDiscardedProfileCleanupPending(profileID)
+            if !journalWasPublished && !retryWasPublished {
+                Logger.shared.log(
+                    "TrackerManager: discarded profile \(profileID) cleanup could not publish durable retry authority",
+                    type: "Error"
+                )
+            }
+        }
+    }
+
+    func beginTentativeAccountBoundaryCredentialPreservation(
+        profileIDs: Set<UUID>
+    ) {
+        trackerStateStatusLock.lock()
+        tentativelyPreservedAccountBoundaryProfileIDs.formUnion(profileIDs)
+        trackerStateStatusLock.unlock()
+    }
+
+    func endTentativeAccountBoundaryCredentialPreservation(
+        profileIDs: Set<UUID>
+    ) {
+        trackerStateStatusLock.lock()
+        tentativelyPreservedAccountBoundaryProfileIDs.subtract(profileIDs)
+        trackerStateStatusLock.unlock()
+    }
+
+    @discardableResult
+    @MainActor
+    func clearStoreForConfirmedAccountBoundary(profileID: UUID) -> Bool {
+        markAccountBoundaryQuarantined(profileID)
+        _ = invalidateAccountBoundary(for: profileID)
+        var cleanupIsDurablyProtected = true
+
+        syncToolTask?.cancel()
+        syncToolTask = nil
+        cachedSyncToolPlan = nil
+        traktTokenRefreshTasks[profileID]?.task.cancel()
+        traktTokenRefreshTasks[profileID] = nil
+        malTokenRefreshTasks[profileID]?.task.cancel()
+        malTokenRefreshTasks[profileID] = nil
+
+        let isActiveProfile = profileID == activeProfileID
+        if isActiveProfile {
+#if !os(tvOS)
+            webAuthSession?.cancel()
+#endif
+            webAuthSession = nil
+            pendingMALCodeVerifier = nil
+            pendingTraktOAuthState = nil
+#if os(tvOS)
+            traktDeviceAuthTask?.cancel()
+            traktDeviceAuthTask = nil
+            traktDeviceUserCode = nil
+            traktDeviceVerificationURL = nil
+#endif
+            isAuthenticating = false
+            authError = nil
+            authenticationNotice = nil
+            isRunningSyncTool = false
+            syncToolStatus = nil
+            syncToolPreview = nil
+            syncToolProgressCompleted = 0
+            syncToolProgressTotal = 0
+            syncToolProgressDetail = nil
+            syncToolIsLocked = false
+        }
+
+        trackerStateStatusLock.lock()
+        pendingTrackerStatePersistence.removeValue(forKey: profileID)
+        pendingCredentialOnlyAccounts.removeValue(forKey: profileID)
+        credentialHydrationPendingProfileIDs.remove(profileID)
+        trackerStateStatusLock.unlock()
+
+        let stateURL = Self.stateURL(for: profileID)
+        let removedStateFile = trackerStatePersistenceQueue.sync {
+            do {
+                if FileManager.default.fileExists(atPath: stateURL.path) {
+                    try FileManager.default.removeItem(at: stateURL)
+                }
+                return true
+            } catch {
+                Logger.shared.log(
+                    "TrackerManager: failed to remove tracker state at a confirmed account boundary for profile \(profileID): \(error.localizedDescription)",
+                    type: "Error"
+                )
+                return false
+            }
+        }
+        cleanupIsDurablyProtected = cleanupIsDurablyProtected && removedStateFile
+
+        for service in TrackerService.allCases {
+            let outcome = removeTrackerCredentialOutcome(service, profileID: profileID)
+            cleanupIsDurablyProtected = cleanupIsDurablyProtected
+                && outcome.deletionIsDurablyProtected
+        }
+
+        if isActiveProfile {
+            trackerState = TrackerState()
+        }
+
+        recentWatchSyncQueue.sync {
+            watchSyncDedupeGate = TrackerWatchSyncDedupeGate()
+        }
+        recentTraktPlaybackSyncQueue.sync {
+            recentTraktPlaybackSyncKeys.removeAll()
+        }
+        cleanupIsDurablyProtected = clearTraktHistoryWriteReceipts(for: profileID)
+            && cleanupIsDurablyProtected
+        traktContinueWatchingCacheQueue.sync {
+            traktContinueWatchingCache = nil
+        }
+        traktScrobbleQueue.sync {
+            traktScrobbleLastActionByKey.removeAll()
+            traktScrobbleLastStampByKey.removeAll()
+            traktScrobblePendingByKey.removeAll()
+            traktScrobbleFailureStampByKey.removeAll()
+        }
+        if cleanupIsDurablyProtected {
+            clearAccountBoundaryQuarantine(profileID)
+        }
+        return cleanupIsDurablyProtected
+    }
+
+    private func readPersistedTrackerState(forProfile profileID: UUID) -> TrackerState? {
+        guard !accountBoundaryRecoveryBlocksStateAccess(),
+              !trackerStateIsUnreadable(profileID) else { return nil }
+        let stateURL = Self.stateURL(for: profileID)
+        return trackerStatePersistenceQueue.sync {
+            guard !accountBoundaryRecoveryBlocksStateAccess(),
+                  !trackerStateIsUnreadable(profileID) else { return nil }
+            guard FileManager.default.fileExists(atPath: stateURL.path) else {
+                return TrackerState()
+            }
+            do {
+                let data = try BoundedLocalStoreReader.read(
+                    from: stateURL,
+                    maximumBytes: Self.maximumPersistedTrackerStateBytes
+                )
+                return try JSONDecoder().decode(TrackerState.self, from: data)
+            } catch {
+                markTrackerStateUnreadable(profileID)
+                Logger.shared.log(
+                    "TrackerManager: refused to treat unreadable tracker state as empty for profile \(profileID): \(error.localizedDescription)",
+                    type: "Error"
+                )
+                return nil
+            }
+        }
+    }
+
+    private func loadTrackerState(forProfile profileID: UUID? = nil) {
+        let profileID = profileID ?? activeProfileID
+        guard !accountBoundaryRecoveryBlocksStateAccess(),
+              !accountBoundaryIsQuarantined(profileID),
+              !discardedProfileCleanupIsPending(profileID) else { return }
+        guard var state = readPersistedTrackerState(forProfile: profileID) else { return }
+        guard Self.trackerAccountsAreStructurallyValid(state.accounts) else {
+            markTrackerStateUnreadable(profileID)
+            Logger.shared.log(
+                "TrackerManager: refused structurally invalid tracker state for profile \(profileID)",
+                type: "Error"
+            )
+            return
+        }
+        var migratedPlaintextCredentials = false
+        var removedDefinitelyAbsentCredential = false
+        var recoveredIdentityBoundCredential = false
+        var hydrationUnavailable = false
+        state.accounts = state.accounts.compactMap { account in
+            guard account.isConnected else {
+                if removeTrackerCredential(account.service, profileID: profileID) {
+                    removedDefinitelyAbsentCredential = true
+                    return nil
+                }
+                hydrationUnavailable = true
+                return account
+            }
+            if !account.accessToken.isEmpty {
+                guard storeTrackerCredential(account, profileID: profileID) else {
+                    hydrationUnavailable = true
+                    return account
+                }
+                migratedPlaintextCredentials = true
+            }
+            switch hydrateTrackerCredential(account, profileID: profileID) {
+            case .found(let hydrated, let identityIsKeychainBound):
+                if !identityIsKeychainBound {
+
+                    if storeTrackerCredential(hydrated, profileID: profileID) {
+                        migratedPlaintextCredentials = true
+                    } else {
+                        hydrationUnavailable = true
+                    }
+                }
+                return hydrated
+            case .absent:
+                removedDefinitelyAbsentCredential = true
+                return nil
+            case .temporarilyUnavailable(let status):
+                hydrationUnavailable = true
+                Logger.shared.log(
+                    "TrackerManager: deferred \(account.service.rawValue) credential hydration for profile \(profileID) (Keychain status \(status))",
+                    type: "Tracker"
+                )
+                return account
+            }
+        }
+        let discovered = recoverIdentityBoundCredentialRows(
+            in: &state,
+            profileID: profileID
+        )
+        recoveredIdentityBoundCredential = discovered.changed
+        hydrationUnavailable = hydrationUnavailable || discovered.unavailable
+        self.trackerState = state
+        if hydrationUnavailable {
+            markCredentialHydrationPending(profileID)
+
+            queueTrackerStatePersistence(state, forProfile: profileID)
+        } else {
+            clearCredentialHydrationPending(profileID)
+            if migratedPlaintextCredentials
+                || removedDefinitelyAbsentCredential
+                || recoveredIdentityBoundCredential {
+                saveTrackerState(forProfile: profileID)
+            }
+        }
+    }
+
+    @objc private func retryActiveProfileCredentialHydration() {
+        let retry = { [weak self] in
+            guard let self else { return }
+
+            self.loadPendingCredentialDeletionMarkers()
+            self.loadPendingDiscardedProfileCleanupMarkers()
+            guard !self.trackerDeletionJournalSourcesAreUnreadable() else {
+                return
+            }
+            self.retryPendingDiscardedProfileCleanup()
+#if os(iOS)
+
+            _ = self.completeCommittedAccountBoundaryCleanupBeforeLoadingState()
+            guard !self.accountBoundaryRecoveryGloballyBlocksOperations() else {
+                return
+            }
+#endif
+
+            self.retryPendingCredentialDeletions()
+            guard !self.trackerDeletionJournalsBlockOperations() else {
+                return
+            }
+            if self.consumeTrackerStateReloadPendingAfterDeletionJournalRecovery() {
+                let profileID = self.activeProfileID
+                self.trackerState = TrackerState()
+                if let pending = self.pendingTrackerState(forProfile: profileID) {
+                    self.trackerState = pending
+                } else {
+                    self.loadTrackerState(forProfile: profileID)
+                }
+            }
+            let profileID = self.activeProfileID
+            if self.credentialHydrationIsPending(profileID),
+               !self.trackerStateIsUnreadable(profileID) {
+                var stillUnavailable = false
+                var changed = false
+                self.trackerState.accounts = self.trackerState.accounts.compactMap { account in
+                    guard account.isConnected, account.accessToken.isEmpty else { return account }
+                    switch self.hydrateTrackerCredential(account, profileID: profileID) {
+                    case .found(let hydrated, _):
+                        changed = true
+                        return hydrated
+                    case .absent:
+                        changed = true
+                        return nil
+                    case .temporarilyUnavailable:
+                        stillUnavailable = true
+                        return account
+                    }
+                }
+                let discovered = self.recoverIdentityBoundCredentialRows(
+                    in: &self.trackerState,
+                    profileID: profileID
+                )
+                changed = changed || discovered.changed
+                stillUnavailable = stillUnavailable || discovered.unavailable
+                if stillUnavailable {
+                    self.markCredentialHydrationPending(profileID)
+                } else {
+                    self.clearCredentialHydrationPending(profileID)
+                    if changed {
+                        self.saveTrackerState(forProfile: profileID)
+                    }
+                }
+            }
+            self.retryPendingTrackerStatePersistence()
+            self.retryPendingCredentialOnlyAccounts()
+        }
+        if Thread.isMainThread {
+            retry()
+        } else {
+            DispatchQueue.main.async(execute: retry)
+        }
+    }
+
+    @objc private func experimentalCloudRestoreRecoveryDidComplete() {
+        let reload = { [weak self] in
+            guard let self else { return }
+#if os(iOS)
+
+            guard !MediaStateAccountBoundaryRecoveryGate.isBlockingSync else {
+                self.setAccountBoundaryRecoveryGlobalBlock(true)
+                return
+            }
+            guard case .none = BackupManager.accountBoundaryTrackerCleanupAuthority() else {
+                _ = self.completeCommittedAccountBoundaryCleanupBeforeLoadingState()
+                return
+            }
+#endif
+            self.reloadTrackerStateAfterCompletedCloudRecovery()
+        }
+        if Thread.isMainThread {
+            reload()
+        } else {
+            DispatchQueue.main.async(execute: reload)
+        }
+    }
+
+    private func reloadTrackerStateAfterCompletedCloudRecovery() {
+        setAccountBoundaryRecoveryGlobalBlock(false)
+        trackerStateStatusLock.lock()
+        let quarantined = accountBoundaryQuarantinedProfileIDs
+        accountBoundaryQuarantinedProfileIDs.removeAll()
+        unreadableTrackerStateProfileIDs.subtract(quarantined)
+        trackerStateStatusLock.unlock()
+
+        retryPendingDiscardedProfileCleanup()
+        retryPendingCredentialDeletions()
+        guard !trackerDeletionJournalsBlockOperations() else {
+            trackerState = TrackerState()
+            markTrackerStateReloadPendingAfterDeletionJournalRecovery()
+            return
+        }
+        let profileID = activeProfileID
+        trackerState = TrackerState()
+        if let pending = pendingTrackerState(forProfile: profileID) {
+            trackerState = pending
+        } else {
+            loadTrackerState(forProfile: profileID)
+        }
+        retryPendingTrackerStatePersistence()
+        retryPendingCredentialOnlyAccounts()
+    }
+
+    func saveTrackerState(forProfile profileID: UUID? = nil) {
+        let profileID = profileID ?? activeProfileID
+        guard !accountBoundaryRecoveryBlocksStateAccess(),
+              !isDiscarded(profileID),
+              !trackerStateIsUnreadable(profileID),
+              profileID == activeProfileID else { return }
+        queueTrackerStatePersistence(trackerState, forProfile: profileID)
+    }
+
+    private enum CredentialSafePersistencePreparation {
+        case ready(materialized: TrackerState, redacted: TrackerState)
+        case unavailable(String)
+    }
+
+    private func credentialSafePersistencePreparation(
+        _ state: TrackerState,
+        forProfile profileID: UUID,
+        pendingAuthority: PendingTrackerStatePersistence
+    ) -> CredentialSafePersistencePreparation {
+        guard pendingTrackerStateAuthorityIsCurrent(
+            pendingAuthority,
+            forProfile: profileID
+        ) else {
+            return .unavailable("pending persistence authority was superseded")
+        }
+        guard Self.trackerAccountsAreStructurallyValid(state.accounts) else {
+            return .unavailable("tracker-account metadata failed structural validation")
+        }
+        var materialized = state
+        var accounts: [TrackerAccount] = []
+        accounts.reserveCapacity(state.accounts.count)
+
+        for original in state.accounts {
+            var account = original
+            if account.isConnected {
+                if account.accessToken.isEmpty {
+                    switch hydrateTrackerCredential(
+                        account,
+                        profileID: profileID,
+                        pendingAuthority: pendingAuthority
+                    ) {
+                    case .found(let hydrated, _):
+                        account = hydrated
+                    case .absent:
+
+                        continue
+                    case .temporarilyUnavailable(let status):
+                        return .unavailable("credential hydration status \(status)")
+                    }
+                }
+                guard storeTrackerCredential(
+                    account,
+                    profileID: profileID,
+                    pendingAuthority: pendingAuthority
+                ) else {
+                    return .unavailable("credential store failed")
+                }
+            } else if !removeTrackerCredential(
+                account.service,
+                profileID: profileID,
+                pendingAuthority: pendingAuthority
+            ) {
+                return .unavailable("credential removal failed")
+            }
+            accounts.append(account)
+        }
+
+        materialized.accounts = accounts
+        var redacted = materialized
+        redacted.accounts = materialized.accounts.map { account in
+            var account = account
+            account.accessToken = ""
+            account.refreshToken = nil
+            account.expiresAt = nil
+            return account
+        }
+        return .ready(materialized: materialized, redacted: redacted)
+    }
+
+    private func queueTrackerStatePersistence(_ state: TrackerState, forProfile profileID: UUID) {
+        guard !accountBoundaryRecoveryBlocksStateAccess(),
+              !isDiscarded(profileID),
+              !trackerStateIsUnreadable(profileID) else { return }
+        let pending = retainPendingTrackerState(state, forProfile: profileID)
+        attemptPendingTrackerStatePersistence(pending, forProfile: profileID)
+    }
+
+    private func retryPendingTrackerStatePersistence() {
+        guard !accountBoundaryRecoveryBlocksStateAccess() else { return }
+        for (profileID, pending) in allPendingTrackerStateEntries() {
+            attemptPendingTrackerStatePersistence(pending, forProfile: profileID)
+        }
+    }
+
+    private func retryPendingCredentialOnlyAccounts() {
+        guard !accountBoundaryRecoveryBlocksStateAccess() else { return }
+        for (profileID, account) in allPendingCredentialOnlyAccounts() {
+            guard !isDiscarded(profileID),
+                  ProfileManager.shared.profile(with: profileID) != nil else { continue }
+            guard storeTrackerCredential(
+                account,
+                profileID: profileID,
+                pendingCredentialOnlyAuthority: account
+            ) else { continue }
+            clearPendingCredentialOnlyAccount(
+                matching: account,
+                forProfile: profileID
+            )
+        }
+    }
+
+    private func retryPendingCredentialDeletions() {
+        guard !trackerDeletionJournalSourcesAreUnreadable() else { return }
+        for (profileID, service) in allPendingCredentialDeletions() {
+            guard removeTrackerCredential(service, profileID: profileID) else { continue }
+            if profileID == activeProfileID,
+               let index = trackerState.accounts.firstIndex(where: {
+                   $0.service == service
+               }) {
+                trackerState.accounts[index].isConnected = false
+                trackerState.accounts[index].accessToken = ""
+                trackerState.accounts[index].refreshToken = nil
+                trackerState.accounts[index].expiresAt = nil
+            }
+        }
+    }
+
+    private func completeCommittedAccountBoundaryCleanupBeforeLoadingState() -> Set<UUID> {
+        var quarantinedProfileIDs = Set<UUID>()
+#if os(iOS)
+        let cleanupAuthority = BackupManager.accountBoundaryTrackerCleanupAuthority()
+        let recoveryGateIsBlocking = MediaStateAccountBoundaryRecoveryGate.isBlockingSync
+        switch cleanupAuthority {
+        case .none:
+            if recoveryGateIsBlocking {
+                setAccountBoundaryRecoveryGlobalBlock(true)
+            } else if accountBoundaryRecoveryGloballyBlocksOperations() {
+
+                reloadTrackerStateAfterCompletedCloudRecovery()
+            }
+            return quarantinedProfileIDs
+        case .blocked:
+            setAccountBoundaryRecoveryGlobalBlock(true)
+            return quarantinedProfileIDs
+        case .authorized(let context):
+            setAccountBoundaryRecoveryGlobalBlock(true)
+            let cleanupProfileIDs = ExperimentalCloudTrackerAccountBoundaryPolicy.profileIDsToClear(
+                outgoingProfileIDs: Set(context.outgoingProfileIDs),
+                restoredTrackerProfileIDs: Set(context.restoredTrackerProfileIDs)
+            )
+            for profileID in cleanupProfileIDs {
+                quarantinedProfileIDs.insert(profileID)
+
+                markAccountBoundaryQuarantined(profileID)
+                var profileCleanupIsDurablyProtected = true
+                _ = invalidateAccountBoundary(for: profileID)
+                let stateURL = Self.stateURL(for: profileID)
+                let removedStateFile = trackerStatePersistenceQueue.sync {
+                    do {
+                        if FileManager.default.fileExists(atPath: stateURL.path) {
+                            try FileManager.default.removeItem(at: stateURL)
+                        }
+                        return true
+                    } catch {
+                        return false
+                    }
+                }
+                profileCleanupIsDurablyProtected = profileCleanupIsDurablyProtected && removedStateFile
+                for service in TrackerService.allCases {
+                    let outcome = removeTrackerCredentialOutcome(service, profileID: profileID)
+                    profileCleanupIsDurablyProtected = profileCleanupIsDurablyProtected
+                        && outcome.deletionIsDurablyProtected
+                }
+                profileCleanupIsDurablyProtected = clearTraktHistoryWriteReceipts(for: profileID)
+                    && profileCleanupIsDurablyProtected
+                if !profileCleanupIsDurablyProtected {
+                    Logger.shared.log(
+                        "TrackerManager: committed account-boundary cleanup remains quarantined for profile \(profileID) and will retry",
+                        type: "Tracker"
+                    )
+                }
+
+            }
+        }
+#endif
+        return quarantinedProfileIDs
+    }
+
+    private func attemptPendingTrackerStatePersistence(
+        _ pending: PendingTrackerStatePersistence,
+        forProfile profileID: UUID
+    ) {
+        guard !accountBoundaryRecoveryBlocksStateAccess(),
+              !isDiscarded(profileID),
+              !trackerStateIsUnreadable(profileID),
+              pendingTrackerStateAuthorityIsCurrent(pending, forProfile: profileID),
+              ProfileManager.shared.profile(with: profileID) != nil else { return }
+
+        let state = profileID == activeProfileID ? trackerState : pending.state
+        switch credentialSafePersistencePreparation(
+            state,
+            forProfile: profileID,
+            pendingAuthority: pending
+        ) {
+        case .unavailable(let reason):
+            Logger.shared.log(
+                "TrackerManager: deferred tracker-state persistence for profile \(profileID); \(reason). Existing disk bytes were preserved.",
+                type: "Error"
+            )
+        case .ready(let materialized, let redacted):
+            guard updatePendingTrackerState(
+                materialized,
+                forProfile: profileID,
+                matching: pending.id
+            ) else { return }
+            persistStateSnapshot(
+                redacted,
+                forProfile: profileID,
+                pendingAuthority: pending
+            ) { [weak self] succeeded in
+                guard succeeded else { return }
+                self?.clearPendingTrackerState(forProfile: profileID, matching: pending.id)
+            }
+        }
+    }
+
+    private func persistStateSnapshot(
+        _ state: TrackerState,
+        forProfile profileID: UUID,
+        pendingAuthority: PendingTrackerStatePersistence,
+        completion: ((Bool) -> Void)? = nil
+    ) {
+        guard !accountBoundaryRecoveryBlocksStateAccess(),
+              !isDiscarded(profileID),
+              !trackerStateIsUnreadable(profileID),
+              pendingTrackerStateAuthorityIsCurrent(
+                  pendingAuthority,
+                  forProfile: profileID
+              ) else {
+            completion?(false)
+            return
+        }
+
+        guard state.accounts.allSatisfy({
+            $0.accessToken.isEmpty && ($0.refreshToken?.isEmpty != false)
+        }) else {
+            Logger.shared.log(
+                "TrackerManager: blocked an attempt to serialize tracker credentials outside Keychain",
+                type: "Error"
+            )
+            completion?(false)
+            return
+        }
+        let stateURL = Self.stateURL(for: profileID)
+        trackerStatePersistenceQueue.async { [weak self] in
+            guard let self,
+                  !self.accountBoundaryRecoveryBlocksStateAccess(),
+                  !self.isDiscarded(profileID),
+                  !self.trackerStateIsUnreadable(profileID),
+                  self.pendingTrackerStateAuthorityIsCurrent(
+                      pendingAuthority,
+                      forProfile: profileID
+                  ),
+                  let encoded = try? JSONEncoder().encode(state),
+                  encoded.count <= Self.maximumPersistedTrackerStateBytes else {
+                completion?(false)
+                return
+            }
+            do {
+                try encoded.write(to: stateURL, options: .atomic)
+                completion?(true)
+            } catch {
+                Logger.shared.log(
+                    "TrackerManager: failed to persist tracker state for profile \(profileID): \(error.localizedDescription)",
+                    type: "Error"
+                )
+                completion?(false)
+            }
+        }
+    }
+
+    private func persistDisconnectedStateSynchronously(
+        service: TrackerService,
+        profileID: UUID
+    ) -> Bool {
+        guard profileID == activeProfileID,
+              !trackerStateIsUnreadable(profileID) else { return false }
+        var state = trackerState
+        if let index = state.accounts.firstIndex(where: { $0.service == service }) {
+            state.accounts[index].isConnected = false
+            state.accounts[index].accessToken = ""
+            state.accounts[index].refreshToken = nil
+            state.accounts[index].expiresAt = nil
+        } else {
+            state.accounts.append(
+                TrackerAccount(
+                    service: service,
+                    username: "Disconnected",
+                    accessToken: "",
+                    refreshToken: nil,
+                    expiresAt: nil,
+                    userId: "local-disconnect-tombstone",
+                    isConnected: false
+                )
+            )
+        }
+        state.accounts = state.accounts.map { account in
             var redacted = account
             redacted.accessToken = ""
             redacted.refreshToken = nil
             redacted.expiresAt = nil
             return redacted
         }
-        trackerStatePersistenceQueue.async {
-            if let encoded = try? JSONEncoder().encode(stateToPersist) {
-                try? encoded.write(to: self.trackerStateURL, options: .atomic)
+        guard Self.trackerAccountsAreStructurallyValid(state.accounts),
+              let encoded = try? JSONEncoder().encode(state),
+              encoded.count <= Self.maximumPersistedTrackerStateBytes else { return false }
+        let stateURL = Self.stateURL(for: profileID)
+        return trackerStatePersistenceQueue.sync {
+            do {
+                try encoded.write(to: stateURL, options: .atomic)
+                return true
+            } catch {
+                return false
             }
         }
+    }
+
+    @MainActor
+    @discardableResult
+    func commitCompletedSignIn(
+        _ account: TrackerAccount,
+        forProfile owner: UUID,
+        accountBoundaryGeneration: UInt64,
+        serviceGeneration: UInt64
+    ) -> Bool {
+        guard trackerProfileAcceptsOperations(owner),
+              accountBoundaryGenerationIsCurrent(accountBoundaryGeneration, for: owner),
+              trackerServiceGenerationIsCurrent(
+                  serviceGeneration,
+                  service: account.service,
+                  profileID: owner
+              ) else {
+            Logger.shared.log(
+                "TrackerManager: dropped a completed \(account.service.rawValue) sign-in because its cloud-account boundary changed",
+                type: "Tracker"
+            )
+            return false
+        }
+        if account.service == .trakt {
+            traktTokenRefreshTasks[owner]?.task.cancel()
+            traktTokenRefreshTasks[owner] = nil
+        } else if account.service == .myAnimeList {
+            malTokenRefreshTasks[owner]?.task.cancel()
+            malTokenRefreshTasks[owner] = nil
+        }
+        isAuthenticating = false
+        guard activeProfileID == owner else {
+
+            persistAccountIntoInactiveProfile(account, profileID: owner)
+            Logger.shared.log(
+                "TrackerManager: \(account.service.displayName) sign-in completed after a profile switch; stored it against profile \(owner) instead of the active one",
+                type: "Tracker"
+            )
+            return true
+        }
+        trackerState.addOrUpdateAccount(account)
+        saveTrackerState(forProfile: owner)
+        authError = nil
+        clearAuthenticationNotice(for: account.service)
+        return true
+    }
+
+    @MainActor
+    private func commitRefreshedAccount(
+        _ account: TrackerAccount,
+        replacing previousAccount: TrackerAccount,
+        forProfile owner: UUID,
+        accountBoundaryGeneration: UInt64,
+        serviceGeneration: UInt64
+    ) throws {
+        guard account.service == previousAccount.service,
+              account.userId == previousAccount.userId else {
+
+            throw CancellationError()
+        }
+        guard trackerProfileAcceptsOperations(owner),
+              accountBoundaryGenerationIsCurrent(accountBoundaryGeneration, for: owner),
+              trackerServiceGenerationIsCurrent(
+                  serviceGeneration,
+                  service: previousAccount.service,
+                  profileID: owner
+              ) else {
+            Logger.shared.log(
+                "TrackerManager: dropped a refreshed \(account.service.rawValue) credential because its cloud-account boundary changed",
+                type: "Tracker"
+            )
+            throw CancellationError()
+        }
+
+        guard let state = trackerState(forProfile: owner),
+              var current = state.accounts.first(where: {
+                  $0.service == previousAccount.service && $0.isConnected
+              }) else {
+
+            throw CancellationError()
+        }
+        if current.accessToken.isEmpty {
+            switch hydrateTrackerCredential(current, profileID: owner) {
+            case .found(let hydrated, _):
+                current = hydrated
+            case .absent, .temporarilyUnavailable:
+                throw CancellationError()
+            }
+        }
+        if current.userId == account.userId,
+           current.accessToken == account.accessToken,
+           current.refreshToken == account.refreshToken {
+
+            return
+        }
+        guard current.userId == previousAccount.userId,
+              current.accessToken == previousAccount.accessToken,
+              current.refreshToken == previousAccount.refreshToken else {
+
+            throw CancellationError()
+        }
+        guard activeProfileID == owner else {
+            persistAccountIntoInactiveProfile(account, profileID: owner)
+            Logger.shared.log(
+                "TrackerManager: \(account.service.displayName) token refresh completed after a profile switch; stored it against profile \(owner)",
+                type: "Tracker"
+            )
+            return
+        }
+        trackerState.addOrUpdateAccount(account)
+        saveTrackerState(forProfile: owner)
+        clearAuthenticationNotice(for: account.service)
+    }
+
+    private func requireOwner(
+        _ owner: UUID,
+        operationGeneration: UInt64? = nil
+    ) throws {
+        guard !accountBoundaryRecoveryBlocksNetworkOperations(),
+              ProfileManager.shared.isStillActive(owner),
+              (operationGeneration.map {
+                  Self.trackerOperationAuthorityIsCurrent(
+                      authorityGeneration: $0,
+                      currentGeneration: trackerOperationGenerationSnapshot()
+                  )
+              } ?? true) else {
+            Logger.shared.log(
+                "TrackerManager: abandoned an import commit; its profile or cloud-account authority changed while it ran",
+                type: "Tracker"
+            )
+            throw CancellationError()
+        }
+    }
+
+    private func persistAccountIntoInactiveProfile(_ account: TrackerAccount, profileID: UUID) {
+
+        guard !isDiscarded(profileID), ProfileManager.shared.profile(with: profileID) != nil else {
+            removeTrackerCredential(account.service, profileID: profileID)
+            Logger.shared.log(
+                "TrackerManager: dropped a late \(account.service.rawValue) credential for a deleted profile",
+                type: "Tracker"
+            )
+            return
+        }
+        guard var state = trackerState(forProfile: profileID) else {
+
+            if !storeTrackerCredential(account, profileID: profileID) {
+                retainPendingCredentialOnlyAccount(account, forProfile: profileID)
+            }
+            Logger.shared.log(
+                "TrackerManager: kept refreshed \(account.service.rawValue) credentials in Keychain or memory but did not overwrite unreadable tracker state for profile \(profileID)",
+                type: "Error"
+            )
+            return
+        }
+        state.addOrUpdateAccount(account)
+
+        queueTrackerStatePersistence(state, forProfile: profileID)
+    }
+
+    func checkForExpiredTrackerSessions() {
+        let now = Date()
+        let owner = activeProfileID
+        for account in trackerState.accounts where account.isConnected {
+            guard let expiresAt = account.expiresAt, expiresAt <= now else { continue }
+
+            switch account.service {
+            case .anilist:
+
+                reportAuthenticationRequired(for: .anilist, owner: owner)
+            case .myAnimeList, .trakt:
+
+                if account.refreshToken?.isEmpty != false {
+                    reportAuthenticationRequired(for: account.service, owner: owner)
+                }
+            }
+        }
+    }
+
+    func reconnectTracker(_ service: TrackerService) {
+        if authenticationNotice?.service == service {
+            authenticationNotice = nil
+        }
+        authError = nil
+
+        switch service {
+        case .anilist:
+            startAniListAuth()
+        case .myAnimeList:
+            startMALAuth()
+        case .trakt:
+            startTraktAuth()
+        }
+    }
+
+    private func reportAuthenticationRequired(for service: TrackerService, owner: UUID) {
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            guard self.activeProfileID == owner else {
+                Logger.shared.log(
+                    "TrackerManager: dropped a \(service.displayName) login-required notice; its owning profile is no longer active",
+                    type: "Plugin"
+                )
+                return
+            }
+            guard self.trackerState.accounts.contains(where: { $0.service == service && $0.isConnected }) else {
+                return
+            }
+
+            let notice = TrackerAuthenticationNotice(service: service)
+            if self.authenticationNotice != notice {
+                self.authenticationNotice = notice
+                Logger.shared.log("\(service.displayName) authorization expired; user login required", type: "Tracker")
+            }
+            self.authError = notice.message
+        }
+    }
+
+    @MainActor
+    private func clearAuthenticationNotice(for service: TrackerService) {
+        let matchingMessage = TrackerAuthenticationNotice(service: service).message
+        if authenticationNotice?.service == service {
+            authenticationNotice = nil
+        }
+        if authError == matchingMessage {
+            authError = nil
+        }
+    }
+
+    private static func refreshFailureRequiresLogin(_ error: Error) -> Bool {
+        let nsError = error as NSError
+        if nsError.code == 401 { return true }
+        guard nsError.code == 400 else { return false }
+
+        let description = nsError.localizedDescription.lowercased()
+        return description.contains("invalid_grant")
+            || description.contains("invalid token")
+            || description.contains("invalid_token")
+            || description.contains("expired")
+            || description.contains("revoked")
     }
 
     func setSyncEnabled(_ enabled: Bool) {
         trackerState.syncEnabled = enabled
         saveTrackerState()
     }
+
+#if !os(tvOS)
+    func setReaderSyncEnabled(_ enabled: Bool) {
+        trackerState.readerSyncEnabled = enabled
+        saveTrackerState()
+    }
+#endif
 
     func setAutoSyncRatings(_ enabled: Bool) {
         trackerState.autoSyncRatings = enabled
@@ -427,8 +4033,7 @@ final class TrackerManager: NSObject, ObservableObject {
         trackerState.traktWatchlistSync = enabled
         saveTrackerState()
         if enabled {
-            // Pull current Trakt watchlist into the local collection so the two sides
-            // line up the moment the user opts in. Push happens on future edits.
+
             refreshTraktWatchlistCollection()
         }
     }
@@ -438,65 +4043,703 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     func setBackupRestoreSyncSuppressed(_ suppressed: Bool) {
-        backupRestoreSyncQueue.sync {
-            syncSuppressedDuringBackupRestore = suppressed
+        let isSuppressed = backupRestoreSyncQueue.sync { () -> Bool in
+            // Bump on begin and end. A pre-restore authority is stale as soon
+            // as suppression begins; an authority accidentally captured while
+            // suppressed is stale once the window closes.
+            trackerOperationGeneration &+= 1
+            if suppressed {
+                backupRestoreSyncSuppressionCount += 1
+            } else {
+                backupRestoreSyncSuppressionCount = max(
+                    backupRestoreSyncSuppressionCount - 1,
+                    0
+                )
+            }
+            return backupRestoreSyncSuppressionCount > 0
         }
-        Logger.shared.log("Tracker sync suppression during backup restore: \(suppressed ? "enabled" : "disabled")", type: "Tracker")
+        // Every generation transition revokes the tasks represented by these
+        // pending entries. Drop them immediately so a newly-authorized task
+        // is not suppressed while an old completion drains.
+        traktScrobbleQueue.sync {
+            traktScrobblePendingByKey.removeAll()
+        }
+        Logger.shared.log(
+            "Tracker sync suppression during backup restore: \(isSuppressed ? "enabled" : "disabled")",
+            type: "Tracker"
+        )
     }
 
     private func isBackupRestoreSyncSuppressed() -> Bool {
         backupRestoreSyncQueue.sync {
-            syncSuppressedDuringBackupRestore
+            backupRestoreSyncSuppressionCount > 0
         }
     }
 
-    private func shouldStartWatchSync(
+    private func trackerOperationGenerationSnapshot() -> UInt64 {
+        backupRestoreSyncQueue.sync { trackerOperationGeneration }
+    }
+
+    @discardableResult
+    private func invalidateTrackerOperationAuthority() -> UInt64 {
+        backupRestoreSyncQueue.sync {
+            trackerOperationGeneration &+= 1
+            return trackerOperationGeneration
+        }
+    }
+
+    private func trackerOperationAuthorityIsCurrent(_ generation: UInt64) -> Bool {
+        backupRestoreSyncQueue.sync {
+            backupRestoreSyncSuppressionCount == 0
+                && Self.trackerOperationAuthorityIsCurrent(
+                    authorityGeneration: generation,
+                    currentGeneration: trackerOperationGeneration
+                )
+        }
+    }
+
+    static func trackerOperationAuthorityIsCurrent(
+        authorityGeneration: UInt64,
+        currentGeneration: UInt64
+    ) -> Bool {
+        authorityGeneration == currentGeneration
+    }
+
+    private func loadTraktHistoryWriteReceipts() {
+        let defaults = UserDefaults.standard
+        guard let data = defaults.data(forKey: Self.traktHistoryWriteReceiptsDefaultsKey) else {
+            return
+        }
+        guard data.count <= Self.maximumTraktHistoryWriteReceiptBytes,
+              var decoded = try? JSONDecoder().decode(
+                  [String: TraktHistoryWriteReceipt].self,
+                  from: data
+              ),
+              decoded.count <= Self.maximumTraktHistoryWriteReceiptCount,
+              traktHistoryWriteReceiptsAreValid(decoded, now: Date()) else {
+            traktHistoryReceiptJournalIsUnreadable = true
+            Logger.shared.log(
+                "TrackerManager: Trakt history write-ahead journal is unreadable; history POSTs remain fail-closed",
+                type: "Error"
+            )
+            return
+        }
+
+        var migratedReceiptIdentity = false
+        for key in decoded.keys where decoded[key]?.receiptID == nil {
+            decoded[key]?.receiptID = UUID()
+            migratedReceiptIdentity = true
+        }
+
+        traktHistoryWriteReceiptQueue.sync {
+            traktHistoryWriteReceipts = decoded
+            let pruned = pruneTraktHistoryWriteReceiptsLocked(now: Date())
+            if (migratedReceiptIdentity || pruned),
+               !persistTraktHistoryWriteReceiptsLocked() {
+                traktHistoryReceiptJournalNeedsPersistence = true
+            }
+        }
+    }
+
+    private func traktHistoryWriteReceiptsAreValid(
+        _ receipts: [String: TraktHistoryWriteReceipt],
+        now: Date
+    ) -> Bool {
+        let lowercaseHexCharacters = Set("0123456789abcdef")
+        return receipts.allSatisfy { key, receipt in
+            guard key.count == 64,
+                  key.allSatisfy({ lowercaseHexCharacters.contains($0) }),
+                  traktHistoryReceiptDateIsPlausible(receipt.watchedAt, now: now),
+                  traktHistoryReceiptDateIsPlausible(receipt.lastAttemptAt, now: now) else {
+                return false
+            }
+            guard let confirmedAt = receipt.confirmedAt else { return true }
+            return traktHistoryReceiptDateIsPlausible(confirmedAt, now: now)
+        }
+    }
+
+    private func traktHistoryWriteReceiptKey(
+        owner: UUID,
+        accountUserId: String,
+        kind: String,
+        traktId: Int
+    ) -> String {
+        let components = [
+            owner.uuidString.lowercased(),
+            accountUserId,
+            kind,
+            String(traktId)
+        ]
+        let unambiguous = components
+            .map { "\($0.utf8.count):\($0)" }
+            .joined(separator: "|")
+        let digest = SHA256.hash(data: Data(unambiguous.utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private func beginTraktHistoryWrite(
+        owner: UUID,
+        accountUserId: String,
+        kind: String,
+        traktId: Int
+    ) -> TraktHistoryWriteAttempt? {
+        let key = traktHistoryWriteReceiptKey(
+            owner: owner,
+            accountUserId: accountUserId,
+            kind: kind,
+            traktId: traktId
+        )
+
+        return traktHistoryWriteReceiptQueue.sync {
+            guard !traktHistoryReceiptJournalIsUnreadable else { return nil }
+            let now = Date()
+            if pruneTraktHistoryWriteReceiptsLocked(now: now) {
+                traktHistoryReceiptJournalNeedsPersistence = true
+            }
+            if traktHistoryReceiptJournalNeedsPersistence,
+               !persistTraktHistoryWriteReceiptsLocked() {
+                return nil
+            }
+
+            if var receipt = traktHistoryWriteReceipts[key], receipt.receiptID == nil {
+                receipt.receiptID = UUID()
+                traktHistoryWriteReceipts[key] = receipt
+                guard persistTraktHistoryWriteReceiptsLocked() else {
+                    return nil
+                }
+            }
+
+            if let inFlightReceiptID = traktHistoryWritesInFlight[key],
+               let receipt = traktHistoryWriteReceipts[key],
+               receipt.receiptID == inFlightReceiptID {
+                return TraktHistoryWriteAttempt(
+                    key: key,
+                    watchedAt: receipt.watchedAt,
+                    receiptID: inFlightReceiptID,
+                    disposition: .deferPending
+                )
+            }
+            traktHistoryWritesInFlight.removeValue(forKey: key)
+
+            if var receipt = traktHistoryWriteReceipts[key] {
+                guard let receiptID = receipt.receiptID else { return nil }
+                let decision = TraktHistoryReceiptReconciliationPolicy.decision(
+                    lastAttemptAt: receipt.lastAttemptAt,
+                    confirmedAt: receipt.confirmedAt,
+                    now: now,
+                    reconciliationDelay: traktHistoryReconciliationDelay,
+                    confirmedInterval: watchSyncDedupeInterval
+                )
+                switch decision {
+                case .suppressConfirmed:
+                    return TraktHistoryWriteAttempt(
+                        key: key,
+                        watchedAt: receipt.watchedAt,
+                        receiptID: receiptID,
+                        disposition: .suppressConfirmed
+                    )
+                case .waitForReconciliation:
+                    return TraktHistoryWriteAttempt(
+                        key: key,
+                        watchedAt: receipt.watchedAt,
+                        receiptID: receiptID,
+                        disposition: .deferPending
+                    )
+                case .reconcile:
+                    let previousReceipt = receipt
+                    receipt.lastAttemptAt = now
+                    traktHistoryWriteReceipts[key] = receipt
+                    guard persistTraktHistoryWriteReceiptsLocked() else {
+                        traktHistoryWriteReceipts[key] = previousReceipt
+                        _ = persistTraktHistoryWriteReceiptsLocked()
+                        return TraktHistoryWriteAttempt(
+                            key: key,
+                            watchedAt: receipt.watchedAt,
+                            receiptID: receiptID,
+                            disposition: .deferPending
+                        )
+                    }
+                    traktHistoryWritesInFlight[key] = receiptID
+                    return TraktHistoryWriteAttempt(
+                        key: key,
+                        watchedAt: receipt.watchedAt,
+                        receiptID: receiptID,
+                        disposition: .reconcile
+                    )
+                }
+            }
+
+            let previousReceipts = traktHistoryWriteReceipts
+            if traktHistoryWriteReceipts.count >= Self.maximumTraktHistoryWriteReceiptCount {
+                let overflow = traktHistoryWriteReceipts.count - Self.maximumTraktHistoryWriteReceiptCount + 1
+                let evictableKeys = traktHistoryWriteReceipts
+                    .filter { entryKey, receipt in
+                        traktHistoryWritesInFlight[entryKey] != receipt.receiptID
+                    }
+                    .sorted { $0.value.lastAttemptAt < $1.value.lastAttemptAt }
+                    .prefix(overflow)
+                    .map(\.key)
+                guard evictableKeys.count == overflow else { return nil }
+                for evictedKey in evictableKeys {
+                    traktHistoryWriteReceipts.removeValue(forKey: evictedKey)
+                }
+            }
+            let watchedAt = TraktHistoryReceiptReconciliationPolicy.canonicalMinute(now)
+            let receiptID = UUID()
+            let receipt = TraktHistoryWriteReceipt(
+                owner: owner,
+                watchedAt: watchedAt,
+                lastAttemptAt: now,
+                confirmedAt: nil,
+                receiptID: receiptID
+            )
+            traktHistoryWriteReceipts[key] = receipt
+
+            guard traktHistoryWriteReceipts[key] != nil,
+                  persistTraktHistoryWriteReceiptsLocked() else {
+                traktHistoryWriteReceipts = previousReceipts
+                _ = persistTraktHistoryWriteReceiptsLocked()
+                return nil
+            }
+
+            traktHistoryWritesInFlight[key] = receiptID
+            return TraktHistoryWriteAttempt(
+                key: key,
+                watchedAt: receipt.watchedAt,
+                receiptID: receiptID,
+                disposition: .send
+            )
+        }
+    }
+
+    private func confirmTraktHistoryWrite(_ attempt: TraktHistoryWriteAttempt) {
+        traktHistoryWriteReceiptQueue.sync {
+            guard !traktHistoryReceiptJournalIsUnreadable else { return }
+            guard var receipt = traktHistoryWriteReceipts[attempt.key],
+                  receipt.watchedAt == attempt.watchedAt,
+                  receipt.receiptID == attempt.receiptID else {
+                return
+            }
+            let now = Date()
+            receipt.lastAttemptAt = now
+            receipt.confirmedAt = now
+            traktHistoryWriteReceipts[attempt.key] = receipt
+            if !persistTraktHistoryWriteReceiptsLocked() {
+
+                traktHistoryReceiptJournalNeedsPersistence = true
+            }
+        }
+    }
+
+    private func abandonTraktHistoryWriteReceipt(_ attempt: TraktHistoryWriteAttempt) {
+        traktHistoryWriteReceiptQueue.sync {
+            guard !traktHistoryReceiptJournalIsUnreadable else { return }
+            guard case .send = attempt.disposition,
+                  traktHistoryWriteReceipts[attempt.key]?.watchedAt == attempt.watchedAt,
+                  traktHistoryWriteReceipts[attempt.key]?.receiptID == attempt.receiptID else {
+                return
+            }
+            let previousReceipts = traktHistoryWriteReceipts
+            let previousWritesInFlight = traktHistoryWritesInFlight
+            traktHistoryWriteReceipts.removeValue(forKey: attempt.key)
+            if traktHistoryWritesInFlight[attempt.key] == attempt.receiptID {
+                traktHistoryWritesInFlight.removeValue(forKey: attempt.key)
+            }
+            guard persistTraktHistoryWriteReceiptsLocked() else {
+
+                traktHistoryWriteReceipts = previousReceipts
+                traktHistoryWritesInFlight = previousWritesInFlight
+                _ = persistTraktHistoryWriteReceiptsLocked()
+                return
+            }
+        }
+    }
+
+    private func finishTraktHistoryWriteAttempt(_ attempt: TraktHistoryWriteAttempt) {
+        traktHistoryWriteReceiptQueue.sync {
+            guard traktHistoryWritesInFlight[attempt.key] == attempt.receiptID else { return }
+            traktHistoryWritesInFlight.removeValue(forKey: attempt.key)
+        }
+    }
+
+    private func reconcileTraktHistoryWrite(
+        _ attempt: TraktHistoryWriteAttempt,
+        mediaType: String,
+        traktId: Int,
+        account: TrackerAccount,
+        owner: UUID,
+        authority: TrackerOperationAuthority,
+        allowsRefreshRetry: Bool = true
+    ) async -> TraktHistoryReconciliationResult {
+        guard authority.owner == owner,
+              authority.matches(account),
+              (mediaType == "episodes" || mediaType == "movies"),
+              traktId > 0,
+              !traktClientId.isEmpty,
+              let bounds = traktHistoryReconciliationDateBounds(for: attempt.watchedAt) else {
+            return .unavailable
+        }
+
+        var declaredPageCount: Int?
+        for page in 1...traktHistoryReconciliationMaximumPages {
+            guard var components = URLComponents(
+                string: "https://api.trakt.tv/sync/history/\(mediaType)/\(traktId)"
+            ) else {
+                return .unavailable
+            }
+            components.queryItems = [
+                URLQueryItem(name: "start_at", value: bounds.start),
+                URLQueryItem(name: "end_at", value: bounds.end),
+                URLQueryItem(name: "page", value: String(page)),
+                URLQueryItem(name: "limit", value: String(traktHistoryReconciliationPageLimit))
+            ]
+            guard let url = components.url else { return .unavailable }
+
+            var request = URLRequest(url: url)
+            request.setValue("application/json", forHTTPHeaderField: "Accept")
+            request.setValue(traktClientId, forHTTPHeaderField: "trakt-api-key")
+            request.setValue("Bearer \(account.accessToken)", forHTTPHeaderField: "Authorization")
+            request.setValue("2", forHTTPHeaderField: "trakt-api-version")
+
+            do {
+                let (data, response) = try await sendTrackerRequest(
+                    request,
+                    provider: .trakt,
+                    maxRetries: 2,
+                    reportRateLimitStatus: false,
+                    reportAuthenticationFailure: !allowsRefreshRetry,
+                    beforeAttempt: { [weak self] in
+                        guard let self,
+                              await self.operationAuthorityIsCurrent(authority) else {
+                            throw CancellationError()
+                        }
+                    }
+                )
+
+                if response.statusCode == 401, allowsRefreshRetry {
+                    let refreshed = try await refreshedTraktAccountIfNeeded(
+                        account,
+                        force: true,
+                        requiredOwner: owner,
+                        requiredAuthority: authority
+                    )
+                    guard refreshed.userId == account.userId else {
+                        return .unavailable
+                    }
+                    return await reconcileTraktHistoryWrite(
+                        attempt,
+                        mediaType: mediaType,
+                        traktId: traktId,
+                        account: refreshed,
+                        owner: owner,
+                        authority: authority.replacingCredential(with: refreshed),
+                        allowsRefreshRetry: false
+                    )
+                }
+
+                guard response.statusCode == 200,
+                      data.count <= traktHistoryReconciliationMaximumPageBytes,
+                      let entries = try? JSONDecoder().decode(
+                          [TraktHistoryEntry].self,
+                          from: data
+                      ),
+                      entries.count <= traktHistoryReconciliationPageLimit else {
+                    return .unavailable
+                }
+
+                let watchedDates = entries.compactMap {
+                    parseTraktHistoryWatchedAt($0.watchedAt)
+                }
+                guard watchedDates.count == entries.count else {
+                    return .unavailable
+                }
+                if TraktHistoryReceiptReconciliationPolicy.containsReceipt(
+                    watchedAt: attempt.watchedAt,
+                    historyWatchedAt: watchedDates
+                ) {
+                    return .found
+                }
+
+                guard let rawPage = response.value(
+                          forHTTPHeaderField: "X-Pagination-Page"
+                      ),
+                      let responsePage = Self.boundedPaginationInteger(
+                          rawPage,
+                          in: 1...traktHistoryReconciliationMaximumPages
+                      ),
+                      responsePage == page,
+                      let rawPageLimit = response.value(
+                          forHTTPHeaderField: "X-Pagination-Limit"
+                      ),
+                      let responsePageLimit = Self.boundedPaginationInteger(
+                          rawPageLimit,
+                          in: 1...traktHistoryReconciliationPageLimit
+                      ),
+                      entries.count <= responsePageLimit,
+                      let rawPageCount = response.value(
+                          forHTTPHeaderField: "X-Pagination-Page-Count"
+                      ),
+                      let pageCount = Self.boundedPaginationInteger(
+                          rawPageCount,
+                          in: 0...traktHistoryReconciliationMaximumPages
+                      ),
+                      declaredPageCount == nil || declaredPageCount == pageCount else {
+
+                    return .unavailable
+                }
+                declaredPageCount = pageCount
+                if pageCount == 0 {
+                    guard page == 1, entries.isEmpty else { return .unavailable }
+                    return await authoritativeTraktHistoryAbsence(
+                        account: account,
+                        owner: owner,
+                        authority: authority
+                    )
+                }
+                guard page <= pageCount else { return .unavailable }
+                if page == pageCount {
+                    return await authoritativeTraktHistoryAbsence(
+                        account: account,
+                        owner: owner,
+                        authority: authority
+                    )
+                }
+            } catch {
+                Logger.shared.log(
+                    "Trakt history reconciliation failed for \(mediaType) \(traktId): \(error.localizedDescription)",
+                    type: "Tracker"
+                )
+                return .unavailable
+            }
+        }
+
+        return .unavailable
+    }
+
+    private func authoritativeTraktHistoryAbsence(
+        account: TrackerAccount,
+        owner: UUID,
+        authority: TrackerOperationAuthority
+    ) async -> TraktHistoryReconciliationResult {
+        guard authority.owner == owner,
+              authority.matches(account),
+              await operationAuthorityIsCurrent(authority) else {
+            return .unavailable
+        }
+        return .absent(account: account)
+    }
+
+    private func traktHistoryReconciliationDateBounds(
+        for watchedAt: Date
+    ) -> (start: String, end: String)? {
+        guard let utcTimeZone = TimeZone(secondsFromGMT: 0) else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = utcTimeZone
+        let day = calendar.startOfDay(for: watchedAt)
+        guard let start = calendar.date(byAdding: .day, value: -1, to: day),
+              let end = calendar.date(byAdding: .day, value: 1, to: day) else {
+            return nil
+        }
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "yyyy-MM-dd"
+        return (formatter.string(from: start), formatter.string(from: end))
+    }
+
+    private func parseTraktHistoryWatchedAt(_ value: String) -> Date? {
+        guard value.utf8.count <= 64 else { return nil }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: value) {
+            return date
+        }
+        let wholeSeconds = ISO8601DateFormatter()
+        wholeSeconds.formatOptions = [.withInternetDateTime]
+        return wholeSeconds.date(from: value)
+    }
+
+    static func boundedPaginationInteger(
+        _ rawValue: String,
+        in allowedRange: ClosedRange<Int>
+    ) -> Int? {
+        guard let value = Int(rawValue), allowedRange.contains(value) else {
+            return nil
+        }
+        return value
+    }
+
+    @discardableResult
+    private func clearTraktHistoryWriteReceipts(for owner: UUID) -> Bool {
+        traktHistoryWriteReceiptQueue.sync {
+            guard !traktHistoryReceiptJournalIsUnreadable else { return false }
+            let previousReceipts = traktHistoryWriteReceipts
+            let previousWritesInFlight = traktHistoryWritesInFlight
+            let previousCount = traktHistoryWriteReceipts.count
+            traktHistoryWriteReceipts = traktHistoryWriteReceipts.filter { _, receipt in
+                receipt.owner != owner
+            }
+            if traktHistoryWriteReceipts.count != previousCount {
+                traktHistoryWritesInFlight = traktHistoryWritesInFlight.filter {
+                    traktHistoryWriteReceipts[$0.key]?.receiptID == $0.value
+                }
+                guard persistTraktHistoryWriteReceiptsLocked() else {
+
+                    traktHistoryWriteReceipts = previousReceipts
+                    traktHistoryWritesInFlight = previousWritesInFlight
+                    _ = persistTraktHistoryWriteReceiptsLocked()
+                    return false
+                }
+            } else if traktHistoryReceiptJournalNeedsPersistence,
+                      !persistTraktHistoryWriteReceiptsLocked() {
+                return false
+            }
+            return true
+        }
+    }
+
+    @discardableResult
+    private func pruneTraktHistoryWriteReceiptsLocked(now: Date) -> Bool {
+        let previousCount = traktHistoryWriteReceipts.count
+
+        traktHistoryWriteReceipts = traktHistoryWriteReceipts.filter { _, receipt in
+            if let confirmedAt = receipt.confirmedAt {
+                return now.timeIntervalSince(confirmedAt) < watchSyncDedupeInterval
+            }
+            return now.timeIntervalSince(receipt.lastAttemptAt) < traktHistoryReceiptTimeToLive
+        }
+        return traktHistoryWriteReceipts.count != previousCount
+    }
+
+    private func traktHistoryReceiptDateIsPlausible(_ date: Date, now: Date) -> Bool {
+        date.timeIntervalSinceReferenceDate.isFinite
+            && date.timeIntervalSince(now) <= traktHistoryReceiptFutureTolerance
+    }
+
+    @discardableResult
+    private func persistTraktHistoryWriteReceiptsLocked() -> Bool {
+        let defaults = UserDefaults.standard
+        guard !traktHistoryWriteReceipts.isEmpty else {
+            defaults.removeObject(forKey: Self.traktHistoryWriteReceiptsDefaultsKey)
+            let succeeded = defaults.synchronize()
+            traktHistoryReceiptJournalNeedsPersistence = !succeeded
+            return succeeded
+        }
+        guard let data = try? JSONEncoder().encode(traktHistoryWriteReceipts),
+              data.count <= Self.maximumTraktHistoryWriteReceiptBytes else {
+            traktHistoryReceiptJournalNeedsPersistence = true
+            return false
+        }
+        defaults.set(data, forKey: Self.traktHistoryWriteReceiptsDefaultsKey)
+        let succeeded = defaults.synchronize()
+        traktHistoryReceiptJournalNeedsPersistence = !succeeded
+        return succeeded
+    }
+
+    private func traktWatchedAtString(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
+    }
+
+    private enum WatchSyncStart {
+        case untracked
+        case tracked(TrackerWatchSyncDedupeRegistration)
+        case duplicate
+    }
+
+    static func normalizedWatchSyncProgress(_ progress: Double) -> Double? {
+        guard progress.isFinite else { return nil }
+        let percent: Double
+        if progress <= 0 {
+            percent = 0
+        } else if progress <= 1.0 {
+            percent = progress * 100.0
+        } else {
+            percent = progress
+        }
+        guard percent.isFinite else { return nil }
+        return min(max(percent, 0), 100)
+    }
+
+    static func watchSyncLogPercent(_ progress: Double) -> Int? {
+        guard let normalized = normalizedWatchSyncProgress(progress) else { return nil }
+        return Int(exactly: normalized.rounded())
+    }
+
+    private func beginWatchSync(
         showId: Int,
         seasonNumber: Int,
         episodeNumber: Int,
         progress: Double,
         isMovie: Bool,
-        playbackContext: EpisodePlaybackContext?
-    ) -> Bool {
-        let normalizedProgress = progress <= 1.0 ? progress * 100.0 : progress
-        guard normalizedProgress >= 85 else {
-            return true
+        playbackContext: EpisodePlaybackContext?,
+        owner: UUID,
+        account: TrackerAccount
+    ) -> WatchSyncStart {
+        guard let normalizedProgress = Self.normalizedWatchSyncProgress(progress),
+              normalizedProgress >= 85 else {
+            return .untracked
         }
 
         let providerKey = playbackContext?.anilistMediaId.map { String($0) } ?? "none"
         let specialKey = playbackContext?.isSpecial == true ? "special" : "regular"
-        let key = "\(isMovie ? "movie" : "episode")|\(showId)|\(seasonNumber)|\(episodeNumber)|\(providerKey)|\(specialKey)|watched"
+
+        let accountKey = "\(account.service.rawValue.utf8.count):\(account.service.rawValue)\(account.userId.utf8.count):\(account.userId)"
+        let key = "\(owner.uuidString.lowercased())|\(accountKey)|\(isMovie ? "movie" : "episode")|\(showId)|\(seasonNumber)|\(episodeNumber)|\(providerKey)|\(specialKey)|watched"
         let now = Date()
-        var shouldStart = true
+        var registration: TrackerWatchSyncDedupeRegistration?
         recentWatchSyncQueue.sync {
-            recentWatchSyncKeys = recentWatchSyncKeys.filter {
-                now.timeIntervalSince($0.value) < watchSyncDedupeInterval * 10
-            }
-            if let previous = recentWatchSyncKeys[key],
-               now.timeIntervalSince(previous) < watchSyncDedupeInterval {
-                shouldStart = false
-            } else {
-                recentWatchSyncKeys[key] = now
-            }
+            registration = watchSyncDedupeGate.begin(
+                key: key,
+                now: now,
+                completedInterval: watchSyncDedupeInterval,
+                staleInFlightInterval: watchSyncDedupeInterval * 10
+            )
         }
 
-        if !shouldStart {
-            Logger.shared.log("Skipping duplicate watched sync for TMDB \(showId) S\(seasonNumber)E\(episodeNumber) \(Int(normalizedProgress))% within \(Int(watchSyncDedupeInterval))s", type: "Tracker")
+        guard let registration else {
+            let logPercent = Self.watchSyncLogPercent(normalizedProgress) ?? 0
+            Logger.shared.log("Skipping duplicate or in-flight watched sync for TMDB \(showId) S\(seasonNumber)E\(episodeNumber) \(logPercent)%", type: "Tracker")
+            return .duplicate
         }
-        return shouldStart
+        return .tracked(registration)
+    }
+
+    private func finishWatchSync(
+        registration: TrackerWatchSyncDedupeRegistration?,
+        succeeded: Bool
+    ) {
+        guard let registration else { return }
+        recentWatchSyncQueue.sync {
+            watchSyncDedupeGate.finish(
+                registration: registration,
+                succeeded: succeeded,
+                now: Date()
+            )
+        }
     }
 
     private func sendTrackerRequest(
         _ request: URLRequest,
         provider: TrackerRequestProvider,
         maxRetries: Int = 2,
-        reportRateLimitStatus: Bool = true
+        reportRateLimitStatus: Bool = true,
+        reportAuthenticationFailure: Bool = true,
+        beforeAttempt: (() async throws -> Void)? = nil
     ) async throws -> (Data, HTTPURLResponse) {
+        let owner = await MainActor.run { self.activeProfileID }
         var lastError: Error?
 
         for attempt in 0..<maxRetries {
             await TrackerRequestScheduler.shared.waitForSlot(provider: provider)
             try Task.checkCancellation()
+            guard !accountBoundaryRecoveryBlocksNetworkOperations() else {
+                throw CancellationError()
+            }
+
+            try await beforeAttempt?()
 
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let httpResponse = response as? HTTPURLResponse else {
@@ -504,15 +4747,17 @@ final class TrackerManager: NSObject, ObservableObject {
             }
 
             if let retryDelay = await TrackerRequestScheduler.shared.recordResponse(provider: provider, response: httpResponse),
-               attempt < maxRetries - 1 {
-                Logger.shared.log("Tracker request paused for rate limit (\(provider)) for \(Int(retryDelay))s", type: "Tracker")
+               attempt < maxRetries - 1,
+               let displaySeconds = TrackerRateLimitHeaderPolicy.displaySeconds(for: retryDelay),
+               let sleepNanoseconds = TrackerRateLimitHeaderPolicy.sleepNanoseconds(for: retryDelay) {
+                Logger.shared.log("Tracker request paused for rate limit (\(provider)) for \(displaySeconds)s", type: "Tracker")
                 if reportRateLimitStatus {
                     await MainActor.run {
-                        self.syncToolStatus = "Paused for rate limit. Resuming in \(Int(retryDelay))s..."
-                        self.syncToolProgressDetail = "Paused for rate limit. Resuming in \(Int(retryDelay))s..."
+                        self.syncToolStatus = "Paused for rate limit. Resuming in \(displaySeconds)s..."
+                        self.syncToolProgressDetail = "Paused for rate limit. Resuming in \(displaySeconds)s..."
                     }
                 }
-                try await Task.sleep(nanoseconds: UInt64(retryDelay * 1_000_000_000))
+                try await Task.sleep(nanoseconds: sleepNanoseconds)
                 try Task.checkCancellation()
                 lastError = NSError(domain: "TrackerRateLimit", code: httpResponse.statusCode, userInfo: [NSLocalizedDescriptionKey: "Rate limited by tracker"])
                 continue
@@ -529,10 +4774,91 @@ final class TrackerManager: NSObject, ObservableObject {
                 continue
             }
 
+            if reportAuthenticationFailure {
+                reportAuthenticationFailureIfNeeded(
+                    request: request,
+                    provider: provider,
+                    response: httpResponse,
+                    data: data,
+                    owner: owner
+                )
+            }
+
             return (data, httpResponse)
         }
 
         throw lastError ?? NSError(domain: "TrackerNetwork", code: -1, userInfo: [NSLocalizedDescriptionKey: "Tracker request failed"])
+    }
+
+    private func requireTrackerAccountStillConnected(
+        _ expected: TrackerAccount,
+        owner: UUID,
+        requireSameCredential: Bool = true
+    ) async throws {
+        try await MainActor.run {
+            guard self.activeProfileID == owner,
+                  ProfileManager.shared.isStillActive(owner),
+                  ProfileManager.shared.profiles.contains(where: { $0.id == owner }),
+                  self.trackerProfileAcceptsOperations(owner) else {
+                throw CancellationError()
+            }
+            guard let state = self.trackerState(forProfile: owner),
+                  var current = state.accounts.first(where: {
+                      $0.service == expected.service && $0.isConnected
+                  }) else {
+                throw CancellationError()
+            }
+
+            if current.accessToken.isEmpty {
+                switch self.hydrateTrackerCredential(current, profileID: owner) {
+                case .found(let hydrated, _):
+                    current = hydrated
+                case .absent, .temporarilyUnavailable:
+                    throw CancellationError()
+                }
+            }
+
+            guard current.service == expected.service,
+                  current.userId == expected.userId else {
+                throw CancellationError()
+            }
+
+            if requireSameCredential,
+               (current.accessToken != expected.accessToken
+                    || current.refreshToken != expected.refreshToken) {
+                throw CancellationError()
+            }
+        }
+    }
+
+    private func reportAuthenticationFailureIfNeeded(
+        request: URLRequest,
+        provider: TrackerRequestProvider,
+        response: HTTPURLResponse,
+        data: Data,
+        owner: UUID
+    ) {
+        guard request.value(forHTTPHeaderField: "Authorization")?.lowercased().hasPrefix("bearer ") == true else {
+            return
+        }
+
+        let responseText = graphQLErrorMessage(from: data)?.lowercased() ?? ""
+        let isAuthenticationFailure = response.statusCode == 401
+            || (provider == .anilist && (
+                responseText.contains("invalid token")
+                    || responseText.contains("invalid_token")
+                    || responseText.contains("unauthorized")
+            ))
+        guard isAuthenticationFailure else { return }
+
+        switch provider {
+        case .anilist:
+            reportAuthenticationRequired(for: .anilist, owner: owner)
+        case .myAnimeList:
+            reportAuthenticationRequired(for: .myAnimeList, owner: owner)
+        case .trakt:
+            reportAuthenticationRequired(for: .trakt, owner: owner)
+        }
     }
 
     private func graphQLErrorMessage(from data: Data) -> String? {
@@ -544,43 +4870,128 @@ final class TrackerManager: NSObject, ObservableObject {
         return first["message"] as? String
     }
 
-    private func responseBodyPreview(from data: Data, limit: Int = 500) -> String {
-        let raw = String(data: data, encoding: .utf8) ?? "<non-utf8 response>"
-        guard raw.count > limit else { return raw }
-        return String(raw.prefix(limit)) + "..."
+    private func responseBodyPreview(from data: Data, limit: Int = 12) -> String {
+        let digest = SHA256.hash(data: data)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        return "bytes=\(data.count) token=\(digest.prefix(max(8, min(limit, 32))))"
     }
 
     private func aniListFailureDescription(_ prefix: String, response: HTTPURLResponse, data: Data) -> String {
-        if let graphQLError = graphQLErrorMessage(from: data) {
-            return "\(prefix) (\(response.statusCode)): \(graphQLError)"
-        }
         return "\(prefix) (\(response.statusCode)): \(responseBodyPreview(from: data))"
     }
 
-    private func resolvedAniListUserId(for account: TrackerAccount) async throws -> Int {
+    private func resolvedAniListUserId(
+        for account: TrackerAccount,
+        requiredAuthority: TrackerOperationAuthority? = nil
+    ) async throws -> Int {
+        if let requiredAuthority {
+            guard requiredAuthority.matches(account),
+                  await operationAuthorityIsCurrent(requiredAuthority) else {
+                throw CancellationError()
+            }
+        }
         if let userId = Int(account.userId), userId > 0 {
             return userId
         }
         let viewer = try await fetchAniListUser(token: account.accessToken)
+        if let requiredAuthority,
+           !(await operationAuthorityIsCurrent(requiredAuthority)) {
+            throw CancellationError()
+        }
         return viewer.id
     }
 
-    private func connectedMALAccount() async throws -> TrackerAccount {
+    private func connectedMALAccount(requiredOwner: UUID? = nil) async throws -> TrackerAccount {
         let account = try connectedAccount(.myAnimeList)
-        return try await refreshedMALAccountIfNeeded(account)
+        return try await refreshedMALAccountIfNeeded(account, requiredOwner: requiredOwner)
     }
 
-    private func refreshedMALAccountIfNeeded(_ account: TrackerAccount, force: Bool = false) async throws -> TrackerAccount {
+    @MainActor
+    private func refreshedMALAccountIfNeeded(
+        _ account: TrackerAccount,
+        force: Bool = false,
+        requiredOwner: UUID? = nil,
+        requiredAuthority: TrackerOperationAuthority? = nil
+    ) async throws -> TrackerAccount {
         guard account.service == .myAnimeList else { return account }
-        let latestAccount = await MainActor.run {
-            self.trackerState.getAccount(for: .myAnimeList) ?? account
+
+        let owner = activeProfileID
+        if let requiredOwner, owner != requiredOwner {
+            throw CancellationError()
         }
+        let authority = requiredAuthority ?? operationAuthority(
+            for: account,
+            owner: owner
+        )
+        let enforcesOperationAuthority = requiredAuthority.map { _ in true } ?? false
+        guard trackerProfileAcceptsOperations(owner),
+              authority.owner == owner,
+              authority.matches(account),
+              !enforcesOperationAuthority || (
+                  trackerOperationAuthorityIsCurrent(authority.operationGeneration)
+                      && (authority.progressAuthority.map(
+                          ProgressManager.shared.profileMutationAuthorityIsCurrent
+                      ) ?? true)
+              ),
+              accountBoundaryGenerationIsCurrent(
+                  authority.accountBoundaryGeneration,
+                  for: owner
+              ),
+              trackerServiceGenerationIsCurrent(
+                  authority.serviceGeneration,
+                  service: .myAnimeList,
+                  profileID: owner
+              ),
+              let latestAccount = trackerState.getAccount(for: .myAnimeList),
+              latestAccount.userId == account.userId,
+              latestAccount.accessToken == account.accessToken,
+              latestAccount.refreshToken == account.refreshToken else {
+            throw CancellationError()
+        }
+
+        if let existing = malTokenRefreshTasks[owner],
+           let refreshToken = latestAccount.refreshToken,
+           !refreshToken.isEmpty,
+           existing.matches(
+                account: latestAccount,
+                refreshToken: refreshToken,
+                accountBoundaryGeneration: authority.accountBoundaryGeneration,
+                serviceGeneration: authority.serviceGeneration
+           ) {
+            defer {
+                if malTokenRefreshTasks[owner]?.id == existing.id {
+                    malTokenRefreshTasks[owner] = nil
+                }
+            }
+            let refreshed = try await existing.task.value
+            guard refreshed.service == latestAccount.service,
+                  refreshed.userId == latestAccount.userId,
+                  !enforcesOperationAuthority || (
+                      trackerOperationAuthorityIsCurrent(authority.operationGeneration)
+                          && (authority.progressAuthority.map(
+                              ProgressManager.shared.profileMutationAuthorityIsCurrent
+                          ) ?? true)
+                  ) else {
+                throw CancellationError()
+            }
+            try commitRefreshedAccount(
+                refreshed,
+                replacing: latestAccount,
+                forProfile: owner,
+                accountBoundaryGeneration: authority.accountBoundaryGeneration,
+                serviceGeneration: authority.serviceGeneration
+            )
+            return refreshed
+        }
+
         if !force {
             guard let expiresAt = latestAccount.expiresAt else { return latestAccount }
             guard expiresAt.timeIntervalSinceNow <= tokenRefreshLeeway else { return latestAccount }
         }
 
         guard let refreshToken = latestAccount.refreshToken, !refreshToken.isEmpty else {
+            reportAuthenticationRequired(for: .myAnimeList, owner: owner)
             throw NSError(
                 domain: "MALAuth",
                 code: 401,
@@ -588,34 +4999,146 @@ final class TrackerManager: NSObject, ObservableObject {
             )
         }
 
-        let token = try await refreshMALToken(refreshToken)
-        var refreshedAccount = latestAccount
-        refreshedAccount.updateTokens(
-            access: token.accessToken,
-            refresh: token.refreshToken ?? refreshToken,
-            expiresAt: token.expiresIn.map { Date().addingTimeInterval(TimeInterval($0)) }
-                ?? Date().addingTimeInterval(30 * 24 * 60 * 60)
-        )
-        let accountToSave = refreshedAccount
+        if let existing = malTokenRefreshTasks[owner] {
 
-        await MainActor.run {
-            self.trackerState.addOrUpdateAccount(accountToSave)
-            self.saveTrackerState()
+            existing.task.cancel()
+            if malTokenRefreshTasks[owner]?.id == existing.id {
+                malTokenRefreshTasks[owner] = nil
+            }
         }
-        Logger.shared.log(force ? "MAL token refreshed after invalid_token response" : "MAL token refreshed before tracker library operation", type: "Tracker")
-        return accountToSave
+
+        let attemptID = UUID()
+        guard accountBoundaryGenerationIsCurrent(
+                  authority.accountBoundaryGeneration,
+                  for: owner
+              ),
+              !enforcesOperationAuthority || (
+                  trackerOperationAuthorityIsCurrent(authority.operationGeneration)
+                      && (authority.progressAuthority.map(
+                          ProgressManager.shared.profileMutationAuthorityIsCurrent
+                      ) ?? true)
+              ),
+              trackerServiceGenerationIsCurrent(
+                  authority.serviceGeneration,
+                  service: .myAnimeList,
+                  profileID: owner
+              ) else {
+            throw CancellationError()
+        }
+        let refreshTask = Task { [weak self] () throws -> TrackerAccount in
+            guard let self else {
+                throw NSError(
+                    domain: "MALAuth",
+                    code: -1,
+                    userInfo: [NSLocalizedDescriptionKey: "Tracker manager unavailable"]
+                )
+            }
+            let token = try await self.refreshMALToken(refreshToken)
+            var refreshedAccount = latestAccount
+            refreshedAccount.updateTokens(
+                access: token.accessToken,
+                refresh: token.refreshToken ?? refreshToken,
+                expiresAt: token.expiresIn.map {
+                    Date().addingTimeInterval(TimeInterval($0))
+                } ?? Date().addingTimeInterval(30 * 24 * 60 * 60)
+            )
+            return refreshedAccount
+        }
+        malTokenRefreshTasks[owner] = MALTokenRefreshAttempt(
+            id: attemptID,
+            accountBoundaryGeneration: authority.accountBoundaryGeneration,
+            serviceGeneration: authority.serviceGeneration,
+            userId: latestAccount.userId,
+            accessToken: latestAccount.accessToken,
+            refreshToken: refreshToken,
+            task: refreshTask
+        )
+        defer {
+            if malTokenRefreshTasks[owner]?.id == attemptID {
+                malTokenRefreshTasks[owner] = nil
+            }
+        }
+
+        do {
+            let refreshedAccount = try await refreshTask.value
+            guard refreshedAccount.service == latestAccount.service,
+                  refreshedAccount.userId == latestAccount.userId,
+                  !enforcesOperationAuthority || (
+                      trackerOperationAuthorityIsCurrent(authority.operationGeneration)
+                          && (authority.progressAuthority.map(
+                              ProgressManager.shared.profileMutationAuthorityIsCurrent
+                          ) ?? true)
+                  ) else {
+                throw CancellationError()
+            }
+            try commitRefreshedAccount(
+                refreshedAccount,
+                replacing: latestAccount,
+                forProfile: owner,
+                accountBoundaryGeneration: authority.accountBoundaryGeneration,
+                serviceGeneration: authority.serviceGeneration
+            )
+            Logger.shared.log(
+                force
+                    ? "MAL token refreshed after invalid_token response"
+                    : "MAL token refreshed before tracker library operation",
+                type: "Tracker"
+            )
+            return refreshedAccount
+        } catch {
+            if Self.refreshFailureRequiresLogin(error) {
+                reportAuthenticationRequired(for: .myAnimeList, owner: owner)
+            }
+            throw error
+        }
     }
 
     @MainActor
-    private func refreshedTraktAccountIfNeeded(_ account: TrackerAccount, force: Bool = false) async throws -> TrackerAccount {
+    private func refreshedTraktAccountIfNeeded(
+        _ account: TrackerAccount,
+        force: Bool = false,
+        requiredOwner: UUID? = nil,
+        requiredAuthority: TrackerOperationAuthority? = nil
+    ) async throws -> TrackerAccount {
         guard account.service == .trakt else { return account }
-        let latestAccount = trackerState.getAccount(for: .trakt) ?? account
+
+        if let requiredOwner, activeProfileID != requiredOwner {
+            throw CancellationError()
+        }
+        let owner = activeProfileID
+        let authority = requiredAuthority ?? operationAuthority(for: account, owner: owner)
+        let enforcesOperationAuthority = requiredAuthority.map { _ in true } ?? false
+        guard trackerProfileAcceptsOperations(owner),
+              authority.owner == owner,
+              authority.matches(account),
+              !enforcesOperationAuthority || (
+                  trackerOperationAuthorityIsCurrent(authority.operationGeneration)
+                      && (authority.progressAuthority.map(
+                          ProgressManager.shared.profileMutationAuthorityIsCurrent
+                      ) ?? true)
+              ),
+              accountBoundaryGenerationIsCurrent(
+                  authority.accountBoundaryGeneration,
+                  for: owner
+              ),
+              trackerServiceGenerationIsCurrent(
+                  authority.serviceGeneration,
+                  service: .trakt,
+                  profileID: owner
+              ),
+              let latestAccount = trackerState.getAccount(for: .trakt),
+              latestAccount.userId == account.userId,
+              latestAccount.accessToken == account.accessToken,
+              latestAccount.refreshToken == account.refreshToken else {
+            throw CancellationError()
+        }
         if !force {
             guard let expiresAt = latestAccount.expiresAt else { return latestAccount }
             guard expiresAt.timeIntervalSinceNow <= tokenRefreshLeeway else { return latestAccount }
         }
 
         guard let refreshToken = latestAccount.refreshToken, !refreshToken.isEmpty else {
+            reportAuthenticationRequired(for: .trakt, owner: owner)
             throw NSError(
                 domain: "TraktAuth",
                 code: 401,
@@ -623,10 +5146,63 @@ final class TrackerManager: NSObject, ObservableObject {
             )
         }
 
-        if let traktTokenRefreshTask {
-            return try await traktTokenRefreshTask.value
+        if let existing = traktTokenRefreshTasks[owner] {
+            if existing.matches(
+                account: latestAccount,
+                refreshToken: refreshToken,
+                accountBoundaryGeneration: authority.accountBoundaryGeneration,
+                serviceGeneration: authority.serviceGeneration
+            ) {
+                defer {
+                    if traktTokenRefreshTasks[owner]?.id == existing.id {
+                        traktTokenRefreshTasks[owner] = nil
+                    }
+                }
+                let refreshed = try await existing.task.value
+                guard refreshed.service == latestAccount.service,
+                      refreshed.userId == latestAccount.userId,
+                      !enforcesOperationAuthority || (
+                          trackerOperationAuthorityIsCurrent(authority.operationGeneration)
+                              && (authority.progressAuthority.map(
+                                  ProgressManager.shared.profileMutationAuthorityIsCurrent
+                              ) ?? true)
+                      ) else {
+                    throw CancellationError()
+                }
+                try commitRefreshedAccount(
+                    refreshed,
+                    replacing: latestAccount,
+                    forProfile: owner,
+                    accountBoundaryGeneration: authority.accountBoundaryGeneration,
+                    serviceGeneration: authority.serviceGeneration
+                )
+                return refreshed
+            }
+
+            existing.task.cancel()
+            if traktTokenRefreshTasks[owner]?.id == existing.id {
+                traktTokenRefreshTasks[owner] = nil
+            }
         }
 
+        let attemptID = UUID()
+        guard accountBoundaryGenerationIsCurrent(
+                  authority.accountBoundaryGeneration,
+                  for: owner
+              ),
+              !enforcesOperationAuthority || (
+                  trackerOperationAuthorityIsCurrent(authority.operationGeneration)
+                      && (authority.progressAuthority.map(
+                          ProgressManager.shared.profileMutationAuthorityIsCurrent
+                      ) ?? true)
+              ),
+              trackerServiceGenerationIsCurrent(
+                  authority.serviceGeneration,
+                  service: .trakt,
+                  profileID: owner
+              ) else {
+            throw CancellationError()
+        }
         let refreshTask = Task { [weak self] () throws -> TrackerAccount in
             guard let self else {
                 throw NSError(domain: "TraktAuth", code: -1, userInfo: [NSLocalizedDescriptionKey: "Tracker manager unavailable"])
@@ -640,17 +5216,46 @@ final class TrackerManager: NSObject, ObservableObject {
             )
             return refreshedAccount
         }
-        traktTokenRefreshTask = refreshTask
+        traktTokenRefreshTasks[owner] = TraktTokenRefreshAttempt(
+            id: attemptID,
+            accountBoundaryGeneration: authority.accountBoundaryGeneration,
+            serviceGeneration: authority.serviceGeneration,
+            userId: latestAccount.userId,
+            accessToken: latestAccount.accessToken,
+            refreshToken: refreshToken,
+            task: refreshTask
+        )
+        defer {
+            if traktTokenRefreshTasks[owner]?.id == attemptID {
+                traktTokenRefreshTasks[owner] = nil
+            }
+        }
 
         do {
             let refreshedAccount = try await refreshTask.value
-            trackerState.addOrUpdateAccount(refreshedAccount)
-            saveTrackerState()
-            traktTokenRefreshTask = nil
+            guard refreshedAccount.service == latestAccount.service,
+                  refreshedAccount.userId == latestAccount.userId,
+                  !enforcesOperationAuthority || (
+                      trackerOperationAuthorityIsCurrent(authority.operationGeneration)
+                          && (authority.progressAuthority.map(
+                              ProgressManager.shared.profileMutationAuthorityIsCurrent
+                          ) ?? true)
+                  ) else {
+                throw CancellationError()
+            }
+            try commitRefreshedAccount(
+                refreshedAccount,
+                replacing: latestAccount,
+                forProfile: owner,
+                accountBoundaryGeneration: authority.accountBoundaryGeneration,
+                serviceGeneration: authority.serviceGeneration
+            )
             Logger.shared.log("Trakt token refreshed before tracker operation", type: "Tracker")
             return refreshedAccount
         } catch {
-            traktTokenRefreshTask = nil
+            if Self.refreshFailureRequiresLogin(error) {
+                reportAuthenticationRequired(for: .trakt, owner: owner)
+            }
             throw error
         }
     }
@@ -671,14 +5276,16 @@ final class TrackerManager: NSObject, ObservableObject {
         url: URL,
         providerName: String,
         callbackScheme: String = "luna",
+        authority: WebAuthenticationAuthority,
         onCode: @escaping (String) -> Void
     ) {
         let session = ASWebAuthenticationSession(url: url, callbackURLScheme: callbackScheme) { [weak self] callbackURL, error in
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.webAuthSession = nil
+                guard self.authenticationAuthorityIsCurrent(authority) else { return }
 
                 if let error {
+                    self.finishAuthenticationAuthority(authority)
                     self.authError = "\(providerName) sign-in did not complete: \(error.localizedDescription)"
                     self.isAuthenticating = false
                     return
@@ -688,6 +5295,7 @@ final class TrackerManager: NSObject, ObservableObject {
                       let components = URLComponents(url: callbackURL, resolvingAgainstBaseURL: true),
                       let code = components.queryItems?.first(where: { $0.name == "code" })?.value,
                       !code.isEmpty else {
+                    self.finishAuthenticationAuthority(authority)
                     self.authError = "\(providerName) did not return an authorization code."
                     self.isAuthenticating = false
                     return
@@ -699,14 +5307,12 @@ final class TrackerManager: NSObject, ObservableObject {
         }
         webAuthSession = session
         if !session.start() {
-            webAuthSession = nil
+            finishAuthenticationAuthority(authority)
             authError = "\(providerName) sign-in could not be opened on Apple TV."
             isAuthenticating = false
         }
     }
 #endif
-
-    // MARK: - AniList Authentication
 
     func getAniListAuthURL() -> URL? {
         guard !anilistClientId.isEmpty, !anilistClientSecret.isEmpty else {
@@ -727,12 +5333,26 @@ final class TrackerManager: NSObject, ObservableObject {
 
     func startAniListAuth() {
         guard let url = getAniListAuthURL() else { return }
+        let owner = activeProfileID
+        guard trackerReconnectIsAllowed(.anilist, owner: owner) else { return }
         authError = nil
         isAuthenticating = true
 
+        let authority = beginAuthenticationAuthority(for: .anilist, owner: owner)
+
         #if os(tvOS)
-        startTVOAuthSession(url: url, providerName: "AniList") { [weak self] code in
-            self?.handleAniListCallback(code: code)
+        startTVOAuthSession(
+            url: url,
+            providerName: "AniList",
+            authority: authority
+        ) { [weak self] code in
+            self?.handleAniListCallback(
+                code: code,
+                owner: owner,
+                accountBoundaryGeneration: authority.accountBoundaryGeneration,
+                serviceGeneration: authority.serviceGeneration,
+                authenticationID: authority.id
+            )
         }
         #else
         let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "luna") { [weak self] callbackURL, error in
@@ -740,6 +5360,8 @@ final class TrackerManager: NSObject, ObservableObject {
 
             if let error = error {
                 DispatchQueue.main.async {
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    self.finishAuthenticationAuthority(authority)
                     self.authError = error.localizedDescription
                     self.isAuthenticating = false
                 }
@@ -750,6 +5372,8 @@ final class TrackerManager: NSObject, ObservableObject {
             guard let callbackURL = callbackURL else {
                 Logger.shared.log("AniList callback URL is nil", type: "Error")
                 DispatchQueue.main.async {
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    self.finishAuthenticationAuthority(authority)
                     self.authError = "AniList callback URL is nil"
                     self.isAuthenticating = false
                 }
@@ -762,6 +5386,8 @@ final class TrackerManager: NSObject, ObservableObject {
                   let code = components.queryItems?.first(where: { $0.name == "code" })?.value else {
                 Logger.shared.log("Failed to extract code from AniList callback", type: "Error")
                 DispatchQueue.main.async {
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    self.finishAuthenticationAuthority(authority)
                     self.authError = "Invalid AniList callback - failed to extract code"
                     self.isAuthenticating = false
                 }
@@ -769,17 +5395,42 @@ final class TrackerManager: NSObject, ObservableObject {
             }
 
             Logger.shared.log("AniList code extracted successfully", type: "Tracker")
-            self.handleAniListCallback(code: code)
+            self.handleAniListCallback(
+                code: code,
+                owner: owner,
+                accountBoundaryGeneration: authority.accountBoundaryGeneration,
+                serviceGeneration: authority.serviceGeneration,
+                authenticationID: authority.id
+            )
         }
 
         session.prefersEphemeralWebBrowserSession = true
         session.presentationContextProvider = self
-        session.start()
         webAuthSession = session
+        if !session.start() {
+            finishAuthenticationAuthority(authority)
+            authError = "AniList sign-in could not be opened."
+            isAuthenticating = false
+        }
         #endif
     }
 
-    func handleAniListCallback(code: String) {
+    func handleAniListCallback(
+        code: String,
+        owner: UUID? = nil,
+        accountBoundaryGeneration: UInt64? = nil,
+        serviceGeneration: UInt64? = nil,
+        authenticationID: UUID? = nil
+    ) {
+        let owner = owner ?? activeProfileID
+        let authority = authenticationAuthority(
+            owner: owner,
+            service: .anilist,
+            accountBoundaryGeneration: accountBoundaryGeneration,
+            serviceGeneration: serviceGeneration,
+            authenticationID: authenticationID
+        )
+        guard authenticationAuthorityIsCurrent(authority) else { return }
         isAuthenticating = true
         Logger.shared.log("AniList callback received with code", type: "Tracker")
         Task {
@@ -797,14 +5448,22 @@ final class TrackerManager: NSObject, ObservableObject {
                     userId: String(user.id)
                 )
                 await MainActor.run {
-                    self.trackerState.addOrUpdateAccount(account)
-                    self.saveTrackerState()
-                    self.isAuthenticating = false
-                    self.authError = nil
-                    Logger.shared.log("AniList account saved", type: "Tracker")
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    let committed = self.commitCompletedSignIn(
+                        account,
+                        forProfile: owner,
+                        accountBoundaryGeneration: authority.accountBoundaryGeneration,
+                        serviceGeneration: authority.serviceGeneration
+                    )
+                    if committed {
+                        self.finishAuthenticationAuthority(authority)
+                        Logger.shared.log("AniList account saved", type: "Tracker")
+                    }
                 }
             } catch {
                 await MainActor.run {
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    self.finishAuthenticationAuthority(authority)
                     self.authError = "AniList auth failed: \(error.localizedDescription)"
                     self.isAuthenticating = false
                     Logger.shared.log("AniList auth error: \(error.localizedDescription)", type: "Error")
@@ -814,7 +5473,10 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     func handleAniListPinAuth(token: String) {
+        let owner = activeProfileID
+        guard trackerReconnectIsAllowed(.anilist, owner: owner) else { return }
         isAuthenticating = true
+        let authority = beginAuthenticationAuthority(for: .anilist, owner: owner)
         Task {
             do {
                 let user = try await fetchAniListUser(token: token)
@@ -827,13 +5489,19 @@ final class TrackerManager: NSObject, ObservableObject {
                     userId: String(user.id)
                 )
                 await MainActor.run {
-                    self.trackerState.addOrUpdateAccount(account)
-                    self.saveTrackerState()
-                    self.isAuthenticating = false
-                    self.authError = nil
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    self.commitCompletedSignIn(
+                        account,
+                        forProfile: owner,
+                        accountBoundaryGeneration: authority.accountBoundaryGeneration,
+                        serviceGeneration: authority.serviceGeneration
+                    )
+                    self.finishAuthenticationAuthority(authority)
                 }
             } catch {
                 await MainActor.run {
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    self.finishAuthenticationAuthority(authority)
                     self.authError = error.localizedDescription
                     self.isAuthenticating = false
                 }
@@ -861,6 +5529,9 @@ final class TrackerManager: NSObject, ObservableObject {
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         Logger.shared.log("Exchanging AniList code for token", type: "Tracker")
+        guard !accountBoundaryRecoveryBlocksNetworkOperations() else {
+            throw CancellationError()
+        }
         let (data, response) = try await URLSession.shared.data(for: request)
         let httpResponse = response as? HTTPURLResponse
         let statusCode = httpResponse?.statusCode ?? -1
@@ -903,6 +5574,9 @@ final class TrackerManager: NSObject, ObservableObject {
 
         Logger.shared.log("Fetching AniList user", type: "Tracker")
 
+        guard !accountBoundaryRecoveryBlocksNetworkOperations() else {
+            throw CancellationError()
+        }
         let (data, response) = try await URLSession.shared.data(for: request)
         let httpResponse = response as? HTTPURLResponse
         let statusCode = httpResponse?.statusCode ?? -1
@@ -925,8 +5599,6 @@ final class TrackerManager: NSObject, ObservableObject {
             throw error
         }
     }
-
-    // MARK: - MyAnimeList Authentication
 
     private func generateMALCodeVerifier() -> String {
         let characters = Array("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")
@@ -951,19 +5623,36 @@ final class TrackerManager: NSObject, ObservableObject {
             URLQueryItem(name: "code_challenge_method", value: "plain")
         ]
         let url = components?.url
-        // The MAL URL contains the PKCE verifier. Never place it in logs or crash breadcrumbs.
+
         Logger.shared.log("MAL authorization URL prepared", type: "Tracker")
         return url
     }
 
     func startMALAuth() {
         guard let url = getMALAuthURL() else { return }
+        let owner = activeProfileID
+        guard trackerReconnectIsAllowed(.myAnimeList, owner: owner) else {
+            pendingMALCodeVerifier = nil
+            return
+        }
         authError = nil
         isAuthenticating = true
 
+        let authority = beginAuthenticationAuthority(for: .myAnimeList, owner: owner)
+
         #if os(tvOS)
-        startTVOAuthSession(url: url, providerName: "MyAnimeList") { [weak self] code in
-            self?.handleMALCallback(code: code)
+        startTVOAuthSession(
+            url: url,
+            providerName: "MyAnimeList",
+            authority: authority
+        ) { [weak self] code in
+            self?.handleMALCallback(
+                code: code,
+                owner: owner,
+                accountBoundaryGeneration: authority.accountBoundaryGeneration,
+                serviceGeneration: authority.serviceGeneration,
+                authenticationID: authority.id
+            )
         }
         #else
         let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "luna") { [weak self] callbackURL, error in
@@ -971,6 +5660,8 @@ final class TrackerManager: NSObject, ObservableObject {
 
             if let error = error {
                 DispatchQueue.main.async {
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    self.finishAuthenticationAuthority(authority)
                     self.authError = error.localizedDescription
                     self.isAuthenticating = false
                 }
@@ -982,6 +5673,8 @@ final class TrackerManager: NSObject, ObservableObject {
                   let components = URLComponents(url: callbackURL, resolvingAgainstBaseURL: true),
                   let code = components.queryItems?.first(where: { $0.name == "code" })?.value else {
                 DispatchQueue.main.async {
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    self.finishAuthenticationAuthority(authority)
                     self.authError = "Invalid MAL callback - failed to extract code"
                     self.isAuthenticating = false
                 }
@@ -989,21 +5682,48 @@ final class TrackerManager: NSObject, ObservableObject {
             }
 
             Logger.shared.log("MAL code extracted successfully", type: "Tracker")
-            self.handleMALCallback(code: code)
+            self.handleMALCallback(
+                code: code,
+                owner: owner,
+                accountBoundaryGeneration: authority.accountBoundaryGeneration,
+                serviceGeneration: authority.serviceGeneration,
+                authenticationID: authority.id
+            )
         }
 
         session.prefersEphemeralWebBrowserSession = true
         session.presentationContextProvider = self
-        session.start()
         webAuthSession = session
+        if !session.start() {
+            finishAuthenticationAuthority(authority)
+            pendingMALCodeVerifier = nil
+            authError = "MyAnimeList sign-in could not be opened."
+            isAuthenticating = false
+        }
         #endif
     }
 
-    func handleMALCallback(code: String) {
+    func handleMALCallback(
+        code: String,
+        owner: UUID? = nil,
+        accountBoundaryGeneration: UInt64? = nil,
+        serviceGeneration: UInt64? = nil,
+        authenticationID: UUID? = nil
+    ) {
+        let owner = owner ?? activeProfileID
+        let authority = authenticationAuthority(
+            owner: owner,
+            service: .myAnimeList,
+            accountBoundaryGeneration: accountBoundaryGeneration,
+            serviceGeneration: serviceGeneration,
+            authenticationID: authenticationID
+        )
+        guard authenticationAuthorityIsCurrent(authority),
+              let codeVerifier = pendingMALCodeVerifier else { return }
         isAuthenticating = true
         Task {
             do {
-                let token = try await exchangeMALCode(code)
+                let token = try await exchangeMALCode(code, codeVerifier: codeVerifier)
                 let user = try await fetchMALUser(token: token.accessToken)
                 let account = TrackerAccount(
                     service: .myAnimeList,
@@ -1015,15 +5735,24 @@ final class TrackerManager: NSObject, ObservableObject {
                 )
 
                 await MainActor.run {
-                    self.trackerState.addOrUpdateAccount(account)
-                    self.saveTrackerState()
-                    self.isAuthenticating = false
-                    self.authError = nil
-                    self.pendingMALCodeVerifier = nil
-                    Logger.shared.log("MAL account saved", type: "Tracker")
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    let committed = self.commitCompletedSignIn(
+                        account,
+                        forProfile: owner,
+                        accountBoundaryGeneration: authority.accountBoundaryGeneration,
+                        serviceGeneration: authority.serviceGeneration
+                    )
+                    if committed {
+                        self.pendingMALCodeVerifier = nil
+                        self.finishAuthenticationAuthority(authority)
+                        Logger.shared.log("MAL account saved", type: "Tracker")
+                    }
                 }
             } catch {
                 await MainActor.run {
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    self.pendingMALCodeVerifier = nil
+                    self.finishAuthenticationAuthority(authority)
                     self.authError = "MAL auth failed: \(error.localizedDescription)"
                     self.isAuthenticating = false
                     Logger.shared.log("MAL auth error: \(error.localizedDescription)", type: "Error")
@@ -1033,7 +5762,10 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     func handleMALPinAuth(token: String) {
+        let owner = activeProfileID
+        guard trackerReconnectIsAllowed(.myAnimeList, owner: owner) else { return }
         isAuthenticating = true
+        let authority = beginAuthenticationAuthority(for: .myAnimeList, owner: owner)
         Task {
             do {
                 let user = try await fetchMALUser(token: token)
@@ -1046,13 +5778,19 @@ final class TrackerManager: NSObject, ObservableObject {
                     userId: String(user.id)
                 )
                 await MainActor.run {
-                    self.trackerState.addOrUpdateAccount(account)
-                    self.saveTrackerState()
-                    self.isAuthenticating = false
-                    self.authError = nil
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    self.commitCompletedSignIn(
+                        account,
+                        forProfile: owner,
+                        accountBoundaryGeneration: authority.accountBoundaryGeneration,
+                        serviceGeneration: authority.serviceGeneration
+                    )
+                    self.finishAuthenticationAuthority(authority)
                 }
             } catch {
                 await MainActor.run {
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    self.finishAuthenticationAuthority(authority)
                     self.authError = error.localizedDescription
                     self.isAuthenticating = false
                 }
@@ -1060,11 +5798,10 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    private func exchangeMALCode(_ code: String) async throws -> MALAuthResponse {
-        guard let verifier = pendingMALCodeVerifier else {
-            throw NSError(domain: "MALAuth", code: -1, userInfo: [NSLocalizedDescriptionKey: "Missing MAL code verifier"])
-        }
-
+    private func exchangeMALCode(
+        _ code: String,
+        codeVerifier: String
+    ) async throws -> MALAuthResponse {
         let url = URL(string: "https://myanimelist.net/v1/oauth2/token")!
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -1073,7 +5810,7 @@ final class TrackerManager: NSObject, ObservableObject {
         var body: [String: String] = [
             "client_id": malClientId,
             "code": code,
-            "code_verifier": verifier,
+            "code_verifier": codeVerifier,
             "grant_type": "authorization_code",
             "redirect_uri": malRedirectUri
         ]
@@ -1084,8 +5821,8 @@ final class TrackerManager: NSObject, ObservableObject {
 
         let (data, response) = try await sendTrackerRequest(request, provider: .myAnimeList)
         guard response.statusCode == 200 else {
-            let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
-            throw NSError(domain: "MALAuth", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "MAL token request failed: \(bodyPreview)"])
+            let diagnostic = responseBodyPreview(from: data)
+            throw NSError(domain: "MALAuth", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "MAL token request failed: \(diagnostic)"])
         }
 
         return try JSONDecoder().decode(MALAuthResponse.self, from: data)
@@ -1109,8 +5846,8 @@ final class TrackerManager: NSObject, ObservableObject {
 
         let (data, response) = try await sendTrackerRequest(request, provider: .myAnimeList)
         guard response.statusCode == 200 else {
-            let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
-            throw NSError(domain: "MALAuth", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "MAL token refresh failed: \(bodyPreview)"])
+            let diagnostic = responseBodyPreview(from: data)
+            throw NSError(domain: "MALAuth", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "MAL token refresh failed: \(diagnostic)"])
         }
 
         return try JSONDecoder().decode(MALAuthResponse.self, from: data)
@@ -1128,8 +5865,6 @@ final class TrackerManager: NSObject, ObservableObject {
 
         return try JSONDecoder().decode(MALUser.self, from: data)
     }
-
-    // MARK: - Trakt Authentication
 
     private static func makeOAuthState() -> String {
         UUID().uuidString.replacingOccurrences(of: "-", with: "")
@@ -1158,17 +5893,23 @@ final class TrackerManager: NSObject, ObservableObject {
             return
         }
 
+        let owner = activeProfileID
+        guard trackerReconnectIsAllowed(.trakt, owner: owner) else { return }
         traktDeviceAuthTask?.cancel()
         authError = nil
         isAuthenticating = true
         traktDeviceUserCode = nil
         traktDeviceVerificationURL = nil
 
+        let authority = beginAuthenticationAuthority(for: .trakt, owner: owner)
         traktDeviceAuthTask = Task { [weak self] in
             guard let self else { return }
             do {
                 let device = try await self.requestTraktDeviceCode()
-                await MainActor.run {
+                try await MainActor.run {
+                    guard self.authenticationAuthorityIsCurrent(authority) else {
+                        throw CancellationError()
+                    }
                     self.traktDeviceUserCode = device.userCode
                     self.traktDeviceVerificationURL = device.verificationURL
                     let session = ASWebAuthenticationSession(
@@ -1190,26 +5931,34 @@ final class TrackerManager: NSObject, ObservableObject {
                     userId: user.ids.trakt.map(String.init) ?? user.ids.slug
                 )
                 await MainActor.run {
-                    self.trackerState.addOrUpdateAccount(account)
-                    self.saveTrackerState()
-                    self.isAuthenticating = false
-                    self.authError = nil
-                    self.traktDeviceUserCode = nil
-                    self.traktDeviceVerificationURL = nil
-                    self.webAuthSession = nil
-                    self.traktDeviceAuthTask = nil
-                    Logger.shared.log("Trakt device authorization completed", type: "Tracker")
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    let committed = self.commitCompletedSignIn(
+                        account,
+                        forProfile: owner,
+                        accountBoundaryGeneration: authority.accountBoundaryGeneration,
+                        serviceGeneration: authority.serviceGeneration
+                    )
+                    if committed {
+                        self.traktDeviceUserCode = nil
+                        self.traktDeviceVerificationURL = nil
+                        self.finishAuthenticationAuthority(authority)
+                        self.traktDeviceAuthTask = nil
+                        Logger.shared.log("Trakt device authorization completed", type: "Tracker")
+                    }
                 }
             } catch is CancellationError {
                 await MainActor.run {
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    self.finishAuthenticationAuthority(authority)
                     self.isAuthenticating = false
                     self.traktDeviceAuthTask = nil
                 }
             } catch {
                 await MainActor.run {
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
                     self.authError = "Trakt device authorization failed: \(error.localizedDescription)"
                     self.isAuthenticating = false
-                    self.webAuthSession = nil
+                    self.finishAuthenticationAuthority(authority)
                     self.traktDeviceAuthTask = nil
                 }
             }
@@ -1221,6 +5970,9 @@ final class TrackerManager: NSObject, ObservableObject {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["client_id": traktClientId])
+        guard !accountBoundaryRecoveryBlocksNetworkOperations() else {
+            throw CancellationError()
+        }
         let (data, response) = try await URLSession.shared.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? -1
         guard status == 200 else {
@@ -1250,6 +6002,9 @@ final class TrackerManager: NSObject, ObservableObject {
                 "client_secret": traktClientSecret
             ])
 
+            guard !accountBoundaryRecoveryBlocksNetworkOperations() else {
+                throw CancellationError()
+            }
             let (data, response) = try await URLSession.shared.data(for: request)
             let status = (response as? HTTPURLResponse)?.statusCode ?? -1
             switch status {
@@ -1294,7 +6049,7 @@ final class TrackerManager: NSObject, ObservableObject {
         }
         components?.queryItems = queryItems
         let url = components?.url
-        // OAuth state must stay out of logs even though it is short-lived.
+
         Logger.shared.log("Trakt authorization URL prepared", type: "Tracker")
         return url
     }
@@ -1309,15 +6064,24 @@ final class TrackerManager: NSObject, ObservableObject {
             pendingTraktOAuthState = nil
             return
         }
+        let owner = activeProfileID
+        guard trackerReconnectIsAllowed(.trakt, owner: owner) else {
+            pendingTraktOAuthState = nil
+            return
+        }
         authError = nil
         isAuthenticating = true
+
+        let authority = beginAuthenticationAuthority(for: .trakt, owner: owner)
 
         let session = ASWebAuthenticationSession(url: url, callbackURLScheme: "luna") { [weak self] callbackURL, error in
             guard let self = self else { return }
 
             if let error = error {
-                self.pendingTraktOAuthState = nil
                 DispatchQueue.main.async {
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    self.pendingTraktOAuthState = nil
+                    self.finishAuthenticationAuthority(authority)
                     self.authError = error.localizedDescription
                     self.isAuthenticating = false
                 }
@@ -1326,9 +6090,11 @@ final class TrackerManager: NSObject, ObservableObject {
             }
 
             guard let callbackURL = callbackURL else {
-                self.pendingTraktOAuthState = nil
                 Logger.shared.log("Trakt callback URL is nil", type: "Error")
                 DispatchQueue.main.async {
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    self.pendingTraktOAuthState = nil
+                    self.finishAuthenticationAuthority(authority)
                     self.authError = "Trakt callback URL is nil"
                     self.isAuthenticating = false
                 }
@@ -1339,9 +6105,11 @@ final class TrackerManager: NSObject, ObservableObject {
 
             guard let components = URLComponents(url: callbackURL, resolvingAgainstBaseURL: true),
                   let code = components.queryItems?.first(where: { $0.name == "code" })?.value else {
-                self.pendingTraktOAuthState = nil
                 Logger.shared.log("Failed to extract code from Trakt callback", type: "Error")
                 DispatchQueue.main.async {
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    self.pendingTraktOAuthState = nil
+                    self.finishAuthenticationAuthority(authority)
                     self.authError = "Invalid Trakt callback - failed to extract code"
                     self.isAuthenticating = false
                 }
@@ -1349,11 +6117,12 @@ final class TrackerManager: NSObject, ObservableObject {
             }
 
             let callbackState = components.queryItems?.first(where: { $0.name == "state" })?.value
-            if let expectedState = self.pendingTraktOAuthState,
-               callbackState != expectedState {
-                self.pendingTraktOAuthState = nil
+            if callbackState != oauthState {
                 Logger.shared.log("Rejected Trakt callback with invalid OAuth state.", type: "Error")
                 DispatchQueue.main.async {
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    self.pendingTraktOAuthState = nil
+                    self.finishAuthenticationAuthority(authority)
                     self.authError = "Invalid Trakt callback state. Please try connecting again."
                     self.isAuthenticating = false
                 }
@@ -1361,17 +6130,43 @@ final class TrackerManager: NSObject, ObservableObject {
             }
 
             Logger.shared.log("Trakt code extracted successfully", type: "Tracker")
-            self.handleTraktCallback(code: code)
+            self.handleTraktCallback(
+                code: code,
+                owner: owner,
+                accountBoundaryGeneration: authority.accountBoundaryGeneration,
+                serviceGeneration: authority.serviceGeneration,
+                authenticationID: authority.id
+            )
         }
 
         session.prefersEphemeralWebBrowserSession = true
         session.presentationContextProvider = self
-        session.start()
         webAuthSession = session
+        if !session.start() {
+            pendingTraktOAuthState = nil
+            finishAuthenticationAuthority(authority)
+            authError = "Trakt sign-in could not be opened."
+            isAuthenticating = false
+        }
 #endif
     }
 
-    func handleTraktCallback(code: String) {
+    func handleTraktCallback(
+        code: String,
+        owner: UUID? = nil,
+        accountBoundaryGeneration: UInt64? = nil,
+        serviceGeneration: UInt64? = nil,
+        authenticationID: UUID? = nil
+    ) {
+        let owner = owner ?? activeProfileID
+        let authority = authenticationAuthority(
+            owner: owner,
+            service: .trakt,
+            accountBoundaryGeneration: accountBoundaryGeneration,
+            serviceGeneration: serviceGeneration,
+            authenticationID: authenticationID
+        )
+        guard authenticationAuthorityIsCurrent(authority) else { return }
         isAuthenticating = true
         Logger.shared.log("Trakt callback received with code", type: "Tracker")
         Task {
@@ -1389,16 +6184,24 @@ final class TrackerManager: NSObject, ObservableObject {
                     userId: user.ids.trakt.map(String.init) ?? user.ids.slug
                 )
                 await MainActor.run {
-                    self.trackerState.addOrUpdateAccount(account)
-                    self.saveTrackerState()
-                    self.pendingTraktOAuthState = nil
-                    self.isAuthenticating = false
-                    self.authError = nil
-                    Logger.shared.log("Trakt account saved", type: "Tracker")
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    let committed = self.commitCompletedSignIn(
+                        account,
+                        forProfile: owner,
+                        accountBoundaryGeneration: authority.accountBoundaryGeneration,
+                        serviceGeneration: authority.serviceGeneration
+                    )
+                    if committed {
+                        self.pendingTraktOAuthState = nil
+                        self.finishAuthenticationAuthority(authority)
+                        Logger.shared.log("Trakt account saved", type: "Tracker")
+                    }
                 }
             } catch {
                 await MainActor.run {
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
                     self.pendingTraktOAuthState = nil
+                    self.finishAuthenticationAuthority(authority)
                     self.authError = "Trakt auth failed: \(error.localizedDescription)"
                     self.isAuthenticating = false
                     Logger.shared.log("Trakt auth error: \(error.localizedDescription)", type: "Error")
@@ -1408,7 +6211,10 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     func handleTraktPinAuth(token: String) {
+        let owner = activeProfileID
+        guard trackerReconnectIsAllowed(.trakt, owner: owner) else { return }
         isAuthenticating = true
+        let authority = beginAuthenticationAuthority(for: .trakt, owner: owner)
         Task {
             do {
                 let user = try await fetchTraktUser(token: token)
@@ -1421,13 +6227,19 @@ final class TrackerManager: NSObject, ObservableObject {
                     userId: user.ids.trakt.map(String.init) ?? user.ids.slug
                 )
                 await MainActor.run {
-                    self.trackerState.addOrUpdateAccount(account)
-                    self.saveTrackerState()
-                    self.isAuthenticating = false
-                    self.authError = nil
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    self.commitCompletedSignIn(
+                        account,
+                        forProfile: owner,
+                        accountBoundaryGeneration: authority.accountBoundaryGeneration,
+                        serviceGeneration: authority.serviceGeneration
+                    )
+                    self.finishAuthenticationAuthority(authority)
                 }
             } catch {
                 await MainActor.run {
+                    guard self.authenticationAuthorityIsCurrent(authority) else { return }
+                    self.finishAuthenticationAuthority(authority)
                     self.authError = error.localizedDescription
                     self.isAuthenticating = false
                 }
@@ -1456,6 +6268,9 @@ final class TrackerManager: NSObject, ObservableObject {
 
         Logger.shared.log("Exchanging Trakt code for token", type: "Tracker")
 
+        guard !accountBoundaryRecoveryBlocksNetworkOperations() else {
+            throw CancellationError()
+        }
         let (data, response) = try await URLSession.shared.data(for: request)
         let httpResponse = response as? HTTPURLResponse
         let statusCode = httpResponse?.statusCode ?? -1
@@ -1494,14 +6309,17 @@ final class TrackerManager: NSObject, ObservableObject {
             "grant_type": "refresh_token"
         ])
 
+        guard !accountBoundaryRecoveryBlocksNetworkOperations() else {
+            throw CancellationError()
+        }
         let (data, response) = try await URLSession.shared.data(for: request)
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
         guard statusCode == 200 else {
-            let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+            let diagnostic = responseBodyPreview(from: data)
             throw NSError(
                 domain: "TraktAuth",
                 code: statusCode,
-                userInfo: [NSLocalizedDescriptionKey: "Trakt token refresh failed with status \(statusCode): \(bodyPreview)"]
+                userInfo: [NSLocalizedDescriptionKey: "Trakt token refresh failed with status \(statusCode): \(diagnostic)"]
             )
         }
 
@@ -1521,6 +6339,9 @@ final class TrackerManager: NSObject, ObservableObject {
 
         Logger.shared.log("Fetching Trakt user", type: "Tracker")
 
+        guard !accountBoundaryRecoveryBlocksNetworkOperations() else {
+            throw CancellationError()
+        }
         let (data, response) = try await URLSession.shared.data(for: request)
         let httpResponse = response as? HTTPURLResponse
         let statusCode = httpResponse?.statusCode ?? -1
@@ -1529,11 +6350,11 @@ final class TrackerManager: NSObject, ObservableObject {
         Logger.shared.log("Trakt user response data length: \(data.count) bytes", type: "Tracker")
 
         guard (200...299).contains(statusCode) else {
-            let bodyPreview = responseBodyPreview(from: data)
+            let diagnostic = responseBodyPreview(from: data)
             throw NSError(
                 domain: "TraktAuth",
                 code: statusCode,
-                userInfo: [NSLocalizedDescriptionKey: "Trakt user request failed with status \(statusCode): \(bodyPreview)"]
+                userInfo: [NSLocalizedDescriptionKey: "Trakt user request failed with status \(statusCode): \(diagnostic)"]
             )
         }
 
@@ -1544,8 +6365,6 @@ final class TrackerManager: NSObject, ObservableObject {
             throw error
         }
     }
-
-    // MARK: - Sync Methods
 
     func cacheAniListId(tmdbId: Int, anilistId: Int) {
         guard anilistId > 0 else {
@@ -1564,8 +6383,7 @@ final class TrackerManager: NSObject, ObservableObject {
         }
         return id
     }
-    
-    // Season-specific AniList ID caching for anime with multiple entries
+
     func cacheAniListSeasonId(tmdbId: Int, seasonNumber: Int, anilistId: Int) {
         guard anilistId > 0 else {
             Logger.shared.log("Skipping TMDB \(tmdbId) S\(seasonNumber) AniList season cache for provider-safe fallback id \(anilistId)", type: "Tracker")
@@ -1576,7 +6394,7 @@ final class TrackerManager: NSObject, ObservableObject {
             anilistSeasonIdCache[key] = anilistId
         }
     }
-    
+
     func cachedAniListSeasonId(tmdbId: Int, seasonNumber: Int) -> Int? {
         let key = "\(tmdbId)_\(seasonNumber)"
         var id: Int? = nil
@@ -1585,8 +6403,7 @@ final class TrackerManager: NSObject, ObservableObject {
         }
         return id
     }
-    
-    // Register AniList anime data when a show page loads (for accurate season-based syncing)
+
     func registerAniListAnimeData(tmdbId: Int, seasons: [(seasonNumber: Int, anilistId: Int)]) {
         for season in seasons {
             cacheAniListSeasonId(tmdbId: tmdbId, seasonNumber: season.seasonNumber, anilistId: season.anilistId)
@@ -1609,45 +6426,82 @@ final class TrackerManager: NSObject, ObservableObject {
             return
         }
 
-        guard trackerState.syncEnabled else {
-            ReaderLogger.shared.log("Skipping manga sync (sync disabled) for \(title) ch \(chapterNumber)", type: "Tracker")
+        guard trackerState.readerSyncEnabled else {
+            ReaderLogger.shared.log("Skipping manga sync (Reader sync disabled) for \(title) ch \(chapterNumber)", type: "Tracker")
             return
         }
 
-        let accounts = trackerState.accounts.filter { $0.isConnected && ($0.service == .anilist || $0.service == .myAnimeList) }
+        let owner = ProfileManager.shared.activeProfileID
+        let accounts = trackerState.accounts.filter {
+            $0.isConnected
+                && !$0.accessToken.isEmpty
+                && ($0.service == .anilist || $0.service == .myAnimeList)
+        }
         guard !accounts.isEmpty else {
             ReaderLogger.shared.log("Skipping manga sync (no connected manga tracker account) for \(title) ch \(chapterNumber)", type: "Tracker")
             return
+        }
+        let profileAuthority = profileOperationAuthority(for: owner)
+        let accountAuthorities = accounts.reduce(into: [TrackerService: TrackerOperationAuthority]()) {
+            $0[$1.service] = operationAuthority(
+                for: $1,
+                owner: owner,
+                operationGeneration: profileAuthority.operationGeneration
+            )
         }
 
         ReaderLogger.shared.log("Starting manga sync for \(title) ch \(chapterNumber) across \(accounts.count) account(s)", type: "Tracker")
 
         Task {
+            guard profileOperationAuthorityIsCurrent(profileAuthority) else { return }
             guard let match = await resolveMangaTrackerMatch(
                 title: title,
                 totalChapters: totalChapters,
                 format: format,
                 routeKey: routeKey,
                 knownAniListId: knownAniListId,
-                knownMALId: knownMALId
+                knownMALId: knownMALId,
+                requiredProfileAuthority: profileAuthority,
+                requiredMALAuthority: accountAuthorities[.myAnimeList]
             ) else {
                 ReaderLogger.shared.log("Skipping manga sync for \(title): no confident tracker match", type: "Tracker")
                 return
             }
 
             for account in accounts {
+                guard profileOperationAuthorityIsCurrent(profileAuthority),
+                      let authority = accountAuthorities[account.service] else { return }
                 switch account.service {
                 case .anilist:
                     if let aniListId = match.aniListId {
-                        await sendMangaProgressToAniList(mediaId: aniListId, chapterNumber: chapterNumber, account: account)
+                        await sendMangaProgressToAniList(
+                            mediaId: aniListId,
+                            chapterNumber: chapterNumber,
+                            account: account,
+                            owner: owner,
+                            requiredAuthority: authority
+                        )
                     } else {
                         ReaderLogger.shared.log("Skipping AniList manga sync for \(title): resolved match has no AniList ID", type: "Tracker")
                     }
                 case .myAnimeList:
                     if let malId = match.malId {
-                        await sendMangaProgressToMAL(malId: malId, chapterNumber: chapterNumber, account: account)
+                        await sendMangaProgressToMAL(
+                            malId: malId,
+                            chapterNumber: chapterNumber,
+                            account: account,
+                            owner: owner,
+                            requiredAuthority: authority
+                        )
                     } else if let aniListId = match.aniListId {
-                        await sendMangaProgressToMAL(aniListId: aniListId, chapterNumber: chapterNumber, account: account)
+                        await sendMangaProgressToMAL(
+                            aniListId: aniListId,
+                            chapterNumber: chapterNumber,
+                            account: account,
+                            owner: owner,
+                            requiredProfileAuthority: profileAuthority,
+                            requiredAuthority: authority
+                        )
                     } else {
                         ReaderLogger.shared.log("Skipping MAL manga sync for \(title): resolved match has no MAL ID", type: "Tracker")
                     }
@@ -1658,7 +6512,6 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    /// Sync manga reading progress using a known AniList media ID (skips title lookup).
     func syncMangaProgress(aniListId: Int, malId: Int? = nil, title: String? = nil, chapterNumber: Int, totalChapters: Int? = nil, format: String? = nil, routeKey: String? = nil) {
         guard !isBackupRestoreSyncSuppressed() else {
             ReaderLogger.shared.log("Skipping manga sync during backup restore for aniListId \(aniListId) ch \(chapterNumber)", type: "Tracker")
@@ -1682,29 +6535,62 @@ final class TrackerManager: NSObject, ObservableObject {
             return
         }
 
-        guard trackerState.syncEnabled else {
-            ReaderLogger.shared.log("Skipping manga sync (sync disabled) for aniListId \(aniListId) ch \(chapterNumber)", type: "Tracker")
+        guard trackerState.readerSyncEnabled else {
+            ReaderLogger.shared.log("Skipping manga sync (Reader sync disabled) for aniListId \(aniListId) ch \(chapterNumber)", type: "Tracker")
             return
         }
 
-        let accounts = trackerState.accounts.filter { $0.isConnected && ($0.service == .anilist || $0.service == .myAnimeList) }
+        let owner = ProfileManager.shared.activeProfileID
+        let accounts = trackerState.accounts.filter {
+            $0.isConnected
+                && !$0.accessToken.isEmpty
+                && ($0.service == .anilist || $0.service == .myAnimeList)
+        }
         guard !accounts.isEmpty else {
             ReaderLogger.shared.log("Skipping manga sync (no connected manga tracker account) for aniListId \(aniListId) ch \(chapterNumber)", type: "Tracker")
             return
         }
+        let profileAuthority = profileOperationAuthority(for: owner)
+        let accountAuthorities = accounts.reduce(into: [TrackerService: TrackerOperationAuthority]()) {
+            $0[$1.service] = operationAuthority(
+                for: $1,
+                owner: owner,
+                operationGeneration: profileAuthority.operationGeneration
+            )
+        }
 
         ReaderLogger.shared.log("Starting manga sync for aniListId \(aniListId) ch \(chapterNumber) across \(accounts.count) account(s)", type: "Tracker")
-
         Task {
             for account in accounts {
+                guard profileOperationAuthorityIsCurrent(profileAuthority),
+                      let authority = accountAuthorities[account.service] else { return }
                 switch account.service {
                 case .anilist:
-                    await sendMangaProgressToAniList(mediaId: aniListId, chapterNumber: chapterNumber, account: account)
+                    await sendMangaProgressToAniList(
+                        mediaId: aniListId,
+                        chapterNumber: chapterNumber,
+                        account: account,
+                        owner: owner,
+                        requiredAuthority: authority
+                    )
                 case .myAnimeList:
                     if let malId {
-                        await sendMangaProgressToMAL(malId: malId, chapterNumber: chapterNumber, account: account)
+                        await sendMangaProgressToMAL(
+                            malId: malId,
+                            chapterNumber: chapterNumber,
+                            account: account,
+                            owner: owner,
+                            requiredAuthority: authority
+                        )
                     } else {
-                        await sendMangaProgressToMAL(aniListId: aniListId, chapterNumber: chapterNumber, account: account)
+                        await sendMangaProgressToMAL(
+                            aniListId: aniListId,
+                            chapterNumber: chapterNumber,
+                            account: account,
+                            owner: owner,
+                            requiredProfileAuthority: profileAuthority,
+                            requiredAuthority: authority
+                        )
                     }
                 case .trakt:
                     break
@@ -1759,32 +6645,68 @@ final class TrackerManager: NSObject, ObservableObject {
             return
         }
 
-        let accounts = trackerState.accounts.filter { $0.isConnected && ($0.service == .anilist || $0.service == .myAnimeList) }
+        let owner = ProfileManager.shared.activeProfileID
+        let accounts = trackerState.accounts.filter {
+            $0.isConnected
+                && !$0.accessToken.isEmpty
+                && ($0.service == .anilist || $0.service == .myAnimeList)
+        }
         guard !accounts.isEmpty else {
             Logger.shared.log("Skipping rating sync (no connected AniList/MAL account) for TMDB \(tmdbId)", type: "Tracker")
             return
         }
-
+        let profileAuthority = profileOperationAuthority(for: owner)
+        let accountAuthorities = accounts.reduce(into: [TrackerService: TrackerOperationAuthority]()) {
+            $0[$1.service] = operationAuthority(
+                for: $1,
+                owner: owner,
+                operationGeneration: profileAuthority.operationGeneration
+            )
+        }
         Task {
             var resolvedAniListId = cachedAniListId(for: tmdbId)
             if resolvedAniListId == nil {
-                resolvedAniListId = await getAniListMediaId(tmdbId: tmdbId)
+                resolvedAniListId = await getAniListMediaId(
+                    tmdbId: tmdbId,
+                    requiredProfileAuthority: profileAuthority
+                )
             }
-            guard let aniListId = resolvedAniListId else {
+            guard profileOperationAuthorityIsCurrent(profileAuthority),
+                  let aniListId = resolvedAniListId else {
                 Logger.shared.log("Could not find AniList ID for rating sync, TMDB \(tmdbId)", type: "Tracker")
                 return
             }
 
             for account in accounts {
+                guard profileOperationAuthorityIsCurrent(profileAuthority),
+                      let authority = accountAuthorities[account.service] else { return }
                 switch account.service {
                 case .anilist:
-                    await saveAniListRatingAndNote(account: account, anilistId: aniListId, rating: clampedRating, note: nil)
+                    await saveAniListRatingAndNote(
+                        account: account,
+                        anilistId: aniListId,
+                        rating: clampedRating,
+                        note: nil,
+                        owner: owner,
+                        requiredAuthority: authority
+                    )
                 case .myAnimeList:
-                    guard let malId = await getMyAnimeListId(fromAniListId: aniListId, mediaType: "ANIME") else {
+                    guard let malId = await getMyAnimeListId(
+                        fromAniListId: aniListId,
+                        mediaType: "ANIME",
+                        requiredProfileAuthority: profileAuthority
+                    ), profileOperationAuthorityIsCurrent(profileAuthority) else {
                         Logger.shared.log("Could not find MAL anime ID for rating sync, AniList \(aniListId)", type: "Tracker")
                         continue
                     }
-                    await saveMALAnimeRatingAndNote(account: account, malId: malId, rating: clampedRating, note: nil)
+                    await saveMALAnimeRatingAndNote(
+                        account: account,
+                        malId: malId,
+                        rating: clampedRating,
+                        note: nil,
+                        owner: owner,
+                        requiredAuthority: authority
+                    )
                 case .trakt:
                     break
                 }
@@ -1810,30 +6732,58 @@ final class TrackerManager: NSObject, ObservableObject {
             return
         }
 
+        let owner = ProfileManager.shared.activeProfileID
         guard let account = trackerState.getAccount(for: service), account.isConnected else {
             Logger.shared.log("Skipping rating note sync (no connected \(service.displayName) account) for TMDB \(tmdbId)", type: "Tracker")
             return
         }
-
+        let profileAuthority = profileOperationAuthority(for: owner)
+        let authority = operationAuthority(
+            for: account,
+            owner: owner,
+            operationGeneration: profileAuthority.operationGeneration
+        )
         Task {
             var resolvedAniListId = cachedAniListId(for: tmdbId)
             if resolvedAniListId == nil {
-                resolvedAniListId = await getAniListMediaId(tmdbId: tmdbId)
+                resolvedAniListId = await getAniListMediaId(
+                    tmdbId: tmdbId,
+                    requiredProfileAuthority: profileAuthority
+                )
             }
-            guard let aniListId = resolvedAniListId else {
+            guard profileOperationAuthorityIsCurrent(profileAuthority),
+                  let aniListId = resolvedAniListId else {
                 Logger.shared.log("Could not find AniList ID for rating note sync, TMDB \(tmdbId)", type: "Tracker")
                 return
             }
 
             switch service {
             case .anilist:
-                await saveAniListRatingAndNote(account: account, anilistId: aniListId, rating: clampedRating, note: note)
+                await saveAniListRatingAndNote(
+                    account: account,
+                    anilistId: aniListId,
+                    rating: clampedRating,
+                    note: note,
+                    owner: owner,
+                    requiredAuthority: authority
+                )
             case .myAnimeList:
-                guard let malId = await getMyAnimeListId(fromAniListId: aniListId, mediaType: "ANIME") else {
+                guard let malId = await getMyAnimeListId(
+                    fromAniListId: aniListId,
+                    mediaType: "ANIME",
+                    requiredProfileAuthority: profileAuthority
+                ), profileOperationAuthorityIsCurrent(profileAuthority) else {
                     Logger.shared.log("Could not find MAL anime ID for rating note sync, AniList \(aniListId)", type: "Tracker")
                     return
                 }
-                await saveMALAnimeRatingAndNote(account: account, malId: malId, rating: clampedRating, note: note)
+                await saveMALAnimeRatingAndNote(
+                    account: account,
+                    malId: malId,
+                    rating: clampedRating,
+                    note: note,
+                    owner: owner,
+                    requiredAuthority: authority
+                )
             case .trakt:
                 break
             }
@@ -1841,6 +6791,33 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
 #if !os(tvOS)
+
+    private func updateReaderTrackerMatchIfStillOwned(
+        owner: UUID,
+        requiredProfileAuthority: TrackerProfileOperationAuthority,
+        mangaId: Int,
+        aniListId: Int?,
+        malId: Int?,
+        confidence: Double
+    ) async {
+        await MainActor.run {
+            guard profileOperationAuthorityIsCurrent(requiredProfileAuthority),
+                  requiredProfileAuthority.owner == owner else {
+                ReaderLogger.shared.log(
+                    "Skipped a resolved reader tracker match because the active profile changed",
+                    type: "Tracker"
+                )
+                return
+            }
+            MangaReadingProgressManager.shared.updateTrackerMatch(
+                mangaId: mangaId,
+                aniListId: aniListId,
+                malId: malId,
+                confidence: confidence
+            )
+        }
+    }
+
     func syncReaderMangaRating(
         localMangaId: Int,
         title: String,
@@ -1871,34 +6848,50 @@ final class TrackerManager: NSObject, ObservableObject {
             return
         }
 
-        guard trackerState.syncEnabled else {
-            ReaderLogger.shared.log("Skipping reader rating sync (sync disabled) for \(title)", type: "Tracker")
+        guard trackerState.readerSyncEnabled else {
+            ReaderLogger.shared.log("Skipping reader rating sync (Reader sync disabled) for \(title)", type: "Tracker")
             return
         }
 
         let allowedServices: Set<TrackerService> = service.map { [$0] } ?? [.anilist, .myAnimeList]
+        let owner = ProfileManager.shared.activeProfileID
         let accounts = trackerState.accounts.filter {
-            $0.isConnected && allowedServices.contains($0.service) && ($0.service == .anilist || $0.service == .myAnimeList)
+            $0.isConnected
+                && !$0.accessToken.isEmpty
+                && allowedServices.contains($0.service)
+                && ($0.service == .anilist || $0.service == .myAnimeList)
         }
         guard !accounts.isEmpty else {
             ReaderLogger.shared.log("Skipping reader rating sync (no connected AniList/MAL account) for \(title)", type: "Tracker")
             return
         }
-
+        let profileAuthority = profileOperationAuthority(for: owner)
+        let accountAuthorities = accounts.reduce(into: [TrackerService: TrackerOperationAuthority]()) {
+            $0[$1.service] = operationAuthority(
+                for: $1,
+                owner: owner,
+                operationGeneration: profileAuthority.operationGeneration
+            )
+        }
         Task {
+            guard profileOperationAuthorityIsCurrent(profileAuthority) else { return }
             guard let match = await resolveMangaTrackerMatch(
                 title: title,
                 totalChapters: totalChapters,
                 format: format,
                 routeKey: routeKey,
                 knownAniListId: knownAniListId,
-                knownMALId: knownMALId
+                knownMALId: knownMALId,
+                requiredProfileAuthority: profileAuthority,
+                requiredMALAuthority: accountAuthorities[.myAnimeList]
             ) else {
                 ReaderLogger.shared.log("Skipping reader rating sync for \(title): no confident tracker match", type: "Tracker")
                 return
             }
 
-            MangaReadingProgressManager.shared.updateTrackerMatch(
+            await updateReaderTrackerMatchIfStillOwned(
+                owner: owner,
+                requiredProfileAuthority: profileAuthority,
                 mangaId: localMangaId,
                 aniListId: match.aniListId,
                 malId: match.malId,
@@ -1909,38 +6902,68 @@ final class TrackerManager: NSObject, ObservableObject {
             var resolvedMALId = match.malId
 
             for account in accounts {
+                guard profileOperationAuthorityIsCurrent(profileAuthority),
+                      let authority = accountAuthorities[account.service] else { return }
                 switch account.service {
                 case .anilist:
                     if resolvedAniListId == nil, let malId = resolvedMALId {
-                        resolvedAniListId = await getAniListId(fromMALId: malId, mediaType: "MANGA")
+                        resolvedAniListId = await getAniListId(
+                            fromMALId: malId,
+                            mediaType: "MANGA",
+                            requiredProfileAuthority: profileAuthority
+                        )
                     }
-                    guard let aniListId = resolvedAniListId else {
+                    guard profileOperationAuthorityIsCurrent(profileAuthority),
+                          let aniListId = resolvedAniListId else {
                         ReaderLogger.shared.log("Skipping AniList reader rating sync for \(title): no AniList manga ID", type: "Tracker")
                         continue
                     }
-                    MangaReadingProgressManager.shared.updateTrackerMatch(
+                    await updateReaderTrackerMatchIfStillOwned(
+                        owner: owner,
+                        requiredProfileAuthority: profileAuthority,
                         mangaId: localMangaId,
                         aniListId: aniListId,
                         malId: resolvedMALId,
                         confidence: match.confidence
                     )
-                    await saveAniListMangaRatingAndNote(account: account, anilistId: aniListId, rating: clampedRating, note: note)
+                    await saveAniListMangaRatingAndNote(
+                        account: account,
+                        anilistId: aniListId,
+                        rating: clampedRating,
+                        note: note,
+                        owner: owner,
+                        requiredAuthority: authority
+                    )
 
                 case .myAnimeList:
                     if resolvedMALId == nil, let aniListId = resolvedAniListId {
-                        resolvedMALId = await getMyAnimeListId(fromAniListId: aniListId, mediaType: "MANGA")
+                        resolvedMALId = await getMyAnimeListId(
+                            fromAniListId: aniListId,
+                            mediaType: "MANGA",
+                            requiredProfileAuthority: profileAuthority
+                        )
                     }
-                    guard let malId = resolvedMALId else {
+                    guard profileOperationAuthorityIsCurrent(profileAuthority),
+                          let malId = resolvedMALId else {
                         ReaderLogger.shared.log("Skipping MAL reader rating sync for \(title): no MAL manga ID", type: "Tracker")
                         continue
                     }
-                    MangaReadingProgressManager.shared.updateTrackerMatch(
+                    await updateReaderTrackerMatchIfStillOwned(
+                        owner: owner,
+                        requiredProfileAuthority: profileAuthority,
                         mangaId: localMangaId,
                         aniListId: resolvedAniListId,
                         malId: malId,
                         confidence: match.confidence
                     )
-                    await saveMALMangaRatingAndNote(account: account, malId: malId, rating: clampedRating, note: note)
+                    await saveMALMangaRatingAndNote(
+                        account: account,
+                        malId: malId,
+                        rating: clampedRating,
+                        note: note,
+                        owner: owner,
+                        requiredAuthority: authority
+                    )
 
                 case .trakt:
                     break
@@ -1951,7 +6974,14 @@ final class TrackerManager: NSObject, ObservableObject {
 #endif
 
 #if !os(tvOS)
-    private func saveAniListMangaRatingAndNote(account: TrackerAccount, anilistId: Int, rating: Double, note: String?) async {
+    private func saveAniListMangaRatingAndNote(
+        account: TrackerAccount,
+        anilistId: Int,
+        rating: Double,
+        note: String?,
+        owner: UUID,
+        requiredAuthority: TrackerOperationAuthority? = nil
+    ) async {
         let clampedRating = Self.normalizedRatingOutOf10(rating)
         let displayRating = Self.ratingDisplayString(clampedRating)
         do {
@@ -1960,7 +6990,9 @@ final class TrackerManager: NSObject, ObservableObject {
                 anilistId: anilistId,
                 rating: clampedRating,
                 note: note,
-                includeCurrentStatus: false
+                includeCurrentStatus: false,
+                owner: owner,
+                requiredAuthority: requiredAuthority
             )
 
             if firstResult.succeeded {
@@ -1969,29 +7001,31 @@ final class TrackerManager: NSObject, ObservableObject {
             }
 
             if firstResult.statusCode == 400 {
-                ReaderLogger.shared.log("AniList manga rating sync returned 400; retrying with CURRENT status for mediaId \(anilistId): \(firstResult.bodyPreview)", type: "Tracker")
+                ReaderLogger.shared.log("AniList manga rating sync returned 400; retrying with CURRENT status for mediaId \(anilistId): \(firstResult.diagnostic)", type: "Tracker")
                 let retryResult = try await sendAniListRatingAndNoteRequest(
                     account: account,
                     anilistId: anilistId,
                     rating: clampedRating,
                     note: note,
-                    includeCurrentStatus: true
+                    includeCurrentStatus: true,
+                    owner: owner,
+                    requiredAuthority: requiredAuthority
                 )
 
                 if retryResult.succeeded {
                     ReaderLogger.shared.log("Synced AniList manga rating \(displayRating)/10\(note == nil ? "" : " and notes") for mediaId \(anilistId) after creating a list entry", type: "Tracker")
-                } else if let graphQLError = retryResult.graphQLError {
-                    ReaderLogger.shared.log("AniList manga rating sync error after retry: \(graphQLError)", type: "Tracker")
+                } else if retryResult.graphQLError != nil {
+                    ReaderLogger.shared.log("AniList manga rating sync error after retry: \(retryResult.diagnostic)", type: "Tracker")
                 } else {
-                    ReaderLogger.shared.log("AniList manga rating sync returned status \(retryResult.statusCode) after retry: \(retryResult.bodyPreview)", type: "Tracker")
+                    ReaderLogger.shared.log("AniList manga rating sync returned status \(retryResult.statusCode) after retry: \(retryResult.diagnostic)", type: "Tracker")
                 }
                 return
             }
 
-            if let graphQLError = firstResult.graphQLError {
-                ReaderLogger.shared.log("AniList manga rating sync error: \(graphQLError)", type: "Tracker")
+            if firstResult.graphQLError != nil {
+                ReaderLogger.shared.log("AniList manga rating sync error: \(firstResult.diagnostic)", type: "Tracker")
             } else {
-                ReaderLogger.shared.log("AniList manga rating sync returned status \(firstResult.statusCode): \(firstResult.bodyPreview)", type: "Tracker")
+                ReaderLogger.shared.log("AniList manga rating sync returned status \(firstResult.statusCode): \(firstResult.diagnostic)", type: "Tracker")
             }
         } catch {
             ReaderLogger.shared.log("Failed to sync AniList manga rating \(anilistId): \(error.localizedDescription)", type: "Error")
@@ -1999,7 +7033,14 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 #endif
 
-    private func saveAniListRatingAndNote(account: TrackerAccount, anilistId: Int, rating: Double, note: String?) async {
+    private func saveAniListRatingAndNote(
+        account: TrackerAccount,
+        anilistId: Int,
+        rating: Double,
+        note: String?,
+        owner: UUID,
+        requiredAuthority: TrackerOperationAuthority? = nil
+    ) async {
         let clampedRating = Self.normalizedRatingOutOf10(rating)
         let displayRating = Self.ratingDisplayString(clampedRating)
         do {
@@ -2008,7 +7049,9 @@ final class TrackerManager: NSObject, ObservableObject {
                 anilistId: anilistId,
                 rating: clampedRating,
                 note: note,
-                includeCurrentStatus: false
+                includeCurrentStatus: false,
+                owner: owner,
+                requiredAuthority: requiredAuthority
             )
 
             if firstResult.succeeded {
@@ -2017,29 +7060,31 @@ final class TrackerManager: NSObject, ObservableObject {
             }
 
             if firstResult.statusCode == 400 {
-                Logger.shared.log("AniList rating sync returned 400; retrying with CURRENT status for mediaId \(anilistId): \(firstResult.bodyPreview)", type: "Tracker")
+                Logger.shared.log("AniList rating sync returned 400; retrying with CURRENT status for mediaId \(anilistId): \(firstResult.diagnostic)", type: "Tracker")
                 let retryResult = try await sendAniListRatingAndNoteRequest(
                     account: account,
                     anilistId: anilistId,
                     rating: clampedRating,
                     note: note,
-                    includeCurrentStatus: true
+                    includeCurrentStatus: true,
+                    owner: owner,
+                    requiredAuthority: requiredAuthority
                 )
 
                 if retryResult.succeeded {
                     Logger.shared.log("Synced AniList rating \(displayRating)/10\(note == nil ? "" : " and notes") for mediaId \(anilistId) after creating a list entry", type: "Tracker")
-                } else if let graphQLError = retryResult.graphQLError {
-                    Logger.shared.log("AniList rating sync error after retry: \(graphQLError)", type: "Tracker")
+                } else if retryResult.graphQLError != nil {
+                    Logger.shared.log("AniList rating sync error after retry: \(retryResult.diagnostic)", type: "Tracker")
                 } else {
-                    Logger.shared.log("AniList rating sync returned status \(retryResult.statusCode) after retry: \(retryResult.bodyPreview)", type: "Tracker")
+                    Logger.shared.log("AniList rating sync returned status \(retryResult.statusCode) after retry: \(retryResult.diagnostic)", type: "Tracker")
                 }
                 return
             }
 
-            if let graphQLError = firstResult.graphQLError {
-                Logger.shared.log("AniList rating sync error: \(graphQLError)", type: "Tracker")
+            if firstResult.graphQLError != nil {
+                Logger.shared.log("AniList rating sync error: \(firstResult.diagnostic)", type: "Tracker")
             } else {
-                Logger.shared.log("AniList rating sync returned status \(firstResult.statusCode): \(firstResult.bodyPreview)", type: "Tracker")
+                Logger.shared.log("AniList rating sync returned status \(firstResult.statusCode): \(firstResult.diagnostic)", type: "Tracker")
             }
         } catch {
             Logger.shared.log("Failed to sync AniList rating \(anilistId): \(error.localizedDescription)", type: "Error")
@@ -2051,8 +7096,14 @@ final class TrackerManager: NSObject, ObservableObject {
         anilistId: Int,
         rating: Double,
         note: String?,
-        includeCurrentStatus: Bool
+        includeCurrentStatus: Bool,
+        owner: UUID,
+        requiredAuthority: TrackerOperationAuthority? = nil
     ) async throws -> AniListRatingSyncResponse {
+        let authority = requiredAuthority ?? operationAuthority(for: account, owner: owner)
+        guard authority.owner == owner, authority.matches(account) else {
+            throw CancellationError()
+        }
         let variableDeclaration = note == nil
             ? "($mediaId: Int, $score: Float)"
             : "($mediaId: Int, $score: Float, $notes: String)"
@@ -2085,8 +7136,17 @@ final class TrackerManager: NSObject, ObservableObject {
         request.setValue("Bearer \(account.accessToken)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["query": mutation, "variables": variables])
 
-        let (data, response) = try await sendTrackerRequest(request, provider: .anilist)
-        let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
+        let (data, response) = try await sendTrackerRequest(
+            request,
+            provider: .anilist,
+            beforeAttempt: { [weak self] in
+                guard let self,
+                      await self.operationAuthorityIsCurrent(authority) else {
+                    throw CancellationError()
+                }
+            }
+        )
+        let diagnostic = responseBodyPreview(from: data)
         let graphQLError = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
             .flatMap { json -> String? in
                 guard let errors = json["errors"] as? [[String: Any]], !errors.isEmpty else {
@@ -2097,7 +7157,7 @@ final class TrackerManager: NSObject, ObservableObject {
 
         return AniListRatingSyncResponse(
             statusCode: response.statusCode,
-            bodyPreview: bodyPreview,
+            diagnostic: diagnostic,
             graphQLError: graphQLError
         )
     }
@@ -2107,9 +7167,28 @@ final class TrackerManager: NSObject, ObservableObject {
         mediaPath: String,
         mediaId: Int,
         values: [String: String],
-        allowsRefreshRetry: Bool = true
+        allowsRefreshRetry: Bool = true,
+        owner: UUID,
+        requiredAuthority: TrackerOperationAuthority? = nil
     ) async throws -> (Data, HTTPURLResponse) {
-        let account = try await refreshedMALAccountIfNeeded(account)
+        let authority = requiredAuthority ?? operationAuthority(for: account, owner: owner)
+        guard authority.owner == owner, authority.matches(account) else {
+            throw CancellationError()
+        }
+        let resolvedAccount = try await refreshedMALAccountIfNeeded(
+            account,
+            requiredOwner: owner,
+            requiredAuthority: authority
+        )
+        guard resolvedAccount.userId == account.userId else {
+            Logger.shared.log(
+                "Skipped MAL \(mediaPath) write for id \(mediaId); the connected account changed while it was queued",
+                type: "Tracker"
+            )
+            throw CancellationError()
+        }
+        let account = resolvedAccount
+        let requestAuthority = authority.replacingCredential(with: account)
         let url = URL(string: "https://api.myanimelist.net/v2/\(mediaPath)/\(mediaId)/my_list_status")!
         var request = URLRequest(url: url)
         request.httpMethod = "PATCH"
@@ -2117,24 +7196,48 @@ final class TrackerManager: NSObject, ObservableObject {
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         request.httpBody = formURLEncodedBody(values)
 
-        let (data, response) = try await sendTrackerRequest(request, provider: .myAnimeList)
+        let (data, response) = try await sendTrackerRequest(
+            request,
+            provider: .myAnimeList,
+            reportAuthenticationFailure: !allowsRefreshRetry,
+            beforeAttempt: { [weak self] in
+                guard let self else { throw CancellationError() }
+                guard await self.operationAuthorityIsCurrent(requestAuthority) else {
+                    throw CancellationError()
+                }
+            }
+        )
         if response.statusCode == 401, allowsRefreshRetry {
-            let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
-            Logger.shared.log("MAL \(mediaPath) list status returned 401; refreshing token and retrying once: \(bodyPreview)", type: "Tracker")
-            let refreshed = try await refreshedMALAccountIfNeeded(account, force: true)
+            let diagnostic = responseBodyPreview(from: data)
+            Logger.shared.log("MAL \(mediaPath) list status returned 401; refreshing token and retrying once: \(diagnostic)", type: "Tracker")
+            let refreshed = try await refreshedMALAccountIfNeeded(
+                account,
+                force: true,
+                requiredOwner: owner,
+                requiredAuthority: requestAuthority
+            )
             return try await sendMALListStatusRequest(
                 account: refreshed,
                 mediaPath: mediaPath,
                 mediaId: mediaId,
                 values: values,
-                allowsRefreshRetry: false
+                allowsRefreshRetry: false,
+                owner: owner,
+                requiredAuthority: requestAuthority.replacingCredential(with: refreshed)
             )
         }
 
         return (data, response)
     }
 
-    private func saveMALAnimeRatingAndNote(account: TrackerAccount, malId: Int, rating: Double, note: String?) async {
+    private func saveMALAnimeRatingAndNote(
+        account: TrackerAccount,
+        malId: Int,
+        rating: Double,
+        note: String?,
+        owner: UUID,
+        requiredAuthority: TrackerOperationAuthority? = nil
+    ) async {
         let clampedRating = Self.normalizedRatingOutOf10(rating)
         let malRating = Self.myAnimeListScore(from: clampedRating)
         let displayRating = Self.ratingDisplayString(clampedRating)
@@ -2150,7 +7253,9 @@ final class TrackerManager: NSObject, ObservableObject {
                 account: account,
                 mediaPath: "anime",
                 mediaId: malId,
-                values: values
+                values: values,
+                owner: owner,
+                requiredAuthority: requiredAuthority
             )
             if (200...299).contains(response.statusCode) {
                 let malSuffix = malRating == Int(clampedRating) && clampedRating.truncatingRemainder(dividingBy: 1) == 0
@@ -2158,8 +7263,8 @@ final class TrackerManager: NSObject, ObservableObject {
                     : " as \(malRating)/10"
                 Logger.shared.log("Synced MAL rating \(displayRating)/10\(malSuffix)\(note == nil ? "" : " and comments") for animeId \(malId)", type: "Tracker")
             } else {
-                let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
-                Logger.shared.log("MAL rating sync returned status \(response.statusCode): \(bodyPreview)", type: "Tracker")
+                let diagnostic = responseBodyPreview(from: data)
+                Logger.shared.log("MAL rating sync returned status \(response.statusCode): \(diagnostic)", type: "Tracker")
             }
         } catch {
             Logger.shared.log("Failed to sync MAL rating \(malId): \(error.localizedDescription)", type: "Error")
@@ -2167,7 +7272,15 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
 #if !os(tvOS)
-    private func sendMangaProgressToAniList(mediaId: Int, chapterNumber: Int, account: TrackerAccount) async {
+    private func sendMangaProgressToAniList(
+        mediaId: Int,
+        chapterNumber: Int,
+        account: TrackerAccount,
+        owner: UUID,
+        requiredAuthority: TrackerOperationAuthority? = nil
+    ) async {
+        let authority = requiredAuthority ?? operationAuthority(for: account, owner: owner)
+        guard authority.owner == owner, authority.matches(account) else { return }
         let mutation = """
         mutation {
             SaveMediaListEntry(
@@ -2192,7 +7305,16 @@ final class TrackerManager: NSObject, ObservableObject {
             let body: [String: Any] = ["query": mutation]
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-            let (data, response) = try await sendTrackerRequest(request, provider: .anilist)
+            let (data, response) = try await sendTrackerRequest(
+                request,
+                provider: .anilist,
+                beforeAttempt: { [weak self] in
+                    guard let self,
+                          await self.operationAuthorityIsCurrent(authority) else {
+                        throw CancellationError()
+                    }
+                }
+            )
             if response.statusCode == 200 {
                 if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let errors = json["errors"] as? [[String: Any]], !errors.isEmpty {
@@ -2209,101 +7331,209 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    private func sendMangaProgressToMAL(aniListId: Int, chapterNumber: Int, account: TrackerAccount) async {
-        guard let malId = await getMyAnimeListId(fromAniListId: aniListId, mediaType: "MANGA") else {
+    private func sendMangaProgressToMAL(
+        aniListId: Int,
+        chapterNumber: Int,
+        account: TrackerAccount,
+        owner: UUID,
+        requiredProfileAuthority: TrackerProfileOperationAuthority? = nil,
+        requiredAuthority: TrackerOperationAuthority? = nil
+    ) async {
+        guard let malId = await getMyAnimeListId(
+            fromAniListId: aniListId,
+            mediaType: "MANGA",
+            requiredProfileAuthority: requiredProfileAuthority
+        ), requiredProfileAuthority.map(profileOperationAuthorityIsCurrent) ?? true else {
             ReaderLogger.shared.log("Could not find MAL manga ID for AniList manga \(aniListId)", type: "Tracker")
             return
         }
 
-        await sendMangaProgressToMAL(malId: malId, chapterNumber: chapterNumber, account: account)
+        await sendMangaProgressToMAL(
+            malId: malId,
+            chapterNumber: chapterNumber,
+            account: account,
+            owner: owner,
+            requiredAuthority: requiredAuthority
+        )
     }
 
-    private func sendMangaProgressToMAL(malId: Int, chapterNumber: Int, account: TrackerAccount) async {
-        await saveMALMangaProgress(account: account, malId: malId, chaptersRead: chapterNumber, status: "reading")
+    private func sendMangaProgressToMAL(
+        malId: Int,
+        chapterNumber: Int,
+        account: TrackerAccount,
+        owner: UUID,
+        requiredAuthority: TrackerOperationAuthority? = nil
+    ) async {
+        await saveMALMangaProgress(
+            account: account,
+            malId: malId,
+            chaptersRead: chapterNumber,
+            status: "reading",
+            owner: owner,
+            requiredAuthority: requiredAuthority
+        )
     }
 #endif
 
-    func syncWatchProgress(showId: Int, seasonNumber: Int, episodeNumber: Int, progress: Double, isMovie: Bool = false, isAnime: Bool = false, playbackContext: EpisodePlaybackContext? = nil) {
+    func syncWatchProgress(
+        showId: Int,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        progress: Double,
+        isMovie: Bool = false,
+        isAnime: Bool = false,
+        playbackContext: EpisodePlaybackContext? = nil,
+        requiredOwner: UUID? = nil,
+        progressAuthority: ProgressManager.ProfileMutationAuthority? = nil
+    ) {
+        guard let owner = resolvedPlaybackOperationOwner(
+            requiredOwner: requiredOwner,
+            progressAuthority: progressAuthority
+        ) else {
+            Logger.shared.log(
+                "Skipping watch sync because its originating profile is no longer active",
+                type: "Tracker"
+            )
+            return
+        }
+        guard let progressPercentForLog = Self.watchSyncLogPercent(progress) else {
+            Logger.shared.log(
+                "Skipping watch sync with non-finite progress for TMDB \(showId) S\(seasonNumber)E\(episodeNumber)",
+                type: "Tracker"
+            )
+            return
+        }
         guard !isBackupRestoreSyncSuppressed() else {
-            Logger.shared.log("Skipping watch sync (backup restore in progress) for TMDB \(showId) S\(seasonNumber)E\(episodeNumber) \(Int(progress))%", type: "Tracker")
+            Logger.shared.log("Skipping watch sync (backup restore in progress) for TMDB \(showId) S\(seasonNumber)E\(episodeNumber) \(progressPercentForLog)%", type: "Tracker")
             return
         }
 
         guard trackerState.syncEnabled else {
-            Logger.shared.log("Skipping watch sync (sync disabled) for TMDB \(showId) S\(seasonNumber)E\(episodeNumber) \(Int(progress))%", type: "Tracker")
+            Logger.shared.log("Skipping watch sync (sync disabled) for TMDB \(showId) S\(seasonNumber)E\(episodeNumber) \(progressPercentForLog)%", type: "Tracker")
             return
         }
 
-        let connectedAccounts = trackerState.accounts.filter { $0.isConnected }
+        let connectedAccounts = trackerState.accounts.filter { $0.isConnected && !$0.accessToken.isEmpty }
         guard !connectedAccounts.isEmpty else {
-            Logger.shared.log("Skipping watch sync (no connected tracker accounts) for TMDB \(showId) S\(seasonNumber)E\(episodeNumber) \(Int(progress))%", type: "Tracker")
+            Logger.shared.log("Skipping watch sync (no connected tracker accounts) for TMDB \(showId) S\(seasonNumber)E\(episodeNumber) \(progressPercentForLog)%", type: "Tracker")
             return
         }
 
-        guard shouldStartWatchSync(
-            showId: showId,
-            seasonNumber: seasonNumber,
-            episodeNumber: episodeNumber,
-            progress: progress,
-            isMovie: isMovie,
-            playbackContext: playbackContext
-        ) else {
-            return
-        }
-
-        let playbackProviderId = playbackContext?.anilistMediaId
-        let playbackAniListMediaId = playbackProviderId.flatMap { $0 > 0 ? $0 : nil }
-        let playbackMALMediaId = playbackProviderId.flatMap { $0 < 0 ? abs($0) : nil }
+        let playbackAniListMediaId = playbackContext?.positiveAniListMediaId
+        let playbackMALMediaId = playbackContext?.exactMALMediaId
         let canSyncAnimeTrackers = isAnime || playbackAniListMediaId != nil || playbackMALMediaId != nil
-        Logger.shared.log("Starting watch sync for TMDB \(showId) S\(seasonNumber)E\(episodeNumber) \(Int(progress))% across \(connectedAccounts.count) account(s)", type: "Tracker")     
+        let eligibleAccounts = connectedAccounts.filter { account in
+            guard account.service == .trakt || canSyncAnimeTrackers else {
+                Logger.shared.log(
+                    "Skipping \(account.service.displayName) watch sync for non-anime TMDB \(showId) S\(seasonNumber)E\(episodeNumber)",
+                    type: "Tracker"
+                )
+                return false
+            }
+            return true
+        }
+        guard !eligibleAccounts.isEmpty else { return }
+
+        let syncAttempts: [(account: TrackerAccount, authority: TrackerOperationAuthority, registration: TrackerWatchSyncDedupeRegistration?)] = eligibleAccounts.compactMap { account in
+            let authority = operationAuthority(
+                for: account,
+                owner: owner,
+                progressAuthority: progressAuthority
+            )
+            switch beginWatchSync(
+                showId: showId,
+                seasonNumber: seasonNumber,
+                episodeNumber: episodeNumber,
+                progress: progress,
+                isMovie: isMovie,
+                playbackContext: playbackContext,
+                owner: owner,
+                account: account
+            ) {
+            case .untracked:
+                return (account, authority, nil)
+            case .tracked(let registration):
+                return (account, authority, registration)
+            case .duplicate:
+                return nil
+            }
+        }
+        guard !syncAttempts.isEmpty else { return }
+
+        Logger.shared.log("Starting watch sync for TMDB \(showId) S\(seasonNumber)E\(episodeNumber) \(progressPercentForLog)% across \(syncAttempts.count) account(s)", type: "Tracker")
 
         Task {
-            for account in connectedAccounts {
+            for attempt in syncAttempts {
+                let account = attempt.account
+                var succeeded = false
                 Logger.shared.log("Syncing \(account.service) account \(account.username) for TMDB \(showId) S\(seasonNumber)E\(episodeNumber)", type: "Tracker")
                 switch account.service {
                 case .anilist:
-                    guard canSyncAnimeTrackers else {
-                        Logger.shared.log("Skipping AniList watch sync for non-anime TMDB \(showId) S\(seasonNumber)E\(episodeNumber)", type: "Tracker")
-                        continue
-                    }
                     if let playbackContext,
                        let anilistMediaId = playbackAniListMediaId {
-                        await syncToAniListMediaId(
+                        succeeded = await syncToAniListMediaId(
                             account: account,
                             anilistId: anilistMediaId,
                             showId: showId,
                             seasonNumber: playbackContext.localSeasonNumber,
                             episodeNumber: playbackContext.localEpisodeNumber,
-                            progress: progress
+                            progress: progress,
+                            owner: owner,
+                            authority: attempt.authority
                         )
-                    } else if let malMediaId = playbackMALMediaId {
-                        Logger.shared.log("Skipping direct AniList watch sync for MAL fallback mediaId=\(malMediaId)", type: "Tracker")
+                    } else if let playbackContext,
+                              let malMediaId = playbackMALMediaId {
+                        var exactAniListID = cachedAniListSeasonId(
+                            tmdbId: showId,
+                            seasonNumber: playbackContext.localSeasonNumber
+                        )
+                        if exactAniListID == nil {
+                            exactAniListID = await getAniListId(
+                                fromMALId: malMediaId,
+                                mediaType: "ANIME"
+                            )
+                        }
+                        if let exactAniListID {
+                            succeeded = await syncToAniListMediaId(
+                                account: account,
+                                anilistId: exactAniListID,
+                                showId: showId,
+                                seasonNumber: playbackContext.localSeasonNumber,
+                                episodeNumber: playbackContext.localEpisodeNumber,
+                                progress: progress,
+                                owner: owner,
+                                authority: attempt.authority
+                            )
+                        } else {
+                            Logger.shared.log("Could not resolve exact AniList identity for MAL fallback mediaId=\(malMediaId)", type: "Tracker")
+                            succeeded = false
+                        }
                     } else {
-                        await syncToAniList(account: account, showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, progress: progress)
+                        succeeded = await syncToAniList(account: account, showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, progress: progress, owner: owner, authority: attempt.authority)
                     }
                 case .myAnimeList:
-                    guard canSyncAnimeTrackers else {
-                        Logger.shared.log("Skipping MAL anime watch sync for non-anime TMDB \(showId) S\(seasonNumber)E\(episodeNumber)", type: "Tracker")
-                        continue
-                    }
                     if let playbackContext,
                        let malMediaId = playbackMALMediaId {
-                        await syncToMyAnimeList(
+                        succeeded = await syncToMyAnimeList(
                             account: account,
                             malId: malMediaId,
                             episodeNumber: playbackContext.localEpisodeNumber,
-                            progress: progress
+                            progress: progress,
+                            owner: owner,
+                            authority: attempt.authority
                         )
                     } else if let playbackContext,
                               let anilistMediaId = playbackAniListMediaId {
-                        await syncToMyAnimeList(
+                        succeeded = await syncToMyAnimeList(
                             account: account,
                             anilistId: anilistMediaId,
                             episodeNumber: playbackContext.localEpisodeNumber,
-                            progress: progress
+                            progress: progress,
+                            owner: owner,
+                            authority: attempt.authority
                         )
                     } else {
-                        await syncToMyAnimeList(account: account, showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, progress: progress)
+                        succeeded = await syncToMyAnimeList(account: account, showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, progress: progress, owner: owner, authority: attempt.authority)
                     }
                 case .trakt:
                     let resolvedTrakt = resolvedTraktEpisodeNumbers(
@@ -2312,50 +7542,88 @@ final class TrackerManager: NSObject, ObservableObject {
                         playbackContext: playbackContext
                     )
                     if resolvedTrakt != nil || canUseTraktAnimeFallback(playbackContext) {
-                        await syncToTrakt(
+                        succeeded = await syncToTrakt(
                             account: account,
                             showId: showId,
                             resolved: resolvedTrakt,
                             progress: progress,
-                            playbackContext: playbackContext
+                            playbackContext: playbackContext,
+                            owner: owner,
+                            authority: attempt.authority
                         )
                     }
                 }
+
+                finishWatchSync(
+                    registration: attempt.registration,
+                    succeeded: succeeded
+                )
             }
         }
     }
 
-    private func syncToAniList(account: TrackerAccount, showId: Int, seasonNumber: Int, episodeNumber: Int, progress: Double) async {
-        // First check if we have a season-specific AniList ID (for anime with multiple AniList entries per season)
+    @discardableResult
+    private func syncToAniList(
+        account: TrackerAccount,
+        showId: Int,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        progress: Double,
+        owner: UUID,
+        authority: TrackerOperationAuthority? = nil
+    ) async -> Bool {
+        let authority = authority ?? operationAuthority(for: account, owner: owner)
+
         var anilistId: Int? = cachedAniListSeasonId(tmdbId: showId, seasonNumber: seasonNumber)
-        
-        // Fall back to show-level lookup if no season-specific mapping exists
+
         if anilistId == nil {
             anilistId = await getAniListMediaId(tmdbId: showId)
         }
-        
+
         guard let anilistId = anilistId else {
             Logger.shared.log("Could not find AniList ID for TMDB ID \(showId) S\(seasonNumber)", type: "Tracker")
-            return
+            return false
         }
 
-        await syncToAniListMediaId(account: account, anilistId: anilistId, showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber, progress: progress)
+        return await syncToAniListMediaId(
+            account: account,
+            anilistId: anilistId,
+            showId: showId,
+            seasonNumber: seasonNumber,
+            episodeNumber: episodeNumber,
+            progress: progress,
+            owner: owner,
+            authority: authority
+        )
     }
 
-    private func syncToAniListMediaId(account: TrackerAccount, anilistId: Int, showId: Int, seasonNumber: Int, episodeNumber: Int, progress: Double) async {
-        // AniList progress for anime is episode-based. Mark as COMPLETED only when we reach
-        // the final known episode for this AniList entry; otherwise keep it CURRENT.
+    @discardableResult
+    private func syncToAniListMediaId(
+        account: TrackerAccount,
+        anilistId: Int,
+        showId: Int,
+        seasonNumber: Int,
+        episodeNumber: Int,
+        progress: Double,
+        owner: UUID,
+        authority: TrackerOperationAuthority
+    ) async -> Bool {
+
         let totalEpisodes = await getAniListEpisodeCount(mediaId: anilistId)
         let isFinalEpisode = (totalEpisodes ?? 0) > 0 && episodeNumber >= (totalEpisodes ?? 0)
         let normalStatus = isFinalEpisode ? "COMPLETED" : "CURRENT"
         let status: String?
 #if os(iOS)
-        switch await fetchAniListAnimeListStatus(account: account, mediaId: anilistId) {
+        switch await fetchAniListAnimeListStatus(
+            account: account,
+            mediaId: anilistId,
+            owner: owner,
+            authority: authority
+        ) {
         case .loaded(let currentStatus):
             status = currentStatus?.uppercased() == "REPEATING" ? "REPEATING" : normalStatus
         case .unavailable:
-            // A progress-only mutation is safer than guessing when the status lookup fails:
-            // AniList preserves an existing REPEATING status when status is omitted.
+
             status = nil
         }
 #else
@@ -2363,7 +7631,6 @@ final class TrackerManager: NSObject, ObservableObject {
 #endif
         let statusClause = status.map { ",\n                status: \($0)" } ?? ""
 
-        // Only include completedAt when marking as COMPLETED
         let completedAtClause: String
         if status == "COMPLETED" {
             completedAtClause = """
@@ -2400,21 +7667,34 @@ final class TrackerManager: NSObject, ObservableObject {
             let body: [String: Any] = ["query": mutation]
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-            let (data, response) = try await sendTrackerRequest(request, provider: .anilist)
+            let (data, response) = try await sendTrackerRequest(
+                request,
+                provider: .anilist,
+                beforeAttempt: { [weak self] in
+                    guard let self else { throw CancellationError() }
+                    guard await self.operationAuthorityIsCurrent(authority) else {
+                        throw CancellationError()
+                    }
+                }
+            )
             if response.statusCode == 200 {
-                // Parse response to check for errors
+
                 if let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let errors = json["errors"] as? [[String: Any]], !errors.isEmpty {
                     let errorMsg = (errors.first?["message"] as? String) ?? "Unknown error"
                     Logger.shared.log("AniList sync error: \(errorMsg)", type: "Tracker")
+                    return false
                 } else {
                     Logger.shared.log("Synced to AniList: mediaId=\(anilistId) S\(seasonNumber)E\(episodeNumber) (\(status ?? "status preserved"))", type: "Tracker")
+                    return true
                 }
             } else {
                 Logger.shared.log("AniList sync returned status \(response.statusCode)", type: "Tracker")
+                return false
             }
         } catch {
             Logger.shared.log("Failed to sync to AniList: \(error.localizedDescription)", type: "Error")
+            return false
         }
     }
 
@@ -2426,7 +7706,9 @@ final class TrackerManager: NSObject, ObservableObject {
 
     private func fetchAniListAnimeListStatus(
         account: TrackerAccount,
-        mediaId: Int
+        mediaId: Int,
+        owner: UUID,
+        authority: TrackerOperationAuthority
     ) async -> AniListAnimeListStatusLookup {
         let query = """
         query($mediaId: Int!) {
@@ -2464,13 +7746,25 @@ final class TrackerManager: NSObject, ObservableObject {
                 "variables": ["mediaId": mediaId]
             ])
 
-            let (data, response) = try await sendTrackerRequest(request, provider: .anilist)
+            let (data, response) = try await sendTrackerRequest(
+                request,
+                provider: .anilist,
+                beforeAttempt: { [weak self] in
+                    guard let self else { throw CancellationError() }
+                    guard await self.operationAuthorityIsCurrent(authority) else {
+                        throw CancellationError()
+                    }
+                }
+            )
             guard response.statusCode == 200 else {
                 Logger.shared.log("AniList status lookup returned \(response.statusCode) for mediaId=\(mediaId); preserving server status", type: "Tracker")
                 return .unavailable
             }
-            if let graphQLError = graphQLErrorMessage(from: data) {
-                Logger.shared.log("AniList status lookup failed for mediaId=\(mediaId): \(graphQLError)", type: "Tracker")
+            if graphQLErrorMessage(from: data) != nil {
+                Logger.shared.log(
+                    "AniList status lookup failed for mediaId=\(mediaId): \(responseBodyPreview(from: data))",
+                    type: "Tracker"
+                )
                 return .unavailable
             }
 
@@ -2483,7 +7777,9 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 #endif
 
-    private func syncToMyAnimeList(account: TrackerAccount, showId: Int, seasonNumber: Int, episodeNumber: Int, progress: Double) async {
+    @discardableResult
+    private func syncToMyAnimeList(account: TrackerAccount, showId: Int, seasonNumber: Int, episodeNumber: Int, progress: Double, owner: UUID, authority: TrackerOperationAuthority? = nil) async -> Bool {
+        let authority = authority ?? operationAuthority(for: account, owner: owner)
         var anilistId: Int? = cachedAniListSeasonId(tmdbId: showId, seasonNumber: seasonNumber)
 
         if anilistId == nil {
@@ -2492,65 +7788,76 @@ final class TrackerManager: NSObject, ObservableObject {
 
         guard let anilistId = anilistId else {
             Logger.shared.log("Could not find AniList ID for MAL sync, TMDB \(showId) S\(seasonNumber)", type: "Tracker")
-            return
+            return false
         }
 
-        await syncToMyAnimeList(account: account, anilistId: anilistId, episodeNumber: episodeNumber, progress: progress)
+        return await syncToMyAnimeList(account: account, anilistId: anilistId, episodeNumber: episodeNumber, progress: progress, owner: owner, authority: authority)
     }
 
-    private func syncToMyAnimeList(account: TrackerAccount, anilistId: Int, episodeNumber: Int, progress: Double) async {
+    @discardableResult
+    private func syncToMyAnimeList(account: TrackerAccount, anilistId: Int, episodeNumber: Int, progress: Double, owner: UUID, authority: TrackerOperationAuthority? = nil) async -> Bool {
+        let authority = authority ?? operationAuthority(for: account, owner: owner)
         let malProgress = progress <= 1.0 ? progress * 100.0 : progress
         guard malProgress >= 85 else {
             Logger.shared.log("Skipping MAL anime sync below watched threshold for AniList \(anilistId) E\(episodeNumber)", type: "Tracker")
-            return
+            return false
         }
 
         guard let malId = await getMyAnimeListId(fromAniListId: anilistId, mediaType: "ANIME") else {
             Logger.shared.log("Could not find MAL anime ID for AniList \(anilistId)", type: "Tracker")
-            return
+            return false
         }
 
         let totalEpisodes = await getAniListEpisodeCount(mediaId: anilistId)
         let status = ((totalEpisodes ?? 0) > 0 && episodeNumber >= (totalEpisodes ?? 0)) ? "completed" : "watching"
-        await saveMALAnimeProgress(
+        return await saveMALAnimeProgress(
             account: account,
             malId: malId,
             watchedEpisodes: episodeNumber,
             status: status,
-            preserveRewatching: true
+            preserveRewatching: true,
+            owner: owner,
+            authority: authority
         )
     }
 
-    private func syncToMyAnimeList(account: TrackerAccount, malId: Int, episodeNumber: Int, progress: Double) async {
+    @discardableResult
+    private func syncToMyAnimeList(account: TrackerAccount, malId: Int, episodeNumber: Int, progress: Double, owner: UUID, authority: TrackerOperationAuthority? = nil) async -> Bool {
+        let authority = authority ?? operationAuthority(for: account, owner: owner)
         let malProgress = progress <= 1.0 ? progress * 100.0 : progress
         guard malProgress >= 85 else {
             Logger.shared.log("Skipping MAL anime sync below watched threshold for MAL \(malId) E\(episodeNumber)", type: "Tracker")
-            return
+            return false
         }
 
 #if os(iOS)
-        // The MAL media lookup below supplies the actual episode total. Playback percentage
-        // describes this episode, not completion of the whole series.
+
         let status = "watching"
 #else
         let status = malProgress >= 95 ? "completed" : "watching"
 #endif
-        await saveMALAnimeProgress(
+        return await saveMALAnimeProgress(
             account: account,
             malId: malId,
             watchedEpisodes: episodeNumber,
             status: status,
-            preserveRewatching: true
+            preserveRewatching: true,
+            owner: owner,
+            authority: authority
         )
     }
 
+    @discardableResult
     private func saveMALAnimeProgress(
         account: TrackerAccount,
         malId: Int,
         watchedEpisodes: Int,
         status: String,
-        preserveRewatching: Bool = false
-    ) async {
+        preserveRewatching: Bool = false,
+        owner: UUID,
+        authority: TrackerOperationAuthority? = nil
+    ) async -> Bool {
+        let authority = authority ?? operationAuthority(for: account, owner: owner)
         var values = [
             "status": status,
             "num_watched_episodes": String(max(watchedEpisodes, 0))
@@ -2558,19 +7865,22 @@ final class TrackerManager: NSObject, ObservableObject {
 
 #if os(iOS)
         if preserveRewatching {
-            switch await fetchMALAnimePlaybackState(account: account, malId: malId) {
+            switch await fetchMALAnimePlaybackState(
+                account: account,
+                malId: malId,
+                owner: owner,
+                authority: authority
+            ) {
             case .loaded(let state):
                 if state.isRewatching {
-                    // MAL models rewatching separately from its watching/completed status.
-                    // Avoid replacing that state and explicitly keep its rewatch flag set.
+
                     values.removeValue(forKey: "status")
                     values["is_rewatching"] = "true"
                 } else if let totalEpisodes = state.totalEpisodes, totalEpisodes > 0 {
                     values["status"] = watchedEpisodes >= totalEpisodes ? "completed" : "watching"
                 }
             case .unavailable:
-                // If current state cannot be read, update progress only. Omitting status avoids
-                // turning a remote rewatch into a normal Watching entry on a transient failure.
+
                 values.removeValue(forKey: "status")
             }
         }
@@ -2581,16 +7891,21 @@ final class TrackerManager: NSObject, ObservableObject {
                 account: account,
                 mediaPath: "anime",
                 mediaId: malId,
-                values: values
+                values: values,
+                owner: owner,
+                requiredAuthority: authority
             )
             if (200...299).contains(response.statusCode) {
                 Logger.shared.log("Synced to MAL: animeId=\(malId) episodes=\(watchedEpisodes) status=\(values["status"] ?? "preserved")", type: "Tracker")
+                return true
             } else {
-                let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
-                Logger.shared.log("MAL anime sync returned status \(response.statusCode): \(bodyPreview)", type: "Tracker")
+                let diagnostic = responseBodyPreview(from: data)
+                Logger.shared.log("MAL anime sync returned status \(response.statusCode): \(diagnostic)", type: "Tracker")
+                return false
             }
         } catch {
             Logger.shared.log("Failed to sync to MAL: \(error.localizedDescription)", type: "Error")
+            return false
         }
     }
 
@@ -2608,7 +7923,8 @@ final class TrackerManager: NSObject, ObservableObject {
     private func fetchMALAnimePlaybackState(
         account: TrackerAccount,
         malId: Int,
-        allowsRefreshRetry: Bool = true
+        owner: UUID,
+        authority: TrackerOperationAuthority
     ) async -> MALAnimePlaybackStateLookup {
         struct Response: Decodable {
             let numEpisodes: Int?
@@ -2629,20 +7945,21 @@ final class TrackerManager: NSObject, ObservableObject {
         }
 
         do {
-            let account = try await refreshedMALAccountIfNeeded(account)
             let url = URL(string: "https://api.myanimelist.net/v2/anime/\(malId)?fields=my_list_status,num_episodes")!
             var request = URLRequest(url: url)
             request.setValue("Bearer \(account.accessToken)", forHTTPHeaderField: "Authorization")
 
-            let (data, response) = try await sendTrackerRequest(request, provider: .myAnimeList)
-            if response.statusCode == 401, allowsRefreshRetry {
-                let refreshed = try await refreshedMALAccountIfNeeded(account, force: true)
-                return await fetchMALAnimePlaybackState(
-                    account: refreshed,
-                    malId: malId,
-                    allowsRefreshRetry: false
-                )
-            }
+            let (data, response) = try await sendTrackerRequest(
+                request,
+                provider: .myAnimeList,
+                reportAuthenticationFailure: false,
+                beforeAttempt: { [weak self] in
+                    guard let self else { throw CancellationError() }
+                    guard await self.operationAuthorityIsCurrent(authority) else {
+                        throw CancellationError()
+                    }
+                }
+            )
             guard response.statusCode == 200 else {
                 Logger.shared.log("MAL rewatch status lookup returned \(response.statusCode) for animeId=\(malId); preserving server status", type: "Tracker")
                 return .unavailable
@@ -2661,7 +7978,14 @@ final class TrackerManager: NSObject, ObservableObject {
 #endif
 
 #if !os(tvOS)
-    private func saveMALMangaProgress(account: TrackerAccount, malId: Int, chaptersRead: Int, status: String) async {
+    private func saveMALMangaProgress(
+        account: TrackerAccount,
+        malId: Int,
+        chaptersRead: Int,
+        status: String,
+        owner: UUID,
+        requiredAuthority: TrackerOperationAuthority? = nil
+    ) async {
         let values = [
             "status": status,
             "num_chapters_read": String(max(chaptersRead, 0))
@@ -2672,20 +7996,29 @@ final class TrackerManager: NSObject, ObservableObject {
                 account: account,
                 mediaPath: "manga",
                 mediaId: malId,
-                values: values
+                values: values,
+                owner: owner,
+                requiredAuthority: requiredAuthority
             )
             if (200...299).contains(response.statusCode) {
                 ReaderLogger.shared.log("Synced manga to MAL: mangaId=\(malId) chapters=\(chaptersRead) status=\(status)", type: "Tracker")
             } else {
-                let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
-                ReaderLogger.shared.log("MAL manga sync returned status \(response.statusCode): \(bodyPreview)", type: "Tracker")
+                let diagnostic = responseBodyPreview(from: data)
+                ReaderLogger.shared.log("MAL manga sync returned status \(response.statusCode): \(diagnostic)", type: "Tracker")
             }
         } catch {
             ReaderLogger.shared.log("Failed to sync manga to MAL: \(error.localizedDescription)", type: "Error")
         }
     }
 
-    private func saveMALMangaRatingAndNote(account: TrackerAccount, malId: Int, rating: Double, note: String?) async {
+    private func saveMALMangaRatingAndNote(
+        account: TrackerAccount,
+        malId: Int,
+        rating: Double,
+        note: String?,
+        owner: UUID,
+        requiredAuthority: TrackerOperationAuthority? = nil
+    ) async {
         let clampedRating = Self.normalizedRatingOutOf10(rating)
         let malRating = Self.myAnimeListScore(from: clampedRating)
         let displayRating = Self.ratingDisplayString(clampedRating)
@@ -2701,7 +8034,9 @@ final class TrackerManager: NSObject, ObservableObject {
                 account: account,
                 mediaPath: "manga",
                 mediaId: malId,
-                values: values
+                values: values,
+                owner: owner,
+                requiredAuthority: requiredAuthority
             )
             if (200...299).contains(response.statusCode) {
                 let malSuffix = malRating == Int(clampedRating) && clampedRating.truncatingRemainder(dividingBy: 1) == 0
@@ -2709,15 +8044,14 @@ final class TrackerManager: NSObject, ObservableObject {
                     : " as \(malRating)/10"
                 ReaderLogger.shared.log("Synced MAL manga rating \(displayRating)/10\(malSuffix)\(note == nil ? "" : " and comments") for mangaId \(malId)", type: "Tracker")
             } else {
-                let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
-                ReaderLogger.shared.log("MAL manga rating sync returned status \(response.statusCode): \(bodyPreview)", type: "Tracker")
+                let diagnostic = responseBodyPreview(from: data)
+                ReaderLogger.shared.log("MAL manga rating sync returned status \(response.statusCode): \(diagnostic)", type: "Tracker")
             }
         } catch {
             ReaderLogger.shared.log("Failed to sync MAL manga rating \(malId): \(error.localizedDescription)", type: "Error")
         }
     }
 #endif
-
 
     private enum TraktMediaType: String {
         case show
@@ -2751,9 +8085,6 @@ final class TrackerManager: NSObject, ObservableObject {
         let show: TraktShow?
     }
 
-    // Trakt's `/shows/:id/comments/:sort` and `/movies/:id/comments/:sort` endpoints
-    // return a flat array of comment objects, where `comment` is the text string and
-    // `user` is nested inside each element (NOT a `{ comment: {...}, user: {...} }` wrapper).
     private struct TraktCommentResponse: Decodable {
         let id: Int
         let comment: String
@@ -2888,8 +8219,20 @@ final class TrackerManager: NSObject, ObservableObject {
         episodeNumber: Int,
         progress: Double,
         playbackContext: EpisodePlaybackContext? = nil,
-        force: Bool = false
+        force: Bool = false,
+        requiredOwner: UUID? = nil,
+        progressAuthority: ProgressManager.ProfileMutationAuthority? = nil
     ) {
+        guard let owner = resolvedPlaybackOperationOwner(
+            requiredOwner: requiredOwner,
+            progressAuthority: progressAuthority
+        ) else {
+            Logger.shared.log(
+                "Skipping Trakt episode progress because its originating profile is no longer active",
+                type: "Tracker"
+            )
+            return
+        }
         guard !isBackupRestoreSyncSuppressed(), trackerState.syncEnabled else { return }
         guard progress.isFinite, progress > 0 else { return }
         guard let account = trackerState.getAccount(for: .trakt) else { return }
@@ -2901,7 +8244,9 @@ final class TrackerManager: NSObject, ObservableObject {
                 for: .episode(showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber),
                 progress: progress,
                 playbackContext: playbackContext,
-                force: force
+                force: force,
+                requiredOwner: owner,
+                progressAuthority: progressAuthority
             )
             return
         }
@@ -2915,34 +8260,69 @@ final class TrackerManager: NSObject, ObservableObject {
 
         let keySeason = resolved?.season ?? seasonNumber
         let keyEpisode = resolved?.episode ?? episodeNumber
-        let key = "episode|\(showId)|\(keySeason)|\(keyEpisode)"
+        let key = "\(owner.uuidString.lowercased())|episode|\(showId)|\(keySeason)|\(keyEpisode)"
         guard shouldStartTraktPlaybackSync(key: key, force: force) else { return }
+        let authority = operationAuthority(
+            for: account,
+            owner: owner,
+            progressAuthority: progressAuthority
+        )
         Task {
             await syncToTrakt(
                 account: account,
                 showId: showId,
                 resolved: resolved,
                 progress: progress,
-                playbackContext: playbackContext
+                playbackContext: playbackContext,
+                owner: owner,
+                authority: authority
             )
         }
     }
 
-    func syncTraktMoviePlaybackProgress(movieId: Int, progress: Double, force: Bool = false) {
+    func syncTraktMoviePlaybackProgress(
+        movieId: Int,
+        progress: Double,
+        force: Bool = false,
+        requiredOwner: UUID? = nil,
+        progressAuthority: ProgressManager.ProfileMutationAuthority? = nil
+    ) {
+        guard let owner = resolvedPlaybackOperationOwner(
+            requiredOwner: requiredOwner,
+            progressAuthority: progressAuthority
+        ) else {
+            Logger.shared.log(
+                "Skipping Trakt movie progress because its originating profile is no longer active",
+                type: "Tracker"
+            )
+            return
+        }
         guard !isBackupRestoreSyncSuppressed(), trackerState.syncEnabled else { return }
         guard progress.isFinite, progress > 0 else { return }
         guard let account = trackerState.getAccount(for: .trakt) else { return }
 
         if trackerState.liveTraktScrobbling {
             guard force else { return }
-            scrobbleTraktPlayback(.stop, for: .movie(id: movieId, title: ""), progress: progress, force: force)
+            scrobbleTraktPlayback(
+                .stop,
+                for: .movie(id: movieId, title: ""),
+                progress: progress,
+                force: force,
+                requiredOwner: owner,
+                progressAuthority: progressAuthority
+            )
             return
         }
 
-        let key = "movie|\(movieId)"
+        let key = "\(owner.uuidString.lowercased())|movie|\(movieId)"
         guard shouldStartTraktPlaybackSync(key: key, force: force) else { return }
+        let authority = operationAuthority(
+            for: account,
+            owner: owner,
+            progressAuthority: progressAuthority
+        )
         Task {
-            await syncMovieToTrakt(account: account, movieId: movieId, progress: progress)
+            await syncMovieToTrakt(account: account, movieId: movieId, progress: progress, owner: owner, authority: authority)
         }
     }
 
@@ -2951,8 +8331,20 @@ final class TrackerManager: NSObject, ObservableObject {
         for mediaInfo: MediaInfo,
         progress: Double,
         playbackContext: EpisodePlaybackContext? = nil,
-        force: Bool = false
+        force: Bool = false,
+        requiredOwner: UUID? = nil,
+        progressAuthority: ProgressManager.ProfileMutationAuthority? = nil
     ) {
+        guard let owner = resolvedPlaybackOperationOwner(
+            requiredOwner: requiredOwner,
+            progressAuthority: progressAuthority
+        ) else {
+            Logger.shared.log(
+                "Skipping Trakt scrobble because its originating profile is no longer active",
+                type: "Tracker"
+            )
+            return
+        }
         guard !isBackupRestoreSyncSuppressed(),
               trackerState.syncEnabled,
               trackerState.liveTraktScrobbling else { return }
@@ -2962,41 +8354,94 @@ final class TrackerManager: NSObject, ObservableObject {
             guard normalizedProgress > 0 else { return }
         }
         guard let account = trackerState.getAccount(for: .trakt) else { return }
-        guard let key = traktScrobbleKey(for: mediaInfo, playbackContext: playbackContext) else { return }
-        guard shouldQueueTraktScrobble(action: action, key: key, progress: normalizedProgress, force: force) else { return }
+        guard let mediaKey = traktScrobbleKey(for: mediaInfo, playbackContext: playbackContext) else { return }
+        let key = "\(owner.uuidString.lowercased())|\(mediaKey)"
+        guard let pendingID = shouldQueueTraktScrobble(
+            action: action,
+            key: key,
+            progress: normalizedProgress,
+            force: force
+        ) else { return }
+        let authority = operationAuthority(
+            for: account,
+            owner: owner,
+            progressAuthority: progressAuthority
+        )
 
         Task {
-            let sent = await sendTraktScrobble(
+            let outcome = await sendTraktScrobble(
                 action: action,
                 account: account,
                 mediaInfo: mediaInfo,
                 progress: normalizedProgress,
-                playbackContext: playbackContext
+                playbackContext: playbackContext,
+                owner: owner,
+                authority: authority
             )
-            finishTraktScrobble(action: action, key: key, progress: normalizedProgress, sent: sent)
+            finishTraktScrobble(
+                action: action,
+                key: key,
+                progress: normalizedProgress,
+                pendingID: pendingID,
+                outcome: outcome
+            )
         }
     }
 
-    func fetchTraktContinueWatchingItems() async -> [ContinueWatchingItem] {
-        guard let account = trackerState.getAccount(for: .trakt) else {
+    @MainActor
+    func fetchTraktContinueWatchingItems(
+        requiredOwner: UUID
+    ) async -> [ContinueWatchingItem] {
+        let owner = activeProfileID
+        guard requiredOwner == owner,
+              ProfileManager.shared.isStillActive(owner),
+              let account = trackerState.getAccount(for: .trakt) else {
             return []
         }
+        let authority = operationAuthority(for: account, owner: owner)
 
-        if let cached = cachedTraktContinueWatchingItems(for: account) {
+        if let cached = cachedTraktContinueWatchingItems(for: account, owner: owner) {
+            guard await operationAuthorityIsCurrent(authority) else { return [] }
             return cached
         }
 
         do {
-            let refreshedAccount = try await refreshedTraktAccountIfNeeded(account)
+            let refreshedAccount = try await refreshedTraktAccountIfNeeded(
+                account,
+                requiredOwner: owner,
+                requiredAuthority: authority
+            )
+            let requestAuthority = authority.replacingCredential(with: refreshedAccount)
+            guard await operationAuthorityIsCurrent(requestAuthority) else {
+                throw CancellationError()
+            }
             guard !traktClientId.isEmpty else {
                 Logger.shared.log("Skipping Trakt Continue Watching fetch because TRAKT_CLIENT_ID is not configured.", type: "Tracker")
                 return []
             }
 
-            async let upNextData = fetchTraktPlaybackData(path: "sync/progress/up_next", account: refreshedAccount)
-            async let episodeData = fetchTraktPlaybackData(path: "sync/playback/episodes", account: refreshedAccount)
-            async let movieData = fetchTraktPlaybackData(path: "sync/playback/movies", account: refreshedAccount)
+            async let upNextData = fetchTraktPlaybackData(
+                path: "sync/progress/up_next",
+                account: refreshedAccount,
+                owner: owner,
+                requiredAuthority: requestAuthority
+            )
+            async let episodeData = fetchTraktPlaybackData(
+                path: "sync/playback/episodes",
+                account: refreshedAccount,
+                owner: owner,
+                requiredAuthority: requestAuthority
+            )
+            async let movieData = fetchTraktPlaybackData(
+                path: "sync/playback/movies",
+                account: refreshedAccount,
+                owner: owner,
+                requiredAuthority: requestAuthority
+            )
             let (upNextPlaybackData, episodePlaybackData, moviePlaybackData) = try await (upNextData, episodeData, movieData)
+            guard await operationAuthorityIsCurrent(requestAuthority) else {
+                throw CancellationError()
+            }
 
             let shows: [ContinueWatchingItem] = try JSONDecoder().decode([TraktUpNextResponse].self, from: upNextPlaybackData).compactMap { item -> ContinueWatchingItem? in
                 guard let tmdbId = item.show.ids.tmdb,
@@ -3068,18 +8513,28 @@ final class TrackerManager: NSObject, ObservableObject {
                 )
             }
             let items = episodes + shows + movies
-            storeTraktContinueWatchingItems(items, for: refreshedAccount)
+
+            guard await operationAuthorityIsCurrent(requestAuthority) else {
+                throw CancellationError()
+            }
+            storeTraktContinueWatchingItems(items, for: refreshedAccount, owner: owner)
             return items
+        } catch is CancellationError {
+            return []
         } catch {
             Logger.shared.log("Failed to fetch Trakt Continue Watching: \(error.localizedDescription)", type: "Error")
             return []
         }
     }
 
-    private func cachedTraktContinueWatchingItems(for account: TrackerAccount) -> [ContinueWatchingItem]? {
+    private func cachedTraktContinueWatchingItems(
+        for account: TrackerAccount,
+        owner: UUID
+    ) -> [ContinueWatchingItem]? {
         let now = Date()
         return traktContinueWatchingCacheQueue.sync {
             guard let cache = traktContinueWatchingCache,
+                  cache.owner == owner,
                   cache.accountUserId == account.userId,
                   now.timeIntervalSince(cache.fetchedAt) < traktContinueWatchingCacheTTL else {
                 return nil
@@ -3088,9 +8543,13 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    private func storeTraktContinueWatchingItems(_ items: [ContinueWatchingItem], for account: TrackerAccount) {
+    private func storeTraktContinueWatchingItems(
+        _ items: [ContinueWatchingItem],
+        for account: TrackerAccount,
+        owner: UUID
+    ) {
         traktContinueWatchingCacheQueue.sync {
-            traktContinueWatchingCache = (account.userId, Date(), items)
+            traktContinueWatchingCache = (owner, account.userId, Date(), items)
         }
     }
 
@@ -3279,7 +8738,7 @@ final class TrackerManager: NSObject, ObservableObject {
                 }
             }
 
-            let filtered = TMDBContentFilter.shared.filterSearchResults(resolved)
+            let filtered = await TMDBContentFilter.shared.filterSearchResultsResolvingRatings(resolved)
             storeTraktRelated(filtered, key: cacheKey)
             return filtered
         } catch {
@@ -3288,7 +8747,18 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    private func fetchTraktPlaybackData(path: String, account: TrackerAccount, allowsRefreshRetry: Bool = true) async throws -> Data {
+    private func fetchTraktPlaybackData(
+        path: String,
+        account: TrackerAccount,
+        allowsRefreshRetry: Bool = true,
+        owner: UUID? = nil,
+        requiredAuthority: TrackerOperationAuthority? = nil
+    ) async throws -> Data {
+        let owner = owner ?? activeProfileID
+        let authority = requiredAuthority ?? operationAuthority(for: account, owner: owner)
+        guard authority.owner == owner, authority.matches(account) else {
+            throw CancellationError()
+        }
         let url = URL(string: "https://api.trakt.tv/\(path)")!
         var request = URLRequest(url: url)
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -3296,20 +8766,53 @@ final class TrackerManager: NSObject, ObservableObject {
         request.setValue("Bearer \(account.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("2", forHTTPHeaderField: "trakt-api-version")
 
-        let (data, response) = try await sendTrackerRequest(request, provider: .trakt, reportRateLimitStatus: false)
+        let (data, response) = try await sendTrackerRequest(
+            request,
+            provider: .trakt,
+            reportRateLimitStatus: false,
+            reportAuthenticationFailure: !allowsRefreshRetry,
+            beforeAttempt: { [weak self] in
+                guard let self,
+                      await self.operationAuthorityIsCurrent(authority) else {
+                    throw CancellationError()
+                }
+            }
+        )
         let statusCode = response.statusCode
         if statusCode == 401, allowsRefreshRetry {
-            let refreshedAccount = try await refreshedTraktAccountIfNeeded(account, force: true)
-            return try await fetchTraktPlaybackData(path: path, account: refreshedAccount, allowsRefreshRetry: false)
+            let refreshedAccount = try await refreshedTraktAccountIfNeeded(
+                account,
+                force: true,
+                requiredOwner: owner,
+                requiredAuthority: authority
+            )
+            return try await fetchTraktPlaybackData(
+                path: path,
+                account: refreshedAccount,
+                allowsRefreshRetry: false,
+                owner: owner,
+                requiredAuthority: authority.replacingCredential(with: refreshedAccount)
+            )
         }
         guard statusCode == 200 else {
-            let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
-            throw NSError(domain: "Trakt", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Trakt \(path) returned status \(statusCode): \(bodyPreview)"])
+            let diagnostic = responseBodyPreview(from: data)
+            throw NSError(domain: "Trakt", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Trakt \(path) returned status \(statusCode): \(diagnostic)"])
         }
         return data
     }
 
-    private func fetchAllTraktPages(path: String, account: TrackerAccount, limit: Int = 100) async throws -> [Data] {
+    private func fetchAllTraktPages(
+        path: String,
+        account: TrackerAccount,
+        limit: Int = 100,
+        owner: UUID? = nil,
+        requiredAuthority: TrackerOperationAuthority? = nil
+    ) async throws -> [Data] {
+        let owner = owner ?? activeProfileID
+        let authority = requiredAuthority ?? operationAuthority(for: account, owner: owner)
+        guard authority.owner == owner, authority.matches(account) else {
+            throw CancellationError()
+        }
         var pages: [Data] = []
         var page = 1
 
@@ -3317,7 +8820,9 @@ final class TrackerManager: NSObject, ObservableObject {
             let separator = path.contains("?") ? "&" : "?"
             let data = try await fetchTraktPlaybackData(
                 path: "\(path)\(separator)page=\(page)&limit=\(limit)",
-                account: account
+                account: account,
+                owner: owner,
+                requiredAuthority: authority
             )
             pages.append(data)
 
@@ -3327,16 +8832,38 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    private func fetchTraktData(path: String, account: TrackerAccount? = nil, allowsRefreshRetry: Bool = true) async throws -> Data {
+    private func fetchTraktData(
+        path: String,
+        account: TrackerAccount? = nil,
+        allowsRefreshRetry: Bool = true,
+        owner requiredOwner: UUID? = nil,
+        requiredAuthority: TrackerOperationAuthority? = nil
+    ) async throws -> Data {
         guard !traktClientId.isEmpty else {
             throw NSError(domain: "Trakt", code: -1, userInfo: [NSLocalizedDescriptionKey: "TRAKT_CLIENT_ID is not configured."])
         }
 
         let refreshedAccount: TrackerAccount?
+        let requestAuthority: TrackerOperationAuthority?
+        let owner: UUID?
         if let account {
-            refreshedAccount = try await refreshedTraktAccountIfNeeded(account)
+            let resolvedOwner = requiredOwner ?? activeProfileID
+            let authority = requiredAuthority ?? operationAuthority(
+                for: account,
+                owner: resolvedOwner
+            )
+            let refreshed = try await refreshedTraktAccountIfNeeded(
+                account,
+                requiredOwner: resolvedOwner,
+                requiredAuthority: authority
+            )
+            refreshedAccount = refreshed
+            requestAuthority = authority.replacingCredential(with: refreshed)
+            owner = resolvedOwner
         } else {
             refreshedAccount = nil
+            requestAuthority = nil
+            owner = nil
         }
 
         let url = URL(string: "https://api.trakt.tv/\(path)")!
@@ -3348,14 +8875,38 @@ final class TrackerManager: NSObject, ObservableObject {
             request.setValue("Bearer \(refreshedAccount.accessToken)", forHTTPHeaderField: "Authorization")
         }
 
-        let (data, response) = try await sendTrackerRequest(request, provider: .trakt, reportRateLimitStatus: false)
+        let (data, response) = try await sendTrackerRequest(
+            request,
+            provider: .trakt,
+            reportRateLimitStatus: false,
+            reportAuthenticationFailure: !allowsRefreshRetry,
+            beforeAttempt: { [weak self] in
+                guard let requestAuthority else { return }
+                guard let self,
+                      await self.operationAuthorityIsCurrent(requestAuthority) else {
+                    throw CancellationError()
+                }
+            }
+        )
         if response.statusCode == 401, let account = refreshedAccount, allowsRefreshRetry {
-            let forcedRefresh = try await refreshedTraktAccountIfNeeded(account, force: true)
-            return try await fetchTraktData(path: path, account: forcedRefresh, allowsRefreshRetry: false)
+            guard let owner, let requestAuthority else { throw CancellationError() }
+            let forcedRefresh = try await refreshedTraktAccountIfNeeded(
+                account,
+                force: true,
+                requiredOwner: owner,
+                requiredAuthority: requestAuthority
+            )
+            return try await fetchTraktData(
+                path: path,
+                account: forcedRefresh,
+                allowsRefreshRetry: false,
+                owner: owner,
+                requiredAuthority: requestAuthority.replacingCredential(with: forcedRefresh)
+            )
         }
         guard (200...299).contains(response.statusCode) else {
-            let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
-            throw NSError(domain: "Trakt", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "Trakt \(path) returned status \(response.statusCode): \(bodyPreview)"])
+            let diagnostic = responseBodyPreview(from: data)
+            throw NSError(domain: "Trakt", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "Trakt \(path) returned status \(response.statusCode): \(diagnostic)"])
         }
         return data
     }
@@ -3511,13 +9062,28 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     func removeTraktContinueWatchingItem(_ playbackId: Int, completion: (() -> Void)? = nil) {
+        let owner = ProfileManager.shared.activeProfileID
         guard let account = trackerState.getAccount(for: .trakt) else { return }
+        let authority = operationAuthority(for: account, owner: owner)
 
         Task {
             do {
-                let refreshedAccount = try await refreshedTraktAccountIfNeeded(account)
+                let refreshedAccount = try await refreshedTraktAccountIfNeeded(
+                    account,
+                    requiredOwner: owner,
+                    requiredAuthority: authority
+                )
+                guard refreshedAccount.userId == account.userId else {
+                    Logger.shared.log("Skipped Trakt playback removal \(playbackId); the connected account changed while it was queued", type: "Tracker")
+                    return
+                }
                 guard !traktClientId.isEmpty else { return }
-                try await deleteTraktPlaybackItem(playbackId, account: refreshedAccount)
+                try await deleteTraktPlaybackItem(
+                    playbackId,
+                    account: refreshedAccount,
+                    owner: owner,
+                    authority: authority.replacingCredential(with: refreshedAccount)
+                )
                 invalidateTraktContinueWatchingCache()
                 if let completion {
                     await MainActor.run {
@@ -3531,11 +9097,21 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     func removeTraktUpNextShow(tmdbId: Int, completion: (() -> Void)? = nil) {
+        let owner = ProfileManager.shared.activeProfileID
         guard let account = trackerState.getAccount(for: .trakt) else { return }
+        let authority = operationAuthority(for: account, owner: owner)
 
         Task {
             do {
-                let refreshedAccount = try await refreshedTraktAccountIfNeeded(account)
+                let refreshedAccount = try await refreshedTraktAccountIfNeeded(
+                    account,
+                    requiredOwner: owner,
+                    requiredAuthority: authority
+                )
+                guard refreshedAccount.userId == account.userId else {
+                    Logger.shared.log("Skipped Trakt Up Next hide tmdb=\(tmdbId); the connected account changed while it was queued", type: "Tracker")
+                    return
+                }
                 guard !traktClientId.isEmpty else { return }
                 let payload: [String: Any] = [
                     "shows": [
@@ -3546,7 +9122,13 @@ final class TrackerManager: NSObject, ObservableObject {
                         ]
                     ]
                 ]
-                _ = try await postTraktJSON(path: "users/hidden/progress_watched", account: refreshedAccount, payload: payload)
+                _ = try await postTraktJSON(
+                    path: "users/hidden/progress_watched",
+                    account: refreshedAccount,
+                    payload: payload,
+                    owner: owner,
+                    requiredAuthority: authority.replacingCredential(with: refreshedAccount)
+                )
                 invalidateTraktContinueWatchingCache()
                 Logger.shared.log("Removed Trakt Up Next show tmdb=\(tmdbId)", type: "Tracker")
                 if let completion {
@@ -3560,7 +9142,13 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    private func deleteTraktPlaybackItem(_ playbackId: Int, account: TrackerAccount, allowsRefreshRetry: Bool = true) async throws {
+    private func deleteTraktPlaybackItem(
+        _ playbackId: Int,
+        account: TrackerAccount,
+        allowsRefreshRetry: Bool = true,
+        owner: UUID,
+        authority: TrackerOperationAuthority
+    ) async throws {
         let url = URL(string: "https://api.trakt.tv/sync/playback/\(playbackId)")!
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
@@ -3569,15 +9157,44 @@ final class TrackerManager: NSObject, ObservableObject {
         request.setValue("Bearer \(account.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("2", forHTTPHeaderField: "trakt-api-version")
 
-        let (data, response) = try await sendTrackerRequest(request, provider: .trakt, reportRateLimitStatus: false)
+        let (data, response) = try await sendTrackerRequest(
+            request,
+            provider: .trakt,
+            reportRateLimitStatus: false,
+            reportAuthenticationFailure: !allowsRefreshRetry,
+            beforeAttempt: { [weak self] in
+                guard let self else { throw CancellationError() }
+                guard await self.operationAuthorityIsCurrent(authority) else {
+                    throw CancellationError()
+                }
+            }
+        )
         let statusCode = response.statusCode
         if statusCode == 401, allowsRefreshRetry {
-            let refreshedAccount = try await refreshedTraktAccountIfNeeded(account, force: true)
-            return try await deleteTraktPlaybackItem(playbackId, account: refreshedAccount, allowsRefreshRetry: false)
+            let refreshedAccount = try await refreshedTraktAccountIfNeeded(
+                account,
+                force: true,
+                requiredOwner: owner,
+                requiredAuthority: authority
+            )
+            guard refreshedAccount.userId == account.userId else {
+                Logger.shared.log(
+                    "Skipped Trakt playback remove retry for \(playbackId); the connected account changed while the request was in flight",
+                    type: "Tracker"
+                )
+                throw CancellationError()
+            }
+            return try await deleteTraktPlaybackItem(
+                playbackId,
+                account: refreshedAccount,
+                allowsRefreshRetry: false,
+                owner: owner,
+                authority: authority.replacingCredential(with: refreshedAccount)
+            )
         }
         guard (200...299).contains(statusCode) else {
-            let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
-            throw NSError(domain: "Trakt", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Trakt playback remove returned status \(statusCode): \(bodyPreview)"])
+            let diagnostic = responseBodyPreview(from: data)
+            throw NSError(domain: "Trakt", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Trakt playback remove returned status \(statusCode): \(diagnostic)"])
         }
     }
 
@@ -3618,9 +9235,9 @@ final class TrackerManager: NSObject, ObservableObject {
         key: String,
         progress: Double,
         force: Bool
-    ) -> Bool {
+    ) -> UUID? {
         let now = Date()
-        return traktScrobbleQueue.sync {
+        return traktScrobbleQueue.sync { () -> UUID? in
             traktScrobbleLastStampByKey = traktScrobbleLastStampByKey.filter {
                 now.timeIntervalSince($0.value.sentAt) < 10 * 60
             }
@@ -3636,26 +9253,26 @@ final class TrackerManager: NSObject, ObservableObject {
                    failure.action == action,
                    now.timeIntervalSince(failure.failedAt) < traktScrobbleFailureCooldown,
                    abs(failure.progress - progress) <= traktScrobbleProgressWindow {
-                    return false
+                    return nil
                 }
 
                 if action == .start, traktScrobbleLastActionByKey[key] == .start {
                     guard let stamp = traktScrobbleLastStampByKey[key] else {
-                        return false
+                        return nil
                     }
                     if now.timeIntervalSince(stamp.sentAt) < traktScrobbleStartRefreshMinimumInterval {
-                        return false
+                        return nil
                     }
                 }
 
                 if let pending = traktScrobblePendingByKey[key] {
                     if action == .start, pending.action == .start {
-                        return false
+                        return nil
                     }
                     if pending.action == action,
                        now.timeIntervalSince(pending.queuedAt) < traktScrobbleMinimumInterval,
                        abs(pending.progress - progress) <= traktScrobbleProgressWindow {
-                        return false
+                        return nil
                     }
                 }
 
@@ -3663,7 +9280,7 @@ final class TrackerManager: NSObject, ObservableObject {
                    stamp.action == action,
                    now.timeIntervalSince(stamp.sentAt) < traktScrobbleMinimumInterval,
                    abs(stamp.progress - progress) <= traktScrobbleProgressWindow {
-                    return false
+                    return nil
                 }
 
                 if action != .start,
@@ -3671,12 +9288,13 @@ final class TrackerManager: NSObject, ObservableObject {
                    lastAction == action,
                    let stamp = traktScrobbleLastStampByKey[key],
                    abs(stamp.progress - progress) <= traktScrobbleProgressWindow {
-                    return false
+                    return nil
                 }
             }
 
-            traktScrobblePendingByKey[key] = (action, progress, now)
-            return true
+            let pendingID = UUID()
+            traktScrobblePendingByKey[key] = (pendingID, action, progress, now)
+            return pendingID
         }
     }
 
@@ -3689,25 +9307,62 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
+    private func abandonPendingTraktScrobbles(for owner: UUID) {
+        let ownerPrefix = owner.uuidString.lowercased() + "|"
+        traktScrobbleQueue.sync {
+            traktScrobblePendingByKey = traktScrobblePendingByKey.filter {
+                !$0.key.hasPrefix(ownerPrefix)
+            }
+        }
+    }
+
+    private enum TraktScrobbleSendOutcome {
+        case sent
+        case failed
+        case cancelled
+    }
+
+    static func traktScrobbleCompletionRecordsFailure(
+        sent: Bool,
+        cancelled: Bool
+    ) -> Bool {
+        !sent && !cancelled
+    }
+
+    static func traktScrobblePendingCompletionIsCurrent(
+        expectedID: UUID,
+        currentID: UUID?
+    ) -> Bool {
+        expectedID == currentID
+    }
+
     private func finishTraktScrobble(
         action: TraktScrobbleAction,
         key: String,
         progress: Double,
-        sent: Bool
+        pendingID: UUID,
+        outcome: TraktScrobbleSendOutcome
     ) {
         let now = Date()
         traktScrobbleQueue.sync {
-            if let pending = traktScrobblePendingByKey[key],
-               pending.action == action,
-               abs(pending.progress - progress) <= 0.1 {
-                traktScrobblePendingByKey.removeValue(forKey: key)
-            }
-            if sent {
+            guard let pending = traktScrobblePendingByKey[key],
+                  Self.traktScrobblePendingCompletionIsCurrent(
+                    expectedID: pendingID,
+                    currentID: pending.id
+                  ),
+                  pending.action == action,
+                  abs(pending.progress - progress) <= 0.1 else { return }
+
+            traktScrobblePendingByKey.removeValue(forKey: key)
+            switch outcome {
+            case .sent:
                 traktScrobbleLastActionByKey[key] = action
                 traktScrobbleLastStampByKey[key] = (action, progress, now)
                 traktScrobbleFailureStampByKey.removeValue(forKey: key)
-            } else {
+            case .failed:
                 traktScrobbleFailureStampByKey[key] = (action, progress, now)
+            case .cancelled:
+                break
             }
         }
     }
@@ -3717,17 +9372,31 @@ final class TrackerManager: NSObject, ObservableObject {
         account: TrackerAccount,
         mediaInfo: MediaInfo,
         progress: Double,
-        playbackContext: EpisodePlaybackContext?
-    ) async -> Bool {
+        playbackContext: EpisodePlaybackContext?,
+        owner: UUID,
+        authority: TrackerOperationAuthority
+    ) async -> TraktScrobbleSendOutcome {
         do {
-            let refreshedAccount = try await refreshedTraktAccountIfNeeded(account)
+            let refreshedAccount = try await refreshedTraktAccountIfNeeded(
+                account,
+                requiredOwner: owner,
+                requiredAuthority: authority
+            )
+            guard refreshedAccount.userId == account.userId else {
+                Logger.shared.log("Skipped Trakt scrobble \(action.rawValue); the connected account changed while it was queued", type: "Tracker")
+                return .cancelled
+            }
+            let requestAuthority = authority.replacingCredential(with: refreshedAccount)
             let payload: [String: Any]
 
             switch mediaInfo {
             case .movie(let movieId, let title, _, _):
                 guard let traktId = await getTraktIdFromTmdbId(movieId, mediaType: .movie) else {
+                    guard await operationAuthorityIsCurrent(requestAuthority) else {
+                        return .cancelled
+                    }
                     Logger.shared.log("Skipping Trakt scrobble \(action.rawValue); no Trakt movie ID for TMDB \(movieId)", type: "Tracker")
-                    return false
+                    return .failed
                 }
                 var moviePayload: [String: Any] = ["ids": ["trakt": traktId]]
                 if !title.isEmpty {
@@ -3744,20 +9413,28 @@ final class TrackerManager: NSObject, ObservableObject {
                     episodeNumber: episodeNumber,
                     playbackContext: playbackContext
                 )
-                // When the direct TMDB mapping is unavailable, only proceed if the anime
-                // absolute-number fallback can supply an episode (never for specials).
-                // With the setting off this collapses to the original skip behaviour.
-                guard resolved != nil || canUseTraktAnimeFallback(playbackContext) else { return false }
+
+                guard resolved != nil || canUseTraktAnimeFallback(playbackContext) else { return .failed }
                 guard let traktId = await getTraktIdFromTmdbId(showId, mediaType: .show) else {
+                    guard await operationAuthorityIsCurrent(requestAuthority) else {
+                        return .cancelled
+                    }
                     Logger.shared.log("Skipping Trakt scrobble \(action.rawValue); no Trakt show ID for TMDB \(showId)", type: "Tracker")
-                    return false
+                    return .failed
                 }
                 guard let traktEpisodeId = await resolveTraktEpisodeIdForSync(
                     showTraktId: traktId,
                     resolved: resolved,
                     playbackContext: playbackContext,
-                    account: refreshedAccount
-                ) else { return false }
+                    account: refreshedAccount,
+                    owner: owner,
+                    authority: requestAuthority
+                ) else {
+                    guard await operationAuthorityIsCurrent(requestAuthority) else {
+                        return .cancelled
+                    }
+                    return .failed
+                }
                 payload = [
                     "progress": progress,
                     "episode": ["ids": ["trakt": traktEpisodeId]]
@@ -3769,64 +9446,170 @@ final class TrackerManager: NSObject, ObservableObject {
                 account: refreshedAccount,
                 payload: payload,
                 additionalAcceptedStatusCodes: [409],
-                maxRetries: action == .stop ? 3 : 2
+                maxRetries: action == .stop ? 3 : 2,
+                owner: owner,
+                requiredAuthority: requestAuthority
             )
 
             if action != .start {
                 invalidateTraktContinueWatchingCache()
             }
-            Logger.shared.log("Trakt scrobble \(action.rawValue) sent at \(Int(progress.rounded()))%", type: "Tracker")
-            return true
+            let logPercent = Self.watchSyncLogPercent(progress) ?? 0
+            Logger.shared.log("Trakt scrobble \(action.rawValue) sent at \(logPercent)%", type: "Tracker")
+            return .sent
+        } catch is CancellationError {
+            Logger.shared.log(
+                "Cancelled stale Trakt scrobble \(action.rawValue) without installing a failure cooldown",
+                type: "Tracker"
+            )
+            return .cancelled
         } catch {
             Logger.shared.log("Failed Trakt scrobble \(action.rawValue): \(error.localizedDescription)", type: "Error")
-            return false
+            return .failed
         }
     }
 
-    private func syncToTrakt(account: TrackerAccount, showId: Int, resolved: (season: Int, episode: Int)?, progress: Double, playbackContext: EpisodePlaybackContext?) async {
+    @discardableResult
+    private func syncToTrakt(account: TrackerAccount, showId: Int, resolved: (season: Int, episode: Int)?, progress: Double, playbackContext: EpisodePlaybackContext?, owner: UUID, authority: TrackerOperationAuthority? = nil) async -> Bool {
         do {
-            let refreshedAccount = try await refreshedTraktAccountIfNeeded(account)
+            let authority = authority ?? operationAuthority(for: account, owner: owner)
+            let refreshedAccount = try await refreshedTraktAccountIfNeeded(
+                account,
+                requiredOwner: owner,
+                requiredAuthority: authority
+            )
+            guard refreshedAccount.userId == account.userId else {
+                Logger.shared.log("Skipped Trakt history write for TMDB \(showId); the connected account changed while it was queued", type: "Tracker")
+                return false
+            }
+            let requestAuthority = authority.replacingCredential(with: refreshedAccount)
             guard let traktId = await getTraktIdFromTmdbId(showId, mediaType: .show) else {
                 Logger.shared.log("Could not find Trakt ID for TMDB show ID \(showId)", type: "Tracker")
-                return
+                return false
             }
             guard let traktEpisodeId = await resolveTraktEpisodeIdForSync(
                 showTraktId: traktId,
                 resolved: resolved,
                 playbackContext: playbackContext,
-                account: refreshedAccount
+                account: refreshedAccount,
+                owner: owner,
+                authority: requestAuthority
             ) else {
-                return
+                return false
             }
 
             let logSeason = resolved?.season ?? -1
             let logEpisode = resolved?.episode ?? (playbackContext?.animeAbsoluteEpisodeNumber ?? -1)
             let traktProgress = progress <= 1.0 ? progress * 100.0 : progress
             guard traktProgress >= 85 else {
-                await scrobblePause(account: refreshedAccount, traktEpisodeId: traktEpisodeId, seasonNumber: logSeason, episodeNumber: logEpisode, progress: traktProgress)
-                return
+                return await scrobblePause(account: refreshedAccount, traktEpisodeId: traktEpisodeId, seasonNumber: logSeason, episodeNumber: logEpisode, progress: traktProgress, owner: owner, authority: requestAuthority)
             }
 
-            let watchedAt = ISO8601DateFormatter().string(from: Date())
+            guard let writeAttempt = beginTraktHistoryWrite(
+                owner: owner,
+                accountUserId: refreshedAccount.userId,
+                kind: "episode",
+                traktId: traktEpisodeId
+            ) else {
+                Logger.shared.log(
+                    "Skipped Trakt history write for TMDB \(showId); its retry receipt could not be persisted",
+                    type: "Error"
+                )
+                return false
+            }
+            defer {
+                if writeAttempt.disposition.ownsInFlightClaim {
+                    finishTraktHistoryWriteAttempt(writeAttempt)
+                }
+            }
+            guard await operationAuthorityIsCurrent(requestAuthority) else {
+                abandonTraktHistoryWriteReceipt(writeAttempt)
+                return false
+            }
+
+            var accountForWrite = refreshedAccount
+            switch writeAttempt.disposition {
+            case .suppressConfirmed:
+                Logger.shared.log(
+                    "Skipped recently confirmed Trakt history write for S\(logSeason)E\(logEpisode)",
+                    type: "Tracker"
+                )
+                return true
+            case .deferPending:
+                Logger.shared.log(
+                    "Deferred ambiguous Trakt history write for S\(logSeason)E\(logEpisode) until it can be reconciled",
+                    type: "Tracker"
+                )
+                return false
+            case .reconcile:
+                switch await reconcileTraktHistoryWrite(
+                    writeAttempt,
+                    mediaType: "episodes",
+                    traktId: traktEpisodeId,
+                    account: refreshedAccount,
+                    owner: owner,
+                    authority: requestAuthority
+                ) {
+                case .found:
+                    confirmTraktHistoryWrite(writeAttempt)
+                    Logger.shared.log(
+                        "Reconciled ambiguous Trakt history write for S\(logSeason)E\(logEpisode); no retry sent",
+                        type: "Tracker"
+                    )
+                    return true
+                case .absent(let reconciledAccount):
+                    accountForWrite = reconciledAccount
+                case .unavailable:
+                    Logger.shared.log(
+                        "Kept ambiguous Trakt history write pending for S\(logSeason)E\(logEpisode); history could not prove absence",
+                        type: "Tracker"
+                    )
+                    return false
+                }
+            case .send:
+                break
+            }
+
             let payload: [String: Any] = [
                 "episodes": [
                     [
-                        "watched_at": watchedAt,
+                        "watched_at": traktWatchedAtString(writeAttempt.watchedAt),
                         "ids": ["trakt": traktEpisodeId]
                     ]
                 ]
             ]
-            let data = try await postTraktJSON(path: "sync/history", account: refreshedAccount, payload: payload)
-            Logger.shared.log("Trakt sync response: \(String(data: data, encoding: .utf8) ?? "<non-utf8>")", type: "Tracker")
+            let data = try await postTraktJSON(
+                path: "sync/history",
+                account: accountForWrite,
+                payload: payload,
+                maxRetries: 1,
+                owner: owner,
+                requiredAccountBoundaryGeneration: requestAuthority.accountBoundaryGeneration,
+                requiredAuthority: requestAuthority.replacingCredential(with: accountForWrite)
+            )
+            confirmTraktHistoryWrite(writeAttempt)
+            Logger.shared.log("Trakt sync response: \(responseBodyPreview(from: data))", type: "Tracker")
             Logger.shared.log("Synced to Trakt: S\(logSeason)E\(logEpisode) (watched)", type: "Tracker")
+            return true
         } catch {
             Logger.shared.log("Failed to sync to Trakt: \(error.localizedDescription)", type: "Error")
+            return false
         }
     }
 
-    private func syncMovieToTrakt(account: TrackerAccount, movieId: Int, progress: Double) async {
+    private func syncMovieToTrakt(account: TrackerAccount, movieId: Int, progress: Double, owner: UUID, authority: TrackerOperationAuthority? = nil) async {
         do {
-            let refreshedAccount = try await refreshedTraktAccountIfNeeded(account)
+            let authority = authority ?? operationAuthority(for: account, owner: owner)
+            let refreshedAccount = try await refreshedTraktAccountIfNeeded(
+                account,
+                requiredOwner: owner,
+                requiredAuthority: authority
+            )
+            guard refreshedAccount.userId == account.userId else {
+                Logger.shared.log("Skipped Trakt movie history write for TMDB \(movieId); the connected account changed while it was queued", type: "Tracker")
+                return
+            }
+            let requestAuthority = authority.replacingCredential(with: refreshedAccount)
             guard let traktId = await getTraktIdFromTmdbId(movieId, mediaType: .movie) else {
                 Logger.shared.log("Could not find Trakt ID for TMDB movie ID \(movieId)", type: "Tracker")
                 return
@@ -3845,41 +9628,127 @@ final class TrackerManager: NSObject, ObservableObject {
                     traktId: traktId,
                     title: detail.title,
                     year: year,
-                    progress: traktProgress
+                    progress: traktProgress,
+                    owner: owner,
+                    authority: requestAuthority
                 )
                 return
+            }
+
+            guard let writeAttempt = beginTraktHistoryWrite(
+                owner: owner,
+                accountUserId: refreshedAccount.userId,
+                kind: "movie",
+                traktId: traktId
+            ) else {
+                Logger.shared.log(
+                    "Skipped Trakt movie history write for TMDB \(movieId); its retry receipt could not be persisted",
+                    type: "Error"
+                )
+                return
+            }
+            defer {
+                if writeAttempt.disposition.ownsInFlightClaim {
+                    finishTraktHistoryWriteAttempt(writeAttempt)
+                }
+            }
+            guard await operationAuthorityIsCurrent(requestAuthority) else {
+                abandonTraktHistoryWriteReceipt(writeAttempt)
+                return
+            }
+
+            var accountForWrite = refreshedAccount
+            switch writeAttempt.disposition {
+            case .suppressConfirmed:
+                Logger.shared.log(
+                    "Skipped recently confirmed Trakt movie history write for TMDB \(movieId)",
+                    type: "Tracker"
+                )
+                return
+            case .deferPending:
+                Logger.shared.log(
+                    "Deferred ambiguous Trakt movie history write for TMDB \(movieId) until it can be reconciled",
+                    type: "Tracker"
+                )
+                return
+            case .reconcile:
+                switch await reconcileTraktHistoryWrite(
+                    writeAttempt,
+                    mediaType: "movies",
+                    traktId: traktId,
+                    account: refreshedAccount,
+                    owner: owner,
+                    authority: requestAuthority
+                ) {
+                case .found:
+                    confirmTraktHistoryWrite(writeAttempt)
+                    Logger.shared.log(
+                        "Reconciled ambiguous Trakt movie history write for TMDB \(movieId); no retry sent",
+                        type: "Tracker"
+                    )
+                    return
+                case .absent(let reconciledAccount):
+                    accountForWrite = reconciledAccount
+                case .unavailable:
+                    Logger.shared.log(
+                        "Kept ambiguous Trakt movie history write pending for TMDB \(movieId); history could not prove absence",
+                        type: "Tracker"
+                    )
+                    return
+                }
+            case .send:
+                break
             }
 
             let payload: [String: Any] = [
                 "movies": [
                     [
                         "ids": ["trakt": traktId],
-                        "watched_at": ISO8601DateFormatter().string(from: Date())
+                        "watched_at": traktWatchedAtString(writeAttempt.watchedAt)
                     ]
                 ]
             ]
-            _ = try await postTraktJSON(path: "sync/history", account: refreshedAccount, payload: payload)
+            _ = try await postTraktJSON(
+                path: "sync/history",
+                account: accountForWrite,
+                payload: payload,
+                maxRetries: 1,
+                owner: owner,
+                requiredAccountBoundaryGeneration: requestAuthority.accountBoundaryGeneration,
+                requiredAuthority: requestAuthority.replacingCredential(with: accountForWrite)
+            )
+            confirmTraktHistoryWrite(writeAttempt)
             Logger.shared.log("Synced movie to Trakt: TMDB \(movieId) (watched)", type: "Tracker")
         } catch {
             Logger.shared.log("Failed to sync movie to Trakt: \(error.localizedDescription)", type: "Error")
         }
     }
 
-    private func scrobblePause(account: TrackerAccount, traktEpisodeId: Int, seasonNumber: Int, episodeNumber: Int, progress: Double) async {
+    @discardableResult
+    private func scrobblePause(account: TrackerAccount, traktEpisodeId: Int, seasonNumber: Int, episodeNumber: Int, progress: Double, owner: UUID, authority: TrackerOperationAuthority) async -> Bool {
         let payload: [String: Any] = [
             "progress": normalizedTraktScrobbleProgress(progress),
             "episode": ["ids": ["trakt": traktEpisodeId]]
         ]
 
         do {
-            _ = try await postTraktJSON(path: "scrobble/pause", account: account, payload: payload)
-            Logger.shared.log("Scrobbled to Trakt: S\(seasonNumber)E\(episodeNumber) \(Int(progress))%", type: "Tracker")
+            _ = try await postTraktJSON(
+                path: "scrobble/pause",
+                account: account,
+                payload: payload,
+                owner: owner,
+                requiredAuthority: authority
+            )
+            let logPercent = Self.watchSyncLogPercent(progress) ?? 0
+            Logger.shared.log("Scrobbled to Trakt: S\(seasonNumber)E\(episodeNumber) \(logPercent)%", type: "Tracker")
+            return true
         } catch {
             Logger.shared.log("Failed to scrobble to Trakt: \(error.localizedDescription)", type: "Error")
+            return false
         }
     }
 
-    private func scrobbleMoviePause(account: TrackerAccount, traktId: Int, title: String, year: Int, progress: Double) async {
+    private func scrobbleMoviePause(account: TrackerAccount, traktId: Int, title: String, year: Int, progress: Double, owner: UUID, authority: TrackerOperationAuthority) async {
         do {
             _ = try await postTraktJSON(
                 path: "scrobble/pause",
@@ -3891,15 +9760,19 @@ final class TrackerManager: NSObject, ObservableObject {
                         "year": year,
                         "ids": ["trakt": traktId]
                     ]
-                ]
+                ],
+                owner: owner,
+                requiredAuthority: authority
             )
-            Logger.shared.log("Scrobbled movie to Trakt: \(Int(progress))%", type: "Tracker")
+            let logPercent = Self.watchSyncLogPercent(progress) ?? 0
+            Logger.shared.log("Scrobbled movie to Trakt: \(logPercent)%", type: "Tracker")
         } catch {
             Logger.shared.log("Failed to scrobble movie to Trakt: \(error.localizedDescription)", type: "Error")
         }
     }
 
     private func normalizedTraktScrobbleProgress(_ progress: Double) -> Double {
+        guard progress.isFinite else { return 0 }
         let percent = progress <= 1.0 ? progress * 100.0 : progress
         let clamped = min(max(percent, 0), 100)
         return (clamped * 10).rounded() / 10
@@ -3919,10 +9792,21 @@ final class TrackerManager: NSObject, ObservableObject {
         payload: [String: Any],
         allowsRefreshRetry: Bool = true,
         additionalAcceptedStatusCodes: Set<Int> = [],
-        maxRetries: Int = 2
+        maxRetries: Int = 2,
+        owner: UUID,
+        requiredAccountBoundaryGeneration: UInt64? = nil,
+        requiredAuthority: TrackerOperationAuthority? = nil
     ) async throws -> Data {
         guard !traktClientId.isEmpty else {
             throw NSError(domain: "Trakt", code: -1, userInfo: [NSLocalizedDescriptionKey: "TRAKT_CLIENT_ID is not configured."])
+        }
+
+        let authority = requiredAuthority ?? operationAuthority(for: account, owner: owner)
+        guard authority.owner == owner,
+              authority.matches(account),
+              (requiredAccountBoundaryGeneration == nil
+                || requiredAccountBoundaryGeneration == authority.accountBoundaryGeneration) else {
+            throw CancellationError()
         }
 
         let url = URL(string: "https://api.trakt.tv/\(path)")!
@@ -3939,23 +9823,45 @@ final class TrackerManager: NSObject, ObservableObject {
             request,
             provider: .trakt,
             maxRetries: maxRetries,
-            reportRateLimitStatus: false
+            reportRateLimitStatus: false,
+            reportAuthenticationFailure: !allowsRefreshRetry,
+            beforeAttempt: { [weak self] in
+                guard let self else { throw CancellationError() }
+                guard await self.operationAuthorityIsCurrent(authority) else {
+                    throw CancellationError()
+                }
+            }
         )
         let statusCode = response.statusCode
         if statusCode == 401, allowsRefreshRetry {
-            let refreshedAccount = try await refreshedTraktAccountIfNeeded(account, force: true)
+            let refreshedAccount = try await refreshedTraktAccountIfNeeded(
+                account,
+                force: true,
+                requiredOwner: owner,
+                requiredAuthority: authority
+            )
+            guard refreshedAccount.userId == account.userId else {
+                Logger.shared.log(
+                    "Skipped Trakt \(path) retry; the connected account changed while the request was in flight",
+                    type: "Tracker"
+                )
+                throw CancellationError()
+            }
             return try await postTraktJSON(
                 path: path,
                 account: refreshedAccount,
                 payload: payload,
                 allowsRefreshRetry: false,
                 additionalAcceptedStatusCodes: additionalAcceptedStatusCodes,
-                maxRetries: maxRetries
+                maxRetries: maxRetries,
+                owner: owner,
+                requiredAccountBoundaryGeneration: requiredAccountBoundaryGeneration,
+                requiredAuthority: authority.replacingCredential(with: refreshedAccount)
             )
         }
         guard (200...299).contains(statusCode) || additionalAcceptedStatusCodes.contains(statusCode) else {
-            let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
-            throw NSError(domain: "Trakt", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Trakt \(path) returned status \(statusCode): \(bodyPreview)"])
+            let diagnostic = responseBodyPreview(from: data)
+            throw NSError(domain: "Trakt", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Trakt \(path) returned status \(statusCode): \(diagnostic)"])
         }
         return data
     }
@@ -3980,8 +9886,8 @@ final class TrackerManager: NSObject, ObservableObject {
 
             let (data, response) = try await sendTrackerRequest(request, provider: .trakt, reportRateLimitStatus: false)
             if response.statusCode != 200 {
-                let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
-                Logger.shared.log("Trakt tmdb lookup failed (HTTP \(response.statusCode)): \(bodyPreview)", type: "Tracker")
+                let diagnostic = responseBodyPreview(from: data)
+                Logger.shared.log("Trakt tmdb lookup failed (HTTP \(response.statusCode)): \(diagnostic)", type: "Tracker")
                 return nil
             }
 
@@ -4014,7 +9920,7 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    private func getTraktEpisodeId(showTraktId: Int, seasonNumber: Int, episodeNumber: Int, account: TrackerAccount) async -> Int? {
+    private func getTraktEpisodeId(showTraktId: Int, seasonNumber: Int, episodeNumber: Int, account: TrackerAccount, owner: UUID? = nil, authority: TrackerOperationAuthority? = nil) async -> Int? {
         let cacheKey = "episode|\(showTraktId)|\(seasonNumber)|\(episodeNumber)"
         if let cached = traktMediaIdCacheQueue.sync(execute: { traktMediaIdCache[cacheKey] }) {
             return cached
@@ -4023,7 +9929,9 @@ final class TrackerManager: NSObject, ObservableObject {
         do {
             let data = try await fetchTraktPlaybackData(
                 path: "shows/\(showTraktId)/seasons/\(seasonNumber)/episodes/\(episodeNumber)",
-                account: account
+                account: account,
+                owner: owner,
+                requiredAuthority: authority
             )
             let episode = try JSONDecoder().decode(TraktEpisode.self, from: data)
             guard let traktEpisodeId = episode.ids?.trakt else {
@@ -4045,8 +9953,7 @@ final class TrackerManager: NSObject, ObservableObject {
         let episodes: [TraktEpisode]?
     }
 
-    /// Anime / absolute-numbering fallback.
-    private func traktFlattenedEpisodeId(showTraktId: Int, absoluteEpisodeNumber: Int, account: TrackerAccount) async -> Int? {
+    private func traktFlattenedEpisodeId(showTraktId: Int, absoluteEpisodeNumber: Int, account: TrackerAccount, owner: UUID? = nil, authority: TrackerOperationAuthority? = nil) async -> Int? {
         guard absoluteEpisodeNumber > 0 else { return nil }
         let cacheKey = "episode-abs|\(showTraktId)|\(absoluteEpisodeNumber)"
         if let cached = traktMediaIdCacheQueue.sync(execute: { traktMediaIdCache[cacheKey] }) {
@@ -4056,11 +9963,12 @@ final class TrackerManager: NSObject, ObservableObject {
         do {
             let data = try await fetchTraktPlaybackData(
                 path: "shows/\(showTraktId)/seasons?extended=episodes",
-                account: account
+                account: account,
+                owner: owner,
+                requiredAuthority: authority
             )
             let seasons = try JSONDecoder().decode([TraktSeasonWithEpisodes].self, from: data)
-            // Exclude specials (season 0) and order by (season, episode) so position N
-            // matches absolute episode N.
+
             let ordered = seasons
                 .filter { $0.number > 0 }
                 .sorted { $0.number < $1.number }
@@ -4082,19 +9990,22 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    /// Resolve a Trakt episode id for scrobble/sync.
     private func resolveTraktEpisodeIdForSync(
         showTraktId: Int,
         resolved: (season: Int, episode: Int)?,
         playbackContext: EpisodePlaybackContext?,
-        account: TrackerAccount
+        account: TrackerAccount,
+        owner: UUID? = nil,
+        authority: TrackerOperationAuthority? = nil
     ) async -> Int? {
         if let resolved,
            let directId = await getTraktEpisodeId(
                 showTraktId: showTraktId,
                 seasonNumber: resolved.season,
                 episodeNumber: resolved.episode,
-                account: account
+                account: account,
+                owner: owner,
+                authority: authority
            ) {
             return directId
         }
@@ -4108,12 +10019,12 @@ final class TrackerManager: NSObject, ObservableObject {
         return await traktFlattenedEpisodeId(
             showTraktId: showTraktId,
             absoluteEpisodeNumber: absolute,
-            account: account
+            account: account,
+            owner: owner,
+            authority: authority
         )
     }
 
-    /// Whether the anime absolute-number fallback can supply a Trakt episode when the
-    /// direct TMDB mapping is unavailable (never for specials).
     private func canUseTraktAnimeFallback(_ playbackContext: EpisodePlaybackContext?) -> Bool {
         trackerState.traktAnimeEpisodeMapping
             && playbackContext?.isSpecial != true
@@ -4126,10 +10037,15 @@ final class TrackerManager: NSObject, ObservableObject {
         return fractional.date(from: raw) ?? ISO8601DateFormatter().date(from: raw)
     }
 
-
-    // MARK: - Helper Methods
-
-    private func getMyAnimeListId(fromAniListId aniListId: Int, mediaType: String) async -> Int? {
+    private func getMyAnimeListId(
+        fromAniListId aniListId: Int,
+        mediaType: String,
+        requiredProfileAuthority: TrackerProfileOperationAuthority? = nil
+    ) async -> Int? {
+        if let requiredProfileAuthority,
+           !profileOperationAuthorityIsCurrent(requiredProfileAuthority) {
+            return nil
+        }
         if let cached = cachedMyAnimeListId(fromAniListId: aniListId, mediaType: mediaType) {
             return cached
         }
@@ -4156,8 +10072,19 @@ final class TrackerManager: NSObject, ObservableObject {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: ["query": query])
 
-            let (data, response) = try await sendTrackerRequest(request, provider: .anilist)
-            guard response.statusCode == 200 else { return nil }
+            let (data, response) = try await sendTrackerRequest(
+                request,
+                provider: .anilist,
+                beforeAttempt: { [weak self] in
+                    guard let requiredProfileAuthority else { return }
+                    guard let self,
+                          self.profileOperationAuthorityIsCurrent(requiredProfileAuthority) else {
+                        throw CancellationError()
+                    }
+                }
+            )
+            guard response.statusCode == 200,
+                  requiredProfileAuthority.map(profileOperationAuthorityIsCurrent) ?? true else { return nil }
 
             let decoded = try JSONDecoder().decode(Response.self, from: data)
             if let malId = decoded.data.Media?.idMal {
@@ -4171,7 +10098,15 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    private func getAniListId(fromMALId malId: Int, mediaType: String) async -> Int? {
+    private func getAniListId(
+        fromMALId malId: Int,
+        mediaType: String,
+        requiredProfileAuthority: TrackerProfileOperationAuthority? = nil
+    ) async -> Int? {
+        if let requiredProfileAuthority,
+           !profileOperationAuthorityIsCurrent(requiredProfileAuthority) {
+            return nil
+        }
         if let cached = cachedAniListIds(fromMALIds: [malId], mediaType: mediaType)[malId] {
             return cached
         }
@@ -4198,8 +10133,19 @@ final class TrackerManager: NSObject, ObservableObject {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: ["query": query])
 
-            let (data, response) = try await sendTrackerRequest(request, provider: .anilist)
-            guard response.statusCode == 200 else { return nil }
+            let (data, response) = try await sendTrackerRequest(
+                request,
+                provider: .anilist,
+                beforeAttempt: { [weak self] in
+                    guard let requiredProfileAuthority else { return }
+                    guard let self,
+                          self.profileOperationAuthorityIsCurrent(requiredProfileAuthority) else {
+                        throw CancellationError()
+                    }
+                }
+            )
+            guard response.statusCode == 200,
+                  requiredProfileAuthority.map(profileOperationAuthorityIsCurrent) ?? true else { return nil }
 
             let decoded = try JSONDecoder().decode(Response.self, from: data)
             if let aniListId = decoded.data.Media?.id {
@@ -4258,16 +10204,31 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     func getAniListMediaId(tmdbId: Int) async -> Int? {
-        // Return cached mapping when available
+        await getAniListMediaId(
+            tmdbId: tmdbId,
+            requiredProfileAuthority: nil
+        )
+    }
+
+    private func getAniListMediaId(
+        tmdbId: Int,
+        requiredProfileAuthority: TrackerProfileOperationAuthority?
+    ) async -> Int? {
+
+        if let requiredProfileAuthority,
+           !profileOperationAuthorityIsCurrent(requiredProfileAuthority) {
+            return nil
+        }
+
         if let cachedId = cachedAniListId(for: tmdbId) {
             return cachedId
         }
 
-        // Fetch TMDB metadata to derive candidate titles for AniList search
         var candidateTitles: [String] = []
         var firstAirYear: Int?
 
         if let detail = try? await TMDBService.shared.getTVShowDetails(id: tmdbId) {
+            guard requiredProfileAuthority.map(profileOperationAuthorityIsCurrent) ?? true else { return nil }
             candidateTitles.append(detail.name)
             if let original = detail.originalName { candidateTitles.append(original) }
 
@@ -4276,11 +10237,11 @@ final class TrackerManager: NSObject, ObservableObject {
             }
 
             if let alt = try? await TMDBService.shared.getTVShowAlternativeTitles(id: tmdbId) {
+                guard requiredProfileAuthority.map(profileOperationAuthorityIsCurrent) ?? true else { return nil }
                 candidateTitles.append(contentsOf: alt.results.map { $0.title })
             }
         }
 
-        // Remove empties and duplicates while preserving order
         var seen = Set<String>()
         let titles = candidateTitles.compactMap { title -> String? in
             let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -4290,7 +10251,12 @@ final class TrackerManager: NSObject, ObservableObject {
         }
 
         for title in titles {
-            if let id = await searchAniListId(byTitle: title, seasonYear: firstAirYear) {
+            if let id = await searchAniListId(
+                byTitle: title,
+                seasonYear: firstAirYear,
+                requiredProfileAuthority: requiredProfileAuthority
+            ) {
+                guard requiredProfileAuthority.map(profileOperationAuthorityIsCurrent) ?? true else { return nil }
                 cacheAniListId(tmdbId: tmdbId, anilistId: id)
                 Logger.shared.log("Resolved AniList ID \(id) for TMDB \(tmdbId) using title '" + title + "'", type: "Tracker")
                 return id
@@ -4301,7 +10267,11 @@ final class TrackerManager: NSObject, ObservableObject {
         return nil
     }
 
-    private func searchAniListId(byTitle title: String, seasonYear: Int?) async -> Int? {
+    private func searchAniListId(
+        byTitle title: String,
+        seasonYear: Int?,
+        requiredProfileAuthority: TrackerProfileOperationAuthority? = nil
+    ) async -> Int? {
         let escapedTitle = title.replacingOccurrences(of: "\"", with: "\\\"")
         let seasonFilter = seasonYear.map { ", seasonYear: \($0)" } ?? ""
 
@@ -4330,8 +10300,19 @@ final class TrackerManager: NSObject, ObservableObject {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: ["query": query])
 
-            let (data, response) = try await sendTrackerRequest(request, provider: .anilist)
-            guard response.statusCode == 200 else { return nil }
+            let (data, response) = try await sendTrackerRequest(
+                request,
+                provider: .anilist,
+                beforeAttempt: { [weak self] in
+                    guard let requiredProfileAuthority else { return }
+                    guard let self,
+                          self.profileOperationAuthorityIsCurrent(requiredProfileAuthority) else {
+                        throw CancellationError()
+                    }
+                }
+            )
+            guard response.statusCode == 200,
+                  requiredProfileAuthority.map(profileOperationAuthorityIsCurrent) ?? true else { return nil }
 
             let decoded = try JSONDecoder().decode(Response.self, from: data)
             return decoded.data.Page.media.first?.id
@@ -4353,7 +10334,19 @@ final class TrackerManager: NSObject, ObservableObject {
         )?.aniListId
     }
 
-    private func resolveMangaTrackerMatch(title: String, totalChapters: Int?, format: String?, routeKey: String?, knownAniListId: Int?, knownMALId: Int?) async -> MangaTrackerMatch? {
+    private func resolveMangaTrackerMatch(
+        title: String,
+        totalChapters: Int?,
+        format: String?,
+        routeKey: String?,
+        knownAniListId: Int?,
+        knownMALId: Int?,
+        requiredProfileAuthority: TrackerProfileOperationAuthority? = nil,
+        requiredMALAuthority: TrackerOperationAuthority? = nil
+    ) async -> MangaTrackerMatch? {
+        guard requiredProfileAuthority.map(profileOperationAuthorityIsCurrent) ?? true else {
+            return nil
+        }
         if let knownAniListId, knownAniListId > 0 {
             let match = MangaTrackerMatch(aniListId: knownAniListId, malId: knownMALId, title: title, confidence: 100)
             if let routeKey {
@@ -4363,7 +10356,14 @@ final class TrackerManager: NSObject, ObservableObject {
         }
 
         if let knownMALId, knownMALId > 0, knownAniListId == nil {
-            let aniListId = await getAniListId(fromMALId: knownMALId, mediaType: "MANGA")
+            let aniListId = await getAniListId(
+                fromMALId: knownMALId,
+                mediaType: "MANGA",
+                requiredProfileAuthority: requiredProfileAuthority
+            )
+            guard requiredProfileAuthority.map(profileOperationAuthorityIsCurrent) ?? true else {
+                return nil
+            }
             let match = MangaTrackerMatch(aniListId: aniListId, malId: knownMALId, title: title, confidence: 100)
             if let routeKey {
                 cacheMangaTrackerMatch(match, for: routeKey)
@@ -4376,11 +10376,25 @@ final class TrackerManager: NSObject, ObservableObject {
             return cached
         }
 
-        async let aniListMatch = searchAniListMangaTrackerMatch(title: title, totalChapters: totalChapters, format: format)
-        async let malMatch = searchMALMangaTrackerMatch(title: title, totalChapters: totalChapters, format: format)
+        async let aniListMatch = searchAniListMangaTrackerMatch(
+            title: title,
+            totalChapters: totalChapters,
+            format: format,
+            requiredProfileAuthority: requiredProfileAuthority
+        )
+        async let malMatch = searchMALMangaTrackerMatch(
+            title: title,
+            totalChapters: totalChapters,
+            format: format,
+            requiredProfileAuthority: requiredProfileAuthority,
+            requiredAuthority: requiredMALAuthority
+        )
 
         let resolvedAniList = await aniListMatch
         let resolvedMAL = await malMatch
+        guard requiredProfileAuthority.map(profileOperationAuthorityIsCurrent) ?? true else {
+            return nil
+        }
         let bestConfidence = max(resolvedAniList?.confidence ?? 0, resolvedMAL?.confidence ?? 0)
         let threshold = mangaTrackerConfidenceThreshold(totalChapters: totalChapters)
 
@@ -4393,21 +10407,35 @@ final class TrackerManager: NSObject, ObservableObject {
         let acceptedMAL = resolvedMAL.flatMap { $0.confidence >= threshold ? $0 : nil }
         let match: MangaTrackerMatch?
         if let acceptedAniList, let acceptedMAL {
-            match = await reconciledMangaTrackerMatch(aniListMatch: acceptedAniList, malMatch: acceptedMAL, fallbackTitle: title)
+            match = await reconciledMangaTrackerMatch(
+                aniListMatch: acceptedAniList,
+                malMatch: acceptedMAL,
+                fallbackTitle: title,
+                requiredProfileAuthority: requiredProfileAuthority
+            )
         } else if let acceptedAniList {
             match = acceptedAniList
         } else if let acceptedMAL {
-            match = await mangaTrackerMatchResolvingAniListFromMAL(acceptedMAL)
+            match = await mangaTrackerMatchResolvingAniListFromMAL(
+                acceptedMAL,
+                requiredProfileAuthority: requiredProfileAuthority
+            )
         } else {
             match = nil
         }
 
-        guard let match, match.isUsable else { return nil }
+        guard requiredProfileAuthority.map(profileOperationAuthorityIsCurrent) ?? true,
+              let match, match.isUsable else { return nil }
         cacheMangaTrackerMatch(match, for: cacheKey)
         return match
     }
 
-    private func searchAniListMangaTrackerMatch(title: String, totalChapters: Int?, format: String?) async -> MangaTrackerMatch? {
+    private func searchAniListMangaTrackerMatch(
+        title: String,
+        totalChapters: Int?,
+        format: String?,
+        requiredProfileAuthority: TrackerProfileOperationAuthority? = nil
+    ) async -> MangaTrackerMatch? {
         let escaped = title.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
         let query = """
         query {
@@ -4453,8 +10481,19 @@ final class TrackerManager: NSObject, ObservableObject {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: ["query": query])
 
-            let (data, response) = try await sendTrackerRequest(request, provider: .anilist)
-            guard response.statusCode == 200 else { return nil }
+            let (data, response) = try await sendTrackerRequest(
+                request,
+                provider: .anilist,
+                beforeAttempt: { [weak self] in
+                    guard let requiredProfileAuthority else { return }
+                    guard let self,
+                          self.profileOperationAuthorityIsCurrent(requiredProfileAuthority) else {
+                        throw CancellationError()
+                    }
+                }
+            )
+            guard response.statusCode == 200,
+                  requiredProfileAuthority.map(profileOperationAuthorityIsCurrent) ?? true else { return nil }
 
             let decoded = try JSONDecoder().decode(Response.self, from: data)
             return decoded.data?.Page?.media
@@ -4482,7 +10521,16 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    private func searchMALMangaTrackerMatch(title: String, totalChapters: Int?, format: String?) async -> MangaTrackerMatch? {
+    private func searchMALMangaTrackerMatch(
+        title: String,
+        totalChapters: Int?,
+        format: String?,
+        requiredProfileAuthority: TrackerProfileOperationAuthority? = nil,
+        requiredAuthority: TrackerOperationAuthority? = nil
+    ) async -> MangaTrackerMatch? {
+        guard requiredProfileAuthority.map(profileOperationAuthorityIsCurrent) ?? true else {
+            return nil
+        }
         guard var components = URLComponents(string: "https://api.myanimelist.net/v2/manga") else { return nil }
         components.queryItems = [
             URLQueryItem(name: "q", value: title),
@@ -4518,17 +10566,48 @@ final class TrackerManager: NSObject, ObservableObject {
 
         do {
             var request = URLRequest(url: url)
+            var requestAuthority: TrackerOperationAuthority?
             if !malClientId.isEmpty {
                 request.setValue(malClientId, forHTTPHeaderField: "X-MAL-CLIENT-ID")
-            } else if let account = trackerState.accounts.first(where: { $0.isConnected && $0.service == .myAnimeList }),
+            } else if let requiredAuthority,
+                      let account = trackerState.accounts.first(where: {
+                          $0.isConnected
+                              && $0.service == .myAnimeList
+                              && requiredAuthority.matches($0)
+                      }),
+                      let refreshed = try? await refreshedMALAccountIfNeeded(
+                          account,
+                          requiredOwner: requiredAuthority.owner,
+                          requiredAuthority: requiredAuthority
+                      ) {
+                requestAuthority = requiredAuthority.replacingCredential(with: refreshed)
+                request.setValue("Bearer \(refreshed.accessToken)", forHTTPHeaderField: "Authorization")
+            } else if case nil = requiredAuthority,
+                      let account = trackerState.accounts.first(where: { $0.isConnected && $0.service == .myAnimeList }),
                       let refreshed = try? await refreshedMALAccountIfNeeded(account) {
+                requestAuthority = operationAuthority(for: refreshed, owner: activeProfileID)
                 request.setValue("Bearer \(refreshed.accessToken)", forHTTPHeaderField: "Authorization")
             } else {
                 return nil
             }
 
-            let (data, response) = try await sendTrackerRequest(request, provider: .myAnimeList)
-            guard response.statusCode == 200 else { return nil }
+            let (data, response) = try await sendTrackerRequest(
+                request,
+                provider: .myAnimeList,
+                beforeAttempt: { [weak self] in
+                    guard let self else { throw CancellationError() }
+                    if let requiredProfileAuthority,
+                       !self.profileOperationAuthorityIsCurrent(requiredProfileAuthority) {
+                        throw CancellationError()
+                    }
+                    if let requestAuthority,
+                       !(await self.operationAuthorityIsCurrent(requestAuthority)) {
+                        throw CancellationError()
+                    }
+                }
+            )
+            guard response.statusCode == 200,
+                  requiredProfileAuthority.map(profileOperationAuthorityIsCurrent) ?? true else { return nil }
 
             let decoded = try JSONDecoder().decode(Response.self, from: data)
             return decoded.data
@@ -4561,7 +10640,8 @@ final class TrackerManager: NSObject, ObservableObject {
     private func reconciledMangaTrackerMatch(
         aniListMatch: MangaTrackerMatch,
         malMatch: MangaTrackerMatch,
-        fallbackTitle: String
+        fallbackTitle: String,
+        requiredProfileAuthority: TrackerProfileOperationAuthority? = nil
     ) async -> MangaTrackerMatch {
         let confidence = max(aniListMatch.confidence, malMatch.confidence)
         let title = aniListMatch.confidence >= malMatch.confidence ? aniListMatch.title : malMatch.title
@@ -4580,11 +10660,19 @@ final class TrackerManager: NSObject, ObservableObject {
                 "Manga tracker resolver provider mismatch for '\(fallbackTitle)': AniList idMal=\(aniListMALId) MAL id=\(malId). Using higher-confidence provider only.",
                 type: "Tracker"
             )
-            return await preferredSingleProviderMangaMatch(aniListMatch: aniListMatch, malMatch: malMatch)
+            return await preferredSingleProviderMangaMatch(
+                aniListMatch: aniListMatch,
+                malMatch: malMatch,
+                requiredProfileAuthority: requiredProfileAuthority
+            )
         }
 
         if let aniListId = aniListMatch.aniListId, let malId = malMatch.malId {
-            if let mappedAniListId = await getAniListId(fromMALId: malId, mediaType: "MANGA") {
+            if let mappedAniListId = await getAniListId(
+                fromMALId: malId,
+                mediaType: "MANGA",
+                requiredProfileAuthority: requiredProfileAuthority
+            ) {
                 if mappedAniListId == aniListId {
                     return MangaTrackerMatch(
                         aniListId: aniListId,
@@ -4598,7 +10686,11 @@ final class TrackerManager: NSObject, ObservableObject {
                     "Manga tracker resolver provider mismatch for '\(fallbackTitle)': AniList id=\(aniListId) MAL maps to AniList id=\(mappedAniListId). Using higher-confidence provider only.",
                     type: "Tracker"
                 )
-                return await preferredSingleProviderMangaMatch(aniListMatch: aniListMatch, malMatch: malMatch)
+                return await preferredSingleProviderMangaMatch(
+                    aniListMatch: aniListMatch,
+                    malMatch: malMatch,
+                    requiredProfileAuthority: requiredProfileAuthority
+                )
             }
         }
 
@@ -4606,22 +10698,37 @@ final class TrackerManager: NSObject, ObservableObject {
             "Manga tracker resolver could not cross-confirm AniList/MAL matches for '\(fallbackTitle)'. Using higher-confidence provider only.",
             type: "Tracker"
         )
-        return await preferredSingleProviderMangaMatch(aniListMatch: aniListMatch, malMatch: malMatch)
+        return await preferredSingleProviderMangaMatch(
+            aniListMatch: aniListMatch,
+            malMatch: malMatch,
+            requiredProfileAuthority: requiredProfileAuthority
+        )
     }
 
     private func preferredSingleProviderMangaMatch(
         aniListMatch: MangaTrackerMatch,
-        malMatch: MangaTrackerMatch
+        malMatch: MangaTrackerMatch,
+        requiredProfileAuthority: TrackerProfileOperationAuthority? = nil
     ) async -> MangaTrackerMatch {
         if aniListMatch.confidence >= malMatch.confidence {
             return aniListMatch
         }
-        return await mangaTrackerMatchResolvingAniListFromMAL(malMatch)
+        return await mangaTrackerMatchResolvingAniListFromMAL(
+            malMatch,
+            requiredProfileAuthority: requiredProfileAuthority
+        )
     }
 
-    private func mangaTrackerMatchResolvingAniListFromMAL(_ match: MangaTrackerMatch) async -> MangaTrackerMatch {
+    private func mangaTrackerMatchResolvingAniListFromMAL(
+        _ match: MangaTrackerMatch,
+        requiredProfileAuthority: TrackerProfileOperationAuthority? = nil
+    ) async -> MangaTrackerMatch {
         guard match.aniListId == nil, let malId = match.malId else { return match }
-        let aniListId = await getAniListId(fromMALId: malId, mediaType: "MANGA")
+        let aniListId = await getAniListId(
+            fromMALId: malId,
+            mediaType: "MANGA",
+            requiredProfileAuthority: requiredProfileAuthority
+        )
         return MangaTrackerMatch(
             aniListId: aniListId,
             malId: malId,
@@ -4713,7 +10820,43 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 #endif
 
-    // MARK: - Sync Tools
+    private func validateSyncToolAuthority(
+        owner: UUID,
+        accounts: [TrackerAccount]
+    ) async throws {
+        try Task.checkCancellation()
+        try requireOwner(owner)
+        for account in accounts {
+
+            try await requireTrackerAccountStillConnected(
+                account,
+                owner: owner,
+                requireSameCredential: false
+            )
+        }
+        try requireOwner(owner)
+        try Task.checkCancellation()
+    }
+
+    private func validateSyncToolPlan(_ plan: TrackerSyncToolPlan) async throws {
+        try await validateSyncToolAuthority(
+            owner: plan.owner,
+            accounts: plan.accountSnapshots
+        )
+    }
+
+    private func finalizedSyncToolPlan(_ plan: TrackerSyncToolPlan) async throws -> TrackerSyncToolPlan {
+        try await validateSyncToolPlan(plan)
+        return plan
+    }
+
+    private func finalizedSyncToolResult(
+        _ result: TrackerSyncPreview,
+        plan: TrackerSyncToolPlan
+    ) async throws -> TrackerSyncPreview {
+        try await validateSyncToolPlan(plan)
+        return result
+    }
 
 #if !os(tvOS)
     func previewSyncTool(_ action: TrackerSyncToolAction) {
@@ -4732,7 +10875,9 @@ final class TrackerManager: NSObject, ObservableObject {
 
             do {
                 let plan = try await buildSyncToolPlan(for: action)
-                await MainActor.run {
+                try await validateSyncToolPlan(plan)
+                try await MainActor.run {
+                    try self.requireOwner(plan.owner)
                     self.cachedSyncToolPlan = plan
                     self.syncToolPreview = plan.preview
                     self.syncToolStatus = "Preview ready"
@@ -4769,7 +10914,8 @@ final class TrackerManager: NSObject, ObservableObject {
                     self.syncToolIsLocked = plan.preview.estimatedAPICalls >= self.largeSyncAPICallThreshold || total >= self.largeSyncAPICallThreshold
                 }
                 let result = try await performSyncTool(plan)
-                await MainActor.run {
+                try await MainActor.run {
+                    try self.requireOwner(plan.owner)
                     self.cachedSyncToolPlan = nil
                     self.syncToolPreview = result
                     self.syncToolStatus = "Finished \(action.title)"
@@ -4809,10 +10955,15 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     private func cachedOrBuildSyncToolPlan(for action: TrackerSyncToolAction) async throws -> TrackerSyncToolPlan {
-        if let cachedSyncToolPlan, cachedSyncToolPlan.action == action {
+
+        if let cachedSyncToolPlan,
+           cachedSyncToolPlan.action == action,
+           cachedSyncToolPlan.owner == ProfileManager.shared.activeProfileID {
+            try await validateSyncToolPlan(cachedSyncToolPlan)
             return cachedSyncToolPlan
         }
         let plan = try await buildSyncToolPlan(for: action)
+        try await validateSyncToolPlan(plan)
         cachedSyncToolPlan = plan
         return plan
     }
@@ -4849,11 +11000,16 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     private func buildSyncToolPlan(for action: TrackerSyncToolAction) async throws -> TrackerSyncToolPlan {
+
+        let owner = ProfileManager.shared.activeProfileID
+        try requireOwner(owner)
         switch action {
         case .fillEclipseFromAniList:
             let account = try connectedAccount(.anilist)
             let animeEntries = try await fetchAniListAnimeProgressEntries(account: account)
+            try await validateSyncToolAuthority(owner: owner, accounts: [account])
             let mangaEntries = try await fetchAniListMangaProgressEntries(account: account)
+            try await validateSyncToolAuthority(owner: owner, accounts: [account])
             let animePreview = previewForRemoteFill(action: action, entries: animeEntries, sourceName: "AniList")
             let mangaMapped = mangaEntries.filter { $0.anilistId != nil }
             let mangaUnmapped = mangaEntries.count - mangaMapped.count
@@ -4866,12 +11022,25 @@ final class TrackerManager: NSObject, ObservableObject {
                 estimatedAPICalls: estimatedReadCalls(sourceName: "AniList", animeCount: animeEntries.count, mangaCount: mangaEntries.count),
                 notes: ["AniList fill reuses this preview when you run it; local progress is never deleted or downgraded."]
             )
-            return TrackerSyncToolPlan(action: action, preview: preview, animeEntries: animeEntries, mangaEntries: mangaEntries)
+            return try await finalizedSyncToolPlan(TrackerSyncToolPlan(
+                action: action,
+                owner: owner,
+                accountSnapshots: [account],
+                preview: preview,
+                animeEntries: animeEntries,
+                mangaEntries: mangaEntries
+            ))
 
         case .fillEclipseFromMAL:
             let account = try connectedAccount(.myAnimeList)
-            let animeEntries = await resolveMALAnimeEntriesToAniList(try await fetchMALAnimeProgressEntries(account: account))
-            let mangaEntries = await resolveMALMangaEntriesToAniList(try await fetchMALMangaProgressEntries(account: account))
+            let fetchedAnimeEntries = try await fetchMALAnimeProgressEntries(account: account)
+            try await validateSyncToolAuthority(owner: owner, accounts: [account])
+            let animeEntries = await resolveMALAnimeEntriesToAniList(fetchedAnimeEntries)
+            try await validateSyncToolAuthority(owner: owner, accounts: [account])
+            let fetchedMangaEntries = try await fetchMALMangaProgressEntries(account: account)
+            try await validateSyncToolAuthority(owner: owner, accounts: [account])
+            let mangaEntries = await resolveMALMangaEntriesToAniList(fetchedMangaEntries)
+            try await validateSyncToolAuthority(owner: owner, accounts: [account])
             let animePreview = previewForRemoteFill(action: action, entries: animeEntries, sourceName: "MAL")
             let mangaMapped = mangaEntries.filter { $0.anilistId != nil }
             let mangaUnmapped = mangaEntries.count - mangaMapped.count
@@ -4884,10 +11053,17 @@ final class TrackerManager: NSObject, ObservableObject {
                 estimatedAPICalls: estimatedReadCalls(sourceName: "MAL", animeCount: animeEntries.count, mangaCount: mangaEntries.count),
                 notes: ["MAL IDs are resolved in batches through AniList, then local progress advances without overwrites."]
             )
-            return TrackerSyncToolPlan(action: action, preview: preview, animeEntries: animeEntries, mangaEntries: mangaEntries)
+            return try await finalizedSyncToolPlan(TrackerSyncToolPlan(
+                action: action,
+                owner: owner,
+                accountSnapshots: [account],
+                preview: preview,
+                animeEntries: animeEntries,
+                mangaEntries: mangaEntries
+            ))
 
         case .pushEclipseToAniList:
-            _ = try connectedAccount(.anilist)
+            let account = try connectedAccount(.anilist)
             let anime = localHighestWatchedEpisodes()
             let manga = localHighestReadMangaChapters()
             let preview = TrackerSyncPreview(
@@ -4899,10 +11075,15 @@ final class TrackerManager: NSObject, ObservableObject {
                 estimatedAPICalls: anime.count * 3 + manga.count,
                 notes: ["Local Eclipse progress will only push watched/read progress; it will not delete or downgrade AniList."]
             )
-            return TrackerSyncToolPlan(action: action, preview: preview)
+            return try await finalizedSyncToolPlan(TrackerSyncToolPlan(
+                action: action,
+                owner: owner,
+                accountSnapshots: [account],
+                preview: preview
+            ))
 
         case .pushEclipseToMAL:
-            _ = try connectedAccount(.myAnimeList)
+            let account = try connectedAccount(.myAnimeList)
             let anime = localHighestWatchedEpisodes()
             let manga = localHighestReadMangaChapters()
             let preview = TrackerSyncPreview(
@@ -4914,15 +11095,24 @@ final class TrackerManager: NSObject, ObservableObject {
                 estimatedAPICalls: anime.count * 4 + manga.count * 2,
                 notes: ["Local Eclipse progress will resolve AniList/MAL IDs first, then push watched/read counts."]
             )
-            return TrackerSyncToolPlan(action: action, preview: preview)
+            return try await finalizedSyncToolPlan(TrackerSyncToolPlan(
+                action: action,
+                owner: owner,
+                accountSnapshots: [account],
+                preview: preview
+            ))
 
         case .portAniListToMAL:
             let account = try connectedAccount(.anilist)
             let destination = try connectedAccount(.myAnimeList)
             let sourceAnimeEntries = try await fetchAniListAnimeProgressEntries(account: account)
+            try await validateSyncToolAuthority(owner: owner, accounts: [account, destination])
             let sourceMangaEntries = try await fetchAniListMangaProgressEntries(account: account)
+            try await validateSyncToolAuthority(owner: owner, accounts: [account, destination])
             let destinationAnime = try await fetchMALAnimeProgressEntries(account: destination)
+            try await validateSyncToolAuthority(owner: owner, accounts: [account, destination])
             let destinationManga = try await fetchMALMangaProgressEntries(account: destination)
+            try await validateSyncToolAuthority(owner: owner, accounts: [account, destination])
             let destinationAnimeByMAL = remoteAnimeByMALId(destinationAnime)
             let destinationMangaByMAL = remoteMangaByMALId(destinationManga)
             let animeEntries = sourceAnimeEntries.filter { entry in
@@ -4952,15 +11142,30 @@ final class TrackerManager: NSObject, ObservableObject {
                 estimatedAPICalls: estimatedReadCalls(sourceName: "AniList", animeCount: sourceAnimeEntries.count, mangaCount: sourceMangaEntries.count) + estimatedReadCalls(sourceName: "MAL", animeCount: destinationAnime.count, mangaCount: destinationManga.count) + mapped,
                 notes: ["Only entries that advance MAL are written; already-current destination entries are skipped."]
             )
-            return TrackerSyncToolPlan(action: action, preview: preview, animeEntries: animeEntries, mangaEntries: mangaEntries)
+            return try await finalizedSyncToolPlan(TrackerSyncToolPlan(
+                action: action,
+                owner: owner,
+                accountSnapshots: [account, destination],
+                preview: preview,
+                animeEntries: animeEntries,
+                mangaEntries: mangaEntries
+            ))
 
         case .portMALToAniList:
             let account = try connectedAccount(.myAnimeList)
             let destination = try connectedAccount(.anilist)
-            let sourceAnimeEntries = await resolveMALAnimeEntriesToAniList(try await fetchMALAnimeProgressEntries(account: account))
-            let sourceMangaEntries = await resolveMALMangaEntriesToAniList(try await fetchMALMangaProgressEntries(account: account))
+            let fetchedSourceAnimeEntries = try await fetchMALAnimeProgressEntries(account: account)
+            try await validateSyncToolAuthority(owner: owner, accounts: [account, destination])
+            let sourceAnimeEntries = await resolveMALAnimeEntriesToAniList(fetchedSourceAnimeEntries)
+            try await validateSyncToolAuthority(owner: owner, accounts: [account, destination])
+            let fetchedSourceMangaEntries = try await fetchMALMangaProgressEntries(account: account)
+            try await validateSyncToolAuthority(owner: owner, accounts: [account, destination])
+            let sourceMangaEntries = await resolveMALMangaEntriesToAniList(fetchedSourceMangaEntries)
+            try await validateSyncToolAuthority(owner: owner, accounts: [account, destination])
             let destinationAnime = try await fetchAniListAnimeProgressEntries(account: destination)
+            try await validateSyncToolAuthority(owner: owner, accounts: [account, destination])
             let destinationManga = try await fetchAniListMangaProgressEntries(account: destination)
+            try await validateSyncToolAuthority(owner: owner, accounts: [account, destination])
             let destinationAnimeByAniList = remoteAnimeByAniListId(destinationAnime)
             let destinationMangaByAniList = remoteMangaByAniListId(destinationManga)
             let animeEntries = sourceAnimeEntries.filter { entry in
@@ -4990,69 +11195,104 @@ final class TrackerManager: NSObject, ObservableObject {
                 estimatedAPICalls: estimatedReadCalls(sourceName: "MAL", animeCount: sourceAnimeEntries.count, mangaCount: sourceMangaEntries.count) + estimatedReadCalls(sourceName: "AniList", animeCount: destinationAnime.count, mangaCount: destinationManga.count) + mapped,
                 notes: ["MAL IDs are resolved in batches, and only entries that advance AniList are written."]
             )
-            return TrackerSyncToolPlan(action: action, preview: preview, animeEntries: animeEntries, mangaEntries: mangaEntries)
+            return try await finalizedSyncToolPlan(TrackerSyncToolPlan(
+                action: action,
+                owner: owner,
+                accountSnapshots: [account, destination],
+                preview: preview,
+                animeEntries: animeEntries,
+                mangaEntries: mangaEntries
+            ))
         }
     }
 
     private func performSyncTool(_ plan: TrackerSyncToolPlan) async throws -> TrackerSyncPreview {
-        try Task.checkCancellation()
+        try await validateSyncToolPlan(plan)
         let action = plan.action
         switch action {
         case .fillEclipseFromAniList:
             _ = try connectedAccount(.anilist)
             await updateSyncToolProgress(detail: "Filling Eclipse anime from AniList...")
-            let animeResult = try await fillEclipseFromRemoteAnime(plan.animeEntries, sourceName: "AniList", action: action)
+            let animeResult = try await fillEclipseFromRemoteAnime(plan.animeEntries, sourceName: "AniList", action: action, owner: plan.owner)
             try await advanceSyncToolProgress(by: plan.animeEntries.count, detail: "Finished AniList anime fill")
             await updateSyncToolProgress(detail: "Filling Eclipse manga from AniList...")
-            let mangaResult = try await fillEclipseFromRemoteManga(plan.mangaEntries, sourceName: "AniList", action: action)
+            let mangaResult = try await fillEclipseFromRemoteManga(plan.mangaEntries, sourceName: "AniList", action: action, owner: plan.owner)
             try await advanceSyncToolProgress(by: plan.mangaEntries.count, detail: "Finished AniList manga fill")
-            return combineSyncPreviews(action: action, animeResult, mangaResult, note: "AniList fill completed without deleting or downgrading local progress.")
+            return try await finalizedSyncToolResult(
+                combineSyncPreviews(action: action, animeResult, mangaResult, note: "AniList fill completed without deleting or downgrading local progress."),
+                plan: plan
+            )
 
         case .fillEclipseFromMAL:
             _ = try connectedAccount(.myAnimeList)
             await updateSyncToolProgress(detail: "Filling Eclipse anime from MAL...")
-            let animeResult = try await fillEclipseFromRemoteAnime(plan.animeEntries, sourceName: "MAL", action: action)
+            let animeResult = try await fillEclipseFromRemoteAnime(plan.animeEntries, sourceName: "MAL", action: action, owner: plan.owner)
             try await advanceSyncToolProgress(by: plan.animeEntries.count, detail: "Finished MAL anime fill")
             await updateSyncToolProgress(detail: "Filling Eclipse manga from MAL...")
-            let mangaResult = try await fillEclipseFromRemoteManga(plan.mangaEntries, sourceName: "MAL", action: action)
+            let mangaResult = try await fillEclipseFromRemoteManga(plan.mangaEntries, sourceName: "MAL", action: action, owner: plan.owner)
             try await advanceSyncToolProgress(by: plan.mangaEntries.count, detail: "Finished MAL manga fill")
-            return combineSyncPreviews(action: action, animeResult, mangaResult, note: "MAL fill completed without deleting or downgrading local progress.")
+            return try await finalizedSyncToolResult(
+                combineSyncPreviews(action: action, animeResult, mangaResult, note: "MAL fill completed without deleting or downgrading local progress."),
+                plan: plan
+            )
 
         case .pushEclipseToAniList:
             let account = try connectedAccount(.anilist)
             let anime = localHighestWatchedEpisodes()
             let manga = localHighestReadMangaChapters()
             for (index, entry) in anime.enumerated() {
-                try Task.checkCancellation()
+                try await validateSyncToolPlan(plan)
                 await updateSyncToolProgress(detail: "Pushing anime \(index + 1) of \(anime.count) to AniList...")
-                await syncToAniList(account: account, showId: entry.showId, seasonNumber: entry.seasonNumber, episodeNumber: entry.episodeNumber, progress: 1.0)
+                await syncToAniList(
+                    account: account,
+                    showId: entry.showId,
+                    seasonNumber: entry.seasonNumber,
+                    episodeNumber: entry.episodeNumber,
+                    progress: 1.0,
+                    owner: plan.owner
+                )
+                try await validateSyncToolPlan(plan)
                 try await advanceSyncToolProgress()
             }
             for (index, item) in manga.enumerated() {
-                try Task.checkCancellation()
+                try await validateSyncToolPlan(plan)
                 await updateSyncToolProgress(detail: "Pushing manga \(index + 1) of \(manga.count) to AniList...")
-                await sendMangaProgressToAniList(mediaId: item.mangaId, chapterNumber: item.chapter, account: account)
+                await sendMangaProgressToAniList(
+                    mediaId: item.mangaId,
+                    chapterNumber: item.chapter,
+                    account: account,
+                    owner: plan.owner
+                )
+                try await validateSyncToolPlan(plan)
                 try await advanceSyncToolProgress()
             }
-            return TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: anime.count + manga.count, skipped: 0, unmapped: 0, estimatedAPICalls: 0, notes: ["Eclipse progress push completed."])
+            return try await finalizedSyncToolResult(
+                TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: anime.count + manga.count, skipped: 0, unmapped: 0, estimatedAPICalls: 0, notes: ["Eclipse progress push completed."]),
+                plan: plan
+            )
 
         case .pushEclipseToMAL:
             let account = try connectedAccount(.myAnimeList)
             let anime = localHighestWatchedEpisodes()
             let manga = localHighestReadMangaChapters()
             for (index, entry) in anime.enumerated() {
-                try Task.checkCancellation()
+                try await validateSyncToolPlan(plan)
                 await updateSyncToolProgress(detail: "Pushing anime \(index + 1) of \(anime.count) to MAL...")
-                await syncToMyAnimeList(account: account, showId: entry.showId, seasonNumber: entry.seasonNumber, episodeNumber: entry.episodeNumber, progress: 1.0)
+                await syncToMyAnimeList(account: account, showId: entry.showId, seasonNumber: entry.seasonNumber, episodeNumber: entry.episodeNumber, progress: 1.0, owner: plan.owner)
+                try await validateSyncToolPlan(plan)
                 try await advanceSyncToolProgress()
             }
             for (index, item) in manga.enumerated() {
-                try Task.checkCancellation()
+                try await validateSyncToolPlan(plan)
                 await updateSyncToolProgress(detail: "Pushing manga \(index + 1) of \(manga.count) to MAL...")
-                await sendMangaProgressToMAL(aniListId: item.mangaId, chapterNumber: item.chapter, account: account)
+                await sendMangaProgressToMAL(aniListId: item.mangaId, chapterNumber: item.chapter, account: account, owner: plan.owner)
+                try await validateSyncToolPlan(plan)
                 try await advanceSyncToolProgress()
             }
-            return TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: anime.count + manga.count, skipped: 0, unmapped: 0, estimatedAPICalls: 0, notes: ["Eclipse progress push completed."])
+            return try await finalizedSyncToolResult(
+                TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: anime.count + manga.count, skipped: 0, unmapped: 0, estimatedAPICalls: 0, notes: ["Eclipse progress push completed."]),
+                plan: plan
+            )
 
         case .portAniListToMAL:
             _ = try connectedAccount(.anilist)
@@ -5060,7 +11300,7 @@ final class TrackerManager: NSObject, ObservableObject {
             var advanced = 0
             var unmapped = 0
             for (index, entry) in plan.animeEntries.enumerated() {
-                try Task.checkCancellation()
+                try await validateSyncToolPlan(plan)
                 await updateSyncToolProgress(detail: "Writing anime \(index + 1) of \(plan.animeEntries.count) to MAL...")
                 guard let malId = entry.malId else {
                     unmapped += 1
@@ -5071,13 +11311,15 @@ final class TrackerManager: NSObject, ObservableObject {
                     account: destination,
                     malId: malId,
                     watchedEpisodes: remoteWatchedEpisodes(entry),
-                    status: malStatus(fromAniListStatus: entry.status)
+                    status: malStatus(fromAniListStatus: entry.status),
+                    owner: plan.owner
                 )
+                try await validateSyncToolPlan(plan)
                 advanced += 1
                 try await advanceSyncToolProgress()
             }
             for (index, entry) in plan.mangaEntries.enumerated() {
-                try Task.checkCancellation()
+                try await validateSyncToolPlan(plan)
                 await updateSyncToolProgress(detail: "Writing manga \(index + 1) of \(plan.mangaEntries.count) to MAL...")
                 guard let malId = entry.malId else {
                     unmapped += 1
@@ -5088,12 +11330,17 @@ final class TrackerManager: NSObject, ObservableObject {
                     account: destination,
                     malId: malId,
                     chaptersRead: remoteReadChapters(entry),
-                    status: malMangaStatus(fromAniListStatus: entry.status)
+                    status: malMangaStatus(fromAniListStatus: entry.status),
+                    owner: plan.owner
                 )
+                try await validateSyncToolPlan(plan)
                 advanced += 1
                 try await advanceSyncToolProgress()
             }
-            return TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: advanced, skipped: unmapped, unmapped: unmapped, estimatedAPICalls: advanced, notes: ["AniList to MAL port finished. No entries were deleted."])
+            return try await finalizedSyncToolResult(
+                TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: advanced, skipped: unmapped, unmapped: unmapped, estimatedAPICalls: advanced, notes: ["AniList to MAL port finished. No entries were deleted."]),
+                plan: plan
+            )
 
         case .portMALToAniList:
             _ = try connectedAccount(.myAnimeList)
@@ -5101,7 +11348,7 @@ final class TrackerManager: NSObject, ObservableObject {
             var advanced = 0
             var unmapped = 0
             for (index, entry) in plan.animeEntries.enumerated() {
-                try Task.checkCancellation()
+                try await validateSyncToolPlan(plan)
                 await updateSyncToolProgress(detail: "Writing anime \(index + 1) of \(plan.animeEntries.count) to AniList...")
                 guard let anilistId = entry.anilistId else {
                     unmapped += 1
@@ -5112,13 +11359,15 @@ final class TrackerManager: NSObject, ObservableObject {
                     account: destination,
                     anilistId: anilistId,
                     watchedEpisodes: remoteWatchedEpisodes(entry),
-                    status: aniListStatus(fromMALStatus: entry.status)
+                    status: aniListStatus(fromMALStatus: entry.status),
+                    owner: plan.owner
                 )
+                try await validateSyncToolPlan(plan)
                 advanced += 1
                 try await advanceSyncToolProgress()
             }
             for (index, entry) in plan.mangaEntries.enumerated() {
-                try Task.checkCancellation()
+                try await validateSyncToolPlan(plan)
                 await updateSyncToolProgress(detail: "Writing manga \(index + 1) of \(plan.mangaEntries.count) to AniList...")
                 guard let anilistId = entry.anilistId else {
                     unmapped += 1
@@ -5129,12 +11378,17 @@ final class TrackerManager: NSObject, ObservableObject {
                     account: destination,
                     anilistId: anilistId,
                     chaptersRead: remoteReadChapters(entry),
-                    status: aniListStatus(fromMALStatus: entry.status)
+                    status: aniListStatus(fromMALStatus: entry.status),
+                    owner: plan.owner
                 )
+                try await validateSyncToolPlan(plan)
                 advanced += 1
                 try await advanceSyncToolProgress()
             }
-            return TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: advanced, skipped: unmapped, unmapped: unmapped, estimatedAPICalls: advanced, notes: ["MAL to AniList port finished. No entries were deleted."])
+            return try await finalizedSyncToolResult(
+                TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: advanced, skipped: unmapped, unmapped: unmapped, estimatedAPICalls: advanced, notes: ["MAL to AniList port finished. No entries were deleted."]),
+                plan: plan
+            )
         }
     }
 
@@ -5161,13 +11415,15 @@ final class TrackerManager: NSObject, ObservableObject {
         let mapped = entries.filter { $0.anilistId != nil }
         let advanced = mapped.filter { remoteWatchedEpisodes($0) > 0 }.count
         let unmapped = entries.count - mapped.count
+        let multiplier = sourceName == "MAL" ? 2 : 1
+        let (estimatedCalls, overflow) = entries.count.multipliedReportingOverflow(by: multiplier)
         return TrackerSyncPreview(
             action: action,
             itemsToAdd: mapped.count,
             itemsToAdvance: advanced,
             skipped: unmapped,
             unmapped: unmapped,
-            estimatedAPICalls: max(2, entries.count * (sourceName == "MAL" ? 2 : 1)),
+            estimatedAPICalls: max(2, overflow ? Int.max : estimatedCalls),
             notes: ["\(sourceName) fill only adds missing library items and advances incomplete local progress."]
         )
     }
@@ -5190,8 +11446,10 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     private func pagedCallCount(itemCount: Int, pageSize: Int) -> Int {
-        guard itemCount > 0, pageSize > 0 else { return 0 }
-        return Int(ceil(Double(itemCount) / Double(pageSize)))
+        TrackerRemoteProgressBoundary.pageCallCount(
+            itemCount: itemCount,
+            pageSize: pageSize
+        ) ?? TrackerRemoteProgressBoundary.maximumPageCount
     }
 
     private func shouldWriteAnimeProgress(source: RemoteAnimeProgress, destination: RemoteAnimeProgress?) -> Bool {
@@ -5278,7 +11536,9 @@ final class TrackerManager: NSObject, ObservableObject {
 
             do {
                 let plan = try await buildTVSyncToolPlan(for: action)
-                await MainActor.run {
+                try await validateSyncToolPlan(plan)
+                try await MainActor.run {
+                    try self.requireOwner(plan.owner)
                     self.cachedSyncToolPlan = plan
                     self.syncToolPreview = plan.preview
                     self.syncToolStatus = "Preview ready"
@@ -5307,10 +11567,14 @@ final class TrackerManager: NSObject, ObservableObject {
 
             do {
                 let plan: TrackerSyncToolPlan
-                if let cachedSyncToolPlan, cachedSyncToolPlan.action == action {
+                if let cachedSyncToolPlan,
+                   cachedSyncToolPlan.action == action,
+                   cachedSyncToolPlan.owner == ProfileManager.shared.activeProfileID {
+                    try await validateSyncToolPlan(cachedSyncToolPlan)
                     plan = cachedSyncToolPlan
                 } else {
                     plan = try await buildTVSyncToolPlan(for: action)
+                    try await validateSyncToolPlan(plan)
                     cachedSyncToolPlan = plan
                 }
                 let total = tvSyncToolOperationCount(for: plan)
@@ -5321,7 +11585,8 @@ final class TrackerManager: NSObject, ObservableObject {
                     self.syncToolIsLocked = plan.preview.estimatedAPICalls >= self.largeSyncAPICallThreshold || total >= self.largeSyncAPICallThreshold
                 }
                 let result = try await performTVSyncTool(plan)
-                await MainActor.run {
+                try await MainActor.run {
+                    try self.requireOwner(plan.owner)
                     self.cachedSyncToolPlan = nil
                     self.syncToolPreview = result
                     self.syncToolStatus = "Finished \(action.title)"
@@ -5388,30 +11653,42 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     private func buildTVSyncToolPlan(for action: TrackerSyncToolAction) async throws -> TrackerSyncToolPlan {
+        let owner = ProfileManager.shared.activeProfileID
+        try requireOwner(owner)
         switch action {
         case .fillEclipseFromAniList:
             let account = try connectedAccount(.anilist)
             let entries = try await fetchAniListAnimeProgressEntries(account: account)
-            return TrackerSyncToolPlan(
+            try await validateSyncToolAuthority(owner: owner, accounts: [account])
+            return try await finalizedSyncToolPlan(TrackerSyncToolPlan(
                 action: action,
+                owner: owner,
+                accountSnapshots: [account],
                 preview: tvRemoteFillPreview(action: action, entries: entries, sourceName: "AniList"),
                 animeEntries: entries
-            )
+            ))
 
         case .fillEclipseFromMAL:
             let account = try connectedAccount(.myAnimeList)
-            let entries = await resolveMALAnimeEntriesToAniList(try await fetchMALAnimeProgressEntries(account: account))
-            return TrackerSyncToolPlan(
+            let fetchedEntries = try await fetchMALAnimeProgressEntries(account: account)
+            try await validateSyncToolAuthority(owner: owner, accounts: [account])
+            let entries = await resolveMALAnimeEntriesToAniList(fetchedEntries)
+            try await validateSyncToolAuthority(owner: owner, accounts: [account])
+            return try await finalizedSyncToolPlan(TrackerSyncToolPlan(
                 action: action,
+                owner: owner,
+                accountSnapshots: [account],
                 preview: tvRemoteFillPreview(action: action, entries: entries, sourceName: "MAL"),
                 animeEntries: entries
-            )
+            ))
 
         case .pushEclipseToAniList:
-            _ = try connectedAccount(.anilist)
+            let account = try connectedAccount(.anilist)
             let entries = localHighestWatchedEpisodes()
-            return TrackerSyncToolPlan(
+            return try await finalizedSyncToolPlan(TrackerSyncToolPlan(
                 action: action,
+                owner: owner,
+                accountSnapshots: [account],
                 preview: TrackerSyncPreview(
                     action: action,
                     itemsToAdd: 0,
@@ -5421,13 +11698,15 @@ final class TrackerManager: NSObject, ObservableObject {
                     estimatedAPICalls: entries.count * 3,
                     notes: ["Only local anime watch progress is sent from Apple TV."]
                 )
-            )
+            ))
 
         case .pushEclipseToMAL:
-            _ = try connectedAccount(.myAnimeList)
+            let account = try connectedAccount(.myAnimeList)
             let entries = localHighestWatchedEpisodes()
-            return TrackerSyncToolPlan(
+            return try await finalizedSyncToolPlan(TrackerSyncToolPlan(
                 action: action,
+                owner: owner,
+                accountSnapshots: [account],
                 preview: TrackerSyncPreview(
                     action: action,
                     itemsToAdd: 0,
@@ -5437,13 +11716,15 @@ final class TrackerManager: NSObject, ObservableObject {
                     estimatedAPICalls: entries.count * 4,
                     notes: ["Only local anime watch progress is sent from Apple TV."]
                 )
-            )
+            ))
 
         case .portAniListToMAL:
             let source = try connectedAccount(.anilist)
             let destination = try connectedAccount(.myAnimeList)
             let sourceEntries = try await fetchAniListAnimeProgressEntries(account: source)
+            try await validateSyncToolAuthority(owner: owner, accounts: [source, destination])
             let destinationEntries = try await fetchMALAnimeProgressEntries(account: destination)
+            try await validateSyncToolAuthority(owner: owner, accounts: [source, destination])
             let destinationByMAL = tvRemoteAnimeByMALId(destinationEntries)
             let entries = sourceEntries.filter { entry in
                 guard let malId = entry.malId else { return false }
@@ -5454,8 +11735,10 @@ final class TrackerManager: NSObject, ObservableObject {
                 return !shouldWriteTVAnimeProgress(source: entry, destination: destinationByMAL[malId])
             }.count
             let unmapped = max(0, sourceEntries.count - entries.count - alreadyCurrent)
-            return TrackerSyncToolPlan(
+            return try await finalizedSyncToolPlan(TrackerSyncToolPlan(
                 action: action,
+                owner: owner,
+                accountSnapshots: [source, destination],
                 preview: TrackerSyncPreview(
                     action: action,
                     itemsToAdd: 0,
@@ -5468,13 +11751,17 @@ final class TrackerManager: NSObject, ObservableObject {
                     notes: ["Only anime entries that advance MAL are written from Apple TV."]
                 ),
                 animeEntries: entries
-            )
+            ))
 
         case .portMALToAniList:
             let source = try connectedAccount(.myAnimeList)
             let destination = try connectedAccount(.anilist)
-            let sourceEntries = await resolveMALAnimeEntriesToAniList(try await fetchMALAnimeProgressEntries(account: source))
+            let fetchedSourceEntries = try await fetchMALAnimeProgressEntries(account: source)
+            try await validateSyncToolAuthority(owner: owner, accounts: [source, destination])
+            let sourceEntries = await resolveMALAnimeEntriesToAniList(fetchedSourceEntries)
+            try await validateSyncToolAuthority(owner: owner, accounts: [source, destination])
             let destinationEntries = try await fetchAniListAnimeProgressEntries(account: destination)
+            try await validateSyncToolAuthority(owner: owner, accounts: [source, destination])
             let destinationByAniList = tvRemoteAnimeByAniListId(destinationEntries)
             let entries = sourceEntries.filter { entry in
                 guard let anilistId = entry.anilistId else { return false }
@@ -5485,8 +11772,10 @@ final class TrackerManager: NSObject, ObservableObject {
                 return !shouldWriteTVAnimeProgress(source: entry, destination: destinationByAniList[anilistId])
             }.count
             let unmapped = max(0, sourceEntries.count - entries.count - alreadyCurrent)
-            return TrackerSyncToolPlan(
+            return try await finalizedSyncToolPlan(TrackerSyncToolPlan(
                 action: action,
+                owner: owner,
+                accountSnapshots: [source, destination],
                 preview: TrackerSyncPreview(
                     action: action,
                     itemsToAdd: 0,
@@ -5499,50 +11788,65 @@ final class TrackerManager: NSObject, ObservableObject {
                     notes: ["Only anime entries that advance AniList are written from Apple TV."]
                 ),
                 animeEntries: entries
-            )
+            ))
         }
     }
 
     private func performTVSyncTool(_ plan: TrackerSyncToolPlan) async throws -> TrackerSyncPreview {
-        try Task.checkCancellation()
+        try await validateSyncToolPlan(plan)
         let action = plan.action
 
         switch action {
         case .fillEclipseFromAniList:
             _ = try connectedAccount(.anilist)
             await updateSyncToolProgress(detail: "Filling Eclipse anime from AniList...")
-            let result = try await fillEclipseFromRemoteAnime(plan.animeEntries, sourceName: "AniList", action: action)
+            let result = try await fillEclipseFromRemoteAnime(plan.animeEntries, sourceName: "AniList", action: action, owner: plan.owner)
             try await advanceSyncToolProgress(by: plan.animeEntries.count, detail: "Finished AniList anime fill")
-            return result
+            return try await finalizedSyncToolResult(result, plan: plan)
 
         case .fillEclipseFromMAL:
             _ = try connectedAccount(.myAnimeList)
             await updateSyncToolProgress(detail: "Filling Eclipse anime from MAL...")
-            let result = try await fillEclipseFromRemoteAnime(plan.animeEntries, sourceName: "MAL", action: action)
+            let result = try await fillEclipseFromRemoteAnime(plan.animeEntries, sourceName: "MAL", action: action, owner: plan.owner)
             try await advanceSyncToolProgress(by: plan.animeEntries.count, detail: "Finished MAL anime fill")
-            return result
+            return try await finalizedSyncToolResult(result, plan: plan)
 
         case .pushEclipseToAniList:
             let account = try connectedAccount(.anilist)
             let entries = localHighestWatchedEpisodes()
             for (index, entry) in entries.enumerated() {
-                try Task.checkCancellation()
+                try await validateSyncToolPlan(plan)
                 await updateSyncToolProgress(detail: "Pushing anime \(index + 1) of \(entries.count) to AniList...")
-                await syncToAniList(account: account, showId: entry.showId, seasonNumber: entry.seasonNumber, episodeNumber: entry.episodeNumber, progress: 1.0)
+                await syncToAniList(
+                    account: account,
+                    showId: entry.showId,
+                    seasonNumber: entry.seasonNumber,
+                    episodeNumber: entry.episodeNumber,
+                    progress: 1.0,
+                    owner: plan.owner
+                )
+                try await validateSyncToolPlan(plan)
                 try await advanceSyncToolProgress()
             }
-            return TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: entries.count, skipped: 0, unmapped: 0, estimatedAPICalls: 0, notes: ["Anime progress push completed."])
+            return try await finalizedSyncToolResult(
+                TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: entries.count, skipped: 0, unmapped: 0, estimatedAPICalls: 0, notes: ["Anime progress push completed."]),
+                plan: plan
+            )
 
         case .pushEclipseToMAL:
             let account = try connectedAccount(.myAnimeList)
             let entries = localHighestWatchedEpisodes()
             for (index, entry) in entries.enumerated() {
-                try Task.checkCancellation()
+                try await validateSyncToolPlan(plan)
                 await updateSyncToolProgress(detail: "Pushing anime \(index + 1) of \(entries.count) to MAL...")
-                await syncToMyAnimeList(account: account, showId: entry.showId, seasonNumber: entry.seasonNumber, episodeNumber: entry.episodeNumber, progress: 1.0)
+                await syncToMyAnimeList(account: account, showId: entry.showId, seasonNumber: entry.seasonNumber, episodeNumber: entry.episodeNumber, progress: 1.0, owner: plan.owner)
+                try await validateSyncToolPlan(plan)
                 try await advanceSyncToolProgress()
             }
-            return TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: entries.count, skipped: 0, unmapped: 0, estimatedAPICalls: 0, notes: ["Anime progress push completed."])
+            return try await finalizedSyncToolResult(
+                TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: entries.count, skipped: 0, unmapped: 0, estimatedAPICalls: 0, notes: ["Anime progress push completed."]),
+                plan: plan
+            )
 
         case .portAniListToMAL:
             _ = try connectedAccount(.anilist)
@@ -5550,7 +11854,7 @@ final class TrackerManager: NSObject, ObservableObject {
             var advanced = 0
             var unmapped = 0
             for (index, entry) in plan.animeEntries.enumerated() {
-                try Task.checkCancellation()
+                try await validateSyncToolPlan(plan)
                 await updateSyncToolProgress(detail: "Writing anime \(index + 1) of \(plan.animeEntries.count) to MAL...")
                 guard let malId = entry.malId else {
                     unmapped += 1
@@ -5561,12 +11865,17 @@ final class TrackerManager: NSObject, ObservableObject {
                     account: destination,
                     malId: malId,
                     watchedEpisodes: remoteWatchedEpisodes(entry),
-                    status: malStatus(fromAniListStatus: entry.status)
+                    status: malStatus(fromAniListStatus: entry.status),
+                    owner: plan.owner
                 )
+                try await validateSyncToolPlan(plan)
                 advanced += 1
                 try await advanceSyncToolProgress()
             }
-            return TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: advanced, skipped: unmapped, unmapped: unmapped, estimatedAPICalls: advanced, notes: ["AniList to MAL anime port finished. No entries were deleted."])
+            return try await finalizedSyncToolResult(
+                TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: advanced, skipped: unmapped, unmapped: unmapped, estimatedAPICalls: advanced, notes: ["AniList to MAL anime port finished. No entries were deleted."]),
+                plan: plan
+            )
 
         case .portMALToAniList:
             _ = try connectedAccount(.myAnimeList)
@@ -5574,7 +11883,7 @@ final class TrackerManager: NSObject, ObservableObject {
             var advanced = 0
             var unmapped = 0
             for (index, entry) in plan.animeEntries.enumerated() {
-                try Task.checkCancellation()
+                try await validateSyncToolPlan(plan)
                 await updateSyncToolProgress(detail: "Writing anime \(index + 1) of \(plan.animeEntries.count) to AniList...")
                 guard let anilistId = entry.anilistId else {
                     unmapped += 1
@@ -5585,12 +11894,17 @@ final class TrackerManager: NSObject, ObservableObject {
                     account: destination,
                     anilistId: anilistId,
                     watchedEpisodes: remoteWatchedEpisodes(entry),
-                    status: aniListStatus(fromMALStatus: entry.status)
+                    status: aniListStatus(fromMALStatus: entry.status),
+                    owner: plan.owner
                 )
+                try await validateSyncToolPlan(plan)
                 advanced += 1
                 try await advanceSyncToolProgress()
             }
-            return TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: advanced, skipped: unmapped, unmapped: unmapped, estimatedAPICalls: advanced, notes: ["MAL to AniList anime port finished. No entries were deleted."])
+            return try await finalizedSyncToolResult(
+                TrackerSyncPreview(action: action, itemsToAdd: 0, itemsToAdvance: advanced, skipped: unmapped, unmapped: unmapped, estimatedAPICalls: advanced, notes: ["MAL to AniList anime port finished. No entries were deleted."]),
+                plan: plan
+            )
         }
     }
 
@@ -5619,8 +11933,11 @@ final class TrackerManager: NSObject, ObservableObject {
     private func tvEstimatedReadCalls(sourceName: String, itemCount: Int) -> Int {
         guard itemCount > 0 else { return 1 }
         let pageSize = sourceName == "MAL" ? malListPageLimit : 50
-        let pages = Int(ceil(Double(itemCount) / Double(pageSize)))
-        return sourceName == "MAL" ? pages * 2 : pages
+        let pages = TrackerRemoteProgressBoundary.pageCallCount(
+            itemCount: itemCount,
+            pageSize: pageSize
+        ) ?? TrackerRemoteProgressBoundary.maximumPageCount
+        return sourceName == "MAL" ? min(pages * 2, Int.max) : pages
     }
 
     private func shouldWriteTVAnimeProgress(source: RemoteAnimeProgress, destination: RemoteAnimeProgress?) -> Bool {
@@ -5653,14 +11970,25 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 #endif
 
-    private func fetchAniListAnimeProgressEntries(account: TrackerAccount) async throws -> [RemoteAnimeProgress] {
-        let userId = try await resolvedAniListUserId(for: account)
+    private func fetchAniListAnimeProgressEntries(
+        account: TrackerAccount,
+        requiredAuthority: TrackerOperationAuthority? = nil
+    ) async throws -> [RemoteAnimeProgress] {
+        let userId = try await resolvedAniListUserId(
+            for: account,
+            requiredAuthority: requiredAuthority
+        )
         var entriesByMediaId: [Int: RemoteAnimeProgress] = [:]
         var orderedMediaIds: [Int] = []
         var chunk = 1
         var hasNextChunk = true
+        var pageCount = 0
 
         while hasNextChunk {
+            guard pageCount < TrackerRemoteProgressBoundary.maximumPageCount else {
+                throw NSError(domain: "AniList", code: -4, userInfo: [NSLocalizedDescriptionKey: "AniList anime list exceeded the supported page limit."])
+            }
+            pageCount += 1
             let query = """
             query($userId: Int!, $chunk: Int!) {
                 MediaListCollection(
@@ -5730,50 +12058,87 @@ final class TrackerManager: NSObject, ObservableObject {
                 ]
             ])
 
-            let (data, response) = try await sendTrackerRequest(request, provider: .anilist)
+            let (data, response) = try await sendTrackerRequest(
+                request,
+                provider: .anilist,
+                beforeAttempt: { [weak self] in
+                    guard let requiredAuthority else { return }
+                    guard let self,
+                          await self.operationAuthorityIsCurrent(requiredAuthority) else {
+                        throw CancellationError()
+                    }
+                }
+            )
             guard response.statusCode == 200 else {
                 let message = aniListFailureDescription("AniList anime list fetch failed", response: response, data: data)
                 Logger.shared.log(message, type: "Tracker")
                 throw NSError(domain: "AniList", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: message])
             }
 
+            guard data.count <= 8 * 1_024 * 1_024 else {
+                throw BoundedURLSessionError.responseTooLarge(maximumBytes: 8 * 1_024 * 1_024)
+            }
             let decoded = try JSONDecoder().decode(Response.self, from: data)
             guard let collection = decoded.data?.MediaListCollection else {
-                let message = graphQLErrorMessage(from: data) ?? "AniList anime list fetch returned no collection data."
+                let message = graphQLErrorMessage(from: data) != nil
+                    ? "AniList anime list fetch failed: \(responseBodyPreview(from: data))"
+                    : "AniList anime list fetch returned no collection data."
                 throw NSError(domain: "AniList", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: message])
+            }
+
+            guard collection.lists.count <= TrackerRemoteProgressBoundary.maximumRemoteEntryCount,
+                  collection.lists.allSatisfy({
+                      $0.entries.count <= TrackerRemoteProgressBoundary.maximumRemoteEntryCount
+                  }) else {
+                throw NSError(domain: "AniList", code: -4, userInfo: [NSLocalizedDescriptionKey: "AniList anime list exceeded the supported row limit."])
             }
 
             for group in collection.lists {
                 for item in group.entries {
                     guard let media = item.media else { continue }
-                    if let malId = media.idMal {
-                        cacheMyAnimeListId(malId, forAniListId: media.id, mediaType: "ANIME")
-                    }
-
-                    if entriesByMediaId[media.id] == nil {
-                        orderedMediaIds.append(media.id)
-                    }
-
-                    entriesByMediaId[media.id] = RemoteAnimeProgress(
-                        anilistId: media.id,
-                        malId: media.idMal,
+                    guard let entry = RemoteAnimeProgress(
+                        validatingAniListID: media.id,
+                        malID: media.idMal,
                         title: media.title.english ?? media.title.romaji ?? media.title.native ?? "Unknown",
                         status: item.status ?? group.status ?? "CURRENT",
                         progress: item.progress ?? 0,
                         totalEpisodes: media.episodes
-                    )
+                    ) else {
+                        throw NSError(domain: "AniList", code: -4, userInfo: [NSLocalizedDescriptionKey: "AniList anime list contained unsupported numeric values."])
+                    }
+                    if let malId = entry.malId, let anilistId = entry.anilistId {
+                        cacheMyAnimeListId(malId, forAniListId: anilistId, mediaType: "ANIME")
+                    }
+
+                    guard let anilistId = entry.anilistId else { continue }
+                    if entriesByMediaId[anilistId] == nil {
+                        guard orderedMediaIds.count < TrackerRemoteProgressBoundary.maximumRemoteEntryCount else {
+                            throw NSError(domain: "AniList", code: -4, userInfo: [NSLocalizedDescriptionKey: "AniList anime list exceeded the supported entry limit."])
+                        }
+                        orderedMediaIds.append(anilistId)
+                    }
+
+                    entriesByMediaId[anilistId] = entry
                 }
             }
             hasNextChunk = collection.hasNextChunk
+            guard !hasNextChunk || chunk < TrackerRemoteProgressBoundary.maximumPageCount else {
+                throw NSError(domain: "AniList", code: -4, userInfo: [NSLocalizedDescriptionKey: "AniList anime list returned an invalid continuation."])
+            }
             chunk += 1
         }
 
         return orderedMediaIds.compactMap { entriesByMediaId[$0] }
     }
 
-    private func fetchMALAnimeProgressEntries(account: TrackerAccount) async throws -> [RemoteAnimeProgress] {
+    private func fetchMALAnimeProgressEntries(
+        account: TrackerAccount,
+        requiredAuthority: TrackerOperationAuthority? = nil
+    ) async throws -> [RemoteAnimeProgress] {
         var entries: [RemoteAnimeProgress] = []
         var nextURL: URL? = URL(string: "https://api.myanimelist.net/v2/users/@me/animelist?fields=list_status,num_episodes&limit=\(malListPageLimit)&nsfw=true")
+        var seenPageURLs = Set<URL>()
+        var pageCount = 0
 
         struct Response: Codable {
             let data: [Entry]
@@ -5812,27 +12177,63 @@ final class TrackerManager: NSObject, ObservableObject {
         }
 
         while let url = nextURL {
+            guard pageCount < TrackerRemoteProgressBoundary.maximumPageCount,
+                  TrackerRemoteProgressBoundary.isAllowedMALPageURL(url),
+                  seenPageURLs.insert(url).inserted else {
+                throw NSError(domain: "MAL", code: -4, userInfo: [NSLocalizedDescriptionKey: "MAL anime list returned an invalid or repeated continuation."])
+            }
+            pageCount += 1
             var request = URLRequest(url: url)
             request.setValue("Bearer \(account.accessToken)", forHTTPHeaderField: "Authorization")
 
-            let (data, response) = try await sendTrackerRequest(request, provider: .myAnimeList)
+            let (data, response) = try await sendTrackerRequest(
+                request,
+                provider: .myAnimeList,
+                beforeAttempt: { [weak self] in
+                    guard let requiredAuthority else { return }
+                    guard let self,
+                          await self.operationAuthorityIsCurrent(requiredAuthority) else {
+                        throw CancellationError()
+                    }
+                }
+            )
             guard response.statusCode == 200 else {
-                let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
-                throw NSError(domain: "MAL", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "MAL anime list fetch failed (\(response.statusCode)): \(bodyPreview)"])
+                let diagnostic = responseBodyPreview(from: data)
+                throw NSError(domain: "MAL", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "MAL anime list fetch failed (\(response.statusCode)): \(diagnostic)"])
             }
 
+            guard data.count <= 8 * 1_024 * 1_024 else {
+                throw BoundedURLSessionError.responseTooLarge(maximumBytes: 8 * 1_024 * 1_024)
+            }
             let decoded = try JSONDecoder().decode(Response.self, from: data)
-            entries.append(contentsOf: decoded.data.map { item in
-                RemoteAnimeProgress(
-                    anilistId: nil,
-                    malId: item.node.id,
+            guard decoded.data.count <= TrackerRemoteProgressBoundary.maximumRemoteEntryCount,
+                  decoded.data.count <= TrackerRemoteProgressBoundary.maximumRemoteEntryCount - entries.count else {
+                throw NSError(domain: "MAL", code: -4, userInfo: [NSLocalizedDescriptionKey: "MAL anime list exceeded the supported entry limit."])
+            }
+            for item in decoded.data {
+                guard let entry = RemoteAnimeProgress(
+                    validatingAniListID: nil,
+                    malID: item.node.id,
                     title: item.node.title,
                     status: item.listStatus?.status ?? "watching",
                     progress: item.listStatus?.numEpisodesWatched ?? 0,
                     totalEpisodes: item.node.numEpisodes
-                )
-            })
-            nextURL = decoded.paging?.next.flatMap { URL(string: $0) }
+                ) else {
+                    throw NSError(domain: "MAL", code: -4, userInfo: [NSLocalizedDescriptionKey: "MAL anime list contained unsupported numeric values."])
+                }
+                entries.append(entry)
+            }
+            if let rawNext = decoded.paging?.next {
+                guard rawNext.utf8.count <= 8 * 1_024,
+                      let parsedNext = URL(string: rawNext),
+                      TrackerRemoteProgressBoundary.isAllowedMALPageURL(parsedNext),
+                      !seenPageURLs.contains(parsedNext) else {
+                    throw NSError(domain: "MAL", code: -4, userInfo: [NSLocalizedDescriptionKey: "MAL anime list returned an invalid continuation."])
+                }
+                nextURL = parsedNext
+            } else {
+                nextURL = nil
+            }
         }
 
         return entries
@@ -5855,14 +12256,14 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
 #if !os(tvOS)
-    private func fetchAniListMangaProgressEntries(account: TrackerAccount) async throws -> [RemoteMangaProgress] {
-#if os(tvOS)
-        // The TV product has no reader surface. Keep sync-tool actions anime-only and
-        // never fetch a user's manga library merely because the same tracker account
-        // is connected for anime playback.
-        return []
-#else
-        let userId = try await resolvedAniListUserId(for: account)
+    private func fetchAniListMangaProgressEntries(
+        account: TrackerAccount,
+        requiredAuthority: TrackerOperationAuthority? = nil
+    ) async throws -> [RemoteMangaProgress] {
+        let userId = try await resolvedAniListUserId(
+            for: account,
+            requiredAuthority: requiredAuthority
+        )
         var entriesByMediaId: [Int: RemoteMangaProgress] = [:]
         var orderedMediaIds: [Int] = []
         var chunk = 1
@@ -5938,7 +12339,17 @@ final class TrackerManager: NSObject, ObservableObject {
                 ]
             ])
 
-            let (data, response) = try await sendTrackerRequest(request, provider: .anilist)
+            let (data, response) = try await sendTrackerRequest(
+                request,
+                provider: .anilist,
+                beforeAttempt: { [weak self] in
+                    guard let requiredAuthority else { return }
+                    guard let self,
+                          await self.operationAuthorityIsCurrent(requiredAuthority) else {
+                        throw CancellationError()
+                    }
+                }
+            )
             guard response.statusCode == 200 else {
                 let message = aniListFailureDescription("AniList manga list fetch failed", response: response, data: data)
                 Logger.shared.log(message, type: "Tracker")
@@ -5947,7 +12358,9 @@ final class TrackerManager: NSObject, ObservableObject {
 
             let decoded = try JSONDecoder().decode(Response.self, from: data)
             guard let collection = decoded.data?.MediaListCollection else {
-                let message = graphQLErrorMessage(from: data) ?? "AniList manga list fetch returned no collection data."
+                let message = graphQLErrorMessage(from: data) != nil
+                    ? "AniList manga list fetch failed: \(responseBodyPreview(from: data))"
+                    : "AniList manga list fetch returned no collection data."
                 throw NSError(domain: "AniList", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: message])
             }
 
@@ -5977,13 +12390,12 @@ final class TrackerManager: NSObject, ObservableObject {
         }
 
         return orderedMediaIds.compactMap { entriesByMediaId[$0] }
-#endif
     }
 
-    private func fetchMALMangaProgressEntries(account: TrackerAccount) async throws -> [RemoteMangaProgress] {
-#if os(tvOS)
-        return []
-#else
+    private func fetchMALMangaProgressEntries(
+        account: TrackerAccount,
+        requiredAuthority: TrackerOperationAuthority? = nil
+    ) async throws -> [RemoteMangaProgress] {
         var entries: [RemoteMangaProgress] = []
         var nextURL: URL? = URL(string: "https://api.myanimelist.net/v2/users/@me/mangalist?fields=list_status,num_chapters&limit=\(malListPageLimit)&nsfw=true")
 
@@ -6027,10 +12439,20 @@ final class TrackerManager: NSObject, ObservableObject {
             var request = URLRequest(url: url)
             request.setValue("Bearer \(account.accessToken)", forHTTPHeaderField: "Authorization")
 
-            let (data, response) = try await sendTrackerRequest(request, provider: .myAnimeList)
+            let (data, response) = try await sendTrackerRequest(
+                request,
+                provider: .myAnimeList,
+                beforeAttempt: { [weak self] in
+                    guard let requiredAuthority else { return }
+                    guard let self,
+                          await self.operationAuthorityIsCurrent(requiredAuthority) else {
+                        throw CancellationError()
+                    }
+                }
+            )
             guard response.statusCode == 200 else {
-                let bodyPreview = String(data: data, encoding: .utf8) ?? "<non-utf8>"
-                throw NSError(domain: "MAL", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "MAL manga list fetch failed (\(response.statusCode)): \(bodyPreview)"])
+                let diagnostic = responseBodyPreview(from: data)
+                throw NSError(domain: "MAL", code: response.statusCode, userInfo: [NSLocalizedDescriptionKey: "MAL manga list fetch failed (\(response.statusCode)): \(diagnostic)"])
             }
 
             let decoded = try JSONDecoder().decode(Response.self, from: data)
@@ -6048,13 +12470,9 @@ final class TrackerManager: NSObject, ObservableObject {
         }
 
         return entries
-#endif
     }
 
     private func resolveMALMangaEntriesToAniList(_ entries: [RemoteMangaProgress]) async -> [RemoteMangaProgress] {
-#if os(tvOS)
-        return []
-#else
         let malIds = entries.compactMap(\.malId)
         let resolvedIds = await resolveAniListIds(fromMALIds: malIds, mediaType: "MANGA")
 
@@ -6068,7 +12486,6 @@ final class TrackerManager: NSObject, ObservableObject {
                 totalChapters: entry.totalChapters
             )
         }
-#endif
     }
 #endif
 
@@ -6206,13 +12623,20 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    private func fillEclipseFromRemoteAnime(_ entries: [RemoteAnimeProgress], sourceName: String, action: TrackerSyncToolAction) async throws -> TrackerSyncPreview {
+    private func fillEclipseFromRemoteAnime(
+        _ entries: [RemoteAnimeProgress],
+        sourceName: String,
+        action: TrackerSyncToolAction,
+        owner: UUID,
+        requiredOperationGeneration: UInt64? = nil
+    ) async throws -> TrackerSyncPreview {
         try Task.checkCancellation()
         let anilistIds = entries.compactMap { $0.anilistId }
         let tmdbMap = await AniListService.shared.mapAniListAnimeIdsToTMDBForImport(anilistIds, tmdbService: TMDBService.shared)
         try Task.checkCancellation()
 
         let counts = try await MainActor.run { () throws -> (added: Int, advanced: Int, unmapped: Int) in
+            try self.requireOwner(owner, operationGeneration: requiredOperationGeneration)
             let library = LibraryManager.shared
             var added = 0
             var advanced = 0
@@ -6245,7 +12669,12 @@ final class TrackerManager: NSObject, ObservableObject {
 
                 let watched = remoteWatchedEpisodes(entry)
                 if watched > 0 {
-                    ProgressManager.shared.bulkMarkEpisodesAsWatched(showId: tmdb.id, seasonNumber: 1, throughEpisode: watched)
+                    ProgressManager.shared.bulkMarkEpisodesAsWatched(
+                        showId: tmdb.id,
+                        seasonNumber: 1,
+                        throughEpisode: watched,
+                        owner: owner
+                    )
                     advanced += 1
                 }
             }
@@ -6264,7 +12693,12 @@ final class TrackerManager: NSObject, ObservableObject {
         )
     }
 
-    private func fillMALAnimeCollectionsForLibraryImport(_ entries: [RemoteAnimeProgress], action: TrackerSyncToolAction) async throws -> TrackerSyncPreview {
+    private func fillMALAnimeCollectionsForLibraryImport(
+        _ entries: [RemoteAnimeProgress],
+        action: TrackerSyncToolAction,
+        owner: UUID,
+        requiredOperationGeneration: UInt64? = nil
+    ) async throws -> TrackerSyncPreview {
         try Task.checkCancellation()
         let anilistIds = entries.compactMap { $0.anilistId }
         let aniMapMatches = await AniListService.shared.mapAniListAnimeIdsToTMDBViaAniMapForMALImport(
@@ -6279,6 +12713,7 @@ final class TrackerManager: NSObject, ObservableObject {
         try Task.checkCancellation()
 
         let counts = try await MainActor.run { () throws -> (added: Int, advanced: Int, unmapped: Int, aniMapMapped: Int, fallbackMapped: Int) in
+            try self.requireOwner(owner, operationGeneration: requiredOperationGeneration)
             let library = LibraryManager.shared
             var added = 0
             var advanced = 0
@@ -6332,7 +12767,8 @@ final class TrackerManager: NSObject, ObservableObject {
                     ProgressManager.shared.bulkMarkEpisodesAsWatched(
                         showId: tmdb.id,
                         seasonNumber: mappedSeason ?? 1,
-                        throughEpisode: watched
+                        throughEpisode: watched,
+                        owner: owner
                     )
                     advanced += 1
                 } else if tmdb.isMovie {
@@ -6341,7 +12777,8 @@ final class TrackerManager: NSObject, ObservableObject {
                         title: tmdb.displayTitle,
                         currentTime: 1,
                         totalDuration: 1,
-                        posterURL: tmdb.fullPosterURL
+                        posterURL: tmdb.fullPosterURL,
+                        owner: owner
                     )
                     advanced += 1
                 }
@@ -6363,19 +12800,16 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
 #if !os(tvOS)
-    private func fillEclipseFromRemoteManga(_ entries: [RemoteMangaProgress], sourceName: String, action: TrackerSyncToolAction) async throws -> TrackerSyncPreview {
-#if os(tvOS)
-        return TrackerSyncPreview(
-            action: action,
-            itemsToAdd: 0,
-            itemsToAdvance: 0,
-            skipped: entries.count,
-            unmapped: 0,
-            estimatedAPICalls: 0,
-            notes: ["Manga import is unavailable on Apple TV."]
-        )
-#else
+
+    private func fillEclipseFromRemoteManga(
+        _ entries: [RemoteMangaProgress],
+        sourceName: String,
+        action: TrackerSyncToolAction,
+        owner: UUID,
+        requiredOperationGeneration: UInt64? = nil
+    ) async throws -> TrackerSyncPreview {
         let counts = try await MainActor.run { () throws -> (advanced: Int, unmapped: Int) in
+            try self.requireOwner(owner, operationGeneration: requiredOperationGeneration)
             var advanced = 0
             var unmapped = 0
 
@@ -6410,22 +12844,16 @@ final class TrackerManager: NSObject, ObservableObject {
             estimatedAPICalls: max(1, entries.count),
             notes: ["\(sourceName) manga fill completed without deleting or downgrading local reader progress."]
         )
-#endif
     }
 
-    private func fillMALMangaCollectionsForLibraryImport(_ entries: [RemoteMangaProgress], action: TrackerSyncToolAction) async throws -> TrackerSyncPreview {
-#if os(tvOS)
-        return TrackerSyncPreview(
-            action: action,
-            itemsToAdd: 0,
-            itemsToAdvance: 0,
-            skipped: entries.count,
-            unmapped: 0,
-            estimatedAPICalls: 0,
-            notes: ["Manga collections are unavailable on Apple TV."]
-        )
-#else
+    private func fillMALMangaCollectionsForLibraryImport(
+        _ entries: [RemoteMangaProgress],
+        action: TrackerSyncToolAction,
+        owner: UUID,
+        requiredOperationGeneration: UInt64? = nil
+    ) async throws -> TrackerSyncPreview {
         let counts = try await MainActor.run { () throws -> (added: Int, unmapped: Int) in
+            try self.requireOwner(owner, operationGeneration: requiredOperationGeneration)
             let library = MangaLibraryManager.shared
             var added = 0
             var unmapped = 0
@@ -6473,7 +12901,6 @@ final class TrackerManager: NSObject, ObservableObject {
             estimatedAPICalls: 0,
             notes: ["MAL manga lists were imported into Kanzen collections."]
         )
-#endif
     }
 #endif
 
@@ -6498,16 +12925,12 @@ final class TrackerManager: NSObject, ObservableObject {
 
 #if !os(tvOS)
     private func localHighestReadMangaChapters() -> [(mangaId: Int, chapter: Int)] {
-#if os(tvOS)
-        return []
-#else
         MangaReadingProgressManager.shared.progressMap.compactMap { element in
             let mangaId = element.key
             let progress = element.value
             let highest = progress.readChapterNumbers.compactMap { numericChapter(from: $0) }.max()
             return highest.map { (mangaId: mangaId, chapter: $0) }
         }
-#endif
     }
 
     private func numericChapter(from chapter: String) -> Int? {
@@ -6522,10 +12945,11 @@ final class TrackerManager: NSObject, ObservableObject {
 #endif
 
     private func remoteWatchedEpisodes(_ entry: RemoteAnimeProgress) -> Int {
-        if entry.status.uppercased() == "COMPLETED" || entry.status.lowercased() == "completed" {
-            return max(entry.progress, entry.totalEpisodes ?? 0)
-        }
-        return max(entry.progress, 0)
+        TrackerRemoteProgressBoundary.watchedEpisodeCount(
+            progress: entry.progress,
+            totalEpisodes: entry.totalEpisodes,
+            status: entry.status
+        ) ?? 0
     }
 
 #if !os(tvOS)
@@ -6632,7 +13056,14 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    private func saveAniListAnimeProgress(account: TrackerAccount, anilistId: Int, watchedEpisodes: Int, status: String) async {
+    private func saveAniListAnimeProgress(
+        account: TrackerAccount,
+        anilistId: Int,
+        watchedEpisodes: Int,
+        status: String,
+        owner: UUID
+    ) async {
+        let authority = operationAuthority(for: account, owner: owner)
         let completedAtClause: String
         if status == "COMPLETED" {
             completedAtClause = """
@@ -6668,7 +13099,16 @@ final class TrackerManager: NSObject, ObservableObject {
             request.setValue("Bearer \(account.accessToken)", forHTTPHeaderField: "Authorization")
             request.httpBody = try JSONSerialization.data(withJSONObject: ["query": mutation])
 
-            let (data, response) = try await sendTrackerRequest(request, provider: .anilist)
+            let (data, response) = try await sendTrackerRequest(
+                request,
+                provider: .anilist,
+                beforeAttempt: { [weak self] in
+                    guard let self,
+                          await self.operationAuthorityIsCurrent(authority) else {
+                        throw CancellationError()
+                    }
+                }
+            )
             if response.statusCode == 200,
                let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                let errors = json["errors"] as? [[String: Any]], !errors.isEmpty {
@@ -6684,7 +13124,14 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
 #if !os(tvOS)
-    private func saveAniListMangaProgress(account: TrackerAccount, anilistId: Int, chaptersRead: Int, status: String) async {
+    private func saveAniListMangaProgress(
+        account: TrackerAccount,
+        anilistId: Int,
+        chaptersRead: Int,
+        status: String,
+        owner: UUID
+    ) async {
+        let authority = operationAuthority(for: account, owner: owner)
         let mutation = """
         mutation {
             SaveMediaListEntry(
@@ -6707,7 +13154,16 @@ final class TrackerManager: NSObject, ObservableObject {
             request.setValue("Bearer \(account.accessToken)", forHTTPHeaderField: "Authorization")
             request.httpBody = try JSONSerialization.data(withJSONObject: ["query": mutation])
 
-            let (data, response) = try await sendTrackerRequest(request, provider: .anilist)
+            let (data, response) = try await sendTrackerRequest(
+                request,
+                provider: .anilist,
+                beforeAttempt: { [weak self] in
+                    guard let self,
+                          await self.operationAuthorityIsCurrent(authority) else {
+                        throw CancellationError()
+                    }
+                }
+            )
             if response.statusCode == 200,
                let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                let errors = json["errors"] as? [[String: Any]], !errors.isEmpty {
@@ -6724,6 +13180,39 @@ final class TrackerManager: NSObject, ObservableObject {
 #endif
 
     func disconnectTracker(_ service: TrackerService) {
+        let owner = activeProfileID
+        guard trackerProfileAcceptsOperations(owner) else {
+            Logger.shared.log(
+                "TrackerManager: refused to disconnect \(service.rawValue) while account cleanup owns tracker state",
+                type: "Tracker"
+            )
+            return
+        }
+        _ = invalidateTrackerServiceAuthority(service, profileID: owner)
+        if let authority = webAuthenticationAuthority,
+           authority.owner == owner,
+           authority.service == service {
+#if !os(tvOS)
+            webAuthSession?.cancel()
+#endif
+            finishAuthenticationAuthority(authority)
+            isAuthenticating = false
+        }
+        if service == .trakt {
+            traktTokenRefreshTasks[owner]?.task.cancel()
+            traktTokenRefreshTasks[owner] = nil
+            pendingTraktOAuthState = nil
+        } else if service == .myAnimeList {
+            malTokenRefreshTasks[owner]?.task.cancel()
+            malTokenRefreshTasks[owner] = nil
+            pendingMALCodeVerifier = nil
+        }
+
+        let deletionJournalWasPublished = markCredentialDeletionPending(
+            service,
+            profileID: owner
+        )
+        scrubPendingPersistenceForDisconnect(service, profileID: owner)
         trackerState.disconnectAccount(for: service)
 #if os(tvOS)
         if service == .trakt {
@@ -6740,13 +13229,28 @@ final class TrackerManager: NSObject, ObservableObject {
             trackerState.accounts[index].refreshToken = nil
             trackerState.accounts[index].expiresAt = nil
         }
-        TrackerCredentialVault.remove(service)
-        saveTrackerState()
+        let disconnectedStatePersisted = persistDisconnectedStateSynchronously(
+            service: service,
+            profileID: owner
+        )
+        let removal = removeTrackerCredentialOutcome(service, profileID: owner)
+        if deletionJournalWasPublished
+            || disconnectedStatePersisted
+            || removal.deletionIsDurablyProtected {
+
+            resolveUnpersistedCredentialDeletionAuthority(
+                service,
+                profileID: owner
+            )
+        } else {
+            Logger.shared.log(
+                "TrackerManager: \(service.rawValue) disconnect could not persist its journal or disconnected state and Keychain deletion failed; tracker operations remain fail-closed in this process",
+                type: "Error"
+            )
+        }
+        saveTrackerState(forProfile: owner)
     }
 
-    // MARK: - Tracker Library Import
-
-    /// Import supported tracker progress into local Eclipse collections.
     @Published var isImportingAniList = false
     @Published var aniListImportError: String?
     @Published var aniListImportProgress: String?
@@ -6763,26 +13267,46 @@ final class TrackerManager: NSObject, ObservableObject {
             return
         }
 
+        let owner = ProfileManager.shared.activeProfileID
+        let authority = operationAuthority(for: account, owner: owner)
+
         guard !isImportingAniList else { return }
 
-        // Set the latch before launching the worker task so repeated button taps
-        // cannot start overlapping imports before an enqueued MainActor task runs.
         isImportingAniList = true
         aniListImportError = nil
         aniListImportProgress = "Fetching your AniList library..."
 
         Task {
-            setBackupRestoreSyncSuppressed(true)
-            defer { setBackupRestoreSyncSuppressed(false) }
+            var suppressesOutgoingSync = false
+            defer {
+                if suppressesOutgoingSync {
+                    setBackupRestoreSyncSuppressed(false)
+                }
+            }
 
             do {
-                let animeEntries = try await fetchAniListAnimeProgressEntries(account: account)
+                let animeEntries = try await fetchAniListAnimeProgressEntries(
+                    account: account,
+                    requiredAuthority: authority
+                )
 #if os(tvOS)
                 await MainActor.run {
                     aniListImportProgress = "Adding anime to Eclipse..."
                 }
 
-                let animeResult = try await fillEclipseFromRemoteAnime(animeEntries, sourceName: "AniList", action: .fillEclipseFromAniList)
+                guard await operationAuthorityIsCurrent(authority) else {
+                    throw CancellationError()
+                }
+                setBackupRestoreSyncSuppressed(true)
+                suppressesOutgoingSync = true
+                let applyGeneration = trackerOperationGenerationSnapshot()
+                let animeResult = try await fillEclipseFromRemoteAnime(
+                    animeEntries,
+                    sourceName: "AniList",
+                    action: .fillEclipseFromAniList,
+                    owner: owner,
+                    requiredOperationGeneration: applyGeneration
+                )
                 let imported = animeResult.itemsToAdd + animeResult.itemsToAdvance
 
                 await MainActor.run {
@@ -6792,14 +13316,35 @@ final class TrackerManager: NSObject, ObservableObject {
                     Logger.shared.log("AniList anime import completed: \(imported) local changes from \(animeEntries.count) entries", type: "Tracker")
                 }
 #else
-                let mangaEntries = try await fetchAniListMangaProgressEntries(account: account)
+                let mangaEntries = try await fetchAniListMangaProgressEntries(
+                    account: account,
+                    requiredAuthority: authority
+                )
 
                 await MainActor.run {
                     aniListImportProgress = "Adding items to Eclipse..."
                 }
 
-                let animeResult = try await fillEclipseFromRemoteAnime(animeEntries, sourceName: "AniList", action: .fillEclipseFromAniList)
-                let mangaResult = try await fillEclipseFromRemoteManga(mangaEntries, sourceName: "AniList", action: .fillEclipseFromAniList)
+                guard await operationAuthorityIsCurrent(authority) else {
+                    throw CancellationError()
+                }
+                setBackupRestoreSyncSuppressed(true)
+                suppressesOutgoingSync = true
+                let applyGeneration = trackerOperationGenerationSnapshot()
+                let animeResult = try await fillEclipseFromRemoteAnime(
+                    animeEntries,
+                    sourceName: "AniList",
+                    action: .fillEclipseFromAniList,
+                    owner: owner,
+                    requiredOperationGeneration: applyGeneration
+                )
+                let mangaResult = try await fillEclipseFromRemoteManga(
+                    mangaEntries,
+                    sourceName: "AniList",
+                    action: .fillEclipseFromAniList,
+                    owner: owner,
+                    requiredOperationGeneration: applyGeneration
+                )
                 let imported = animeResult.itemsToAdd + animeResult.itemsToAdvance + mangaResult.itemsToAdvance
 
                 await MainActor.run {
@@ -6821,10 +13366,14 @@ final class TrackerManager: NSObject, ObservableObject {
     }
 
     func importMALToLibrary() {
-        guard trackerState.getAccount(for: .myAnimeList)?.isConnected == true else {
+        guard let account = trackerState.getAccount(for: .myAnimeList),
+              account.isConnected else {
             malImportError = "No connected MAL account"
             return
         }
+
+        let owner = ProfileManager.shared.activeProfileID
+        let authority = operationAuthority(for: account, owner: owner)
 
         guard !isImportingMAL else { return }
 
@@ -6833,12 +13382,24 @@ final class TrackerManager: NSObject, ObservableObject {
         malImportProgress = "Fetching your MAL library..."
 
         Task {
-            setBackupRestoreSyncSuppressed(true)
-            defer { setBackupRestoreSyncSuppressed(false) }
+            var suppressesOutgoingSync = false
+            defer {
+                if suppressesOutgoingSync {
+                    setBackupRestoreSyncSuppressed(false)
+                }
+            }
 
             do {
-                let account = try await connectedMALAccount()
-                let fetchedAnimeEntries = try await fetchMALAnimeProgressEntries(account: account)
+                let refreshedAccount = try await refreshedMALAccountIfNeeded(
+                    account,
+                    requiredOwner: owner,
+                    requiredAuthority: authority
+                )
+                let requestAuthority = authority.replacingCredential(with: refreshedAccount)
+                let fetchedAnimeEntries = try await fetchMALAnimeProgressEntries(
+                    account: refreshedAccount,
+                    requiredAuthority: requestAuthority
+                )
 #if os(tvOS)
                 await MainActor.run {
                     malImportProgress = "Matching MAL anime to app collections..."
@@ -6851,7 +13412,18 @@ final class TrackerManager: NSObject, ObservableObject {
                     malImportProgress = "Adding \(mappedAnimeCount) anime entries to app collections..."
                 }
 
-                let animeResult = try await fillMALAnimeCollectionsForLibraryImport(animeEntries, action: .fillEclipseFromMAL)
+                guard await operationAuthorityIsCurrent(requestAuthority) else {
+                    throw CancellationError()
+                }
+                setBackupRestoreSyncSuppressed(true)
+                suppressesOutgoingSync = true
+                let applyGeneration = trackerOperationGenerationSnapshot()
+                let animeResult = try await fillMALAnimeCollectionsForLibraryImport(
+                    animeEntries,
+                    action: .fillEclipseFromMAL,
+                    owner: owner,
+                    requiredOperationGeneration: applyGeneration
+                )
                 let imported = animeResult.itemsToAdd + animeResult.itemsToAdvance
 
                 await MainActor.run {
@@ -6861,7 +13433,10 @@ final class TrackerManager: NSObject, ObservableObject {
                     Logger.shared.log("MAL anime import completed: \(imported) local changes from \(animeEntries.count) entries", type: "Tracker")
                 }
 #else
-                let fetchedMangaEntries = try await fetchMALMangaProgressEntries(account: account)
+                let fetchedMangaEntries = try await fetchMALMangaProgressEntries(
+                    account: refreshedAccount,
+                    requiredAuthority: requestAuthority
+                )
 
                 await MainActor.run {
                     malImportProgress = "Matching MAL entries to app collections..."
@@ -6876,9 +13451,31 @@ final class TrackerManager: NSObject, ObservableObject {
                     malImportProgress = "Adding \(mappedAnimeCount) anime and \(mappedMangaCount) manga entries to app collections..."
                 }
 
-                let animeResult = try await fillMALAnimeCollectionsForLibraryImport(animeEntries, action: .fillEclipseFromMAL)
-                let mangaCollectionResult = try await fillMALMangaCollectionsForLibraryImport(mangaEntries, action: .fillEclipseFromMAL)
-                let mangaResult = try await fillEclipseFromRemoteManga(mangaEntries, sourceName: "MAL", action: .fillEclipseFromMAL)
+                guard await operationAuthorityIsCurrent(requestAuthority) else {
+                    throw CancellationError()
+                }
+                setBackupRestoreSyncSuppressed(true)
+                suppressesOutgoingSync = true
+                let applyGeneration = trackerOperationGenerationSnapshot()
+                let animeResult = try await fillMALAnimeCollectionsForLibraryImport(
+                    animeEntries,
+                    action: .fillEclipseFromMAL,
+                    owner: owner,
+                    requiredOperationGeneration: applyGeneration
+                )
+                let mangaCollectionResult = try await fillMALMangaCollectionsForLibraryImport(
+                    mangaEntries,
+                    action: .fillEclipseFromMAL,
+                    owner: owner,
+                    requiredOperationGeneration: applyGeneration
+                )
+                let mangaResult = try await fillEclipseFromRemoteManga(
+                    mangaEntries,
+                    sourceName: "MAL",
+                    action: .fillEclipseFromMAL,
+                    owner: owner,
+                    requiredOperationGeneration: applyGeneration
+                )
                 let imported = animeResult.itemsToAdd + animeResult.itemsToAdvance + mangaCollectionResult.itemsToAdd + mangaResult.itemsToAdvance
 
                 await MainActor.run {
@@ -6899,12 +13496,10 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    // MARK: - Trakt Watchlist Sync
-
     static let traktWatchlistCollectionName = "Trakt Watchlist"
 
-    /// Mirror a local "Trakt Watchlist" collection change up to the Trakt watchlist.
     func pushTraktWatchlistChange(searchResult: TMDBSearchResult, added: Bool) {
+        let owner = ProfileManager.shared.activeProfileID
         guard trackerState.syncEnabled,
               trackerState.traktWatchlistSync,
               !isBackupRestoreSyncSuppressed(),
@@ -6915,11 +13510,26 @@ final class TrackerManager: NSObject, ObservableObject {
         let tmdbId = searchResult.id
         let path = added ? "sync/watchlist" : "sync/watchlist/remove"
         let payload: [String: Any] = [mediaKey: [["ids": ["tmdb": tmdbId]]]]
+        let authority = operationAuthority(for: account, owner: owner)
 
         Task {
             do {
-                let refreshedAccount = try await refreshedTraktAccountIfNeeded(account)
-                _ = try await postTraktJSON(path: path, account: refreshedAccount, payload: payload)
+                let refreshedAccount = try await refreshedTraktAccountIfNeeded(
+                    account,
+                    requiredOwner: owner,
+                    requiredAuthority: authority
+                )
+                guard refreshedAccount.userId == account.userId else {
+                    Logger.shared.log("Skipped Trakt watchlist \(added ? "add" : "remove") tmdb=\(tmdbId); the connected account changed while it was queued", type: "Tracker")
+                    return
+                }
+                _ = try await postTraktJSON(
+                    path: path,
+                    account: refreshedAccount,
+                    payload: payload,
+                    owner: owner,
+                    requiredAuthority: authority.replacingCredential(with: refreshedAccount)
+                )
                 Logger.shared.log("Trakt watchlist \(added ? "add" : "remove") tmdb=\(tmdbId) type=\(mediaKey)", type: "Tracker")
             } catch {
                 Logger.shared.log("Failed Trakt watchlist \(added ? "add" : "remove") tmdb=\(tmdbId): \(error.localizedDescription)", type: "Error")
@@ -6927,19 +13537,34 @@ final class TrackerManager: NSObject, ObservableObject {
         }
     }
 
-    /// Pull the Trakt watchlist into the local "Trakt Watchlist" collection. Additive:
-    /// never deletes local items (matches Eclipse's "import never downgrades" rule), so a
-    /// removal made on another device won't surprise-delete a local entry.
     func refreshTraktWatchlistCollection() {
         guard trackerState.syncEnabled,
               trackerState.traktWatchlistSync,
               let account = trackerState.getAccount(for: .trakt) else { return }
 
+        let owner = ProfileManager.shared.activeProfileID
+        let authority = operationAuthority(for: account, owner: owner)
+
         Task {
             do {
-                let refreshedAccount = try await refreshedTraktAccountIfNeeded(account)
-                async let showPages = fetchAllTraktPages(path: "users/me/watchlist/shows?extended=full", account: refreshedAccount)
-                async let moviePages = fetchAllTraktPages(path: "users/me/watchlist/movies?extended=full", account: refreshedAccount)
+                let refreshedAccount = try await refreshedTraktAccountIfNeeded(
+                    account,
+                    requiredOwner: owner,
+                    requiredAuthority: authority
+                )
+                let requestAuthority = authority.replacingCredential(with: refreshedAccount)
+                async let showPages = fetchAllTraktPages(
+                    path: "users/me/watchlist/shows?extended=full",
+                    account: refreshedAccount,
+                    owner: owner,
+                    requiredAuthority: requestAuthority
+                )
+                async let moviePages = fetchAllTraktPages(
+                    path: "users/me/watchlist/movies?extended=full",
+                    account: refreshedAccount,
+                    owner: owner,
+                    requiredAuthority: requestAuthority
+                )
                 let (showsRaw, moviesRaw) = try await (showPages, moviePages)
 
                 let decoder = JSONDecoder()
@@ -6961,7 +13586,11 @@ final class TrackerManager: NSObject, ObservableObject {
                 }
 
                 let resolvedResults = results
-                await MainActor.run {
+                guard await operationAuthorityIsCurrent(requestAuthority) else {
+                    throw CancellationError()
+                }
+                try await MainActor.run {
+                    try self.requireOwner(owner)
                     LibraryManager.shared.applyTraktWatchlistPull(resolvedResults)
                 }
                 Logger.shared.log("Trakt watchlist pull: \(resolvedResults.count) items merged into \(Self.traktWatchlistCollectionName)", type: "Tracker")
@@ -6977,6 +13606,9 @@ final class TrackerManager: NSObject, ObservableObject {
             return
         }
 
+        let owner = ProfileManager.shared.activeProfileID
+        let authority = operationAuthority(for: account, owner: owner)
+
         guard !isImportingTrakt else { return }
 
         isImportingTrakt = true
@@ -6984,15 +13616,44 @@ final class TrackerManager: NSObject, ObservableObject {
         traktImportProgress = "Fetching your Trakt library..."
 
         Task {
-            setBackupRestoreSyncSuppressed(true)
-            defer { setBackupRestoreSyncSuppressed(false) }
+            var suppressesOutgoingSync = false
+            defer {
+                if suppressesOutgoingSync {
+                    setBackupRestoreSyncSuppressed(false)
+                }
+            }
 
             do {
-                let refreshedAccount = try await refreshedTraktAccountIfNeeded(account)
-                async let watchlistShowPages = fetchAllTraktPages(path: "users/me/watchlist/shows?extended=full", account: refreshedAccount)
-                async let watchlistMoviePages = fetchAllTraktPages(path: "users/me/watchlist/movies?extended=full", account: refreshedAccount)
-                async let watchedShowData = fetchTraktPlaybackData(path: "users/me/watched/shows", account: refreshedAccount)
-                async let watchedMovieData = fetchTraktPlaybackData(path: "users/me/watched/movies", account: refreshedAccount)
+                let refreshedAccount = try await refreshedTraktAccountIfNeeded(
+                    account,
+                    requiredOwner: owner,
+                    requiredAuthority: authority
+                )
+                let requestAuthority = authority.replacingCredential(with: refreshedAccount)
+                async let watchlistShowPages = fetchAllTraktPages(
+                    path: "users/me/watchlist/shows?extended=full",
+                    account: refreshedAccount,
+                    owner: owner,
+                    requiredAuthority: requestAuthority
+                )
+                async let watchlistMoviePages = fetchAllTraktPages(
+                    path: "users/me/watchlist/movies?extended=full",
+                    account: refreshedAccount,
+                    owner: owner,
+                    requiredAuthority: requestAuthority
+                )
+                async let watchedShowData = fetchTraktPlaybackData(
+                    path: "users/me/watched/shows",
+                    account: refreshedAccount,
+                    owner: owner,
+                    requiredAuthority: requestAuthority
+                )
+                async let watchedMovieData = fetchTraktPlaybackData(
+                    path: "users/me/watched/movies",
+                    account: refreshedAccount,
+                    owner: owner,
+                    requiredAuthority: requestAuthority
+                )
                 let (watchlistShowsRaw, watchlistMoviesRaw, watchedShowsRaw, watchedMoviesRaw) = try await (
                     watchlistShowPages,
                     watchlistMoviePages,
@@ -7032,7 +13693,14 @@ final class TrackerManager: NSObject, ObservableObject {
 
                 let resolvedShows = mappedShows
                 let resolvedMovies = mappedMovies
-                let counts = await MainActor.run { () -> (added: Int, advanced: Int, skipped: Int) in
+                guard await operationAuthorityIsCurrent(requestAuthority) else {
+                    throw CancellationError()
+                }
+                setBackupRestoreSyncSuppressed(true)
+                suppressesOutgoingSync = true
+                let applyGeneration = trackerOperationGenerationSnapshot()
+                let counts = try await MainActor.run { () throws -> (added: Int, advanced: Int, skipped: Int) in
+                    try self.requireOwner(owner, operationGeneration: applyGeneration)
                     let library = LibraryManager.shared
                     var added = 0
                     var advanced = 0
@@ -7079,20 +13747,39 @@ final class TrackerManager: NSObject, ObservableObject {
                             skipped += 1
                             continue
                         }
-                        let watchedEpisodeCount = (entry.seasons ?? []).reduce(0) { $0 + $1.episodes.count }
-                        let collectionName = (entry.show.airedEpisodes ?? 0) > 0 && watchedEpisodeCount >= (entry.show.airedEpisodes ?? 0)
+                        let remoteSeasons = entry.seasons ?? []
+                        guard remoteSeasons.count <= ProgressPersistencePolicy.maximumBulkEpisodeMutationCount,
+                              let watchedEpisodeCount = RemoteMediaNumericBoundary.boundedSum(
+                                remoteSeasons.map { $0.episodes.count },
+                                maximum: ProgressPersistencePolicy.maximumBulkEpisodeMutationCount
+                              ) else {
+                            skipped += 1
+                            continue
+                        }
+                        let safeAiredEpisodeCount = entry.show.airedEpisodes.flatMap {
+                            (0...ProgressPersistencePolicy.maximumBulkEpisodeMutationCount).contains($0)
+                                ? $0
+                                : nil
+                        }
+                        let collectionName = (safeAiredEpisodeCount ?? 0) > 0
+                            && watchedEpisodeCount >= (safeAiredEpisodeCount ?? 0)
                             ? "Trakt Completed"
                             : "Trakt Watching"
                         add(result, to: collectionName)
 
                         var didAdvance = false
-                        for season in entry.seasons ?? [] {
+                        for season in remoteSeasons {
                             let watchedEpisodes = season.episodes.map(\.number)
-                            guard !watchedEpisodes.isEmpty else { continue }
+                            guard ProgressPersistencePolicy.exactEpisodeMutationNumbers(
+                                showID: tmdbId,
+                                seasonNumber: season.number,
+                                episodeNumbers: watchedEpisodes
+                            ) != nil else { continue }
                             ProgressManager.shared.bulkMarkEpisodeNumbersAsWatched(
                                 showId: tmdbId,
                                 seasonNumber: season.number,
-                                episodeNumbers: watchedEpisodes
+                                episodeNumbers: watchedEpisodes,
+                                owner: owner
                             )
                             didAdvance = true
                         }
@@ -7110,7 +13797,8 @@ final class TrackerManager: NSObject, ObservableObject {
                         ProgressManager.shared.markMovieAsWatchedForImport(
                             movieId: tmdbId,
                             title: result.displayTitle,
-                            posterURL: result.fullPosterURL
+                            posterURL: result.fullPosterURL,
+                            owner: owner
                         )
                         advanced += 1
                     }

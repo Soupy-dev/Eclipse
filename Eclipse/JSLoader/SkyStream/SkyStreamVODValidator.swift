@@ -1,10 +1,6 @@
 import Foundation
 import CryptoKit
 
-// MARK: - Untrusted input
-
-/// Cache and runtime identity. Including the payload generation prevents an
-/// accepted URL from one plugin version being reused by another.
 public struct SkyStreamVODValidationIdentity: Sendable, Hashable {
     public let packageID: String
     public let providerID: String
@@ -46,8 +42,6 @@ public struct SkyStreamRawSubtitleCandidate: Sendable, Hashable {
     }
 }
 
-/// A direct representation of untrusted ABI output. No consumer should turn
-/// this into StreamOption or a player request without validation.
 public struct SkyStreamRawStreamCandidate: Sendable, Hashable {
     public var url: String
     public var headers: [String: String]
@@ -93,8 +87,6 @@ public struct SkyStreamRawStreamCandidate: Sendable, Hashable {
         self.policyHints = policyHints
     }
 }
-
-// MARK: - Validated output
 
 public enum SkyStreamValidatedMediaKind: String, Sendable, Hashable {
     case direct
@@ -192,8 +184,6 @@ public struct SkyStreamValidatedSubtitle: Sendable, Hashable {
     }
 }
 
-/// The only SkyStream value intended to cross into Eclipse playback. Its
-/// initializer is file-private; callers receive it from `SkyStreamVODValidator`.
 public struct SkyStreamValidatedPlaybackDescriptor: Sendable, Hashable {
     public let identity: SkyStreamVODValidationIdentity
     public let mediaKind: SkyStreamValidatedMediaKind
@@ -231,8 +221,6 @@ public struct SkyStreamValidatedPlaybackDescriptor: Sendable, Hashable {
         self.finiteContentLength = finiteContentLength
     }
 }
-
-// MARK: - Limits and errors
 
 public struct SkyStreamVODValidationLimits: Sendable, Hashable {
     public var maximumManifestBytes: Int
@@ -327,8 +315,6 @@ extension SkyStreamVODValidationError: LocalizedError {
         }
     }
 }
-
-// MARK: - MAGIC_PROXY decoding (decode only; never starts a proxy)
 
 public struct SkyStreamRawProxyOptions: Sendable, Hashable {
     public var version: SkyStreamValidatedProxyOptions.MagicVersion
@@ -448,8 +434,7 @@ public enum SkyStreamMagicProxyDecoder {
     }
 
     private static func validateJSONShape(_ data: Data) throws {
-        // Bound both depth and flat structural width before Foundation materializes fields that
-        // MAGIC v2 does not understand and will later discard.
+
         guard String(data: data, encoding: .utf8) != nil else {
             throw SkyStreamVODValidationError.invalidMagicDescriptor
         }
@@ -513,8 +498,6 @@ public enum SkyStreamMagicProxyDecoder {
     }
 }
 
-// MARK: - Cache
-
 private enum SkyStreamVODCachedValue: Sendable {
     case accepted(SkyStreamValidatedPlaybackDescriptor)
     case rejected(String)
@@ -573,8 +556,6 @@ private actor SkyStreamVODValidationCache {
     }
 }
 
-// MARK: - Validator
-
 public final class SkyStreamVODValidator: @unchecked Sendable {
     public static let shared = SkyStreamVODValidator()
 
@@ -590,8 +571,6 @@ public final class SkyStreamVODValidator: @unchecked Sendable {
         self.client = client
     }
 
-    /// Validates one candidate independently, allowing a progressive caller to
-    /// publish accepted streams as soon as each finishes.
     public func validate(
         _ candidate: SkyStreamRawStreamCandidate,
         identity: SkyStreamVODValidationIdentity,
@@ -659,15 +638,12 @@ public final class SkyStreamVODValidator: @unchecked Sendable {
         }
 
         let proxyOptions = try await validateProxyOptions(rawProxyOptions)
-        // Official SkyStream packages commonly include transport-owned headers such as
-        // Host, Connection, or Accept-Encoding in MAGIC_PROXY descriptors. URLSession owns
-        // those fields; discard them at this SkyStream boundary instead of rejecting the
-        // otherwise valid stream descriptor.
+
         var mergedHeaders = SkyStreamRuntimeHeaderCompatibility.droppingControlled(decodedHeaders)
         let preferredReferer = rawProxyOptions?.referer ?? candidate.referer
         if let preferredReferer,
-           !mergedHeaders.keys.contains(where: { $0.caseInsensitiveCompare("Referer") == .orderedSame }) {
-            let validatedReferer = try await policy.validate(preferredReferer, purpose: .pluginRequest)
+           !mergedHeaders.keys.contains(where: { $0.caseInsensitiveCompare("Referer") == .orderedSame }),
+           let validatedReferer = try? await policy.validate(preferredReferer, purpose: .pluginRequest) {
             mergedHeaders["Referer"] = validatedReferer.url.absoluteString
         }
         let headers = try SkyStreamHeaderSanitizer.sanitize(mergedHeaders, purpose: .stream)
@@ -1110,9 +1086,6 @@ public final class SkyStreamVODValidator: @unchecked Sendable {
         )
     }
 
-    /// Subtitle URLs are optional and can be substantially slower than the media root. Validate
-    /// them in parallel with the media graph, then seal only the usable first credential variant
-    /// for each exact URL onto the already-validated immutable descriptor.
     private func attachingSubtitles(
         _ subtitles: [SkyStreamValidatedSubtitle],
         to descriptor: SkyStreamValidatedPlaybackDescriptor,
@@ -1327,10 +1300,6 @@ public final class SkyStreamVODValidator: @unchecked Sendable {
         guard limits.maximumSubtitles > 0 else { return [] }
         _ = identity
 
-        // Subtitles are optional adornments. A provider returning 200 subtitle rows, one stale
-        // subtitle URL, or a malformed optional header must not discard an otherwise valid video.
-        // Syntactically filter and deduplicate first, then perform DNS validation for only the
-        // bounded accepted prefix.
         var prepared: [(Int, SkyStreamRawSubtitleCandidate, SkyStreamSanitizedHeaders)] = []
         var seen = Set<String>()
         for candidate in candidates.prefix(256) {
@@ -1342,9 +1311,7 @@ public final class SkyStreamVODValidator: @unchecked Sendable {
                       SkyStreamRuntimeHeaderCompatibility.droppingControlled(candidate.headers),
                       purpose: .subtitle
                   ) else { continue }
-            // The typed proxy owns one immutable credential set per exact URL. Keep the first
-            // valid optional variant instead of allowing a same-URL header conflict to reject
-            // the video during proxy sealing.
+
             let key = syntacticURL.url.absoluteString
             guard seen.insert(key).inserted else { continue }
             prepared.append((prepared.count, candidate, headers))
@@ -1522,14 +1489,11 @@ public final class SkyStreamVODValidator: @unchecked Sendable {
     }
 }
 
-// MARK: - HLS validation
-
 private struct HLSValidationContext: @unchecked Sendable {
     let identity: SkyStreamVODValidationIdentity
     let defaultHeaders: SkyStreamSanitizedHeaders
     let defaultProxyOptions: SkyStreamValidatedProxyOptions?
-    /// MAGIC descriptors explicitly request sticky proxy semantics. Ordinary
-    /// manifests still shed credentials whenever a child changes origin.
+
     let permitsUnscopedHeaderInheritance: Bool
     let limits: SkyStreamVODValidationLimits
     let policy: SkyStreamRemoteURLPolicy
@@ -1619,11 +1583,6 @@ private extension SkyStreamVODValidator {
             finiteMediaPlaylistCount: parsed.isFiniteMedia ? 1 : 0
         )
 
-        // A finite media playlist commonly contains thousands of segment URLs
-        // on one CDN host. Resolve its ordinary references as one syntactically
-        // checked batch, so DNS is performed once per host instead of creating
-        // a task group for every small wave of segments. MAGIC descriptors stay
-        // on the full per-reference path because they can carry unique options.
         let resolvedReferences = try await resolveHLSReferences(
             parsed.references,
             relativeTo: baseURL,
@@ -2180,8 +2139,6 @@ private extension SkyStreamVODValidator {
     }
 }
 
-// MARK: - Response classification and direct-media proof
-
 private extension SkyStreamVODValidator {
     static func looksLikeHLS(_ data: Data) -> Bool {
         guard let prefix = String(data: data.prefix(4_096), encoding: .utf8) else { return false }
@@ -2258,19 +2215,19 @@ private extension SkyStreamVODValidator {
     static func hasRecognizedMediaSignature(_ data: Data) -> Bool {
         let bytes = [UInt8](data.prefix(16))
         if bytes.count >= 8, String(bytes: bytes[4..<8], encoding: .ascii) == "ftyp" { return true }
-        if bytes.starts(with: [0x1a, 0x45, 0xdf, 0xa3]) { return true } // EBML / Matroska
+        if bytes.starts(with: [0x1a, 0x45, 0xdf, 0xa3]) { return true }
         if bytes.starts(with: Array("OggS".utf8)) || bytes.starts(with: Array("fLaC".utf8)) { return true }
         if bytes.starts(with: Array("ID3".utf8)) { return true }
         if bytes.count >= 12,
            String(bytes: bytes[0..<4], encoding: .ascii) == "RIFF",
            String(bytes: bytes[8..<12], encoding: .ascii) == "WAVE" { return true }
-        if bytes.count >= 2, bytes[0] == 0xff, bytes[1] & 0xe0 == 0xe0 { return true } // MPEG audio
-        if bytes.first == 0x47 { return true } // MPEG transport stream sync byte
+        if bytes.count >= 2, bytes[0] == 0xff, bytes[1] & 0xe0 == 0xe0 { return true }
+        if bytes.first == 0x47 { return true }
         return false
     }
 
     static func parseContentRangeTotal(_ value: String) -> Int64? {
-        // Required shape: bytes START-END/TOTAL. Wildcard totals are not finite proof.
+
         let components = value.lowercased().split(separator: " ", maxSplits: 1)
         guard components.count == 2, components[0] == "bytes" else { return nil }
         let rangeAndTotal = components[1].split(separator: "/", maxSplits: 1)
@@ -2282,8 +2239,6 @@ private extension SkyStreamVODValidator {
         return total
     }
 }
-
-// MARK: - DASH validation
 
 private struct DASHReference: Sendable {
     let rawValue: String
@@ -2404,7 +2359,7 @@ private final class SkyStreamDASHParserDelegate: NSObject, XMLParserDelegate {
         } else if name == "location" || name.hasSuffix(":location")
                     || name == "patchlocation" || name.hasSuffix(":patchlocation")
                     || name == "utctiming" || name.hasSuffix(":utctiming") {
-            // These can introduce mutable network dependencies into an otherwise static MPD.
+
             fail(.nonStaticDASH, parser: parser)
         }
     }
@@ -2611,9 +2566,7 @@ private extension SkyStreamVODValidator {
         _ references: [DASHReference],
         basedSources: [(url: URL, origin: SkyStreamRemoteOrigin, headers: SkyStreamSanitizedHeaders)]
     ) throws -> [BasedDASHReference] {
-        // The XML delegate already rejects templates. Exact references are
-        // resolved against the manifest; BaseURL alternatives are added below
-        // by `parseDASH` callers through ordinary reference values.
+
         try basedSources.flatMap { source in
             try references.map { reference in
                 guard !reference.rawValue.contains("$") else {

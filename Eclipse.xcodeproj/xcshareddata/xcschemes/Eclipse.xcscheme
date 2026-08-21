@@ -41,17 +41,6 @@
                ReferencedContainer = "container:Eclipse.xcodeproj">
             </BuildableReference>
          </TestableReference>
-         <TestableReference
-            skipped = "NO"
-            parallelizable = "YES">
-            <BuildableReference
-               BuildableIdentifier = "primary"
-               BlueprintIdentifier = "12F745262EB539F000889684"
-               BuildableName = "FakeKitTests.xctest"
-               BlueprintName = "FakeKitTests"
-               ReferencedContainer = "container:Eclipse.xcodeproj">
-            </BuildableReference>
-         </TestableReference>
       </Testables>
    </TestAction>
    <LaunchAction

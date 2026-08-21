@@ -84,11 +84,13 @@ final class CloudflareBypassManager: ObservableObject {
 
         // Tokens that appear only on the actual interstitial/challenge document, never on an
         // already-cleared page — reliable on any status.
+        let bodyIsDocument = lowerBody.contains("<html") || lowerBody.contains("<!doctype")
+
         if lowerBody.contains("__cf_chl_")
             || lowerBody.contains("cf_chl_opt")
             || lowerBody.contains("enable javascript and cookies")
-            || lowerBody.contains("check.ddos-guard.net")
-            || lowerBody.contains("/.well-known/ddos-guard/")
+            || (bodyIsDocument && lowerBody.contains("check.ddos-guard.net"))
+            || (bodyIsDocument && lowerBody.contains("/.well-known/ddos-guard/"))
             || (lowerBody.contains("just a moment") && lowerBody.contains("cloudflare")) {
             return true
         }
@@ -129,13 +131,8 @@ final class CloudflareBypassManager: ObservableObject {
 #else
 import WebKit
 
-#if os(iOS)
 import SwiftUI
 import UIKit
-#elseif os(macOS)
-import AppKit
-import SwiftUI
-#endif
 
 enum CloudflareBypassError: Error {
     case timeout
@@ -184,6 +181,10 @@ final class CloudflareBypassManager: ObservableObject {
     /// common case silent and fast, and only escalate to visible UI for the genuine minority.
     private static let silentSolveBudgetSeconds: TimeInterval = 5
     private static let totalSolveBudgetSeconds: TimeInterval = 45
+    private static let maximumSharedCookieCount = 64
+    private static let maximumSharedCookieNameBytes = 64
+    private static let maximumSharedCookieValueBytes = 4 * 1_024
+    private static let maximumSharedCookieHeaderBytes = 32 * 1_024
 
     private init() {
         loadPersistedCache()
@@ -215,10 +216,13 @@ final class CloudflareBypassManager: ObservableObject {
 
     func applyCachedBypass(to request: inout URLRequest, for url: URL) {
         guard let host = normalizedHost(from: url),
-              let entry = cachedEntry(for: host) else { return }
+              let entry = cachedEntry(for: host),
+              let vettedCookieHeader = Self.vettedSharedCookieHeader(from: entry.cookieHeader) else {
+            return
+        }
 
         let existingCookie = request.value(forHTTPHeaderField: "Cookie") ?? ""
-        let mergedCookie = mergeCookieHeaders(existingCookie, entry.cookieHeader)
+        let mergedCookie = mergeCookieHeaders(existingCookie, vettedCookieHeader)
         request.setValue(mergedCookie, forHTTPHeaderField: "Cookie")
 
         if !entry.userAgent.isEmpty {
@@ -226,7 +230,7 @@ final class CloudflareBypassManager: ObservableObject {
         }
 
         Logger.shared.log(
-            "CloudflareBypass: applied cached session host=\(host) cachedCookies=\(cookiePairCount(in: entry.cookieHeader)) cookieNames=\(cookieNameSummary(entry.cookieHeader)) mergedWithExisting=\(!existingCookie.isEmpty) userAgent=\(!entry.userAgent.isEmpty) uaProfile=\(userAgentProfile(entry.userAgent))",
+            "CloudflareBypass: applied cached session host=\(host) cachedCookies=\(cookiePairCount(in: vettedCookieHeader)) cookieNames=\(cookieNameSummary(vettedCookieHeader)) mergedWithExisting=\(!existingCookie.isEmpty) userAgent=\(!entry.userAgent.isEmpty) uaProfile=\(userAgentProfile(entry.userAgent))",
             type: "Service"
         )
     }
@@ -251,7 +255,9 @@ final class CloudflareBypassManager: ObservableObject {
 
     func store(cookieHeader: String, userAgent: String, for host: String) {
         let normalizedHost = normalizedHost(host)
-        guard !cookieHeader.isEmpty else { return }
+        guard let cookieHeader = Self.vettedSharedCookieHeader(from: cookieHeader) else {
+            return
+        }
 
         lock.lock()
         cache[normalizedHost] = CachedBypass(
@@ -410,7 +416,7 @@ final class CloudflareBypassManager: ObservableObject {
             sessionInfo = nil
         }
 
-        guard let sessionInfo, !sessionInfo.cookieHeader.isEmpty else {
+        guard let sessionInfo else {
             Logger.shared.log("CloudflareBypass: no solved session available host=\(host)", type: "Service")
             return nil
         }
@@ -426,7 +432,9 @@ final class CloudflareBypassManager: ObservableObject {
         for (key, value) in extraHeaders where !["cookie", "user-agent"].contains(key.lowercased()) {
             request.setValue(value, forHTTPHeaderField: key)
         }
-        request.setValue(sessionInfo.cookieHeader, forHTTPHeaderField: "Cookie")
+        if !sessionInfo.cookieHeader.isEmpty {
+            request.setValue(sessionInfo.cookieHeader, forHTTPHeaderField: "Cookie")
+        }
         if !sessionInfo.userAgent.isEmpty {
             request.setValue(sessionInfo.userAgent, forHTTPHeaderField: "User-Agent")
         }
@@ -475,7 +483,10 @@ final class CloudflareBypassManager: ObservableObject {
             )
             return (data, httpResponse)
         } catch {
-            Logger.shared.log("CloudflareBypass: session retry failed host=\(redactedHost(url)) elapsedMs=\(elapsedMilliseconds(since: retryStartedAt)) error=\(error.localizedDescription)", type: "Error")
+            Logger.shared.log(
+                "CloudflareBypass: session retry failed host=\(redactedHost(url)) elapsedMs=\(elapsedMilliseconds(since: retryStartedAt)) reason=\(servicePinnedNetworkErrorToken(error))",
+                type: "Error"
+            )
             return nil
         }
     }
@@ -598,6 +609,18 @@ final class CloudflareBypassManager: ObservableObject {
         // not time spent waiting behind another host or another same-host caller.
         let verificationStartedAt = Date()
 
+        guard await ServiceBrowserAutomationPolicy.permitsNavigation(
+            to: url,
+            allowsLocalDocument: false
+        ) else {
+            Logger.shared.log(
+                "CloudflareBypass: verification target rejected host=\(host) reason=browser-policy",
+                type: "Service"
+            )
+            flagPendingVerification(for: url)
+            return false
+        }
+
         let webView = makeBypassWebView()
         // Load the exact URL that got challenged, not the bare host. cf_clearance is domain-wide,
         // but many providers (e.g. AnimePahe) only present the interactive Turnstile widget — the
@@ -611,7 +634,6 @@ final class CloudflareBypassManager: ObservableObject {
 
         activeBypassWebView = webView
         var isVisible = presentation == .visible
-        #if os(iOS) || os(macOS)
         switch presentation {
         case .visible:
             CloudflareBypassWindowController.shared.show()
@@ -621,13 +643,10 @@ final class CloudflareBypassManager: ObservableObject {
             // never need to interrupt the user.
             CloudflareBypassSilentHost.shared.attach(webView)
         }
-        #endif
         defer {
             activeBypassWebView = nil
-            #if os(iOS) || os(macOS)
             CloudflareBypassSilentHost.shared.detach(webView)
             CloudflareBypassWindowController.shared.hide()
-            #endif
         }
 
         webView.load(URLRequest(url: verificationURL))
@@ -644,7 +663,11 @@ final class CloudflareBypassManager: ObservableObject {
                 flagPendingVerification(for: url)
                 return false
             }
-            if let solved = await captureSolvedSessionIfPresent(originalHost: host, in: webView) {
+            if let solved = await captureSolvedSessionIfPresent(
+                originalHost: host,
+                in: webView,
+                retainsWebView: true
+            ) {
                 Logger.shared.log(
                     "CloudflareBypass: verification solved host=\(host) resolvedHost=\(solved.resolvedHost ?? "nil") cachedHosts=\(solved.cachedHosts.joined(separator: ",")) cookieNames=\(cookieNameSummary(solved.cookieHeader)) uaProfile=\(userAgentProfile(solved.userAgent)) elapsedMs=\(elapsedMilliseconds(since: verificationStartedAt)) shownInteractiveUI=\(isVisible)",
                     type: "Service"
@@ -652,7 +675,6 @@ final class CloudflareBypassManager: ObservableObject {
                 return true
             }
 
-            #if os(iOS) || os(macOS)
             if presentation == .silentThenEscalate, !isVisible, elapsed >= Self.silentSolveBudgetSeconds {
                 // The silent attempt didn't resolve on its own, so this challenge needs a human
                 // (typically an interactive Turnstile checkbox). Surface the SAME flow in a
@@ -666,7 +688,6 @@ final class CloudflareBypassManager: ObservableObject {
                 webView.load(URLRequest(url: verificationURL))
                 isVisible = true
             }
-            #endif
 
             if Date().timeIntervalSince(lastLoggedAt) >= 5 {
                 lastLoggedAt = Date()
@@ -728,11 +749,13 @@ final class CloudflareBypassManager: ObservableObject {
 
         // Tokens that appear only on the actual interstitial/challenge document, never on an
         // already-cleared page — reliable on any status.
+        let bodyIsDocument = lowerBody.contains("<html") || lowerBody.contains("<!doctype")
+
         if lowerBody.contains("__cf_chl_")
             || lowerBody.contains("cf_chl_opt")
             || lowerBody.contains("enable javascript and cookies")
-            || lowerBody.contains("check.ddos-guard.net")
-            || lowerBody.contains("/.well-known/ddos-guard/")
+            || (bodyIsDocument && lowerBody.contains("check.ddos-guard.net"))
+            || (bodyIsDocument && lowerBody.contains("/.well-known/ddos-guard/"))
             || (lowerBody.contains("just a moment") && lowerBody.contains("cloudflare")) {
             return true
         }
@@ -776,7 +799,11 @@ final class CloudflareBypassManager: ObservableObject {
     func captureSolvedCookies(from webView: WKWebView, for url: URL?) {
         guard let url, let host = normalizedHost(from: url) else { return }
         Task { @MainActor in
-            if let solved = await captureSolvedSessionIfPresent(originalHost: host, in: webView) {
+            if let solved = await captureSolvedSessionIfPresent(
+                originalHost: host,
+                in: webView,
+                retainsWebView: false
+            ) {
                 Logger.shared.log(
                     "CloudflareBypass: captured solved cookies from web view host=\(host) resolvedHost=\(solved.resolvedHost ?? "nil") cachedHosts=\(solved.cachedHosts.joined(separator: ",")) cookieNames=\(cookieNameSummary(solved.cookieHeader)) uaProfile=\(userAgentProfile(solved.userAgent))",
                     type: "Service"
@@ -907,7 +934,19 @@ final class CloudflareBypassManager: ObservableObject {
     private func loadPersistedCache() {
         guard let data = UserDefaults.standard.data(forKey: Keys.persistedCache),
               let decoded = try? JSONDecoder().decode([String: CachedBypass].self, from: data) else { return }
-        cache = decoded.filter { $0.value.expires > Date() }
+        cache = decoded.reduce(into: [String: CachedBypass]()) { result, pair in
+            guard pair.value.expires > Date(),
+                  let vettedHeader = Self.vettedSharedCookieHeader(
+                    from: pair.value.cookieHeader
+                  ) else {
+                return
+            }
+            result[pair.key] = CachedBypass(
+                cookieHeader: vettedHeader,
+                userAgent: pair.value.userAgent,
+                expires: pair.value.expires
+            )
+        }
         #if os(iOS)
         // A short-lived build used an iPhone UA for iPad verification. Those cookies are tied to
         // that profile and can make AnimePahe return its landing page instead of the requested
@@ -921,6 +960,7 @@ final class CloudflareBypassManager: ObservableObject {
             }
         }
         #endif
+        persistCache()
         Logger.shared.log("CloudflareBypass: loaded persisted sessions count=\(cache.count)", type: "Service")
     }
 
@@ -939,7 +979,17 @@ final class CloudflareBypassManager: ObservableObject {
         reloadAfterRejectedReuse: Bool
     ) async -> (data: Data, response: HTTPURLResponse)? {
         let browserRecoveryStartedAt = Date()
-        guard let webView = bypassWebViews[host] else { return nil }
+        guard let webView = bypassWebViews[host],
+              await ServiceBrowserAutomationPolicy.permitsNavigation(
+                to: url,
+                allowsLocalDocument: false
+              ) else {
+            Logger.shared.log(
+                "CloudflareBypass: browser recovery rejected host=\(host) reason=browser-policy",
+                type: "Service"
+            )
+            return nil
+        }
 
         var previousDocumentMarker: String?
         if reloadAfterRejectedReuse {
@@ -1158,12 +1208,10 @@ final class CloudflareBypassManager: ObservableObject {
         #else
         return await withCheckedContinuation { continuation in
             webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
-                let hostCookies = cookies.filter { cookie in
-                    let domain = cookie.domain.hasPrefix(".") ? String(cookie.domain.dropFirst()) : cookie.domain
-                    return host == domain.lowercased() || host.hasSuffix("." + domain.lowercased())
-                }
-                let header = hostCookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
-                continuation.resume(returning: header.isEmpty ? nil : header)
+                continuation.resume(returning: Self.vettedSharedCookieHeader(
+                    from: cookies,
+                    for: host
+                ))
             }
         }
         #endif
@@ -1185,9 +1233,15 @@ final class CloudflareBypassManager: ObservableObject {
     /// carry them across that same cross-domain redirect, and caches the session under both the
     /// originally-requested host and the resolved challenge host.
     @MainActor
-    private func captureSolvedSessionIfPresent(originalHost: String, in webView: WKWebView) async -> SolvedSession? {
+    private func captureSolvedSessionIfPresent(
+        originalHost: String,
+        in webView: WKWebView,
+        retainsWebView: Bool
+    ) async -> SolvedSession? {
         let cookies = await allCookies(in: webView)
-        guard cookies.contains(where: { Self.isClearanceCookieName($0.name) }) else { return nil }
+        guard cookies.contains(where: { Self.isClearanceCookieName($0.name) }) else {
+            return nil
+        }
 
         // A provider can reject a clearance before its client-side expiry. The stale cookie is
         // still present in WebKit while the interstitial is displayed, so cookie presence alone
@@ -1197,27 +1251,60 @@ final class CloudflareBypassManager: ObservableObject {
 
         let userAgent = await userAgent(for: webView)
         let resolvedHost = webView.url?.host?.lowercased()
-        let fullHeader = cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
 
         // Put every cookie in the shared jar honoring its own domain, so a later URLSession
         // request to the original host is served the clearance after it redirects to the host
         // that actually issued it.
-        let storage = HTTPCookieStorage.shared
-        for cookie in cookies { storage.setCookie(cookie) }
-
-        var cachedHosts: [String] = []
-        for candidate in [originalHost, resolvedHost].compactMap({ $0 }) where !cachedHosts.contains(candidate) {
-            store(cookieHeader: fullHeader, userAgent: userAgent, for: candidate)
-            bypassWebViews[candidate] = webView
-            cachedHosts.append(candidate)
+        let sharedCookieStorage = HTTPCookieStorage.shared
+        for cookie in cookies {
+            sharedCookieStorage.setCookie(cookie)
         }
 
-        if let pendingHost = pendingVerificationURL?.host?.lowercased(), cachedHosts.contains(pendingHost) {
+        var cachedHosts: [String] = []
+        var candidateHosts: [String] = []
+        var solvedHeaders: [String: String] = [:]
+        for candidate in [originalHost, resolvedHost].compactMap({ $0 }) where !candidateHosts.contains(candidate) {
+            candidateHosts.append(candidate)
+            if retainsWebView {
+                bypassWebViews[candidate] = webView
+            }
+            guard let hostHeader = Self.vettedSharedCookieHeader(
+                from: cookies,
+                for: candidate
+            ), Self.isSolvedCookieHeader(hostHeader) else {
+                continue
+            }
+            store(cookieHeader: hostHeader, userAgent: userAgent, for: candidate)
+            solvedHeaders[candidate] = hostHeader
+            cachedHosts.append(candidate)
+        }
+        if let pendingHost = pendingVerificationURL?.host?.lowercased(), candidateHosts.contains(pendingHost) {
             pendingVerificationURL = nil
         }
 
+        // cf_clearance is issued by whichever host served the challenge, which after a redirect
+        // (animepahe.com -> animepahe.pw) is not the host the module asked for. Without carrying
+        // it back to the requested host, retryWithSolvedSession finds no cached entry and the
+        // caller re-solves the same challenge forever.
+        if let resolvedHost,
+           let resolvedHeader = solvedHeaders[resolvedHost],
+           !cachedHosts.contains(originalHost) {
+            store(cookieHeader: resolvedHeader, userAgent: userAgent, for: originalHost)
+            solvedHeaders[originalHost] = resolvedHeader
+            cachedHosts.append(originalHost)
+            Logger.shared.log(
+                "CloudflareBypass: carried the solved session to the requested host"
+                    + " requested=\(originalHost) solvedBy=\(resolvedHost)",
+                type: "Service"
+            )
+        }
+
+        let solvedHeader = resolvedHost.flatMap({ solvedHeaders[$0] })
+            ?? cachedHosts.compactMap({ solvedHeaders[$0] }).first
+            ?? ""
+
         return SolvedSession(
-            cookieHeader: fullHeader,
+            cookieHeader: solvedHeader,
             userAgent: userAgent,
             resolvedHost: resolvedHost,
             cachedHosts: cachedHosts
@@ -1238,6 +1325,93 @@ final class CloudflareBypassManager: ObservableObject {
         return lower == "cf_clearance" || lower.hasPrefix("__ddg")
     }
 
+    static func vettedSharedCookieHeader(from rawHeader: String) -> String? {
+        guard !rawHeader.isEmpty,
+              rawHeader.utf8.count <= maximumSharedCookieHeaderBytes else {
+            return nil
+        }
+        var seenNames: Set<String> = []
+        var vetted: [String] = []
+        for part in rawHeader.split(separator: ";", omittingEmptySubsequences: true) {
+            let pieces = part.split(separator: "=", maxSplits: 1).map {
+                String($0).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard pieces.count == 2 else { continue }
+            let name = pieces[0]
+            let value = pieces[1]
+            let normalizedName = name.lowercased()
+            guard !name.isEmpty,
+                  !value.isEmpty,
+                  name.utf8.count <= maximumSharedCookieNameBytes,
+                  value.utf8.count <= maximumSharedCookieValueBytes,
+                  !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+                  !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+                  seenNames.insert(normalizedName).inserted,
+                  vetted.count < maximumSharedCookieCount else {
+                continue
+            }
+            vetted.append("\(name)=\(value)")
+        }
+        guard !vetted.isEmpty else { return nil }
+        return vetted.joined(separator: "; ")
+    }
+
+    private static func vettedSharedCookieHeader(
+        from cookies: [HTTPCookie],
+        now: Date = Date()
+    ) -> String? {
+        let prioritized = cookies.sorted { left, right in
+            let leftClearance = isClearanceCookieName(left.name)
+            let rightClearance = isClearanceCookieName(right.name)
+            if leftClearance != rightClearance { return leftClearance }
+            return left.name.localizedCaseInsensitiveCompare(right.name) == .orderedAscending
+        }
+        var seenNames: Set<String> = []
+        var accepted: [String] = []
+        var totalBytes = 0
+        for cookie in prioritized {
+            let name = cookie.name
+            let value = cookie.value
+            let normalizedName = name.lowercased()
+            let entryBytes = name.utf8.count + value.utf8.count + 2
+            guard accepted.count < maximumSharedCookieCount,
+                  cookie.expiresDate.map({ $0 > now }) != false,
+                  !name.isEmpty,
+                  !value.isEmpty,
+                  name.utf8.count <= maximumSharedCookieNameBytes,
+                  value.utf8.count <= maximumSharedCookieValueBytes,
+                  !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+                  !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
+                  seenNames.insert(normalizedName).inserted,
+                  entryBytes <= maximumSharedCookieHeaderBytes - totalBytes else {
+                continue
+            }
+            accepted.append("\(name)=\(value)")
+            totalBytes += entryBytes
+        }
+        return accepted.isEmpty ? nil : accepted.joined(separator: "; ")
+    }
+
+    static func vettedSharedCookieHeader(
+        from cookies: [HTTPCookie],
+        for host: String,
+        now: Date = Date()
+    ) -> String? {
+        let normalizedHost = host.lowercased()
+        let applicable = cookies.filter { cookie in
+            let domain = cookie.domain
+                .trimmingCharacters(in: CharacterSet(charactersIn: "."))
+                .lowercased()
+            return cookie.expiresDate.map({ $0 > now }) != false
+                && (cookie.path.isEmpty || cookie.path == "/")
+                && (normalizedHost == domain || normalizedHost.hasSuffix(".\(domain)"))
+        }
+        guard applicable.contains(where: { isClearanceCookieName($0.name) }) else {
+            return nil
+        }
+        return vettedSharedCookieHeader(from: applicable, now: now)
+    }
+
     @MainActor
     private func userAgent(for webView: WKWebView) async -> String {
         if let customUserAgent = webView.customUserAgent, !customUserAgent.isEmpty {
@@ -1253,8 +1427,11 @@ final class CloudflareBypassManager: ObservableObject {
     @MainActor
     private func documentHTML(for webView: WKWebView) async -> String {
         await withCheckedContinuation { continuation in
-            webView.evaluateJavaScript("document.documentElement ? document.documentElement.outerHTML : ''") { result, _ in
-                continuation.resume(returning: (result as? String) ?? "")
+            webView.evaluateJavaScript(
+                ServiceBrowserOutputBoundary.boundedHTMLCaptureScript
+            ) { result, _ in
+                let payload = result as? [String: Any]
+                continuation.resume(returning: (payload?["html"] as? String) ?? "")
             }
         }
     }
@@ -1277,9 +1454,7 @@ final class CloudflareBypassManager: ObservableObject {
     }
 
     private static func redactedURL(_ urlString: String) -> String {
-        guard var components = URLComponents(string: urlString) else { return urlString }
-        components.query = components.query == nil ? nil : "<redacted>"
-        return components.string ?? urlString
+        ServiceSandboxState.redactedURL(urlString)
     }
 
     private func mergeCookieHeaders(_ existing: String, _ bypass: String) -> String {
@@ -1424,7 +1599,7 @@ private final class CloudflareBypassWindowController {
         guard window == nil else { return }
         guard let scene = cloudflarePresentationScene() else { return }
 
-        let host = UIHostingController(rootView: CloudflareBypassSheetView())
+        let host = UIHostingController(rootView: CloudflareBypassSheetView().profileScopedAppStorage())
         host.view.backgroundColor = UIColor.systemBackground
 
         let window = UIWindow(windowScene: scene)
@@ -1478,102 +1653,6 @@ private final class CloudflareBypassSilentHost {
         guard hostedWebView === webView else { return }
         webView.removeFromSuperview()
         window?.isHidden = true
-        window = nil
-        hostedWebView = nil
-    }
-}
-#elseif os(macOS)
-private struct CloudflareBypassSheetView: View {
-    @ObservedObject private var manager = CloudflareBypassManager.shared
-
-    var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Security Check").font(.headline)
-                Spacer()
-                Button("Cancel") { CloudflareBypassManager.shared.cancelActiveBypass() }
-            }
-            .padding(12)
-            Divider()
-            if let webView = manager.activeBypassWebView {
-                CloudflareBypassWebView(webView: webView)
-            } else {
-                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-            }
-        }
-        .frame(minWidth: 720, minHeight: 560)
-    }
-}
-
-private struct CloudflareBypassWebView: NSViewRepresentable {
-    let webView: WKWebView
-    func makeNSView(context: Context) -> WKWebView { webView }
-    func updateNSView(_ nsView: WKWebView, context: Context) {}
-}
-
-@MainActor
-private final class CloudflareBypassWindowController: NSObject, NSWindowDelegate {
-    static let shared = CloudflareBypassWindowController()
-    private var window: NSWindow?
-    private override init() { super.init() }
-
-    func show() {
-        guard window == nil else { window?.makeKeyAndOrderFront(nil); return }
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 780, height: 620),
-            styleMask: [.titled, .closable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = "Eclipse Security Check"
-        window.level = .floating
-        window.isReleasedWhenClosed = false
-        window.delegate = self
-        window.contentViewController = NSHostingController(rootView: CloudflareBypassSheetView())
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
-        self.window = window
-    }
-
-    func hide() { window?.orderOut(nil); window = nil }
-
-    func windowWillClose(_ notification: Notification) {
-        window = nil
-        CloudflareBypassManager.shared.cancelActiveBypass()
-    }
-}
-
-@MainActor
-private final class CloudflareBypassSilentHost {
-    static let shared = CloudflareBypassSilentHost()
-    private var window: NSWindow?
-    private weak var hostedWebView: WKWebView?
-    private init() {}
-
-    func attach(_ webView: WKWebView) {
-        guard window == nil else { return }
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 390, height: 844),
-            styleMask: [.borderless],
-            backing: .buffered,
-            defer: false
-        )
-        window.alphaValue = 0.01
-        window.ignoresMouseEvents = true
-        window.level = .normal - 1
-        webView.frame = window.contentView?.bounds ?? NSRect(x: 0, y: 0, width: 390, height: 844)
-        webView.autoresizingMask = [.width, .height]
-        window.contentView?.addSubview(webView)
-        window.orderBack(nil)
-        self.window = window
-        hostedWebView = webView
-    }
-
-    func detach(_ webView: WKWebView) {
-        guard hostedWebView === webView else { return }
-        webView.removeFromSuperview()
-        window?.orderOut(nil)
         window = nil
         hostedWebView = nil
     }

@@ -4,20 +4,6 @@ import UserNotifications
 import UIKit
 #endif
 
-enum LocalNotificationMediaSource: String, Codable, CaseIterable, Identifiable, Sendable {
-    case anime
-    case western
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .anime: return "Anime"
-        case .western: return "Western"
-        }
-    }
-}
-
 enum LocalNotificationNavigationKind: String, Codable, Sendable {
     case episode
     case batch
@@ -127,8 +113,6 @@ private actor LocalNotificationHistoryStore {
         }
     }
 
-    // Keep a long device-local history while still preventing an accidental
-    // unbounded archive from making every future append expensive.
     private let maximumEntryCount = 1_000
     private let maximumTombstoneCount = 2_000
     private var archive: Archive?
@@ -399,7 +383,10 @@ struct LocalMediaNotificationSubscription: Codable, Identifiable, Equatable {
     var tmdbID: Int
     var title: String
     var titleAliases: [String]
+
     var animeMediaIDs: Set<Int>
+
+    var animeSpecialMediaIDs: Set<Int>
     var knownWesternSeasonIDs: Set<Int>
     var episodeNotifications: Bool
     var futureSeasonNotifications: Bool
@@ -417,6 +404,7 @@ struct LocalMediaNotificationSubscription: Codable, Identifiable, Equatable {
         title: String,
         titleAliases: [String],
         animeMediaIDs: Set<Int>,
+        animeSpecialMediaIDs: Set<Int> = [],
         knownWesternSeasonIDs: Set<Int>,
         episodeNotifications: Bool,
         futureSeasonNotifications: Bool,
@@ -433,6 +421,7 @@ struct LocalMediaNotificationSubscription: Codable, Identifiable, Equatable {
         self.title = title
         self.titleAliases = titleAliases
         self.animeMediaIDs = animeMediaIDs
+        self.animeSpecialMediaIDs = animeSpecialMediaIDs
         self.knownWesternSeasonIDs = knownWesternSeasonIDs
         self.episodeNotifications = episodeNotifications
         self.futureSeasonNotifications = futureSeasonNotifications
@@ -445,7 +434,7 @@ struct LocalMediaNotificationSubscription: Codable, Identifiable, Equatable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, source, tmdbID, title, titleAliases, animeMediaIDs, knownWesternSeasonIDs
+        case id, source, tmdbID, title, titleAliases, animeMediaIDs, animeSpecialMediaIDs, knownWesternSeasonIDs
         case episodeNotifications, futureSeasonNotifications, mutedEpisodeKeys, mutedEpisodeExpirations, seasonPremieres
         case hasCompleteAnimeSeasonBaseline, hasCompleteWesternSeasonBaseline, dateAdded
     }
@@ -458,6 +447,7 @@ struct LocalMediaNotificationSubscription: Codable, Identifiable, Equatable {
         title = try container.decode(String.self, forKey: .title)
         titleAliases = try container.decodeIfPresent([String].self, forKey: .titleAliases) ?? [title]
         animeMediaIDs = try container.decodeIfPresent(Set<Int>.self, forKey: .animeMediaIDs) ?? []
+        animeSpecialMediaIDs = try container.decodeIfPresent(Set<Int>.self, forKey: .animeSpecialMediaIDs) ?? []
         knownWesternSeasonIDs = try container.decodeIfPresent(Set<Int>.self, forKey: .knownWesternSeasonIDs) ?? []
         episodeNotifications = try container.decodeIfPresent(Bool.self, forKey: .episodeNotifications) ?? true
         futureSeasonNotifications = try container.decodeIfPresent(Bool.self, forKey: .futureSeasonNotifications) ?? false
@@ -538,12 +528,12 @@ struct LocalEpisodeNotificationReminder: Codable, Identifiable, Equatable {
 final class LocalNotificationManager: NSObject, ObservableObject {
     static let shared = LocalNotificationManager()
 
-    static let subscriptionsStorageKey = "localNotificationSubscriptions"
-    static let episodeRemindersStorageKey = "localNotificationEpisodeReminders"
-    static let episodeLeadTimeKey = "localNotificationEpisodeLeadTime"
-    static let seasonLeadTimeKey = "localNotificationSeasonLeadTime"
-    static let includeAnimeSpecialsKey = "localNotificationIncludeAnimeSpecials"
-    private static let futureMetadataRefreshDatesStorageKey = "localNotificationFutureMetadataRefreshDates"
+    nonisolated static let subscriptionsStorageKey = "localNotificationSubscriptions"
+    nonisolated static let episodeRemindersStorageKey = "localNotificationEpisodeReminders"
+    nonisolated static let episodeLeadTimeKey = "localNotificationEpisodeLeadTime"
+    nonisolated static let seasonLeadTimeKey = "localNotificationSeasonLeadTime"
+    nonisolated static let includeAnimeSpecialsKey = "localNotificationIncludeAnimeSpecials"
+    nonisolated private static let futureMetadataRefreshDatesStorageKey = "localNotificationFutureMetadataRefreshDates"
 
     @Published private(set) var authorizationStatus: UNAuthorizationStatus = .notDetermined
     @Published private(set) var subscriptions: [LocalMediaNotificationSubscription] = []
@@ -572,6 +562,8 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     private var pendingNavigationTarget: LocalNotificationNavigationTarget?
     private var pendingNavigationSceneSessionIdentifier: String?
     private var notificationStateRevision: UInt = 0
+
+    private var settingsStore: UserDefaults = ProfileSettingsStore.active
 
     private override init() {
         super.init()
@@ -620,8 +612,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             return true
         }
 #if os(iOS)
-        // Multiple iPad roots can attach before their scene probes resolve. Do
-        // not let an unidentified root steal a route from the activated scene.
+
         if UIDevice.current.userInterfaceIdiom == .pad { return false }
 #endif
         return true
@@ -671,9 +662,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             let granted = try await center.requestAuthorization(options: [.alert, .sound])
             await refreshAuthorizationStatus()
             if granted || canScheduleNotifications {
-                // Restored selections may already exist. Reconcile them from
-                // the shared schedule cache, but do not force a second provider
-                // download before a newly tapped subscription has been saved.
+
                 await refreshSchedulesIfNeeded()
                 return .enabled
             }
@@ -688,6 +677,68 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         tmdbID: Int
     ) -> LocalMediaNotificationSubscription? {
         subscriptions.first { $0.source == source && $0.tmdbID == tmdbID }
+    }
+
+    func reconcileAnimeStructuralRoles(
+        tmdbID: Int,
+        regularMediaIDs: Set<Int>,
+        specialMediaIDs: Set<Int>,
+        canonicalProviderIDByStoredID: [Int: Int] = [:]
+    ) {
+        func canonical(_ id: Int) -> Int {
+            canonicalProviderIDByStoredID[id] ?? id
+        }
+
+        var changed = false
+        for index in episodeReminders.indices
+        where episodeReminders[index].source == .anime
+            && episodeReminders[index].tmdbID == tmdbID {
+            let storedID = episodeReminders[index].sourceMediaID
+            let canonicalID = canonical(storedID)
+            if canonicalID != storedID {
+                episodeReminders[index].sourceMediaID = canonicalID
+                changed = true
+            }
+            let shouldBeSpecial = specialMediaIDs.contains(storedID)
+                || specialMediaIDs.contains(canonicalID)
+            let shouldBeRegular = regularMediaIDs.contains(storedID)
+                || regularMediaIDs.contains(canonicalID)
+            if (shouldBeSpecial || shouldBeRegular),
+               episodeReminders[index].isAnimeSpecial != shouldBeSpecial {
+                episodeReminders[index].isAnimeSpecial = shouldBeSpecial
+                changed = true
+            }
+        }
+
+        if let index = subscriptions.firstIndex(where: {
+            $0.source == .anime && $0.tmdbID == tmdbID
+        }) {
+            var subscription = subscriptions[index]
+            let oldSubscription = subscription
+            subscription.animeMediaIDs.subtract(specialMediaIDs)
+            subscription.animeSpecialMediaIDs.subtract(regularMediaIDs)
+            subscription.animeMediaIDs.formUnion(regularMediaIDs)
+            subscription.animeSpecialMediaIDs.formUnion(specialMediaIDs)
+            for premiereIndex in subscription.seasonPremieres.indices {
+                guard let storedID = subscription.seasonPremieres[premiereIndex].sourceMediaID else {
+                    continue
+                }
+                let canonicalID = canonical(storedID)
+                if canonicalID != storedID {
+                    subscription.seasonPremieres[premiereIndex].sourceMediaID = canonicalID
+                }
+            }
+            if subscription != oldSubscription {
+                subscriptions[index] = subscription
+                changed = true
+            }
+        }
+
+        guard changed else { return }
+        persistState()
+        Task { @MainActor in
+            await reconcileScheduleEntries(lastScheduleEntries, refreshedSources: [])
+        }
     }
 
     func episodeState(for entry: ScheduleEntry) -> LocalEpisodeNotificationState {
@@ -763,8 +814,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
 
         let permission = await ensureAuthorization()
         guard permission == .enabled else { return permission }
-        // A second tap can arrive while the permission query is suspended.
-        // Treat an already-added key as enabled instead of appending a duplicate.
+
         guard !episodeReminders.contains(where: { $0.id == key }) else { return .enabled }
 
         if var followed = matchingSubscription(for: entry),
@@ -788,7 +838,10 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             airingAt: entry.airingAt,
             hasKnownAiringTime: entry.hasKnownAiringTime,
             isStreamingRelease: entry.isStreamingRelease,
-            isAnimeSpecial: isAnimeSpecial(entry)
+            isAnimeSpecial: isAnimeSpecial(
+                entry,
+                subscription: matchingSubscription(for: entry)
+            )
         ))
         sortAndPersistState()
         mergeScheduleEntry(entry)
@@ -841,9 +894,6 @@ final class LocalNotificationManager: NSObject, ObservableObject {
                 subscriptionChanged = true
             }
 
-            // Remove expired identities before looking at incoming rows so a
-            // later season/reboot reusing the same fallback key cannot revive
-            // an old mute by replacing its timestamp.
             if !subscription.mutedEpisodeKeys.isEmpty {
                 for entry in entries where matches(entry, subscription: subscription) {
                     let key = subscriptionEpisodeKey(entry, subscriptionID: subscription.id)
@@ -873,6 +923,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         title: String,
         titleAliases: [String],
         animeMediaIDs: Set<Int>,
+        animeSpecialMediaIDs: Set<Int> = [],
         westernSeasonIDs: Set<Int>,
         episodeNotifications: Bool,
         futureSeasonNotifications: Bool
@@ -897,9 +948,6 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             let permission = await ensureAuthorization()
             guard permission == .enabled else { return permission }
 
-            // Authorization and notification-center queries suspend. Merge
-            // against the latest subscription rather than restoring a stale
-            // copy if another surface changed it while this action was waiting.
             existing = subscriptions.first(where: { $0.id == id })
             isTurningOnEpisodes = episodeNotifications && existing?.episodeNotifications != true
             isTurningOffEpisodes = !episodeNotifications && existing?.episodeNotifications == true
@@ -922,13 +970,17 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             title: title,
             titleAliases: titleAliases,
             animeMediaIDs: animeMediaIDs,
+            animeSpecialMediaIDs: animeSpecialMediaIDs,
             knownWesternSeasonIDs: westernSeasonIDs,
             episodeNotifications: episodeNotifications,
             futureSeasonNotifications: futureSeasonNotifications
         )
         subscription.title = title
         subscription.titleAliases = normalizedAliases(titleAliases + [title] + subscription.titleAliases)
+        subscription.animeMediaIDs.subtract(animeSpecialMediaIDs)
+        subscription.animeSpecialMediaIDs.subtract(animeMediaIDs)
         subscription.animeMediaIDs.formUnion(animeMediaIDs)
+        subscription.animeSpecialMediaIDs.formUnion(animeSpecialMediaIDs)
         subscription.knownWesternSeasonIDs.formUnion(westernSeasonIDs)
         subscription.episodeNotifications = episodeNotifications
         subscription.futureSeasonNotifications = futureSeasonNotifications
@@ -966,8 +1018,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         }
 
         if isTurningOnFutureSeasons || (source == .anime && isTurningOnEpisodes) {
-            // An opt-in needs a baseline from this request, not a success date
-            // left over from an older notification configuration.
+
             removeFutureMetadataRefreshState(for: id)
             _ = await refreshFutureSeasonMetadataIfNeeded(
                 for: id,
@@ -978,8 +1029,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         if episodeNotifications {
             await reconcileScheduleSourceAfterSelection(source)
         } else {
-            // Future-season-only follows need their newly built premiere
-            // requests, but they do not need either episode schedule feed.
+
             await reconcileScheduleEntries([], refreshedSources: [])
         }
         return .enabled
@@ -1036,12 +1086,8 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         await refreshPendingRequestCount()
     }
 
-    /// Reloads restored choices without ever prompting for notification access.
-    /// Pending requests are rebuilt because they are device-owned and are not backed up.
     func reloadPersistedSelectionsAfterRestore() async {
-        // A remote CloudKit tombstone intentionally removes the defaults key.
-        // Reload without immediately canonicalizing it back to an empty JSON
-        // array, which would otherwise recreate the deleted cloud record.
+
         loadPersistedState(writeCanonicalizedState: false)
         await refreshAuthorizationStatus()
 
@@ -1155,8 +1201,6 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         } while true
     }
 
-    /// Applies the already-completed two-source startup warmup without asking
-    /// either provider for the same data again.
     func consumeStartupScheduleSnapshot(_ snapshot: NotificationScheduleSnapshot) async {
         await refreshAuthorizationStatus()
         guard hasNotificationSelections, canScheduleNotifications else { return }
@@ -1317,7 +1361,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         }
         let failedSourcePending = pending.filter { request in
             if invalidateExcludedAnimeSpecialRequests,
-               !UserDefaults.standard.bool(forKey: Self.includeAnimeSpecialsKey),
+               !settingsStore.bool(forKey: Self.includeAnimeSpecialsKey),
                request.content.userInfo["isAnimeSpecial"] as? Bool == true {
                 return false
             }
@@ -1377,8 +1421,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         let desiredByID = Dictionary(uniqueKeysWithValues: desired.map { ($0.request.identifier, $0) })
         let staleIdentifiers = pending.compactMap { request -> String? in
             guard request.identifier.hasPrefix(managedPrefix), desiredByID[request.identifier] == nil else { return nil }
-            // These one-shot requests are intentionally outside the rolling
-            // desired schedule and should be allowed to deliver immediately.
+
             if request.identifier.hasPrefix("\(managedPrefix)announcement.") { return nil }
             if retainedFailedSourceIDs.contains(request.identifier) { return nil }
             return request.identifier
@@ -1444,8 +1487,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     func scheduleWindowDidChange() async {
         guard hasNotificationSelections else { return }
         notificationStateRevision &+= 1
-        // Apply a smaller window to existing requests immediately, then let the
-        // shared cache/single-flight path extend or refresh for a larger window.
+
         await reconcileScheduleEntries(
             lastScheduleEntries,
             successfulSources: [],
@@ -1597,18 +1639,26 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             let positiveMediaIDs = snapshot.animeMediaIDs.filter { $0 > 0 }
             guard !positiveMediaIDs.isEmpty else { return false }
             let graph = await AniListService.shared.fetchNotificationSeasons(
-                startingMediaIDs: Array(positiveMediaIDs)
+                startingMediaIDs: Array(positiveMediaIDs),
+                tmdbShowId: snapshot.tmdbID
             )
             let seasons = graph.seasons
-            // A complete empty graph is a valid baseline. A partial empty graph
-            // is indistinguishable from a failed lookup and should retry soon.
+
             guard graph.isComplete || !seasons.isEmpty else { return false }
             guard var subscription = subscriptions.first(where: { $0.id == subscriptionID }),
                   subscription.source == .anime else { return false }
-            let priorIDs = subscription.animeMediaIDs
-            let allIDs = Set(seasons.map(\.id))
-            subscription.animeMediaIDs.formUnion(allIDs)
-            let refreshedPremiereIDs = Set(seasons.map { "anilist-\($0.id)" })
+            let priorIDs = subscription.animeMediaIDs.union(subscription.animeSpecialMediaIDs)
+            let regularIDs = Set(seasons.filter { !$0.isDetachedSpecial }.map(\.id))
+            let specialIDs = Set(seasons.filter(\.isDetachedSpecial).map(\.id))
+            subscription.animeMediaIDs.subtract(specialIDs)
+            subscription.animeSpecialMediaIDs.subtract(regularIDs)
+            subscription.animeMediaIDs.formUnion(regularIDs)
+            subscription.animeSpecialMediaIDs.formUnion(specialIDs)
+            let refreshedPremiereIDs = Set(
+                seasons
+                    .filter { !$0.isDetachedSpecial }
+                    .map { "anilist-\($0.id)" }
+            )
             if graph.isComplete {
                 subscription.seasonPremieres.removeAll { $0.id.hasPrefix("anilist-") }
             } else {
@@ -1627,7 +1677,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
                 seasonNumber: Int?
             )] = []
 
-            for season in seasons where season.isUpcoming {
+            for season in seasons where season.isUpcoming && !season.isDetachedSpecial {
                 if let premiereDate = season.premiereDate {
                     let premiere = LocalSeasonPremiere(
                         id: "anilist-\(season.id)",
@@ -1681,8 +1731,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
                 && subscription.hasCompleteWesternSeasonBaseline
             subscription.knownWesternSeasonIDs.formUnion(seasons.map(\.id))
             subscription.titleAliases = normalizedAliases(subscription.titleAliases + [detail.name, detail.originalName ?? ""])
-            // TMDB returned the complete season list successfully, so rebuild
-            // its dated premieres and discard dates that were retracted.
+
             subscription.seasonPremieres.removeAll { $0.id.hasPrefix("tmdb-season-") }
             var announcements: [(
                 title: String,
@@ -1788,13 +1837,15 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     private func updateExplicitReminders(from entries: [ScheduleEntry]) {
         var changed = false
         for entry in entries {
-            // Estimated fallback rows must never downgrade a confirmed explicit
-            // reminder into an unschedulable unknown-time reminder.
+
             guard entry.hasKnownAiringTime else { continue }
             let key = explicitEpisodeKey(entry)
             guard let index = episodeReminders.firstIndex(where: { $0.id == key }) else { continue }
             let reminder = episodeReminders[index]
-            let entryIsAnimeSpecial = isAnimeSpecial(entry)
+            let entryIsAnimeSpecial = isAnimeSpecial(
+                entry,
+                subscription: matchingSubscription(for: entry)
+            )
             let inferredMediaType: LocalNotificationTMDBMediaType? = {
                 guard reminder.tmdbID != nil else { return reminder.tmdbMediaType }
                 if entry.source == .western { return .tv }
@@ -1816,9 +1867,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
                 changed = true
             }
         }
-        // Apply confirmed provider corrections before expiring old timestamps.
-        // Otherwise a delay discovered just after the former airtime would
-        // incorrectly delete the user's explicit selection.
+
         let countAfterUpdates = episodeReminders.count
         episodeReminders.removeAll { $0.airingAt <= Date() }
         changed = changed || countAfterUpdates != episodeReminders.count
@@ -1856,7 +1905,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     private func followedEpisodeNotifications(from entries: [ScheduleEntry]) -> [DesiredNotification] {
         var result: [DesiredNotification] = []
         let now = Date()
-        let includeSpecials = UserDefaults.standard.bool(forKey: Self.includeAnimeSpecialsKey)
+        let includeSpecials = settingsStore.bool(forKey: Self.includeAnimeSpecialsKey)
 
         for subscription in subscriptions where subscription.episodeNotifications {
             let candidates = entries.filter { entry in
@@ -1864,15 +1913,21 @@ final class LocalNotificationManager: NSObject, ObservableObject {
                       entry.hasKnownAiringTime,
                       isWithinAutomaticEpisodeNotificationWindow(entry),
                       matches(entry, subscription: subscription) else { return false }
-                if subscription.source == .anime, !includeSpecials, isAnimeSpecial(entry) { return false }
+                if subscription.source == .anime,
+                   !includeSpecials,
+                   isAnimeSpecial(entry, subscription: subscription) { return false }
                 if episodeReminders.contains(where: { $0.id == explicitEpisodeKey(entry) }) { return false }
                 return !subscription.mutedEpisodeKeys.contains(subscriptionEpisodeKey(entry, subscriptionID: subscription.id))
             }
-            let grouped = Dictionary(grouping: candidates) { entry in
-                Int(entry.airingAt.timeIntervalSince1970 / 300)
+            var grouped: [Int: [ScheduleEntry]] = [:]
+            for entry in candidates {
+                guard let bucket = Self.notificationTimeBucket(for: entry.airingAt, now: now) else {
+                    continue
+                }
+                grouped[bucket, default: []].append(entry)
             }
 
-            for (_, group) in grouped {
+            for (bucket, group) in grouped {
                 let sorted = group.sorted { $0.episode < $1.episode }
                 guard let first = sorted.first, let fireDate = episodeFireDate(airingAt: first.airingAt) else { continue }
                 if sorted.count >= 3 {
@@ -1889,10 +1944,12 @@ final class LocalNotificationManager: NSObject, ObservableObject {
                         isBatch: true,
                         batchCount: sorted.count,
                         isAnimeSpecial: subscription.source == .anime
-                            && sorted.contains(where: isAnimeSpecial)
+                            && sorted.contains {
+                                isAnimeSpecial($0, subscription: subscription)
+                            }
                     )
                     result.append(desiredNotification(
-                        identifier: "\(managedPrefix)episode.\(subscription.source.rawValue).follow.\(subscription.id).batch.\(Int(first.airingAt.timeIntervalSince1970 / 300))",
+                        identifier: "\(managedPrefix)episode.\(subscription.source.rawValue).follow.\(subscription.id).batch.\(bucket)",
                         source: subscription.source,
                         fireDate: fireDate,
                         content: content,
@@ -1918,7 +1975,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
                                 isBatch: false,
                                 batchCount: 1,
                                 isAnimeSpecial: subscription.source == .anime
-                                    && isAnimeSpecial(entry)
+                                    && isAnimeSpecial(entry, subscription: subscription)
                             ),
                             priority: 2
                         ))
@@ -1929,8 +1986,23 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         return result
     }
 
+    nonisolated static func notificationTimeBucket(
+        for value: Date,
+        now: Date = Date()
+    ) -> Int? {
+        let seconds = value.timeIntervalSince1970
+        let maximum = now.addingTimeInterval(10 * 366 * 24 * 60 * 60).timeIntervalSince1970
+        guard seconds.isFinite,
+              maximum.isFinite,
+              seconds >= 0,
+              seconds <= maximum else {
+            return nil
+        }
+        return Int(exactly: floor(seconds / 300))
+    }
+
     private func seasonPremiereNotifications() -> [DesiredNotification] {
-        let lead = TimeInterval(UserDefaults.standard.integer(forKey: Self.seasonLeadTimeKey))
+        let lead = TimeInterval(settingsStore.integer(forKey: Self.seasonLeadTimeKey))
         return subscriptions
             .filter(\.futureSeasonNotifications)
             .flatMap { subscription in
@@ -2000,7 +2072,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
             } else {
                 label = "Episode \(episode)"
             }
-            let lead = UserDefaults.standard.integer(forKey: Self.episodeLeadTimeKey)
+            let lead = settingsStore.integer(forKey: Self.episodeLeadTimeKey)
             if lead > 0 {
                 content.body = "\(label) is scheduled to air soon."
             } else if isStreamingRelease {
@@ -2056,7 +2128,7 @@ final class LocalNotificationManager: NSObject, ObservableObject {
 
     private func episodeFireDate(airingAt: Date) -> Date? {
         guard airingAt > Date() else { return nil }
-        let lead = TimeInterval(UserDefaults.standard.integer(forKey: Self.episodeLeadTimeKey))
+        let lead = TimeInterval(settingsStore.integer(forKey: Self.episodeLeadTimeKey))
         let preferred = airingAt.addingTimeInterval(-lead)
         return preferred > Date() ? preferred : airingAt
     }
@@ -2100,12 +2172,11 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         guard localSource(for: entry.source) == subscription.source else { return false }
         switch subscription.source {
         case .anime:
-            if subscription.animeMediaIDs.contains(entry.sourceMediaId) { return true }
-            // MAL fallback identifiers are negative, and Performance Mode can
-            // intentionally omit AniList identity. Keep that fallback exact and
-            // title-scoped rather than guessing through fuzzy matching.
+            let knownAnimeIDs = subscription.animeMediaIDs.union(subscription.animeSpecialMediaIDs)
+            if knownAnimeIDs.contains(entry.sourceMediaId) { return true }
+
             let entryUsesAniListNamespace = entry.sourceMediaId > 0
-            let hasIDsInEntryNamespace = subscription.animeMediaIDs.contains {
+            let hasIDsInEntryNamespace = knownAnimeIDs.contains {
                 ($0 > 0) == entryUsesAniListNamespace
             }
             guard !hasIDsInEntryNamespace else { return false }
@@ -2117,7 +2188,18 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         }
     }
 
-    private func isAnimeSpecial(_ entry: ScheduleEntry) -> Bool {
+    private func isAnimeSpecial(
+        _ entry: ScheduleEntry,
+        subscription: LocalMediaNotificationSubscription? = nil
+    ) -> Bool {
+        if entry.source == .anime, let subscription {
+            if subscription.animeSpecialMediaIDs.contains(entry.sourceMediaId) {
+                return true
+            }
+            if subscription.animeMediaIDs.contains(entry.sourceMediaId) {
+                return false
+            }
+        }
         guard let format = entry.format?.uppercased() else { return false }
         return ["MOVIE", "OVA", "SPECIAL", "MUSIC"].contains(format)
     }
@@ -2230,6 +2312,58 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         await applyHistoryMutationOutcome(outcome, operation: "record observed notifications")
     }
 
+    nonisolated func switchProfile(to profileID: UUID) {
+        let store = ProfileSettingsStore.shared.store(for: profileID)
+        Task { @MainActor [weak self] in
+            self?.adoptProfile(store: store)
+        }
+    }
+
+    @MainActor
+    private func adoptProfile(store: UserDefaults) {
+        settingsStore = store
+
+        loadPersistedState(writeCanonicalizedState: false)
+        loadFutureMetadataRefreshDates()
+        futureMetadataLastAttemptDates.removeAll()
+        futureMetadataPendingBaselineRefreshes.removeAll()
+        lastScheduleEntries = []
+        lastLoadedSources = []
+        Task { [weak self] in
+            guard let self else { return }
+
+            await self.removeAllManagedRequests()
+            await self.refreshSchedulesIfNeeded(force: true)
+        }
+    }
+
+    nonisolated func flushPendingWrites(forProfile outgoing: UUID) {
+        let store = ProfileSettingsStore.shared.store(for: outgoing)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            guard ProfileManager.shared.profiles.contains(where: { $0.id == outgoing }) else {
+                return
+            }
+            self.persistState(into: store)
+            self.persistFutureMetadataRefreshDates(into: store)
+        }
+    }
+
+    nonisolated func discardStore(forProfile profileID: UUID) {
+        let store = ProfileSettingsStore.shared.store(for: profileID)
+        store.removeObject(forKey: Self.subscriptionsStorageKey)
+        store.removeObject(forKey: Self.episodeRemindersStorageKey)
+        store.removeObject(forKey: Self.futureMetadataRefreshDatesStorageKey)
+    }
+
+    private func removeAllManagedRequests() async {
+        let pending = await pendingNotificationRequests()
+        let identifiers = pending.map(\.identifier).filter { $0.hasPrefix(managedPrefix) }
+        center.removePendingNotificationRequests(withIdentifiers: identifiers)
+        await refreshPendingRequestCount()
+    }
+
     private func sortAndPersistState() {
         subscriptions.sort { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
         episodeReminders.sort { $0.airingAt < $1.airingAt }
@@ -2281,12 +2415,17 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     }
 
     private func persistFutureMetadataRefreshDates() {
+        persistFutureMetadataRefreshDates(into: settingsStore)
+    }
+
+    private func persistFutureMetadataRefreshDates(into store: UserDefaults) {
         if futureMetadataLastSuccessfulRefreshDates.isEmpty {
-            UserDefaults.standard.removeObject(forKey: Self.futureMetadataRefreshDatesStorageKey)
+            store.removeObject(forKey: Self.futureMetadataRefreshDatesStorageKey)
         } else {
             encodeStored(
                 futureMetadataLastSuccessfulRefreshDates,
-                key: Self.futureMetadataRefreshDatesStorageKey
+                key: Self.futureMetadataRefreshDatesStorageKey,
+                into: store
             )
         }
     }
@@ -2311,19 +2450,27 @@ final class LocalNotificationManager: NSObject, ObservableObject {
     }
 
     private func persistState() {
+        persistState(into: settingsStore)
+    }
+
+    private func persistState(into store: UserDefaults) {
         notificationStateRevision &+= 1
-        encodeStored(subscriptions, key: Self.subscriptionsStorageKey)
-        encodeStored(episodeReminders, key: Self.episodeRemindersStorageKey)
+        encodeStored(subscriptions, key: Self.subscriptionsStorageKey, into: store)
+        encodeStored(episodeReminders, key: Self.episodeRemindersStorageKey, into: store)
     }
 
     private func decodeStored<T: Decodable>(_ type: T.Type, key: String) -> T? {
-        guard let raw = UserDefaults.standard.string(forKey: key), let data = raw.data(using: .utf8) else { return nil }
+        guard let raw = settingsStore.string(forKey: key), let data = raw.data(using: .utf8) else { return nil }
         return try? decoder.decode(type, from: data)
     }
 
     private func encodeStored<T: Encodable>(_ value: T, key: String) {
+        encodeStored(value, key: key, into: settingsStore)
+    }
+
+    private func encodeStored<T: Encodable>(_ value: T, key: String, into store: UserDefaults) {
         guard let data = try? encoder.encode(value), let raw = String(data: data, encoding: .utf8) else { return }
-        UserDefaults.standard.set(raw, forKey: key)
+        store.set(raw, forKey: key)
     }
 
     private func recordObservedNotification(_ notification: UNNotification, wasOpened: Bool) async {
@@ -2376,7 +2523,9 @@ final class LocalNotificationManager: NSObject, ObservableObject {
         let request = notification.request
         let content = request.content
         let route = routeValues(from: request)
-        let deliveredMilliseconds = Int64((notification.date.timeIntervalSince1970 * 1_000).rounded())
+        let deliveredMilliseconds = Int64(
+            exactly: (notification.date.timeIntervalSince1970 * 1_000).rounded()
+        ) ?? 0
         return LocalNotificationHistoryEntry(
             id: "\(request.identifier)|\(deliveredMilliseconds)",
             requestIdentifier: request.identifier,

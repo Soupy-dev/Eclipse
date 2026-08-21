@@ -1,6 +1,3 @@
-// UIKit-owned reader bridge. The lowercase type name is kept so every
-// existing Detail/Library/History entry point can keep launching the reader.
-
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -25,7 +22,7 @@ protocol KanzenReaderChildDelegate: AnyObject {
 }
 
 private func kanzenReaderCanvasColor(for style: UIUserInterfaceStyle) -> UIColor {
-    let storedValue = UserDefaults.standard.string(forKey: "Reader.backgroundColor")
+    let storedValue = ProfileSettingsStore.active.string(forKey: "Reader.backgroundColor")
     switch storedValue {
     case "white":
         return .white
@@ -83,7 +80,7 @@ struct KanzenTapZone {
     let regions: [Region]
 
     static func configured(for kind: ReaderKind) -> KanzenTapZone? {
-        let raw = UserDefaults.standard.string(forKey: "Reader.tapZones") ?? KanzenTapZonePreset.disabled.rawValue
+        let raw = ProfileSettingsStore.active.string(forKey: "Reader.tapZones") ?? KanzenTapZonePreset.disabled.rawValue
         let preset = KanzenTapZonePreset(rawValue: raw) ?? .disabled
         switch preset {
         case .automatic:
@@ -137,14 +134,29 @@ struct KanzenTapZone {
 enum KanzenReaderUpscaleModelStore {
     private static let storedFileName = "reader-upscale.mlmodel"
 
-    static var storedModelURL: URL {
+    static func storedModelURL(forProfile profileID: UUID) -> URL {
         let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("ReaderUpscaling", isDirectory: true)
-        return directory.appendingPathComponent(storedFileName)
+        guard profileID != ProfileManager.defaultProfileID else {
+            return directory.appendingPathComponent(storedFileName)
+        }
+        return directory.appendingPathComponent("\(profileID.uuidString.lowercased())-\(storedFileName)")
+    }
+
+    static var storedModelURL: URL {
+        storedModelURL(forProfile: ProfileManager.shared.activeProfileID)
+    }
+
+    static func discardModel(forProfile profileID: UUID) {
+        guard profileID != ProfileManager.defaultProfileID else { return }
+        try? FileManager.default.removeItem(at: storedModelURL(forProfile: profileID))
     }
 
     static var storedModelName: String {
-        UserDefaults.standard.string(forKey: "Reader.upscaleModelName") ?? "None"
+        guard FileManager.default.fileExists(atPath: storedModelURL.path) else {
+            return "None"
+        }
+        return ProfileSettingsStore.active.string(forKey: "Reader.upscaleModelName") ?? "None"
     }
 
     static func importModel(from sourceURL: URL) throws {
@@ -161,12 +173,12 @@ enum KanzenReaderUpscaleModelStore {
             try FileManager.default.removeItem(at: storedModelURL)
         }
         try FileManager.default.copyItem(at: sourceURL, to: storedModelURL)
-        UserDefaults.standard.set(sourceURL.lastPathComponent, forKey: "Reader.upscaleModelName")
+        ProfileSettingsStore.active.set(sourceURL.lastPathComponent, forKey: "Reader.upscaleModelName")
     }
 
     static func clearModel() {
         try? FileManager.default.removeItem(at: storedModelURL)
-        UserDefaults.standard.removeObject(forKey: "Reader.upscaleModelName")
+        ProfileSettingsStore.active.removeObject(forKey: "Reader.upscaleModelName")
     }
 }
 
@@ -248,20 +260,24 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
     private let loadingView = UIActivityIndicatorView(style: .large)
     private let errorContainer = UIStackView()
     private let errorLabel = UILabel()
+    private let retryButton = UIButton(type: .system)
+    private let notNowButton = UIButton(type: .system)
     private var activeReader: KanzenReaderChildViewController?
     private var loadTask: Task<Void, Never>?
+    private var pendingDomainApproval: ReaderExtensionDomainConsentRequest?
+    private var pendingVerificationSourceID: ReaderExtensionSourceID?
     private var barsVisible = true
     private var didRequestClose = false
     private weak var readerWindowScene: UIWindowScene?
 
     private var orientationLockEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: "readerOrientationLockEnabled") }
-        set { UserDefaults.standard.set(newValue, forKey: "readerOrientationLockEnabled") }
+        get { ProfileSettingsStore.active.bool(forKey: "readerOrientationLockEnabled") }
+        set { ProfileSettingsStore.active.set(newValue, forKey: "readerOrientationLockEnabled") }
     }
 
     private var orientationLockMaskRaw: String {
-        get { UserDefaults.standard.string(forKey: "readerOrientationLockMask") ?? "all" }
-        set { UserDefaults.standard.set(newValue, forKey: "readerOrientationLockMask") }
+        get { ProfileSettingsStore.active.string(forKey: "readerOrientationLockMask") ?? "all" }
+        set { ProfileSettingsStore.active.set(newValue, forKey: "readerOrientationLockMask") }
     }
 
     init(session: KanzenReaderSession) {
@@ -356,13 +372,16 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
         errorLabel.numberOfLines = 0
         errorLabel.textAlignment = .center
 
-        let retry = UIButton(type: .system)
-        retry.setTitle("Retry", for: .normal)
-        retry.addTarget(self, action: #selector(retryTapped), for: .touchUpInside)
+        retryButton.setTitle("Retry", for: .normal)
+        retryButton.addTarget(self, action: #selector(retryTapped), for: .touchUpInside)
+        notNowButton.setTitle("Not Now", for: .normal)
+        notNowButton.addTarget(self, action: #selector(notNowTapped), for: .touchUpInside)
+        notNowButton.isHidden = true
 
         errorContainer.addArrangedSubview(icon)
         errorContainer.addArrangedSubview(errorLabel)
-        errorContainer.addArrangedSubview(retry)
+        errorContainer.addArrangedSubview(retryButton)
+        errorContainer.addArrangedSubview(notNowButton)
         view.addSubview(errorContainer)
         NSLayoutConstraint.activate([
             errorContainer.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 24),
@@ -392,6 +411,10 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
 
     private func loadCurrentChapter() {
         loadTask?.cancel()
+        pendingDomainApproval = nil
+        pendingVerificationSourceID = nil
+        retryButton.setTitle("Retry", for: .normal)
+        notNowButton.isHidden = true
         loadingView.startAnimating()
         errorContainer.isHidden = true
         activeReader?.view.isHidden = true
@@ -411,9 +434,20 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
             } catch {
                 await MainActor.run {
                     self.loadingView.stopAnimating()
-                    self.showError(error.localizedDescription)
+                    if case ReaderExtensionError.domainConsentRequired(let host) = error,
+                       let sourceID = self.session.mangaRoute?.readerExtensionSourceID {
+                        self.showDomainConsentPrompt(host: host, sourceID: sourceID)
+                    } else if case ReaderExtensionError.browserVerificationRequired(let host) = error,
+                              let sourceID = self.session.mangaRoute?.readerExtensionSourceID {
+                        self.showBrowserVerificationPrompt(host: host, sourceID: sourceID)
+                    } else {
+                        self.showError(error.localizedDescription)
+                    }
                 }
-                ReaderLogger.shared.log("Reader load failed: \(error.localizedDescription)", type: "ReaderError")
+                ReaderLogger.shared.log(
+                    "Reader load failed error=\(ReaderExtensionDiagnostics.errorCode(error))",
+                    type: "ReaderError"
+                )
             }
         }
     }
@@ -467,12 +501,91 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
 
     private func showError(_ message: String) {
         activeReader?.view.isHidden = true
+        pendingDomainApproval = nil
+        pendingVerificationSourceID = nil
+        retryButton.setTitle("Retry", for: .normal)
+        notNowButton.isHidden = true
         errorLabel.text = message
         errorContainer.isHidden = false
     }
 
+    private func showDomainConsentPrompt(host: String, sourceID: ReaderExtensionSourceID) {
+        activeReader?.view.isHidden = true
+        let sourceName = ReaderExtensionManager.shared.source(for: sourceID)?.name ?? "This reader source"
+        let request = ReaderExtensionManager.shared.domainConsentRequest(
+            domain: host,
+            for: sourceID
+        )
+        guard ReaderExtensionDomainConsentCoordinator.shared.claim(request) else {
+            showError("This domain request is already being reviewed.")
+            return
+        }
+        pendingDomainApproval = request
+        errorLabel.text = "\(sourceName) wants to contact \(host). Approval applies only to this source, profile, and device. It may send requests and matching authentication cookies to that domain."
+        retryButton.setTitle("Allow & Retry", for: .normal)
+        notNowButton.isHidden = false
+        errorContainer.isHidden = false
+    }
+
+    /// The site wants a browser check. Reuse the source-scoped sign-in
+    /// browser: it runs the page in WebKit and writes any resulting cookies
+    /// into the same source jar the pinned transport reads from, so a solved
+    /// challenge simply makes the next request succeed.
+    private func showBrowserVerificationPrompt(host: String, sourceID: ReaderExtensionSourceID) {
+        activeReader?.view.isHidden = true
+        pendingDomainApproval = nil
+        pendingVerificationSourceID = sourceID
+        let sourceName = ReaderExtensionManager.shared.source(for: sourceID)?.name ?? "This reader source"
+        errorLabel.text = "\(host) is asking for a browser verification check before \(sourceName) can load. Open it to complete the check, then retry."
+        retryButton.setTitle("Open Verification", for: .normal)
+        notNowButton.isHidden = false
+        errorContainer.isHidden = false
+    }
+
+    private func presentBrowserVerification(sourceID: ReaderExtensionSourceID) {
+        do {
+            let session = try ReaderExtensionManager.shared.makeSignInSession(for: sourceID)
+            let controller = UIHostingController(
+                rootView: ReaderExtensionSignInView(session: session, title: "Verification")
+            )
+            controller.modalPresentationStyle = .formSheet
+            present(controller, animated: true)
+        } catch {
+            showError(error.localizedDescription)
+        }
+    }
+
     @objc private func retryTapped() {
+        if let pendingVerificationSourceID {
+            self.pendingVerificationSourceID = nil
+            retryButton.setTitle("Retry", for: .normal)
+            notNowButton.isHidden = true
+            presentBrowserVerification(sourceID: pendingVerificationSourceID)
+            return
+        }
+        if let pendingDomainApproval {
+            do {
+                try ReaderExtensionManager.shared.approve(pendingDomainApproval)
+            } catch {
+                showError(error.localizedDescription)
+                return
+            }
+        }
         loadCurrentChapter()
+    }
+
+    @objc private func notNowTapped() {
+        if let pendingDomainApproval {
+            ReaderExtensionDomainConsentCoordinator.shared.defer(pendingDomainApproval)
+        }
+        let declinedVerification = pendingVerificationSourceID != nil
+        pendingDomainApproval = nil
+        pendingVerificationSourceID = nil
+        retryButton.setTitle("Retry", for: .normal)
+        notNowButton.isHidden = true
+        errorLabel.text = declinedVerification
+            ? "Verification was not completed. Retry once the site check has been passed."
+            : "Domain access was not allowed. Retry when you are ready to review the request again."
     }
 
     private func updateOverlay(page: Int, totalPages: Int) {
@@ -549,6 +662,8 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
             UIHostingController(
                 rootView: NavigationView { view }
                     .navigationViewStyle(StackNavigationViewStyle())
+
+                    .profileScopedAppStorage()
             ),
             animated: true
         )
@@ -561,9 +676,9 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
             onModeChanged: { [weak self] mode in
                 guard let self else { return }
                 self.session.mode = mode
-                UserDefaults.standard.set(mode.rawValue, forKey: self.session.readerModeStorageKey)
+                ProfileSettingsStore.active.set(mode.rawValue, forKey: self.session.readerModeStorageKey)
                 if self.session.readerModeStorageKey == "kanzenReaderMode" {
-                    UserDefaults.standard.set(mode.readingMode.rawValue, forKey: "readingMode")
+                    ProfileSettingsStore.active.set(mode.readingMode.rawValue, forKey: "readingMode")
                 }
                 ReaderLogger.shared.log("Reader mode changed mode=\(mode.rawValue)", type: "ReaderSettings")
                 self.loadCurrentChapter()
@@ -576,6 +691,8 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
             UIHostingController(
                 rootView: NavigationView { view }
                     .navigationViewStyle(StackNavigationViewStyle())
+
+                    .profileScopedAppStorage()
             ),
             animated: true
         )
@@ -620,7 +737,7 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
 
     private func applyReaderOrientationPreference() {
         guard !orientationLockEnabled else { return }
-        switch UserDefaults.standard.string(forKey: "Reader.orientation") ?? "device" {
+        switch ProfileSettingsStore.active.string(forKey: "Reader.orientation") ?? "device" {
         case "portrait":
             applyOrientationMask(.portrait)
         case "landscape":
@@ -654,8 +771,7 @@ final class KanzenReaderViewController: UIViewController, KanzenReaderChildDeleg
     }
 
     private func applyOrientationMask(_ mask: UIInterfaceOrientationMask) {
-        // `viewDidLoad` can run before this controller belongs to a window. Defer until
-        // `viewDidAppear` rather than applying the preference to an unrelated Stage Manager scene.
+
         guard let scene = activeWindowScene else { return }
         AppDelegate.setOrientationLock(mask, for: scene)
         if #available(iOS 16.0, *) {
@@ -1009,6 +1125,42 @@ private struct KanzenReaderSettingsView: View {
     @AppStorage("readerLineSpacing") private var textLineSpacing = 1.6
     @AppStorage("readerMargin") private var textHorizontalPadding = 4.0
 
+    private var sanitizedPillarboxAmount: Double {
+        Self.sanitizedSetting(pillarboxAmount, default: 15, range: 5...95)
+    }
+
+    private var sanitizedTextFontSize: Double {
+        Self.sanitizedSetting(textFontSize, default: 16, range: 12...32)
+    }
+
+    private var sanitizedTextLineSpacing: Double {
+        Self.sanitizedSetting(textLineSpacing, default: 1.6, range: 1...3)
+    }
+
+    private var sanitizedTextHorizontalPadding: Double {
+        Self.sanitizedSetting(textHorizontalPadding, default: 4, range: 0...30)
+    }
+
+    private func sanitizedBinding(
+        _ value: Binding<Double>,
+        default defaultValue: Double,
+        range: ClosedRange<Double>
+    ) -> Binding<Double> {
+        Binding(
+            get: { Self.sanitizedSetting(value.wrappedValue, default: defaultValue, range: range) },
+            set: { value.wrappedValue = Self.sanitizedSetting($0, default: defaultValue, range: range) }
+        )
+    }
+
+    private static func sanitizedSetting(
+        _ value: Double,
+        default defaultValue: Double,
+        range: ClosedRange<Double>
+    ) -> Double {
+        guard value.isFinite else { return defaultValue }
+        return min(max(value, range.lowerBound), range.upperBound)
+    }
+
     init(
         scopeKey: String?,
         onModeChanged: @escaping (KanzenReaderMode) -> Void,
@@ -1019,7 +1171,7 @@ private struct KanzenReaderSettingsView: View {
         self.onSettingsChanged = onSettingsChanged
         let mode = KanzenReaderMode.currentDefault(scopeKey: scopeKey)
         _modeRaw = State(initialValue: mode.rawValue)
-        _pageOffset = State(initialValue: UserDefaults.standard.object(forKey: Self.pageOffsetStorageKey(scopeKey: scopeKey)) as? Bool ?? false)
+        _pageOffset = State(initialValue: ProfileSettingsStore.active.object(forKey: Self.pageOffsetStorageKey(scopeKey: scopeKey)) as? Bool ?? false)
         _upscaleModelName = State(initialValue: KanzenReaderUpscaleModelStore.storedModelName)
     }
 
@@ -1052,7 +1204,7 @@ private struct KanzenReaderSettingsView: View {
                     get: { KanzenReaderMode(rawValue: modeRaw) ?? .webtoon },
                     set: {
                         modeRaw = $0.rawValue
-                        UserDefaults.standard.set($0.rawValue, forKey: modeStorageKey)
+                        ProfileSettingsStore.active.set($0.rawValue, forKey: modeStorageKey)
                         onModeChanged($0)
                     }
                 )) {
@@ -1145,7 +1297,12 @@ private struct KanzenReaderSettingsView: View {
             Section("Webtoon") {
                 Toggle("Infinite Vertical Scroll", isOn: $infiniteScroll)
                 Toggle("Pillarbox", isOn: $pillarbox)
-                Stepper("Pillarbox Amount: \(Int(pillarboxAmount))%", value: $pillarboxAmount, in: 5...95, step: 5)
+                Stepper(
+                    "Pillarbox Amount: \(Int(sanitizedPillarboxAmount))%",
+                    value: sanitizedBinding($pillarboxAmount, default: 15, range: 5...95),
+                    in: 5...95,
+                    step: 5
+                )
                     .disabled(!pillarbox)
                 Picker("Pillarbox In", selection: $pillarboxOrientation) {
                     Text("Both").tag("both")
@@ -1186,9 +1343,24 @@ private struct KanzenReaderSettingsView: View {
                     Text("Justify").tag("justify")
                 }
                 .pickerStyle(.menu)
-                Stepper("Font Size: \(Int(textFontSize))", value: $textFontSize, in: 12...32, step: 1)
-                Stepper("Line Spacing: \(String(format: "%.1f", textLineSpacing))", value: $textLineSpacing, in: 1...3, step: 0.1)
-                Stepper("Margin: \(Int(textHorizontalPadding))", value: $textHorizontalPadding, in: 0...30, step: 1)
+                Stepper(
+                    "Font Size: \(Int(sanitizedTextFontSize))",
+                    value: sanitizedBinding($textFontSize, default: 16, range: 12...32),
+                    in: 12...32,
+                    step: 1
+                )
+                Stepper(
+                    "Line Spacing: \(String(format: "%.1f", sanitizedTextLineSpacing))",
+                    value: sanitizedBinding($textLineSpacing, default: 1.6, range: 1...3),
+                    in: 1...3,
+                    step: 0.1
+                )
+                Stepper(
+                    "Margin: \(Int(sanitizedTextHorizontalPadding))",
+                    value: sanitizedBinding($textHorizontalPadding, default: 4, range: 0...30),
+                    in: 0...30,
+                    step: 1
+                )
             }
             .eclipseExperimentalSettingsRows()
         }
@@ -1231,7 +1403,7 @@ private struct KanzenReaderSettingsView: View {
         .onChange(of: pagesToPreload) { _ in onSettingsChanged(false, "Reader.pagesToPreload") }
         .onChange(of: pagedLayout) { _ in onSettingsChanged(true, "Reader.pagedPageLayout") }
         .onChange(of: pageOffset) { newValue in
-            UserDefaults.standard.set(newValue, forKey: pageOffsetStorageKey)
+            ProfileSettingsStore.active.set(newValue, forKey: pageOffsetStorageKey)
             onSettingsChanged(true, pageOffsetStorageKey)
         }
         .onChange(of: splitWideImages) { _ in onSettingsChanged(true, "Reader.splitWideImages") }
@@ -1247,6 +1419,12 @@ private struct KanzenReaderSettingsView: View {
         .onChange(of: textFontSize) { _ in onSettingsChanged(true, "readerFontSize") }
         .onChange(of: textLineSpacing) { _ in onSettingsChanged(true, "readerLineSpacing") }
         .onChange(of: textHorizontalPadding) { _ in onSettingsChanged(true, "readerMargin") }
+        .onAppear {
+            pillarboxAmount = sanitizedPillarboxAmount
+            textFontSize = sanitizedTextFontSize
+            textLineSpacing = sanitizedTextLineSpacing
+            textHorizontalPadding = sanitizedTextHorizontalPadding
+        }
     }
 }
 

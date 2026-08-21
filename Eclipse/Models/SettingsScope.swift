@@ -30,15 +30,19 @@ enum EclipseSettingsRegistry {
         "tmdbFastAnimeAdultKeywordIDs.v1",
         "serviceCloudflareBypassCache",
         "serviceCloudflareInteractiveHosts",
+        ServiceJavaScriptQuarantineStore.storageKey,
         "experimentalCloudRestorePendingV1",
         "experimentalCloudSyncPrimaryProviderV1",
         "experimentalICloudSyncEnabled",
         "experimentalICloudSyncLastSeenRemoteModificationAt",
 
         "experimentalGoogleDriveSyncEnabled",
+        "experimentalGoogleDriveSyncLastSeenRemoteModificationAt",
         "experimentalOneDriveSyncEnabled",
+        "experimentalOneDriveSyncLastSeenRemoteModificationAt",
 
         "mediaStateCloudKitSuspendedAfterDeletionV1",
+        "mediaStateCloudKitOptInUpgradeNoticeHandledV1",
 
         "experimentalFeaturesEnabled",
 
@@ -60,6 +64,7 @@ enum EclipseSettingsRegistry {
         "githubRelease",
         "logger",
         "eclipseProfileStoreMigrationV1.",
+        "experimentalCloudSync",
         "provider."
     ]
 
@@ -84,6 +89,7 @@ enum EclipseSettingsRegistry {
     ]
 
     static let profileKeys: Set<String> = [
+        MediaStateServiceSourcesPayload.settingKey,
         "tmdbLanguage",
         "enableSubtitlesByDefault",
         "defaultSubtitleLanguage",

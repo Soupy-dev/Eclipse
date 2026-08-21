@@ -1,7 +1,12 @@
+//
+//  StremioClient.swift
+//  Eclipse
+//
+//  Created by Soupy on 2026.
+//
+
 import Foundation
 
-/// HTTP client for the Stremio addon protocol.
-/// HTTP-only streams. Torrent-only streams are discarded.
 final class StremioClient {
     static let shared = StremioClient()
     static let openSubtitlesV3BaseURL = "https://opensubtitles-v3.strem.io"
@@ -14,20 +19,30 @@ final class StremioClient {
     private static let maximumMetaResponseBytes = 5_000_000
     private static let maximumSubtitleResponseBytes = 5_000_000
     private static let retryDelayNanoseconds: UInt64 = 400_000_000
-    private let session: URLSession
+    private static let maximumSessionScopes = 64
+
+    private let clientLock = NSLock()
+    private var sessions: [String: URLSession] = [:]
+    private var sessionOrder: [String] = []
+    private var observerTokens: [NSObjectProtocol] = []
 
     private init() {
-        let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 15
-        config.timeoutIntervalForResource = 30
-        session = URLSession(
-            configuration: config,
-            delegate: FetchDelegate(allowRedirects: true),
-            delegateQueue: nil
-        )
+        let center = NotificationCenter.default
+        for name in [Notification.Name.activeProfileDidChange, ServiceStoreScope.didChangeNotification] {
+            observerTokens.append(center.addObserver(
+                forName: name,
+                object: nil,
+                queue: nil
+            ) { [weak self] _ in
+                self?.removeAllSessions()
+            })
+        }
     }
 
-    // MARK: - Fetch Manifest
+    deinit {
+        observerTokens.forEach(NotificationCenter.default.removeObserver)
+        removeAllSessions()
+    }
 
     func fetchManifest(from url: String) async throws -> StremioManifest {
         guard let requestURL = Self.endpointURL(
@@ -44,6 +59,7 @@ final class StremioClient {
 
         let (data, response) = try await boundedData(
             from: requestURL,
+            configuredBaseURL: url,
             maximumResponseBytes: Self.maximumManifestResponseBytes
         )
         guard let httpResponse = response as? HTTPURLResponse,
@@ -53,21 +69,41 @@ final class StremioClient {
             throw StremioError.httpError(code)
         }
 
+        try Self.validateJSONEnvelope(data)
         let manifest = try JSONDecoder().decode(StremioManifest.self, from: data)
-        Logger.shared.log("Stremio: Manifest OK - id=\(manifest.id) name=\(manifest.name) resources=\(manifest.resources?.count ?? 0) idPrefixes=\(manifest.idPrefixes ?? [])", type: "Stremio")
+        Logger.shared.log(
+            "Stremio: Manifest OK resources=\(manifest.resources?.count ?? 0) idPrefixCount=\(manifest.idPrefixes?.count ?? 0)",
+            type: "Stremio"
+        )
         return manifest
     }
 
-    // MARK: - Fetch Streams
+    struct StreamFetchOutcome {
+        let streams: [StremioStream]
+        let torrentOnlyCount: Int
+        let externalOnlyCount: Int
+    }
 
-    /// Fetches streams for a given addon and content ID.
-    /// Only direct HTTP(S) streams are returned.
     func fetchStreams(
         baseURL: String,
         type: String,
         id: String,
         retryEmptyResponse: Bool = false
     ) async throws -> [StremioStream] {
+        try await fetchStreamOutcome(
+            baseURL: baseURL,
+            type: type,
+            id: id,
+            retryEmptyResponse: retryEmptyResponse
+        ).streams
+    }
+
+    func fetchStreamOutcome(
+        baseURL: String,
+        type: String,
+        id: String,
+        retryEmptyResponse: Bool = false
+    ) async throws -> StreamFetchOutcome {
         let encodedId = encodePathSegment(id, preservingColon: true)
         guard let url = Self.endpointURL(
             baseURL: baseURL,
@@ -91,13 +127,14 @@ final class StremioClient {
             request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
 
             Logger.shared.log(
-                "Stremio: Stream lookup[\(lookupID)] attempt \(attempt)/\(Self.maximumStreamFetchAttempts) endpoint=\(endpoint) type=\(type) id=\(id)",
+                "Stremio: Stream lookup[\(lookupID)] attempt \(attempt)/\(Self.maximumStreamFetchAttempts) endpoint=\(endpoint) contentType=\(Self.safeContentType(type)) contentIDBytes=\(id.utf8.count)",
                 type: "Stremio"
             )
 
             do {
                 let (data, response) = try await boundedData(
                     for: request,
+                    configuredBaseURL: baseURL,
                     maximumResponseBytes: Self.maximumStreamResponseBytes
                 )
                 try Task.checkCancellation()
@@ -108,10 +145,10 @@ final class StremioClient {
                       (200...299).contains(httpResponse.statusCode) else {
                     throw StremioError.httpError(statusCode)
                 }
+                try Self.validateJSONEnvelope(data)
                 let streamResponse = try JSONDecoder().decode(StremioStreamResponse.self, from: data)
                 let allStreams = streamResponse.streams ?? []
 
-                // Keep torrent-only streams out of playback.
                 var safeStreams: [StremioStream] = []
                 safeStreams.reserveCapacity(min(allStreams.count, Self.maximumPlayableStreamsPerResponse))
                 var directHTTPCount = 0
@@ -121,10 +158,19 @@ final class StremioClient {
                         safeStreams.append(stream)
                     }
                 }
+                var torrentOnlyCount = 0
+                var externalOnlyCount = 0
+                for stream in allStreams where !stream.isDirectHTTP {
+                    if stream.usesTorrentTransport {
+                        torrentOnlyCount += 1
+                    } else if stream.hasExternalDestination {
+                        externalOnlyCount += 1
+                    }
+                }
                 let dropped = allStreams.count - directHTTPCount
                 let truncated = max(directHTTPCount - safeStreams.count, 0)
                 Logger.shared.log(
-                    "Stremio: Stream lookup[\(lookupID)] HTTP \(statusCode) attempt=\(attempt) bytes=\(data.count) decoded=\(allStreams.count) playable=\(safeStreams.count) dropped=\(dropped) truncated=\(truncated) elapsed=\(String(format: "%.2f", elapsed))s",
+                    "Stremio: Stream lookup[\(lookupID)] HTTP \(statusCode) attempt=\(attempt) bytes=\(data.count) decoded=\(allStreams.count) playable=\(safeStreams.count) dropped=\(dropped) torrentOnly=\(torrentOnlyCount) externalOnly=\(externalOnlyCount) truncated=\(truncated) elapsed=\(String(format: "%.2f", elapsed))s",
                     type: "Stremio"
                 )
 
@@ -151,7 +197,17 @@ final class StremioClient {
                     continue
                 }
 
-                return safeStreams
+                return StreamFetchOutcome(
+                    streams: safeStreams.enumerated().map { ordinal, stream in
+                        stream.withResolutionProvenance(
+                            contentType: type,
+                            contentID: id,
+                            streamOrdinal: ordinal
+                        )
+                    },
+                    torrentOnlyCount: torrentOnlyCount,
+                    externalOnlyCount: externalOnlyCount
+                )
             } catch {
                 if Task.isCancelled || Self.isCancellation(error) {
                     throw CancellationError()
@@ -179,8 +235,6 @@ final class StremioClient {
         throw lastError ?? StremioError.noStreams
     }
 
-    // MARK: - Fetch Catalogs and Meta
-
     func fetchCatalogMetas(baseURL: String, catalog: StremioCatalog, searchQuery: String? = nil, skip: Int? = nil) async throws -> [StremioMetaPreview] {
         let encodedType = encodePathSegment(catalog.type, preservingColon: false)
         let encodedCatalogId = encodePathSegment(catalog.id, preservingColon: true)
@@ -200,25 +254,33 @@ final class StremioClient {
         }
         let endpoint = Self.redactedEndpointDescription(for: url)
 
-        Logger.shared.log("Stremio: Fetching catalog \(catalog.id) query='\(searchQuery ?? "nil")' skip=\(skip?.description ?? "nil") endpoint=\(endpoint)", type: "Stremio")
+        Logger.shared.log(
+            "Stremio: Fetching catalog queryBytes=\(searchQuery?.utf8.count ?? 0) skip=\(skip?.description ?? "nil") endpoint=\(endpoint)",
+            type: "Stremio"
+        )
 
         let (data, response) = try await boundedData(
             from: url,
+            configuredBaseURL: baseURL,
             maximumResponseBytes: Self.maximumCatalogResponseBytes
         )
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
-            Logger.shared.log("Stremio: Catalog fetch failed HTTP \(statusCode) catalog=\(catalog.id) query='\(searchQuery ?? "nil")' skip=\(skip?.description ?? "nil") endpoint=\(endpoint)", type: "Stremio")
+            Logger.shared.log(
+                "Stremio: Catalog fetch failed HTTP \(statusCode) queryBytes=\(searchQuery?.utf8.count ?? 0) skip=\(skip?.description ?? "nil") endpoint=\(endpoint)",
+                type: "Stremio"
+            )
             throw StremioError.httpError(statusCode)
         }
 
         do {
+            try Self.validateJSONEnvelope(data)
             let response = try JSONDecoder().decode(StremioCatalogResponse.self, from: data)
-            Logger.shared.log("Stremio: Catalog \(catalog.id) returned \(response.metas.count) meta candidate(s)", type: "Stremio")
+            Logger.shared.log("Stremio: Catalog returned \(response.metas.count) meta candidate(s)", type: "Stremio")
             return response.metas
         } catch {
-            Logger.shared.log("Stremio: Catalog decode FAILED for \(catalog.id) endpoint=\(endpoint) bytes=\(data.count) error=\(Self.safeErrorDescription(error))", type: "Stremio")
+            Logger.shared.log("Stremio: Catalog decode FAILED endpoint=\(endpoint) bytes=\(data.count) error=\(Self.safeErrorDescription(error))", type: "Stremio")
             throw error
         }
     }
@@ -234,29 +296,32 @@ final class StremioClient {
         }
         let endpoint = Self.redactedEndpointDescription(for: url)
 
-        Logger.shared.log("Stremio: Fetching meta type=\(type) id=\(id) endpoint=\(endpoint)", type: "Stremio")
+        Logger.shared.log(
+            "Stremio: Fetching meta contentType=\(Self.safeContentType(type)) contentIDBytes=\(id.utf8.count) endpoint=\(endpoint)",
+            type: "Stremio"
+        )
 
         let (data, response) = try await boundedData(
             from: url,
+            configuredBaseURL: baseURL,
             maximumResponseBytes: Self.maximumMetaResponseBytes
         )
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
-            Logger.shared.log("Stremio: Meta fetch failed HTTP \(statusCode) type=\(type) id=\(id)", type: "Stremio")
+            Logger.shared.log("Stremio: Meta fetch failed HTTP \(statusCode)", type: "Stremio")
             throw StremioError.httpError(statusCode)
         }
 
         do {
+            try Self.validateJSONEnvelope(data)
             let response = try JSONDecoder().decode(StremioMetaResponse.self, from: data)
             return response.meta
         } catch {
-            Logger.shared.log("Stremio: Meta decode FAILED for id=\(id) endpoint=\(endpoint) bytes=\(data.count) error=\(Self.safeErrorDescription(error))", type: "Stremio")
+            Logger.shared.log("Stremio: Meta decode FAILED endpoint=\(endpoint) bytes=\(data.count) error=\(Self.safeErrorDescription(error))", type: "Stremio")
             throw error
         }
     }
-
-    // MARK: - Fetch Subtitles
 
     func fetchSubtitles(baseURL: String, type: String, id: String) async throws -> [StremioSubtitle] {
         let encodedType = encodePathSegment(type, preservingColon: false)
@@ -269,21 +334,26 @@ final class StremioClient {
         }
         let endpoint = Self.redactedEndpointDescription(for: url)
 
-        Logger.shared.log("Stremio: Fetching subtitles - type=\(type) id=\(id) endpoint=\(endpoint)", type: "Stremio")
+        Logger.shared.log(
+            "Stremio: Fetching subtitles contentType=\(Self.safeContentType(type)) contentIDBytes=\(id.utf8.count) endpoint=\(endpoint)",
+            type: "Stremio"
+        )
 
         let (data, response) = try await boundedData(
             from: url,
+            configuredBaseURL: baseURL,
             maximumResponseBytes: Self.maximumSubtitleResponseBytes
         )
         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
-            Logger.shared.log("Stremio: Subtitle fetch FAILED HTTP \(statusCode) endpoint=\(endpoint) type=\(type) id=\(id)", type: "Stremio")
+            Logger.shared.log("Stremio: Subtitle fetch FAILED HTTP \(statusCode) endpoint=\(endpoint)", type: "Stremio")
             throw StremioError.httpError(statusCode)
         }
 
         let subtitleResponse: StremioSubtitleResponse
         do {
+            try Self.validateJSONEnvelope(data)
             subtitleResponse = try JSONDecoder().decode(StremioSubtitleResponse.self, from: data)
         } catch {
             Logger.shared.log("Stremio: Subtitle decode FAILED endpoint=\(endpoint) bytes=\(data.count) error=\(Self.safeErrorDescription(error))", type: "Stremio")
@@ -326,9 +396,6 @@ final class StremioClient {
         )
     }
 
-    // MARK: - Build Stremio Content ID
-
-    /// Builds the Stremio content ID string for a given item.
     func buildContentId(tmdbId: Int, imdbId: String?, type: String, season: Int?, episode: Int?, addon: StremioAddon) -> String? {
         return buildContentIds(
             tmdbId: tmdbId,
@@ -361,7 +428,7 @@ final class StremioClient {
         ).first
     }
 
-    func buildContentIds(tmdbId: Int, imdbId: String?, type: String, season: Int?, episode: Int?, anilistId: Int? = nil, anilistSeason: Int? = nil, anilistEpisode: Int? = nil, kitsuId: Int? = nil, kitsuEpisode: Int? = nil, alternateSeason: Int? = nil, alternateEpisode: Int? = nil, addon: StremioAddon) -> [String] {
+    func buildContentIds(tmdbId: Int, imdbId: String?, type: String, season: Int?, episode: Int?, anilistId: Int? = nil, anilistSeason: Int? = nil, anilistEpisode: Int? = nil, kitsuId: Int? = nil, kitsuEpisode: Int? = nil, alternateSeason: Int? = nil, alternateEpisode: Int? = nil, allowParentSeriesIDs: Bool = true, addon: StremioAddon) -> [String] {
         buildContentIds(
             tmdbId: tmdbId,
             imdbId: imdbId,
@@ -375,12 +442,13 @@ final class StremioClient {
             kitsuEpisode: kitsuEpisode,
             alternateSeason: alternateSeason,
             alternateEpisode: alternateEpisode,
+            allowParentSeriesIDs: allowParentSeriesIDs,
             idPrefixes: addon.manifest.streamIdPrefixes,
             addonName: addon.manifest.name
         )
     }
 
-    func buildContentIds(tmdbId: Int, imdbId: String?, type: String, season: Int?, episode: Int?, anilistId: Int? = nil, anilistSeason: Int? = nil, anilistEpisode: Int? = nil, kitsuId: Int? = nil, kitsuEpisode: Int? = nil, alternateSeason: Int? = nil, alternateEpisode: Int? = nil, idPrefixes: [String]?, addonName: String) -> [String] {
+    func buildContentIds(tmdbId: Int, imdbId: String?, type: String, season: Int?, episode: Int?, anilistId: Int? = nil, anilistSeason: Int? = nil, anilistEpisode: Int? = nil, kitsuId: Int? = nil, kitsuEpisode: Int? = nil, alternateSeason: Int? = nil, alternateEpisode: Int? = nil, allowParentSeriesIDs: Bool = true, idPrefixes: [String]?, addonName: String) -> [String] {
         let prefixes = idPrefixes ?? []
         let normalizedPrefixes = prefixes.map { $0.lowercased() }
         let supportsTMDB = normalizedPrefixes.isEmpty || normalizedPrefixes.contains { $0 == "tmdb" || $0.hasPrefix("tmdb:") }
@@ -390,7 +458,10 @@ final class StremioClient {
         let supportsKitsu = normalizedPrefixes.isEmpty || normalizedPrefixes.contains { $0 == "kitsu" || $0 == "kitsu:" }
 
         let normalizedIMDbID = Self.normalizedIMDbID(imdbId)
-        Logger.shared.log("Stremio: buildContentId addon=\(addonName) prefixes=\(prefixes) imdbId=\(normalizedIMDbID ?? "nil") tmdbId=\(tmdbId) anilistId=\(anilistId?.description ?? "nil") kitsuId=\(kitsuId?.description ?? "nil") type=\(type) s=\(season?.description ?? "nil") e=\(episode?.description ?? "nil") anilistS=\(anilistSeason?.description ?? "nil") anilistE=\(anilistEpisode?.description ?? "nil") kitsuE=\(kitsuEpisode?.description ?? "nil") altS=\(alternateSeason?.description ?? "nil") altE=\(alternateEpisode?.description ?? "nil")", type: "Stremio")
+        Logger.shared.log(
+            "Stremio: Building content ID candidates prefixCount=\(prefixes.count) contentType=\(Self.safeContentType(type))",
+            type: "Stremio"
+        )
         var candidates: [String] = []
         let seriesTuples = contentIdSeriesTuples(
             type: type,
@@ -400,9 +471,8 @@ final class StremioClient {
             alternateEpisode: alternateEpisode
         )
 
-        // Prefer IMDB because it is the universal Stremio standard, then try TMDB too.
-        if supportsIMDB, let ttId = normalizedIMDbID {
-            if type == "series", !seriesTuples.isEmpty {
+        if allowParentSeriesIDs, supportsIMDB, let ttId = normalizedIMDbID {
+            if type == "series" {
                 for tuple in seriesTuples {
                     candidates.append("\(ttId):\(tuple.season):\(tuple.episode)")
                 }
@@ -411,7 +481,7 @@ final class StremioClient {
             }
 
             if supportsIMDBNamespace {
-                if type == "series", !seriesTuples.isEmpty {
+                if type == "series" {
                     for tuple in seriesTuples {
                         candidates.append("imdb:\(ttId):\(tuple.season):\(tuple.episode)")
                     }
@@ -421,8 +491,8 @@ final class StremioClient {
             }
         }
 
-        if supportsTMDB {
-            if type == "series", !seriesTuples.isEmpty {
+        if allowParentSeriesIDs, supportsTMDB {
+            if type == "series" {
                 for tuple in seriesTuples {
                     candidates.append("tmdb:\(tmdbId):\(tuple.season):\(tuple.episode)")
                 }
@@ -431,13 +501,14 @@ final class StremioClient {
             }
         }
 
-        if supportsAniList, let anilistId {
+        if supportsAniList, let anilistId, anilistId > 0 {
             if type == "series" {
-                if let animeSeason = anilistSeason, let animeEpisode = anilistEpisode {
-                    candidates.append("anilist:\(anilistId):\(animeSeason):\(animeEpisode)")
-                }
-                if let s = season, let e = episode {
-                    candidates.append("anilist:\(anilistId):\(s):\(e)")
+                if let animeEpisode = anilistEpisode, animeEpisode > 0 {
+                    if let animeSeason = anilistSeason, animeSeason > 0 {
+                        candidates.append("anilist:\(anilistId):\(animeSeason):\(animeEpisode)")
+                    } else {
+                        candidates.append("anilist:\(anilistId):\(animeEpisode)")
+                    }
                 }
             } else {
                 candidates.append("anilist:\(anilistId)")
@@ -457,9 +528,9 @@ final class StremioClient {
         var seen = Set<String>()
         let unique = candidates.filter { seen.insert($0).inserted }
         if unique.isEmpty {
-            Logger.shared.log("Stremio: No supported prefix for addon \(addonName)", type: "Stremio")
+            Logger.shared.log("Stremio: No supported content ID prefix", type: "Stremio")
         } else {
-            Logger.shared.log("Stremio: Content ID candidates for \(addonName): \(unique.joined(separator: ", "))", type: "Stremio")
+            Logger.shared.log("Stremio: Built \(unique.count) content ID candidate(s)", type: "Stremio")
         }
         return unique
     }
@@ -468,23 +539,23 @@ final class StremioClient {
         guard type == "series" else { return [] }
         var tuples: [(season: Int, episode: Int)] = []
 
-        if let season, let episode {
+        if let season, let episode, season >= 0, episode > 0 {
             tuples.append((season, episode))
         }
 
+        // A multi-season anime whose Cinemeta layout differs from TMDB's linear list needs BOTH
+        // coordinates asked; the dedupe below already drops the alternate when it matches.
         if let alternateSeason, let alternateEpisode {
             tuples.append((alternateSeason, alternateEpisode))
         }
 
         var seen = Set<String>()
         return tuples.filter { tuple in
-            tuple.season > 0 &&
+            tuple.season >= 0 &&
             tuple.episode > 0 &&
             seen.insert("\(tuple.season):\(tuple.episode)").inserted
         }
     }
-
-    // MARK: - Helpers
 
     static func normalizedIMDbID(_ rawValue: String?) -> String? {
         guard var value = rawValue?
@@ -506,8 +577,7 @@ final class StremioClient {
               value.allSatisfy(\.isNumber) else {
             return nil
         }
-        // IMDb's older numeric IDs are seven digits and often have a leading zero.
-        // Preserve their canonical form when an addon encoded imdb_id as a JSON number.
+
         if value.count < 7 {
             value = String(repeating: "0", count: 7 - value.count) + value
         }
@@ -538,37 +608,53 @@ final class StremioClient {
         guard safeStreams.isEmpty else { return false }
         if allStreams.isEmpty { return true }
 
-        // Some addons report temporary upstream failures as a 200 response with
-        // a display-only stream item (no URL or info hash). Retry that once, but
-        // do not retry a legitimate torrent-only response that Eclipse filters.
         return allStreams.allSatisfy { stream in
             let url = stream.url?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             let infoHash = stream.infoHash?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            return url.isEmpty && infoHash.isEmpty
+            return url.isEmpty && infoHash.isEmpty && !stream.hasExternalDestination
         }
     }
 
     private func boundedData(
         for request: URLRequest,
+        configuredBaseURL: String,
         maximumResponseBytes: Int
     ) async throws -> (Data, URLResponse) {
-        do {
-            return try await session.boundedData(
-                for: request,
-                maximumResponseBytes: maximumResponseBytes
-            )
-        } catch is BoundedURLSessionError {
-            throw ServiceCompatibilityError.responseTooLarge
-        }
+        try await session(for: configuredBaseURL).boundedData(
+            for: request,
+            maximumResponseBytes: maximumResponseBytes
+        )
     }
 
     private func boundedData(
         from url: URL,
+        configuredBaseURL: String,
         maximumResponseBytes: Int
     ) async throws -> (Data, URLResponse) {
         try await boundedData(
             for: URLRequest(url: url),
+            configuredBaseURL: configuredBaseURL,
             maximumResponseBytes: maximumResponseBytes
+        )
+    }
+
+    func fetchProviderResource(
+        _ url: URL,
+        configuredBaseURL: String,
+        maximumResponseBytes: Int
+    ) async throws -> SkyStreamPinnedHTTPClient.Response {
+        let (data, response) = try await session(for: configuredBaseURL).boundedData(
+            for: URLRequest(url: url),
+            maximumResponseBytes: maximumResponseBytes
+        )
+        guard let http = response as? HTTPURLResponse else {
+            throw StremioError.httpError(0)
+        }
+        return SkyStreamPinnedHTTPClient.Response(
+            data: data,
+            response: http,
+            wasTruncated: false,
+            effectiveRequestHeaders: .empty
         )
     }
 
@@ -623,6 +709,57 @@ final class StremioClient {
         return String(describing: type(of: error))
     }
 
+    private static func validateJSONEnvelope(_ data: Data) throws {
+        try StremioJSONBoundary.validate(data)
+    }
+
+    private static func safeContentType(_ rawValue: String) -> String {
+        switch rawValue.lowercased() {
+        case "movie": return "movie"
+        case "series": return "series"
+        default: return "other"
+        }
+    }
+
+    private func session(for configuredBaseURL: String) -> URLSession {
+        let normalized = Self.normalizedConfiguredURL(from: configuredBaseURL)
+        let profileScope = ProfileManager.shared.activeProfileID.uuidString.lowercased()
+        let key = "\(profileScope):\(normalized)".sha256
+
+        clientLock.lock()
+        defer { clientLock.unlock() }
+        if let existing = sessions[key] {
+            return existing
+        }
+        if sessions.count >= Self.maximumSessionScopes,
+           let oldest = sessionOrder.first {
+            sessionOrder.removeFirst()
+            sessions.removeValue(forKey: oldest)?.invalidateAndCancel()
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 15
+        configuration.timeoutIntervalForResource = 30
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieAcceptPolicy = .always
+        let session = URLSession(
+            configuration: configuration,
+            delegate: FetchDelegate(allowRedirects: true),
+            delegateQueue: nil
+        )
+        sessions[key] = session
+        sessionOrder.append(key)
+        return session
+    }
+
+    private func removeAllSessions() {
+        clientLock.lock()
+        let activeSessions = Array(sessions.values)
+        sessions.removeAll(keepingCapacity: true)
+        sessionOrder.removeAll(keepingCapacity: true)
+        clientLock.unlock()
+        activeSessions.forEach { $0.invalidateAndCancel() }
+    }
+
     private static func waitBeforeStreamRetry() async throws {
         try await Task<Never, Never>.sleep(nanoseconds: retryDelayNanoseconds)
     }
@@ -648,14 +785,19 @@ final class StremioClient {
         if path.lowercased().hasSuffix("/manifest.json") {
             path.removeLast("/manifest.json".count)
         }
+        while path.count > 1 && path.hasSuffix("/") {
+            path.removeLast()
+        }
+        if path.lowercased().hasSuffix("/configure") {
+            path.removeLast("/configure".count)
+        }
+        if path == "/" {
+            path = ""
+        }
         components.percentEncodedPath = path
         return components.string ?? cleaned
     }
 
-    /// Builds the provider's configuration page without ever exposing the
-    /// configured URL to logs or visible diagnostics. URLComponents is used so
-    /// a token-bearing query remains a query instead of becoming part of the
-    /// appended path.
     static func configurationPageURL(from configuredURL: String) -> URL? {
         let normalized = normalizedConfiguredURL(from: configuredURL)
         guard var components = URLComponents(string: normalized),

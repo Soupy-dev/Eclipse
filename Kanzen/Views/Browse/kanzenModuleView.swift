@@ -1,5 +1,10 @@
+//
+//  ModuleView.swift
+//  Kanzen
+//
+//  Created by Dawud Osman on 15/05/2025.
+//
 import SwiftUI
-import Kingfisher
 
 #if !os(tvOS)
 struct KanzenModuleView: View {
@@ -14,8 +19,7 @@ struct KanzenModuleView: View {
                         .font(.body)
                         .lineLimit(2)
                 }
-            
-        
+
     }
     func deleteItems(at offsets: IndexSet) {
         for index in offsets
@@ -24,17 +28,16 @@ struct KanzenModuleView: View {
         }
     }
     var body: some View {
-        
-        ZStack{
-            GlobalGradientBackground()
-                .ignoresSafeArea()
+
                  Form
                  {
                      Section {
-                         Text("Aidoku sources are recommended for the best Reader home, search, downloads, and update support. Legacy JS modules are kept for compatibility.")
+                         Text("Reader Extensions are recommended for Reader home, search, downloads, and update support. Legacy JS modules are kept for compatibility.")
                              .font(.footnote)
                              .foregroundColor(.secondary)
                      }
+                     .eclipseExperimentalSettingsRows()
+                     .background(EclipseScrollTracker())
 
                      if(moduleManager.modules.isEmpty)
                      {
@@ -43,20 +46,22 @@ struct KanzenModuleView: View {
                              Text("No Modules Found").font(.headline)
                              Text("Tap the \"+\" button to add a module").font(.caption).foregroundColor(.secondary)
                          }.padding().frame(maxWidth:.infinity)
+                         .eclipseExperimentalSettingsRows()
+                         .background(EclipseScrollTracker())
                      }
                      else
                      { Section{
                          ForEach(moduleManager.modules){item in
                              let selectedModule = copySelectedModule == item.moduleurl
                              let row = ZStack{
-                                 
+
                                  HStack
                                  {
-                                     
+
                                      circularImage(from: item.moduleData.iconURL, size: 50)
                                          .padding(.trailing,10)
                                      HStack{Divider()}
-                                    
+
                                      VStack(alignment: .leading)
                                      {
                                          HStack(alignment: .bottom, spacing: 4){
@@ -67,7 +72,7 @@ struct KanzenModuleView: View {
                                                  .font(.subheadline)
                                                  .foregroundColor(.secondary)
                                          }
-                                         
+
                                          Text("Author: \(item.moduleData.author.name)")
                                              .font(.subheadline)
                                              .foregroundColor(.secondary)
@@ -76,7 +81,6 @@ struct KanzenModuleView: View {
                                              .foregroundColor(.secondary)
                                      }.padding(.horizontal,20)
                                      Spacer()
-                                     
 
                                  }
                                  .padding(.leading,10)
@@ -106,48 +110,41 @@ struct KanzenModuleView: View {
                              .padding(.bottom,10)
                              .listRowInsets(EdgeInsets())
                              .compositingGroup()
-                             
+
                              .frame(maxWidth: .infinity,alignment: .center)
                              .shadow(color: .black.opacity(selectedModule ? 0.4 : 0.2), radius: selectedModule ? 10 : 4)
-                             
+
                              .clipShape(RoundedRectangle(cornerRadius: 16))
-                             
+
                              .overlay(
                                  RoundedRectangle(cornerRadius: 16)
                                      .stroke(Color.accentColor.opacity(selectedModule ? 1 : 0), lineWidth: selectedModule ? 5 : 0)
                              )
-                            
 
-                        
                          }
-                         
-                         
+
                          .onDelete(perform: deleteItems)
                      }
+                     .eclipseExperimentalSettingsRows()
+                     .background(EclipseScrollTracker())
 
-
-
-                             
-                        
                      }
 
                  }
-                 
-                 // Remove default list styling
-                 .eclipseHideScrollBackground()
-                 .background(Color.clear)
-             .navigationTitle("Modules")
-             .navigationBarTitleDisplayMode(.inline)
+
              .frame(maxWidth: .infinity,alignment: .center)
              .padding(.top,10)
+             .navigationTitle("Modules")
+             .navigationBarTitleDisplayMode(.inline)
+             .eclipseSettingsStyle()
              .overlay
              {
                  if copySelectedModule != nil
                  {
                      Text("Copied to Clipboard")
-                         
+
                          .foregroundColor(.accentColor)
-                         
+
                          .padding()
                          .background(Color(.systemBackground).cornerRadius(20))
                          .padding(.bottom)
@@ -164,30 +161,28 @@ struct KanzenModuleView: View {
                          }){Image(systemName: "plus").resizable().frame(width: 20, height: 20)}
                      }
                  }
-        }
-
+             .preferredColorScheme(.dark)
 
     }
     func circularImage(from urlString: String, size: CGFloat) -> some View {
         Group {
             if let url = URL(string: urlString) {
-                KFImage(url)
-                    .placeholder {
+                ReaderPinnedRemoteImage(
+                    url: url,
+                    maximumPixelSize: max(256, Int((size * UIScreen.main.scale).rounded(.up)))
+                ) {
                         EclipseLoadingIndicator()
-                    }
-                    .cancelOnDisappear(true)
-                    .resizable()
+                }
                     .aspectRatio(contentMode: .fill)
             } else {
-                Circle().fill(Color.black)
+                Circle().fill(Color.white.opacity(0.08))
             }
         }
- 
-      
+
         .frame(width: size, height: size)
         .clipShape(Circle())
         .shadow(radius: 5)
-        
+
     }
     func addModule(fetchedModule: ModuleData, url: String, dismiss: @escaping () -> Void)
     {
@@ -202,7 +197,7 @@ struct KanzenModuleView: View {
         }
     }
     func popupContent(fetchedModule: ModuleData?,url: String,width: CGFloat,height: CGFloat, dismiss: @escaping () -> Void) -> some View {
-        
+
         ZStack{
             if let moduleData = fetchedModule
             {
@@ -266,11 +261,13 @@ struct KanzenModuleView: View {
                         }
                     }.padding(.bottom, 20)
                 }.padding(.top).frame(maxWidth: .infinity,alignment: .top)
-                
+
                 }
 
         }.padding(.top).frame(maxWidth: .infinity,alignment: .top)
             .clipped()
+            .background(GlobalGradientBackground().ignoresSafeArea())
+            .preferredColorScheme(.dark)
     }
 
     func fetchModule(url: String) -> Void
@@ -282,7 +279,7 @@ struct KanzenModuleView: View {
             DispatchQueue.main.async {
                 if let metaData = metaData
                 {
-                    
+
                     var hostingController: UIHostingController<AnyView>? = nil
 
                     let content = popupContent(
@@ -294,19 +291,19 @@ struct KanzenModuleView: View {
                         }
                     )
 
-                    hostingController = UIHostingController(rootView: AnyView(content))
-                    
+                    hostingController = UIHostingController(rootView: AnyView(content.profileScopedAppStorage()))
+                    hostingController?.overrideUserInterfaceStyle = .dark
 
                     if let topVC = getTopViewController(), let hc = hostingController {
                         topVC.present(hc, animated: true)
                     }
-
 
                 }
                 else{
                     let alert = UIAlertController(title: "Failed to Add Module",
                                                   message: "The provided Module URL is invalid",
                                                   preferredStyle: .alert)
+                    alert.overrideUserInterfaceStyle = .dark
                     alert.addAction(UIAlertAction(title: "OK", style: .default))
                     if let topVC = getTopViewController() {
                         topVC.present(alert, animated: true)
@@ -314,16 +311,15 @@ struct KanzenModuleView: View {
                 }
 
             }
-           
+
         }
-       
+
     }
     func validFetchedModule(_ urlString: String, completion: @escaping (ModuleData?) -> Void) {
         Task {
             do{
                 let metaData = try await moduleManager.validateModuleUrl(urlString)
-                
-               
+
                 completion(metaData)
             }
             catch {
@@ -335,7 +331,8 @@ struct KanzenModuleView: View {
     func addModuleAlert()
     {
         let alert = UIAlertController(title: "Add Module", message: "Enter Module Name", preferredStyle: .alert)
-        
+        alert.overrideUserInterfaceStyle = .dark
+
         alert.addTextField { textField in
             textField.placeholder = "https://real.url/module.json"
         }
@@ -355,7 +352,7 @@ struct KanzenModuleView: View {
         self.fetchModule(url:url)
 
     }
-    
+
     func getTopViewController(base: UIViewController? = nil) -> UIViewController? {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         let resolvedBase = base
@@ -367,12 +364,12 @@ struct KanzenModuleView: View {
         if let presented = resolvedBase?.presentedViewController {
             return getTopViewController(base: presented)
         }
-        
+
         if let nav = resolvedBase as? UINavigationController,
            let visible = nav.visibleViewController {
             return getTopViewController(base: visible)
         }
-        
+
         if let tab = resolvedBase as? UITabBarController, let selected = tab.selectedViewController {
             return getTopViewController(base: selected)
         }
@@ -381,7 +378,7 @@ struct KanzenModuleView: View {
            let visible = split.viewControllers.last {
             return getTopViewController(base: visible)
         }
-        
+
         return resolvedBase
     }
 

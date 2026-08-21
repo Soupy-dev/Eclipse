@@ -1,3 +1,10 @@
+//
+//  Untitled.swift
+//  Eclipse
+//
+//  Created by Dominic on 30.12.25.
+//
+
 import SwiftUI
 
 struct AdaptiveConfirmationDialog<Actions: View, Message: View>: ViewModifier {
@@ -15,7 +22,7 @@ struct AdaptiveConfirmationDialog<Actions: View, Message: View>: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
         #if !os(tvOS)
-            // use alert on iPadOS to prevent anchoring to the side of a sheet
+
             if isPad {
                 content
                     .alert(
@@ -27,7 +34,7 @@ struct AdaptiveConfirmationDialog<Actions: View, Message: View>: ViewModifier {
                         message
                     }
             } else {
-                // use a normal confirmationDialog otherwise
+
                 content
                     .confirmationDialog(
                         title,
@@ -40,7 +47,7 @@ struct AdaptiveConfirmationDialog<Actions: View, Message: View>: ViewModifier {
                     }
             }
         #else
-            // use confirmationDialog on tvos ? ( can be changed easily )
+
             content
                 .confirmationDialog(
                     title,

@@ -1,3 +1,10 @@
+//
+//  MainMenu.swift
+//  Eclipse
+//
+//  Created by Dawud Osman on 17/11/2025.
+//
+
 import SwiftUI
 
 #if !os(tvOS)
@@ -10,7 +17,7 @@ enum KanzenRootTab: Hashable {
 }
 
 struct KanzenModeSwitchButton: View {
-    @AppStorage("showKanzen") private var showKanzen: Bool = false
+    @AppStorage("showKanzen", store: .standard) private var showKanzen: Bool = false
     @AppStorage(ModeSwitchAnimationSettings.enabledKey) private var modeSwitchAnimationEnabled = ModeSwitchAnimationSettings.defaultEnabled
     @EnvironmentObject private var modeSwitchTransitionCoordinator: ModeSwitchTransitionCoordinator
     @State private var isLaunching = false
@@ -86,8 +93,8 @@ struct KanzenModeSwitchButton: View {
             isLaunching = true
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) {
-            withAnimation(.easeInOut(duration: 0.84)) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
+            withAnimation(.timingCurve(0.2, 0.75, 0.25, 1, duration: 0.82)) {
                 showKanzen = false
             }
         }
@@ -139,11 +146,12 @@ extension KanzenRootHeader where Trailing == EmptyView {
 }
 
 struct KanzenMenu: View {
-    let kanzen = KanzenEngine()
+    @StateObject private var kanzen = KanzenEngine()
     private let onStartupReady: () -> Void
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject var moduleManager: ModuleManager
-    @StateObject private var aidokuManager = AidokuSourceManager.shared
+    @StateObject private var readerExtensionManager = ReaderExtensionManager.shared
+    @StateObject private var readerDownloadManager = ReaderDownloadManager.shared
     @State private var selectedTab: KanzenRootTab = .home
 
     init(onStartupReady: @escaping () -> Void = {}) {
@@ -194,17 +202,30 @@ struct KanzenMenu: View {
                 .tag(KanzenRootTab.settings)
         }
         .environmentObject(kanzen)
+        .kanzenAidokuMigrationPrompt()
         .task {
             await moduleManager.autoUpdateModulesIfNeeded()
-            await aidokuManager.autoUpdateInstalledSourcesIfNeeded(reason: "reader-open")
+            await readerExtensionManager.autoUpdateInstalledSourcesIfNeeded(reason: "reader-open")
         }
         .onChange(of: scenePhase) { newPhase in
             if newPhase == .active {
                 Task {
                     await moduleManager.autoUpdateModulesIfNeeded()
-                    await aidokuManager.autoUpdateInstalledSourcesIfNeeded(reason: "reader-active")
+                    await readerExtensionManager.autoUpdateInstalledSourcesIfNeeded(reason: "reader-active")
                 }
             }
+        }
+        .alert("Reader Download Not Added", isPresented: Binding(
+            get: { readerDownloadManager.enqueueErrorMessage != nil },
+            set: { isPresented in
+                if !isPresented { readerDownloadManager.clearEnqueueError() }
+            }
+        )) {
+            Button("OK") {
+                readerDownloadManager.clearEnqueueError()
+            }
+        } message: {
+            Text(readerDownloadManager.enqueueErrorMessage ?? "The download could not be added safely.")
         }
     }
 }

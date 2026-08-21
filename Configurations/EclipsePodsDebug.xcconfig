@@ -1,6 +1,0 @@
-#include "../Build.xcconfig"
-#include "../Pods/Target Support Files/Pods-Eclipse/Pods-Eclipse.debug.xcconfig"
-
-// CocoaPods 1.17's generated resource script maintains a temporary file under
-// PODS_ROOT, which Xcode's user-script sandbox otherwise rejects.
-ENABLE_USER_SCRIPT_SANDBOXING = NO

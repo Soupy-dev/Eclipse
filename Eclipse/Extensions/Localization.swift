@@ -1,7 +1,6 @@
 import SwiftUI
 import ObjectiveC
 
-
 private var eclipseLanguageBundleKey: UInt8 = 0
 
 private final class EclipseLocalizedBundle: Bundle, @unchecked Sendable {
@@ -14,12 +13,11 @@ private final class EclipseLocalizedBundle: Bundle, @unchecked Sendable {
 }
 
 extension Bundle {
-    
+
     private static let activateEclipseLocalization: Void = {
         object_setClass(Bundle.main, EclipseLocalizedBundle.self)
     }()
 
-    
     static func setEclipseLanguage(_ code: String) {
         _ = activateEclipseLocalization
 
@@ -47,13 +45,11 @@ extension Bundle {
     }
 }
 
-
 final class LocalizationManager: NSObject, ObservableObject {
     static let shared = LocalizationManager()
 
     static let tmdbLanguageKey = "tmdbLanguage"
     static let defaultTMDBCode = "en-US"
-
 
     private static let uiCodeByTMDBCode: [String: String] = [
         "en-US": "en",       "en-GB": "en-GB",
@@ -73,8 +69,10 @@ final class LocalizationManager: NSObject, ObservableObject {
     @Published private(set) var locale: Locale
     @Published private(set) var layoutDirection: LayoutDirection
 
+    private var observedStore: UserDefaults?
+
     private override init() {
-        let tmdbCode = UserDefaults.standard.string(forKey: Self.tmdbLanguageKey) ?? Self.defaultTMDBCode
+        let tmdbCode = ProfileSettingsStore.active.string(forKey: Self.tmdbLanguageKey) ?? Self.defaultTMDBCode
         let uiCode = Self.uiCode(forTMDB: tmdbCode)
 
         Bundle.setEclipseLanguage(uiCode)
@@ -83,7 +81,8 @@ final class LocalizationManager: NSObject, ObservableObject {
 
         super.init()
 
-        UserDefaults.standard.addObserver(
+        observedStore = ProfileSettingsStore.active
+        observedStore?.addObserver(
             self,
             forKeyPath: Self.tmdbLanguageKey,
             options: [.new],
@@ -91,8 +90,19 @@ final class LocalizationManager: NSObject, ObservableObject {
         )
     }
 
+    func reloadForActiveProfile() {
+        let store = ProfileSettingsStore.active
+        if observedStore !== store {
+            observedStore?.removeObserver(self, forKeyPath: Self.tmdbLanguageKey)
+            observedStore = store
+            store.addObserver(self, forKeyPath: Self.tmdbLanguageKey, options: [.new], context: nil)
+        }
+        let tmdbCode = store.string(forKey: Self.tmdbLanguageKey) ?? Self.defaultTMDBCode
+        apply(uiCode: Self.uiCode(forTMDB: tmdbCode))
+    }
+
     deinit {
-        UserDefaults.standard.removeObserver(self, forKeyPath: Self.tmdbLanguageKey)
+        observedStore?.removeObserver(self, forKeyPath: Self.tmdbLanguageKey)
     }
 
     static func uiCode(forTMDB tmdbCode: String) -> String {
@@ -114,7 +124,7 @@ final class LocalizationManager: NSObject, ObservableObject {
             super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
             return
         }
-        let tmdbCode = UserDefaults.standard.string(forKey: Self.tmdbLanguageKey) ?? Self.defaultTMDBCode
+        let tmdbCode = ProfileSettingsStore.active.string(forKey: Self.tmdbLanguageKey) ?? Self.defaultTMDBCode
         apply(uiCode: Self.uiCode(forTMDB: tmdbCode))
     }
 

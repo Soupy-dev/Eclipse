@@ -1,5 +1,3 @@
-// Separate Kanzen/Aidoku reader logger so media playback logs stay isolated.
-
 import Foundation
 #if canImport(UIKit)
 import UIKit
@@ -26,7 +24,8 @@ class ReaderLogger: @unchecked Sendable {
     private let maxLogEntries = 1000
     private let maxLogFileBytes = 1_000_000
     private let noisyTypes: Set<String> = [
-        "ReaderDebug", "AidokuRuntime", "AidokuNetwork", "ReaderNetwork", "ReaderProgress", "ReaderPerf"
+        "ReaderDebug", "AidokuRuntime", "AidokuNetwork", "ReaderNetwork", "ReaderProgress", "ReaderPerf",
+        "ReaderExtensionRuntime", "ReaderExtensionNetwork", "ReaderExtensionCompatibility"
     ]
     private let noisyWindowDuration: TimeInterval = 20
     private let noisyTypeBurstLimit = 30
@@ -55,6 +54,18 @@ class ReaderLogger: @unchecked Sendable {
         switch trimmed.lowercased() {
         case "aidoku", "aidokuruntime", "aidokusource", "aidokuhome", "aidokusearch":
             return "Aidoku"
+        case "readerextensionlifecycle":
+            return "Mangayomi Sources"
+        case "readerextensionrepository":
+            return "Mangayomi Repositories"
+        case "readerextensionruntime":
+            return "Mangayomi Runtime"
+        case "readerextensionnetwork":
+            return "Mangayomi Network"
+        case "readerextensioncompatibility":
+            return "Mangayomi Compatibility"
+        case "readerextensionhome", "readerextensions":
+            return "Mangayomi Runtime"
         case "readersearch":
             return "Reader Search"
         case "readerdebug", "readerprogress":
@@ -63,8 +74,10 @@ class ReaderLogger: @unchecked Sendable {
             return "Reader Performance"
         case "readernetwork", "aidokunetwork":
             return "Reader Network"
-        case "readersandbox", "aidokusandbox":
-            return "Reader Sandbox"
+        case "readersandbox":
+            return "Mangayomi Sandbox"
+        case "aidokusandbox":
+            return "Aidoku"
         default:
             return trimmed
         }
@@ -165,10 +178,10 @@ class ReaderLogger: @unchecked Sendable {
         return url
     }
 
-    private static func redact(_ message: String) -> String {
+    static func redact(_ message: String) -> String {
         var result = message
         let patterns = [
-            #"(?i)\b(authorization|cookie|set-cookie|token|api[_-]?key|password)\b\s*([:=])\s*["']?[^"',;]+["']?"#
+            #"(?i)(?<![A-Za-z0-9])(authorization|cookie|set[-_]?cookie|token|access[-_]?token|refresh[-_]?token|session[-_]?cookie|client[-_]?secret|api[-_]?key|x[-_]?api[-_]?key|password|secret|credentials?)(?![A-Za-z0-9])\s*([:=])\s*["']?[^\s"',;]+["']?"#
         ]
         for pattern in patterns {
             result = result.replacingOccurrences(
@@ -186,12 +199,19 @@ class ReaderLogger: @unchecked Sendable {
             guard let range = Range(match.range, in: result) else { continue }
             let rawURL = String(result[range])
             guard var components = URLComponents(string: rawURL),
-                  components.queryItems?.isEmpty == false else {
+                  components.scheme != nil,
+                  components.host != nil else {
                 continue
             }
-            components.queryItems = components.queryItems?.map {
-                URLQueryItem(name: $0.name, value: "<redacted>")
+            components.user = nil
+            components.password = nil
+            if !components.path.isEmpty, components.path != "/" {
+                components.path = "/redacted"
             }
+            components.queryItems = components.queryItems?.map {
+                URLQueryItem(name: $0.name, value: "redacted")
+            }
+            components.fragment = nil
             if let redacted = components.string {
                 result.replaceSubrange(range, with: redacted)
             }

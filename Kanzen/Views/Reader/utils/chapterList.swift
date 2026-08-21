@@ -1,10 +1,17 @@
+//
+//  chapterList.swift
+//  Kanzen
+//
+//  Created by Dawud Osman on 09/10/2025.
+//
+
 import SwiftUI
 
 struct ChapterList: View {
     @ObservedObject var readerManager: readerManager
     @EnvironmentObject var settings : Settings
     @State var reverseChapterlist: Bool = false
-    
+
     var body: some View {
         ScrollView {
             VStack{
@@ -16,7 +23,7 @@ struct ChapterList: View {
                             Array(chapters.enumerated())
                         }
                     }
-                    
+
                     HStack{
                         Text("\(chapters.count) Chapters")
                             .font(.headline)
@@ -32,7 +39,7 @@ struct ChapterList: View {
                             .onTapGesture {
                                 reverseChapterlist.toggle()
                             }
-                        
+
                     }
                     Divider()
                     ForEach(displayedChapters, id:\.offset) { index, item in

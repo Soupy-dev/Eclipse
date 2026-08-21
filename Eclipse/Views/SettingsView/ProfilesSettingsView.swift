@@ -427,6 +427,7 @@ struct ProfilesSettingsView: View {
     @State private var pendingUnlock: Profile?
     @State private var profilePendingDeletion: Profile?
     @State private var pendingAuthorization: ProfileAuthorizationRequest?
+    @State private var authorizedRequest: ProfileAuthorizationRequest?
     @State private var sharesServices = ProfileSettingsStore.sharesServices
 
     private var accent: Color { accentColorManager.currentAccentColor }
@@ -552,10 +553,14 @@ struct ProfilesSettingsView: View {
                 }
             }
         }
-        .sheet(item: $pendingAuthorization) { request in
+        .sheet(item: $pendingAuthorization, onDismiss: {
+            guard let request = authorizedRequest else { return }
+            authorizedRequest = nil
+            perform(request.action, on: request.profile)
+        }) { request in
             ProfilePINEntryView(mode: .authorize(request.profile)) { success in
                 guard success else { return }
-                perform(request.action, on: request.profile)
+                authorizedRequest = request
             }
         }
         .alert(item: $profilePendingDeletion) { profile in

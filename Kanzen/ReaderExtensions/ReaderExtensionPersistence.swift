@@ -265,6 +265,291 @@ enum ReaderExtensionPersistence {
         }
     }
 
+    static func capturePrivateCloudConfiguration(
+        profileID: UUID,
+        metadataStore: UserDefaults,
+        preferenceStore: UserDefaults,
+        keychain: any ReaderExtensionKeychainAccess = ReaderExtensionSystemKeychainAccess()
+    ) throws -> ReaderExtensionPrivateCloudConfiguration {
+        let namespace = profileID.uuidString
+        try requirePrivateCloudAuthenticationIsStable(namespace: namespace)
+        let metadataSources = try loadInstalledSources(from: metadataStore)
+        let sources = try applyingPreferenceOverlay(
+            to: metadataSources,
+            from: preferenceStore
+        )
+        guard sanitizeSources(sources) == sources else {
+            throw ReaderExtensionError.persistenceFailed("Reader source configuration is unreadable")
+        }
+        let stores = Dictionary(uniqueKeysWithValues: sources.map { source in
+            (
+                source.id,
+                ReaderExtensionKeychainStore(
+                    sourceID: source.id,
+                    values: source.preferences,
+                    namespace: namespace,
+                    schemaSecretKeys: source.secretPreferenceKeys,
+                    keychain: keychain
+                )
+            )
+        })
+        let captured = try ReaderExtensionAuthenticationGenerationRegistry
+            .withPrivateCloudConfigurationReadFence {
+                try sources.sorted { $0.id.rawValue < $1.id.rawValue }.map { source in
+                    guard let keychainStore = stores[source.id] else {
+                        throw ReaderExtensionError.persistenceFailed("Reader source configuration changed")
+                    }
+                    let ordinary = try privateCloudOrdinaryPreferences(for: source)
+                    let keychainConfiguration = try keychainStore
+                        .privateCloudConfigurationUnlocked()
+                    try validatePrivateCloudKeychainConfiguration(
+                        keychainConfiguration,
+                        for: source
+                    )
+                    return ReaderExtensionPrivateCloudSourceConfiguration(
+                        source: source,
+                        ordinaryPreferences: ordinary,
+                        keychain: keychainConfiguration
+                    )
+                }
+            }
+        try requirePrivateCloudAuthenticationIsStable(namespace: namespace)
+        let configuration = ReaderExtensionPrivateCloudConfiguration(
+            profileID: profileID,
+            sources: captured
+        )
+        try ReaderExtensionPrivateCloudConfigurationPolicy.validate(configuration)
+        return configuration
+    }
+
+    static func applyPrivateCloudConfiguration(
+        _ configuration: ReaderExtensionPrivateCloudConfiguration,
+        profileID: UUID,
+        metadataStore: UserDefaults,
+        preferenceStore: UserDefaults,
+        keychain: any ReaderExtensionKeychainAccess = ReaderExtensionSystemKeychainAccess(),
+        previousSources: [ReaderExtensionInstalledSource] = [],
+        postMutationVerification: (() throws -> Void)? = nil
+    ) throws {
+        guard configuration.profileID == profileID else {
+            throw ReaderExtensionError.persistenceFailed("Reader private-cloud profile does not match")
+        }
+        try ReaderExtensionPrivateCloudConfigurationPolicy.validate(configuration)
+        let namespace = profileID.uuidString
+        try requirePrivateCloudAuthenticationIsStable(namespace: namespace)
+        let metadataSources = try loadInstalledSources(from: metadataStore)
+        let sources = try applyingPreferenceOverlay(
+            to: metadataSources,
+            from: preferenceStore
+        )
+        guard sanitizeSources(sources) == sources else {
+            throw ReaderExtensionError.persistenceFailed("Reader source configuration is unreadable")
+        }
+        guard sanitizeSources(previousSources) == previousSources else {
+            throw ReaderExtensionError.persistenceFailed("Previous Reader source configuration is unreadable")
+        }
+        let currentByID = Dictionary(uniqueKeysWithValues: sources.map { ($0.id, $0) })
+        let incomingByID = Dictionary(
+            uniqueKeysWithValues: configuration.sources.map { ($0.sourceID, $0) }
+        )
+        guard configuration.sources.allSatisfy({ incoming in
+            currentByID[incoming.sourceID].map {
+                ReaderExtensionPrivateCloudConfigurationPolicy.identityMatches(
+                    incoming,
+                    source: $0
+                )
+            } == true
+        }) else {
+            throw ReaderExtensionError.persistenceFailed("Reader private-cloud source does not match")
+        }
+
+        var targetSources = sources
+        var targetKeychain: [ReaderExtensionSourceID: ReaderExtensionPrivateCloudKeychainConfiguration] = [:]
+        for index in targetSources.indices {
+            let source = targetSources[index]
+            let incoming = incomingByID[source.id]
+            let keychainConfiguration = incoming?.keychain ?? .empty
+            try validatePrivateCloudKeychainConfiguration(
+                keychainConfiguration,
+                for: source
+            )
+            let ordinary = incoming?.ordinaryPreferences ?? [:]
+            for key in ordinary.keys where source.secretPreferenceKeys.contains(key) {
+                throw ReaderExtensionError.persistenceFailed("Reader secret preference used ordinary storage")
+            }
+            var preferences = ordinary
+            for key in keychainConfiguration.secrets.keys {
+                preferences[key] = .secretReference(key)
+            }
+            targetSources[index].preferences = preferences
+            targetKeychain[source.id] = keychainConfiguration
+        }
+        guard sanitizeSources(targetSources) == targetSources else {
+            throw ReaderExtensionError.persistenceFailed("Reader private-cloud configuration is invalid")
+        }
+
+        let removedSources = previousSources.filter { currentByID[$0.id] == nil }
+        let transactionSources = (sources + removedSources).sorted {
+            $0.id.rawValue < $1.id.rawValue
+        }
+        for source in removedSources {
+            targetKeychain[source.id] = .empty
+        }
+        let stores = Dictionary(uniqueKeysWithValues: transactionSources.map { source in
+            (
+                source.id,
+                ReaderExtensionKeychainStore(
+                    sourceID: source.id,
+                    values: source.preferences,
+                    namespace: namespace,
+                    schemaSecretKeys: source.secretPreferenceKeys,
+                    keychain: keychain
+                )
+            )
+        })
+        let previousOverlayData = preferenceStore.object(forKey: preferenceOverlayKey)
+        let previousOverlayMarker = preferenceStore.object(forKey: preferenceOverlayMigrationKey)
+        try ReaderExtensionAuthenticationGenerationRegistry
+            .withPrivateCloudConfigurationMutationFence(
+                sourceIDs: Set(transactionSources.map(\.id)),
+                namespace: namespace
+            ) {
+                var previousKeychain: [ReaderExtensionSourceID: ReaderExtensionPrivateCloudKeychainConfiguration] = [:]
+                for source in transactionSources {
+                    guard let keychainStore = stores[source.id] else {
+                        throw ReaderExtensionError.persistenceFailed("Reader source configuration changed")
+                    }
+                    previousKeychain[source.id] = try keychainStore
+                        .privateCloudConfigurationUnlocked()
+                }
+                do {
+                    for source in transactionSources {
+                        guard let keychainStore = stores[source.id],
+                              let target = targetKeychain[source.id] else {
+                            throw ReaderExtensionError.persistenceFailed("Reader source configuration changed")
+                        }
+                        try keychainStore.replacePrivateCloudConfigurationUnlocked(target)
+                    }
+                    try writePreferenceOverlay(
+                        preferenceOverlayPayload(from: targetSources),
+                        to: preferenceStore
+                    )
+                    let persistedSources = try applyingPreferenceOverlay(
+                        to: try loadInstalledSources(from: metadataStore),
+                        from: preferenceStore
+                    )
+                    guard Dictionary(uniqueKeysWithValues: persistedSources.map {
+                        ($0.id, $0.preferences)
+                    }) == Dictionary(uniqueKeysWithValues: targetSources.map {
+                        ($0.id, $0.preferences)
+                    }) else {
+                        throw ReaderExtensionError.persistenceFailed("Reader preference restore verification failed")
+                    }
+                    for source in transactionSources {
+                        guard let keychainStore = stores[source.id],
+                              try keychainStore.privateCloudConfigurationUnlocked()
+                                == targetKeychain[source.id] else {
+                            throw ReaderExtensionError.persistenceFailed("Reader secure configuration restore verification failed")
+                        }
+                    }
+                    try postMutationVerification?()
+                } catch {
+                    var rollbackError: Error?
+                    for source in transactionSources.reversed() {
+                        guard let keychainStore = stores[source.id],
+                              let previous = previousKeychain[source.id] else { continue }
+                        do {
+                            try keychainStore.replacePrivateCloudConfigurationUnlocked(previous)
+                        } catch {
+                            if rollbackError == nil { rollbackError = error }
+                        }
+                    }
+                    if let previousOverlayData {
+                        preferenceStore.set(previousOverlayData, forKey: preferenceOverlayKey)
+                    } else {
+                        preferenceStore.removeObject(forKey: preferenceOverlayKey)
+                    }
+                    if let previousOverlayMarker {
+                        preferenceStore.set(previousOverlayMarker, forKey: preferenceOverlayMigrationKey)
+                    } else {
+                        preferenceStore.removeObject(forKey: preferenceOverlayMigrationKey)
+                    }
+                    if let rollbackError { throw rollbackError }
+                    throw error
+                }
+            }
+    }
+
+    private static func requirePrivateCloudAuthenticationIsStable(
+        namespace: String
+    ) throws {
+        let pending = try loadPendingAuthenticationCleanup(from: .standard)
+        guard !pending.contains(where: {
+            $0.namespace == namespace
+        }) else {
+            throw ReaderExtensionError.persistenceFailed("Reader authentication cleanup is pending")
+        }
+    }
+
+    private static func privateCloudOrdinaryPreferences(
+        for source: ReaderExtensionInstalledSource
+    ) throws -> [String: ReaderExtensionPreferenceValue] {
+        guard source.preferences.count <= ReaderExtensionSecurityPolicy.maximumPreferenceCount else {
+            throw ReaderExtensionError.contentTooLarge
+        }
+        var ordinary: [String: ReaderExtensionPreferenceValue] = [:]
+        for (key, value) in source.preferences {
+            if case .secretReference(let reference) = value {
+                guard reference == key,
+                      source.secretPreferenceKeys.contains(key)
+                        || ReaderExtensionSecurityPolicy.isCredentialLikePreferenceKey(key) else {
+                    throw ReaderExtensionError.persistenceFailed("Reader secret preference metadata is invalid")
+                }
+                continue
+            }
+            guard !source.secretPreferenceKeys.contains(key),
+                  !ReaderExtensionSecurityPolicy.isCredentialLikePreferenceKey(key) else {
+                throw ReaderExtensionError.persistenceFailed("Reader credential preference used ordinary storage")
+            }
+            try ReaderExtensionSecurityPolicy.validatePreference(key: key, value: value)
+            ordinary[key] = value
+        }
+        return ordinary
+    }
+
+    private static func validatePrivateCloudKeychainConfiguration(
+        _ configuration: ReaderExtensionPrivateCloudKeychainConfiguration,
+        for source: ReaderExtensionInstalledSource
+    ) throws {
+        guard configuration.secrets.keys.allSatisfy({ key in
+            source.secretPreferenceKeys.contains(key)
+                || ReaderExtensionSecurityPolicy.isCredentialLikePreferenceKey(key)
+        }) else {
+            throw ReaderExtensionError.persistenceFailed("Reader secret preference schema does not match")
+        }
+        for (key, value) in configuration.secrets {
+            try ReaderExtensionSecurityPolicy.validatePreferenceSecret(key: key, value: value)
+        }
+        let userApprovedDomains = Set(configuration.userApprovedDomains)
+        guard configuration.userApprovedDomains.count
+                <= ReaderExtensionPrivateCloudConfigurationPolicy.maximumApprovedDomainCount,
+              userApprovedDomains.count == configuration.userApprovedDomains.count,
+              ReaderExtensionSecurityPolicy.canonicalHosts(
+                userApprovedDomains
+              ) == userApprovedDomains,
+              configuration.userApprovedDomains == userApprovedDomains.sorted(),
+              userApprovedDomains.allSatisfy({ host in
+                  guard let url = ReaderExtensionSecurityPolicy.canonicalHTTPSURL(forHost: host)
+                  else { return false }
+                  return (try? ReaderExtensionSecurityPolicy.validatePublicURLSyntax(
+                      url,
+                      requireHTTPS: true
+                  )) != nil
+              }) else {
+            throw ReaderExtensionError.insecureURL
+        }
+    }
+
     /// Validates that executable metadata is backed by the exact bytes it
     /// names before a source can become runnable. A complete, valid LKG
     /// snapshot is restored as one unit; digest-only historical metadata is

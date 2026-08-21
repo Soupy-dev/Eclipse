@@ -1,14 +1,44 @@
+﻿//
+//  TMDBService.swift
+//  Sora
+//
+//  Created by Francesco on 07/08/25.
+//
+
 import Foundation
+import CoreGraphics
+import ImageIO
 #if canImport(zlib)
 import zlib
 #endif
 
+actor TMDBPosterFingerprintCache {
+    private var storage: [String: [UInt8]] = [:]
+    private var insertionOrder: [String] = []
+    private let limit = 512
+
+    func fingerprint(for filePath: String) -> [UInt8]? {
+        storage[filePath]
+    }
+
+    func store(_ fingerprint: [UInt8], for filePath: String) {
+        if storage[filePath] == nil {
+            insertionOrder.append(filePath)
+        }
+        storage[filePath] = fingerprint
+        while insertionOrder.count > limit {
+            let evicted = insertionOrder.removeFirst()
+            storage.removeValue(forKey: evicted)
+        }
+    }
+}
+
 class TMDBService: ObservableObject {
     static let shared = TMDBService()
-    
+
     static let tmdbBaseURL = "https://api.themoviedb.org/3"
     static let tmdbImageBaseURL = "https://image.tmdb.org/t/p/original"
-    
+
     private var apiKey: String {
         let raw = Bundle.main.object(forInfoDictionaryKey: "TMDBAPIKey") as? String ?? ""
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -16,11 +46,10 @@ class TMDBService: ObservableObject {
     }
     private let baseURL = tmdbBaseURL
 
-    // MARK: - Rate Limiting
     private let rateLimiter = TMDBRateLimiter(maxConcurrent: 4, minInterval: 0.05)
 
-    // MARK: - In-Memory Detail Cache (avoids duplicate fetches from ContinueWatchingCards etc.)
     private let detailCache = TMDBDetailCache()
+    private let seasonRequestCoordinator = TMDBSeasonRequestCoordinator()
     private var fastAnimeAdultKeywordIDsCache: [Int]?
     private var fastAnimeAdultKeywordIDsTask: Task<[Int], Never>?
 
@@ -40,14 +69,14 @@ class TMDBService: ObservableObject {
     private static let fastAnimeAdultKeywordCacheVersion = 1
     private static let fastAnimeAdultKeywordCacheKey = "tmdbFastAnimeAdultKeywordIDs.v1"
     private static let fastAnimeAdultKeywordCacheTTL: TimeInterval = 30 * 24 * 60 * 60
+    private static let maximumJSONResponseBytes = 8 * 1_024 * 1_024
 
     private init() {}
-    
+
     private var currentLanguage: String {
-        return UserDefaults.standard.string(forKey: "tmdbLanguage") ?? "en-US"
+        return ProfileSettingsStore.active.string(forKey: "tmdbLanguage") ?? "en-US"
     }
 
-    /// Throttled URL fetch - limits concurrent TMDB requests to avoid 429s
     private func throttledData(from url: URL) async throws -> (Data, URLResponse) {
         guard !apiKey.isEmpty else {
             throw TMDBError.missingAPIKey
@@ -59,9 +88,17 @@ class TMDBService: ObservableObject {
         let request = configuredRequest
 
         let result = try await rateLimiter.execute {
-            try await URLSession.shared.data(for: request)
+            try await URLSession.shared.boundedData(
+                for: request,
+                maximumResponseBytes: Self.maximumJSONResponseBytes
+            )
         }
         let responseData = Self.normalizedResponseData(result.0, endpoint: url.path)
+        guard responseData.count <= Self.maximumJSONResponseBytes else {
+            throw BoundedURLSessionError.responseTooLarge(
+                maximumBytes: Self.maximumJSONResponseBytes
+            )
+        }
 
         if let httpResponse = result.1 as? HTTPURLResponse,
            !(200..<300).contains(httpResponse.statusCode) {
@@ -247,29 +284,26 @@ class TMDBService: ObservableObject {
         return nil
 #endif
     }
-    
-    // MARK: - Multi Search (Movies and TV Shows)
+
     func searchMulti(query: String, maxPages: Int = 2) async throws -> [TMDBSearchResult] {
         guard !query.isEmpty else { return [] }
-        
+
         let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         var allResults: [TMDBSearchResult] = []
-        
-        // TMDB returns 20 results per page; fetch up to maxPages to get more results
+
         for page in 1...maxPages {
             let urlString = "\(baseURL)/search/multi?api_key=\(apiKey)&query=\(encodedQuery)&language=\(currentLanguage)&include_adult=false&page=\(page)"
-            
+
             guard let url = URL(string: urlString) else {
                 throw TMDBError.invalidURL
             }
-            
+
             do {
                 let (data, _) = try await throttledData(from: url)
                 let response = try decodeTMDBListResponse(TMDBSearchResponse.self, from: data, endpoint: url.path)
                 let filtered = response.results.filter { $0.mediaType == "movie" || $0.mediaType == "tv" }
                 allResults.append(contentsOf: filtered)
-                
-                // Stop if we get fewer results than expected (last page)
+
                 if filtered.count < 20 {
                     break
                 }
@@ -277,7 +311,7 @@ class TMDBService: ObservableObject {
                 throw TMDBError.networkError(error)
             }
         }
-        
+
         return allResults
     }
 
@@ -314,18 +348,17 @@ class TMDBService: ObservableObject {
             throw TMDBError.networkError(error)
         }
     }
-    
-    // MARK: - Search Movies
+
     func searchMovies(query: String) async throws -> [TMDBMovie] {
         guard !query.isEmpty else { return [] }
-        
+
         let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         let urlString = "\(baseURL)/search/movie?api_key=\(apiKey)&query=\(encodedQuery)&language=\(currentLanguage)&include_adult=false"
-        
+
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
         }
-        
+
         do {
             let (data, _) = try await throttledData(from: url)
             let response = try decodeTMDBListResponse(TMDBMovieSearchResponse.self, from: data, endpoint: url.path)
@@ -334,18 +367,17 @@ class TMDBService: ObservableObject {
             throw TMDBError.networkError(error)
         }
     }
-    
-    // MARK: - Search TV Shows
+
     func searchTVShows(query: String) async throws -> [TMDBTVShow] {
         guard !query.isEmpty else { return [] }
-        
+
         let encodedQuery = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         let urlString = "\(baseURL)/search/tv?api_key=\(apiKey)&query=\(encodedQuery)&language=\(currentLanguage)&include_adult=false"
-        
+
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
         }
-        
+
         do {
             let (data, _) = try await throttledData(from: url)
             let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
@@ -354,98 +386,126 @@ class TMDBService: ObservableObject {
             throw TMDBError.networkError(error)
         }
     }
-    
-    // MARK: - Get Movie Details
+
     func getMovieDetails(id: Int) async throws -> TMDBMovieDetail {
-        if let cached: TMDBMovieDetail = detailCache.get(key: "movie_\(id)") {
+
+        let language = currentLanguage
+        if let cached: TMDBMovieDetail = detailCache.get(key: "movie_\(id)_\(language)") {
             return cached
         }
 
-        let urlString = "\(baseURL)/movie/\(id)?api_key=\(apiKey)&language=\(currentLanguage)&append_to_response=release_dates"
-        
+        let urlString = "\(baseURL)/movie/\(id)?api_key=\(apiKey)&language=\(language)&append_to_response=release_dates"
+
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
         }
-        
+
         do {
             let (data, _) = try await throttledData(from: url)
             let movieDetail = try JSONDecoder().decode(TMDBMovieDetail.self, from: data)
-            detailCache.set(key: "movie_\(id)", value: movieDetail)
+            detailCache.set(key: "movie_\(id)_\(language)", value: movieDetail)
             return movieDetail
         } catch {
             throw TMDBError.networkError(error)
         }
     }
-    
-    // MARK: - Get TV Show Details
+
     func getTVShowDetails(id: Int) async throws -> TMDBTVShowDetail {
-        if let cached: TMDBTVShowDetail = detailCache.get(key: "tv_\(id)") {
+        guard RemoteMediaNumericBoundary.positiveIdentifier(id) != nil else {
+            throw TMDBError.invalidURL
+        }
+        let language = currentLanguage
+        let cacheKey = "tv_\(id)_\(language)"
+        if let cached: TMDBTVShowDetail = detailCache.get(key: cacheKey),
+           cached.isValidRemotePayload {
             return cached
         }
 
-        let urlString = "\(baseURL)/tv/\(id)?api_key=\(apiKey)&language=\(currentLanguage)&append_to_response=content_ratings,external_ids"
-        
+        let urlString = "\(baseURL)/tv/\(id)?api_key=\(apiKey)&language=\(language)&append_to_response=content_ratings,external_ids"
+
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
         }
-        
+
         do {
             let (data, _) = try await throttledData(from: url)
             let tvShowDetail = try JSONDecoder().decode(TMDBTVShowDetail.self, from: data)
-            detailCache.set(key: "tv_\(id)", value: tvShowDetail)
-            return tvShowDetail
-        } catch {
-            throw TMDBError.networkError(error)
-        }
-    }
-    
-    // MARK: - Get TV Show with Seasons
-    func getTVShowWithSeasons(id: Int) async throws -> TMDBTVShowWithSeasons {
-        let cacheKey = "tvWithSeasons_\(id)"
-        if let cached: TMDBTVShowWithSeasons = detailCache.get(key: cacheKey) {
-            return cached
-        }
-
-        let urlString = "\(baseURL)/tv/\(id)?api_key=\(apiKey)&language=\(currentLanguage)&append_to_response=content_ratings,external_ids"
-        
-        guard let url = URL(string: urlString) else {
-            throw TMDBError.invalidURL
-        }
-        
-        do {
-            let (data, _) = try await throttledData(from: url)
-            let tvShowDetail = try JSONDecoder().decode(TMDBTVShowWithSeasons.self, from: data)
+            guard tvShowDetail.isValidRemotePayload else {
+                throw TMDBError.decodingError
+            }
             detailCache.set(key: cacheKey, value: tvShowDetail)
             return tvShowDetail
         } catch {
             throw TMDBError.networkError(error)
         }
     }
-    
-    // MARK: - Get Season Details
-    func getSeasonDetails(tvShowId: Int, seasonNumber: Int) async throws -> TMDBSeasonDetail {
-        let cacheKey = "season_\(tvShowId)_\(seasonNumber)"
-        if let cached: TMDBSeasonDetail = detailCache.get(key: cacheKey) {
+
+    func getTVShowWithSeasons(id: Int) async throws -> TMDBTVShowWithSeasons {
+        guard RemoteMediaNumericBoundary.positiveIdentifier(id) != nil else {
+            throw TMDBError.invalidURL
+        }
+        let language = currentLanguage
+        let cacheKey = "tvWithSeasons_\(id)_\(language)"
+        if let cached: TMDBTVShowWithSeasons = detailCache.get(key: cacheKey),
+           cached.isValidRemotePayload {
             return cached
         }
 
-        let urlString = "\(baseURL)/tv/\(tvShowId)/season/\(seasonNumber)?api_key=\(apiKey)&language=\(currentLanguage)"
-        
+        let urlString = "\(baseURL)/tv/\(id)?api_key=\(apiKey)&language=\(language)&append_to_response=content_ratings,external_ids"
+
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
         }
-        
+
         do {
             let (data, _) = try await throttledData(from: url)
-            let seasonDetail = try JSONDecoder().decode(TMDBSeasonDetail.self, from: data)
-            detailCache.set(key: cacheKey, value: seasonDetail)
-            return seasonDetail
+            let tvShowDetail = try JSONDecoder().decode(TMDBTVShowWithSeasons.self, from: data)
+            guard tvShowDetail.isValidRemotePayload else {
+                throw TMDBError.decodingError
+            }
+            detailCache.set(key: cacheKey, value: tvShowDetail)
+            return tvShowDetail
         } catch {
             throw TMDBError.networkError(error)
         }
     }
-    
-    // MARK: - Get Movie Alternative Titles
+
+    func getSeasonDetails(tvShowId: Int, seasonNumber: Int) async throws -> TMDBSeasonDetail {
+        guard RemoteMediaNumericBoundary.positiveIdentifier(tvShowId) != nil,
+              RemoteMediaNumericBoundary.seasonNumber(seasonNumber, allowsZero: true) != nil else {
+            throw TMDBError.invalidURL
+        }
+        let language = currentLanguage
+        let cacheKey = "season_\(tvShowId)_\(seasonNumber)_\(language)"
+        if let cached: TMDBSeasonDetail = detailCache.get(key: cacheKey),
+           cached.isValidRemotePayload {
+            return cached
+        }
+        return try await seasonRequestCoordinator.value(for: cacheKey) { [self] in
+            if let cached: TMDBSeasonDetail = detailCache.get(key: cacheKey),
+               cached.isValidRemotePayload {
+                return cached
+            }
+            let urlString = "\(baseURL)/tv/\(tvShowId)/season/\(seasonNumber)?api_key=\(apiKey)&language=\(language)"
+            guard let url = URL(string: urlString) else {
+                throw TMDBError.invalidURL
+            }
+
+            do {
+                let (data, _) = try await throttledData(from: url)
+                let seasonDetail = try JSONDecoder().decode(TMDBSeasonDetail.self, from: data)
+                guard seasonDetail.isValidRemotePayload,
+                      seasonDetail.seasonNumber == seasonNumber else {
+                    throw TMDBError.decodingError
+                }
+                detailCache.set(key: cacheKey, value: seasonDetail)
+                return seasonDetail
+            } catch {
+                throw TMDBError.networkError(error)
+            }
+        }
+    }
+
     func getMovieAlternativeTitles(id: Int) async throws -> TMDBAlternativeTitles {
         let cacheKey = "movieAltTitles_\(id)"
         if let cached: TMDBAlternativeTitles = detailCache.get(key: cacheKey) {
@@ -453,11 +513,11 @@ class TMDBService: ObservableObject {
         }
 
         let urlString = "\(baseURL)/movie/\(id)/alternative_titles?api_key=\(apiKey)"
-        
+
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
         }
-        
+
         do {
             let (data, _) = try await throttledData(from: url)
             let alternativeTitles = try JSONDecoder().decode(TMDBAlternativeTitles.self, from: data)
@@ -467,8 +527,7 @@ class TMDBService: ObservableObject {
             throw TMDBError.networkError(error)
         }
     }
-    
-    // MARK: - Get TV Show Alternative Titles
+
     func getTVShowAlternativeTitles(id: Int) async throws -> TMDBTVAlternativeTitles {
         let cacheKey = "tvAltTitles_\(id)"
         if let cached: TMDBTVAlternativeTitles = detailCache.get(key: cacheKey) {
@@ -476,11 +535,11 @@ class TMDBService: ObservableObject {
         }
 
         let urlString = "\(baseURL)/tv/\(id)/alternative_titles?api_key=\(apiKey)"
-        
+
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
         }
-        
+
         do {
             let (data, _) = try await throttledData(from: url)
             let alternativeTitles = try JSONDecoder().decode(TMDBTVAlternativeTitles.self, from: data)
@@ -490,15 +549,14 @@ class TMDBService: ObservableObject {
             throw TMDBError.networkError(error)
         }
     }
-    
-    // MARK: - Get Trending Movies and TV Shows
+
     func getTrending(mediaType: String = "all", timeWindow: String = "week", page: Int = 1) async throws -> [TMDBSearchResult] {
         let urlString = "\(baseURL)/trending/\(mediaType)/\(timeWindow)?api_key=\(apiKey)&language=\(currentLanguage)&page=\(page)&include_adult=false"
-        
+
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
         }
-        
+
         do {
             let (data, _) = try await throttledData(from: url)
             let response = try decodeTMDBListResponse(TMDBSearchResponse.self, from: data, endpoint: url.path)
@@ -507,15 +565,14 @@ class TMDBService: ObservableObject {
             throw TMDBError.networkError(error)
         }
     }
-    
-    // MARK: - Get Popular Movies
+
     func getPopularMovies(page: Int = 1) async throws -> [TMDBMovie] {
         let urlString = "\(baseURL)/movie/popular?api_key=\(apiKey)&language=\(currentLanguage)&page=\(page)&include_adult=false"
-        
+
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
         }
-        
+
         do {
             let (data, _) = try await throttledData(from: url)
             let response = try decodeTMDBListResponse(TMDBMovieSearchResponse.self, from: data, endpoint: url.path)
@@ -524,15 +581,14 @@ class TMDBService: ObservableObject {
             throw TMDBError.networkError(error)
         }
     }
-    
-    // MARK: - Get Now Playing Movies
+
     func getNowPlayingMovies(page: Int = 1) async throws -> [TMDBMovie] {
         let urlString = "\(baseURL)/movie/now_playing?api_key=\(apiKey)&language=\(currentLanguage)&page=\(page)&include_adult=false"
-        
+
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
         }
-        
+
         do {
             let (data, _) = try await throttledData(from: url)
             let response = try decodeTMDBListResponse(TMDBMovieSearchResponse.self, from: data, endpoint: url.path)
@@ -541,15 +597,14 @@ class TMDBService: ObservableObject {
             throw TMDBError.networkError(error)
         }
     }
-    
-    // MARK: - Get Upcoming Movies
+
     func getUpcomingMovies(page: Int = 1) async throws -> [TMDBMovie] {
         let urlString = "\(baseURL)/movie/upcoming?api_key=\(apiKey)&language=\(currentLanguage)&page=\(page)&include_adult=false"
-        
+
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
         }
-        
+
         do {
             let (data, _) = try await throttledData(from: url)
             let response = try decodeTMDBListResponse(TMDBMovieSearchResponse.self, from: data, endpoint: url.path)
@@ -558,15 +613,14 @@ class TMDBService: ObservableObject {
             throw TMDBError.networkError(error)
         }
     }
-    
-    // MARK: - Get Popular TV Shows
+
     func getPopularTVShows(page: Int = 1) async throws -> [TMDBTVShow] {
         let urlString = "\(baseURL)/tv/popular?api_key=\(apiKey)&language=\(currentLanguage)&page=\(page)&include_adult=false"
-        
+
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
         }
-        
+
         do {
             let (data, _) = try await throttledData(from: url)
             let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
@@ -575,15 +629,14 @@ class TMDBService: ObservableObject {
             throw TMDBError.networkError(error)
         }
     }
-    
-    // MARK: - Get On The Air TV Shows
+
     func getOnTheAirTVShows(page: Int = 1) async throws -> [TMDBTVShow] {
         let urlString = "\(baseURL)/tv/on_the_air?api_key=\(apiKey)&language=\(currentLanguage)&page=\(page)&include_adult=false"
-        
+
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
         }
-        
+
         do {
             let (data, _) = try await throttledData(from: url)
             let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
@@ -592,15 +645,14 @@ class TMDBService: ObservableObject {
             throw TMDBError.networkError(error)
         }
     }
-    
-    // MARK: - Get Airing Today TV Shows
+
     func getAiringTodayTVShows(page: Int = 1) async throws -> [TMDBTVShow] {
         let urlString = "\(baseURL)/tv/airing_today?api_key=\(apiKey)&language=\(currentLanguage)&page=\(page)&include_adult=false"
-        
+
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
         }
-        
+
         do {
             let (data, _) = try await throttledData(from: url)
             let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
@@ -609,15 +661,41 @@ class TMDBService: ObservableObject {
             throw TMDBError.networkError(error)
         }
     }
-    
-    // MARK: - Get Top Rated Movies
+
+    func getUpcomingTVShows(page: Int = 1) async throws -> [TMDBTVShow] {
+        let tomorrow = fastAnimeDateString(Calendar.current.date(byAdding: .day, value: 1, to: Date()) ?? Date())
+        let url = try tmdbURL(path: "/discover/tv", queryItems: [
+            URLQueryItem(name: "page", value: "\(page)"),
+            URLQueryItem(name: "sort_by", value: "popularity.desc"),
+            URLQueryItem(name: "first_air_date.gte", value: tomorrow),
+            URLQueryItem(name: "include_adult", value: "false")
+        ])
+
+        do {
+            let (data, _) = try await throttledData(from: url)
+            let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
+            guard let tomorrowDate = fastAnimeDate(from: tomorrow) else {
+                return response.results
+            }
+
+            return response.results.filter { show in
+                guard let firstAirDate = fastAnimeDate(from: show.firstAirDate) else {
+                    return false
+                }
+                return firstAirDate >= tomorrowDate
+            }
+        } catch {
+            throw TMDBError.networkError(error)
+        }
+    }
+
     func getTopRatedMovies(page: Int = 1) async throws -> [TMDBMovie] {
         let urlString = "\(baseURL)/movie/top_rated?api_key=\(apiKey)&language=\(currentLanguage)&page=\(page)&include_adult=false"
-        
+
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
         }
-        
+
         do {
             let (data, _) = try await throttledData(from: url)
             let response = try decodeTMDBListResponse(TMDBMovieSearchResponse.self, from: data, endpoint: url.path)
@@ -626,15 +704,14 @@ class TMDBService: ObservableObject {
             throw TMDBError.networkError(error)
         }
     }
-    
-    // MARK: - Get Top Rated TV Shows
+
     func getTopRatedTVShows(page: Int = 1) async throws -> [TMDBTVShow] {
         let urlString = "\(baseURL)/tv/top_rated?api_key=\(apiKey)&language=\(currentLanguage)&page=\(page)&include_adult=false"
-        
+
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
         }
-        
+
         do {
             let (data, _) = try await throttledData(from: url)
             let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
@@ -643,15 +720,14 @@ class TMDBService: ObservableObject {
             throw TMDBError.networkError(error)
         }
     }
-    
-    // MARK: - Get Popular Anime (Animation TV Shows from Japan)
+
     func getPopularAnime(page: Int = 1) async throws -> [TMDBTVShow] {
         let urlString = "\(baseURL)/discover/tv?api_key=\(apiKey)&language=\(currentLanguage)&page=\(page)&with_genres=16&with_origin_country=JP&sort_by=popularity.desc&include_adult=false"
-        
+
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
         }
-        
+
         do {
             let (data, _) = try await throttledData(from: url)
             let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
@@ -660,15 +736,14 @@ class TMDBService: ObservableObject {
             throw TMDBError.networkError(error)
         }
     }
-    
-    // MARK: - Get Top Rated Anime (Animation TV Shows from Japan)
+
     func getTopRatedAnime(page: Int = 1) async throws -> [TMDBTVShow] {
         let urlString = "\(baseURL)/discover/tv?api_key=\(apiKey)&language=\(currentLanguage)&page=\(page)&with_genres=16&with_origin_country=JP&sort_by=vote_average.desc&vote_count.gte=100&include_adult=false"
-        
+
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
         }
-        
+
         do {
             let (data, _) = try await throttledData(from: url)
             let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
@@ -686,7 +761,6 @@ class TMDBService: ObservableObject {
         case upcoming
     }
 
-    // MARK: - Fast Anime Catalogs (TMDB-native Performance Mode)
     func getFastAnimeCatalog(kind: FastAnimeCatalogKind, limit: Int = 20) async throws -> [TMDBSearchResult] {
         let adultKeywordIDs = await fastAnimeAdultKeywordIDs()
         let results: [TMDBSearchResult]
@@ -1062,8 +1136,7 @@ class TMDBService: ObservableObject {
         formatter.dateFormat = "yyyy-MM-dd"
         return formatter.date(from: value)
     }
-    
-    // MARK: - Helper function to get romaji title
+
     func getRomajiTitle(for mediaType: String, id: Int) async -> String? {
         do {
             if mediaType == "movie" {
@@ -1105,7 +1178,6 @@ class TMDBService: ObservableObject {
         }
     }
 
-    // MARK: - Discover Media
     func discoverMedia(
         mediaType: String,
         genreIds: [Int] = [],
@@ -1117,6 +1189,7 @@ class TMDBService: ObservableObject {
         originalLanguage: String? = nil,
         sortBy: String = "popularity.desc",
         minimumVoteCount: Int? = nil,
+        voteAverageGte: Double? = nil,
         page: Int = 1
     ) async throws -> [TMDBSearchResult] {
         let normalizedMediaType = mediaType == "tv" ? "tv" : "movie"
@@ -1163,6 +1236,10 @@ class TMDBService: ObservableObject {
             queryItems.append(URLQueryItem(name: "vote_count.gte", value: "\(minimumVoteCount)"))
         }
 
+        if let voteAverageGte, voteAverageGte > 0 {
+            queryItems.append(URLQueryItem(name: "vote_average.gte", value: "\(voteAverageGte)"))
+        }
+
         let url = try tmdbURL(path: "/discover/\(normalizedMediaType)", queryItems: queryItems)
         let (data, _) = try await throttledData(from: url)
 
@@ -1175,7 +1252,6 @@ class TMDBService: ObservableObject {
         }
     }
 
-    // MARK: - Discover by Genre
     func discoverByGenre(genreId: Int, mediaType: String = "movie", page: Int = 1) async throws -> [TMDBSearchResult] {
         let urlString = "\(baseURL)/discover/\(mediaType)?api_key=\(apiKey)&language=\(currentLanguage)&page=\(page)&with_genres=\(genreId)&sort_by=popularity.desc&include_adult=false"
         guard let url = URL(string: urlString) else { throw TMDBError.invalidURL }
@@ -1192,8 +1268,50 @@ class TMDBService: ObservableObject {
             }
         }
     }
-    
-    // MARK: - Discover by Network
+
+    func discoverForKids(query: KidsDiscoverQuery, page: Int = 1) async throws -> [TMDBSearchResult] {
+        guard var components = URLComponents(string: "\(baseURL)/discover/\(query.mediaType)") else {
+            throw TMDBError.invalidURL
+        }
+        var items = [
+            URLQueryItem(name: "api_key", value: apiKey),
+            URLQueryItem(name: "language", value: currentLanguage),
+            URLQueryItem(name: "page", value: String(page)),
+            URLQueryItem(name: "sort_by", value: query.sort.rawValue),
+            URLQueryItem(name: "include_adult", value: "false"),
+            URLQueryItem(name: "without_genres", value: KidsDiscoverQuery.excludedGenreIDs
+                .map(String.init)
+                .joined(separator: ","))
+        ]
+        if !query.genreIDs.isEmpty {
+            items.append(URLQueryItem(
+                name: "with_genres",
+                value: query.genreIDs.map(String.init).joined(separator: query.genreMatch.rawValue)
+            ))
+        }
+        if let ceiling = query.certificationCeiling, query.mediaType == "movie" {
+            items.append(URLQueryItem(name: "certification_country", value: "US"))
+            items.append(URLQueryItem(name: "certification.lte", value: ceiling))
+        }
+        if let minimumVoteCount = query.minimumVoteCount {
+            items.append(URLQueryItem(name: "vote_count.gte", value: String(minimumVoteCount)))
+        }
+        components.queryItems = items
+
+        guard let url = components.url else { throw TMDBError.invalidURL }
+        let (data, _) = try await throttledData(from: url)
+        if query.mediaType == "movie" {
+            let response = try decodeTMDBListResponse(TMDBMovieSearchResponse.self, from: data, endpoint: url.path)
+            return response.results.map {
+                TMDBSearchResult(id: $0.id, mediaType: "movie", title: $0.title, name: nil, overview: $0.overview, posterPath: $0.posterPath, backdropPath: $0.backdropPath, releaseDate: $0.releaseDate, firstAirDate: nil, voteAverage: $0.voteAverage, popularity: $0.popularity, adult: $0.adult, genreIds: $0.genreIds, originalLanguage: $0.originalLanguage, originCountry: $0.originCountry)
+            }
+        }
+        let response = try decodeTMDBListResponse(TMDBTVSearchResponse.self, from: data, endpoint: url.path)
+        return response.results.map {
+            TMDBSearchResult(id: $0.id, mediaType: "tv", title: nil, name: $0.name, overview: $0.overview, posterPath: $0.posterPath, backdropPath: $0.backdropPath, releaseDate: nil, firstAirDate: $0.firstAirDate, voteAverage: $0.voteAverage, popularity: $0.popularity, adult: $0.adult, genreIds: $0.genreIds)
+        }
+    }
+
     func discoverByNetwork(networkId: Int, page: Int = 1) async throws -> [TMDBSearchResult] {
         let urlString = "\(baseURL)/discover/tv?api_key=\(apiKey)&language=\(currentLanguage)&page=\(page)&with_networks=\(networkId)&sort_by=popularity.desc&include_adult=false"
         guard let url = URL(string: urlString) else { throw TMDBError.invalidURL }
@@ -1203,8 +1321,7 @@ class TMDBService: ObservableObject {
             TMDBSearchResult(id: $0.id, mediaType: "tv", title: nil, name: $0.name, overview: $0.overview, posterPath: $0.posterPath, backdropPath: $0.backdropPath, releaseDate: nil, firstAirDate: $0.firstAirDate, voteAverage: $0.voteAverage, popularity: $0.popularity, adult: $0.adult, genreIds: $0.genreIds)
         }
     }
-    
-    // MARK: - Discover by Company
+
     func discoverByCompany(companyId: Int, mediaType: String = "movie", page: Int = 1) async throws -> [TMDBSearchResult] {
         let urlString = "\(baseURL)/discover/\(mediaType)?api_key=\(apiKey)&language=\(currentLanguage)&page=\(page)&with_companies=\(companyId)&sort_by=popularity.desc&include_adult=false"
         guard let url = URL(string: urlString) else { throw TMDBError.invalidURL }
@@ -1221,8 +1338,7 @@ class TMDBService: ObservableObject {
             }
         }
     }
-    
-    // MARK: - Get Images (Backdrops, Logos, Posters)
+
     func getMovieImages(id: Int, preferredLanguage: String? = nil) async throws -> TMDBImagesResponse {
         let langCode = (preferredLanguage ?? currentLanguage).components(separatedBy: "-").first ?? "en"
         let cacheKey = "movieImages_\(id)_\(langCode)"
@@ -1231,11 +1347,11 @@ class TMDBService: ObservableObject {
         }
 
         let urlString = "\(baseURL)/movie/\(id)/images?api_key=\(apiKey)&include_image_language=\(langCode),en,null"
-        
+
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
         }
-        
+
         do {
             let (data, _) = try await throttledData(from: url)
             let decodedResponse = try JSONDecoder().decode(TMDBImagesResponse.self, from: data)
@@ -1245,7 +1361,7 @@ class TMDBService: ObservableObject {
             throw TMDBError.networkError(error)
         }
     }
-    
+
     func getTVShowImages(id: Int, preferredLanguage: String? = nil) async throws -> TMDBImagesResponse {
         let langCode = (preferredLanguage ?? currentLanguage).components(separatedBy: "-").first ?? "en"
         let cacheKey = "tvImages_\(id)_\(langCode)"
@@ -1254,11 +1370,11 @@ class TMDBService: ObservableObject {
         }
 
         let urlString = "\(baseURL)/tv/\(id)/images?api_key=\(apiKey)&include_image_language=\(langCode),en,null"
-        
+
         guard let url = URL(string: urlString) else {
             throw TMDBError.invalidURL
         }
-        
+
         do {
             let (data, _) = try await throttledData(from: url)
             let response = try JSONDecoder().decode(TMDBImagesResponse.self, from: data)
@@ -1322,12 +1438,12 @@ class TMDBService: ObservableObject {
             throw TMDBError.networkError(error)
         }
     }
-    
+
     func getBestLogo(from images: TMDBImagesResponse, preferredLanguage: String? = nil) -> TMDBImage? {
         guard let logos = images.logos, !logos.isEmpty else { return nil }
-        
+
         let langCode = (preferredLanguage ?? currentLanguage).components(separatedBy: "-").first ?? "en"
-        
+
         if let logo = logos.first(where: { $0.iso6391 == langCode }) {
             return logo
         }
@@ -1340,38 +1456,209 @@ class TMDBService: ObservableObject {
         return logos.first
     }
 
-    /// Picks artwork that can sit behind Eclipse's separately-rendered title art.
-    /// TMDB's language-neutral posters are the best available signal for artwork
-    /// without baked-in title text, so prefer those before localized alternates.
-    func getBestAlternatePoster(
+    static let minimumAlternatePosterScore = 2.0
+    static let tmdbThumbnailBaseURL = "https://image.tmdb.org/t/p/w92"
+    private static let maximumAlternatePosterTwinDistance = 36.0
+    private static let minimumAlternatePosterTwinSeparation = 20.0
+    private static let alternatePosterComparisonLimit = 12
+    private static let alternatePosterFingerprintWidth = 24
+    private static let alternatePosterFingerprintHeight = 36
+    private static let alternatePosterComparedRowFraction = 0.55
+    private static let maximumAlternatePosterThumbnailBytes = 512 * 1024
+    private static let maximumAlternatePosterSourceDimension: Int64 = 4_096
+    private static let maximumAlternatePosterSourcePixels: Int64 = 8_000_000
+    private static let alternatePosterHTTPClient = SkyStreamPinnedHTTPClient()
+    private static let posterFingerprintCache = TMDBPosterFingerprintCache()
+
+    func bestAlternatePoster(
         from images: TMDBImagesResponse,
         excluding posterPaths: [String?],
-        preferredLanguage: String? = nil
-    ) -> TMDBImage? {
-        let excludedPaths = Set(posterPaths.compactMap { $0 })
-        let candidates = (images.posters ?? []).filter { !excludedPaths.contains($0.filePath) }
-        guard !candidates.isEmpty else { return nil }
-
-        let langCode = (preferredLanguage ?? currentLanguage).components(separatedBy: "-").first ?? "en"
-        let languageRank: (TMDBImage) -> Int = { poster in
-            if poster.iso6391 == nil { return 0 }
-            if poster.iso6391 == langCode { return 1 }
-            if poster.iso6391 == "en" { return 2 }
-            return 3
+        matching primaryPosterPath: String?
+    ) async -> TMDBImage? {
+        let ranked = rankedAlternatePosters(from: images, excluding: posterPaths)
+        guard let fallback = ranked.first else { return nil }
+        guard let primaryPosterPath, ranked.count > 1 else { return fallback }
+        guard let primaryFingerprint = await posterFingerprint(for: primaryPosterPath) else {
+            return fallback
         }
 
-        return candidates.sorted { lhs, rhs in
-            let lhsLanguageRank = languageRank(lhs)
-            let rhsLanguageRank = languageRank(rhs)
-            if lhsLanguageRank != rhsLanguageRank { return lhsLanguageRank < rhsLanguageRank }
-            let lhsVotes = lhs.voteCount ?? 0
-            let rhsVotes = rhs.voteCount ?? 0
-            if lhsVotes != rhsVotes { return lhsVotes > rhsVotes }
-            return (lhs.voteAverage ?? 0) > (rhs.voteAverage ?? 0)
-        }.first
+        let compared = Array(ranked.prefix(Self.alternatePosterComparisonLimit))
+        var distances: [(poster: TMDBImage, distance: Double)] = []
+        await withTaskGroup(of: (Int, Double?).self) { group in
+            for (index, poster) in compared.enumerated() {
+                group.addTask {
+                    guard let fingerprint = await self.posterFingerprint(for: poster.filePath) else {
+                        return (index, nil)
+                    }
+                    return (index, Self.fingerprintDistance(primaryFingerprint, fingerprint))
+                }
+            }
+            for await (index, distance) in group {
+                guard let distance else { continue }
+                distances.append((compared[index], distance))
+            }
+        }
+
+        let ordered = distances.sorted { lhs, rhs in
+            if lhs.distance != rhs.distance { return lhs.distance < rhs.distance }
+            return lhs.poster.filePath < rhs.poster.filePath
+        }
+        guard let closest = ordered.first,
+              closest.distance <= Self.maximumAlternatePosterTwinDistance else {
+            return fallback
+        }
+        guard ordered.count > 1 else { return closest.poster }
+        let separation = ordered[1].distance - closest.distance
+        guard separation >= Self.minimumAlternatePosterTwinSeparation else { return fallback }
+        return closest.poster
     }
-    
-    // MARK: - Get Movie Credits (Cast)
+
+    private func posterFingerprint(for filePath: String) async -> [UInt8]? {
+        if let cached = await Self.posterFingerprintCache.fingerprint(for: filePath) {
+            return cached
+        }
+        guard let url = URL(string: "\(Self.tmdbThumbnailBaseURL)\(filePath)") else { return nil }
+        guard let fetched = try? await Self.alternatePosterHTTPClient.fetch(
+            url.absoluteString,
+            purpose: .icon,
+            allowsCookies: false,
+            maximumRedirects: 4,
+            maximumResponseBytes: Self.maximumAlternatePosterThumbnailBytes,
+            timeout: 10
+        ),
+              (200...299).contains(fetched.response.statusCode),
+              !fetched.data.isEmpty,
+              !fetched.wasTruncated,
+              let contentType = fetched.response.value(forHTTPHeaderField: "Content-Type")?
+                .lowercased()
+                .split(separator: ";", maxSplits: 1)
+                .first,
+              contentType.hasPrefix("image/"),
+              fetched.data.count <= Self.maximumAlternatePosterThumbnailBytes,
+              let fingerprint = Self.grayscaleFingerprint(from: fetched.data) else {
+            return nil
+        }
+        await Self.posterFingerprintCache.store(fingerprint, for: filePath)
+        return fingerprint
+    }
+
+    private static func grayscaleFingerprint(from data: Data) -> [UInt8]? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              (1...4).contains(CGImageSourceGetCount(source)),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil)
+                as NSDictionary?,
+              let sourceWidth = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.int64Value,
+              let sourceHeight = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.int64Value,
+              sourceWidth > 0,
+              sourceHeight > 0,
+              sourceWidth <= maximumAlternatePosterSourceDimension,
+              sourceHeight <= maximumAlternatePosterSourceDimension,
+              sourceWidth <= maximumAlternatePosterSourcePixels / sourceHeight,
+              let image = CGImageSourceCreateThumbnailAtIndex(
+                source,
+                0,
+                [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 256,
+                    kCGImageSourceShouldCacheImmediately: true
+                ] as CFDictionary
+              ),
+              image.width > 0,
+              image.height > 0 else {
+            return nil
+        }
+
+        let croppedHeight = Int((Double(image.height) * alternatePosterComparedRowFraction).rounded())
+        guard croppedHeight > 0,
+              let cropped = image.cropping(
+                  to: CGRect(x: 0, y: 0, width: image.width, height: croppedHeight)
+              ) else {
+            return nil
+        }
+
+        let width = alternatePosterFingerprintWidth
+        let height = Int((Double(alternatePosterFingerprintHeight) * alternatePosterComparedRowFraction).rounded())
+        guard height > 0 else { return nil }
+
+        var buffer = [UInt8](repeating: 0, count: width * height)
+        let drawn = buffer.withUnsafeMutableBytes { raw -> Bool in
+            guard let base = raw.baseAddress,
+                  let context = CGContext(
+                      data: base,
+                      width: width,
+                      height: height,
+                      bitsPerComponent: 8,
+                      bytesPerRow: width,
+                      space: CGColorSpaceCreateDeviceGray(),
+                      bitmapInfo: CGImageAlphaInfo.none.rawValue
+                  ) else {
+                return false
+            }
+            context.interpolationQuality = .medium
+            context.draw(cropped, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        return drawn ? buffer : nil
+    }
+
+    private static func fingerprintDistance(_ lhs: [UInt8], _ rhs: [UInt8]) -> Double? {
+        guard lhs.count == rhs.count, !lhs.isEmpty else { return nil }
+        var total = 0
+        for index in lhs.indices {
+            total += abs(Int(lhs[index]) - Int(rhs[index]))
+        }
+        return Double(total) / Double(lhs.count)
+    }
+
+    func getBestAlternatePoster(
+        from images: TMDBImagesResponse,
+        excluding posterPaths: [String?]
+    ) -> TMDBImage? {
+        rankedAlternatePosters(from: images, excluding: posterPaths).first
+    }
+
+    func rankedAlternatePosters(
+        from images: TMDBImagesResponse,
+        excluding posterPaths: [String?]
+    ) -> [TMDBImage] {
+        let excludedPaths = Set(posterPaths.compactMap { $0 })
+        let candidates = (images.posters ?? []).filter { poster in
+            guard !excludedPaths.contains(poster.filePath),
+                  poster.iso6391 == nil,
+                  poster.width >= 500,
+                  poster.height >= 750,
+                  (0.6...0.75).contains(poster.aspectRatio) else {
+                return false
+            }
+            return true
+        }
+        guard !candidates.isEmpty else { return [] }
+
+        let endorsed = candidates.filter { poster in
+            (poster.voteCount ?? 0) >= 1
+                && (poster.voteAverage ?? 0) >= Self.minimumAlternatePosterScore
+        }
+        if !endorsed.isEmpty {
+            return endorsed.sorted { lhs, rhs in
+                let lhsAverage = lhs.voteAverage ?? 0
+                let rhsAverage = rhs.voteAverage ?? 0
+                if lhsAverage != rhsAverage { return lhsAverage > rhsAverage }
+                let lhsVotes = lhs.voteCount ?? 0
+                let rhsVotes = rhs.voteCount ?? 0
+                if lhsVotes != rhsVotes { return lhsVotes > rhsVotes }
+                return lhs.filePath < rhs.filePath
+            }
+        }
+
+        return candidates.filter { ($0.voteCount ?? 0) == 0 }.sorted { lhs, rhs in
+            let lhsPixels = lhs.width * lhs.height
+            let rhsPixels = rhs.width * rhs.height
+            if lhsPixels != rhsPixels { return lhsPixels > rhsPixels }
+            return lhs.filePath < rhs.filePath
+        }
+    }
+
     func getMovieCredits(id: Int) async throws -> TMDBCreditsResponse {
         let cacheKey = "movieCredits_\(id)"
         if let cached: TMDBCreditsResponse = detailCache.get(key: cacheKey) {
@@ -1384,8 +1671,7 @@ class TMDBService: ObservableObject {
         detailCache.set(key: cacheKey, value: result)
         return result
     }
-    
-    // MARK: - Get TV Show Credits (Cast)
+
     func getTVCredits(id: Int) async throws -> TMDBCreditsResponse {
         let cacheKey = "tvCredits_\(id)"
         if let cached: TMDBCreditsResponse = detailCache.get(key: cacheKey) {
@@ -1398,10 +1684,9 @@ class TMDBService: ObservableObject {
         detailCache.set(key: cacheKey, value: result)
         return result
     }
-    
-    // MARK: - Get Movie Recommendations
+
     func getMovieRecommendations(id: Int) async throws -> [TMDBMovie] {
-        let cacheKey = "movieRecs_\(id)"
+        let cacheKey = "movieRecs_\(id)_\(currentLanguage)"
         if let cached: [TMDBMovie] = detailCache.get(key: cacheKey) {
             return cached
         }
@@ -1412,10 +1697,9 @@ class TMDBService: ObservableObject {
         detailCache.set(key: cacheKey, value: decodedResponse.results)
         return decodedResponse.results
     }
-    
-    // MARK: - Get TV Show Recommendations
+
     func getTVRecommendations(id: Int) async throws -> [TMDBTVShow] {
-        let cacheKey = "tvRecs_\(id)"
+        let cacheKey = "tvRecs_\(id)_\(currentLanguage)"
         if let cached: [TMDBTVShow] = detailCache.get(key: cacheKey) {
             return cached
         }
@@ -1437,14 +1721,13 @@ private struct TMDBKeyword: Decodable {
     let name: String
 }
 
-// MARK: - Error Handling
 enum TMDBError: Error, LocalizedError {
     case invalidURL
     case networkError(Error)
     case decodingError
     case missingAPIKey
     case httpError(statusCode: Int, path: String, message: String?)
-    
+
     var errorDescription: String? {
         switch self {
         case .invalidURL:
@@ -1464,10 +1747,6 @@ enum TMDBError: Error, LocalizedError {
     }
 }
 
-// MARK: - Rate Limiter
-
-/// Actor-based concurrency limiter for TMDB API calls.
-/// Limits concurrent in-flight requests and enforces a minimum interval between requests.
 actor TMDBRateLimiter {
     private struct Waiter {
         let id: UUID
@@ -1556,23 +1835,42 @@ actor TMDBRateLimiter {
     }
 }
 
-// MARK: - Detail Cache
+private actor TMDBSeasonRequestCoordinator {
+    private var inFlight: [String: Task<TMDBSeasonDetail, Error>] = [:]
 
-/// Thread-safe in-memory cache for TMDB detail responses.
-/// Prevents duplicate network calls when multiple views fetch the same item (e.g. ContinueWatchingCards).
+    func value(
+        for key: String,
+        operation: @escaping () async throws -> TMDBSeasonDetail
+    ) async throws -> TMDBSeasonDetail {
+        if let existing = inFlight[key] {
+            return try await existing.value
+        }
+        let task = Task { try await operation() }
+        inFlight[key] = task
+        defer { inFlight[key] = nil }
+        return try await task.value
+    }
+}
+
 final class TMDBDetailCache: @unchecked Sendable {
     private var storage: [String: (value: Any, timestamp: Date)] = [:]
+    private var accessOrder: [String] = []
     private let lock = NSLock()
-    private let ttl: TimeInterval = 300 // 5 minutes
+    private let ttl: TimeInterval = 300
+    private let maximumEntryCount = 128
 
     func get<T>(key: String) -> T? {
         lock.lock()
         defer { lock.unlock() }
-        guard let entry = storage[key],
-              Date().timeIntervalSince(entry.timestamp) < ttl,
-              let value = entry.value as? T else {
+        guard let entry = storage[key] else {
             return nil
         }
+        guard Date().timeIntervalSince(entry.timestamp) < ttl else {
+            remove(key)
+            return nil
+        }
+        guard let value = entry.value as? T else { return nil }
+        touch(key)
         return value
     }
 
@@ -1580,11 +1878,37 @@ final class TMDBDetailCache: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         storage[key] = (value: value, timestamp: Date())
+        touch(key)
+        evictIfNeeded()
+    }
 
-        // Evict old entries periodically
-        if storage.count > 200 {
-            let cutoff = Date().addingTimeInterval(-ttl)
-            storage = storage.filter { $0.value.timestamp > cutoff }
+    private func touch(_ key: String) {
+        accessOrder.removeAll { $0 == key }
+        accessOrder.append(key)
+    }
+
+    private func remove(_ key: String) {
+        storage[key] = nil
+        accessOrder.removeAll { $0 == key }
+    }
+
+    private func evictIfNeeded() {
+        let cutoff = Date().addingTimeInterval(-ttl)
+        let expiredKeys = storage.compactMap { entry in
+            entry.value.timestamp < cutoff ? entry.key : nil
+        }
+        for key in expiredKeys {
+            storage[key] = nil
+        }
+        if !expiredKeys.isEmpty {
+            let expired = Set(expiredKeys)
+            accessOrder.removeAll { expired.contains($0) }
+        }
+
+        while storage.count > maximumEntryCount,
+              let oldest = accessOrder.first {
+            storage[oldest] = nil
+            accessOrder.removeFirst()
         }
     }
 }

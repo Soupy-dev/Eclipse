@@ -1,3 +1,10 @@
+//
+//  StretchyHeader.swift
+//  Sora
+//
+//  Created by Francesco on 07/08/25.
+//
+
 import SwiftUI
 import Kingfisher
 import UIKit
@@ -13,7 +20,7 @@ struct StretchyHeaderView: View {
     let minHeaderHeight: CGFloat
     let onAmbientColorExtracted: ((Color) -> Void)?
     var imageDecodeSize: CGSize? = nil
-    
+
     @State private var localAmbientColor: Color = Color.black
 
     private var resolvedImageDecodeSize: CGSize {
@@ -22,14 +29,14 @@ struct StretchyHeaderView: View {
             height: max(headerHeight * UIScreen.main.scale, 1)
         )
     }
-    
+
     var body: some View {
         GeometryReader { geometry in
             let frame = geometry.frame(in: .global)
             let deltaY = frame.minY
             let height = headerHeight + max(0, deltaY)
             let offset = min(0, -deltaY)
-            
+
             ZStack(alignment: .bottom) {
                 Color.clear
                     .overlay(
@@ -49,7 +56,7 @@ struct StretchyHeaderView: View {
                     .clipped()
                     .frame(height: height)
                     .offset(y: offset)
-                
+
                 LinearGradient(
                     gradient: Gradient(stops: [
                         .init(color: localAmbientColor.opacity(0.0), location: 0.0),
@@ -75,8 +82,6 @@ struct StretchyHeaderView: View {
             return
         }
 
-        // Dominant-color analysis walks thousands of pixels. Keep it off the main
-        // thread so a cached image becoming visible does not stall the hero animation.
         DispatchQueue.global(qos: .utility).async {
             let extractedColor = Color.ambientColor(from: image)
             if let cacheKey {

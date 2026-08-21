@@ -1,8 +1,14 @@
+//
+//  KanzenHistoryView.swift
+//  Kanzen
+//
+//  Created by Eclipse on 2026.
+//
+
 import SwiftUI
 import Kingfisher
 
 #if !os(tvOS)
-import AidokuRunner
 
 struct KanzenHistoryView: View {
     @ObservedObject private var progressManager = MangaReadingProgressManager.shared
@@ -14,7 +20,12 @@ struct KanzenHistoryView: View {
     private var designMetrics: ExperimentalMediaDesignMetrics { .current }
 
     private var historyItems: [(id: Int, progress: MangaProgress)] {
-        progressManager.recentlyReadMangaIds()
+
+        progressManager.recentlyReadMangaIds().filter { entry in
+            guard ReaderContentFilter.shared.isKidsModeActive else { return true }
+            guard let title = entry.progress.title else { return false }
+            return ReaderContentFilter.shared.allowsText(title)
+        }
     }
 
     var body: some View {
@@ -91,6 +102,12 @@ struct KanzenHistoryView: View {
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
+
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+            resumeRequest = nil
+            showContextDetail = false
+            contextDetailItem = nil
+        }
         .fullScreenCover(item: $resumeRequest) { request in
             KanzenHistoryResumeDestination(
                 mangaId: request.id,
@@ -131,9 +148,12 @@ struct KanzenHistoryView: View {
     private func historyRow(for item: (id: Int, progress: MangaProgress)) -> some View {
         let experimental = ExperimentalFeatureState.isEnabledAtLaunch
         return HStack(spacing: experimental ? 14 : 12) {
-            KFImage(URL(string: item.progress.coverURL ?? ""))
-                .placeholder { Rectangle().fill(Color.gray.opacity(0.2)) }
-                .resizable()
+            ReaderScopedRemoteImage(
+                url: URL(string: item.progress.coverURL ?? ""),
+                readerExtensionSourceID: item.progress.route?.readerExtensionSourceID
+            ) {
+                Rectangle().fill(Color.gray.opacity(0.2))
+            }
                 .scaledToFill()
                 .frame(width: experimental ? 62 : 50, height: experimental ? 92 : 75)
                 .clipped()
@@ -226,7 +246,7 @@ private struct KanzenHistoryResumeDestination: View {
     let progress: MangaProgress
 
     @StateObject private var kanzen = KanzenEngine()
-    @StateObject private var sourceManager = AidokuSourceManager.shared
+    @StateObject private var sourceManager = ReaderExtensionManager.shared
     @State private var loadedReader: LoadedHistoryReader?
     @State private var downloadedFallback: ReaderDownloadedTitle?
     @State private var errorMessage: String?
@@ -302,14 +322,28 @@ private struct KanzenHistoryResumeDestination: View {
 
         if let downloaded = ReaderDownloadManager.shared.downloadedTitle(for: route),
            sourceUnavailable(for: route) {
+            guard ReaderContentFilter.shared.allows(downloadedTitle: downloaded) else {
+                errorMessage = Self.blockedMessage
+                return
+            }
             downloadedFallback = downloaded
             return
         }
 
         do {
             switch route {
-            case .aidoku(let sourceId, let mangaKey):
-                loadedReader = try await loadAidokuReader(sourceId: sourceId, mangaKey: mangaKey, route: route)
+            case .readerExtension(let sourceID, let itemKey, _):
+                loadedReader = try await loadReaderExtension(
+                    sourceID: sourceID,
+                    itemKey: itemKey,
+                    route: route
+                )
+            case .aidoku:
+                throw NSError(
+                    domain: "KanzenHistory",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "This title used the removed Reader runtime. Reconnect its source to continue online."]
+                )
             case .legacyModule(let moduleUUID, let contentParams, let isNovel):
                 loadedReader = try await loadLegacyReader(
                     moduleUUID: moduleUUID,
@@ -318,8 +352,12 @@ private struct KanzenHistoryResumeDestination: View {
                     route: route
                 )
             }
+        } catch is KanzenHistoryResumeError {
+
+            errorMessage = Self.blockedMessage
         } catch {
-            if let downloaded = ReaderDownloadManager.shared.downloadedTitle(for: route) {
+            if let downloaded = ReaderDownloadManager.shared.downloadedTitle(for: route),
+               ReaderContentFilter.shared.allows(downloadedTitle: downloaded) {
                 downloadedFallback = downloaded
             } else {
                 errorMessage = error.localizedDescription
@@ -327,6 +365,8 @@ private struct KanzenHistoryResumeDestination: View {
             }
         }
     }
+
+    private static let blockedMessage = "Not available on this profile"
 
     @ViewBuilder
     private func fallbackNavigation<Content: View>(@ViewBuilder content: () -> Content) -> some View {
@@ -346,37 +386,50 @@ private struct KanzenHistoryResumeDestination: View {
     }
 
     @MainActor
-    private func loadAidokuReader(sourceId: String, mangaKey: String, route: MangaContentRoute) async throws -> LoadedHistoryReader {
-        guard let metadata = sourceManager.metadata(id: sourceId) else {
-            throw NSError(domain: "KanzenHistory", code: 1, userInfo: [NSLocalizedDescriptionKey: "This Aidoku source is missing."])
+    private func loadReaderExtension(
+        sourceID: ReaderExtensionSourceID,
+        itemKey: String,
+        route: MangaContentRoute
+    ) async throws -> LoadedHistoryReader {
+        guard let metadata = sourceManager.installedSources.first(where: { $0.id == sourceID }) else {
+            throw NSError(domain: "KanzenHistory", code: 1, userInfo: [NSLocalizedDescriptionKey: "This Reader Extension is missing."])
         }
-        guard metadata.isEnabled else {
+        guard metadata.enabled else {
             throw NSError(domain: "KanzenHistory", code: 2, userInfo: [NSLocalizedDescriptionKey: "\(metadata.name) is disabled."])
         }
-
-        let seed = AidokuRunner.Manga(
-            sourceKey: sourceId,
-            key: mangaKey,
+        let provider = try sourceManager.provider(for: sourceID)
+        let seed = ReaderExtensionItem(
+            key: itemKey,
             title: item.title,
-            cover: item.coverURL
+            coverURL: item.coverURL.flatMap(URL.init(string:)),
+            maturity: metadata.maturity
         )
-        let manga = try await sourceManager.mangaUpdate(
-            sourceId: sourceId,
-            manga: seed,
-            needsDetails: true,
-            needsChapters: true
-        )
-        let chapters = readerChapters(from: aidokuChapterModels(from: manga, sourceId: sourceId))
+        let extensionItem = seed.mergingDetail(try await provider.detail(itemKey: itemKey))
+        guard ReaderContentFilter.shared.allows(extensionItem) else {
+            throw KanzenHistoryResumeError.blockedByProfile
+        }
+        let extensionChapters = try await provider.chapters(itemKey: extensionItem.key)
+        let chapters = readerChapters(from: extensionChapters.enumerated().map {
+            $0.element.kanzenChapter(
+                sourceID: sourceID,
+                mediaType: metadata.mediaType,
+                item: extensionItem,
+                index: $0.offset
+            )
+        })
         guard !chapters.isEmpty else {
             throw NSError(domain: "KanzenHistory", code: 3, userInfo: [NSLocalizedDescriptionKey: "No chapters were found for this history item."])
         }
 
         let latestNumbers = ChapterIdentityNormalizer.deduplicatedNumbers(chapters.map(\.chapterNumber))
         return LoadedHistoryReader(
-            title: manga.title,
-            coverURL: manga.cover ?? item.coverURL ?? "",
+            title: extensionItem.title,
+            coverURL: ReaderExtensionSafeMetadata.sanitizedURLString(
+                extensionItem.coverURL,
+                fallback: item.coverURL
+            ) ?? "",
             route: route,
-            format: viewerFormat(manga.viewer),
+            format: metadata.mediaType == .novel ? "NOVEL" : "MANGA",
             chapters: chapters,
             selectedChapter: selectedChapter(from: chapters),
             latestChapterNumbers: latestNumbers
@@ -396,7 +449,19 @@ private struct KanzenHistoryResumeDestination: View {
         }
 
         let content = try ModuleManager.shared.getModuleScript(module: module)
-        try kanzen.loadScript(content, isNovel: isNovel)
+        try await kanzen.loadScript(content, module: module)
+
+        if ReaderContentFilter.shared.isKidsModeActive {
+            let details = await extractLegacyDetails(params: contentParams)
+            guard let details,
+                  ReaderContentFilter.shared.allowsLegacy(
+                    title: item.title,
+                    tags: details["tags"] as? [String],
+                    description: details["description"] as? String
+                  ) else {
+                throw KanzenHistoryResumeError.blockedByProfile
+            }
+        }
         let result = try await extractLegacyChapters(params: contentParams)
         let groups = legacyChapterGroups(from: result)
         guard let selectedGroup = bestLegacyGroup(from: groups) else {
@@ -422,9 +487,11 @@ private struct KanzenHistoryResumeDestination: View {
 
     private func sourceUnavailable(for route: MangaContentRoute) -> Bool {
         switch route {
-        case .aidoku(let sourceId, _):
-            guard let metadata = sourceManager.metadata(id: sourceId) else { return true }
-            return !metadata.isEnabled
+        case .readerExtension(let sourceID, _, _):
+            guard let metadata = sourceManager.installedSources.first(where: { $0.id == sourceID }) else { return true }
+            return !metadata.enabled
+        case .aidoku:
+            return true
         case .legacyModule(let moduleUUID, _, _):
             guard let uuid = UUID(uuidString: moduleUUID) else { return true }
             return ModuleManager.shared.getModule(uuid) == nil
@@ -441,59 +508,19 @@ private struct KanzenHistoryResumeDestination: View {
         } ?? chapters.first ?? Chapter(chapterNumber: lastReadChapter, idx: 0, chapterData: nil)
     }
 
-    private func aidokuChapterModels(from manga: AidokuRunner.Manga, sourceId: String) -> [Chapter] {
-        let chapters = (manga.chapters ?? []).enumerated().map { index, aidokuChapter in
-            let title = aidokuChapter.title ?? ""
-            let number = chapterNumberTitle(aidokuChapter, fallbackIndex: index)
-            let payload = AidokuChapterPayload(sourceId: sourceId, manga: manga, chapter: aidokuChapter)
-            let group = aidokuChapter.scanlators?.joined(separator: ", ") ?? ""
-            return Chapter(
-                chapterNumber: number,
-                idx: index,
-                chapterData: [ChapterData(params: payload, title: title, scanlationGroup: group)]
-            )
-        }
-        return ChapterIdentityNormalizer.deduplicatedChapters(chapters)
-    }
-
-    private func chapterNumberTitle(_ chapter: AidokuRunner.Chapter, fallbackIndex: Int) -> String {
-        if let volume = chapter.volumeNumber, let number = chapter.chapterNumber {
-            return "Vol. \(formatNumber(volume)) Ch. \(formatNumber(number))"
-        }
-        if let number = chapter.chapterNumber {
-            return "Chapter \(formatNumber(number))"
-        }
-        if let title = chapter.title, !title.isEmpty {
-            return title
-        }
-        return "Chapter \(fallbackIndex + 1)"
-    }
-
-    private func formatNumber(_ value: Float) -> String {
-        value.truncatingRemainder(dividingBy: 1) == 0 ? String(Int(value)) : String(value)
-    }
-
-    private func viewerFormat(_ viewer: AidokuRunner.Viewer) -> String {
-        switch viewer {
-        case .vertical, .webtoon:
-            return "WEBTOON"
-        default:
-            return "MANGA"
-        }
+    private func extractLegacyDetails(params: String) async -> [String: Any]? {
+        try? await kanzen.extractDetails(params: params)
     }
 
     private func extractLegacyChapters(params: String) async throws -> Any {
-        try await withCheckedThrowingContinuation { continuation in
-            kanzen.extractChapters(params: params) { result in
-                if let result {
-                    continuation.resume(returning: result)
-                } else {
-                    continuation.resume(
-                        throwing: NSError(domain: "KanzenHistory", code: 7, userInfo: [NSLocalizedDescriptionKey: "The source did not return chapters."])
-                    )
-                }
-            }
+        guard let result = try await kanzen.extractChapters(params: params) else {
+            throw NSError(
+                domain: "KanzenHistory",
+                code: 7,
+                userInfo: [NSLocalizedDescriptionKey: "The source did not return chapters."]
+            )
         }
+        return result
     }
 
     private func legacyChapterGroups(from result: Any) -> [Chapters] {
@@ -595,6 +622,10 @@ private struct KanzenHistoryResumeDestination: View {
               let valueRange = Range(match.range(at: 1), in: text) else { return nil }
         return Double(text[valueRange])
     }
+}
+
+private enum KanzenHistoryResumeError: Error {
+    case blockedByProfile
 }
 
 private struct LoadedHistoryReader {

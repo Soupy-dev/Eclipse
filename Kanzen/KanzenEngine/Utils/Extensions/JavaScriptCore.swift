@@ -1,21 +1,220 @@
+//
+//  JavaScriptCore.swift
+//  Kanzen
+//
+//  Created by Dawud Osman on 13/05/2025.
+//
+
 import JavaScriptCore
 import Foundation
 
+private enum LegacyKanzenNetworkError: Error {
+    case invalidURL
+    case invalidMethod
+    case invalidHeaders
+    case requestBodyTooLarge
+    case responseTooLarge
+}
+
+enum LegacyKanzenNetworkPolicy {
+    static let maximumRequestBodyBytes = 2 * 1_024 * 1_024
+    static let maximumResponseBytes = 8 * 1_024 * 1_024
+    static let maximumRedirects = 10
+    static let maximumTimerDelayMilliseconds: Double = 3_600_000
+    private static let allowedMethods: Set<String> = [
+        "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"
+    ]
+
+    static func boundedTimerDelayMilliseconds(_ rawValue: Double) -> Double? {
+        guard rawValue.isFinite else { return nil }
+        return min(max(rawValue, 0), maximumTimerDelayMilliseconds)
+    }
+
+    static func validatedHTTPURL(_ rawValue: String) throws -> URL {
+        guard rawValue.utf8.count <= 16 * 1_024,
+              let url = URL(string: rawValue),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.host != nil,
+              url.user == nil,
+              url.password == nil else {
+            throw LegacyKanzenNetworkError.invalidURL
+        }
+        return url
+    }
+
+    static func normalizedMethod(_ rawValue: String?) throws -> String {
+        let method = (rawValue ?? "GET")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
+        guard allowedMethods.contains(method) else {
+            throw LegacyKanzenNetworkError.invalidMethod
+        }
+        return method
+    }
+
+    static func requestBody(_ rawValue: String?, method: String) throws -> Data? {
+        let isEmpty = rawValue == nil
+            || rawValue?.isEmpty == true
+            || rawValue == "null"
+            || rawValue == "undefined"
+        guard !isEmpty else { return nil }
+        guard method != "GET", method != "HEAD",
+              let data = rawValue?.data(using: .utf8),
+              data.count <= maximumRequestBodyBytes else {
+            throw LegacyKanzenNetworkError.requestBodyTooLarge
+        }
+        return data
+    }
+
+    static func stringHeaders(from rawValue: Any?) throws -> [String: String] {
+        guard let rawValue, !(rawValue is NSNull) else { return [:] }
+        let pairs: [(String, Any)]
+        if let dictionary = rawValue as? [String: Any] {
+            guard dictionary.count <= 64 else { throw LegacyKanzenNetworkError.invalidHeaders }
+            pairs = dictionary.map { ($0.key, $0.value) }
+        } else if let dictionary = rawValue as? [AnyHashable: Any] {
+            guard dictionary.count <= 64 else { throw LegacyKanzenNetworkError.invalidHeaders }
+            pairs = dictionary.map { (String(describing: $0.key), $0.value) }
+        } else if let dictionary = rawValue as? [String: String] {
+            guard dictionary.count <= 64 else { throw LegacyKanzenNetworkError.invalidHeaders }
+            pairs = dictionary.map { ($0.key, $0.value) }
+        } else {
+            throw LegacyKanzenNetworkError.invalidHeaders
+        }
+
+        var result: [String: String] = [:]
+        result.reserveCapacity(pairs.count)
+        for (key, value) in pairs {
+            let stringValue: String
+            if let value = value as? String {
+                stringValue = value
+            } else if let value = value as? NSNumber {
+                stringValue = value.stringValue
+            } else if value is NSNull {
+                continue
+            } else {
+                throw LegacyKanzenNetworkError.invalidHeaders
+            }
+            guard key.utf8.count <= 128, stringValue.utf8.count <= 8 * 1_024 else {
+                throw LegacyKanzenNetworkError.invalidHeaders
+            }
+            result[key] = stringValue
+        }
+        return result
+    }
+
+    static func responseHeaders(_ response: HTTPURLResponse) -> [String: String] {
+        var result: [String: String] = [:]
+        var totalBytes = 0
+        let fields = response.allHeaderFields.compactMap { key, value -> (String, String)? in
+            guard let name = key as? String else { return nil }
+            return (name, value as? String ?? String(describing: value))
+        }.sorted { $0.0.localizedCaseInsensitiveCompare($1.0) == .orderedAscending }
+
+        for (name, value) in fields {
+            let lowered = name.lowercased()
+            guard result.count < 64,
+                  lowered != "set-cookie",
+                  lowered != "set-cookie2",
+                  name.utf8.count <= 128,
+                  value.utf8.count <= 8 * 1_024,
+                  !name.contains("\r"), !name.contains("\n"),
+                  !value.contains("\r"), !value.contains("\n") else { continue }
+            let nextTotal = totalBytes + name.utf8.count + value.utf8.count + 4
+            guard nextTotal <= 32 * 1_024 else { break }
+            result[name] = value
+            totalBytes = nextTotal
+        }
+        return result
+    }
+
+    static func textEncoding(_ rawValue: String?) -> String.Encoding {
+        switch rawValue?.lowercased() {
+        case "windows-1251", "cp1251": return .windowsCP1251
+        case "windows-1252", "cp1252": return .windowsCP1252
+        case "iso-8859-1", "latin1": return .isoLatin1
+        case "ascii": return .ascii
+        case "utf-16", "utf16": return .utf16
+        default: return .utf8
+        }
+    }
+
+    static func perform(
+        client: SkyStreamPinnedHTTPClient,
+        rawURL: String,
+        rawMethod: String?,
+        rawHeaders: [String: String],
+        rawBody: String?,
+        followsRedirects: Bool
+    ) async throws -> SkyStreamPinnedHTTPClient.Response {
+        let url = try validatedHTTPURL(rawURL)
+        let method = try normalizedMethod(rawMethod)
+        let body = try requestBody(rawBody, method: method)
+        let preparedHeaders: ServicePinnedRequestHeaders
+        do {
+            preparedHeaders = try ServicePinnedRequestHeaders(rawHeaders, method: method)
+        } catch {
+            throw LegacyKanzenNetworkError.invalidHeaders
+        }
+        do {
+            return try await client.fetch(
+                url.absoluteString,
+                purpose: .pluginRequest,
+                method: method,
+                headers: preparedHeaders.headers,
+                body: body,
+                byteRange: preparedHeaders.byteRange,
+                allowsCookies: true,
+                followsRedirects: followsRedirects,
+                maximumRedirects: maximumRedirects,
+                maximumResponseBytes: maximumResponseBytes,
+                maximumRequestBodyBytes: maximumRequestBodyBytes,
+                timeout: 30
+            )
+        } catch SkyStreamSecurityError.responseTooLarge {
+            throw LegacyKanzenNetworkError.responseTooLarge
+        }
+    }
+
+    static func userFacingError(_ error: Error) -> String {
+        switch error {
+        case LegacyKanzenNetworkError.invalidURL:
+            return "Invalid or blocked URL"
+        case LegacyKanzenNetworkError.invalidMethod:
+            return "Unsupported HTTP method"
+        case LegacyKanzenNetworkError.invalidHeaders:
+            return "Unsafe request headers"
+        case LegacyKanzenNetworkError.requestBodyTooLarge:
+            return "Request body is invalid or too large"
+        case LegacyKanzenNetworkError.responseTooLarge:
+            return "Network response exceeded the size limit"
+        case is CancellationError:
+            return "Network request cancelled"
+        default:
+            return "Network request failed"
+        }
+    }
+}
+
 extension JSContext
 {
-    func setupTimeOut()
+    func setupTimeOut(runtimeState: KanzenLegacyJavaScriptRuntimeState)
     {
-        // Define `setTimeout` in Swift
+
         let setTimeout: @convention(block) (JSValue, Double) -> Void = { callback, delay in
-            let delayTime = DispatchTime.now() + delay / 1000.0  // Convert ms to seconds
-            DispatchQueue.main.asyncAfter(deadline: delayTime) {
+            guard !callback.isUndefined, !callback.isNull,
+                  let boundedDelay = LegacyKanzenNetworkPolicy.boundedTimerDelayMilliseconds(delay) else {
+                return
+            }
+            runtimeState.scheduleTimer(delayMilliseconds: boundedDelay) {
                 callback.call(withArguments: [])
             }
         }
-        // Inject `setTimeout` into JSContext
+
         self.setObject(setTimeout, forKeyedSubscript: "setTimeout" as (NSCopying & NSObjectProtocol))
     }
-    
+
     func setupBundle()
     {
         guard let jsPath = Bundle.main.path(forResource: "bundle", ofType: "js")
@@ -28,211 +227,245 @@ extension JSContext
             self.evaluateScript(jsCode)
             ReaderLogger.shared.log("bundle loaded successfully")
         } catch {
-            ReaderLogger.shared.log("Error loading bundle.js: \(error)")
+            ReaderLogger.shared.log("Error loading bundled legacy JavaScript support", type: "Error")
         }
-        
+
     }
-    
-    // MARK: - Console (manga)
-    
+
     func setUpConsole()
     {
         let consoleObject = JSValue(newObjectIn: self)
         let consoleLogFunction: @convention(block) (String) -> Void = {
             message in
-            ReaderLogger.shared.log(message,type: "Debug")
+            ReaderLogger.shared.log("Legacy JavaScript console message omitted length=\(message.utf8.count)", type: "AidokuRuntime")
         }
         let consolePrintFunction: @convention(block) (JSValue) -> Void = {
             message in
-            ReaderLogger.shared.log(message.toString() ?? String(describing: message), type: "Debug")
+            let length = message.toString()?.utf8.count ?? 0
+            ReaderLogger.shared.log("Legacy JavaScript console print omitted length=\(length)", type: "AidokuRuntime")
         }
-        
+
         consoleObject?.setObject(consoleLogFunction, forKeyedSubscript: "log" as NSString)
         consoleObject?.setObject(consolePrintFunction, forKeyedSubscript: "print" as NSString)
         self.setObject(consoleObject, forKeyedSubscript: "console" as NSString)
     }
-    
-    // MARK: - Fetch (manga: resolves with response object)
-    
-    func setUpFetch()
+
+    func setUpFetch(
+        pinnedHTTPClient: SkyStreamPinnedHTTPClient,
+        runtimeState: KanzenLegacyJavaScriptRuntimeState
+    )
     {
         let fetch: @convention(block) (JSValue,JSValue) -> JSValue = {
-            jsUrl, jsOptions in
-            guard let urlStr = jsUrl.toString(), let url = URL(string: urlStr) else
-            {
-                return JSValue(newErrorFromMessage: "Invalid URL", in: self)
+            [weak context = self] jsUrl, jsOptions in
+            guard let context else {
+                return JSValue(undefinedIn: nil)
             }
-            
-            guard let promiseConstructor = self.objectForKeyedSubscript("Promise"),
+            guard let urlStr = jsUrl.toString(),
+                  (try? LegacyKanzenNetworkPolicy.validatedHTTPURL(urlStr)) != nil else
+            {
+                return JSValue(newErrorFromMessage: "Invalid URL", in: context)
+            }
+
+            guard let promiseConstructor = context.objectForKeyedSubscript("Promise"),
                   !promiseConstructor.isUndefined,
                   !promiseConstructor.isNull else {
                 ReaderLogger.shared.log("Promise constructor not found in JSContext", type: "Error")
-                return JSValue(newErrorFromMessage: "Promise is not supported", in: self)
+                return JSValue(newErrorFromMessage: "Promise is not supported", in: context)
             }
-            
-            let executor: @convention(block) (@escaping (JSValue) -> Void, @escaping (JSValue) -> Void) -> Void = { resolve, reject in
-                var request  = URLRequest(url: url)
-                request.httpMethod = "GET"
+
+            let executor: @convention(block) (@escaping (JSValue) -> Void, @escaping (JSValue) -> Void) -> Void = { [weak context] resolve, reject in
+                guard let context else { return }
+                var method: String? = "GET"
+                var headers: [String: String] = [:]
+                var body: String?
                 if let options = jsOptions.toDictionary() as? [String: Any]
                 {
-                    if let method = options["method"] as? String
+                    if let value = options["method"] as? String
                     {
-                        request.httpMethod = method.uppercased()
+                        method = value
                     }
-                    if let headers = options["headers"] as? [String: String]
+                    if let values = options["headers"] as? [String: String]
                     {
-                        for (key,value) in headers
-                        {
-                            request.addValue(value, forHTTPHeaderField: key)
-                        }
+                        headers = values
                     }
-                    if let body = options["body"] as? String
+                    if let value = options["body"] as? String
                     {
-                        let bodyData = body.data(using: .utf8)
-                        request.httpBody = bodyData
+                        body = value
                     }
                 }
-                
-                let task = URLSession.shared.dataTask(with: request) { data, response, error in
-                    
-                    if let error = error
-                    {
-                        return reject(JSValue(newErrorFromMessage: error.localizedDescription, in: self))
-                    }
-                    guard let  httpResponse = response as? HTTPURLResponse
-                    else
-                    {
-                        reject(JSValue(newErrorFromMessage: "No Response", in: self ))
-                        return
-                    }
-                    let textFunc: @convention(block) () -> String = {
-                        if let data = data
-                        {
-                            return String(data: data, encoding: .utf8) ?? ""
-                        }
-                        return ""
-                    }
-                    let jsonFunc: @convention(block) () -> JSValue = {
-                        if let data = data {
+
+                guard let nativeLease = runtimeState.reserveNativeOperation() else {
+                    reject(JSValue(newErrorFromMessage: "Too many active network requests", in: context))
+                    return
+                }
+                let task = Task { [weak context] in
+                    defer { nativeLease.finish() }
+                    do {
+                        let output = try await LegacyKanzenNetworkPolicy.perform(
+                            client: pinnedHTTPClient,
+                            rawURL: urlStr,
+                            rawMethod: method,
+                            rawHeaders: headers,
+                            rawBody: body,
+                            followsRedirects: true
+                        )
+                        try Task.checkCancellation()
+                        runtimeState.scheduleJavaScript { [weak context] in
+                            guard let context else { return }
+                            let data = output.data
+                            let textFunc: @convention(block) () -> String = {
+                                String(data: data, encoding: .utf8) ?? ""
+                            }
+                            let jsonFunc: @convention(block) () -> JSValue = { [weak context] in
+                            guard let context else { return JSValue(undefinedIn: nil) }
                             do{
                                 let json = try JSONSerialization.jsonObject(with: data, options: [])
-                                return JSValue(object: json, in: self)
+                                return JSValue(object: json, in: context)
                             }
                             catch
                             {
                                 ReaderLogger.shared.log("JSON serialization failed",type:"Error")
                             }
+                                return JSValue(newErrorFromMessage: "No Data", in: context)
+                            }
+
+                            guard let textJs = JSValue(object: textFunc, in: context),
+                                  let jsonJs = JSValue(object: jsonFunc, in: context)
+                            else {
+                                reject(JSValue(newErrorFromMessage: "Failed to create JSValue", in: context))
+                                return
+                            }
+                            let responseObject: [String: Any] = [
+                                "status": output.response.statusCode,
+                                "headers": LegacyKanzenNetworkPolicy.responseHeaders(output.response),
+                                "text": textJs,
+                                "json": jsonJs,
+                                "data": data.base64EncodedString()
+                            ]
+
+                            resolve(JSValue(object: responseObject, in: context))
                         }
-                        return JSValue(newErrorFromMessage: "No Data", in: self)
-                        
+                    } catch {
+                        let token = servicePinnedNetworkErrorToken(error)
+                        ReaderLogger.shared.log(
+                            "Legacy JavaScript fetch failed token=\(token)",
+                            type: "AidokuNetwork"
+                        )
+                        let message = LegacyKanzenNetworkPolicy.userFacingError(error)
+                        runtimeState.scheduleJavaScript { [weak context] in
+                            guard let context else { return }
+                            reject(JSValue(newErrorFromMessage: message, in: context))
+                        }
                     }
-                    guard let textJs = JSValue(object: textFunc, in: self),
-                          let jsonJs = JSValue(object: jsonFunc, in: self)
-                    else
-                    {
-                        return reject(JSValue(newErrorFromMessage: "Failed to create JSValue", in: self))
-                    }
-                    let responseObject: [String: Any] = [
-                        "status": httpResponse.statusCode,
-                        "headers": httpResponse.allHeaderFields,
-                        "text": textJs,
-                        "json": jsonJs,
-                        "data": data?.base64EncodedString() ?? ""
-                    ]
-                    
-                    resolve(JSValue(object: responseObject, in: self))
-                    
                 }
-                task.resume()
-                
+                _ = nativeLease.install(task)
+
             }
-            
-            let promise = JSValue(newPromiseIn: self, fromExecutor: { resolve, reject in
+
+            let promise = JSValue(newPromiseIn: context, fromExecutor: { resolve, reject in
                 executor(
                     { value in resolve?.call(withArguments: [value]) },
                     { error in reject?.call(withArguments: [error]) }
                 )
             })
-            
-            return promise ?? JSValue(newErrorFromMessage: "Promise not supported", in: self)
-            
+
+            return promise ?? JSValue(newErrorFromMessage: "Promise not supported", in: context)
+
         }
-        
+
         self.setObject(fetch, forKeyedSubscript: "fetch" as NSString)
     }
-    
-    // MARK: - Manga JS Environment (original)
-    
-    func setUpJSEnvirontment()
+
+    func setUpJSEnvirontment(runtimeState: KanzenLegacyJavaScriptRuntimeState)
     {
-        setUpFetch()
+        let pinnedHTTPClient = SkyStreamPinnedHTTPClient()
+        setUpFetch(pinnedHTTPClient: pinnedHTTPClient, runtimeState: runtimeState)
         setUpConsole()
         setupBundle()
-        setupTimeOut()
+        setupTimeOut(runtimeState: runtimeState)
     }
-    
-    // MARK: - Novel/Sora-compatible Console
-    
+
     func setUpNovelConsole()
     {
         let consoleObject = JSValue(newObjectIn: self)
-        
+
         let consoleLogFunction: @convention(block) (String) -> Void = { message in
-            ReaderLogger.shared.log(message, type: "Debug")
+            ReaderLogger.shared.log("Legacy novel JavaScript console message omitted length=\(message.utf8.count)", type: "AidokuRuntime")
         }
         consoleObject?.setObject(consoleLogFunction, forKeyedSubscript: "log" as NSString)
-        
+
         let consoleErrorFunction: @convention(block) (String) -> Void = { message in
-            ReaderLogger.shared.log(message, type: "Error")
+            ReaderLogger.shared.log("Legacy novel JavaScript console error omitted length=\(message.utf8.count)", type: "Error")
         }
         consoleObject?.setObject(consoleErrorFunction, forKeyedSubscript: "error" as NSString)
-        
+
         self.setObject(consoleObject, forKeyedSubscript: "console" as NSString)
-        
+
         let logFunction: @convention(block) (String) -> Void = { message in
-            ReaderLogger.shared.log("JavaScript log: \(message)", type: "Debug")
+            ReaderLogger.shared.log("Legacy JavaScript log omitted length=\(message.utf8.count)", type: "AidokuRuntime")
         }
         self.setObject(logFunction, forKeyedSubscript: "log" as NSString)
     }
-    
-    // MARK: - Novel/Sora-compatible Fetch (resolves with text string)
-    
-    func setUpNovelFetch()
+
+    func setUpNovelFetch(
+        pinnedHTTPClient: SkyStreamPinnedHTTPClient,
+        runtimeState: KanzenLegacyJavaScriptRuntimeState
+    )
     {
         let fetchNativeFunction: @convention(block) (String, [String: String]?, JSValue, JSValue) -> Void = { urlString, headers, resolve, reject in
-            guard let url = URL(string: urlString) else {
-                ReaderLogger.shared.log("Invalid URL: \(urlString)", type: "Error")
+            guard (try? LegacyKanzenNetworkPolicy.validatedHTTPURL(urlString)) != nil else {
+                ReaderLogger.shared.log("Legacy JavaScript fetch rejected an invalid URL; value omitted", type: "Error")
                 reject.call(withArguments: ["Invalid URL"])
                 return
             }
-            var request = URLRequest(url: url)
-            if let headers = headers {
-                for (key, value) in headers {
-                    request.setValue(value, forHTTPHeaderField: key)
+            let callResolve: (String) -> Void = { value in
+                runtimeState.scheduleJavaScript {
+                    if !resolve.isUndefined {
+                        resolve.call(withArguments: [value])
+                    }
                 }
             }
-            let task = URLSession.shared.dataTask(with: request) { data, _, error in
-                if let error = error {
-                    ReaderLogger.shared.log("Network error in fetch: \(error.localizedDescription)", type: "Error")
-                    reject.call(withArguments: [error.localizedDescription])
-                    return
-                }
-                guard let data = data else {
-                    ReaderLogger.shared.log("No data in fetch response", type: "Error")
-                    reject.call(withArguments: ["No data"])
-                    return
-                }
-                if let text = String(data: data, encoding: .utf8) {
-                    resolve.call(withArguments: [text])
-                } else {
-                    ReaderLogger.shared.log("Unable to decode fetch data to text", type: "Error")
-                    reject.call(withArguments: ["Unable to decode data"])
+            let callReject: (String) -> Void = { value in
+                runtimeState.scheduleJavaScript {
+                    if !reject.isUndefined {
+                        reject.call(withArguments: [value])
+                    }
                 }
             }
-            task.resume()
+            guard let nativeLease = runtimeState.reserveNativeOperation() else {
+                callReject("Too many active network requests")
+                return
+            }
+            let task = Task {
+                defer { nativeLease.finish() }
+                do {
+                    let output = try await LegacyKanzenNetworkPolicy.perform(
+                        client: pinnedHTTPClient,
+                        rawURL: urlString,
+                        rawMethod: "GET",
+                        rawHeaders: headers ?? [:],
+                        rawBody: nil,
+                        followsRedirects: true
+                    )
+                    try Task.checkCancellation()
+                    guard let text = String(data: output.data, encoding: .utf8) else {
+                        ReaderLogger.shared.log("Unable to decode legacy fetch data to text", type: "Error")
+                        callReject("Unable to decode data")
+                        return
+                    }
+                    callResolve(text)
+                } catch {
+                    ReaderLogger.shared.log(
+                        "Legacy JavaScript fetchNative failed token=\(servicePinnedNetworkErrorToken(error))",
+                        type: "AidokuNetwork"
+                    )
+                    callReject(LegacyKanzenNetworkPolicy.userFacingError(error))
+                }
+            }
+            _ = nativeLease.install(task)
         }
         self.setObject(fetchNativeFunction, forKeyedSubscript: "fetchNative" as NSString)
-        
+
         let fetchDefinition = """
             function fetch(url, headers) {
                 return new Promise(function(resolve, reject) {
@@ -242,115 +475,98 @@ extension JSContext
             """
         self.evaluateScript(fetchDefinition)
     }
-    
-    // MARK: - Novel/Sora-compatible FetchV2
-    
-    func setUpNovelFetchV2()
+
+    func setUpNovelFetchV2(
+        pinnedHTTPClient: SkyStreamPinnedHTTPClient,
+        runtimeState: KanzenLegacyJavaScriptRuntimeState
+    )
     {
         let fetchV2NativeFunction: @convention(block) (String, Any?, String?, String?, ObjCBool, String?, JSValue, JSValue) -> Void = { urlString, headersAny, method, body, redirect, encoding, resolve, reject in
-            guard let url = URL(string: urlString) else {
-                ReaderLogger.shared.log("Invalid URL in fetchv2: \(urlString)", type: "Error")
-                DispatchQueue.main.async {
-                    resolve.call(withArguments: [["error": "Invalid URL"]])
+            let callResolve: ([String: Any]) -> Void = { dict in
+                runtimeState.scheduleJavaScript {
+                    if !resolve.isUndefined {
+                        resolve.call(withArguments: [dict])
+                    }
                 }
+            }
+
+            guard (try? LegacyKanzenNetworkPolicy.validatedHTTPURL(urlString)) != nil else {
+                ReaderLogger.shared.log("Legacy JavaScript fetchv2 rejected an invalid URL; value omitted", type: "Error")
+                callResolve([
+                    "status": 0,
+                    "headers": [:],
+                    "body": "",
+                    "error": "Invalid or blocked URL"
+                ])
                 return
             }
-            
-            var headers: [String: String]? = nil
-            if let headersAny = headersAny {
-                if headersAny is NSNull {
-                    headers = nil
-                } else if let headersDict = headersAny as? [String: Any] {
-                    var safeHeaders: [String: String] = [:]
-                    for (key, value) in headersDict {
-                        if let str = value as? String {
-                            safeHeaders[key] = str
-                        } else if let num = value as? NSNumber {
-                            safeHeaders[key] = num.stringValue
-                        } else if value is NSNull {
-                            continue
-                        } else {
-                            safeHeaders[key] = String(describing: value)
-                        }
-                    }
-                    headers = safeHeaders.isEmpty ? nil : safeHeaders
-                }
+
+            let headers: [String: String]
+            let httpMethod: String
+            do {
+                headers = try LegacyKanzenNetworkPolicy.stringHeaders(from: headersAny)
+                httpMethod = try LegacyKanzenNetworkPolicy.normalizedMethod(method)
+                _ = try LegacyKanzenNetworkPolicy.requestBody(body, method: httpMethod)
+            } catch {
+                callResolve([
+                    "status": 0,
+                    "headers": [:],
+                    "body": "",
+                    "error": LegacyKanzenNetworkPolicy.userFacingError(error)
+                ])
+                return
             }
-            
-            let httpMethod = method ?? "GET"
-            var request = URLRequest(url: url)
-            request.httpMethod = httpMethod
-            
-            func getEncoding(from encodingString: String?) -> String.Encoding {
-                guard let enc = encodingString?.lowercased() else { return .utf8 }
-                switch enc {
-                case "utf-8", "utf8": return .utf8
-                case "windows-1251", "cp1251": return .windowsCP1251
-                case "windows-1252", "cp1252": return .windowsCP1252
-                case "iso-8859-1", "latin1": return .isoLatin1
-                case "ascii": return .ascii
-                case "utf-16", "utf16": return .utf16
-                default: return .utf8
-                }
+
+            let textEncoding = LegacyKanzenNetworkPolicy.textEncoding(encoding)
+            guard let nativeLease = runtimeState.reserveNativeOperation() else {
+                callResolve([
+                    "status": 0,
+                    "headers": [:],
+                    "body": "",
+                    "error": "Too many active network requests"
+                ])
+                return
             }
-            let textEncoding = getEncoding(from: encoding)
-            
-            let bodyIsEmpty = body == nil || body?.isEmpty == true || body == "null" || body == "undefined"
-            if httpMethod != "GET" && !bodyIsEmpty {
-                request.httpBody = body?.data(using: .utf8)
-            }
-            
-            if let headers = headers {
-                for (key, value) in headers {
-                    request.setValue(value, forHTTPHeaderField: key)
-                }
-            }
-            
-            let task = URLSession.shared.dataTask(with: request) { data, response, error in
-                let callResolve: ([String: Any]) -> Void = { dict in
-                    DispatchQueue.main.async {
-                        if !resolve.isUndefined {
-                            resolve.call(withArguments: [dict])
-                        }
-                    }
-                }
-                
-                if let error = error {
-                    ReaderLogger.shared.log("Network error in fetchv2: \(error.localizedDescription)", type: "Error")
-                    callResolve(["error": error.localizedDescription])
-                    return
-                }
-                
-                var safeHeaders: [String: String] = [:]
-                if let httpResponse = response as? HTTPURLResponse {
-                    for (key, value) in httpResponse.allHeaderFields {
-                        if let keyString = key as? String {
-                            safeHeaders[keyString] = (value as? String) ?? String(describing: value)
-                        }
-                    }
-                }
-                
-                var responseDict: [String: Any] = [
-                    "status": (response as? HTTPURLResponse)?.statusCode ?? 0,
-                    "headers": safeHeaders,
-                    "body": ""
-                ]
-                
-                if let data = data {
-                    if let text = String(data: data, encoding: textEncoding) {
-                        responseDict["body"] = text
-                    } else if let text = String(data: data, encoding: .utf8) {
+            let task = Task {
+                defer { nativeLease.finish() }
+                do {
+                    let output = try await LegacyKanzenNetworkPolicy.perform(
+                        client: pinnedHTTPClient,
+                        rawURL: urlString,
+                        rawMethod: httpMethod,
+                        rawHeaders: headers,
+                        rawBody: body,
+                        followsRedirects: redirect.boolValue
+                    )
+                    try Task.checkCancellation()
+                    var responseDict: [String: Any] = [
+                        "status": output.response.statusCode,
+                        "headers": LegacyKanzenNetworkPolicy.responseHeaders(output.response),
+                        "body": ""
+                    ]
+                    if let text = String(data: output.data, encoding: textEncoding)
+                        ?? String(data: output.data, encoding: .utf8) {
                         responseDict["body"] = text
                     }
+                    callResolve(responseDict)
+                } catch {
+                    ReaderLogger.shared.log(
+                        "Legacy JavaScript fetchv2 failed token=\(servicePinnedNetworkErrorToken(error))",
+                        type: "AidokuNetwork"
+                    )
+                    callResolve([
+                        "status": 0,
+                        "headers": [:],
+                        "body": "",
+                        "error": LegacyKanzenNetworkPolicy.userFacingError(error)
+                    ])
                 }
-                
-                callResolve(responseDict)
             }
-            task.resume()
+            _ = nativeLease.install(task)
         }
-        
+
         self.setObject(fetchV2NativeFunction, forKeyedSubscript: "fetchV2Native" as NSString)
-        
+
         let fetchv2Definition = """
             function fetchv2(url, headers, method, body, redirect, encoding) {
                 if (headers === undefined || headers === null) headers = {};
@@ -394,9 +610,7 @@ extension JSContext
             """
         self.evaluateScript(fetchv2Definition)
     }
-    
-    // MARK: - Novel Base64 Functions
-    
+
     func setupNovelBase64Functions()
     {
         let btoaFunction: @convention(block) (String) -> String? = { data in
@@ -410,9 +624,7 @@ extension JSContext
         self.setObject(btoaFunction, forKeyedSubscript: "btoa" as NSString)
         self.setObject(atobFunction, forKeyedSubscript: "atob" as NSString)
     }
-    
-    // MARK: - Novel Scraping Utilities
-    
+
     func setupNovelScrapingUtilities()
     {
         let scrapingUtils = """
@@ -464,17 +676,16 @@ extension JSContext
         """
         self.evaluateScript(scrapingUtils)
     }
-    
-    // MARK: - Novel JS Environment (Sora-compatible)
-    
-    func setUpNovelJSEnvironment()
+
+    func setUpNovelJSEnvironment(runtimeState: KanzenLegacyJavaScriptRuntimeState)
     {
+        let pinnedHTTPClient = SkyStreamPinnedHTTPClient()
         setUpNovelConsole()
-        setUpNovelFetch()
-        setUpNovelFetchV2()
+        setUpNovelFetch(pinnedHTTPClient: pinnedHTTPClient, runtimeState: runtimeState)
+        setUpNovelFetchV2(pinnedHTTPClient: pinnedHTTPClient, runtimeState: runtimeState)
         setupNovelBase64Functions()
         setupNovelScrapingUtilities()
         setupBundle()
-        setupTimeOut()
+        setupTimeOut(runtimeState: runtimeState)
     }
 }

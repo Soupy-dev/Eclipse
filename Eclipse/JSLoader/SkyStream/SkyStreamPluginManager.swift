@@ -66,6 +66,7 @@ public struct SkyStreamSafeCloudRestoreResult: Sendable, Equatable {
 public enum SkyStreamPluginManagerError: Error, Sendable, Equatable {
     case unavailable
     case managerNotLoaded
+    case stateLoadFailed
     case packageNotFound
     case repositoryNotFound
     case pluginEntryNotFound
@@ -78,11 +79,13 @@ public enum SkyStreamPluginManagerError: Error, Sendable, Equatable {
     case invalidPersistedPath
     case persistenceFailed
     case capacityLimitReached(kind: String, maximum: Int)
+    case persistedStateBudgetExceeded(maximumBytes: Int)
     case invalidBackup
     case backupArchiveBudgetExceeded(maximumBytes: Int)
     case backupRollbackFailed
     case stateChangedDuringValidation
     case validationAlreadyInProgress
+    case requiresGrownUpProfile
 }
 
 extension SkyStreamPluginManagerError: LocalizedError {
@@ -92,6 +95,8 @@ extension SkyStreamPluginManagerError: LocalizedError {
             return "SkyStream plugins are available only on iPhone and iPad."
         case .managerNotLoaded:
             return "SkyStream is still loading its saved state."
+        case .stateLoadFailed:
+            return "SkyStream could not read its saved data. Open SkyStream Plugins to retry or reset it."
         case .packageNotFound:
             return "The SkyStream package is not installed."
         case .repositoryNotFound:
@@ -116,6 +121,9 @@ extension SkyStreamPluginManagerError: LocalizedError {
             return "The SkyStream package was validated but its state could not be saved."
         case .capacityLimitReached(let kind, let maximum):
             return "Eclipse supports at most \(maximum) SkyStream \(kind). Remove one before adding another."
+        case .persistedStateBudgetExceeded(let maximumBytes):
+            let maximumMiB = maximumBytes / (1_024 * 1_024)
+            return "The saved SkyStream repositories and packages exceed the \(maximumMiB) MB storage limit. Remove a saved repository or an installed package before adding another."
         case .invalidBackup:
             return "The SkyStream backup contains invalid or incomplete package data."
         case .backupArchiveBudgetExceeded(let maximumBytes):
@@ -127,7 +135,41 @@ extension SkyStreamPluginManagerError: LocalizedError {
             return "SkyStream settings changed while the package was being checked. Please try again."
         case .validationAlreadyInProgress:
             return "SkyStream is already checking this package or has reached its validation limit. Wait for an existing check to finish before trying again."
+        case .requiresGrownUpProfile:
+            return "This is a kids profile. Switch to a grown-up profile to change installed SkyStream plugins."
         }
+    }
+}
+
+struct SkyStreamServiceScopeAuthority: Equatable {
+    let profileID: UUID
+    let serviceStoreGeneration: Int
+
+    @MainActor
+    static func capture() -> Self {
+        Self(
+            profileID: ProfileManager.shared.activeProfileID,
+            serviceStoreGeneration: ServiceStoreScope.generation
+        )
+    }
+
+    func matches(profileID: UUID, serviceStoreGeneration: Int) -> Bool {
+        self.profileID == profileID
+            && self.serviceStoreGeneration == serviceStoreGeneration
+    }
+
+    @MainActor
+    var isCurrent: Bool {
+        matches(
+            profileID: ProfileManager.shared.activeProfileID,
+            serviceStoreGeneration: ServiceStoreScope.generation
+        )
+    }
+}
+
+enum ServicePluginAdministrativeAdmissionPolicy {
+    static func permits(isKidsProfile: Bool) -> Bool {
+        !isKidsProfile
     }
 }
 
@@ -137,9 +179,6 @@ private enum SkyStreamSafeRestoreTaskContext {
     @TaskLocal static var token: UUID?
 }
 
-/// Immutable authority captured on the main actor before a manual backup starts doing file I/O.
-/// If an install/update removes one of these exact archives while the export is in flight, the
-/// materialization step fails instead of silently mixing package generations.
 struct SkyStreamManualBackupCapturePlan: Sendable {
     struct Plugin: Sendable {
         let state: SkyStreamInstalledPluginState
@@ -153,10 +192,8 @@ struct SkyStreamManualBackupCapturePlan: Sendable {
 @MainActor
 public final class SkyStreamPluginManager: ObservableObject {
     public static let shared = SkyStreamPluginManager()
+    nonisolated static let pendingSafeCloudSnapshotKey = "skyStreamPendingSafeCloudSnapshot.v1"
 
-    /// Manual backups are JSON, so archive bytes are copied and base64-expanded during encoding.
-    /// Bound the complete archive set as well as each package to keep a valid installation from
-    /// exhausting memory while an export is assembled on an iPhone or iPad.
     nonisolated private static let maximumPackageArchiveBytes = 20 * 1_024 * 1_024
     nonisolated private static let maximumManualBackupArchiveBytes = 64 * 1_024 * 1_024
     private static let maximumManualRestoreExpandedBytes: UInt64 = 256 * 1_024 * 1_024
@@ -180,12 +217,11 @@ public final class SkyStreamPluginManager: ObservableObject {
         }
     }
     @Published public private(set) var isLoaded = false
+    @Published public private(set) var stateLoadDidFail = false
+    @Published public private(set) var unreadablePackageIDs: [String] = []
     @Published public private(set) var lastErrorMessage: String?
     @Published public private(set) var lastNoticeMessage: String?
 
-    // Synchronous backup reads can run while an async transaction is suspended in `persist()`.
-    // Keep a last-successful snapshot so they never serialize optimistic state whose metadata
-    // commit could still fail and roll back.
     private var committedRepositories: [SkyStreamSavedRepository] = []
     private var committedInstalledPlugins: [SkyStreamInstalledPluginState] = []
     private var committedPluginsByID: [String: SkyStreamInstalledPluginState] = [:]
@@ -221,24 +257,14 @@ public final class SkyStreamPluginManager: ObservableObject {
     private let archiveRoot: URL
     private let stagingRoot: URL
 
-    /// The persisted SkyStream document contains repositories and every installed package in
-    /// one atomic blob. Main-actor isolation alone is not a transaction boundary: an `await`
-    /// inside a mutation lets another mutation publish a newer blob, after which the older
-    /// operation can resume and overwrite or roll it back. Keep the complete read -> await ->
-    /// commit -> persist transaction FIFO while still suspending (rather than blocking) callers.
     private var mutationGateIsHeld = false
     private var mutationGateWaiters: [CheckedContinuation<Void, Never>] = []
-    /// A hung JavaScript evaluation intentionally retains its package slot. This bounds both
-    /// same-package retries and aggregate validation runtimes without tying up the mutation gate.
+
     private var packagesWithRuntimeValidationInFlight = Set<String>()
-    /// Safe-cloud reconstruction deliberately releases the mutation gate around downloads and
-    /// JavaScript. Task-local ownership lets its own package publications proceed, while every
-    /// other successful persisted mutation permanently invalidates the restore and catches ABA.
+
     private var activeSafeRestoreTokens = Set<UUID>()
     private var invalidatedSafeRestoreTokens = Set<UUID>()
-    /// While a durable write has succeeded but its RuntimePool trust-domain reset is pending,
-    /// resolver-facing reads fail closed. This prevents old committed metadata from recreating a
-    /// just-cleared package store in the reset -> publication gap.
+
     private var runtimePublicationBlockedPackageIDs = Set<String>()
 
     private struct PackageCodeFingerprint: Hashable, Sendable {
@@ -257,10 +283,6 @@ public final class SkyStreamPluginManager: ObservableObject {
         }
     }
 
-    /// Everything that can change the result of a dynamic `getProviders` call. Discovery runs
-    /// outside the global mutation gate so a badly behaved JavaScript package cannot strand every
-    /// install/settings transaction; this fingerprint prevents its stale result from winning over
-    /// a preference, storage, mirror, or package change that completed while JavaScript was busy.
     private struct DynamicProviderConfigurationFingerprint: Equatable {
         let code: PackageCodeFingerprint
         let selectedDomainURL: String?
@@ -279,21 +301,16 @@ public final class SkyStreamPluginManager: ObservableObject {
         let packageName: String
         let expectedConfiguration: DynamicProviderConfigurationFingerprint
         let providers: [SkyStreamPluginProvider]
-        /// Captured from the one-shot clone used by accepted installed code. Staged candidates
-        /// use the separate validation API and can never construct this commit object.
+
         let runtimeSnapshot: SkyStreamRuntimeStorageSnapshot
+        let scopeAuthority: SkyStreamServiceScopeAuthority
     }
 
-    /// Exact catalog authority captured before a repository download begins. A refresh/removal or
-    /// changed list row while the archive is being validated must win over the stale install.
     private struct RepositoryInstallAuthority: Equatable {
         let repository: SkyStreamSavedRepository
         let entry: SkyStreamPluginListEntry
     }
 
-    /// Only state that uncommitted validation can observe or that changes the pinned execution
-    /// authority. Runtime storage, secrets, enable/order/source flags, and timestamps are excluded
-    /// so ordinary successful activity cannot starve an update prepared concurrently.
     private struct InstallValidationAuthorityFingerprint: Equatable {
         let code: PackageCodeFingerprint
         let selectedDomainURL: String?
@@ -313,9 +330,6 @@ public final class SkyStreamPluginManager: ObservableObject {
         }
     }
 
-    /// Immutable output of every untrusted install step. Network I/O happens before construction;
-    /// ZIP extraction and JavaScript evaluation happen while building it. Publication is the only
-    /// part allowed to run under `mutationGateIsHeld`.
     private struct PreparedInstall {
         let transactionRootURL: URL
         let stagedPayloadURL: URL
@@ -333,6 +347,8 @@ public final class SkyStreamPluginManager: ObservableObject {
         let repositoryAuthority: RepositoryInstallAuthority?
         let requiredPackageName: String?
         let isByteIdenticalReinstall: Bool
+
+        let scopeAuthority: SkyStreamServiceScopeAuthority
     }
 
     private struct CommittedInstall {
@@ -349,9 +365,6 @@ public final class SkyStreamPluginManager: ObservableObject {
         let dynamicPackageIDs: [String]
     }
 
-    /// Every package setting that safe-cloud metadata may overwrite. Code/provenance authority is
-    /// checked separately; this fingerprint makes a local mirror/provider/preference/storage edit
-    /// that happened during remote reconstruction win even when immutable code stayed identical.
     private struct SafeCloudConfigurationFingerprint: Equatable {
         let dynamicConfiguration: DynamicProviderConfigurationFingerprint
         let providers: [SkyStreamProviderState]
@@ -397,8 +410,7 @@ public final class SkyStreamPluginManager: ObservableObject {
             mutationGateIsHeld = false
         } else {
             let next = mutationGateWaiters.removeFirst()
-            // Ownership transfers directly; keeping the flag set prevents a newly arriving task
-            // from bypassing callers already queued in FIFO order.
+
             next.resume()
         }
     }
@@ -451,11 +463,7 @@ public final class SkyStreamPluginManager: ObservableObject {
         cachedProvidersByID = [:]
     }
 
-    /// Repairs only the SkyStream subset after the CoreData state is durable. Non-Sky source
-    /// selection/order is byte-for-byte preserved, and a missing extra-rules key keeps its
-    /// intentional "All" meaning. Running this at startup closes a process-exit window between
-    /// the state save and these UserDefaults updates in either direction.
-    private func reconcileSkySourceDefaults(defaults: UserDefaults = .standard) {
+    private func reconcileSkySourceDefaults(defaults: UserDefaults = ProfileSettingsStore.services) {
         struct DurableSource {
             let id: String
             let state: SkyStreamProviderState
@@ -499,14 +507,20 @@ public final class SkyStreamPluginManager: ObservableObject {
             defaults.stringArray(forKey: "servicesAutoModeSourceOrderIds") ?? []
         )
         var ordered = Set(order)
+        var newlyOfferedIDs: [String] = []
         for id in missingOrder where ordered.insert(id).inserted {
             order.append(id)
+            newlyOfferedIDs.append(id)
         }
         defaults.set(order, forKey: "servicesAutoModeSourceOrderIds")
 
-        let selected = removingStaleSkySources(
+        var selected = removingStaleSkySources(
             defaults.stringArray(forKey: "servicesAutoModeSourceIds") ?? []
         )
+        var selectedIDs = Set(selected)
+        for id in newlyOfferedIDs where selectedIDs.insert(id).inserted {
+            selected.append(id)
+        }
         defaults.set(selected, forKey: "servicesAutoModeSourceIds")
 
         if let explicit = StreamLanguageFilter.extraRulesSourceIds(defaults: defaults) {
@@ -516,7 +530,7 @@ public final class SkyStreamPluginManager: ObservableObject {
     }
 
     private func sourceDefaultsSnapshot(
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = ProfileSettingsStore.services
     ) -> SkySourceDefaultsSnapshot {
         SkySourceDefaultsSnapshot(
             selectedIDs: defaults.stringArray(forKey: "servicesAutoModeSourceIds") ?? [],
@@ -527,16 +541,13 @@ public final class SkyStreamPluginManager: ObservableObject {
 
     private static func applySourceDefaultsSnapshot(
         _ snapshot: SkySourceDefaultsSnapshot,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = ProfileSettingsStore.services
     ) {
         defaults.set(snapshot.selectedIDs, forKey: "servicesAutoModeSourceIds")
         defaults.set(snapshot.orderIDs, forKey: "servicesAutoModeSourceOrderIds")
         StreamLanguageFilter.setExtraRulesSourceIds(snapshot.explicitIDs, defaults: defaults)
     }
 
-    /// Predicts the exact UserDefaults repair that successful package publication performs. Safe
-    /// restore uses this as its three-way baseline so newly reconstructed Sky sources appended by
-    /// internal reconciliation are not mistaken for a concurrent user reorder on a clean device.
     private static func reconciledSourceDefaultsSnapshot(
         _ snapshot: SkySourceDefaultsSnapshot,
         plugins: [SkyStreamInstalledPluginState]
@@ -591,9 +602,6 @@ public final class SkyStreamPluginManager: ObservableObject {
         return result
     }
 
-    /// UserDefaults is the live authority during ordinary operation. Snapshot exports overlay that
-    /// authority at capture time so a queued async persistence task can never upload stale source
-    /// selection/order fields.
     private static func pluginByOverlayingSourceDefaults(
         _ plugin: SkyStreamInstalledPluginState,
         snapshot: SkySourceDefaultsSnapshot
@@ -670,9 +678,7 @@ public final class SkyStreamPluginManager: ObservableObject {
                incomingBySourceID.values.contains(where: {
                    $0.isExplicitlySelectedForExtraRules == false
                }) {
-                // Switching from global All to a remote Sky-specific exclusion requires an
-                // explicit universe. Preserve the shared source ordering and then add any durable
-                // Sky source not currently represented.
+
                 var seen = Set<String>()
                 explicitValues = (current.orderIDs + current.selectedIDs
                     + allCurrentSourceIDs.sorted()).filter { seen.insert($0).inserted }
@@ -687,32 +693,37 @@ public final class SkyStreamPluginManager: ObservableObject {
                         explicitValues.append(sourceID)
                     }
                 }
-                // Only incoming Sky IDs were removed/reinserted. Every non-Sky value—including
-                // duplicates and relative order—remains byte-for-byte where the user put it.
+
                 target.explicitIDs = explicitValues
             }
         }
         return target
     }
 
-    /// Captures the SkyStream subset of the shared source settings after the Settings UI has
-    /// written UserDefaults. Each queued capture re-reads the latest values while holding the
-    /// mutation gate, so rapid toggles/reorders coalesce safely instead of replaying stale UI state.
-    public func captureSourceDefaultsState() async {
-        guard isLoaded, PlatformCapabilities.current.supportsSkyStreamPlugins else { return }
+    public func captureSourceDefaultsState(expectedScopeGeneration: Int? = nil) async {
+        guard isLoaded, PlatformCapabilities.current.supportsSkyStreamPlugins,
+              expectedScopeGeneration.map(ServiceStoreScope.isCurrent) ?? true else { return }
         do {
             try await withMutationGate {
-                try await captureSourceDefaultsStateUnlocked()
+                guard expectedScopeGeneration.map(ServiceStoreScope.isCurrent) ?? true else {
+                    throw SkyStreamPluginManagerError.stateChangedDuringValidation
+                }
+                try await captureSourceDefaultsStateUnlocked(
+                    expectedScopeGeneration: expectedScopeGeneration
+                )
             }
         } catch {
             log("failed to persist source settings", error: error)
         }
     }
 
-    /// Caller must own `mutationGateIsHeld`.
     private func captureSourceDefaultsStateUnlocked(
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = ProfileSettingsStore.services,
+        expectedScopeGeneration: Int? = nil
     ) async throws {
+        guard expectedScopeGeneration.map(ServiceStoreScope.isCurrent) ?? true else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
         let selectedSourceIDs = Set(
             defaults.stringArray(forKey: "servicesAutoModeSourceIds") ?? []
         )
@@ -754,6 +765,9 @@ public final class SkyStreamPluginManager: ObservableObject {
             }
         }
         guard candidate != installedPlugins else { return }
+        guard expectedScopeGeneration.map(ServiceStoreScope.isCurrent) ?? true else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
         installedPlugins = candidate
         try await persist()
     }
@@ -783,11 +797,21 @@ public final class SkyStreamPluginManager: ObservableObject {
         Task { [weak self] in
             await self?.loadPersistedState()
         }
+
+        NotificationCenter.default.addObserver(
+            forName: ServiceStoreScope.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                await self?.loadPersistedState()
+            }
+        }
     }
 
     public var providers: [SkyStreamProviderDescriptor] {
         guard PlatformCapabilities.current.supportsSkyStreamPlugins else { return [] }
-        let order = UserDefaults.standard.stringArray(forKey: "servicesAutoModeSourceOrderIds") ?? []
+        let order = ProfileSettingsStore.services.stringArray(forKey: "servicesAutoModeSourceOrderIds") ?? []
         if cachedProviderOrder == order { return cachedProviders }
         let orderRank = order.enumerated().reduce(into: [String: Int]()) {
             if $0[$1.element] == nil { $0[$1.element] = $1.offset }
@@ -797,8 +821,7 @@ public final class SkyStreamPluginManager: ObservableObject {
             where !runtimePublicationBlockedPackageIDs.contains(plugin.id) {
             let current = Self.currentProviderPairs(for: plugin.manifest)
             let stateByID = plugin.providers.reduce(into: [String: SkyStreamProviderState]()) {
-                // A corrupt/forged backup must not turn duplicate provider IDs into
-                // Dictionary's fatal duplicate-key trap. The first bounded record wins.
+
                 if $0[$1.id] == nil { $0[$1.id] = $1 }
             }
             for pair in current {
@@ -868,16 +891,14 @@ public final class SkyStreamPluginManager: ObservableObject {
         guard PlatformCapabilities.current.supportsSkyStreamPlugins else {
             throw SkyStreamPluginManagerError.unavailable
         }
-        guard isLoaded else { throw SkyStreamPluginManagerError.managerNotLoaded }
+        guard isLoaded else { throw notLoadedError }
         let resolution = try await repositoryManager.resolveUserInput(rawURL)
         if case .repository(let repository) = resolution {
             try await saveRepository(repository)
             return resolution
         }
         guard case .archive(let data, _) = resolution else { return resolution }
-        // Retain the user-approved entry point, not a versioned redirect destination, so a
-        // direct package can participate in the existing auto-update setting. Every later fetch
-        // still revalidates redirects and archive contents before replacement.
+
         let pinnedURL = try SkyStreamRemoteURLPolicy.shared.validateSyntactic(
             rawURL,
             purpose: .package
@@ -886,14 +907,23 @@ public final class SkyStreamPluginManager: ObservableObject {
     }
 
     public func saveRepository(_ repository: SkyStreamSavedRepository) async throws {
+        let scopeAuthority = SkyStreamServiceScopeAuthority.capture()
         try await withMutationGate {
-            try await saveRepositoryUnlocked(repository)
+            try await saveRepositoryUnlocked(
+                repository,
+                expectedScopeAuthority: scopeAuthority
+            )
         }
     }
 
-    /// Caller must own `mutationGateIsHeld`.
-    private func saveRepositoryUnlocked(_ repository: SkyStreamSavedRepository) async throws {
-        guard isLoaded else { throw SkyStreamPluginManagerError.managerNotLoaded }
+    private func saveRepositoryUnlocked(
+        _ repository: SkyStreamSavedRepository,
+        expectedScopeAuthority: SkyStreamServiceScopeAuthority
+    ) async throws {
+        guard expectedScopeAuthority.isCurrent else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
+        guard isLoaded else { throw notLoadedError }
         guard repository.plugins.count <= 2_000,
               repository.pluginListURLs.count <= 32,
               !repository.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -926,30 +956,49 @@ public final class SkyStreamPluginManager: ObservableObject {
         let previous = repositories
         repositories = candidate
         do {
-            try await persist()
+            try await persist(
+                expectedScopeGeneration: expectedScopeAuthority.serviceStoreGeneration
+            )
+            guard expectedScopeAuthority.isCurrent else {
+                throw SkyStreamPluginManagerError.stateChangedDuringValidation
+            }
             log("repository saved", url: repository.sourceURL)
         } catch {
-            repositories = previous
+            if expectedScopeAuthority.isCurrent {
+                repositories = previous
+            }
             throw error
         }
     }
 
     public func refreshRepositoriesAndInstalledPlugins(autoUpdate: Bool) async {
-        guard isLoaded, PlatformCapabilities.current.supportsSkyStreamPlugins else { return }
-        for repository in repositories where repository.frozenAt == nil {
-            if Task.isCancelled { return }
+        guard isLoaded,
+              PlatformCapabilities.current.supportsSkyStreamPlugins,
+              canAdministerPlugins else { return }
+        let scopeAuthority = SkyStreamServiceScopeAuthority.capture()
+        let repositoriesAtStart = repositories.filter { $0.frozenAt == nil }
+        for repository in repositoriesAtStart {
+            guard !Task.isCancelled,
+                  canAdministerPlugins,
+                  scopeAuthority.isCurrent else { return }
             do {
                 let refreshed = try await repositoryManager.refresh(repository)
+                guard canAdministerPlugins, scopeAuthority.isCurrent else { return }
                 try await withMutationGate {
-                    // A removal, freeze, or newer refresh while the network request was in flight
-                    // wins. Never resurrect or overwrite that newer repository state.
-                    guard repositories.contains(repository) else { return }
-                    try await saveRepositoryUnlocked(refreshed)
+                    guard canAdministerPlugins,
+                          scopeAuthority.isCurrent,
+                          repositories.contains(repository) else { return }
+                    try await saveRepositoryUnlocked(
+                        refreshed,
+                        expectedScopeAuthority: scopeAuthority
+                    )
                 }
             } catch {
+                guard scopeAuthority.isCurrent else { return }
                 log("repository refresh failed", url: repository.sourceURL, error: error)
             }
         }
+        guard canAdministerPlugins, scopeAuthority.isCurrent else { return }
         let dynamicCodeBeforeUpdate = installedPlugins
             .filter { $0.usesDynamicProviders == true }
             .reduce(into: [String: String]()) {
@@ -958,30 +1007,44 @@ public final class SkyStreamPluginManager: ObservableObject {
                 }
             }
         if autoUpdate {
-            for plugin in installedPlugins where plugin.provenance.frozenAt == nil {
-                if Task.isCancelled { return }
+            let pluginsAtStart = installedPlugins.filter { $0.provenance.frozenAt == nil }
+            for plugin in pluginsAtStart {
+                guard !Task.isCancelled,
+                      canAdministerPlugins,
+                      scopeAuthority.isCurrent else { return }
                 do {
-                    try await updateIfAvailable(packageName: plugin.manifest.packageName)
+                    try await updateIfAvailable(
+                        packageName: plugin.manifest.packageName,
+                        expectedScopeAuthority: scopeAuthority
+                    )
                 } catch {
+                    guard scopeAuthority.isCurrent else { return }
                     log("automatic update retained installed version", packageName: plugin.manifest.packageName, error: error)
                 }
             }
         }
+        guard canAdministerPlugins, scopeAuthority.isCurrent else { return }
         let dynamicPackages = installedPlugins
             .filter { $0.usesDynamicProviders == true }
             .map(\.id)
         for packageName in dynamicPackages {
-            if Task.isCancelled { return }
+            guard !Task.isCancelled,
+                  canAdministerPlugins,
+                  scopeAuthority.isCurrent else { return }
             if autoUpdate,
                let previousCode = dynamicCodeBeforeUpdate[packageName],
                let current = plugin(packageName: packageName),
                previousCode != "\(current.manifest.version)|\(current.archiveSHA256)" {
-                // The successful install already evaluated getProviders against the new payload.
+
                 continue
             }
             do {
-                try await refreshDynamicProviders(packageName: packageName)
+                try await refreshDynamicProviders(
+                    packageName: packageName,
+                    expectedScopeAuthority: scopeAuthority
+                )
             } catch {
+                guard scopeAuthority.isCurrent else { return }
                 log("dynamic provider refresh retained previous rows", packageName: packageName, error: error)
             }
         }
@@ -993,7 +1056,6 @@ public final class SkyStreamPluginManager: ObservableObject {
         }
     }
 
-    /// Caller must own `mutationGateIsHeld`.
     private func removeRepositoryUnlocked(sourceURL: String) async throws {
         guard let repositoryIndex = repositories.firstIndex(where: { $0.sourceURL == sourceURL }) else {
             throw SkyStreamPluginManagerError.repositoryNotFound
@@ -1015,25 +1077,40 @@ public final class SkyStreamPluginManager: ObservableObject {
         }
     }
 
-    private func refreshDynamicProviders(packageName: String) async throws {
+    private func refreshDynamicProviders(
+        packageName: String,
+        expectedScopeAuthority: SkyStreamServiceScopeAuthority? = nil
+    ) async throws {
         guard PlatformCapabilities.current.supportsSkyStreamPlugins else {
             throw SkyStreamPluginManagerError.unavailable
         }
+        let scopeAuthority = expectedScopeAuthority
+            ?? SkyStreamServiceScopeAuthority.capture()
+        guard scopeAuthority.isCurrent else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
         guard let prepared = try await prepareDynamicProviderRefresh(
-            packageName: packageName
+            packageName: packageName,
+            expectedScopeAuthority: scopeAuthority
         ) else {
             return
         }
         _ = try await withMutationGate {
-            try await commitDynamicProviderRefreshUnlocked(prepared)
+            guard scopeAuthority.isCurrent else {
+                throw SkyStreamPluginManagerError.stateChangedDuringValidation
+            }
+            return try await commitDynamicProviderRefreshUnlocked(prepared)
         }
     }
 
-    /// Deliberately executes package JavaScript before acquiring `mutationGateIsHeld`.
     private func prepareDynamicProviderRefresh(
-        packageName: String
+        packageName: String,
+        expectedScopeAuthority: SkyStreamServiceScopeAuthority
     ) async throws -> PreparedDynamicProviderRefresh? {
         try Task.checkCancellation()
+        guard expectedScopeAuthority.isCurrent else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
         guard let existing = plugin(packageName: packageName), existing.usesDynamicProviders == true else {
             return nil
         }
@@ -1061,8 +1138,14 @@ public final class SkyStreamPluginManager: ObservableObject {
         let discovered = try await SkyStreamRuntimePool.shared.getProvidersForCommittedRefresh(
             using: configuration
         )
+        guard expectedScopeAuthority.isCurrent else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
         let runtimeSnapshot = committedRuntimeStore.snapshot()
         let providers = try await validatedDynamicProviders(discovered)
+        guard expectedScopeAuthority.isCurrent else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
         guard !providers.isEmpty else {
             throw SkyStreamPluginManagerError.packageIncompatible(
                 "This package did not return any usable dynamic providers."
@@ -1073,16 +1156,17 @@ public final class SkyStreamPluginManager: ObservableObject {
             packageName: packageName,
             expectedConfiguration: expectedConfiguration,
             providers: providers,
-            runtimeSnapshot: runtimeSnapshot
+            runtimeSnapshot: runtimeSnapshot,
+            scopeAuthority: expectedScopeAuthority
         )
     }
 
-    /// Caller must own `mutationGateIsHeld`.
     private func commitDynamicProviderRefreshUnlocked(
         _ prepared: PreparedDynamicProviderRefresh
     ) async throws -> Bool {
-        // Runtime execution and dynamic-provider validation both suspend outside the gate. Rebind
-        // to the current package and reject output based on stale code, settings, storage, or mirror.
+        guard prepared.scopeAuthority.isCurrent else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
         guard let index = installedPlugins.firstIndex(where: { $0.id == prepared.packageName }),
               installedPlugins[index].usesDynamicProviders == true,
               DynamicProviderConfigurationFingerprint(installedPlugins[index])
@@ -1115,14 +1199,19 @@ public final class SkyStreamPluginManager: ObservableObject {
         }
         installedPlugins[index].updatedAt = Date()
         do {
-            try await persist(runtimeResetPackageIDs: [prepared.packageName]) {
+            try await persist(
+                runtimeResetPackageIDs: [prepared.packageName],
+                expectedScopeGeneration: prepared.scopeAuthority.serviceStoreGeneration
+            ) {
                 await SkyStreamRuntimePool.shared.invalidatePackage(
                     prepared.packageName,
                     resetDataStore: true
                 )
             }
         } catch {
-            installedPlugins = oldPlugins
+            if prepared.scopeAuthority.isCurrent {
+                installedPlugins = oldPlugins
+            }
             throw error
         }
         return true
@@ -1136,23 +1225,30 @@ public final class SkyStreamPluginManager: ObservableObject {
         guard PlatformCapabilities.current.supportsSkyStreamPlugins else {
             throw SkyStreamPluginManagerError.unavailable
         }
-        guard isLoaded else { throw SkyStreamPluginManagerError.managerNotLoaded }
+        guard isLoaded else { throw notLoadedError }
+        guard canAdministerPlugins else {
+            throw SkyStreamPluginManagerError.requiresGrownUpProfile
+        }
+        let scopeAuthority = SkyStreamServiceScopeAuthority.capture()
         return try await performRepositoryInstall(
             packageName: packageName,
             from: repository,
             replacementPolicy: replacementPolicy,
-            installedBaseline: installedPlugins
+            installedBaseline: installedPlugins,
+            expectedScopeAuthority: scopeAuthority
         )
     }
 
-    /// Captures catalog authority before opening the network. Download, extraction, and arbitrary
-    /// package JavaScript all finish before publication attempts to acquire the mutation gate.
     private func performRepositoryInstall(
         packageName: String,
         from repository: SkyStreamSavedRepository,
         replacementPolicy: SkyStreamReplacementPolicy,
-        installedBaseline: [SkyStreamInstalledPluginState]
+        installedBaseline: [SkyStreamInstalledPluginState],
+        expectedScopeAuthority: SkyStreamServiceScopeAuthority
     ) async throws -> SkyStreamInstalledPluginState {
+        guard expectedScopeAuthority.isCurrent else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
         guard let currentRepository = repositories.first(where: {
             $0.sourceURL == repository.sourceURL
         }), currentRepository == repository,
@@ -1173,6 +1269,9 @@ public final class SkyStreamPluginManager: ObservableObject {
             relativeTo: baseURL,
             packageName: packageName
         )
+        guard expectedScopeAuthority.isCurrent else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
         let provenance = SkyStreamInstallProvenance(
             kind: .repository,
             sourceURL: downloaded.finalURL.absoluteString,
@@ -1187,7 +1286,8 @@ public final class SkyStreamPluginManager: ObservableObject {
             provenance: provenance,
             replacementPolicy: replacementPolicy,
             installedBaseline: installedBaseline,
-            repositoryAuthority: authority
+            repositoryAuthority: authority,
+            expectedScopeAuthority: expectedScopeAuthority
         )
         return try await commitPreparedInstall(prepared)
     }
@@ -1200,7 +1300,11 @@ public final class SkyStreamPluginManager: ObservableObject {
         guard PlatformCapabilities.current.supportsSkyStreamPlugins else {
             throw SkyStreamPluginManagerError.unavailable
         }
-        guard isLoaded else { throw SkyStreamPluginManagerError.managerNotLoaded }
+        guard isLoaded else { throw notLoadedError }
+        guard canAdministerPlugins else {
+            throw SkyStreamPluginManagerError.requiresGrownUpProfile
+        }
+        let scopeAuthority = SkyStreamServiceScopeAuthority.capture()
         let installedBaseline = installedPlugins
         let pinnedURL = try SkyStreamRemoteURLPolicy.shared.validateSyntactic(
             sourceURL.absoluteString,
@@ -1216,16 +1320,34 @@ public final class SkyStreamPluginManager: ObservableObject {
             provenance: provenance,
             replacementPolicy: replacementPolicy,
             installedBaseline: installedBaseline,
-            repositoryAuthority: nil
+            repositoryAuthority: nil,
+            expectedScopeAuthority: scopeAuthority
         )
         return try await commitPreparedInstall(prepared)
     }
 
     public func updateIfAvailable(packageName: String) async throws {
+        guard canAdministerPlugins else {
+            throw SkyStreamPluginManagerError.requiresGrownUpProfile
+        }
+        let scopeAuthority = SkyStreamServiceScopeAuthority.capture()
+        try await updateIfAvailable(
+            packageName: packageName,
+            expectedScopeAuthority: scopeAuthority
+        )
+    }
+
+    private func updateIfAvailable(
+        packageName: String,
+        expectedScopeAuthority: SkyStreamServiceScopeAuthority
+    ) async throws {
         guard PlatformCapabilities.current.supportsSkyStreamPlugins else {
             throw SkyStreamPluginManagerError.unavailable
         }
-        guard isLoaded else { throw SkyStreamPluginManagerError.managerNotLoaded }
+        guard expectedScopeAuthority.isCurrent else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
+        guard isLoaded else { throw notLoadedError }
         let installedBaseline = installedPlugins
         guard let installed = plugin(packageName: packageName) else {
             throw SkyStreamPluginManagerError.packageNotFound
@@ -1242,19 +1364,20 @@ public final class SkyStreamPluginManager: ObservableObject {
                 packageName: packageName,
                 from: repository,
                 replacementPolicy: .normal,
-                installedBaseline: installedBaseline
+                installedBaseline: installedBaseline,
+                expectedScopeAuthority: expectedScopeAuthority
             )
 
         case .directArchive:
-            // Direct installs remain pinned to the exact user-approved HTTPS origin. The normal
-            // installer revalidates the archive, ABI, hashes, package identity, and version rules;
-            // same-version byte changes and downgrades therefore stay installed until the user
-            // explicitly approves a replacement from the manager UI.
+
             let pinned = try SkyStreamRemoteURLPolicy.shared.validateSyntactic(
                 installed.provenance.sourceURL,
                 purpose: .package
             ).url
             let resolution = try await repositoryManager.resolveUserInput(pinned.absoluteString)
+            guard expectedScopeAuthority.isCurrent else {
+                throw SkyStreamPluginManagerError.stateChangedDuringValidation
+            }
             guard case .archive(let data, _) = resolution else {
                 throw SkyStreamRepositoryError.unsupportedInput
             }
@@ -1269,26 +1392,45 @@ public final class SkyStreamPluginManager: ObservableObject {
                 replacementPolicy: .normal,
                 installedBaseline: installedBaseline,
                 repositoryAuthority: nil,
+                expectedScopeAuthority: expectedScopeAuthority,
                 requiredPackageName: installed.id
             )
             _ = try await commitPreparedInstall(prepared)
 
         case .backup:
-            // Legacy backup provenance has no independently pinned network owner. A manual
-            // reinstall can establish repository/direct provenance; background update must not
-            // guess one from restored metadata.
+
             return
         }
     }
 
-    public func setProviderEnabled(sourceID: String, enabled: Bool) async throws {
+    public func setProviderEnabled(
+        sourceID: String,
+        enabled: Bool,
+        expectedScopeGeneration: Int? = nil
+    ) async throws {
+        guard canAdministerPlugins else {
+            throw SkyStreamPluginManagerError.requiresGrownUpProfile
+        }
+        guard expectedScopeGeneration.map(ServiceStoreScope.isCurrent) ?? true else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
         try await withMutationGate {
-            try await setProviderEnabledUnlocked(sourceID: sourceID, enabled: enabled)
+            guard expectedScopeGeneration.map(ServiceStoreScope.isCurrent) ?? true else {
+                throw SkyStreamPluginManagerError.stateChangedDuringValidation
+            }
+            try await setProviderEnabledUnlocked(
+                sourceID: sourceID,
+                enabled: enabled,
+                expectedScopeGeneration: expectedScopeGeneration
+            )
         }
     }
 
-    /// Caller must own `mutationGateIsHeld`.
-    private func setProviderEnabledUnlocked(sourceID: String, enabled: Bool) async throws {
+    private func setProviderEnabledUnlocked(
+        sourceID: String,
+        enabled: Bool,
+        expectedScopeGeneration: Int?
+    ) async throws {
         guard let pluginIndex = installedPlugins.firstIndex(where: { plugin in
             plugin.providers.contains { $0.id == sourceID && $0.removedAt == nil }
         }), let stateIndex = installedPlugins[pluginIndex].providers.firstIndex(where: { $0.id == sourceID }) else {
@@ -1298,10 +1440,12 @@ public final class SkyStreamPluginManager: ObservableObject {
         installedPlugins[pluginIndex].providers[stateIndex].isEnabled = enabled
         installedPlugins[pluginIndex].updatedAt = Date()
         do {
-            try await persist()
+            try await persist(expectedScopeGeneration: expectedScopeGeneration)
             SkyStreamResolver.shared.invalidateCachesForPackage(previous[pluginIndex].id)
         } catch {
-            installedPlugins = previous
+            if expectedScopeGeneration.map(ServiceStoreScope.isCurrent) ?? true {
+                installedPlugins = previous
+            }
             throw error
         }
     }
@@ -1309,6 +1453,9 @@ public final class SkyStreamPluginManager: ObservableObject {
     public func setSelectedDomain(packageName: String, domainURL: String) async throws {
         guard PlatformCapabilities.current.supportsSkyStreamPlugins else {
             throw SkyStreamPluginManagerError.unavailable
+        }
+        guard canAdministerPlugins else {
+            throw SkyStreamPluginManagerError.requiresGrownUpProfile
         }
         guard let beforeValidation = plugin(packageName: packageName) else {
             throw SkyStreamPluginManagerError.packageNotFound
@@ -1318,8 +1465,7 @@ public final class SkyStreamPluginManager: ObservableObject {
         guard allowed.contains(domainURL) else {
             throw SkyStreamPluginManagerError.catalogManifestMismatch
         }
-        // DNS/TLS validation can wait on the network. Do it before the manager-wide transaction;
-        // the gated commit below rebinds and fingerprints the exact package afterward.
+
         _ = try await SkyStreamRemoteURLPolicy.shared.validate(domainURL, purpose: .pluginRequest)
         let shouldRefreshDynamicProviders = try await withMutationGate {
             try await setSelectedDomainUnlocked(
@@ -1332,20 +1478,18 @@ public final class SkyStreamPluginManager: ObservableObject {
             do {
                 try await refreshDynamicProviders(packageName: packageName)
             } catch {
-                // The mirror selection is already durable. Keep the last known provider rows and
-                // retry discovery later instead of turning transient package failure into data loss.
+
                 log("dynamic providers retained after mirror refresh failure", packageName: packageName, error: error)
             }
         }
     }
 
-    /// Caller must own `mutationGateIsHeld`.
     private func setSelectedDomainUnlocked(
         packageName: String,
         domainURL: String,
         expectedConfiguration: DynamicProviderConfigurationFingerprint
     ) async throws -> Bool {
-        // Never apply a mirror approved for a payload that was replaced during validation.
+
         guard let index = installedPlugins.firstIndex(where: { $0.id == packageName }) else {
             throw SkyStreamPluginManagerError.packageNotFound
         }
@@ -1372,6 +1516,9 @@ public final class SkyStreamPluginManager: ObservableObject {
     }
 
     public func resetPreferences(packageName: String) async throws {
+        guard canAdministerPlugins else {
+            throw SkyStreamPluginManagerError.requiresGrownUpProfile
+        }
         let shouldRefreshDynamicProviders = try await withMutationGate {
             try await resetPreferencesUnlocked(packageName: packageName)
         }
@@ -1379,13 +1526,12 @@ public final class SkyStreamPluginManager: ObservableObject {
             do {
                 try await refreshDynamicProviders(packageName: packageName)
             } catch {
-                // The reset is already durable. Keep usable rows and retry discovery later.
+
                 log("dynamic providers retained after preference reset failure", packageName: packageName, error: error)
             }
         }
     }
 
-    /// Caller must own `mutationGateIsHeld`.
     private func resetPreferencesUnlocked(packageName: String) async throws -> Bool {
         guard let index = installedPlugins.firstIndex(where: { $0.manifest.packageName == packageName }) else {
             throw SkyStreamPluginManagerError.packageNotFound
@@ -1412,18 +1558,12 @@ public final class SkyStreamPluginManager: ObservableObject {
         return previous[index].usesDynamicProviders == true
     }
 
-    /// Persists the bounded package-scoped runtime store after an ABI resolution
-    /// batch. Unknown runtime preference keys are secret by default; a plugin must
-    /// never be able to make a newly written credential cloud-exportable merely by
-    /// choosing an innocuous key name.
     func persistRuntimeSnapshot(
         packageName: String,
         expectedScriptSHA256: String,
         snapshot: SkyStreamRuntimeStorageSnapshot
     ) async throws {
-        // Capture the complete package state before waiting for the global transaction. A reset,
-        // mirror change, reinstall, or newer runtime snapshot queued ahead of this one must win,
-        // even when an update happens to reuse the same script hash.
+
         guard let expectedPlugin = plugin(packageName: packageName),
               expectedPlugin.scriptSHA256.caseInsensitiveCompare(expectedScriptSHA256) == .orderedSame else {
             return
@@ -1438,7 +1578,6 @@ public final class SkyStreamPluginManager: ObservableObject {
         }
     }
 
-    /// Caller must own `mutationGateIsHeld`.
     private func persistRuntimeSnapshotUnlocked(
         packageName: String,
         expectedScriptSHA256: String,
@@ -1478,12 +1617,14 @@ public final class SkyStreamPluginManager: ObservableObject {
     }
 
     public func uninstall(packageName: String) async throws {
+        guard canAdministerPlugins else {
+            throw SkyStreamPluginManagerError.requiresGrownUpProfile
+        }
         try await withMutationGate {
             try await uninstallUnlocked(packageName: packageName)
         }
     }
 
-    /// Caller must own `mutationGateIsHeld`.
     private func uninstallUnlocked(packageName: String) async throws {
         guard let index = installedPlugins.firstIndex(where: { $0.manifest.packageName == packageName }) else {
             throw SkyStreamPluginManagerError.packageNotFound
@@ -1503,9 +1644,32 @@ public final class SkyStreamPluginManager: ObservableObject {
             installedPlugins = previous
             throw error
         }
-        try? removeManagedItem(relativePath: removed.payloadRelativePath)
-        try? removeManagedItem(url: archiveURL(for: removed))
+
+        if canDeleteSharedPluginPayloads {
+            try? removeManagedItem(relativePath: removed.payloadRelativePath)
+            try? removeManagedItem(url: archiveURL(for: removed))
+        } else {
+            log(
+                "plugin payload retained: services are not shared and another profile may still reference it",
+                packageName: packageName
+            )
+        }
+
+        let rootID = SkyStreamStableID.rootProvider(packageName: packageName)
+        SourceHealthStore.shared.removeRecords { sourceID in
+            sourceID == rootID || sourceID.hasPrefix(rootID + "::")
+        }
         log("plugin uninstalled", packageName: packageName)
+    }
+
+    private var canAdministerPlugins: Bool {
+        ServicePluginAdministrativeAdmissionPolicy.permits(
+            isKidsProfile: ProfileManager.shared.activeProfile?.isKidsProfile == true
+        )
+    }
+
+    private var canDeleteSharedPluginPayloads: Bool {
+        ProfileSettingsStore.sharesServices || ProfileManager.shared.profiles.count == 1
     }
 
     public func verifyScriptIntegrity(for plugin: SkyStreamInstalledPluginState) throws -> URL {
@@ -1521,9 +1685,6 @@ public final class SkyStreamPluginManager: ObservableObject {
         return scriptURL
     }
 
-    /// Resolves only the managed regular-file path. The provider runtime performs the full
-    /// size/hash/UTF-8 verification again immediately before evaluation on its own queue, so the
-    /// high-frequency resolver path need not hash a potentially 10 MB script on the main actor.
     public func runtimeScriptURL(for plugin: SkyStreamInstalledPluginState) throws -> URL {
         let payloadURL = try managedURL(relativePath: plugin.payloadRelativePath)
         let scriptURL = payloadURL.appendingPathComponent("plugin.js", isDirectory: false)
@@ -1539,7 +1700,7 @@ public final class SkyStreamPluginManager: ObservableObject {
     func manualBackupCapturePlan() throws -> SkyStreamManualBackupCapturePlan {
         let repositorySnapshots = committedRepositories.compactMap(Self.backupRepository)
         guard repositorySnapshots.count == committedRepositories.count else {
-            // Never report a successful authoritative export that silently omitted a saved source.
+
             throw SkyStreamPluginManagerError.invalidBackup
         }
         let liveSourceDefaults = sourceDefaultsSnapshot()
@@ -1558,9 +1719,6 @@ public final class SkyStreamPluginManager: ObservableObject {
         )
     }
 
-    /// Maps and verifies package archives without holding the manager's main-actor executor.
-    /// The caller normally obtains `plan` with `manualBackupCapturePlan()` on the main actor and
-    /// invokes this method from its existing backup worker queue.
     nonisolated static func materializeManualBackupSnapshot(
         _ plan: SkyStreamManualBackupCapturePlan
     ) throws -> SkyStreamBackupSnapshot {
@@ -1579,9 +1737,7 @@ public final class SkyStreamPluginManager: ObservableObject {
                   let archive = try? Data(contentsOf: captured.archiveURL, options: [.mappedIfSafe]),
                   archive.count <= Self.maximumPackageArchiveBytes,
                   Self.sha256Hex(archive).caseInsensitiveCompare(plugin.archiveSHA256) == .orderedSame else {
-                // A normal file backup is authoritative. Writing a redacted package here would
-                // create a backup that appears successful but cannot be restored, so fail the
-                // entire export visibly instead.
+
                 throw SkyStreamPluginManagerError.integrityFailure
             }
             let (nextAggregateBytes, overflow) = aggregateArchiveBytes.addingReportingOverflow(archive.count)
@@ -1613,12 +1769,93 @@ public final class SkyStreamPluginManager: ObservableObject {
         safeCloudBackupSnapshot(includingArchives: true)
     }
 
-    /// Frequent CKSyncEngine captures need only provider/repository metadata. Avoid mapping and
-    /// hashing as much as 64 MB of package archives on every unrelated UserDefaults or progress
-    /// notification; the existing experimental cloud/manual backup lanes remain responsible for
-    /// archive transport.
     public func safeCloudMetadataSnapshot() -> SkyStreamBackupSnapshot {
         safeCloudBackupSnapshot(includingArchives: false)
+    }
+
+    public func completePrivateCloudMetadataSnapshot() -> SkyStreamBackupSnapshot? {
+        completePrivateCloudSnapshot(includingArchives: false)
+    }
+
+    public func completePrivateCloudBackupSnapshot() -> SkyStreamBackupSnapshot? {
+        completePrivateCloudSnapshot(includingArchives: true)
+    }
+
+    static func completePrivateCloudMetadataSnapshot(
+        fromPersistedStateData data: Data
+    ) -> SkyStreamBackupSnapshot? {
+        guard data.count <= Self.maximumPersistedStateBytes,
+              let state = try? JSONDecoder().decode(PersistedState.self, from: data),
+              state.schemaVersion == 1,
+              state.repositories.count <= Self.maximumRepositoryCount,
+              state.installedPlugins.count <= Self.maximumInstalledPluginCount,
+              Set(state.repositories.map(\.sourceURL)).count == state.repositories.count,
+              Set(state.installedPlugins.map(\.id)).count == state.installedPlugins.count else {
+            return nil
+        }
+        var repositories: [SkyStreamRepositoryBackupSnapshot] = []
+        repositories.reserveCapacity(state.repositories.count)
+        for repository in state.repositories {
+            guard let captured = Self.backupRepository(repository),
+                  Self.privateCloudRepositoryConfigurationIsCapturable(captured) else { return nil }
+            repositories.append(captured)
+        }
+        var plugins: [SkyStreamPluginBackupSnapshot] = []
+        plugins.reserveCapacity(state.installedPlugins.count)
+        for plugin in state.installedPlugins {
+            guard Self.privateCloudPluginConfigurationIsCapturable(plugin) else { return nil }
+            var captured = plugin
+            captured.runtimeStorage = nil
+            plugins.append(SkyStreamPluginBackupSnapshot(
+                state: captured,
+                archivePayload: nil,
+                payloadWasRedacted: true,
+                preferencesWereRedacted: false
+            ))
+        }
+        return SkyStreamBackupSnapshot(
+            repositories: repositories,
+            plugins: plugins,
+            isSafeCloudSnapshot: true,
+            privateCloudConfigurationIsComplete: true
+        )
+    }
+
+    static func safeCloudMetadataSnapshot(
+        fromPersistedStateData data: Data
+    ) -> SkyStreamBackupSnapshot? {
+        guard data.count <= Self.maximumPersistedStateBytes,
+              let state = try? JSONDecoder().decode(PersistedState.self, from: data),
+              state.schemaVersion == 1,
+              state.repositories.count <= Self.maximumRepositoryCount,
+              state.installedPlugins.count <= Self.maximumInstalledPluginCount,
+              Set(state.repositories.map(\.sourceURL)).count == state.repositories.count else {
+            return nil
+        }
+        let repositories = state.repositories.compactMap(Self.backupRepository)
+        let plugins = state.installedPlugins.compactMap { plugin -> SkyStreamPluginBackupSnapshot? in
+            guard Self.isCloudSafeHTTPSURL(plugin.provenance.sourceURL),
+                  plugin.provenance.repositoryURL.map(Self.isCloudSafeHTTPSURL) ?? true,
+                  plugin.provenance.pluginListURL.map(Self.isCloudSafeHTTPSURL) ?? true else {
+                return nil
+            }
+            var redacted = plugin
+            redacted.runtimeStorage = nil
+            redacted.preferences = redacted.preferences.filter { key, value in
+                !value.isSecret && !value.isRedacted && !Self.containsCloudUnsafeSecretMarker(key)
+            }
+            return SkyStreamPluginBackupSnapshot(
+                state: redacted,
+                archivePayload: nil,
+                payloadWasRedacted: true,
+                preferencesWereRedacted: true
+            )
+        }
+        return SkyStreamBackupSnapshot(
+            repositories: repositories,
+            plugins: plugins,
+            isSafeCloudSnapshot: true
+        )
     }
 
     private func safeCloudBackupSnapshot(includingArchives: Bool) -> SkyStreamBackupSnapshot {
@@ -1667,7 +1904,7 @@ public final class SkyStreamPluginManager: ObservableObject {
                 state: redacted,
                 archivePayload: archive,
                 payloadWasRedacted: archive == nil,
-                // Conservative and stable: never reveal whether this device holds a local secret.
+
                 preferencesWereRedacted: true
             )
         }
@@ -1678,23 +1915,77 @@ public final class SkyStreamPluginManager: ObservableObject {
         )
     }
 
-    /// Full manual backups are authoritative for the SkyStream domain. Every
-    /// package is revalidated and smoke-evaluated through the normal installer;
-    /// the previous full snapshot is then used as an on-device rollback journal
-    /// if any package or the final metadata transaction fails.
+    private func completePrivateCloudSnapshot(
+        includingArchives: Bool
+    ) -> SkyStreamBackupSnapshot? {
+        var repositorySnapshots: [SkyStreamRepositoryBackupSnapshot] = []
+        repositorySnapshots.reserveCapacity(committedRepositories.count)
+        for repository in committedRepositories {
+            guard let captured = Self.backupRepository(repository),
+                  Self.privateCloudRepositoryConfigurationIsCapturable(captured) else { return nil }
+            repositorySnapshots.append(captured)
+        }
+        let liveSourceDefaults = sourceDefaultsSnapshot()
+        var aggregateArchiveBytes = 0
+        var plugins: [SkyStreamPluginBackupSnapshot] = []
+        plugins.reserveCapacity(committedInstalledPlugins.count)
+        for committedPlugin in committedInstalledPlugins {
+            let plugin = Self.pluginByOverlayingSourceDefaults(
+                committedPlugin,
+                snapshot: liveSourceDefaults
+            )
+            guard Self.privateCloudPluginConfigurationIsCapturable(plugin) else { return nil }
+            var captured = plugin
+            captured.runtimeStorage = nil
+            let archive: Data?
+            if includingArchives {
+                let archiveURL = archiveURL(for: plugin)
+                let candidate = try? Data(contentsOf: archiveURL, options: [.mappedIfSafe])
+                if let candidate,
+                   candidate.count <= Self.maximumPackageArchiveBytes,
+                   Self.sha256Hex(candidate).caseInsensitiveCompare(plugin.archiveSHA256)
+                    == .orderedSame {
+                    let (nextBytes, overflow) = aggregateArchiveBytes.addingReportingOverflow(
+                        candidate.count
+                    )
+                    if !overflow, nextBytes <= Self.maximumManualBackupArchiveBytes {
+                        aggregateArchiveBytes = nextBytes
+                        archive = candidate
+                    } else {
+                        archive = nil
+                    }
+                } else {
+                    archive = nil
+                }
+            } else {
+                archive = nil
+            }
+            plugins.append(SkyStreamPluginBackupSnapshot(
+                state: captured,
+                archivePayload: archive,
+                payloadWasRedacted: archive == nil,
+                preferencesWereRedacted: false
+            ))
+        }
+        return SkyStreamBackupSnapshot(
+            repositories: repositorySnapshots,
+            plugins: plugins,
+            isSafeCloudSnapshot: true,
+            privateCloudConfigurationIsComplete: true
+        )
+    }
+
     public func restoreManualBackupSnapshot(_ snapshot: SkyStreamBackupSnapshot) async throws {
         guard PlatformCapabilities.current.supportsSkyStreamPlugins else {
             throw SkyStreamPluginManagerError.unavailable
         }
-        guard isLoaded else { throw SkyStreamPluginManagerError.managerNotLoaded }
+        guard isLoaded else { throw notLoadedError }
         let prepared = try await prepareAuthoritativeManualSnapshot(snapshot)
         defer { try? removeManagedItem(url: prepared.transactionRootURL) }
         _ = try await withMutationGate {
             try await commitAuthoritativeManualSnapshotUnlocked(prepared)
         }
-        // The archive/effective backup catalog is already authoritative and remains the fallback.
-        // Once commit succeeds, reconcile every dynamic package again with its complete accepted
-        // backup preferences/storage in the real package namespace.
+
         for packageName in prepared.preparedPackages
             .filter(\.usesDynamicProviders)
             .map({ $0.backup.id }) {
@@ -1716,22 +2007,44 @@ public final class SkyStreamPluginManager: ObservableObject {
     public func restoreSafeCloudSnapshot(
         _ snapshot: SkyStreamBackupSnapshot
     ) async throws -> SkyStreamSafeCloudRestoreResult {
+        try await restoreSafeCloudSnapshot(
+            snapshot,
+            expectedScopeAuthority: SkyStreamServiceScopeAuthority.capture()
+        )
+    }
+
+    func restoreSafeCloudSnapshot(
+        _ snapshot: SkyStreamBackupSnapshot,
+        expectedScopeAuthority: SkyStreamServiceScopeAuthority
+    ) async throws -> SkyStreamSafeCloudRestoreResult {
         guard PlatformCapabilities.current.supportsSkyStreamPlugins else {
             throw SkyStreamPluginManagerError.unavailable
         }
-        guard isLoaded else { throw SkyStreamPluginManagerError.managerNotLoaded }
+        guard expectedScopeAuthority.isCurrent else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
+        guard isLoaded else { throw notLoadedError }
         let token = beginSafeRestore()
         defer { endSafeRestore(token) }
         return try await SkyStreamSafeRestoreTaskContext.$token.withValue(token) {
-            try await restoreSafeCloudSnapshot(snapshot, token: token)
+            try await restoreSafeCloudSnapshot(
+                snapshot,
+                token: token,
+                expectedScopeAuthority: expectedScopeAuthority
+            )
         }
     }
 
     private func restoreSafeCloudSnapshot(
         _ snapshot: SkyStreamBackupSnapshot,
-        token: UUID
+        token: UUID,
+        expectedScopeAuthority: SkyStreamServiceScopeAuthority
     ) async throws -> SkyStreamSafeCloudRestoreResult {
         try requireSafeRestoreIsCurrent(token)
+        guard expectedScopeAuthority.isCurrent else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
+        let configurationIsComplete = snapshot.privateCloudConfigurationIsComplete == true
         guard snapshot.isSafeCloudSnapshot,
               snapshot.schemaVersion == 1,
               snapshot.additionalFields.isEmpty,
@@ -1739,9 +2052,9 @@ public final class SkyStreamPluginManager: ObservableObject {
               snapshot.plugins.count <= Self.maximumInstalledPluginCount,
               Set(snapshot.repositories.map(\.sourceURL)).count == snapshot.repositories.count,
               Set(snapshot.plugins.map(\.id)).count == snapshot.plugins.count,
-              Set(repositories.map(\.sourceURL))
+              configurationIsComplete || Set(repositories.map(\.sourceURL))
                 .union(snapshot.repositories.map(\.sourceURL)).count <= Self.maximumRepositoryCount,
-              Set(installedPlugins.map(\.id))
+              configurationIsComplete || Set(installedPlugins.map(\.id))
                 .union(snapshot.plugins.map(\.id)).count <= Self.maximumInstalledPluginCount else {
             throw SkyStreamPluginManagerError.invalidBackup
         }
@@ -1763,11 +2076,12 @@ public final class SkyStreamPluginManager: ObservableObject {
                 result[repository.sourceURL] = repository
             }
         }
-        // Reject the complete envelope before opening any remote URL. Reconstruction runs outside
-        // the mutation gate with bounded concurrency/deadline, so a slow or offline clean device
-        // cannot prevent ordinary installs, settings changes, or runtime-state commits.
+
         let restoredCloudRepositories = try preflightSafeCloudSnapshot(snapshot)
         try requireSafeRestoreIsCurrent(token)
+        guard expectedScopeAuthority.isCurrent else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
         let snapshotPackageIDs = Set(snapshot.plugins.map(\.id))
         let initialPlugins = initialInstalledStates.values.filter {
             snapshotPackageIDs.contains($0.id)
@@ -1796,14 +2110,17 @@ public final class SkyStreamPluginManager: ObservableObject {
         }
         try Task.checkCancellation()
         try requireSafeRestoreIsCurrent(token)
+        guard expectedScopeAuthority.isCurrent else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
 
-        // Each archive is its own ordinary two-phase install. No package JavaScript runs while
-        // the later metadata merge owns the gate, and one stale/conflicting package cannot block
-        // unrelated cloud settings from being considered.
         var acceptedInstalledStates: [String: SkyStreamInstalledPluginState] = [:]
         for snapshotPlugin in snapshot.plugins where !snapshotPlugin.payloadWasRedacted {
             try Task.checkCancellation()
             try requireSafeRestoreIsCurrent(token)
+            guard expectedScopeAuthority.isCurrent else {
+                throw SkyStreamPluginManagerError.stateChangedDuringValidation
+            }
             let installedBaseline = installedPlugins
             let existing = installedBaseline.first { $0.id == snapshotPlugin.id }
             if let initial = initialInstalledStates[snapshotPlugin.id] {
@@ -1836,7 +2153,7 @@ public final class SkyStreamPluginManager: ObservableObject {
                   Self.sha256Hex(archive).caseInsensitiveCompare(
                       snapshotPlugin.state.archiveSHA256
                   ) == .orderedSame,
-                  Self.isCloudSafeHTTPSURL(snapshotPlugin.state.provenance.sourceURL),
+                  Self.isSafeHTTPSURL(snapshotPlugin.state.provenance.sourceURL),
                   let sourceURL = URL(string: snapshotPlugin.state.provenance.sourceURL) else {
                 log("safe cloud restore skipped invalid archive", packageName: snapshotPlugin.id)
                 continue
@@ -1854,7 +2171,8 @@ public final class SkyStreamPluginManager: ObservableObject {
                     provenance: snapshotPlugin.state.provenance,
                     replacementPolicy: .normal,
                     installedBaseline: installedBaseline,
-                    repositoryAuthority: nil
+                    repositoryAuthority: nil,
+                    expectedScopeAuthority: expectedScopeAuthority
                 )
                 let installed = try await commitPreparedInstall(
                     prepared,
@@ -1864,15 +2182,19 @@ public final class SkyStreamPluginManager: ObservableObject {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                guard expectedScopeAuthority.isCurrent else {
+                    throw SkyStreamPluginManagerError.stateChangedDuringValidation
+                }
                 log("safe cloud archive restore skipped", packageName: snapshotPlugin.id, error: error)
             }
         }
 
-        // Network reconstruction already completed outside every mutation gate. A reconstructed
-        // package is installable only on a still-clean slot; a concurrent local install wins.
         for snapshotPlugin in snapshot.plugins where snapshotPlugin.payloadWasRedacted {
             try Task.checkCancellation()
             try requireSafeRestoreIsCurrent(token)
+            guard expectedScopeAuthority.isCurrent else {
+                throw SkyStreamPluginManagerError.stateChangedDuringValidation
+            }
             let installedBaseline = installedPlugins
             let existing = installedBaseline.first { $0.id == snapshotPlugin.id }
             if let initial = initialInstalledStates[snapshotPlugin.id] {
@@ -1883,7 +2205,7 @@ public final class SkyStreamPluginManager: ObservableObject {
                     )
                     continue
                 }
-                // Redacted reconstruction never replaces a package that was already present.
+
                 continue
             } else if existing != nil {
                 log(
@@ -1893,7 +2215,7 @@ public final class SkyStreamPluginManager: ObservableObject {
                 continue
             }
             guard
-                  Self.isCloudSafeHTTPSURL(snapshotPlugin.state.provenance.sourceURL),
+                  Self.isSafeHTTPSURL(snapshotPlugin.state.provenance.sourceURL),
                   let pinnedURL = URL(string: snapshotPlugin.state.provenance.sourceURL),
                   let archive = reconstructedArchives[snapshotPlugin.id],
                   archive.count <= Self.maximumPackageArchiveBytes,
@@ -1915,7 +2237,8 @@ public final class SkyStreamPluginManager: ObservableObject {
                     provenance: snapshotPlugin.state.provenance,
                     replacementPolicy: .normal,
                     installedBaseline: installedBaseline,
-                    repositoryAuthority: nil
+                    repositoryAuthority: nil,
+                    expectedScopeAuthority: expectedScopeAuthority
                 )
                 let installed = try await commitPreparedInstall(
                     prepared,
@@ -1925,6 +2248,9 @@ public final class SkyStreamPluginManager: ObservableObject {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
+                guard expectedScopeAuthority.isCurrent else {
+                    throw SkyStreamPluginManagerError.stateChangedDuringValidation
+                }
                 log(
                     "safe cloud reconstruction skipped",
                     packageName: snapshotPlugin.id,
@@ -1935,6 +2261,9 @@ public final class SkyStreamPluginManager: ObservableObject {
 
         let metadataCommit = try await withMutationGate {
             try requireSafeRestoreIsCurrent(token)
+            guard expectedScopeAuthority.isCurrent else {
+                throw SkyStreamPluginManagerError.stateChangedDuringValidation
+            }
             return try await mergeSafeCloudSnapshotUnlocked(
                 snapshot,
                 safeRestoreToken: token,
@@ -1943,23 +2272,28 @@ public final class SkyStreamPluginManager: ObservableObject {
                 configurationBaseline: configurationBaseline,
                 initialSourceDefaults: initialSourceDefaults,
                 acceptedInstalledStates: acceptedInstalledStates,
-                validInitialCodeFingerprints: validInitialCodeFingerprints
+                validInitialCodeFingerprints: validInitialCodeFingerprints,
+                expectedScopeAuthority: expectedScopeAuthority
             )
         }
-        // Discovery can execute arbitrary package JavaScript. Never hold the global transaction
-        // gate while doing so; preferences are already committed and stale results are fingerprinted.
+
         for packageName in metadataCommit.dynamicPackageIDs {
             do {
-                try await refreshDynamicProviders(packageName: packageName)
+                try await refreshDynamicProviders(
+                    packageName: packageName,
+                    expectedScopeAuthority: expectedScopeAuthority
+                )
             } catch {
+                guard expectedScopeAuthority.isCurrent else {
+                    throw SkyStreamPluginManagerError.stateChangedDuringValidation
+                }
                 log("safe cloud dynamic providers retained after refresh failure", packageName: packageName, error: error)
             }
         }
         return SkyStreamSafeCloudRestoreResult(
             unresolvedPackageIDs: snapshot.plugins.compactMap { snapshotPlugin in
                 guard plugin(packageName: snapshotPlugin.id) == nil else { return nil }
-                // A package that existed initially or was published by this restore and then
-                // disappeared was authoritatively deleted locally. Do not schedule a stale retry.
+
                 guard initialInstalledStates[snapshotPlugin.id] == nil,
                       acceptedInstalledStates[snapshotPlugin.id] == nil else { return nil }
                 return snapshotPlugin.id
@@ -1967,7 +2301,6 @@ public final class SkyStreamPluginManager: ObservableObject {
         )
     }
 
-    /// Caller must own `mutationGateIsHeld`.
     private func mergeSafeCloudSnapshotUnlocked(
         _ snapshot: SkyStreamBackupSnapshot,
         safeRestoreToken: UUID,
@@ -1976,18 +2309,23 @@ public final class SkyStreamPluginManager: ObservableObject {
         configurationBaseline: [String: SafeCloudConfigurationFingerprint],
         initialSourceDefaults: SkySourceDefaultsSnapshot,
         acceptedInstalledStates: [String: SkyStreamInstalledPluginState],
-        validInitialCodeFingerprints: Set<PackageCodeFingerprint>
+        validInitialCodeFingerprints: Set<PackageCodeFingerprint>,
+        expectedScopeAuthority: SkyStreamServiceScopeAuthority
     ) async throws -> SafeCloudMetadataCommit {
         try requireSafeRestoreIsCurrent(safeRestoreToken)
+        guard expectedScopeAuthority.isCurrent else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
+        let configurationIsComplete = snapshot.privateCloudConfigurationIsComplete == true
         guard snapshot.isSafeCloudSnapshot,
               snapshot.schemaVersion == 1,
               snapshot.repositories.count <= 64,
               snapshot.plugins.count <= 128,
               Set(snapshot.repositories.map(\.sourceURL)).count == snapshot.repositories.count,
               Set(snapshot.plugins.map(\.id)).count == snapshot.plugins.count,
-              Set(repositories.map(\.sourceURL))
+              configurationIsComplete || Set(repositories.map(\.sourceURL))
                 .union(snapshot.repositories.map(\.sourceURL)).count <= Self.maximumRepositoryCount,
-              Set(installedPlugins.map(\.id))
+              configurationIsComplete || Set(installedPlugins.map(\.id))
                 .union(snapshot.plugins.map(\.id)).count <= Self.maximumInstalledPluginCount else {
             throw SkyStreamPluginManagerError.invalidBackup
         }
@@ -1995,7 +2333,7 @@ public final class SkyStreamPluginManager: ObservableObject {
         let oldPlugins = installedPlugins
         var metadataCommitted = false
         defer {
-            if !metadataCommitted {
+            if !metadataCommitted, expectedScopeAuthority.isCurrent {
                 repositories = oldRepositories
                 installedPlugins = oldPlugins
             }
@@ -2004,23 +2342,39 @@ public final class SkyStreamPluginManager: ObservableObject {
         var cookieResetPackageIDs = Set<String>()
         var cacheInvalidationPackageIDs = Set<String>()
         var changedPackageIDs = Set<String>()
+        var transientSessionPreservingPackageIDs = Set<String>()
         var incomingSourceStates: [String: SkyStreamProviderState] = [:]
         guard restoredCloudRepositories.allSatisfy({ repository in
-            Self.isCloudSafeHTTPSURL(repository.sourceURL)
-                && repository.pluginListURLs.allSatisfy(Self.isCloudSafeHTTPSURL)
+            Self.acceptsSafeCloudConfigurationURL(
+                repository.sourceURL,
+                configurationIsComplete: configurationIsComplete
+            )
+                && repository.pluginListURLs.allSatisfy {
+                    Self.acceptsSafeCloudConfigurationURL(
+                        $0,
+                        configurationIsComplete: configurationIsComplete
+                    )
+                }
         }) else { throw SkyStreamPluginManagerError.invalidBackup }
         let currentRepositoryURLs = Set(repositories.map(\.sourceURL))
         let authorizedIncomingRepositories = restoredCloudRepositories.filter { repository in
             initialRepositoryStates[repository.sourceURL] == nil
                 || currentRepositoryURLs.contains(repository.sourceURL)
         }
-        repositories = Self.mergingSafeCloudRepositories(
-            current: repositories,
-            incoming: authorizedIncomingRepositories
-        )
-        // Payload omissions are never deletion signals. Merge only safe, non-secret preferences
-        // into a matching locally installed and integrity-checked package, including a package
-        // reconstructed immediately above.
+        repositories = configurationIsComplete
+            ? Self.restoringCompletePrivateCloudRepositories(
+                current: repositories,
+                incoming: authorizedIncomingRepositories,
+                baseline: initialRepositoryStates
+            )
+            : Self.mergingSafeCloudRepositories(
+                current: repositories,
+                incoming: authorizedIncomingRepositories
+            )
+        guard repositories.count <= Self.maximumRepositoryCount else {
+            throw SkyStreamPluginManagerError.invalidBackup
+        }
+
         for snapshotPlugin in snapshot.plugins {
             try Task.checkCancellation()
             guard let index = installedPlugins.firstIndex(where: { $0.id == snapshotPlugin.id }) else {
@@ -2034,9 +2388,7 @@ public final class SkyStreamPluginManager: ObservableObject {
             let matchesInitialConfiguration = baseline.map {
                 DynamicProviderConfigurationFingerprint(current) == $0.dynamicConfiguration
             } ?? false
-            // This also authorizes a pre-existing package whose corrupt payload was republished at
-            // a new managed path. Any post-publication local edit changes the exact state and loses
-            // this authorization; an unchanged healthy package uses the initial fingerprint above.
+
             let matchesAcceptedPublication = acceptedBaseline.map {
                 DynamicProviderConfigurationFingerprint(current) == $0.dynamicConfiguration
             } ?? false
@@ -2061,8 +2413,7 @@ public final class SkyStreamPluginManager: ObservableObject {
                 snapshotPlugin.state,
                 current
             ) else {
-                // A rejected takeover, changed same-version archive, or stale package entry has
-                // no authority over settings belonging to the locally accepted code.
+
                 log(
                     "safe cloud package settings skipped fingerprint mismatch",
                     packageName: snapshotPlugin.id
@@ -2098,21 +2449,42 @@ public final class SkyStreamPluginManager: ObservableObject {
                     cacheInvalidationPackageIDs.insert(candidate.id)
                 }
             }
-            let mergedPreferences = Self.mergingSafeCloudPreferences(
+            guard let mergedPreferences = SkyStreamPrivateCloudConfigurationPolicy.restoredPreferences(
                 local: candidate.preferences,
-                incoming: snapshotPlugin.state.preferences
-            )
+                incoming: snapshotPlugin.state.preferences,
+                incomingIsComplete: snapshot.privateCloudConfigurationIsComplete == true
+                    && !snapshotPlugin.preferencesWereRedacted
+            ) else { throw SkyStreamPluginManagerError.invalidBackup }
             if !Self.safeCloudPreferenceBehaviorIsEqual(
                 candidate.preferences,
                 mergedPreferences
             ) {
                 candidate.preferences = mergedPreferences
                 runtimeResetPackageIDs.insert(candidate.id)
+                transientSessionPreservingPackageIDs.insert(candidate.id)
             }
             if candidate != current {
                 candidate.updatedAt = Date()
                 installedPlugins[index] = candidate
                 changedPackageIDs.insert(candidate.id)
+            }
+        }
+
+        if snapshot.privateCloudConfigurationIsComplete == true {
+            let incomingPackageIDs = Set(snapshot.plugins.map(\.id))
+            for index in installedPlugins.indices where !incomingPackageIDs.contains(installedPlugins[index].id) {
+                let current = installedPlugins[index]
+                guard let baseline = configurationBaseline[current.id],
+                      DynamicProviderConfigurationFingerprint(current) == baseline.dynamicConfiguration,
+                      validInitialCodeFingerprints.contains(PackageCodeFingerprint(current)),
+                      !current.preferences.isEmpty else {
+                    continue
+                }
+                installedPlugins[index].preferences = [:]
+                installedPlugins[index].updatedAt = Date()
+                changedPackageIDs.insert(current.id)
+                runtimeResetPackageIDs.insert(current.id)
+                transientSessionPreservingPackageIDs.insert(current.id)
             }
         }
 
@@ -2146,19 +2518,21 @@ public final class SkyStreamPluginManager: ObservableObject {
             }
         }
 
-        // Safe snapshots have no explicit tombstones, and redaction can omit an otherwise public
-        // package or repository. Absence is therefore never deletion authority; only a full
-        // manual restore may authoritatively remove the local domain.
         try Task.checkCancellation()
         let persistenceChanged = repositories != oldRepositories || installedPlugins != oldPlugins
         let configuredPackageIDs = changedPackageIDs.sorted()
         if persistenceChanged {
-            try await persist(runtimeResetPackageIDs: runtimeResetPackageIDs) {
+            let sessionPreservingPackageIDs = transientSessionPreservingPackageIDs
+                .subtracting(cookieResetPackageIDs)
+            try await persist(
+                runtimeResetPackageIDs: runtimeResetPackageIDs,
+                expectedScopeGeneration: expectedScopeAuthority.serviceStoreGeneration
+            ) {
                 for packageName in runtimeResetPackageIDs.sorted() {
                     await SkyStreamRuntimePool.shared.invalidatePackage(
                         packageName,
                         resetCookies: cookieResetPackageIDs.contains(packageName),
-                        resetDataStore: true
+                        resetDataStore: !sessionPreservingPackageIDs.contains(packageName)
                     )
                 }
                 if sourceDefaultsChanged {
@@ -2166,8 +2540,9 @@ public final class SkyStreamPluginManager: ObservableObject {
                 }
             }
         } else if sourceDefaultsChanged {
-            // The durable plugin rows already describe the target; only the shared live source
-            // authority was stale. Applying it directly avoids an identical Core Data rewrite.
+            guard expectedScopeAuthority.isCurrent else {
+                throw SkyStreamPluginManagerError.stateChangedDuringValidation
+            }
             Self.applySourceDefaultsSnapshot(targetSourceDefaults)
             reconcileSkySourceDefaults()
         }
@@ -2189,7 +2564,7 @@ public final class SkyStreamPluginManager: ObservableObject {
         let candidates = snapshot.plugins.filter {
             $0.payloadWasRedacted
                 && plugin(packageName: $0.id) == nil
-                && Self.isCloudSafeHTTPSURL($0.state.provenance.sourceURL)
+                && Self.isSafeHTTPSURL($0.state.provenance.sourceURL)
         }
         guard !candidates.isEmpty else { return [:] }
 
@@ -2287,8 +2662,6 @@ public final class SkyStreamPluginManager: ObservableObject {
         let newlyPublishedArchiveURL: URL?
     }
 
-    /// Validates, extracts, smoke-tests, and discovers every package without holding the mutation
-    /// gate. The authoritative domain remains untouched until the returned snapshot is committed.
     private func prepareAuthoritativeManualSnapshot(
         _ snapshot: SkyStreamBackupSnapshot
     ) async throws -> PreparedManualRestoreSnapshot {
@@ -2391,12 +2764,10 @@ public final class SkyStreamPluginManager: ObservableObject {
         )
     }
 
-    /// Caller must own `mutationGateIsHeld`. No archive extraction or package JavaScript is
-    /// permitted here; this is only final integrity publication plus the authoritative state save.
     private func commitAuthoritativeManualSnapshotUnlocked(
         _ preparedSnapshot: PreparedManualRestoreSnapshot
     ) async throws -> [String] {
-        guard isLoaded else { throw SkyStreamPluginManagerError.managerNotLoaded }
+        guard isLoaded else { throw notLoadedError }
         let transactionRootValues = try? preparedSnapshot.transactionRootURL.resourceValues(
             forKeys: [.isDirectoryKey, .isSymbolicLinkKey]
         )
@@ -2458,21 +2829,17 @@ public final class SkyStreamPluginManager: ObservableObject {
         }
         publicationCommitted = true
 
-        // Only a successful authoritative metadata commit makes old payloads unreachable. Cleanup
-        // is intentionally last; startup pruning handles a process exit between commit and here.
         let retainedPaths = Set(restoredPlugins.map(\.payloadRelativePath))
         let retainedArchives = Set(restoredPlugins.map { "\($0.id)|\($0.archiveSHA256.lowercased())" })
         for stale in intermediatePlugins where !retainedPaths.contains(stale.payloadRelativePath) {
-            try? removeManagedItem(relativePath: stale.payloadRelativePath)
+            removeSharedManagedItem(relativePath: stale.payloadRelativePath)
             if !retainedArchives.contains("\(stale.id)|\(stale.archiveSHA256.lowercased())") {
-                try? removeManagedItem(url: archiveURL(for: stale))
+                removeSharedManagedItem(url: archiveURL(for: stale))
             }
         }
         return affectedPackageIDs
     }
 
-    /// Prepares one authoritative backup package entirely under the restore transaction root.
-    /// No live payload, archive, provider setting, or persisted manager state is changed here.
     private func prepareManualRestorePackage(
         _ backupPlugin: SkyStreamPluginBackupSnapshot,
         archive: Data,
@@ -2498,8 +2865,7 @@ public final class SkyStreamPluginManager: ObservableObject {
                 backup: backup,
                 existingInstalled: existing,
                 stagedPayloadURL: nil,
-                // Carry the hash-validated backup bytes so publication can repair a missing or
-                // corrupt local archive even when the installed script itself is already exact.
+
                 archiveData: archive,
                 effectiveManifest: effectiveManifest,
                 archiveSHA256: existing.archiveSHA256,
@@ -2610,9 +2976,6 @@ public final class SkyStreamPluginManager: ObservableObject {
             }
         }
 
-        // Staged validation proves only that the script evaluates and exposes the required ABI. It does
-        // not exercise search, detail loading, stream resolution, or playback, so an otherwise
-        // ordinary package remains Untested until Eclipse has a meaningful compatibility suite.
         return PreparedManualRestorePackage(
             backup: backup,
             existingInstalled: nil,
@@ -2627,8 +2990,6 @@ public final class SkyStreamPluginManager: ObservableObject {
         )
     }
 
-    /// Publishes one already-validated package without touching manager state. The caller owns
-    /// returned new artifacts until the single authoritative metadata commit succeeds.
     private func publishManualRestorePackage(
         _ prepared: PreparedManualRestorePackage
     ) throws -> PublishedManualRestorePackage {
@@ -2752,7 +3113,7 @@ public final class SkyStreamPluginManager: ObservableObject {
                 attributes: [.posixPermissions: NSNumber(value: Int16(0o700))]
             )
         }
-        // Atomic replacement also repairs a corrupt orphan with the expected hash-addressed name.
+
         try archiveData.write(to: publishedArchive, options: [.atomic, .completeFileProtectionUnlessOpen])
         let finalArchiveValues = try? publishedArchive.resourceValues(
             forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
@@ -2928,11 +3289,6 @@ public final class SkyStreamPluginManager: ObservableObject {
         }
     }
 
-    // MARK: - Installation transaction
-
-    /// Performs all untrusted work without owning the mutation gate. If package JavaScript never
-    /// returns, only this task and its staging directory are stranded; ordinary manager mutations
-    /// remain available and startup pruning eventually removes the abandoned directory.
     private func prepareInstallArchive(
         _ data: Data,
         expectedEntry: SkyStreamPluginListEntry?,
@@ -2940,13 +3296,17 @@ public final class SkyStreamPluginManager: ObservableObject {
         replacementPolicy: SkyStreamReplacementPolicy,
         installedBaseline: [SkyStreamInstalledPluginState],
         repositoryAuthority: RepositoryInstallAuthority?,
+        expectedScopeAuthority: SkyStreamServiceScopeAuthority,
         requiredPackageName: String? = nil
     ) async throws -> PreparedInstall {
         try Task.checkCancellation()
+        guard expectedScopeAuthority.isCurrent else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
         guard PlatformCapabilities.current.supportsSkyStreamPlugins else {
             throw SkyStreamPluginManagerError.unavailable
         }
-        guard isLoaded else { throw SkyStreamPluginManagerError.managerNotLoaded }
+        guard isLoaded else { throw notLoadedError }
         if let expectedPackageName = expectedEntry?.manifest.packageName ?? requiredPackageName {
             let initialTarget = installedBaseline.first { $0.id == expectedPackageName }
             let currentTarget = installedPlugins.first { $0.id == expectedPackageName }
@@ -2993,6 +3353,9 @@ public final class SkyStreamPluginManager: ObservableObject {
             )
         }.value
         try Task.checkCancellation()
+        guard expectedScopeAuthority.isCurrent else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
         if let expectedEntry {
             guard expectedEntry.manifest.version == validated.manifest.version,
                   expectedEntry.manifest.packageName == validated.manifest.packageName else {
@@ -3037,8 +3400,6 @@ public final class SkyStreamPluginManager: ObservableObject {
             policy: replacementPolicy
         )
 
-        // Byte-identical reinstalls are metadata/archive repair only. In particular, never invoke
-        // package JavaScript merely because a repository Install button was tapped again.
         let isByteIdenticalReinstall = existing.map {
             $0.archiveSHA256.caseInsensitiveCompare(validated.archiveSHA256) == .orderedSame
                 && $0.scriptSHA256.caseInsensitiveCompare(validated.scriptSHA256) == .orderedSame
@@ -3062,7 +3423,8 @@ public final class SkyStreamPluginManager: ObservableObject {
                 existingAtPreparation: existing,
                 repositoryAuthority: repositoryAuthority,
                 requiredPackageName: requiredPackageName,
-                isByteIdenticalReinstall: true
+                isByteIdenticalReinstall: true,
+                scopeAuthority: expectedScopeAuthority
             )
         }
 
@@ -3088,20 +3450,24 @@ public final class SkyStreamPluginManager: ObservableObject {
             scriptURL: scriptURL,
             discoverDynamicProviders: usesDynamicProviders
         )
+        guard expectedScopeAuthority.isCurrent else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
         var effectiveManifest = validated.manifest
         if usesDynamicProviders {
             let discovered = validation.providers ?? []
             effectiveManifest.providers = try await validatedDynamicProviders(
                 discovered
             )
+            guard expectedScopeAuthority.isCurrent else {
+                throw SkyStreamPluginManagerError.stateChangedDuringValidation
+            }
             guard effectiveManifest.providers?.isEmpty == false else {
                 throw SkyStreamPluginManagerError.packageIncompatible(
                     "This package did not return any usable dynamic providers."
                 )
             }
         }
-        // Export-only smoke evaluation is an install-integrity gate, not an end-to-end
-        // compatibility certification. Preserve Untested for ordinary packages.
 
         preparationCompleted = true
         return PreparedInstall(
@@ -3120,12 +3486,11 @@ public final class SkyStreamPluginManager: ObservableObject {
             existingAtPreparation: existing,
             repositoryAuthority: repositoryAuthority,
             requiredPackageName: requiredPackageName,
-            isByteIdenticalReinstall: false
+            isByteIdenticalReinstall: false,
+            scopeAuthority: expectedScopeAuthority
         )
     }
 
-    /// Owns staging cleanup. Runtime revocation for a changed package happens inside the durable
-    /// publication fence so resolver-visible metadata can never outrun the pool epoch bump.
     private func commitPreparedInstall(
         _ prepared: PreparedInstall,
         safeRestoreToken: UUID? = nil
@@ -3137,6 +3502,9 @@ public final class SkyStreamPluginManager: ObservableObject {
             }
             return try await commitPreparedInstallUnlocked(prepared)
         }
+        guard prepared.scopeAuthority.isCurrent else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
         let shouldRefreshAcceptedDynamicState = !prepared.isByteIdenticalReinstall
             && prepared.usesDynamicProviders
             && prepared.existingAtPreparation.map {
@@ -3146,9 +3514,13 @@ public final class SkyStreamPluginManager: ObservableObject {
         if shouldRefreshAcceptedDynamicState {
             do {
                 try await refreshDynamicProviders(
-                    packageName: committed.installed.id
+                    packageName: committed.installed.id,
+                    expectedScopeAuthority: prepared.scopeAuthority
                 )
             } catch {
+                guard prepared.scopeAuthority.isCurrent else {
+                    throw SkyStreamPluginManagerError.stateChangedDuringValidation
+                }
                 log(
                     "installed update retained validated dynamic provider catalog",
                     packageName: committed.installed.id,
@@ -3156,18 +3528,19 @@ public final class SkyStreamPluginManager: ObservableObject {
                 )
             }
         }
+        guard prepared.scopeAuthority.isCurrent else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
         return plugin(packageName: committed.installed.id) ?? committed.installed
     }
 
-    /// Caller must own `mutationGateIsHeld`. This function may atomically publish files and await
-    /// the single persisted-state write, but must never fetch, extract, or execute package code.
     private func commitPreparedInstallUnlocked(
         _ prepared: PreparedInstall
     ) async throws -> CommittedInstall {
         guard PlatformCapabilities.current.supportsSkyStreamPlugins else {
             throw SkyStreamPluginManagerError.unavailable
         }
-        guard isLoaded else { throw SkyStreamPluginManagerError.managerNotLoaded }
+        guard isLoaded else { throw notLoadedError }
         if let authority = prepared.repositoryAuthority {
             guard repositoryInstallAuthorityIsCurrent(authority) else {
                 throw SkyStreamPluginManagerError.stateChangedDuringValidation
@@ -3233,6 +3606,10 @@ public final class SkyStreamPluginManager: ObservableObject {
                 == prepared.existingAtPreparation.map(InstallValidationAuthorityFingerprint.init) else {
             throw SkyStreamPluginManagerError.stateChangedDuringValidation
         }
+
+        guard prepared.scopeAuthority.isCurrent else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
         if existing == nil, installedPlugins.count >= Self.maximumInstalledPluginCount {
             throw SkyStreamPluginManagerError.capacityLimitReached(
                 kind: "plugins",
@@ -3271,9 +3648,7 @@ public final class SkyStreamPluginManager: ObservableObject {
                 archiveSHA256: existing.archiveSHA256
             )
             if !crossesProvenanceTrustDomain {
-                // The accepted code and behavioral owner are unchanged. In particular, hourly
-                // direct-archive refreshes create a fresh `pinnedAt`; treating that timestamp as a
-                // write would churn Core Data, resolver currentness, and cloud metadata forever.
+
                 log(
                     newlyPublishedArchive
                         ? "byte-identical plugin archive repaired"
@@ -3294,7 +3669,10 @@ public final class SkyStreamPluginManager: ObservableObject {
             installedPlugins[index] = existing
             do {
                 if crossesProvenanceTrustDomain {
-                    try await persist(runtimeResetPackageIDs: [existing.id]) {
+                    try await persist(
+                        runtimeResetPackageIDs: [existing.id],
+                        expectedScopeGeneration: prepared.scopeAuthority.serviceStoreGeneration
+                    ) {
                         await SkyStreamRuntimePool.shared.invalidatePackage(
                             existing.id,
                             resetCookies: true,
@@ -3302,10 +3680,14 @@ public final class SkyStreamPluginManager: ObservableObject {
                         )
                     }
                 } else {
-                    try await persist()
+                    try await persist(
+                        expectedScopeGeneration: prepared.scopeAuthority.serviceStoreGeneration
+                    )
                 }
             } catch {
-                installedPlugins = previous
+                if prepared.scopeAuthority.isCurrent {
+                    installedPlugins = previous
+                }
                 if newlyPublishedArchive && !archiveAlreadyExisted {
                     try? removeManagedItem(url: publishedArchive)
                 }
@@ -3381,7 +3763,7 @@ public final class SkyStreamPluginManager: ObservableObject {
             updatedAt: Date(),
             additionalFields: existing?.additionalFields ?? [:]
         )
-        // Verify the exact bytes after their final atomic move, not only the staging copy.
+
         let publishedScript = publishedPayload.appendingPathComponent("plugin.js", isDirectory: false)
         let publishedScriptValues = try? publishedScript.resourceValues(
             forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
@@ -3402,10 +3784,13 @@ public final class SkyStreamPluginManager: ObservableObject {
         } else {
             installedPlugins.append(installed)
         }
-        // Persist only after every validation and final-path integrity check succeeds.
+
         let resetsTrustScopedState = existing == nil || crossesProvenanceTrustDomain
         do {
-            try await persist(runtimeResetPackageIDs: [installed.id]) {
+            try await persist(
+                runtimeResetPackageIDs: [installed.id],
+                expectedScopeGeneration: prepared.scopeAuthority.serviceStoreGeneration
+            ) {
                 await SkyStreamRuntimePool.shared.invalidatePackage(
                     installed.id,
                     resetCookies: resetsTrustScopedState,
@@ -3414,18 +3799,20 @@ public final class SkyStreamPluginManager: ObservableObject {
             }
             publicationCommitted = true
         } catch {
-            installedPlugins = oldPlugins
+            if prepared.scopeAuthority.isCurrent {
+                installedPlugins = oldPlugins
+            }
             try? removeManagedItem(url: publishedPayload)
             if !archiveAlreadyExisted { try? removeManagedItem(url: publishedArchive) }
             throw error
         }
 
         if let old = existing, old.payloadRelativePath != installed.payloadRelativePath {
-            try? removeManagedItem(relativePath: old.payloadRelativePath)
+            removeSharedManagedItem(relativePath: old.payloadRelativePath)
         }
         if let old = existing,
            old.archiveSHA256.caseInsensitiveCompare(installed.archiveSHA256) != .orderedSame {
-            try? removeManagedItem(url: archiveURL(for: old))
+            removeSharedManagedItem(url: archiveURL(for: old))
         }
         if let oldDomain = existing?.selectedDomainURL,
            installed.selectedDomainURL != oldDomain {
@@ -3439,10 +3826,17 @@ public final class SkyStreamPluginManager: ObservableObject {
     }
 
     private func loadPersistedState() async {
+
+        let scopeEpoch = ServiceStoreScope.generation
+        var quarantinedPackageIDs: [String] = []
         do {
             try prepareDirectories()
             removeStaleStagingItems()
             if let data = try await store.loadSkyStreamStateData() {
+                guard ServiceStoreScope.isCurrent(scopeEpoch) else {
+                    log("abandoned a persisted-state load, the services store moved")
+                    return
+                }
                 let state = try decoder.decode(PersistedState.self, from: data)
                 guard state.schemaVersion == 1,
                       state.repositories.count <= Self.maximumRepositoryCount,
@@ -3460,22 +3854,18 @@ public final class SkyStreamPluginManager: ObservableObject {
                           (plugin.manifest.providers?.count ?? 0) <= 64,
                           (plugin.manifest.domains?.count ?? 0) <= 64,
                           plugin.providers.count <= 256 else {
-                        log("persisted plugin rejected by structural check", packageName: plugin.id)
-                        throw SkyStreamPluginManagerError.integrityFailure
+                        log("persisted plugin quarantined by structural check", packageName: plugin.id)
+                        quarantinedPackageIDs.append(plugin.id)
+                        continue
                     }
-                    // Builds before the compatibility-policy correction promoted an export-only
-                    // smoke evaluation to Compatible. There is no persisted evidence of a real
-                    // search/load/playback validation, so fail safely back to Untested.
+
                     if plugin.compatibility.status == .compatible {
                         plugin.compatibility = .untested
                     }
                     seenPackageIDs.insert(plugin.id)
                     structurallyValidPlugins.append(plugin)
                 }
-                // A valid install can contain a 10 MB script, and the persisted set is bounded at
-                // 128 packages. Hashing that worst case on this @MainActor object would freeze the
-                // entire app during launch; immutable path/hash checks run at utility priority and
-                // only the resulting rows are published back on the actor.
+
                 let skyStreamRoot = self.skyStreamRoot
                 let packageRoot = self.packageRoot
                 let integrityResults = await Task.detached(priority: .utility) {
@@ -3491,13 +3881,24 @@ public final class SkyStreamPluginManager: ObservableObject {
                     }
                 }.value
                 for (plugin, isValid) in integrityResults where !isValid {
-                    log("persisted plugin rejected by integrity check", packageName: plugin.id)
+                    log("persisted plugin quarantined by integrity check", packageName: plugin.id)
+                    quarantinedPackageIDs.append(plugin.id)
                 }
-                guard integrityResults.allSatisfy({ $0.1 }) else {
-                    throw SkyStreamPluginManagerError.integrityFailure
+
+                guard ServiceStoreScope.isCurrent(scopeEpoch) else {
+                    log("abandoned a persisted-state load, the services store moved")
+                    return
                 }
                 repositories = loadedRepositories
-                installedPlugins = integrityResults.map(\.0)
+                installedPlugins = integrityResults.filter { $0.1 }.map(\.0)
+            } else {
+                guard ServiceStoreScope.isCurrent(scopeEpoch) else {
+                    log("abandoned a persisted-state load, the services store moved")
+                    return
+                }
+
+                repositories = []
+                installedPlugins = []
             }
             committedRepositories = repositories
             committedInstalledPlugins = installedPlugins
@@ -3514,11 +3915,31 @@ public final class SkyStreamPluginManager: ObservableObject {
                     acceptingRevision: revision
                 )
             }
-            reconcileSkySourceDefaults()
-            removeUnreferencedManagedArtifacts()
+
+            guard ServiceStoreScope.isCurrent(scopeEpoch) else {
+                log("abandoned a persisted-state load, the services store moved")
+                return
+            }
+            unreadablePackageIDs = quarantinedPackageIDs.sorted()
+            if unreadablePackageIDs.isEmpty {
+                reconcileSkySourceDefaults()
+                removeUnreferencedManagedArtifacts()
+            }
+            lastErrorMessage = nil
+            stateLoadDidFail = false
             isLoaded = true
+            await restorePendingSafeCloudSnapshotIfNeeded(scopeEpoch: scopeEpoch)
+            guard ServiceStoreScope.isCurrent(scopeEpoch) else {
+                log("abandoned a pending cloud restore, the services store moved")
+                return
+            }
             NotificationCenter.default.post(name: .skyStreamMetadataDidChange, object: self)
         } catch {
+
+            guard ServiceStoreScope.isCurrent(scopeEpoch) else {
+                log("abandoned a persisted-state load, the services store moved", error: error)
+                return
+            }
             lastErrorMessage = error.localizedDescription
             repositories = []
             installedPlugins = []
@@ -3526,9 +3947,86 @@ public final class SkyStreamPluginManager: ObservableObject {
             committedInstalledPlugins = []
             committedPluginsByID = [:]
             runtimeAuthorityRevisions = [:]
+            unreadablePackageIDs = []
+            stateLoadDidFail = true
             isLoaded = false
             NotificationCenter.default.post(name: .skyStreamMetadataDidChange, object: self)
             log("state load failed closed", error: error)
+        }
+    }
+
+    public func reloadPersistedStateAfterRestore() async {
+        await loadPersistedState()
+    }
+
+    public func retryLoadingPersistedState() async {
+        await loadPersistedState()
+    }
+
+    public func resetPluginData() async throws {
+        guard PlatformCapabilities.current.supportsSkyStreamPlugins else {
+            throw SkyStreamPluginManagerError.unavailable
+        }
+        guard canAdministerPlugins else {
+            throw SkyStreamPluginManagerError.requiresGrownUpProfile
+        }
+        let resetPackageIDs = Set(committedInstalledPlugins.map(\.id))
+            .union(unreadablePackageIDs)
+        try await withMutationGate {
+            repositories = []
+            installedPlugins = []
+            try await persist(runtimeResetPackageIDs: resetPackageIDs) {
+                for packageName in resetPackageIDs.sorted() {
+                    await SkyStreamRuntimePool.shared.invalidatePackage(
+                        packageName,
+                        resetCookies: true,
+                        resetDataStore: true
+                    )
+                }
+            }
+            unreadablePackageIDs = []
+            lastNoticeMessage = nil
+            lastErrorMessage = nil
+            stateLoadDidFail = false
+            isLoaded = true
+            removeUnreferencedManagedArtifacts()
+            SourceHealthStore.shared.removeRecords { sourceID in
+                sourceID.hasPrefix(SkyStreamStableID.prefix)
+            }
+            log("plugin data reset")
+        }
+    }
+
+    private var notLoadedError: SkyStreamPluginManagerError {
+        stateLoadDidFail ? .stateLoadFailed : .managerNotLoaded
+    }
+
+    private func restorePendingSafeCloudSnapshotIfNeeded(scopeEpoch: Int) async {
+        let store = ProfileSettingsStore.services
+        guard let data = store.data(forKey: Self.pendingSafeCloudSnapshotKey),
+              data.count <= 50_000_000 else { return }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        guard let snapshot = try? decoder.decode(SkyStreamBackupSnapshot.self, from: data),
+              snapshot.isSafeCloudSnapshot else {
+            store.removeObject(forKey: Self.pendingSafeCloudSnapshotKey)
+            log("discarded an invalid pending safe-cloud snapshot")
+            return
+        }
+        do {
+            let result = try await restoreSafeCloudSnapshot(snapshot)
+            guard ServiceStoreScope.isCurrent(scopeEpoch) else { return }
+            if result.isComplete {
+                store.removeObject(forKey: Self.pendingSafeCloudSnapshotKey)
+                log("applied the active profile's pending safe-cloud snapshot")
+            } else {
+                log(
+                    "kept a partially reconstructed pending safe-cloud snapshot unresolved=\(result.unresolvedPackageIDs.count)"
+                )
+            }
+        } catch {
+            guard ServiceStoreScope.isCurrent(scopeEpoch) else { return }
+            log("pending safe-cloud reconstruction deferred", error: error)
         }
     }
 
@@ -3567,8 +4065,14 @@ public final class SkyStreamPluginManager: ObservableObject {
 
     private func persist(
         runtimeResetPackageIDs: Set<String> = [],
+        expectedScopeGeneration: Int? = nil,
         beforePublishing: (() async -> Void)? = nil
     ) async throws {
+
+        let scopeEpoch = expectedScopeGeneration ?? ServiceStoreScope.generation
+        guard ServiceStoreScope.isCurrent(scopeEpoch) else {
+            throw SkyStreamPluginManagerError.stateChangedDuringValidation
+        }
         let state = PersistedState(
             repositories: repositories,
             installedPlugins: installedPlugins
@@ -3584,9 +4088,6 @@ public final class SkyStreamPluginManager: ObservableObject {
             }
         }
 
-        // Candidate arrays are assigned synchronously by transaction code so they can be encoded
-        // as one document. Close the actor-reentrancy window before the save suspends: UI and
-        // runtime readers continue seeing the last durable snapshot until the write succeeds.
         repositories = committedRepositories
         installedPlugins = committedInstalledPlugins
         let data: Data
@@ -3596,15 +4097,24 @@ public final class SkyStreamPluginManager: ObservableObject {
                 encoder.outputFormatting = [.sortedKeys]
                 return try encoder.encode(state)
             }.value
-            guard data.count <= Self.maximumPersistedStateBytes else {
-                throw SkyStreamPluginManagerError.persistenceFailed
-            }
         } catch {
             lastErrorMessage = error.localizedDescription
             throw SkyStreamPluginManagerError.persistenceFailed
         }
+        guard data.count <= Self.maximumPersistedStateBytes else {
+            let budgetError = SkyStreamPluginManagerError.persistedStateBudgetExceeded(
+                maximumBytes: Self.maximumPersistedStateBytes
+            )
+            lastErrorMessage = budgetError.localizedDescription
+            log("persist refused, the saved state exceeds its storage budget")
+            throw budgetError
+        }
         do {
-            try await store.saveSkyStreamStateData(data)
+            guard ServiceStoreScope.isCurrent(scopeEpoch) else {
+                log("abandoned a persist, the services store moved")
+                throw SkyStreamPluginManagerError.persistenceFailed
+            }
+            try await store.saveSkyStreamStateData(data, expectedScopeGeneration: scopeEpoch)
             for packageName in runtimeResetPackageIDs.sorted() {
                 let revision = UUID()
                 runtimeAuthorityRevisions[packageName] = revision
@@ -3616,6 +4126,11 @@ public final class SkyStreamPluginManager: ObservableObject {
             }
             if let beforePublishing {
                 await beforePublishing()
+            }
+
+            guard ServiceStoreScope.isCurrent(scopeEpoch) else {
+                log("abandoned a persist, the services store moved")
+                throw SkyStreamPluginManagerError.persistenceFailed
             }
             committedRepositories = state.repositories
             committedInstalledPlugins = state.installedPlugins
@@ -3650,8 +4165,6 @@ public final class SkyStreamPluginManager: ObservableObject {
         }
     }
 
-    /// Staging directories are never referenced by persisted state. Clearing them before the
-    /// manager becomes available recovers safely from process termination during validation.
     private func removeStaleStagingItems() {
         guard let items = try? fileManager.contentsOfDirectory(
             at: stagingRoot,
@@ -3663,10 +4176,12 @@ public final class SkyStreamPluginManager: ObservableObject {
         }
     }
 
-    /// Package metadata is the commit record for immutable payloads and archives. After a clean
-    /// decode, remove artifacts left on either side of a process exit around the atomic metadata
-    /// save: new files from an uncommitted transaction or old files after a committed restore.
     private func removeUnreferencedManagedArtifacts() {
+
+        guard canDeleteSharedPluginPayloads else {
+            log("startup artifact pruning skipped: services are not shared, so this profile cannot see what others reference")
+            return
+        }
         let retainedPayloadPaths = Set(installedPlugins.compactMap {
             try? managedURL(relativePath: $0.payloadRelativePath).standardizedFileURL.path
         })
@@ -3730,6 +4245,22 @@ public final class SkyStreamPluginManager: ObservableObject {
         String(url.standardizedFileURL.path.dropFirst(skyStreamRoot.path.count + 1))
     }
 
+    private func removeSharedManagedItem(relativePath: String) {
+        guard canDeleteSharedPluginPayloads else {
+            log("shared payload retained: another profile may still reference it", packageName: relativePath)
+            return
+        }
+        try? removeManagedItem(relativePath: relativePath)
+    }
+
+    private func removeSharedManagedItem(url: URL) {
+        guard canDeleteSharedPluginPayloads else {
+            log("shared artifact retained: another profile may still reference it", packageName: url.lastPathComponent)
+            return
+        }
+        try? removeManagedItem(url: url)
+    }
+
     private func removeManagedItem(relativePath: String) throws {
         try removeManagedItem(url: try managedURL(relativePath: relativePath))
     }
@@ -3763,10 +4294,6 @@ public final class SkyStreamPluginManager: ObservableObject {
             .appendingPathComponent("\(archiveHash.lowercased()).sky", isDirectory: false)
     }
 
-    /// Makes the hash-addressed archive as durable as the installed script. A crash can leave an
-    /// orphan or corrupt file at the final path; existence alone is not proof that later backup
-    /// and cloud transport can read it. Returns true only when this call created a previously
-    /// missing archive, allowing an uncommitted publication to clean up its own new artifact.
     @discardableResult
     private func ensureManagedArchive(
         _ data: Data,
@@ -3911,9 +4438,7 @@ public final class SkyStreamPluginManager: ObservableObject {
                 state.lastSeenPluginVersion = manifest.version
                 state.removedAt = nil
                 if wasRemoved {
-                    // Removal already cleared the active Auto Mode and extra-rule
-                    // lists. Restore provider-local settings, append it back to the
-                    // unified order, and do not silently re-enable those selections.
+
                     state.isAutoModeSelected = false
                     state.isExplicitlySelectedForExtraRules = nil
                     newIDs.append(pair.sourceID)
@@ -3969,8 +4494,9 @@ public final class SkyStreamPluginManager: ObservableObject {
         for manifest: SkyStreamPluginManifest,
         script: String
     ) -> SkyStreamCompatibilityResult {
-        let bounded = String(script.prefix(10 * 1_024 * 1_024)).lowercased()
-        if bounded.contains("solvecaptcha") || bounded.contains("solve_captcha") {
+        let bounded = String(script.prefix(10 * 1_024 * 1_024))
+        let lowercased = bounded.lowercased()
+        if lowercased.contains("solvecaptcha") || lowercased.contains("solve_captcha") {
             return SkyStreamCompatibilityResult(
                 status: .incompatible,
                 reasons: [
@@ -3982,30 +4508,27 @@ public final class SkyStreamPluginManager: ObservableObject {
                 evaluatedAt: Date()
             )
         }
-        if bounded.contains("eval(")
-            || bounded.contains("eval (")
-            || bounded.contains("new function(")
-            || bounded.contains("new function (") {
-            return SkyStreamCompatibilityResult(
-                status: .incompatible,
-                reasons: [
-                    SkyStreamCompatibilityReason(
-                        code: .unsupportedRuntimeFeature,
-                        message: "This package requires dynamic JavaScript evaluation outside the verified plugin payload."
-                    )
-                ],
-                evaluatedAt: Date()
+        var limitedReasons: [SkyStreamCompatibilityReason] = []
+        if usesDynamicCodeEvaluation(in: bounded) {
+            limitedReasons.append(
+                SkyStreamCompatibilityReason(
+                    code: .unsupportedRuntimeFeature,
+                    message: "This package evaluates JavaScript at runtime. Eclipse blocks that, so some streams may not resolve."
+                )
             )
         }
         if manifest.categories.contains(where: { $0.lowercased().contains("live") }) {
+            limitedReasons.append(
+                SkyStreamCompatibilityReason(
+                    code: .liveOnly,
+                    message: "Live output is filtered; only verified VOD streams can be used."
+                )
+            )
+        }
+        guard limitedReasons.isEmpty else {
             return SkyStreamCompatibilityResult(
                 status: .limited,
-                reasons: [
-                    SkyStreamCompatibilityReason(
-                        code: .liveOnly,
-                        message: "Live output is filtered; only verified VOD streams can be used."
-                    )
-                ],
+                reasons: limitedReasons,
                 evaluatedAt: Date()
             )
         }
@@ -4014,6 +4537,98 @@ public final class SkyStreamPluginManager: ObservableObject {
             reasons: SkyStreamCompatibilityResult.untested.reasons,
             evaluatedAt: Date()
         )
+    }
+
+    private static func usesDynamicCodeEvaluation(in script: String) -> Bool {
+        let scanned = executableCode(in: script)
+        let patterns = [
+            "\\beval\\s*\\(",
+            "\\bnew\\s+Function\\b",
+            "\\bFunction\\s*\\("
+        ]
+        return patterns.contains {
+            scanned.range(of: $0, options: [.regularExpression]) != nil
+        }
+    }
+
+    private static func executableCode(in input: String) -> String {
+        enum ScanState {
+            case code
+            case single
+            case double
+            case template
+            case lineComment
+            case blockComment
+        }
+
+        var state = ScanState.code
+        var escaped = false
+        var output = String()
+        output.reserveCapacity(input.count)
+        var index = input.startIndex
+        while index < input.endIndex {
+            let character = input[index]
+            let next = input.index(after: index)
+            let following = next < input.endIndex ? input[next] : nil
+            switch state {
+            case .code:
+                if character == "/", following == "/" {
+                    state = .lineComment
+                    output.append("  ")
+                    index = input.index(after: next)
+                    continue
+                }
+                if character == "/", following == "*" {
+                    state = .blockComment
+                    output.append("  ")
+                    index = input.index(after: next)
+                    continue
+                }
+                if character == "'" {
+                    state = .single
+                    escaped = false
+                    output.append(" ")
+                } else if character == "\"" {
+                    state = .double
+                    escaped = false
+                    output.append(" ")
+                } else if character == "`" {
+                    state = .template
+                    escaped = false
+                    output.append(" ")
+                } else {
+                    output.append(character)
+                }
+            case .single, .double, .template:
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if (state == .single && character == "'")
+                            || (state == .double && character == "\"")
+                            || (state == .template && character == "`") {
+                    state = .code
+                }
+                output.append(character == "\n" ? "\n" : " ")
+            case .lineComment:
+                if character == "\n" {
+                    state = .code
+                    output.append("\n")
+                } else {
+                    output.append(" ")
+                }
+            case .blockComment:
+                if character == "*", following == "/" {
+                    state = .code
+                    output.append("  ")
+                    index = input.index(after: next)
+                    continue
+                }
+                output.append(character == "\n" ? "\n" : " ")
+            }
+            index = next
+        }
+        return output
     }
 
     private static func validateReplacement(
@@ -4091,6 +4706,52 @@ public final class SkyStreamPluginManager: ObservableObject {
         }
     }
 
+    private static func privateCloudPluginConfigurationIsCapturable(
+        _ plugin: SkyStreamInstalledPluginState
+    ) -> Bool {
+        var boundedState = plugin
+        boundedState.runtimeStorage = nil
+        return SkyStreamBackupMetadataPolicy.isBounded(pluginState: boundedState)
+            && SkyStreamPrivateCloudConfigurationPolicy.preferencesAreCompleteAndBounded(
+                plugin.preferences
+            )
+            && isSafeHTTPSURL(plugin.provenance.sourceURL)
+            && (plugin.provenance.repositoryURL.map(isSafeHTTPSURL) ?? true)
+            && (plugin.provenance.pluginListURL.map(isSafeHTTPSURL) ?? true)
+            && (plugin.selectedDomainURL.map(isSafeHTTPSURL) ?? true)
+            && (plugin.selectedDomainURL.map { selected in
+                plugin.manifest.domains?.contains(where: { $0.url == selected }) == true
+            } ?? true)
+            && (plugin.manifest.baseURL.isEmpty
+                || isSafeHTTPSURL(plugin.manifest.baseURL))
+            && (plugin.manifest.iconURL.map(isSafeHTTPSURL) ?? true)
+            && (plugin.manifest.domains?.allSatisfy {
+                isSafeHTTPSURL($0.url)
+            } ?? true)
+            && (plugin.manifest.providers?.allSatisfy {
+                ($0.baseURL.map(isSafeHTTPSURL) ?? true)
+                    && ($0.iconURL.map(isSafeHTTPSURL) ?? true)
+            } ?? true)
+    }
+
+    private static func privateCloudRepositoryConfigurationIsCapturable(
+        _ repository: SkyStreamRepositoryBackupSnapshot
+    ) -> Bool {
+        guard isSafeHTTPSURL(repository.sourceURL),
+              !repository.pluginListURLs.isEmpty,
+              repository.pluginListURLs.allSatisfy(isSafeHTTPSURL) else { return false }
+        switch repository.kind {
+        case .repository:
+            guard let manifest = repository.manifest,
+                  manifest.pluginLists == repository.pluginListURLs,
+                  manifest.iconURL.map(isSafeHTTPSURL) ?? true,
+                  manifest.websiteURL.map(isSafeHTTPSURL) ?? true else { return false }
+        case .pluginList:
+            guard repository.manifest == nil else { return false }
+        }
+        return true
+    }
+
     private static func containsCloudUnsafeSecretMarker(_ value: String) -> Bool {
         let lowercase = value.lowercased()
         return [
@@ -4144,10 +4805,15 @@ public final class SkyStreamPluginManager: ObservableObject {
         return true
     }
 
-    /// A metadata-only cloud row may configure an existing package only when it identifies the
-    /// exact locally accepted code and the same pinned owner. Timestamps and the redundant
-    /// expected checksum are deliberately excluded; the immutable archive/script hashes above
-    /// are the code identity.
+    static func acceptsSafeCloudConfigurationURL(
+        _ rawValue: String,
+        configurationIsComplete: Bool
+    ) -> Bool {
+        configurationIsComplete
+            ? isSafeHTTPSURL(rawValue)
+            : isCloudSafeHTTPSURL(rawValue)
+    }
+
     static func safeCloudArchiveMayInstall(
         incoming: SkyStreamInstalledPluginState,
         over existing: SkyStreamInstalledPluginState?
@@ -4165,12 +4831,24 @@ public final class SkyStreamPluginManager: ObservableObject {
         }
         let incomingURLs = Set(incoming.map(\.sourceURL))
         let mergedIncoming = incoming.map { candidate in
-            // A cloud document is not signed by the repository. Preserve every locally accepted
-            // field—including pinned list URLs and the bounded catalog cache—for an existing
-            // source. The incoming row can still add that source on a clean device.
+
             currentByURL[candidate.sourceURL] ?? candidate
         }
         return mergedIncoming + current.filter { !incomingURLs.contains($0.sourceURL) }
+    }
+
+    static func restoringCompletePrivateCloudRepositories(
+        current: [SkyStreamSavedRepository],
+        incoming: [SkyStreamSavedRepository],
+        baseline: [String: SkyStreamSavedRepository]
+    ) -> [SkyStreamSavedRepository] {
+        let incomingURLs = Set(incoming.map(\.sourceURL))
+        let concurrentLocal = current.filter { repository in
+            guard !incomingURLs.contains(repository.sourceURL) else { return false }
+            guard let original = baseline[repository.sourceURL] else { return true }
+            return original != repository
+        }
+        return incoming + concurrentLocal
     }
 
     static func mergingSafeCloudPreferences(
@@ -4184,16 +4862,14 @@ public final class SkyStreamPluginManager: ObservableObject {
         )).snapshot().preferences
         for key in boundedIncoming.keys.sorted() {
             guard let boundedValue = boundedIncoming[key] else { continue }
-            // The installed manifest—not a remote value—owns whether an existing field is
-            // credential-bearing. A cloud row cannot downgrade that classification to replace it.
+
             if let existing = merged[key], existing.isSecret || existing.isRedacted { continue }
             guard let metadata = publicIncoming[key] else { continue }
             if let existing = merged[key],
                existing.value == boundedValue,
                !existing.isSecret,
                !existing.isRedacted {
-                // Timestamps are transport metadata, not runtime behavior. Preserve the local row
-                // on an effective no-op so identical cloud snapshots cannot ping-pong updatedAt.
+
                 continue
             }
             var candidate = merged
@@ -4226,6 +4902,17 @@ public final class SkyStreamPluginManager: ObservableObject {
     private func preflightSafeCloudSnapshot(
         _ snapshot: SkyStreamBackupSnapshot
     ) throws -> [SkyStreamSavedRepository] {
+        let configurationIsComplete = snapshot.privateCloudConfigurationIsComplete == true
+        if configurationIsComplete,
+           !SkyStreamPrivateCloudConfigurationPolicy.snapshotHasCompleteConfiguration(snapshot) {
+            throw SkyStreamPluginManagerError.invalidBackup
+        }
+        let acceptsURL: (String) -> Bool = {
+            Self.acceptsSafeCloudConfigurationURL(
+                $0,
+                configurationIsComplete: configurationIsComplete
+            )
+        }
         guard snapshot.repositories.allSatisfy({ repository in
             SkyStreamBackupMetadataPolicy.isBounded(repository: repository)
                 && repository.additionalFields.isEmpty
@@ -4233,18 +4920,27 @@ public final class SkyStreamPluginManager: ObservableObject {
                 && (repository.manifest.map {
                     $0.pluginLists == repository.pluginListURLs
                 } ?? true)
-                && (repository.manifest?.iconURL.map(Self.isCloudSafeHTTPSURL) ?? true)
-                && (repository.manifest?.websiteURL.map(Self.isCloudSafeHTTPSURL) ?? true)
+                && (repository.manifest?.iconURL.map(acceptsURL) ?? true)
+                && (repository.manifest?.websiteURL.map(acceptsURL) ?? true)
         }) else { throw SkyStreamPluginManagerError.invalidBackup }
         let restored = try restoredRepositories(from: snapshot.repositories)
         guard restored.allSatisfy({ repository in
-            Self.isCloudSafeHTTPSURL(repository.sourceURL)
-                && repository.pluginListURLs.allSatisfy(Self.isCloudSafeHTTPSURL)
+            acceptsURL(repository.sourceURL)
+                && repository.pluginListURLs.allSatisfy(acceptsURL)
         }) else { throw SkyStreamPluginManagerError.invalidBackup }
 
         var aggregateArchiveBytes = 0
         for plugin in snapshot.plugins {
             let state = plugin.state
+            let preferencesAreValid = configurationIsComplete
+                ? !plugin.preferencesWereRedacted
+                    && SkyStreamPrivateCloudConfigurationPolicy
+                        .preferencesAreCompleteAndBounded(state.preferences)
+                : plugin.preferencesWereRedacted
+                    && state.preferences.allSatisfy { key, value in
+                        !value.isSecret && !value.isRedacted
+                            && !Self.containsCloudUnsafeSecretMarker(key)
+                    }
             guard SkyStreamBackupMetadataPolicy.isBounded(pluginState: state),
                   plugin.additionalFields.isEmpty,
                   state.payloadRelativePath.isEmpty,
@@ -4252,26 +4948,23 @@ public final class SkyStreamPluginManager: ObservableObject {
                   state.additionalFields.isEmpty,
                   Self.isValidSHA256(state.archiveSHA256),
                   Self.isValidSHA256(state.scriptSHA256),
-                  state.preferences.allSatisfy({ key, value in
-                      !value.isSecret && !value.isRedacted
-                          && !Self.containsCloudUnsafeSecretMarker(key)
-                  }),
-                  Self.isCloudSafeHTTPSURL(state.provenance.sourceURL),
-                  state.provenance.repositoryURL.map(Self.isCloudSafeHTTPSURL) ?? true,
-                  state.provenance.pluginListURL.map(Self.isCloudSafeHTTPSURL) ?? true,
+                  preferencesAreValid,
+                  acceptsURL(state.provenance.sourceURL),
+                  state.provenance.repositoryURL.map(acceptsURL) ?? true,
+                  state.provenance.pluginListURL.map(acceptsURL) ?? true,
                   state.provenance.additionalFields.isEmpty,
-                  state.selectedDomainURL.map(Self.isCloudSafeHTTPSURL) ?? true,
+                  state.selectedDomainURL.map(acceptsURL) ?? true,
                   state.manifest.additionalFields.isEmpty,
                   state.manifest.baseURL.isEmpty
-                    || Self.isCloudSafeHTTPSURL(state.manifest.baseURL),
-                  state.manifest.iconURL.map(Self.isCloudSafeHTTPSURL) ?? true,
+                    || acceptsURL(state.manifest.baseURL),
+                  state.manifest.iconURL.map(acceptsURL) ?? true,
                   state.manifest.domains?.allSatisfy({
-                      $0.additionalFields.isEmpty && Self.isCloudSafeHTTPSURL($0.url)
+                      $0.additionalFields.isEmpty && acceptsURL($0.url)
                   }) ?? true,
                   state.manifest.providers?.allSatisfy({
                       $0.additionalFields.isEmpty
-                          && ($0.baseURL.map(Self.isCloudSafeHTTPSURL) ?? true)
-                          && ($0.iconURL.map(Self.isCloudSafeHTTPSURL) ?? true)
+                          && ($0.baseURL.map(acceptsURL) ?? true)
+                          && ($0.iconURL.map(acceptsURL) ?? true)
                   }) ?? true,
                   state.providers.allSatisfy({ $0.additionalFields.isEmpty }),
                   state.compatibility.reasons.allSatisfy({ $0.additionalFields.isEmpty }) else {
@@ -4320,16 +5013,29 @@ public final class SkyStreamPluginManager: ObservableObject {
 @MainActor
 public final class SkyStreamPluginManager: ObservableObject {
     public static let shared = SkyStreamPluginManager()
+    nonisolated static let pendingSafeCloudSnapshotKey = "skyStreamPendingSafeCloudSnapshot.v1"
     @Published public private(set) var repositories: [SkyStreamSavedRepository] = []
     @Published public private(set) var installedPlugins: [SkyStreamInstalledPluginState] = []
     @Published public private(set) var isLoaded = true
     public var providers: [SkyStreamProviderDescriptor] { [] }
     public init() {}
 
-    public func captureSourceDefaultsState() async {}
+    static func safeCloudMetadataSnapshot(
+        fromPersistedStateData data: Data
+    ) -> SkyStreamBackupSnapshot? {
+        nil
+    }
 
-    /// Non-iOS targets retain SkyStream backup state as an opaque Codable document. They never
-    /// expose providers or evaluate payloads, but a Mac backup round-trip must not erase iOS data.
+    static func completePrivateCloudMetadataSnapshot(
+        fromPersistedStateData data: Data
+    ) -> SkyStreamBackupSnapshot? {
+        nil
+    }
+
+    public func captureSourceDefaultsState(expectedScopeGeneration: Int? = nil) async {}
+
+    public func reloadPersistedStateAfterRestore() async {}
+
     public func opaqueBackupSnapshotData() -> Data? {
         Self.boundedData(at: Self.manualOpaqueBackupURL, maximumBytes: 128 * 1_024 * 1_024)
             ?? Self.boundedData(at: Self.legacySharedOpaqueURL, maximumBytes: 128 * 1_024 * 1_024)
@@ -4368,9 +5074,6 @@ public final class SkyStreamPluginManager: ObservableObject {
         }
     }
 
-    /// The tvOS CloudKit bridge accepts only the much smaller metadata-only safe-cloud document.
-    /// Keep this separate from Mac's full opaque manual-backup path so an imported 128 MB archive
-    /// can never be copied into the media-state record or decoded during an Apple TV sync pass.
     public func opaqueMediaStateSnapshotData() -> Data? {
         guard let data = Self.boundedData(
             at: Self.mediaStateOpaqueURL,

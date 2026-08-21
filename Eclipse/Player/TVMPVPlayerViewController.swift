@@ -51,6 +51,10 @@ final class TVMPVPlayerViewController: UIViewController {
     private let elapsedLabel = UILabel()
     private let remainingLabel = UILabel()
     private let progressView = UIProgressView()
+    private let timelineKnob = UIView()
+    private var timelineKnobLeading: NSLayoutConstraint?
+    private var lastTimelineSeekUptime: TimeInterval = 0
+    private var timelineSeekStreak = 0
     private let timelineFocusButton = UIButton(type: .system)
     private let playPauseButton = UIButton(type: .system)
     private let rewindButton = UIButton(type: .system)
@@ -106,9 +110,6 @@ final class TVMPVPlayerViewController: UIViewController {
         }
     }
 
-    /// Captures the portable part of the current MPV track selection before switching engines.
-    /// MPV numeric track IDs are not forwarded because AVFoundation uses unrelated
-    /// `AVMediaSelectionOption` identities; language is the only reliable mapping.
     func avPlayerFallbackSelectionIntent() -> PlaybackMediaSelectionIntent {
         let audioTracks = renderer.audioTracks()
         let subtitleTracks = renderer.subtitleTracks()
@@ -181,10 +182,22 @@ final class TVMPVPlayerViewController: UIViewController {
         } else {
             controlsContainFocus = false
         }
+        updateTimelineFocusAppearance()
         if controlsContainFocus {
             autoHideWorkItem?.cancel()
         } else {
             scheduleControlsAutoHide()
+        }
+    }
+
+    private func updateTimelineFocusAppearance() {
+        let focused = timelineFocusButton.isFocused
+        timelineKnob.isHidden = !focused
+        progressView.trackTintColor = .white.withAlphaComponent(focused ? 0.45 : 0.25)
+        let scale: CGFloat = focused ? 1.6 : 1.0
+        UIView.animate(withDuration: 0.18) {
+            self.progressView.transform = CGAffineTransform(scaleX: 1, y: scale)
+            self.timelineKnob.transform = focused ? .identity : CGAffineTransform(scaleX: 0.6, y: 0.6)
         }
     }
 
@@ -200,10 +213,15 @@ final class TVMPVPlayerViewController: UIViewController {
             showControls(animated: true, moveFocus: false)
         case .select where !controlsVisible:
             showControls(animated: true, moveFocus: true)
+        case .leftArrow where !controlsVisible,
+             .rightArrow where !controlsVisible,
+             .upArrow where !controlsVisible,
+             .downArrow where !controlsVisible:
+            showControls(animated: true, moveFocus: true)
         case .leftArrow where timelineFocusButton.isFocused:
-            seek(by: -seekInterval)
+            seek(by: -acceleratedTimelineStep())
         case .rightArrow where timelineFocusButton.isFocused:
-            seek(by: seekInterval)
+            seek(by: acceleratedTimelineStep())
         case .menu:
             if controlsVisible {
                 hideControls(animated: true, forced: true)
@@ -216,8 +234,20 @@ final class TVMPVPlayerViewController: UIViewController {
     }
 
     private var seekInterval: Double {
-        let stored = UserDefaults.standard.double(forKey: "playerDoubleTapSeekSeconds")
+        let stored = ProfileSettingsStore.active.double(forKey: "playerDoubleTapSeekSeconds")
         return stored >= 5 ? min(stored, 60) : 10
+    }
+
+    private func acceleratedTimelineStep() -> Double {
+        let now = ProcessInfo.processInfo.systemUptime
+        if now - lastTimelineSeekUptime < 0.7 {
+            timelineSeekStreak = min(timelineSeekStreak + 1, 4)
+        } else {
+            timelineSeekStreak = 0
+        }
+        lastTimelineSeekUptime = now
+        let multiplier = pow(2.0, Double(timelineSeekStreak))
+        return min(seekInterval * multiplier, 120)
     }
 
     private func configureHierarchy() {
@@ -242,8 +272,8 @@ final class TVMPVPlayerViewController: UIViewController {
 
         configureLabel(titleLabel, font: .systemFont(ofSize: 42, weight: .bold), color: .white)
         configureLabel(subtitleLabel, font: .systemFont(ofSize: 24, weight: .medium), color: .white.withAlphaComponent(0.72))
-        configureLabel(elapsedLabel, font: .monospacedDigitSystemFont(ofSize: 20, weight: .medium), color: .white)
-        configureLabel(remainingLabel, font: .monospacedDigitSystemFont(ofSize: 20, weight: .medium), color: .white)
+        configureLabel(elapsedLabel, font: .monospacedDigitSystemFont(ofSize: 26, weight: .medium), color: .white)
+        configureLabel(remainingLabel, font: .monospacedDigitSystemFont(ofSize: 26, weight: .medium), color: .white)
         titleLabel.text = request.title.isEmpty ? fallbackTitle : request.title
         subtitleLabel.text = request.subtitle
         subtitleLabel.isHidden = request.subtitle?.isEmpty != false
@@ -253,6 +283,16 @@ final class TVMPVPlayerViewController: UIViewController {
         progressView.progressTintColor = .white
         progressView.layer.cornerRadius = 3
         progressView.clipsToBounds = true
+
+        timelineKnob.translatesAutoresizingMaskIntoConstraints = false
+        timelineKnob.backgroundColor = .white
+        timelineKnob.layer.cornerRadius = 11
+        timelineKnob.layer.shadowColor = UIColor.black.cgColor
+        timelineKnob.layer.shadowOpacity = 0.6
+        timelineKnob.layer.shadowRadius = 6
+        timelineKnob.layer.shadowOffset = CGSize(width: 0, height: 2)
+        timelineKnob.isHidden = true
+        timelineKnob.transform = CGAffineTransform(scaleX: 0.6, y: 0.6)
 
         timelineFocusButton.translatesAutoresizingMaskIntoConstraints = false
         timelineFocusButton.setTitle("Timeline", for: .normal)
@@ -324,23 +364,30 @@ final class TVMPVPlayerViewController: UIViewController {
         timelineRow.translatesAutoresizingMaskIntoConstraints = false
         timelineRow.addSubview(elapsedLabel)
         timelineRow.addSubview(progressView)
+        timelineRow.addSubview(timelineKnob)
         timelineRow.addSubview(timelineFocusButton)
         timelineRow.addSubview(remainingLabel)
+        let knobLeading = timelineKnob.centerXAnchor.constraint(equalTo: progressView.leadingAnchor)
+        timelineKnobLeading = knobLeading
         NSLayoutConstraint.activate([
             elapsedLabel.leadingAnchor.constraint(equalTo: timelineRow.leadingAnchor),
             elapsedLabel.centerYAnchor.constraint(equalTo: progressView.centerYAnchor),
-            elapsedLabel.widthAnchor.constraint(equalToConstant: 110),
+            elapsedLabel.widthAnchor.constraint(equalToConstant: 140),
             progressView.leadingAnchor.constraint(equalTo: elapsedLabel.trailingAnchor, constant: 20),
             progressView.trailingAnchor.constraint(equalTo: remainingLabel.leadingAnchor, constant: -20),
             progressView.centerYAnchor.constraint(equalTo: timelineRow.centerYAnchor),
             progressView.heightAnchor.constraint(equalToConstant: 8),
+            timelineKnob.centerYAnchor.constraint(equalTo: progressView.centerYAnchor),
+            timelineKnob.widthAnchor.constraint(equalToConstant: 22),
+            timelineKnob.heightAnchor.constraint(equalToConstant: 22),
+            knobLeading,
             timelineFocusButton.leadingAnchor.constraint(equalTo: progressView.leadingAnchor, constant: -16),
             timelineFocusButton.trailingAnchor.constraint(equalTo: progressView.trailingAnchor, constant: 16),
             timelineFocusButton.topAnchor.constraint(equalTo: timelineRow.topAnchor),
             timelineFocusButton.bottomAnchor.constraint(equalTo: timelineRow.bottomAnchor),
             remainingLabel.trailingAnchor.constraint(equalTo: timelineRow.trailingAnchor),
             remainingLabel.centerYAnchor.constraint(equalTo: progressView.centerYAnchor),
-            remainingLabel.widthAnchor.constraint(equalToConstant: 130),
+            remainingLabel.widthAnchor.constraint(equalToConstant: 160),
             timelineRow.heightAnchor.constraint(equalToConstant: 76)
         ])
 
@@ -439,9 +486,7 @@ final class TVMPVPlayerViewController: UIViewController {
     }
 
     private func handleStartupFailure(_ message: String) {
-        // `MPVTVRenderer.start` reports post-setup failures through its callback before it
-        // rethrows to `startPlayback`. Keep this idempotent so the automatic AVPlayer fallback
-        // cannot be followed immediately by a second, terminal-error path.
+
         guard !didReportStartupFailure else { return }
         didReportStartupFailure = true
         loadingIndicator.stopAnimating()
@@ -461,8 +506,7 @@ final class TVMPVPlayerViewController: UIViewController {
     }
 
     private func handlePictureInPictureFailure(_ message: String) {
-        // PiP is optional. A failed handoff must not replace healthy inline playback with the
-        // renderer-failure overlay or offer an unrelated AVPlayer engine fallback.
+
         logPictureInPicture("unavailable reason=\(message)")
         showControls(animated: true, moveFocus: true)
         UIAccessibility.post(notification: .announcement, argument: message)
@@ -479,6 +523,7 @@ final class TVMPVPlayerViewController: UIViewController {
         latestPosition = position.isFinite ? max(0, position) : 0
         latestDuration = duration.isFinite ? max(0, duration) : 0
         progressView.progress = latestDuration > 0 ? Float(min(latestPosition / latestDuration, 1)) : 0
+        timelineKnobLeading?.constant = progressView.bounds.width * CGFloat(progressView.progress)
         elapsedLabel.text = formatTime(latestPosition)
         remainingLabel.text = latestDuration > 0 ? "−\(formatTime(max(0, latestDuration - latestPosition)))" : "−−:−−"
         updateNowPlaying(position: latestPosition, duration: latestDuration, isPlaying: !renderer.isPaused)
@@ -486,8 +531,6 @@ final class TVMPVPlayerViewController: UIViewController {
         pictureInPictureController?.invalidatePlaybackState()
     }
 
-    /// Keep remote/local transport responsive, then publish the authoritative MPVKit timeline
-    /// once it is installed. Rapid commands supersede older waits.
     private func schedulePictureInPicturePlaybackStateUpdate() {
         guard !didStop, let controller = pictureInPictureController else { return }
         controller.invalidatePlaybackState()
@@ -511,8 +554,7 @@ final class TVMPVPlayerViewController: UIViewController {
         let rawCurrentTime = renderer.currentTime
         let rawDuration = renderer.duration
         let currentTime = rawCurrentTime.isFinite ? max(0, rawCurrentTime) : 0
-        // Keep live/unknown timelines internally consistent. A one-second fallback can place an
-        // ordinary live position outside AVKit's advertised range and break PiP transport state.
+
         let duration: Double
         if rawDuration.isFinite, rawDuration > 0 {
             duration = max(rawDuration, currentTime + 1)
@@ -522,9 +564,6 @@ final class TVMPVPlayerViewController: UIViewController {
         return (currentTime, duration)
     }
 
-    /// The AVKit restore callback and `didStop` are allowed to arrive in either order. Keep one
-    /// native restore operation for their shared controller/attempt identity so neither callback
-    /// can race a second teardown or report a frame from a superseded attempt.
     private func beginPictureInPictureRestore(
         for controller: AVPictureInPictureController,
         preparationGeneration: UInt64
@@ -571,8 +610,6 @@ final class TVMPVPlayerViewController: UIViewController {
         return operation
     }
 
-    /// Final UI work is also one-shot for the attempt. Both AVKit callbacks may observe success,
-    /// but only the first one moves focus and rearms control auto-hide.
     private func finalizePictureInPictureRestore(
         _ restored: Bool,
         key: PictureInPictureRestoreKey,
@@ -625,7 +662,11 @@ final class TVMPVPlayerViewController: UIViewController {
         controlsVisible = false
         controlsGradient.isUserInteractionEnabled = false
         let changes = { self.controlsGradient.alpha = 0 }
-        let completion: (Bool) -> Void = { _ in self.controlsGradient.isHidden = true }
+        let completion: (Bool) -> Void = { _ in
+            self.controlsGradient.isHidden = true
+            self.setNeedsFocusUpdate()
+            self.updateFocusIfNeeded()
+        }
         if animated {
             UIView.animate(withDuration: 0.25, animations: changes, completion: completion)
         } else {
@@ -636,7 +677,7 @@ final class TVMPVPlayerViewController: UIViewController {
 
     private func scheduleControlsAutoHide() {
         autoHideWorkItem?.cancel()
-        guard !renderer.isPaused, !controlsContainFocus, presentedViewController == nil else { return }
+        guard controlsVisible, !renderer.isPaused, !controlsContainFocus, presentedViewController == nil else { return }
         let item = DispatchWorkItem { [weak self] in self?.hideControls(animated: true) }
         autoHideWorkItem = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: item)
@@ -692,9 +733,6 @@ final class TVMPVPlayerViewController: UIViewController {
             return
         }
 
-        // AVKit may deliver late playback-delegate messages after a failed or completed start.
-        // Give every attempt a distinct controller identity so those messages cannot mutate the
-        // next attempt. The identity checks in every delegate callback are the immutable latch.
         pictureInPicturePreparationGeneration &+= 1
         let generation = pictureInPicturePreparationGeneration
         pictureInPictureController?.delegate = nil
@@ -827,10 +865,10 @@ final class TVMPVPlayerViewController: UIViewController {
             return kCMVideoCodecType_HEVC
         }
         if normalized.contains("av1") {
-            return 0x61763031 // av01
+            return 0x61763031
         }
         if normalized.contains("vp9") {
-            return 0x76703039 // vp09
+            return 0x76703039
         }
         return kCMVideoCodecType_H264
     }
@@ -895,9 +933,6 @@ final class TVMPVPlayerViewController: UIViewController {
     @objc private func handleDisplayOrRouteChange() {
         guard !didStop, let diagnostics = lastVideoDiagnostics else { return }
 
-        // A receiver/HDMI/AirPlay route change can replace AVDisplayManager while retaining the
-        // same source FPS. Resetting the FPS gate is essential; otherwise the ordinary diagnostics
-        // callback suppresses the criteria as a duplicate and the new display stays unmatched.
         activeDisplayManager?.preferredDisplayCriteria = nil
         activeDisplayManager = nil
         lastDisplayFrameRate = 0
@@ -1015,8 +1050,11 @@ final class TVMPVPlayerViewController: UIViewController {
     }
 
     private func formatTime(_ seconds: Double) -> String {
-        guard seconds.isFinite else { return "−−:−−" }
-        let value = max(0, Int(seconds.rounded(.down)))
+        guard seconds.isFinite,
+              let rounded = Int(exactly: seconds.rounded(.down)) else {
+            return "−−:−−"
+        }
+        let value = max(0, rounded)
         let hours = value / 3600
         let minutes = (value % 3600) / 60
         let remainder = value % 60

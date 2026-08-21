@@ -1,3 +1,10 @@
+//
+//  Bundle.swift
+//  Eclipse
+//
+//  Created by Dominic on 04.11.25.
+//
+
 import Foundation
 
 extension Bundle {
@@ -25,10 +32,51 @@ extension Bundle {
         }
         return "GitHub"
     }
-    /// TestFlight apps use Apple's sandbox receipt even when the build's
-    /// distribution-channel plist value was lost during export.
+
+    var eclipseSourceRevision: String? {
+        gitRevision(forInfoKey: "EclipseSourceRevision")
+    }
+
+    var mpvKitSourceRevision: String? {
+        gitRevision(forInfoKey: "EclipseMPVKitSourceRevision")
+    }
+
+    var eclipseSourceURL: URL {
+        sourceURL(
+            repository: "https://github.com/Soupy-dev/Eclipse",
+            revision: eclipseSourceRevision
+        )
+    }
+
+    var mpvKitSourceURL: URL {
+        sourceURL(
+            repository: "https://github.com/Soupy-dev/MPVKit",
+            revision: mpvKitSourceRevision
+        )
+    }
+
+    private func gitRevision(forInfoKey key: String) -> String? {
+        guard let rawValue = infoDictionary?[key] as? String else { return nil }
+        let revision = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard revision.count == 40,
+              revision.unicodeScalars.allSatisfy({
+                  CharacterSet(charactersIn: "0123456789abcdefABCDEF").contains($0)
+              }) else {
+            return nil
+        }
+        return revision.lowercased()
+    }
+
+    private func sourceURL(repository: String, revision: String?) -> URL {
+        guard let revision,
+              let revisionURL = URL(string: "\(repository)/tree/\(revision)") else {
+            return URL(string: repository)!
+        }
+        return revisionURL
+    }
+
     var isTestFlight: Bool {
-        #if os(iOS) || os(tvOS) || os(macOS)
+        #if os(iOS) || os(tvOS)
         appStoreReceiptURL?.lastPathComponent == "sandboxReceipt"
         #else
         false
@@ -48,13 +96,26 @@ extension Bundle {
         !isAppleReviewedDistribution
     }
 
-    /// Emergency distribution capability seam for the user-supplied SkyStream flow.
-    ///
-    /// All channels intentionally default to enabled. A future reviewed build can opt out with
-    /// an explicit Info.plist boolean without coupling availability to TestFlight/App Store
-    /// receipt heuristics or changing the behavior of existing source families.
     var allowsSkyStreamPlugins: Bool {
         guard let configured = infoDictionary?["EclipseSkyStreamPluginsEnabled"] else {
+            return true
+        }
+        if let value = configured as? Bool {
+            return value
+        }
+        if let value = configured as? NSNumber {
+            return value.boolValue
+        }
+        if let value = configured as? String {
+            let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if ["false", "no", "0"].contains(normalized) { return false }
+            if ["true", "yes", "1"].contains(normalized) { return true }
+        }
+        return true
+    }
+
+    var allowsNuvioPlugins: Bool {
+        guard let configured = infoDictionary?["EclipseNuvioPluginsEnabled"] else {
             return true
         }
         if let value = configured as? Bool {
@@ -84,7 +145,6 @@ enum GitHubReleaseChecker {
     private static let pendingPromptKey = "githubReleaseShowAlertPending"
     private static let lastPromptedVersionKey = "githubReleaseLastPromptedVersion"
 
-    // Keep release checks lightweight and avoid excessive GitHub API calls.
     private static let autoCheckInterval: TimeInterval = 6 * 3600
 
     static var isGitHubReleaseUpdatesAvailable: Bool {

@@ -1,3 +1,10 @@
+//
+//  MangaCatalogManager.swift
+//  Kanzen
+//
+//  Created by Eclipse on 2025.
+//
+
 import Foundation
 import Combine
 import SwiftUI
@@ -100,10 +107,44 @@ final class MangaCatalogManager {
     var catalogs: [MangaCatalog] = []
 
     private let userDefaults = UserDefaults.standard
-    private let catalogsKey = "kanzenMangaCatalogs"
+    private static let legacyCatalogsKey = "kanzenMangaCatalogs"
+
+    private var catalogsKey: String
+    private var activeProfileID: UUID
 
     private init() {
+        let profileID = ProfileManager.shared.activeProfileID
+        activeProfileID = profileID
+        catalogsKey = Self.catalogsKey(for: profileID)
+        Self.migrateLegacyStoreIfNeeded()
         loadCatalogs()
+    }
+
+    static func catalogsKey(for profileID: UUID) -> String {
+        ProfileScopedStorage.defaultsKey(base: legacyCatalogsKey, profileID: profileID)
+    }
+
+    private static func migrateLegacyStoreIfNeeded() {
+        ProfileScopedStorage.migrateLegacyStoreIfNeeded(marker: "readerCatalogs") {
+            let defaults = UserDefaults.standard
+            let destinationKey = catalogsKey(for: ProfileManager.defaultProfileID)
+            guard defaults.data(forKey: destinationKey) == nil,
+                  let legacy = defaults.data(forKey: legacyCatalogsKey) else { return }
+            defaults.set(legacy, forKey: destinationKey)
+            defaults.removeObject(forKey: legacyCatalogsKey)
+        }
+    }
+
+    func switchProfile(to profileID: UUID) {
+        guard profileID != activeProfileID else { return }
+        activeProfileID = profileID
+        catalogsKey = Self.catalogsKey(for: profileID)
+        loadCatalogs()
+    }
+
+    func discardStore(forProfile profileID: UUID) {
+        guard profileID != activeProfileID else { return }
+        userDefaults.removeObject(forKey: Self.catalogsKey(for: profileID))
     }
 
     func loadCatalogs() {
@@ -119,6 +160,35 @@ final class MangaCatalogManager {
         if let data = try? JSONEncoder().encode(catalogs) {
             userDefaults.set(data, forKey: catalogsKey)
         }
+    }
+
+    func catalogs(forProfile profileID: UUID) -> [MangaCatalog] {
+        catalogsSnapshot(forProfile: profileID) ?? []
+    }
+
+    func catalogsSnapshot(forProfile profileID: UUID) -> [MangaCatalog]? {
+        let key = profileID == activeProfileID ? catalogsKey : Self.catalogsKey(for: profileID)
+        guard let data = userDefaults.data(forKey: key) else {
+            return []
+        }
+        guard let decoded = try? JSONDecoder().decode([MangaCatalog].self, from: data) else {
+            ReaderLogger.shared.log(
+                "MangaCatalogManager: profile \(profileID) has an unreadable catalogs store; preserving its bytes",
+                type: "Error"
+            )
+            return nil
+        }
+        return decoded.sorted { $0.order < $1.order }
+    }
+
+    func applyRestoredCatalogs(_ restored: [MangaCatalog], forProfile profileID: UUID) {
+        guard profileID != activeProfileID else {
+            catalogs = restored.sorted { $0.order < $1.order }
+            saveCatalogs()
+            return
+        }
+        guard let data = try? JSONEncoder().encode(restored) else { return }
+        userDefaults.set(data, forKey: Self.catalogsKey(for: profileID))
     }
 
     func getEnabledCatalogs() -> [MangaCatalog] {
@@ -143,6 +213,8 @@ final class MangaCatalogManager {
 }
 
 enum MangaHomeSourceKind: String, Codable {
+    case readerExtension
+    /// Decode-only compatibility with previously persisted source preferences.
     case aidoku
     case legacyModule
 }
@@ -152,31 +224,32 @@ struct MangaHomeSource: Identifiable, Equatable {
     let name: String
     let iconURL: String
     let kind: MangaHomeSourceKind
-    let aidokuSource: AidokuInstalledSource?
+    let readerExtensionSource: ReaderExtensionInstalledSource?
     let module: ModuleDataContainer?
     var isEnabled: Bool
     var order: Int
 
-    var isAidoku: Bool { kind == .aidoku }
+    var isReaderExtension: Bool { kind == .readerExtension }
     var isLegacyModule: Bool { kind == .legacyModule }
 
-    var sourceId: String? {
-        aidokuSource?.id
+    var sourceID: ReaderExtensionSourceID? {
+        readerExtensionSource?.id
     }
 
     var moduleUUID: UUID? {
         module?.id
     }
 
-    static func aidoku(_ source: AidokuInstalledSource, order: Int) -> MangaHomeSource {
-        MangaHomeSource(
-            id: "aidoku:\(source.id)",
-            name: source.name,
-            iconURL: source.iconURLString,
-            kind: .aidoku,
-            aidokuSource: source,
+    static func readerExtension(_ source: ReaderExtensionInstalledSource, order: Int) -> MangaHomeSource {
+        let language = ReaderExtensionLanguageInfo.displayName(source.effectiveLanguage)
+        return MangaHomeSource(
+            id: "readerExtension:\(source.id.rawValue)",
+            name: "\(source.name) · \(language)",
+            iconURL: source.iconURL?.absoluteString ?? "",
+            kind: .readerExtension,
+            readerExtensionSource: source,
             module: nil,
-            isEnabled: source.isEnabled,
+            isEnabled: source.enabled,
             order: order
         )
     }
@@ -187,7 +260,7 @@ struct MangaHomeSource: Identifiable, Equatable {
             name: module.moduleData.sourceName,
             iconURL: module.moduleData.iconURL,
             kind: .legacyModule,
-            aidokuSource: nil,
+            readerExtensionSource: nil,
             module: module,
             isEnabled: preference.isEnabled,
             order: orderOffset + preference.order
@@ -217,35 +290,38 @@ final class MangaHomeSourceManager: ObservableObject {
 
     @MainActor
     func allSources(
-        aidokuManager: AidokuSourceManager,
+        readerExtensionManager: ReaderExtensionManager,
         modules: [ModuleDataContainer],
-        includeDisabledAidoku: Bool = true
+        includeDisabledReaderExtensions: Bool = true
     ) -> [MangaHomeSource] {
-        let aidokuMetadata = includeDisabledAidoku
-            ? aidokuManager.installedSources.filter { aidokuManager.showMatureSources || !$0.isMature }
-            : aidokuManager.enabledSources()
+        let sourceMetadata = readerExtensionManager.installedSources.filter { source in
+            let maturityAllowed = readerExtensionManager.showMatureSources || source.maturity == .safe
+            return maturityAllowed && (includeDisabledReaderExtensions || source.enabled)
+        }
 
-        let aidokuSources = aidokuMetadata
+        let extensionSources = sourceMetadata
             .sorted {
-                if $0.order != $1.order { return $0.order < $1.order }
+                if $0.sortIndex != $1.sortIndex { return $0.sortIndex < $1.sortIndex }
                 return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
             }
             .enumerated()
             .map { index, source in
-                MangaHomeSource.aidoku(source, order: index)
+                MangaHomeSource.readerExtension(source, order: index)
             }
 
-        // Home feeds are Aidoku-only. Legacy JS modules remain available through
-        // compatibility routes, but they do not expose reliable home sections.
-        return aidokuSources
+        return ReaderContentFilter.shared.filterSources(extensionSources)
     }
 
     @MainActor
     func enabledSources(
-        aidokuManager: AidokuSourceManager,
+        readerExtensionManager: ReaderExtensionManager,
         modules: [ModuleDataContainer]
     ) -> [MangaHomeSource] {
-        allSources(aidokuManager: aidokuManager, modules: modules, includeDisabledAidoku: false)
+        allSources(
+            readerExtensionManager: readerExtensionManager,
+            modules: modules,
+            includeDisabledReaderExtensions: false
+        )
             .filter(\.isEnabled)
     }
 
@@ -274,6 +350,9 @@ final class MangaHomeSourceManager: ObservableObject {
             order: legacyPreferences.count
         )
         preference.isEnabled.toggle()
+        if preference.isEnabled, let moduleID = UUID(uuidString: key) {
+            KanzenLegacyJavaScriptQuarantineStore.shared.clear(moduleID: moduleID)
+        }
         legacyPreferences[key] = preference
         savePreferences()
     }
@@ -330,7 +409,7 @@ final class MangaHomeSourceManager: ObservableObject {
             let data = UserDefaults.standard.data(forKey: storageKey),
             let decoded = try? JSONDecoder().decode([String: MangaHomeSourcePreference].self, from: data)
         else {
-            if let oldData = UserDefaults.standard.data(forKey: "kanzenHomeSourcePreferences"),
+            if let oldData = ProfileSettingsStore.active.data(forKey: "kanzenHomeSourcePreferences"),
                let oldDecoded = try? JSONDecoder().decode([String: MangaHomeSourcePreference].self, from: oldData) {
                 legacyPreferences = oldDecoded
             }

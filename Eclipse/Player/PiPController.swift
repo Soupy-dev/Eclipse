@@ -1,4 +1,9 @@
-// test
+//
+//  PiPController.swift
+//  test
+//
+//  Created by Francesco on 30/09/25.
+//
 
 import AVKit
 import AVFoundation
@@ -49,9 +54,7 @@ final class PiPController: NSObject {
     private var timeRangeRequestCount = 0
     private var currentTimeRequestCount = 0
     private var automaticFromInlineEnabled = false
-    /// AVKit can reject an explicit start while concurrently accepting automatic-from-inline on
-    /// the same controller. Track `willStart` independently from Eclipse's attempt IDs so a
-    /// deferred failure from the rejected request cannot tear down the succeeding transition.
+
     private var pictureInPictureWillStartSequence: UInt = 0
     let playbackLoadGeneration: Int
     private var armedTransitionAttemptID: Int = 0
@@ -59,13 +62,13 @@ final class PiPController: NSObject {
     var transitionAttemptID: Int {
         callbackTransitionAttemptID ?? armedTransitionAttemptID
     }
-    
+
     weak var delegate: PiPControllerDelegate?
-    
+
     var isPictureInPictureSupported: Bool {
         AVPictureInPictureController.isPictureInPictureSupported()
     }
-    
+
     var isPictureInPictureActive: Bool {
         return pipController?.isPictureInPictureActive ?? false
     }
@@ -81,7 +84,7 @@ final class PiPController: NSObject {
     var isAutomaticFromInlineEnabled: Bool {
         automaticFromInlineEnabled
     }
-    
+
     var isPictureInPicturePossible: Bool {
         return pipController?.isPictureInPicturePossible ?? false
     }
@@ -89,7 +92,7 @@ final class PiPController: NSObject {
     static var isPictureInPictureSupported: Bool {
         AVPictureInPictureController.isPictureInPictureSupported()
     }
-    
+
     init(sampleBufferDisplayLayer: AVSampleBufferDisplayLayer, playbackLoadGeneration: Int = 0) {
         self.sampleBufferDisplayLayer = sampleBufferDisplayLayer
         self.playbackLoadGeneration = playbackLoadGeneration
@@ -100,11 +103,11 @@ final class PiPController: NSObject {
     func armTransition(attemptID: Int) {
         armedTransitionAttemptID = attemptID
         if isStartRequestPending {
-            // An explicit request can join an automatic-from-inline transition after willStart.
+
             callbackTransitionAttemptID = attemptID
         }
     }
-    
+
     private func setupSampleBufferPictureInPicture() {
         guard isPictureInPictureSupported,
               let displayLayer = sampleBufferDisplayLayer else {
@@ -114,12 +117,12 @@ final class PiPController: NSObject {
             )
             return
         }
-        
+
         let contentSource = AVPictureInPictureController.ContentSource(
             sampleBufferDisplayLayer: displayLayer,
             playbackDelegate: self
         )
-        
+
         pipController = AVPictureInPictureController(contentSource: contentSource)
         pipController?.delegate = self
         pipController?.requiresLinearPlayback = false
@@ -165,7 +168,7 @@ final class PiPController: NSObject {
             self?.pipController?.invalidatePlaybackState()
         }
     }
-    
+
     func stopPictureInPicture() {
         stopPictureInPicture(source: "unspecified")
     }
@@ -178,13 +181,11 @@ final class PiPController: NSObject {
         Logger.shared.log("[PiPController] stop requested source=\(source) active=\(wasActive) possible=\(wasPossible) pending=\(wasPending) layer={\(layerSnapshot())}", type: "MPV")
         pipController?.stopPictureInPicture()
     }
-    
+
     func invalidate() {
         pipController?.invalidatePlaybackState()
     }
 
-    /// Permanently detaches this AVKit controller before the player installs a controller for a
-    /// newer media load. Late callbacks stay on this object and cannot reach the new load.
     func invalidateForReplacement() {
         let wasPending = isStartRequestPending
         let wasActive = pipController?.isPictureInPictureActive ?? false
@@ -200,10 +201,7 @@ final class PiPController: NSObject {
         pipController?.canStartPictureInPictureAutomaticallyFromInline = false
         #endif
         pipController?.delegate = nil
-        // On tvOS, stopPictureInPicture can stop the system's currently active PiP session even
-        // when it belongs to another app. Only stop a transition this wrapper actually owned.
-        // iOS/iPadOS must stop unconditionally because AVKit can have a queued automatic start
-        // before it publishes willStart and flips this wrapper's pending bit.
+
 #if os(tvOS)
         if wasPending || wasActive {
             pipController?.stopPictureInPicture()
@@ -215,7 +213,7 @@ final class PiPController: NSObject {
         pipController = nil
         delegate = nil
     }
-    
+
     func updatePlaybackState() {
         pipController?.invalidatePlaybackState()
     }
@@ -253,11 +251,7 @@ final class PiPController: NSObject {
         let rawCurrentTime = delegate?.pipControllerCurrentTime(self) ?? 0
         let rawDuration = delegate?.pipControllerDuration(self) ?? 0
         let currentTime = rawCurrentTime.isFinite ? max(0, rawCurrentTime) : 0
-        // A finite duration remains valid through the end of playback. Requiring it to be more
-        // than one second *ahead* of the current time made an ordinary VOD look indefinite during
-        // its final second, so the PiP timeline suddenly gained a synthesized ten minutes. Allow a
-        // small amount of clock skew past the reported end while still rejecting a stale duration
-        // that is materially behind the renderer position.
+
         let durationIsUsable = rawDuration.isFinite
             && rawDuration > 0
             && currentTime <= rawDuration + 1.0
@@ -266,20 +260,16 @@ final class PiPController: NSObject {
     }
 }
 
-// MARK: - AVPictureInPictureControllerDelegate
-
 extension PiPController: AVPictureInPictureControllerDelegate {
     func pictureInPictureControllerWillStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
-        // Automatic-from-inline entry does not pass through startPictureInPicture(), so establish
-        // the same pending latch here. Teardown can then cancel the AVKit handoff before stopping
-        // the renderer instead of allowing an automatic start to complete against a dead layer.
+
         pictureInPictureWillStartSequence &+= 1
         isStartRequestPending = true
         callbackTransitionAttemptID = armedTransitionAttemptID
         Logger.shared.log("[PiPController] stage=will-start active=\(pictureInPictureController.isPictureInPictureActive) suspended=\(pictureInPictureController.isPictureInPictureSuspended) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) layer={\(layerSnapshot())}", type: "PiPTrace")
         delegate?.pipController(self, willStartPictureInPicture: true)
     }
-    
+
     func pictureInPictureControllerDidStartPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         isStartRequestPending = false
         let startedAttemptID = transitionAttemptID
@@ -297,7 +287,7 @@ extension PiPController: AVPictureInPictureControllerDelegate {
             Logger.shared.log("[PiPController] stage=post-start-health active=\(pictureInPictureController.isPictureInPictureActive) suspended=\(pictureInPictureController.isPictureInPictureSuspended) possible=\(pictureInPictureController.isPictureInPicturePossible) playing=\(self.delegate?.pipControllerIsPlaying(self) ?? false) current=\(currentText) duration=\(durationText) layer={\(self.layerSnapshot())}", type: "PiPTrace")
         }
     }
-    
+
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, failedToStartPictureInPictureWithError error: Error) {
         isStartRequestPending = false
         let failedAttemptID = transitionAttemptID
@@ -325,19 +315,19 @@ extension PiPController: AVPictureInPictureControllerDelegate {
             }
         }
     }
-    
+
     func pictureInPictureControllerWillStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         isStartRequestPending = false
         Logger.shared.log("[PiPController] stage=will-stop active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) layer={\(layerSnapshot())}", type: "PiPTrace")
         delegate?.pipController(self, willStopPictureInPicture: true)
     }
-    
+
     func pictureInPictureControllerDidStopPictureInPicture(_ pictureInPictureController: AVPictureInPictureController) {
         Logger.shared.log("[PiPController] stage=did-stop active=\(pictureInPictureController.isPictureInPictureActive) possible=\(pictureInPictureController.isPictureInPicturePossible) pending=\(isStartRequestPending) layer={\(layerSnapshot())}", type: "PiPTrace")
         delegate?.pipController(self, didStopPictureInPicture: true)
         callbackTransitionAttemptID = nil
     }
-    
+
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void) {
         let completion = PiPRestoreCompletionOnce(completionHandler)
         let attemptID = transitionAttemptID
@@ -363,10 +353,8 @@ extension PiPController: AVPictureInPictureControllerDelegate {
     }
 }
 
-// MARK: - AVPictureInPictureSampleBufferPlaybackDelegate
-
 extension PiPController: AVPictureInPictureSampleBufferPlaybackDelegate {
-    
+
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, setPlaying playing: Bool) {
         Logger.shared.log(
             "[PiPController] stage=set-playing playing=\(playing) active=\(pictureInPictureController.isPictureInPictureActive) suspended=\(pictureInPictureController.isPictureInPictureSuspended) pending=\(isStartRequestPending) attemptID=\(transitionAttemptID) layer={\(layerSnapshot())}",
@@ -382,7 +370,7 @@ extension PiPController: AVPictureInPictureSampleBufferPlaybackDelegate {
             pictureInPictureController.invalidatePlaybackState()
         }
     }
-    
+
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, didTransitionToRenderSize newRenderSize: CMVideoDimensions) {
         Logger.shared.log("[PiPController] stage=render-size size=\(newRenderSize.width)x\(newRenderSize.height) layer={\(layerSnapshot())}", type: "PiPTrace")
         delegate?.pipController(
@@ -393,7 +381,7 @@ extension PiPController: AVPictureInPictureSampleBufferPlaybackDelegate {
             )
         )
     }
-    
+
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, skipByInterval skipInterval: CMTime, completion completionHandler: @escaping () -> Void) {
         let seconds = CMTimeGetSeconds(skipInterval)
         let times = sanitizedPlaybackTimes()
@@ -415,16 +403,16 @@ extension PiPController: AVPictureInPictureSampleBufferPlaybackDelegate {
             completionHandler()
         }
     }
-    
+
     func pictureInPictureControllerTimeRangeForPlayback(_ pictureInPictureController: AVPictureInPictureController) -> CMTimeRange {
         let times = sanitizedPlaybackTimes()
         return CMTimeRange(start: .zero, duration: CMTime(seconds: times.duration, preferredTimescale: 1000))
     }
-    
+
     func pictureInPictureControllerIsPlaybackPaused(_ pictureInPictureController: AVPictureInPictureController) -> Bool {
         return !(delegate?.pipControllerIsPlaying(self) ?? false)
     }
-    
+
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, setPlaying playing: Bool, completion: @escaping () -> Void) {
         Logger.shared.log(
             "[PiPController] stage=set-playing-completion playing=\(playing) active=\(pictureInPictureController.isPictureInPictureActive) suspended=\(pictureInPictureController.isPictureInPictureSuspended) pending=\(isStartRequestPending) attemptID=\(transitionAttemptID) layer={\(layerSnapshot())}",
@@ -447,7 +435,7 @@ extension PiPController: AVPictureInPictureSampleBufferPlaybackDelegate {
             completion()
         }
     }
-    
+
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, timeRangeForPlayback sampleBufferDisplayLayer: AVSampleBufferDisplayLayer) -> CMTimeRange {
         let times = sanitizedPlaybackTimes()
         timeRangeRequestCount += 1
@@ -456,7 +444,7 @@ extension PiPController: AVPictureInPictureSampleBufferPlaybackDelegate {
         }
         return CMTimeRange(start: .zero, duration: CMTime(seconds: times.duration, preferredTimescale: 1000))
     }
-    
+
     func pictureInPictureController(_ pictureInPictureController: AVPictureInPictureController, currentTimeFor sampleBufferDisplayLayer: AVSampleBufferDisplayLayer) -> CMTime {
         let times = sanitizedPlaybackTimes()
         currentTimeRequestCount += 1

@@ -37,6 +37,7 @@ enum NuvioPluginRuntime {
     private static let maximumResultJSONBytes = 4 * 1024 * 1024
 
     private static let maximumResultRows = 500
+    private static let maximumScannedResultRows = 4_000
     private static let maximumSettingsOptions = 200
 
     private static func reclaimOrBurnPermit(queue: DispatchQueue, scraper: NuvioPluginScraper) {
@@ -104,13 +105,17 @@ enum NuvioPluginRuntime {
         episode: Int?,
         scraper: NuvioPluginScraper,
         repository: NuvioPluginRepository,
-        scraperSettings: [String: Any]
+        scraperSettings: [String: Any],
+        servicesProfileID: UUID,
+        sharesServices: Bool
     ) async throws -> NuvioStreamBatch {
         let tally = NuvioFetchTally()
         let batch = try await run(
             code: code,
             scraper: scraper,
             scraperSettings: scraperSettings,
+            servicesProfileID: servicesProfileID,
+            sharesServices: sharesServices,
             invocation: invocationCode(
                 tmdbId: tmdbId,
                 mediaType: mediaType,
@@ -126,6 +131,9 @@ enum NuvioPluginRuntime {
         return NuvioStreamBatch(
             streams: batch.streams,
             unplayableCount: batch.unplayableCount,
+            torrentCount: batch.torrentCount,
+            unreadableURLCount: batch.unreadableURLCount,
+            discardedRowCount: batch.discardedRowCount,
             requestCount: counts.requests,
             ownSourceRequestCount: counts.ownSourceRequests,
             ownSourceFailureCount: counts.ownSourceFailures,
@@ -138,12 +146,16 @@ enum NuvioPluginRuntime {
     static func executeSettings(
         code: String,
         scraper: NuvioPluginScraper,
-        scraperSettings: [String: Any]
+        scraperSettings: [String: Any],
+        servicesProfileID: UUID,
+        sharesServices: Bool
     ) async throws -> [NuvioSettingsField] {
         try await run(
             code: code,
             scraper: scraper,
             scraperSettings: scraperSettings,
+            servicesProfileID: servicesProfileID,
+            sharesServices: sharesServices,
             invocation: settingsInvocationCode(),
             decode: { rawJSON in
                 try parseSettingsFields(rawJSON: rawJSON)
@@ -155,6 +167,8 @@ enum NuvioPluginRuntime {
         code: String,
         scraper: NuvioPluginScraper,
         scraperSettings: [String: Any],
+        servicesProfileID: UUID,
+        sharesServices: Bool,
         invocation: String,
         tally: NuvioFetchTally? = nil,
         decode: @escaping (String) throws -> Value
@@ -166,11 +180,29 @@ enum NuvioPluginRuntime {
             if Task.isCancelled { throw CancellationError() }
             Logger.shared.log(
                 "Nuvio runtime refused provider=\(scraper.name): every execution permit has been burned by "
-                    + "plugins whose JavaScript never returned. A relaunch is required to run plugins again.",
+                    + "plugins whose JavaScript never returned. Eclipse returns one permit "
+                    + "\(Int(NuvioExecutionPermits.burnRecoveryInterval))s after the last burn, "
+                    + "so this recovers without a relaunch.",
                 type: "Error"
             )
             throw NuvioPluginError.runtimeUnavailable
         }
+        let settingsJSON = jsonLiteral(scraperSettings) ?? "{}"
+        let configurationMaterial = [
+            scraper.repositoryId,
+            scraper.version,
+            code,
+            settingsJSON
+        ].joined(separator: "\u{0}")
+        let configurationFingerprint = Data(
+            SHA256.hash(data: Data(configurationMaterial.utf8))
+        ).base64EncodedString()
+        let sessions = NuvioProviderFetchSessionRegistry.shared.session(
+            profileID: servicesProfileID,
+            sharesServices: sharesServices,
+            scraperID: scraper.id,
+            configurationFingerprint: configurationFingerprint
+        )
         return try await withCheckedThrowingContinuation { continuation in
 
             let box = NuvioPluginRuntimeCompletion(continuation: continuation, queue: queue)
@@ -178,11 +210,9 @@ enum NuvioPluginRuntime {
                 maximumConcurrent: maxConcurrentFetchesPerRun,
                 maximumPerRun: maxFetchesPerRun
             )
-            let sessions = NuvioRunFetchSessions()
             box.onSettled = { settledNormally in
 
                 requests.tearDown()
-                sessions.tearDown()
                 if settledNormally {
                     permits.release()
                 } else {
@@ -205,7 +235,7 @@ enum NuvioPluginRuntime {
 
                 let context = JSContext()
                 box.context = context
-                let cheerio = NuvioCheerioBridge()
+                let cheerio = NuvioCheerioBridge(tally: tally)
 
                 let redactor = NuvioSecretRedactor(settings: scraperSettings)
                 let trap = NuvioRuntimeExceptionTrap()
@@ -244,8 +274,6 @@ enum NuvioPluginRuntime {
                     redactor: redactor
                 )
 
-                let settingsJSON = jsonLiteral(scraperSettings) ?? "{}"
-
                 trap.beginCapture()
                 context?.evaluateScript(polyfillCode(scraperId: scraper.id, settingsJSON: settingsJSON))
                 if let failure = trap.endCapture() {
@@ -276,7 +304,7 @@ enum NuvioPluginRuntime {
         scraper: NuvioPluginScraper,
         tally: NuvioFetchTally?,
         requests: NuvioNativeRequestLimiter,
-        sessions: NuvioRunFetchSessions,
+        sessions: NuvioProviderFetchSession,
         decode: @escaping (String) throws -> Value,
         redactor: NuvioSecretRedactor
     ) {
@@ -319,7 +347,7 @@ enum NuvioPluginRuntime {
         console?.setObject(log, forKeyedSubscript: "error" as NSString)
         context.setObject(console, forKeyedSubscript: "console" as NSString)
 
-        let nativeFetch: @convention(block) (String, String, JSValue?, String?, ObjCBool, JSValue, JSValue) -> Void = { urlString, method, headersValue, body, followRedirects, resolve, reject in
+        let nativeFetch: @convention(block) (String, String, JSValue?, String?, ObjCBool, Double, JSValue, JSValue) -> Void = { urlString, method, headersValue, body, followRedirects, timeoutMilliseconds, resolve, reject in
 
             let requestHeaders = headers(from: headersValue)
             let shouldFollowRedirects = followRedirects.boolValue
@@ -352,6 +380,7 @@ enum NuvioPluginRuntime {
                         headers: requestHeaders,
                         body: body,
                         followRedirects: shouldFollowRedirects,
+                        timeoutMilliseconds: timeoutMilliseconds,
                         scraperName: scraper.name,
                         tally: tally,
                         sessions: sessions
@@ -365,7 +394,9 @@ enum NuvioPluginRuntime {
                         resolve.call(withArguments: [response])
                     }
                 } catch {
-                    tally?.recordTransportFailure()
+                    if !(error is NuvioEclipseRefusalRejection) {
+                        tally?.recordTransportFailure()
+                    }
                     tally?.record(host: URL(string: urlString)?.host, failed: true)
                     box.queue.async {
                         guard !box.isFinished else { return }
@@ -546,6 +577,13 @@ enum NuvioPluginRuntime {
         }
         context.setObject(cheerioPrevious, forKeyedSubscript: "__cheerio_prev" as NSString)
 
+        let cheerioChildren: @convention(block) (Int32) -> [Int32] = { handle in
+            bridgeValue(orJSError: [Int32]()) {
+                try cheerio.children(handle: Int(handle)).map(Int32.init)
+            }
+        }
+        context.setObject(cheerioChildren, forKeyedSubscript: "__cheerio_children" as NSString)
+
         let cheerioParent: @convention(block) (Int32) -> Int32 = { handle in
             bridgeValue(orJSError: Int32(0)) { Int32(try cheerio.parent(handle: Int(handle)) ?? 0) }
         }
@@ -574,9 +612,10 @@ enum NuvioPluginRuntime {
         headers: [String: String],
         body: String?,
         followRedirects: Bool,
+        timeoutMilliseconds: Double,
         scraperName: String,
         tally: NuvioFetchTally?,
-        sessions: NuvioRunFetchSessions
+        sessions: NuvioProviderFetchSession
     ) async throws -> [String: Any] {
         guard let url = URL(string: urlString),
               let scheme = url.scheme?.lowercased(),
@@ -586,7 +625,11 @@ enum NuvioPluginRuntime {
         }
         guard !ServiceSandboxState.isBlockedTrackingURL(url.absoluteString) else {
             tally?.recordEclipseRefusal(.trackingSandbox)
-            Logger.shared.log("Nuvio plugin blocked tracking fetch provider=\(scraperName) target=\(ServiceSandboxState.redactedURL(url.absoluteString))", type: "ServiceSandbox")
+            Logger.shared.log(
+                "Nuvio plugin blocked tracking fetch provider=\(scraperName)"
+                    + " target=\(ServiceSandboxState.redactedURL(url.absoluteString))",
+                type: "ServiceSandbox"
+            )
             throw NuvioPluginError.runtimeFailed("Plugin network request blocked by sandbox.")
         }
 
@@ -617,38 +660,92 @@ enum NuvioPluginRuntime {
             throw NuvioPluginError.runtimeFailed("Plugin network request blocked by sandbox.")
         }
 
-        var request = URLRequest(url: validated.url)
-        request.httpMethod = method.isEmpty ? "GET" : method.uppercased()
-        request.timeoutInterval = 30
-        for (key, value) in sanitizedRequestHeaders(headers, scraperName: scraperName, tally: tally) {
-            request.setValue(value, forHTTPHeaderField: key)
+        var sanitizedHeaders = sanitizedRequestHeaders(headers, scraperName: scraperName, tally: tally)
+        if sanitizedHeaders["user-agent"] == nil {
+            sanitizedHeaders["user-agent"] = defaultDesktopUserAgent
         }
 
-        if request.value(forHTTPHeaderField: "User-Agent") == nil {
-            request.setValue(defaultDesktopUserAgent, forHTTPHeaderField: "User-Agent")
+        let requestMethod = method.isEmpty ? "GET" : method.uppercased()
+        guard ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"].contains(requestMethod) else {
+            throw NuvioPluginError.runtimeFailed("Invalid fetch method.")
         }
-        if let body, !body.isEmpty, request.httpMethod != "GET" {
-            request.httpBody = Data(body.utf8)
+        let requestBody: Data?
+        if let body, !body.isEmpty, requestMethod != "GET" {
+            let data = Data(body.utf8)
+            guard data.count <= 2 * 1024 * 1024 else {
+                throw NuvioPluginError.runtimeFailed("Plugin request body is too large.")
+            }
+            requestBody = data
+        } else {
+            requestBody = nil
         }
 
-        let (data, response) = try await sessions.withSession(followRedirects: followRedirects) { session in
+        let responseData: Data
+        let httpResponse: HTTPURLResponse
+        do {
             Logger.shared.log("Nuvio plugin fetch provider=\(scraperName) target=\(ServiceSandboxState.redactedURL(url.absoluteString))", type: "Plugin")
-            return try await boundedData(session: session, request: request, tally: tally)
+            let timeoutInterval = min(max(timeoutMilliseconds / 1_000, 0.25), 30)
+            var request = URLRequest(url: validated.url, timeoutInterval: timeoutInterval)
+            request.httpMethod = requestMethod
+            request.httpBody = requestBody
+            for (name, value) in sanitizedHeaders {
+                request.setValue(value, forHTTPHeaderField: name)
+            }
+            let result = try await sessions.withSession { session in
+                try await session.boundedData(
+                    for: request,
+                    maximumResponseBytes: maxFetchResponseBytes,
+                    allowRedirects: followRedirects
+                )
+            }
+            guard let response = result.1 as? HTTPURLResponse else {
+                throw URLError(.badServerResponse)
+            }
+            responseData = result.0
+            httpResponse = response
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch is BoundedURLSessionError {
+            tally?.recordEclipseRefusal(.responseTooLarge)
+            throw NuvioPluginError.runtimeFailed(
+                BoundedURLSessionError.responseTooLarge(
+                    maximumBytes: maxFetchResponseBytes
+                ).localizedDescription
+            )
+        } catch let error as URLError where error.code == .timedOut {
+            tally?.recordTransportFailureCode(error.code.rawValue)
+            throw NuvioPluginError.runtimeFailed("TimeoutError")
+        } catch let error as URLError {
+            tally?.recordTransportFailureCode(error.code.rawValue)
+            throw NuvioPluginError.runtimeFailed(
+                "Plugin network request failed. (URLError \(error.code.rawValue))"
+            )
+        } catch {
+            throw NuvioPluginError.runtimeFailed("Plugin network request failed.")
         }
-        let httpResponse = response as? HTTPURLResponse
-        let (text, wasTruncated) = decodeResponseBody(data)
+        let (text, wasTruncated) = decodeResponseBody(responseData)
+        let leadingBytes = Array(responseData.prefix(2))
+        if leadingBytes.count == 2, leadingBytes[0] == 0x1f, leadingBytes[1] == 0x8b {
+            Logger.shared.log(
+                "Nuvio plugin response arrived still gzip-compressed provider=\(scraperName)"
+                    + " target=\(ServiceSandboxState.redactedURL(url.absoluteString))"
+                    + " bytes=\(responseData.count); Eclipse decoded it as UTF-8, so the plugin is"
+                    + " parsing replacement characters and will find nothing",
+                type: "Plugin"
+            )
+        }
         if wasTruncated {
             tally?.recordTruncatedBody()
             Logger.shared.log(
                 "Nuvio plugin response truncated by Eclipse provider=\(scraperName)"
                     + " target=\(ServiceSandboxState.redactedURL(url.absoluteString))"
-                    + " bytes=\(data.count) charCap=\(maxFetchBodyChars);"
+                    + " bytes=\(responseData.count) charCap=\(maxFetchBodyChars);"
                     + " a provider that finds nothing after this was cut off by Eclipse, not by its source",
                 type: "Plugin"
             )
         }
         var responseHeaders: [String: String] = [:]
-        httpResponse?.allHeaderFields.forEach { key, value in
+        httpResponse.allHeaderFields.forEach { key, value in
             let headerName = String(describing: key)
             guard !withheldResponseHeaderNames.contains(headerName.lowercased()) else { return }
             let headerValue = String(describing: value)
@@ -656,29 +753,13 @@ enum NuvioPluginRuntime {
         }
 
         return [
-            "ok": (200...299).contains(httpResponse?.statusCode ?? 0),
-            "status": httpResponse?.statusCode ?? 0,
-            "statusText": HTTPURLResponse.localizedString(forStatusCode: httpResponse?.statusCode ?? 0),
-            "url": httpResponse?.url?.absoluteString ?? url.absoluteString,
+            "ok": (200...299).contains(httpResponse.statusCode),
+            "status": httpResponse.statusCode,
+            "statusText": HTTPURLResponse.localizedString(forStatusCode: httpResponse.statusCode),
+            "url": httpResponse.url?.absoluteString ?? url.absoluteString,
             "headers": responseHeaders,
             "body": text
         ]
-    }
-
-    private static func boundedData(
-        session: URLSession,
-        request: URLRequest,
-        tally: NuvioFetchTally?
-    ) async throws -> (Data, URLResponse) {
-        do {
-            return try await session.boundedData(
-                for: request,
-                maximumResponseBytes: maxFetchResponseBytes
-            )
-        } catch let error as BoundedURLSessionError {
-            tally?.recordEclipseRefusal(.responseTooLarge)
-            throw NuvioPluginError.runtimeFailed(error.localizedDescription)
-        }
     }
 
     private static func sanitizedRequestHeaders(
@@ -706,14 +787,26 @@ enum NuvioPluginRuntime {
 
         var accepted: [String: String] = [:]
         var totalBytes = 0
+        let managedNames: Set<String> = [
+            "accept-encoding", "connection", "content-length", "host", "keep-alive",
+            "proxy-authenticate", "proxy-authorization", "proxy-connection", "te", "trailer",
+            "transfer-encoding", "upgrade"
+        ]
+        let validNameCharacters = CharacterSet(
+            charactersIn: "!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        )
 
         for (name, value) in candidates.sorted(by: { $0.key < $1.key }) {
             guard accepted.count < maxRequestHeaderCount else { break }
-            guard let sanitized = try? SkyStreamHeaderSanitizer.sanitize(
-                    [name: value],
-                    purpose: .pluginRequest
-                  ),
-                  let entry = sanitized.values.first else {
+            let nameIsValid = name.unicodeScalars.allSatisfy {
+                $0.value < 128 && validNameCharacters.contains($0)
+            }
+            let valueIsValid = value.unicodeScalars.allSatisfy {
+                $0.value == 9 || $0.value >= 32 && $0.value != 127
+            }
+            guard nameIsValid,
+                  valueIsValid,
+                  name.utf8.count <= 128 else {
                 dropped += 1
                 Logger.shared.log(
                     "Nuvio plugin dropped unsafe request header provider=\(scraperName) name=\(name)",
@@ -721,10 +814,11 @@ enum NuvioPluginRuntime {
                 )
                 continue
             }
-            let size = entry.key.utf8.count + entry.value.utf8.count + 4
+            guard !managedNames.contains(name) else { continue }
+            let size = name.utf8.count + value.utf8.count + 4
             guard totalBytes + size <= maxRequestHeaderTotalBytes else { break }
             totalBytes += size
-            accepted[entry.key] = entry.value
+            accepted[name] = value
         }
         tally?.recordDroppedRequestHeaders(dropped)
         return accepted
@@ -763,19 +857,46 @@ enum NuvioPluginRuntime {
             throw NuvioPluginError.invalidResponse
         }
 
-        var unplayableCount = 0
+        var torrentCount = 0
+        var unreadableURLCount = 0
+        var discardedRowCount = 0
         var malformedURLCount = 0
 
-        let streams: [NuvioPluginStream] = array.prefix(maximumResultRows).enumerated().compactMap { index, item in
-            let urlString = streamURL(from: item["url"])
-            guard let urlString,
-                  !urlString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                return nil
+        var streams: [NuvioPluginStream] = []
+        streams.reserveCapacity(min(array.count, maximumResultRows))
+        let scannedRows = array.prefix(maximumScannedResultRows)
+        let unscannedRowCount = array.count - scannedRows.count
+        if unscannedRowCount > 0 {
+            Logger.shared.log(
+                "Nuvio provider=\(scraper.name) returned \(array.count) result rows;"
+                    + " Eclipse scanned the first \(maximumScannedResultRows) and skipped"
+                    + " \(unscannedRowCount) without reading them",
+                type: "Plugin"
+            )
+        }
+        for (index, item) in scannedRows.enumerated() {
+            let deliveredURL = streamURL(from: item["url"])
+            guard let deliveredURL,
+                  !deliveredURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                discardedRowCount += 1
+                continue
             }
-            guard !urlString.lowercased().hasPrefix("magnet:"),
-                  NuvioPluginSupport.isDirectHTTPURL(urlString) else {
-                unplayableCount += 1
-                return nil
+            guard !deliveredURL.lowercased().hasPrefix("magnet:") else {
+                torrentCount += 1
+                continue
+            }
+            let urlString = NuvioPluginSupport.repairedDeliveryURL(deliveredURL) ?? deliveredURL
+            guard NuvioPluginSupport.isDirectHTTPURL(urlString) else {
+                unreadableURLCount += 1
+                continue
+            }
+            if urlString != deliveredURL {
+                Logger.shared.log(
+                    "Nuvio provider=\(scraper.name) delivered a stream URL with unencoded spaces"
+                        + " row=\(index); Eclipse percent-encoded them so the row stays playable,"
+                        + " and a later failure on this row is still the provider's data",
+                    type: "Plugin"
+                )
             }
             if let defect = NuvioPluginSupport.urlDeliveryDefect(urlString) {
                 malformedURLCount += 1
@@ -792,7 +913,7 @@ enum NuvioPluginRuntime {
             let title = cleanString(item["title"]) ?? cleanString(item["name"]) ?? "Stream"
             let headers = cleanHeaders(item["headers"])
             let subtitles = parseSubtitles(from: item)
-            return NuvioPluginStream(
+            streams.append(NuvioPluginStream(
                 id: NuvioPluginSupport.streamID(scraperId: scraper.id, sourceId: repository.id, url: urlString, title: title, index: index),
                 scraperId: scraper.id,
                 scraperName: scraper.name,
@@ -808,11 +929,15 @@ enum NuvioPluginRuntime {
                 type: cleanString(item["type"]),
                 headers: headers,
                 subtitles: subtitles
-            )
+            ))
+            if streams.count == maximumResultRows { break }
         }
         return NuvioStreamBatch(
             streams: streams,
-            unplayableCount: unplayableCount,
+            unplayableCount: torrentCount + unreadableURLCount,
+            torrentCount: torrentCount,
+            unreadableURLCount: unreadableURLCount,
+            discardedRowCount: discardedRowCount,
             malformedURLCount: malformedURLCount
         )
     }
@@ -872,7 +997,11 @@ enum NuvioPluginRuntime {
     private static func settingsValue(from value: Any?) -> NuvioSettingsValue? {
 
         if let number = value as? NSNumber {
-            return CFGetTypeID(number) == CFBooleanGetTypeID() ? .bool(number.boolValue) : .number(number.doubleValue)
+            if CFGetTypeID(number) == CFBooleanGetTypeID() {
+                return .bool(number.boolValue)
+            }
+            let value = number.doubleValue
+            return value.isFinite ? .number(value) : nil
         }
         if let text = value as? String {
             return .string(text)
@@ -884,7 +1013,7 @@ enum NuvioPluginRuntime {
         let topLevelHeaders = cleanHeaders(item["subtitleHeaders"])
             ?? cleanHeaders(item["subtitlesHeaders"])
             ?? cleanHeaders(item["subtitle_headers"])
-        var subtitles: [NuvioPluginSubtitle] = []
+        var subtitles = NuvioSubtitleTrackAccumulator()
 
         if let subtitle = cleanString(item["subtitle"] ?? item["subtitleURL"] ?? item["subtitleUrl"]),
            NuvioPluginSupport.isDirectHTTPURL(subtitle) {
@@ -896,40 +1025,61 @@ enum NuvioPluginRuntime {
             ))
         }
 
-        for key in ["subtitles", "subtitleTracks", "allSubtitles"] {
+        for key in ["subtitles", "subtitleTracks", "allSubtitles"] where !subtitles.isFull {
             guard let value = item[key] else { continue }
-            subtitles.append(contentsOf: parseSubtitleValue(value, inheritedHeaders: topLevelHeaders))
+            appendSubtitleValue(
+                value,
+                inheritedHeaders: topLevelHeaders,
+                to: &subtitles
+            )
         }
-
-        var seen = Set<String>()
-        let deduped = subtitles.filter { subtitle in
-            let normalized = subtitle.url.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !normalized.isEmpty, seen.insert(normalized).inserted else { return false }
-            return true
-        }
-        return deduped.isEmpty ? nil : deduped
+        return subtitles.tracks.isEmpty ? nil : subtitles.tracks
     }
 
-    private static func parseSubtitleValue(_ value: Any, inheritedHeaders: [String: String]?) -> [NuvioPluginSubtitle] {
+    private static func appendSubtitleValue(
+        _ value: Any,
+        inheritedHeaders: [String: String]?,
+        to subtitles: inout NuvioSubtitleTrackAccumulator
+    ) {
+        guard !subtitles.isFull else { return }
         if let dictionary = value as? [String: Any],
            let subtitle = parseSubtitleObject(dictionary, inheritedHeaders: inheritedHeaders) {
-            return [subtitle]
+            subtitles.append(subtitle)
+            return
         }
 
         if let dictionaries = value as? [[String: Any]] {
-            return dictionaries.compactMap { parseSubtitleObject($0, inheritedHeaders: inheritedHeaders) }
+            for dictionary in dictionaries where !subtitles.isFull {
+                if let subtitle = parseSubtitleObject(
+                    dictionary,
+                    inheritedHeaders: inheritedHeaders
+                ) {
+                    subtitles.append(subtitle)
+                }
+            }
+            return
         }
 
         if let strings = value as? [String] {
-            return parseSubtitleStrings(strings, inheritedHeaders: inheritedHeaders)
+            appendSubtitleStrings(
+                strings,
+                inheritedHeaders: inheritedHeaders,
+                to: &subtitles
+            )
+            return
         }
 
         if let urlString = cleanString(value),
            NuvioPluginSupport.isDirectHTTPURL(urlString) {
-            return [NuvioPluginSubtitle(url: urlString, language: "Unknown", name: nil, headers: inheritedHeaders)]
+            subtitles.append(
+                NuvioPluginSubtitle(
+                    url: urlString,
+                    language: "Unknown",
+                    name: nil,
+                    headers: inheritedHeaders
+                )
+            )
         }
-
-        return []
     }
 
     private static func parseSubtitleObject(_ object: [String: Any], inheritedHeaders: [String: String]?) -> NuvioPluginSubtitle? {
@@ -945,11 +1095,14 @@ enum NuvioPluginRuntime {
         return NuvioPluginSubtitle(url: url, language: language, name: name, headers: headers)
     }
 
-    private static func parseSubtitleStrings(_ values: [String], inheritedHeaders: [String: String]?) -> [NuvioPluginSubtitle] {
-        var subtitles: [NuvioPluginSubtitle] = []
+    private static func appendSubtitleStrings(
+        _ values: [String],
+        inheritedHeaders: [String: String]?,
+        to subtitles: inout NuvioSubtitleTrackAccumulator
+    ) {
         var pendingLabel: String?
 
-        for rawValue in values {
+        for rawValue in values where !subtitles.isFull {
             guard let value = cleanString(rawValue) else { continue }
             if NuvioPluginSupport.isDirectHTTPURL(value) {
                 subtitles.append(NuvioPluginSubtitle(
@@ -963,8 +1116,6 @@ enum NuvioPluginRuntime {
                 pendingLabel = value
             }
         }
-
-        return subtitles
     }
 
     private static func cleanHeaders(_ value: Any?) -> [String: String]? {
@@ -1304,8 +1455,16 @@ enum NuvioPluginRuntime {
             var headers = headersToObject(options.headers || {});
             var body = encodeRequestBody(options.body, headers);
             var redirect = options.redirect === "manual" ? false : true;
+            var signal = options.signal;
+            if (signal && signal.aborted) {
+                return Promise.reject(signal.reason || new Error("AbortError"));
+            }
+            var timeoutMilliseconds = 30000;
+            if (signal && Number.isFinite(Number(signal._eclipseTimeoutMilliseconds))) {
+                timeoutMilliseconds = Math.min(Math.max(Number(signal._eclipseTimeoutMilliseconds), 250), 30000);
+            }
             return new Promise(function(resolve, reject) {
-                __native_fetch(String(url), String(method), headers, body, redirect, function(raw) {
+                __native_fetch(String(url), String(method), headers, body, redirect, timeoutMilliseconds, function(raw) {
                     var response = {
                         ok: !!raw.ok,
                         status: raw.status || 0,
@@ -1315,7 +1474,7 @@ enum NuvioPluginRuntime {
                         text: function() { return Promise.resolve(raw.body || ""); },
                         json: function() {
                             try { return Promise.resolve(JSON.parse(raw.body || "null")); }
-                            catch (_) { return Promise.resolve(null); }
+                            catch (error) { return Promise.reject(error); }
                         }
                     };
                     resolve(response);
@@ -1575,7 +1734,9 @@ enum NuvioPluginRuntime {
         if (typeof globalThis.AbortSignal === "function" && typeof globalThis.AbortSignal.timeout !== "function") {
             globalThis.AbortSignal.timeout = function(milliseconds) {
                 var controller = new globalThis.AbortController();
-                globalThis.setTimeout(function() { controller.abort("TimeoutError"); }, Number(milliseconds) || 0);
+                var timeoutMilliseconds = Math.min(Math.max(Number(milliseconds) || 0, 0), 30000);
+                controller.signal._eclipseTimeoutMilliseconds = timeoutMilliseconds;
+                globalThis.setTimeout(function() { controller.abort("TimeoutError"); }, timeoutMilliseconds);
                 return controller.signal;
             };
         }
@@ -1991,6 +2152,14 @@ enum NuvioPluginRuntime {
             instantiate: async function() { return { instance: { exports: {} }, module: {} }; }
         };
 
+        function __cheerioFiltered(list, selector) {
+            if (selector === undefined || selector === null) return createCheerioCollection(list);
+            var needle = String(selector);
+            if (needle === "*") return createCheerioCollection(list);
+            return createCheerioCollection(list.filter(function(id) {
+                return __cheerio_matches(id, needle);
+            }));
+        }
         function createCheerioCollection(ids) {
             ids = ids || [];
             function api(selector) { return api.find(selector); }
@@ -2075,7 +2244,81 @@ enum NuvioPluginRuntime {
             api.slice = function(start, end) {
                 return createCheerioCollection(ids.slice(start, end === undefined ? ids.length : end));
             };
-            api.children = function(selector) { return api.find(selector || "*"); };
+            api.children = function(selector) {
+                var out = [];
+                ids.forEach(function(id) { out = out.concat(__cheerio_children(id)); });
+                return __cheerioFiltered(out, selector);
+            };
+            api.hasClass = function(name) {
+                if (name === undefined || name === null) return false;
+                var needle = String(name);
+                if (!needle.length) return false;
+                return ids.some(function(id) {
+                    var raw = __cheerio_attr(id, "class");
+                    if (typeof raw !== "string" || !raw.length) return false;
+                    var token = "";
+                    for (var i = 0; i <= raw.length; i++) {
+                        var code = i < raw.length ? raw.charCodeAt(i) : 32;
+                        if (code === 32 || code === 9 || code === 10 || code === 13 || code === 12) {
+                            if (token === needle) return true;
+                            token = "";
+                        } else {
+                            token += raw.charAt(i);
+                        }
+                    }
+                    return false;
+                });
+            };
+            api.nextAll = function(selector) {
+                var out = [];
+                ids.forEach(function(id) {
+                    var cursor = __cheerio_next(id);
+                    while (cursor) { out.push(cursor); cursor = __cheerio_next(cursor); }
+                });
+                return __cheerioFiltered(out, selector);
+            };
+            api.prevAll = function(selector) {
+                var out = [];
+                ids.forEach(function(id) {
+                    var cursor = __cheerio_prev(id);
+                    while (cursor) { out.push(cursor); cursor = __cheerio_prev(cursor); }
+                });
+                return __cheerioFiltered(out, selector);
+            };
+            api.siblings = function(selector) {
+                var out = [];
+                ids.forEach(function(id) {
+                    var backwards = [];
+                    var cursor = __cheerio_prev(id);
+                    while (cursor) { backwards.push(cursor); cursor = __cheerio_prev(cursor); }
+                    backwards.reverse();
+                    out = out.concat(backwards);
+                    cursor = __cheerio_next(id);
+                    while (cursor) { out.push(cursor); cursor = __cheerio_next(cursor); }
+                });
+                return __cheerioFiltered(out, selector);
+            };
+            api.parents = function(selector) {
+                var out = [];
+                ids.forEach(function(id) {
+                    var cursor = __cheerio_parent(id);
+                    while (cursor) { out.push(cursor); cursor = __cheerio_parent(cursor); }
+                });
+                return __cheerioFiltered(out, selector);
+            };
+            api.closest = function(selector) {
+                if (selector === undefined || selector === null) return createCheerioCollection([]);
+                var needle = String(selector);
+                var out = [];
+                ids.forEach(function(id) {
+                    var cursor = id;
+                    while (cursor) {
+                        if (__cheerio_matches(cursor, needle)) { out.push(cursor); return; }
+                        cursor = __cheerio_parent(cursor);
+                    }
+                });
+                return createCheerioCollection(out);
+            };
             api.parent = function() {
                 var out = [];
                 ids.forEach(function(id) {
@@ -2127,7 +2370,7 @@ enum NuvioPluginRuntime {
 
     private static func jsonLiteral(_ value: Any) -> String? {
         guard JSONSerialization.isValidJSONObject(value),
-              let data = try? JSONSerialization.data(withJSONObject: value),
+              let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
               let text = String(data: data, encoding: .utf8) else {
             if let string = value as? String,
                let data = try? JSONSerialization.data(withJSONObject: [string]),
@@ -2154,7 +2397,7 @@ enum NuvioPluginRuntime {
         let pathname = url.path.isEmpty ? "/" : url.path
         return [
             "href": url.absoluteString,
-            "protocol": (url.scheme ?? "").isEmpty ? "" : "\(url.scheme!):",
+            "protocol": (url.scheme ?? "").isEmpty ? "" : "\(url.scheme ?? ""):",
             "host": host,
             "hostname": hostname,
             "port": port,
@@ -2447,6 +2690,7 @@ final class NuvioFetchTally: @unchecked Sendable {
     private var ownSourceFailures = 0
     private var statusCounts: [Int: Int] = [:]
     private var transportFailures = 0
+    private var transportFailureCodes: [Int: Int] = [:]
     private var eclipseRefusalCounts: [String: Int] = [:]
     private var truncatedBodies = 0
     private var droppedRequestHeaders = 0
@@ -2471,6 +2715,12 @@ final class NuvioFetchTally: @unchecked Sendable {
     func recordTransportFailure() {
         lock.lock()
         transportFailures += 1
+        lock.unlock()
+    }
+
+    func recordTransportFailureCode(_ code: Int) {
+        lock.lock()
+        transportFailureCodes[code, default: 0] += 1
         lock.unlock()
     }
 
@@ -2513,6 +2763,7 @@ final class NuvioFetchTally: @unchecked Sendable {
         lock.lock()
         let statuses = statusCounts
         let transport = transportFailures
+        let transportCodes = transportFailureCodes
         let refusals = eclipseRefusalCounts
         let truncated = truncatedBodies
         let dropped = droppedRequestHeaders
@@ -2526,33 +2777,46 @@ final class NuvioFetchTally: @unchecked Sendable {
         let refusalText = refusals.isEmpty
             ? "none"
             : refusals.sorted { $0.key < $1.key }.map { "\($0.key)x\($0.value)" }.joined(separator: ",")
+        let transportText = transportCodes.isEmpty
+            ? "none"
+            : transportCodes.sorted { $0.key < $1.key }.map { "\($0.key)x\($0.value)" }.joined(separator: ",")
         return "fetches=\(total) ownSource=\(own) status=[\(statusText)] transportFailures=\(transport) "
+            + "transportErrors=[\(transportText)] "
             + "eclipseRefused=[\(refusalText)] truncatedBodies=\(truncated) droppedHeaders=\(dropped)"
     }
 }
 
 enum NuvioEclipseRefusal {
-    case trackingSandbox
-    case addressPolicy
     case invalidRequestURL
     case concurrencyCap
     case responseTooLarge
+    case nodeBudget
+    case addressPolicy
+    case trackingSandbox
 
     var token: String {
         switch self {
-        case .trackingSandbox: return "tracking-sandbox"
-        case .addressPolicy: return "address-policy"
         case .invalidRequestURL: return "invalid-url"
         case .concurrencyCap: return "request-cap"
         case .responseTooLarge: return "response-too-large"
+        case .nodeBudget: return "node-budget"
+        case .addressPolicy: return "address-policy"
+        case .trackingSandbox: return "tracking-sandbox"
         }
     }
 
     static let scrapingBlockingTokens: Set<String> = [
-        addressPolicy.token,
         concurrencyCap.token,
-        responseTooLarge.token
+        responseTooLarge.token,
+        nodeBudget.token,
+        addressPolicy.token,
+        trackingSandbox.token
     ]
+}
+
+private struct NuvioEclipseRefusalRejection: Error, LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
 }
 
 struct NuvioEclipseInterference {
@@ -2611,32 +2875,103 @@ struct NuvioEclipseInterference {
     }
 }
 
-enum NuvioIsolatedNetworking {
-    static func makeSession(
-        allowRedirects: Bool,
-        cookieStorage: HTTPCookieStorage? = nil,
-        redirectAuthorization: FetchDelegate.RedirectAuthorization?
-    ) -> URLSession {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.urlCredentialStorage = nil
-        configuration.urlCache = nil
-        configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
-        configuration.httpAdditionalHeaders = ["User-Agent": URLSession.randomUserAgent]
-        if let cookieStorage {
-            configuration.httpCookieStorage = cookieStorage
+private struct NuvioProviderFetchSessionKey: Hashable {
+    let scopeToken: String
+    let scraperID: String
+    let configurationFingerprint: String
+}
+
+private final class NuvioProviderFetchSessionRegistry: @unchecked Sendable {
+    static let shared = NuvioProviderFetchSessionRegistry()
+
+    private struct Entry {
+        let session: NuvioProviderFetchSession
+        var accessOrder: UInt64
+    }
+
+    private let lock = NSLock()
+    private let maximumSessions = 128
+    private var entries: [NuvioProviderFetchSessionKey: Entry] = [:]
+    private var nextAccessOrder: UInt64 = 0
+    private var scopeObserver: NSObjectProtocol?
+
+    private init() {
+        scopeObserver = NotificationCenter.default.addObserver(
+            forName: ServiceStoreScope.didChangeNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            self?.clearAll()
         }
-        return URLSession(
-            configuration: configuration,
-            delegate: FetchDelegate(
-                allowRedirects: allowRedirects,
-                redirectAuthorization: redirectAuthorization
-            ),
-            delegateQueue: nil
+    }
+
+    deinit {
+        if let scopeObserver {
+            NotificationCenter.default.removeObserver(scopeObserver)
+        }
+    }
+
+    func session(
+        profileID: UUID,
+        sharesServices: Bool,
+        scraperID: String,
+        configurationFingerprint: String
+    ) -> NuvioProviderFetchSession {
+        let scopeToken = sharesServices
+            ? "shared"
+            : ProfileScopedStorage.token(for: profileID)
+        let key = NuvioProviderFetchSessionKey(
+            scopeToken: scopeToken,
+            scraperID: scraperID,
+            configurationFingerprint: configurationFingerprint
         )
+        var retired: [NuvioProviderFetchSession] = []
+
+        lock.lock()
+        nextAccessOrder &+= 1
+        if var existing = entries[key] {
+            existing.accessOrder = nextAccessOrder
+            entries[key] = existing
+            lock.unlock()
+            return existing.session
+        }
+
+        let obsoleteKeys = entries.keys.filter {
+            $0.scopeToken == scopeToken
+                && $0.scraperID == scraperID
+                && $0 != key
+        }
+        for candidate in obsoleteKeys {
+            if let removed = entries.removeValue(forKey: candidate) {
+                retired.append(removed.session)
+            }
+        }
+
+        let created = NuvioProviderFetchSession()
+        entries[key] = Entry(session: created, accessOrder: nextAccessOrder)
+        while entries.count > maximumSessions,
+              let oldest = entries.min(by: {
+                  $0.value.accessOrder < $1.value.accessOrder
+              })?.key,
+              let removed = entries.removeValue(forKey: oldest) {
+            retired.append(removed.session)
+        }
+        lock.unlock()
+
+        retired.forEach { $0.retire() }
+        return created
+    }
+
+    private func clearAll() {
+        lock.lock()
+        let retired = entries.values.map(\.session)
+        entries.removeAll(keepingCapacity: true)
+        lock.unlock()
+        retired.forEach { $0.retire() }
     }
 }
 
-private final class NuvioRunFetchSessions: @unchecked Sendable {
+private final class NuvioProviderFetchSession: @unchecked Sendable {
     private static let authorizeRedirect: FetchDelegate.RedirectAuthorization = { source, destination in
         _ = try await SkyStreamRemoteURLPolicy.shared.validateRedirectForNetworkDispatch(
             from: source,
@@ -2646,85 +2981,64 @@ private final class NuvioRunFetchSessions: @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    private let cookieStorage = URLSessionConfiguration.ephemeral.httpCookieStorage
-    private var redirectFollowing: URLSession?
-    private var manualRedirect: URLSession?
-    private var isTornDown = false
+    private let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.httpShouldSetCookies = true
+        configuration.httpCookieAcceptPolicy = .always
+        configuration.timeoutIntervalForRequest = 30
+        configuration.timeoutIntervalForResource = 60
+        return URLSession(
+            configuration: configuration,
+            delegate: FetchDelegate(
+                allowRedirects: true,
+                redirectAuthorization: NuvioProviderFetchSession.authorizeRedirect
+            ),
+            delegateQueue: nil
+        )
+    }()
+    private var isRetired = false
     private var borrowCount = 0
 
     func withSession<Value>(
-        followRedirects: Bool,
         _ body: (URLSession) async throws -> Value
     ) async throws -> Value {
-        guard let session = borrow(followRedirects: followRedirects) else {
+        guard borrow() else {
             throw NuvioPluginError.runtimeFailed("Plugin network request issued after the run ended.")
         }
         defer { giveBack() }
         return try await body(session)
     }
 
-    func tearDown() {
+    func retire() {
         lock.lock()
-        guard !isTornDown else {
+        guard !isRetired else {
             lock.unlock()
             return
         }
-        isTornDown = true
-        let retired = retireIfIdleLocked()
+        isRetired = true
+        let shouldClear = retireIfIdleLocked()
         lock.unlock()
-        invalidate(retired)
+        if shouldClear { session.finishTasksAndInvalidate() }
     }
 
-    private func borrow(followRedirects: Bool) -> URLSession? {
+    private func borrow() -> Bool {
         lock.lock()
         defer { lock.unlock() }
-        guard !isTornDown else { return nil }
-        let session: URLSession
-        if followRedirects {
-            if let redirectFollowing {
-                session = redirectFollowing
-            } else {
-                session = NuvioIsolatedNetworking.makeSession(
-                    allowRedirects: true,
-                    cookieStorage: cookieStorage,
-                    redirectAuthorization: Self.authorizeRedirect
-                )
-                redirectFollowing = session
-            }
-        } else {
-            if let manualRedirect {
-                session = manualRedirect
-            } else {
-                session = NuvioIsolatedNetworking.makeSession(
-                    allowRedirects: false,
-                    cookieStorage: cookieStorage,
-                    redirectAuthorization: Self.authorizeRedirect
-                )
-                manualRedirect = session
-            }
-        }
+        guard !isRetired else { return false }
         borrowCount += 1
-        return session
+        return true
     }
 
     private func giveBack() {
         lock.lock()
         borrowCount -= 1
-        let retired = retireIfIdleLocked()
+        let shouldClear = retireIfIdleLocked()
         lock.unlock()
-        invalidate(retired)
+        if shouldClear { session.finishTasksAndInvalidate() }
     }
 
-    private func retireIfIdleLocked() -> [URLSession] {
-        guard isTornDown, borrowCount == 0 else { return [] }
-        let live = [redirectFollowing, manualRedirect].compactMap { $0 }
-        redirectFollowing = nil
-        manualRedirect = nil
-        return live
-    }
-
-    private func invalidate(_ sessions: [URLSession]) {
-        for session in sessions { session.finishTasksAndInvalidate() }
+    private func retireIfIdleLocked() -> Bool {
+        isRetired && borrowCount == 0
     }
 }
 
@@ -2958,10 +3272,15 @@ private final class NuvioPluginRuntimeCompletion<Value>: @unchecked Sendable {
 }
 
 private final class NuvioExecutionPermits: @unchecked Sendable {
+
+    fileprivate static let burnRecoveryInterval: TimeInterval = 180
+
     private let lock = NSLock()
     private let capacity: Int
     private var available: Int
     private var burned = 0
+    private var lastBurnAt = Date.distantPast
+    private var recoveriesGranted = 0
 
     private struct Waiter {
         let id: UInt64
@@ -2976,6 +3295,14 @@ private final class NuvioExecutionPermits: @unchecked Sendable {
     }
 
     func acquire() async -> Bool {
+        if recoverOneBurnedPermitIfStalled() {
+            Logger.shared.log(
+                "Nuvio runtime returned one burned execution permit after "
+                    + "\(Int(NuvioExecutionPermits.burnRecoveryInterval))s, so plugins can run again "
+                    + "without a relaunch. Providers whose JavaScript never returned are still parked.",
+                type: "Plugin"
+            )
+        }
         lock.lock()
         if burned >= capacity {
             lock.unlock()
@@ -3038,6 +3365,7 @@ private final class NuvioExecutionPermits: @unchecked Sendable {
         lock.lock()
         burned = min(burned + 1, capacity)
         available = min(available, capacity - burned)
+        lastBurnAt = Date()
         let remaining = capacity - burned
 
         let stranded = burned >= capacity ? waiters : []
@@ -3052,6 +3380,20 @@ private final class NuvioExecutionPermits: @unchecked Sendable {
         burned = max(burned - 1, 0)
         lock.unlock()
         release()
+    }
+
+    private func recoverOneBurnedPermitIfStalled() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard burned >= capacity,
+              recoveriesGranted < capacity,
+              Date().timeIntervalSince(lastBurnAt) >= NuvioExecutionPermits.burnRecoveryInterval else {
+            return false
+        }
+        recoveriesGranted += 1
+        burned -= 1
+        available = min(available + 1, capacity - burned)
+        return true
     }
 }
 
@@ -3086,6 +3428,12 @@ private final class NuvioCheerioBridge {
     private static let maximumLiveDocumentBytes = 48 * 1024 * 1024
     private static let maximumLiveElements = 50_000
 
+    private let tally: NuvioFetchTally?
+
+    init(tally: NuvioFetchTally? = nil) {
+        self.tally = tally
+    }
+
     private var nextHandle = 1
     private var documents: [Int: Document] = [:]
     private var documentOrder: [Int] = []
@@ -3099,7 +3447,8 @@ private final class NuvioCheerioBridge {
     func load(_ html: String) throws -> Int {
         let sourceBytes = html.utf8.count
         guard sourceBytes <= NuvioCheerioBridge.maximumDocumentSourceBytes else {
-            throw NuvioPluginError.runtimeFailed(
+            tally?.recordEclipseRefusal(.nodeBudget)
+            throw NuvioPluginError.runtimeLimitExceeded(
                 "cheerio.load was given \(sourceBytes) bytes of HTML; Eclipse parses at most "
                     + "\(NuvioCheerioBridge.maximumDocumentSourceBytes) bytes in one document."
             )
@@ -3189,6 +3538,18 @@ private final class NuvioCheerioBridge {
         return register(sibling, ownedBy: owner(of: handle))
     }
 
+    func children(handle: Int) throws -> [Int] {
+        if let document = documents[handle] {
+            return document.children().array().map { register($0, ownedBy: handle) }
+        }
+        if let element = elements[handle] {
+            let documentHandle = owner(of: handle)
+            return element.children().array().map { register($0, ownedBy: documentHandle) }
+        }
+        try requireLiveHandle(handle)
+        return []
+    }
+
     func parent(handle: Int) throws -> Int? {
         guard let element = elements[handle] else {
             try requireLiveHandle(handle)
@@ -3212,7 +3573,8 @@ private final class NuvioCheerioBridge {
               documents[handle] == nil, elements[handle] == nil else {
             return
         }
-        throw NuvioPluginError.runtimeFailed(
+        tally?.recordEclipseRefusal(.nodeBudget)
+        throw NuvioPluginError.runtimeLimitExceeded(
             "This cheerio node is no longer available: Eclipse keeps at most "
                 + "\(NuvioCheerioBridge.maximumLiveDocuments) loaded documents and "
                 + "\(NuvioCheerioBridge.maximumLiveElements) selected nodes per run."

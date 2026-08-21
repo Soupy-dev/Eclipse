@@ -1,8 +1,13 @@
+//
+//  Module.swift
+//  Kanzen
+//
+//  Created by Dawud Osman on 13/05/2025.
+//
 import Foundation
 struct ModuleData: Codable, Equatable
 {
 
-    
     let sourceName: String
     let author: Author
     let iconURL: String
@@ -13,10 +18,10 @@ struct ModuleData: Codable, Equatable
 
     enum CodingKeys: String, CodingKey {
         case sourceName, author, version, language, novel
-        // Eclipse format
+
         case iconURL
         case scriptURL
-        // Sora format
+
         case iconUrl
         case scriptUrl
     }
@@ -28,13 +33,13 @@ struct ModuleData: Codable, Equatable
         version = try container.decode(String.self, forKey: .version)
         language = try container.decode(String.self, forKey: .language)
         novel = try container.decodeIfPresent(Bool.self, forKey: .novel)
-        // Accept both "iconURL" (Eclipse) and "iconUrl" (Sora)
+
         if let val = try container.decodeIfPresent(String.self, forKey: .iconURL) {
             iconURL = val
         } else {
             iconURL = try container.decode(String.self, forKey: .iconUrl)
         }
-        // Accept both "scriptURL" (Eclipse) and "scriptUrl" (Sora)
+
         if let val = try container.decodeIfPresent(String.self, forKey: .scriptURL) {
             scriptURL = val
         } else {
@@ -52,7 +57,7 @@ struct ModuleData: Codable, Equatable
         try container.encode(iconURL, forKey: .iconURL)
         try container.encode(scriptURL, forKey: .scriptURL)
     }
-    
+
     struct Author: Codable, Equatable
     {
         let name: String
@@ -60,14 +65,14 @@ struct ModuleData: Codable, Equatable
 
         enum CodingKeys: String, CodingKey {
             case name
-            case iconURL   // Eclipse format
-            case icon      // Sora format
+            case iconURL
+            case icon
         }
 
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
             name = try container.decode(String.self, forKey: .name)
-            // Accept both "iconURL" (Eclipse) and "icon" (Sora)
+
             if let val = try container.decodeIfPresent(String.self, forKey: .iconURL) {
                 iconURL = val
             } else {

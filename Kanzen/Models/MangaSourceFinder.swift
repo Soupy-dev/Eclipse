@@ -1,14 +1,18 @@
+//
+//  MangaSourceFinder.swift
+//  Kanzen
+//
+//  Created by Eclipse on 2025.
+//
+
 import Foundation
 
-// MARK: - Source Match Result
-
-/// A single search result from a module, scored against the AniList manga.
 struct SourceMatch: Identifiable {
     let id = UUID()
     let module: ModuleDataContainer
-    let manga: Manga            // The module's search result
-    let titleScore: Double      // Jaro-Winkler similarity from 0 to 1.
-    let chapterCount: Int?      // Number of chapters if we extracted them
+    let manga: Manga
+    let titleScore: Double
+    let chapterCount: Int?
     let confidence: SourceMatchConfidence
 
     enum SourceMatchConfidence: Comparable {
@@ -16,20 +20,24 @@ struct SourceMatch: Identifiable {
     }
 }
 
-// MARK: - Source Finder
-
-/// Searches all installed modules in parallel for a given AniList manga,
-/// then scores and ranks the results for manual source selection.
 final class MangaSourceFinder: ObservableObject {
     @Published var matches: [SourceMatch] = []
     @Published var isSearching = false
     @Published var hasFinished = false
-    private var searchGeneration = UUID()
 
-    /// Search all installed modules for the given AniList manga.
-    /// Uses all title variants (English, Romaji, Native) for each module.
-    /// Filters modules by type: novel modules for NOVEL format, non-novel for everything else.
+    private var searchGeneration = UUID()
+    private var searchTask: Task<Void, Never>?
+    private var refineTask: Task<Void, Never>?
+
+    deinit {
+        searchTask?.cancel()
+        refineTask?.cancel()
+    }
+
     func searchAllModules(for manga: AniListManga) {
+        searchTask?.cancel()
+        refineTask?.cancel()
+
         let generation = UUID()
         searchGeneration = generation
         matches = []
@@ -37,225 +45,181 @@ final class MangaSourceFinder: ObservableObject {
         hasFinished = false
 
         let isNovel = manga.format == "NOVEL"
-        let modules = ModuleManager.shared.modules.filter { module in
-            let moduleIsNovel = module.moduleData.novel == true
-            return moduleIsNovel == isNovel
+        let modules = ModuleManager.shared.modules.filter {
+            ($0.moduleData.novel == true) == isNovel
         }
-        guard !modules.isEmpty else {
+        let titles = manga.allTitleCandidates
+        guard !modules.isEmpty, !titles.isEmpty else {
             isSearching = false
             hasFinished = true
             return
         }
 
-        let titleCandidates = manga.allTitleCandidates
-        guard !titleCandidates.isEmpty else {
+        // Process installed legacy modules in one structured task. The JSC
+        // runner itself owns exactly two bounded lanes; repeated UI reloads
+        // cancel this coordinator instead of stranding GCD worker threads.
+        searchTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var allMatches: [SourceMatch] = []
+            for module in modules {
+                guard !Task.isCancelled, searchGeneration == generation else { return }
+                allMatches.append(contentsOf: await searchModule(module, titles: titles))
+            }
+            guard !Task.isCancelled, searchGeneration == generation else { return }
+            matches = sorted(allMatches)
             isSearching = false
             hasFinished = true
-            return
-        }
-
-        let aniListChapters = manga.chapters
-        let group = DispatchGroup()
-        var allMatches: [SourceMatch] = []
-        let lock = NSLock()
-
-        for module in modules {
-            group.enter()
-            searchModule(module, titles: titleCandidates, aniListChapters: aniListChapters) { moduleMatches in
-                lock.lock()
-                allMatches.append(contentsOf: moduleMatches)
-                lock.unlock()
-                group.leave()
-            }
-        }
-
-        group.notify(queue: .main) { [weak self] in
-            guard let self, self.searchGeneration == generation else { return }
-
-            // Sort: highest confidence first, then highest chapter count, then highest title score
-            let sorted = allMatches.sorted { a, b in
-                if a.confidence != b.confidence { return a.confidence > b.confidence }
-                let aC = a.chapterCount ?? 0
-                let bC = b.chapterCount ?? 0
-                if aC != bC { return aC > bC }
-                return a.titleScore > b.titleScore
-            }
-
-            self.matches = sorted
-            self.isSearching = false
-            self.hasFinished = true
+            searchTask = nil
         }
     }
 
-    // MARK: - Per-Module Search
-
+    @MainActor
     private func searchModule(
         _ module: ModuleDataContainer,
-        titles: [String],
-        aniListChapters: Int?,
-        completion: @escaping ([SourceMatch]) -> Void
-    ) {
-        // Load module script
+        titles: [String]
+    ) async -> [SourceMatch] {
         let engine = KanzenEngine()
         do {
             let script = try ModuleManager.shared.getModuleScript(module: module)
-            let isNovel = module.moduleData.novel == true
-            ReaderLogger.shared.log("SourceFinder.searchModule: loading '\(module.moduleData.sourceName)', isNovel=\(isNovel)", type: "Debug")
-            try engine.loadScript(script, isNovel: isNovel)
+            try await engine.loadScript(script, module: module)
         } catch {
-            ReaderLogger.shared.log("SourceFinder: Failed to load module \(module.moduleData.sourceName): \(error.localizedDescription)", type: "Error")
-            completion([])
-            return
+            ReaderLogger.shared.log(
+                "SourceFinder failed to load legacy module \(module.moduleData.sourceName): \(error.localizedDescription)",
+                type: "Error"
+            )
+            return []
         }
 
-        // Search with each title variant, collect unique results
-        var seenIds = Set<String>()
-        var allResults: [Manga] = []
-        let titleGroup = DispatchGroup()
-        let resultLock = NSLock()
-
+        var seenIDs = Set<String>()
+        var results: [Manga] = []
         for title in titles {
-            titleGroup.enter()
-            engine.searchInput(title, page: 0) { results in
-                if let results = results {
-                    let mangas = results.compactMap { dict -> Manga? in
-                        guard let t = dict["title"] as? String else { return nil }
-                        let imageURL = (dict["imageURL"] as? String) ?? (dict["image"] as? String) ?? ""
-                        let mangaId = (dict["id"] as? String) ?? (dict["href"] as? String) ?? ""
-                        guard !mangaId.isEmpty else { return nil }
-                        return Manga(title: t, imageURL: imageURL, mangaId: mangaId, parentModule: module)
+            guard !Task.isCancelled else { return [] }
+            do {
+                let raw = try await engine.searchInput(title, page: 0) ?? []
+                for dictionary in raw {
+                    guard let resultTitle = dictionary["title"] as? String else { continue }
+                    let imageURL = (dictionary["imageURL"] as? String)
+                        ?? (dictionary["image"] as? String)
+                        ?? ""
+                    let mangaID = (dictionary["id"] as? String)
+                        ?? (dictionary["href"] as? String)
+                        ?? ""
+                    guard !mangaID.isEmpty,
+                          seenIDs.insert("\(module.id.uuidString):\(mangaID)").inserted else {
+                        continue
                     }
-
-                    resultLock.lock()
-                    for m in mangas {
-                        let key = "\(module.id)-\(m.mangaId)"
-                        if seenIds.insert(key).inserted {
-                            allResults.append(m)
-                        }
-                    }
-                    resultLock.unlock()
+                    results.append(
+                        Manga(
+                            title: resultTitle,
+                            imageURL: imageURL,
+                            mangaId: mangaID,
+                            parentModule: module
+                        )
+                    )
                 }
-                titleGroup.leave()
+            } catch {
+                ReaderLogger.shared.log(
+                    "SourceFinder legacy search failed for \(module.moduleData.sourceName): \(error.localizedDescription)",
+                    type: "Error"
+                )
+                return []
             }
         }
 
-        titleGroup.notify(queue: .global(qos: .userInitiated)) {
-            // Score each result against all title variants - take the best score
-            let matches: [SourceMatch] = allResults.compactMap { result in
-                let bestScore = titles.map { candidate in
-                    JaroWinklerSimilarity.calculateSimilarity(original: candidate, result: result.title)
-                }.max() ?? 0.0
-
-                // Only show 85%+ matches
-                guard bestScore >= 0.85 else { return nil }
-
-                let confidence: SourceMatch.SourceMatchConfidence = .high
-
-                return SourceMatch(
-                    module: module,
-                    manga: result,
-                    titleScore: bestScore,
-                    chapterCount: nil, // We don't fetch chapters during search to keep it fast
-                    confidence: confidence
+        return results.compactMap { result in
+            let score = titles.map {
+                JaroWinklerSimilarity.calculateSimilarity(
+                    original: $0,
+                    result: result.title
                 )
-            }
-
-            completion(matches)
+            }.max() ?? 0
+            guard score >= 0.85 else { return nil }
+            return SourceMatch(
+                module: module,
+                manga: result,
+                titleScore: score,
+                chapterCount: nil,
+                confidence: .high
+            )
         }
     }
 
-    // MARK: - Chapter Count Fetching
-
-    /// For the top N candidates, fetch chapter counts to improve manual ranking.
     func refineTopMatchesWithChapterCounts(for manga: AniListManga, topN: Int = 3) {
+        refineTask?.cancel()
         let generation = searchGeneration
-        let candidates = Array(matches.prefix(topN))
+        let candidates = Array(matches.prefix(max(0, min(topN, 8))))
         guard !candidates.isEmpty else { return }
+        let expectedChapterCount = manga.chapters
 
-        let aniListChapters = manga.chapters
-        let group = DispatchGroup()
-        var refined: [SourceMatch] = []
-        let lock = NSLock()
-
-        for candidate in candidates {
-            group.enter()
-
-            let engine = KanzenEngine()
-            do {
-                let script = try ModuleManager.shared.getModuleScript(module: candidate.module)
-                let isNovel = candidate.module.moduleData.novel == true
-                try engine.loadScript(script, isNovel: isNovel)
-            } catch {
-                lock.lock()
-                refined.append(candidate)
-                lock.unlock()
-                group.leave()
-                continue
-            }
-
-            engine.extractChapters(params: candidate.manga.mangaId) { result in
-                var chapterCount: Int? = nil
-                if let result = result {
-                    var total = 0
-                    if let dictResult = result as? [String: Any] {
-                        // Kanzen format: count chapters across all languages
-                        for (_, value) in dictResult {
-                            if let chapters = value as? [Any?] {
-                                total += chapters.count
-                            }
-                        }
-                    } else if let arrResult = result as? [[String: Any]] {
-                        // Sora format: flat array of chapter dicts
-                        total = arrResult.count
-                    }
-                    if total > 0 {
-                        chapterCount = total
-                    }
-                }
-
-                // Re-score with chapter info
-                var newConfidence = candidate.confidence
-                if let aniCh = aniListChapters, let srcCh = chapterCount {
-                    // Boost confidence when chapter counts mostly match.
-                    let ratio = Double(srcCh) / Double(max(aniCh, 1))
-                    if ratio >= 0.9 && candidate.titleScore >= 0.75 {
-                        newConfidence = .high
-                    }
-                }
-
-                let updated = SourceMatch(
-                    module: candidate.module,
-                    manga: candidate.manga,
-                    titleScore: candidate.titleScore,
-                    chapterCount: chapterCount,
-                    confidence: newConfidence
+        refineTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            var refined: [SourceMatch] = []
+            for candidate in candidates {
+                guard !Task.isCancelled, searchGeneration == generation else { return }
+                refined.append(
+                    await refinedMatch(
+                        candidate,
+                        expectedChapterCount: expectedChapterCount
+                    )
                 )
-
-                lock.lock()
-                refined.append(updated)
-                lock.unlock()
-                group.leave()
             }
+            guard !Task.isCancelled, searchGeneration == generation else { return }
+            var updated = matches
+            updated.removeFirst(min(candidates.count, updated.count))
+            updated.insert(contentsOf: sorted(refined), at: 0)
+            matches = updated
+            refineTask = nil
+        }
+    }
+
+    @MainActor
+    private func refinedMatch(
+        _ candidate: SourceMatch,
+        expectedChapterCount: Int?
+    ) async -> SourceMatch {
+        var chapterCount: Int?
+        do {
+            let engine = KanzenEngine()
+            let script = try ModuleManager.shared.getModuleScript(module: candidate.module)
+            try await engine.loadScript(script, module: candidate.module)
+            if let result = try await engine.extractChapters(params: candidate.manga.mangaId) {
+                let count: Int
+                if let dictionary = result as? [String: Any] {
+                    count = dictionary.values.reduce(into: 0) { total, value in
+                        total += (value as? [Any])?.count ?? 0
+                    }
+                } else {
+                    count = (result as? [Any])?.count ?? 0
+                }
+                chapterCount = count > 0 ? count : nil
+            }
+        } catch {
+            return candidate
         }
 
-        group.notify(queue: .main) { [weak self] in
-            guard let self, self.searchGeneration == generation else { return }
-
-            // Re-sort refined matches: confidence to chapter count to title score
-            let sorted = refined.sorted { a, b in
-                if a.confidence != b.confidence { return a.confidence > b.confidence }
-                let aC = a.chapterCount ?? 0
-                let bC = b.chapterCount ?? 0
-                if aC != bC { return aC > bC }
-                return a.titleScore > b.titleScore
+        var confidence = candidate.confidence
+        if let expectedChapterCount, let chapterCount {
+            let ratio = Double(chapterCount) / Double(max(expectedChapterCount, 1))
+            if ratio >= 0.9, candidate.titleScore >= 0.75 {
+                confidence = .high
             }
+        }
+        return SourceMatch(
+            module: candidate.module,
+            manga: candidate.manga,
+            titleScore: candidate.titleScore,
+            chapterCount: chapterCount,
+            confidence: confidence
+        )
+    }
 
-            // Replace top N in matches with refined versions
-            var updated = self.matches
-            let removeCount = min(topN, updated.count)
-            updated.removeFirst(removeCount)
-            updated.insert(contentsOf: sorted, at: 0)
-            self.matches = updated
+    private func sorted(_ values: [SourceMatch]) -> [SourceMatch] {
+        values.sorted { lhs, rhs in
+            if lhs.confidence != rhs.confidence { return lhs.confidence > rhs.confidence }
+            let lhsCount = lhs.chapterCount ?? 0
+            let rhsCount = rhs.chapterCount ?? 0
+            if lhsCount != rhsCount { return lhsCount > rhsCount }
+            return lhs.titleScore > rhs.titleScore
         }
     }
 }

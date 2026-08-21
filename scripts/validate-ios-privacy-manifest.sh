@@ -39,6 +39,7 @@ required = {
     "NSPrivacyAccessedAPICategoryUserDefaults": {"CA92.1"},
     "NSPrivacyAccessedAPICategoryFileTimestamp": {"C617.1"},
     "NSPrivacyAccessedAPICategoryDiskSpace": {"85F4.1", "E174.1"},
+    "NSPrivacyAccessedAPICategorySystemBootTime": {"35F9.1"},
 }
 declared = {
     entry.get("NSPrivacyAccessedAPIType"): set(entry.get("NSPrivacyAccessedAPITypeReasons", []))

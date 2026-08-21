@@ -1,5 +1,3 @@
-// Full-page grid shown when tapping a widget card (network, genre, company, etc.)
-
 import SwiftUI
 import Kingfisher
 
@@ -8,14 +6,19 @@ struct DiscoverDetailView: View {
     let initialItems: [TMDBSearchResult]
     var heroItem: TMDBSearchResult? = nil
     var loadMore: ((Int) async -> [TMDBSearchResult])? = nil
-    
+
     @State private var items: [TMDBSearchResult] = []
     @State private var currentPage = 1
     @State private var isLoadingMore = false
     @State private var hasMorePages = true
     @Environment(\.heroNamespace) private var heroNamespace
-    
+
     private var columns: [GridItem] {
+#if os(tvOS)
+        return [
+            GridItem(.adaptive(minimum: 220, maximum: 280), spacing: 44, alignment: .top)
+        ]
+#else
         if isIPad {
             return [
                 GridItem(.adaptive(minimum: 260, maximum: 360), spacing: 24, alignment: .top)
@@ -24,23 +27,28 @@ struct DiscoverDetailView: View {
         return [
             GridItem(.adaptive(minimum: 110, maximum: 180), spacing: 16)
         ]
+#endif
     }
-    
+
     var body: some View {
         ScrollView(showsIndicators: false) {
             VStack(spacing: 0) {
                 if let hero = heroItem {
                     heroHeader(hero)
                 }
-                
-                LazyVGrid(columns: columns, spacing: isIPad ? 30 : 20) {
+
+                LazyVGrid(columns: columns, spacing: isTvOS ? 48 : (isIPad ? 30 : 20)) {
                     ForEach(items, id: \.stableIdentity) { item in
                         NavigationLink(destination: MediaDetailView(searchResult: item)
                             .heroDestination(id: "discover-\(item.stableIdentity)", namespace: heroNamespace)
                         ) {
                             discoverCard(item)
                         }
+#if os(tvOS)
+                        .buttonStyle(.card)
+#else
                         .buttonStyle(PlainButtonStyle())
+#endif
                         .onAppear {
                             if item.stableIdentity == items.last?.stableIdentity {
                                 loadNextPage()
@@ -48,14 +56,14 @@ struct DiscoverDetailView: View {
                         }
                     }
                 }
-                .padding(.horizontal, isIPad ? 28 : 16)
-                .padding(.top, heroItem != nil ? (isIPad ? 28 : 16) : 8)
-                
+                .padding(.horizontal, isTvOS ? 60 : (isIPad ? 28 : 16))
+                .padding(.top, heroItem != nil ? (isTvOS ? 40 : (isIPad ? 28 : 16)) : (isTvOS ? 24 : 8))
+
                 if isLoadingMore {
                     EclipseLoadingIndicator()
                         .padding(.vertical, 20)
                 }
-                
+
                 Spacer(minLength: 80)
             }
         }
@@ -63,6 +71,8 @@ struct DiscoverDetailView: View {
         .navigationTitle(title)
 #if os(iOS)
         .navigationBarTitleDisplayMode(.large)
+#elseif os(tvOS)
+        .toolbar(.hidden, for: .tabBar)
 #endif
         .onAppear {
             if items.isEmpty {
@@ -70,7 +80,7 @@ struct DiscoverDetailView: View {
             }
         }
     }
-    
+
     @ViewBuilder
     private func heroHeader(_ hero: TMDBSearchResult) -> some View {
         Group {
@@ -147,7 +157,7 @@ struct DiscoverDetailView: View {
                         .foregroundColor(.white.opacity(0.72))
                 }
                 if let genres = hero.genreIds, let firstGenre = genres.first,
-                   let genreName = WidgetGenre.curated.first(where: { $0.id == firstGenre })?.name {
+                   let genreName = WidgetGenre.active.first(where: { $0.id == firstGenre })?.name {
                     Text(genreName)
                         .font(isIPad ? .subheadline : .caption)
                         .foregroundColor(.white.opacity(0.72))
@@ -247,15 +257,60 @@ struct DiscoverDetailView: View {
         }
     }
 
+#if os(tvOS)
+    @ViewBuilder
+    private func tvDiscoverCard(_ item: TMDBSearchResult) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            KFImage(URL(string: item.fullPosterURL ?? ""))
+                .placeholder {
+                    FallbackImageView(
+                        isMovie: item.isMovie,
+                        size: CGSize(width: 220, height: 330)
+                    )
+                }
+                .resizable()
+                .aspectRatio(2/3, contentMode: .fill)
+                .frame(width: 220, height: 330)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+            Text(item.displayTitle)
+                .font(.system(size: 25, weight: .medium))
+                .foregroundColor(.white)
+                .lineLimit(1)
+                .frame(width: 220, alignment: .leading)
+
+            HStack(spacing: 8) {
+                if !item.displayDate.isEmpty {
+                    Text(String(item.displayDate.prefix(4)))
+                }
+
+                if let vote = item.voteAverage, vote > 0 {
+                    Label(String(format: "%.1f", vote), systemImage: "star.fill")
+                        .labelStyle(.titleAndIcon)
+                }
+            }
+            .font(.system(size: 23))
+            .foregroundColor(.white.opacity(0.6))
+            .frame(width: 220, alignment: .leading)
+        }
+        .frame(width: 220)
+        .padding(.vertical, 20)
+    }
+#endif
+
     @ViewBuilder
     private func discoverCard(_ item: TMDBSearchResult) -> some View {
+#if os(tvOS)
+        tvDiscoverCard(item)
+#else
         if isIPad {
             iPadDiscoverCard(item)
         } else {
             phoneDiscoverCard(item)
         }
+#endif
     }
-    
+
     private func loadNextPage() {
         guard let loadMore = loadMore, !isLoadingMore, hasMorePages else { return }
         isLoadingMore = true

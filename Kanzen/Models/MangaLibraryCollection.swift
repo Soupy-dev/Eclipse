@@ -1,3 +1,10 @@
+//
+//  MangaLibraryCollection.swift
+//  Kanzen
+//
+//  Created by Eclipse on 2026.
+//
+
 import Foundation
 import Combine
 
@@ -13,8 +20,6 @@ final class MangaLibraryCollection: ObservableObject, Codable, Identifiable, Equ
         self.items = items
         self.description = description
     }
-
-    // MARK: - Codable
 
     enum CodingKeys: String, CodingKey {
         case id, name, items, description
@@ -36,8 +41,6 @@ final class MangaLibraryCollection: ObservableObject, Codable, Identifiable, Equ
         let description = try container.decodeIfPresent(String.self, forKey: .description)
         self.init(id: id, name: name, items: items, description: description)
     }
-
-    // MARK: - Equatable
 
     static func == (lhs: MangaLibraryCollection, rhs: MangaLibraryCollection) -> Bool {
         lhs.id == rhs.id

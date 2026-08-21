@@ -1,3 +1,10 @@
+//
+//  SearchView.swift
+//  Sora
+//
+//  Created by Francesco on 07/08/25.
+//
+
 import SwiftUI
 
 struct SearchView: View {
@@ -8,7 +15,7 @@ struct SearchView: View {
 #endif
     @AppStorage("tmdbLanguage") private var selectedLanguage = "en-US"
     @AppStorage("searchHistory") private var searchHistoryData: Data = Data()
-    
+
     @State private var searchText = ""
     @State private var searchResults: [TMDBSearchResult] = []
     @State private var isLoading = false
@@ -25,17 +32,17 @@ struct SearchView: View {
 #if os(tvOS)
     @FocusState private var tvFocusedResultID: String?
 #endif
-    
+
     @StateObject private var tmdbService = TMDBService.shared
     @StateObject private var contentFilter = TMDBContentFilter.shared
     @Environment(\.verticalSizeClass) var verticalSizeClass
-    
+
     enum SearchFilter: String, CaseIterable {
         case all = "All"
         case movies = "Movies"
         case tvShows = "TV Shows"
     }
-    
+
     var filteredResults: [TMDBSearchResult] {
         switch searchFilter {
         case .all:
@@ -46,7 +53,7 @@ struct SearchView: View {
             return searchResults.filter { $0.isTVShow }
         }
     }
-    
+
     private var columnsCount: Int {
 #if os(tvOS)
         switch tvCardDensity {
@@ -80,7 +87,7 @@ struct SearchView: View {
         return Array(repeating: GridItem(.flexible(), spacing: 16), count: columnsCount)
 #endif
     }
-    
+
     var body: some View {
 #if os(tvOS)
         searchContent
@@ -97,9 +104,18 @@ struct SearchView: View {
         }
 #endif
     }
-    
+
     private var searchContent: some View {
         ScrollView {
+#if os(tvOS)
+            if !searchResults.isEmpty {
+                HStack {
+                    Spacer()
+                    searchFilterMenu
+                }
+                .padding()
+            }
+#else
             VStack(spacing: 12) {
                 HStack {
                     Spacer()
@@ -107,32 +123,13 @@ struct SearchView: View {
                 }
 
                 HStack(spacing: 8) {
-#if !os(tvOS)
                     SearchBarEclipse(text: $searchText) {
                         performSearch(force: true)
                     }
-#endif
-                    
+
                     if !searchResults.isEmpty {
-                        Menu {
-                            ForEach(SearchFilter.allCases, id: \.self) { filter in
-                                Button(action: {
-                                    searchFilter = filter
-                                }) {
-                                    HStack {
-                                        Text(filter.rawValue)
-                                        if searchFilter == filter {
-                                            Image(systemName: "checkmark")
-                                        }
-                                    }
-                                }
-                            }
-                        } label: {
-                            Image(systemName: searchFilter == .all ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
-                                .font(.system(size: 20))
-                                .foregroundColor(.primary)
-                        }
-                        .transition(.scale.combined(with: .opacity))
+                        searchFilterMenu
+                            .transition(.scale.combined(with: .opacity))
                     }
                 }
                 .animation(.easeInOut(duration: 0.2), value: searchResults.isEmpty)
@@ -140,12 +137,13 @@ struct SearchView: View {
                 browseButton
             }
             .padding()
-            
+#endif
+
             if isLoading && searchResults.isEmpty {
                 VStack {
                     EclipseLoadingIndicator()
                         .scaleEffect(1.2)
-                    
+
                     Text("Searching...")
                         .font(.caption)
                         .foregroundColor(.secondary)
@@ -158,18 +156,18 @@ struct SearchView: View {
                         .imageScale(.large)
                         .font(.system(size: 60))
                         .foregroundColor(.orange)
-                    
+
                     Text("Error")
                         .font(.title2)
                         .foregroundColor(.primary)
                         .padding(.top)
-                    
+
                     Text(errorMessage)
                         .font(.body)
                         .foregroundColor(.secondary)
                         .multilineTextAlignment(.center)
                         .padding(.horizontal)
-                    
+
                     Button("Try Again") {
                         performSearch(force: true)
                     }
@@ -183,7 +181,7 @@ struct SearchView: View {
                             .imageScale(.large)
                             .font(.system(size: 60))
                             .foregroundColor(.secondary)
-                        
+
                         Text("Search Movies & TV Shows")
                             .font(.title2)
                             .foregroundColor(.secondary)
@@ -196,17 +194,17 @@ struct SearchView: View {
                             Text("Recent Searches")
                                 .font(.headline)
                                 .foregroundColor(.primary)
-                            
+
                             Spacer()
-                            
+
                             Button("Clear") {
                                 clearSearchHistory()
                             }
-                            .font(.caption)
+                            .font(isTvOS ? .system(size: 26) : .caption)
                         }
                         .padding(.horizontal)
                         .padding(.top)
-                        
+
                         VStack(spacing: 0) {
                             ForEach(Array(searchHistory.enumerated()), id: \.offset) { index, historyItem in
                                 HStack(spacing: 12) {
@@ -217,7 +215,7 @@ struct SearchView: View {
                                         HStack {
                                             Image(systemName: "clock")
                                                 .foregroundColor(.secondary)
-                                                .font(.system(size: 16))
+                                                .font(.system(size: isTvOS ? 24 : 16))
 
                                             Text(historyItem)
                                                 .foregroundColor(.primary)
@@ -239,7 +237,7 @@ struct SearchView: View {
                                     }) {
                                         Image(systemName: "xmark")
                                             .foregroundColor(.secondary)
-                                            .font(.system(size: 14))
+                                            .font(.system(size: isTvOS ? 24 : 14))
                                     }
 #if os(tvOS)
                                     .buttonStyle(.bordered)
@@ -249,7 +247,7 @@ struct SearchView: View {
                                 }
                                 .padding(.horizontal)
                                 .padding(.vertical, 8)
-                                
+
                                 if index < searchHistory.count - 1 {
                                     Divider()
                                         .padding(.leading, 40)
@@ -257,7 +255,7 @@ struct SearchView: View {
                             }
                         }
                         .clipped()
-                        
+
                         Spacer()
                     }
                 }
@@ -267,12 +265,12 @@ struct SearchView: View {
                         .imageScale(.large)
                         .font(.system(size: 60))
                         .foregroundColor(.secondary)
-                    
+
                     Text("No \(searchFilter.rawValue.lowercased()) found")
                         .font(.title2)
                         .foregroundColor(.secondary)
                         .padding()
-                    
+
                     Text("Try adjusting your filter or search for something else")
                         .font(.body)
                         .foregroundColor(.secondary)
@@ -286,12 +284,12 @@ struct SearchView: View {
                         .imageScale(.large)
                         .font(.system(size: 60))
                         .foregroundColor(.secondary)
-                    
+
                     Text("No results found")
                         .font(.title2)
                         .foregroundColor(.secondary)
                         .padding()
-                    
+
                     Text("Try searching for a different movie or TV show")
                         .font(.body)
                         .foregroundColor(.secondary)
@@ -300,40 +298,55 @@ struct SearchView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ZStack(alignment: .topTrailing) {
-                    LazyVGrid(
-                        columns: searchGridColumns,
-                        spacing: isIPad ? 24 : 16
-                    ) {
-                        ForEach(filteredResults, id: \.stableIdentity) { result in
-                            SearchResultCard(result: result)
+                LazyVGrid(
+                    columns: searchGridColumns,
+                    spacing: isIPad ? 24 : 16
+                ) {
+                    ForEach(filteredResults, id: \.stableIdentity) { result in
+                        SearchResultCard(result: result)
 #if os(tvOS)
-                                .focused($tvFocusedResultID, equals: result.stableIdentity)
+                            .focused($tvFocusedResultID, equals: result.stableIdentity)
 #endif
-                        }
                     }
-                    .padding(.horizontal)
-                    .padding(.top)
+                }
+                .padding(.horizontal)
+                .padding(.top)
+            }
 
-                    if isLoading {
-                        HStack(spacing: 10) {
-                            EclipseLoadingIndicator()
-                            Text("Updating results")
-                                .font(.caption)
-                        }
+#if os(tvOS)
+            VStack(spacing: 24) {
+                HStack {
+                    Spacer()
+                    randomButton
+                }
+
+                browseButton
+            }
+            .padding()
+#endif
+        }
+        .overlay(alignment: .bottom) {
+            if !searchText.isEmpty && !filteredResults.isEmpty {
+                if isLoading {
+                    HStack(spacing: 10) {
+                        EclipseLoadingIndicator()
+                        Text("Updating results")
+                            .font(.caption)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(24)
+                    .allowsHitTesting(false)
+                    .accessibilityLabel("Updating search results")
+                } else if errorMessage != nil {
+                    Label("Could not refresh results", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 10)
                         .background(.ultraThinMaterial, in: Capsule())
                         .padding(24)
-                        .accessibilityLabel("Updating search results")
-                    } else if errorMessage != nil {
-                        Label("Could not refresh results", systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 10)
-                            .background(.ultraThinMaterial, in: Capsule())
-                            .padding(24)
-                    }
+                        .allowsHitTesting(false)
                 }
             }
         }
@@ -372,6 +385,10 @@ struct SearchView: View {
         }
         .onAppear {
             loadSearchHistory()
+        }
+
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+            reloadSearchResultsForProfileChange()
         }
         .onDisappear {
             pendingSearchTask?.cancel()
@@ -416,15 +433,53 @@ struct SearchView: View {
                 Text("Random")
             }
             .font(.subheadline.weight(.semibold))
+#if !os(tvOS)
+
             .foregroundColor(.accentColor)
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             .background(Color.accentColor.opacity(0.12))
             .clipShape(Capsule())
+#endif
         }
+#if os(tvOS)
+
+        .buttonStyle(.borderedProminent)
+#else
         .buttonStyle(PlainButtonStyle())
+#endif
         .disabled(isLoadingRandom)
         .accessibilityLabel("Open a random movie or TV show")
+    }
+
+    private var searchFilterMenu: some View {
+        Menu {
+            ForEach(SearchFilter.allCases, id: \.self) { filter in
+                Button(action: {
+                    searchFilter = filter
+                }) {
+                    HStack {
+                        Text(filter.rawValue)
+                        if searchFilter == filter {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+#if os(tvOS)
+            HStack(spacing: 10) {
+                Image(systemName: searchFilter == .all ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
+                Text(searchFilter == .all ? "Filter" : searchFilter.rawValue)
+            }
+            .font(.system(size: 28, weight: .semibold))
+            .foregroundColor(.primary)
+#else
+            Image(systemName: searchFilter == .all ? "line.3.horizontal.decrease.circle" : "line.3.horizontal.decrease.circle.fill")
+                .font(.system(size: 20))
+                .foregroundColor(.primary)
+#endif
+        }
     }
 
     private var browseNavigationLink: some View {
@@ -492,41 +547,39 @@ struct SearchView: View {
         .background(Color.primary.opacity(0.06))
         .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
-    
-    // MARK: - Search History Management
-    
+
     private func loadSearchHistory() {
-        if let decodedHistory = try? JSONDecoder().decode([String].self, from: searchHistoryData) {
-            searchHistory = decodedHistory
+        guard let decodedHistory = BackupSearchHistory.decodedQueries(from: searchHistoryData) else {
+            searchHistory = []
+            return
         }
+        searchHistory = decodedHistory
+        saveSearchHistory()
     }
-    
+
     private func saveSearchHistory() {
-        if let encodedHistory = try? JSONEncoder().encode(searchHistory) {
+        searchHistory = BackupSearchHistory.sanitizedQueries(searchHistory)
+        if let encodedHistory = try? JSONEncoder().encode(searchHistory),
+           encodedHistory.count <= BackupSearchHistory.maximumEncodedBytes {
             searchHistoryData = encodedHistory
         }
     }
-    
+
     private func addToSearchHistory(_ query: String) {
-        let trimmedQuery = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedQuery.isEmpty else { return }
-        
+        guard let trimmedQuery = BackupSearchHistory.sanitizedQueries([query]).first else { return }
+
         searchHistory.removeAll { $0.lowercased() == trimmedQuery.lowercased() }
         searchHistory.insert(trimmedQuery, at: 0)
-        
-        if searchHistory.count > 10 {
-            searchHistory = Array(searchHistory.prefix(10))
-        }
-        
+
         saveSearchHistory()
     }
-    
+
     private func removeFromSearchHistory(at index: Int) {
         guard index < searchHistory.count else { return }
         searchHistory.remove(at: index)
         saveSearchHistory()
     }
-    
+
     private func clearSearchHistory() {
         searchHistory.removeAll()
         saveSearchHistory()
@@ -541,7 +594,7 @@ struct SearchView: View {
         Task {
             do {
                 let trendingResults = try await tmdbService.getTrending(mediaType: "all", timeWindow: "week")
-                let eligibleResults = contentFilter.filterSearchResults(trendingResults)
+                let eligibleResults = await contentFilter.filterSearchResultsResolvingRatings(trendingResults)
 
                 await MainActor.run {
                     if let randomResult = eligibleResults.randomElement() {
@@ -559,8 +612,23 @@ struct SearchView: View {
             }
         }
     }
-    
-    
+
+    private func reloadSearchResultsForProfileChange() {
+        pendingSearchTask?.cancel()
+        pendingSearchTask = nil
+
+        searchRequestSerial += 1
+        searchResults = []
+#if os(tvOS)
+        tvFocusedResultID = nil
+#endif
+        errorMessage = nil
+        isLoading = false
+        lastSubmittedSearchQuery = ""
+        guard !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        performSearch(force: true)
+    }
+
     private func scheduleSearch(for value: String) {
         pendingSearchTask?.cancel()
 
@@ -609,6 +677,7 @@ struct SearchView: View {
         Task {
             do {
                 let results = try await tmdbService.searchMulti(query: query)
+                await contentFilter.prepareMaturityRatings(for: results)
 
                 await MainActor.run {
                     guard serial == searchRequestSerial,
@@ -754,6 +823,81 @@ private enum BrowseSort: String, CaseIterable, Identifiable {
     }
 }
 
+private enum BrowseAnimeAgeRating: String, Codable {
+    case all
+    case excludeAdults
+
+    var title: String {
+        switch self {
+        case .all:
+            return "All Ratings"
+        case .excludeAdults:
+            return "Exclude 18+"
+        }
+    }
+}
+
+private enum BrowseAnimeClassifier {
+    private static let originCountries: Set<String> = ["JP", "CN", "KR", "TW"]
+    private static let originalLanguages: Set<String> = ["ja", "zh", "ko"]
+
+    private enum Classification: Equatable {
+        case anime
+        case nonAnime
+
+        case unknownAnimation
+    }
+
+    static func isAnime(_ result: TMDBSearchResult) -> Bool {
+        classification(for: result) == .anime
+    }
+
+    static func shouldIncludeInTV(_ result: TMDBSearchResult) -> Bool {
+        classification(for: result) == .nonAnime
+    }
+
+    private static func classification(for result: TMDBSearchResult) -> Classification {
+        guard result.mediaType == "tv" else { return .nonAnime }
+
+        if result.isAnimeHint == true {
+            return .anime
+        }
+
+        guard result.genreIds?.contains(16) == true else { return .nonAnime }
+
+        if let origins = result.originCountry, !origins.isEmpty {
+            return origins.contains(where: originCountries.contains) ? .anime : .nonAnime
+        }
+
+        if let language = result.originalLanguage?.lowercased(), !language.isEmpty {
+            return originalLanguages.contains(language) ? .anime : .nonAnime
+        }
+
+        return .unknownAnimation
+    }
+}
+
+private struct BrowseFilterPreferences: Codable {
+    static let storageKey = "browseFilterPreferences"
+
+    let mediaTypeRawValue: String
+    let selectedGenreKeys: [String]
+    let excludedGenreKeys: [String]
+    let selectedYears: [Int]
+    let excludedYears: [Int]
+    let selectedCountryCode: String
+    let sortRawValue: String
+    let minimumRating: Double
+    let animeAgeRatingRawValue: String
+
+    static func load(profile id: UUID) -> BrowseFilterPreferences? {
+        guard let data = ProfileSettingsStore.shared.store(for: id).data(forKey: storageKey) else {
+            return nil
+        }
+        return try? JSONDecoder().decode(BrowseFilterPreferences.self, from: data)
+    }
+}
+
 private struct BrowseGenre: Identifiable, Hashable {
     let id: String
     let name: String
@@ -815,9 +959,6 @@ private struct BrowseGenre: Identifiable, Hashable {
         BrowseGenre(id: 37, name: "Western")
     ]
 
-    // TMDB's standard TV genres are broad, so Anime mode also exposes common
-    // anime tags as TMDB keywords. The keyword IDs are resolved at request time
-    // because TMDB does not provide stable genre IDs for these tags.
     static let animeGenres: [BrowseGenre] = [
         BrowseGenre(id: 10759, name: "Action & Adventure"),
         BrowseGenre(id: 35, name: "Comedy"),
@@ -887,13 +1028,16 @@ private struct BrowseMediaView: View {
 #endif
     @AppStorage("tmdbLanguage") private var selectedLanguage = "en-US"
 
-    @State private var mediaType: BrowseMediaType = .movie
-    @State private var selectedGenreKeys: Set<String> = []
-    @State private var excludedGenreKeys: Set<String> = []
-    @State private var selectedYears: Set<Int> = []
-    @State private var excludedYears: Set<Int> = []
-    @State private var selectedCountryCode = ""
-    @State private var sort: BrowseSort = .popularity
+    @State private var mediaType: BrowseMediaType
+    @State private var selectedGenreKeys: Set<String>
+    @State private var excludedGenreKeys: Set<String>
+    @State private var selectedYears: Set<Int>
+    @State private var excludedYears: Set<Int>
+    @State private var selectedCountryCode: String
+    @State private var sort: BrowseSort
+    @State private var minimumRating: Double
+    @State private var animeAgeRating: BrowseAnimeAgeRating
+    @State private var showingFilters = false
     @State private var results: [TMDBSearchResult] = []
     @State private var currentPage = 1
     @State private var hasMorePages = true
@@ -901,9 +1045,82 @@ private struct BrowseMediaView: View {
     @State private var errorMessage: String?
     @State private var requestSerial = 0
 
+    @State private var filterOwner: UUID
+
+    @State private var profileAppliedMediaType: BrowseMediaType?
+
+    private let maximumAnimeAgeRatingCandidatesPerPage = 40
+    private let maximumConcurrentAnimeAgeRatingChecks = 4
+
     @StateObject private var tmdbService = TMDBService.shared
     @StateObject private var contentFilter = TMDBContentFilter.shared
     @Environment(\.verticalSizeClass) private var verticalSizeClass
+
+    private struct RestoredBrowseFilters {
+        let mediaType: BrowseMediaType
+        let selectedGenreKeys: Set<String>
+        let excludedGenreKeys: Set<String>
+        let selectedYears: Set<Int>
+        let excludedYears: Set<Int>
+        let selectedCountryCode: String
+        let sort: BrowseSort
+        let minimumRating: Double
+        let animeAgeRating: BrowseAnimeAgeRating
+    }
+
+    private static func restoredFilters(for profile: UUID) -> RestoredBrowseFilters {
+        let preferences = BrowseFilterPreferences.load(profile: profile)
+        let restoredMediaType = preferences
+            .flatMap { BrowseMediaType(rawValue: $0.mediaTypeRawValue) }
+            ?? .movie
+        let validGenreKeys = Set(restoredMediaType.genres.map(\.id))
+        let restoredSelectedGenreKeys = Set(preferences?.selectedGenreKeys ?? [])
+            .intersection(validGenreKeys)
+        let restoredExcludedGenreKeys = Set(preferences?.excludedGenreKeys ?? [])
+            .intersection(validGenreKeys)
+            .subtracting(restoredSelectedGenreKeys)
+        let currentYear = Calendar.current.component(.year, from: Date())
+        let validYearRange = 1950...currentYear
+        let restoredCountryCode = preferences?.selectedCountryCode ?? ""
+        let validCountryCodes = Set(restoredMediaType.countries.map(\.code))
+        let restoredMinimumRating = preferences?.minimumRating ?? 0
+        let restoredSelectedYears = Set((preferences?.selectedYears ?? []).filter {
+            validYearRange.contains($0)
+        })
+        let restoredExcludedYears = Set((preferences?.excludedYears ?? []).filter {
+            validYearRange.contains($0)
+        }).subtracting(restoredSelectedYears)
+
+        return RestoredBrowseFilters(
+            mediaType: restoredMediaType,
+            selectedGenreKeys: restoredSelectedGenreKeys,
+            excludedGenreKeys: restoredExcludedGenreKeys,
+            selectedYears: restoredSelectedYears,
+            excludedYears: restoredExcludedYears,
+            selectedCountryCode: validCountryCodes.contains(restoredCountryCode) ? restoredCountryCode : "",
+            sort: preferences.flatMap { BrowseSort(rawValue: $0.sortRawValue) } ?? .popularity,
+            minimumRating: restoredMinimumRating.isFinite ? min(max(restoredMinimumRating, 0), 10) : 0,
+            animeAgeRating: preferences
+                .flatMap { BrowseAnimeAgeRating(rawValue: $0.animeAgeRatingRawValue) }
+                ?? .all
+        )
+    }
+
+    init() {
+        let owner = ProfileManager.shared.activeProfileID
+        let restored = Self.restoredFilters(for: owner)
+
+        _filterOwner = State(initialValue: owner)
+        _mediaType = State(initialValue: restored.mediaType)
+        _selectedGenreKeys = State(initialValue: restored.selectedGenreKeys)
+        _excludedGenreKeys = State(initialValue: restored.excludedGenreKeys)
+        _selectedYears = State(initialValue: restored.selectedYears)
+        _excludedYears = State(initialValue: restored.excludedYears)
+        _selectedCountryCode = State(initialValue: restored.selectedCountryCode)
+        _sort = State(initialValue: restored.sort)
+        _minimumRating = State(initialValue: restored.minimumRating)
+        _animeAgeRating = State(initialValue: restored.animeAgeRating)
+    }
 
     private var columnsCount: Int {
 #if os(tvOS)
@@ -981,12 +1198,34 @@ private struct BrowseMediaView: View {
             || !excludedYears.isEmpty
             || !selectedCountryCode.isEmpty
             || sort != .popularity
+            || minimumRating > 0
+            || (mediaType.isAnime && animeAgeRating != .all)
+    }
+
+    private var activeFilterCount: Int {
+        var count = 0
+        if !selectedGenreKeys.isEmpty { count += 1 }
+        if !excludedGenreKeys.isEmpty { count += 1 }
+        if !selectedYears.isEmpty { count += 1 }
+        if !excludedYears.isEmpty { count += 1 }
+        if !selectedCountryCode.isEmpty { count += 1 }
+        if sort != .popularity { count += 1 }
+        if minimumRating > 0 { count += 1 }
+        if mediaType.isAnime && animeAgeRating != .all { count += 1 }
+        return count
     }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+#if os(tvOS)
                 filterPanel
+#else
+                VStack(alignment: .leading, spacing: 12) {
+                    mediaTypeSelector
+                    filterButton
+                }
+#endif
 
                 if isLoading && results.isEmpty {
                     loadingState
@@ -1004,32 +1243,48 @@ private struct BrowseMediaView: View {
 #if os(iOS)
         .navigationBarTitleDisplayMode(.large)
 #endif
+#if !os(tvOS)
+        .sheet(isPresented: $showingFilters) {
+            filterSheet
+        }
+#endif
         .eclipseBackground()
         .onAppear {
             if results.isEmpty && !isLoading {
                 reloadResults()
             }
         }
-        .onChangeComp(of: mediaType) { previousMediaType, _ in
+        .onChangeComp(of: mediaType) { previousMediaType, newMediaType in
+            if profileAppliedMediaType == newMediaType {
+                profileAppliedMediaType = nil
+                return
+            }
             handleMediaTypeChange(from: previousMediaType)
+            persistFilters()
         }
         .onChangeComp(of: selectedGenreKeys) { _, _ in
-            reloadResults()
+            filtersDidChange()
         }
         .onChangeComp(of: excludedGenreKeys) { _, _ in
-            reloadResults()
+            filtersDidChange()
         }
         .onChangeComp(of: selectedYears) { _, _ in
-            reloadResults()
+            filtersDidChange()
         }
         .onChangeComp(of: excludedYears) { _, _ in
-            reloadResults()
+            filtersDidChange()
         }
         .onChangeComp(of: selectedCountryCode) { _, _ in
-            reloadResults()
+            filtersDidChange()
         }
         .onChangeComp(of: sort) { _, _ in
-            reloadResults()
+            filtersDidChange()
+        }
+        .onChangeComp(of: minimumRating) { _, _ in
+            filtersDidChange()
+        }
+        .onChangeComp(of: animeAgeRating) { _, _ in
+            filtersDidChange()
         }
         .onChangeComp(of: selectedLanguage) { _, _ in
             reloadResults()
@@ -1037,34 +1292,109 @@ private struct BrowseMediaView: View {
         .onChangeComp(of: contentFilter.filterHorror) { _, _ in
             reloadResults()
         }
+
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+            applyProfileChange()
+        }
+    }
+
+    private var mediaTypeSelector: some View {
+        Picker("Type", selection: $mediaType) {
+            ForEach(BrowseMediaType.allCases) { type in
+                Text(type.rawValue).tag(type)
+            }
+        }
+        .pickerStyle(.segmented)
+    }
+
+    private var filterChipsGrid: some View {
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: isTvOS ? 420 : 132), spacing: isTvOS ? 20 : 10, alignment: .leading)],
+            alignment: .leading,
+            spacing: isTvOS ? 20 : 10
+        ) {
+            genreMenu
+            excludedGenreMenu
+            yearMenu
+            excludedYearMenu
+            countryMenu
+            sortMenu
+            ratingMenu
+
+            if mediaType.isAnime {
+                animeAgeRatingMenu
+            }
+
+            if hasActiveFilters {
+                resetFiltersButton
+            }
+        }
     }
 
     private var filterPanel: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Picker("Type", selection: $mediaType) {
-                ForEach(BrowseMediaType.allCases) { type in
-                    Text(type.rawValue).tag(type)
-                }
-            }
-            .pickerStyle(.segmented)
-
-            LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 132), spacing: 10, alignment: .leading)],
-                alignment: .leading,
-                spacing: 10
-            ) {
-                genreMenu
-                excludedGenreMenu
-                yearMenu
-                excludedYearMenu
-                countryMenu
-                sortMenu
-
-                if hasActiveFilters {
-                    resetFiltersButton
-                }
-            }
+            mediaTypeSelector
+            filterChipsGrid
         }
+    }
+
+    private var filterButton: some View {
+        Button {
+            showingFilters = true
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: hasActiveFilters ? "line.3.horizontal.decrease.circle.fill" : "line.3.horizontal.decrease.circle")
+                    .font(.system(size: 16, weight: .semibold))
+
+                Text("Filters")
+                    .font(.subheadline.weight(.semibold))
+
+                if activeFilterCount > 0 {
+                    Text("\(activeFilterCount)")
+                        .font(.caption2.weight(.bold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.accentColor))
+                }
+
+                Spacer()
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(.secondary)
+            }
+            .foregroundColor(.primary)
+            .padding(.horizontal, 14)
+            .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+            .background(Color.primary.opacity(0.06))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(PlainButtonStyle())
+    }
+
+    private var filterSheet: some View {
+        NavigationView {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    filterChipsGrid
+                }
+                .padding()
+            }
+            .navigationTitle("Filters")
+#if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+#endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { showingFilters = false }
+                }
+            }
+            .eclipseBackground()
+        }
+#if os(iOS)
+        .navigationViewStyle(StackNavigationViewStyle())
+#endif
     }
 
     private var genreMenu: some View {
@@ -1163,19 +1493,64 @@ private struct BrowseMediaView: View {
         }
     }
 
+    private var minimumRatingLabel: String {
+        minimumRating > 0 ? "\(Int(minimumRating))+ Stars" : "Any Rating"
+    }
+
+    private var ratingMenu: some View {
+        Menu {
+            Button(action: { minimumRating = 0 }) {
+                menuRow("Any Rating", isSelected: minimumRating == 0)
+            }
+
+            ForEach([5, 6, 7, 8, 9], id: \.self) { star in
+                Button(action: { minimumRating = Double(star) }) {
+                    menuRow("\(star)+ Stars", isSelected: Int(minimumRating) == star)
+                }
+            }
+        } label: {
+            filterChip(title: "Rating", value: minimumRatingLabel, systemImage: "star.fill")
+        }
+    }
+
+    private var animeAgeRatingMenu: some View {
+        Menu {
+            ForEach([BrowseAnimeAgeRating.all, .excludeAdults], id: \.rawValue) { option in
+                Button(action: { animeAgeRating = option }) {
+                    menuRow(option.title, isSelected: animeAgeRating == option)
+                }
+            }
+        } label: {
+            filterChip(
+                title: "Age Rating",
+                value: animeAgeRating.title,
+                systemImage: "18.circle"
+            )
+        }
+    }
+
     private var resetFiltersButton: some View {
         Button(action: resetFilters) {
             Label("Reset", systemImage: "arrow.counterclockwise")
                 .font(.subheadline.weight(.semibold))
+#if !os(tvOS)
                 .foregroundColor(.primary)
+#endif
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
                 .padding(.horizontal, 12)
                 .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+#if !os(tvOS)
+
                 .background(Color.primary.opacity(0.06))
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+#endif
         }
+#if os(tvOS)
+        .buttonStyle(.bordered)
+#else
         .buttonStyle(PlainButtonStyle())
+#endif
     }
 
     private var loadingState: some View {
@@ -1252,30 +1627,30 @@ private struct BrowseMediaView: View {
     }
 
     private func filterChip(title: String, value: String, systemImage: String) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: isTvOS ? 14 : 8) {
             Image(systemName: systemImage)
-                .font(.system(size: 13, weight: .semibold))
+                .font(.system(size: isTvOS ? 26 : 13, weight: .semibold))
 
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: isTvOS ? 4 : 1) {
                 Text(title)
-                    .font(.caption2)
+                    .font(isTvOS ? .system(size: 26) : .caption2)
                     .foregroundColor(.secondary)
 
                 Text(value)
-                    .font(.subheadline.weight(.semibold))
+                    .font(isTvOS ? .system(size: 30, weight: .semibold) : .subheadline.weight(.semibold))
                     .foregroundColor(.primary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.78)
             }
 
             Image(systemName: "chevron.down")
-                .font(.system(size: 10, weight: .bold))
+                .font(.system(size: isTvOS ? 18 : 10, weight: .bold))
                 .foregroundColor(.secondary)
         }
-        .padding(.horizontal, 12)
-        .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+        .padding(.horizontal, isTvOS ? 24 : 12)
+        .frame(maxWidth: .infinity, minHeight: isTvOS ? 96 : 48, alignment: .leading)
         .background(Color.primary.opacity(0.06))
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: isTvOS ? 18 : 10, style: .continuous))
     }
 
     private func menuRow(_ title: String, isSelected: Bool) -> some View {
@@ -1324,6 +1699,55 @@ private struct BrowseMediaView: View {
         excludedYears.removeAll()
         selectedCountryCode = mediaType.isAnime ? "JP" : ""
         sort = .popularity
+        minimumRating = 0
+        animeAgeRating = .all
+    }
+
+    private func filtersDidChange() {
+        persistFilters()
+        reloadResults()
+    }
+
+    private func applyProfileChange() {
+        let owner = ProfileManager.shared.activeProfileID
+        guard owner != filterOwner else {
+
+            reloadResults()
+            return
+        }
+        filterOwner = owner
+        let restored = Self.restoredFilters(for: owner)
+        if mediaType != restored.mediaType {
+            profileAppliedMediaType = restored.mediaType
+            mediaType = restored.mediaType
+        }
+        selectedGenreKeys = restored.selectedGenreKeys
+        excludedGenreKeys = restored.excludedGenreKeys
+        selectedYears = restored.selectedYears
+        excludedYears = restored.excludedYears
+        selectedCountryCode = restored.selectedCountryCode
+        sort = restored.sort
+        minimumRating = restored.minimumRating
+        animeAgeRating = restored.animeAgeRating
+        reloadResults()
+    }
+
+    private func persistFilters() {
+        let preferences = BrowseFilterPreferences(
+            mediaTypeRawValue: mediaType.rawValue,
+            selectedGenreKeys: selectedGenreKeys.sorted(),
+            excludedGenreKeys: excludedGenreKeys.sorted(),
+            selectedYears: selectedYears.sorted(),
+            excludedYears: excludedYears.sorted(),
+            selectedCountryCode: selectedCountryCode,
+            sortRawValue: sort.rawValue,
+            minimumRating: minimumRating,
+            animeAgeRatingRawValue: animeAgeRating.rawValue
+        )
+        guard let data = try? JSONEncoder().encode(preferences) else { return }
+        ProfileSettingsStore.shared
+            .store(for: filterOwner)
+            .set(data, forKey: BrowseFilterPreferences.storageKey)
     }
 
     private func reloadResults() {
@@ -1342,14 +1766,17 @@ private struct BrowseMediaView: View {
     private func loadPage(_ page: Int, replacing: Bool) {
         requestSerial += 1
         let serial = requestSerial
-        let mediaType = self.mediaType.tmdbValue
-        let isAnime = self.mediaType.isAnime
-        let selectedGenres = self.mediaType.genres.filter { selectedGenreKeys.contains($0.id) }
-        let excludedGenres = self.mediaType.genres.filter { excludedGenreKeys.contains($0.id) }
+        let browseMediaType = self.mediaType
+        let mediaType = browseMediaType.tmdbValue
+        let isAnime = browseMediaType.isAnime
+        let selectedGenres = browseMediaType.genres.filter { selectedGenreKeys.contains($0.id) }
+        let excludedGenres = browseMediaType.genres.filter { excludedGenreKeys.contains($0.id) }
         let years = selectedYears.sorted(by: >)
         let excludedYears = self.excludedYears
         let country = selectedCountryCode.isEmpty ? nil : selectedCountryCode
         let sort = self.sort
+        let minimumRating = self.minimumRating
+        let animeAgeRating = self.animeAgeRating
 
         isLoading = true
         errorMessage = nil
@@ -1365,14 +1792,23 @@ private struct BrowseMediaView: View {
                     excludedYears: excludedYears,
                     originCountry: country,
                     sort: sort,
+                    minimumRating: minimumRating,
                     page: page
                 )
-                let filtered = contentFilter.filterSearchResults(
-                    filterExcludedResults(
-                        pageResult.results,
-                        excludedGenreIds: excludedGenres.compactMap(\.tmdbGenreID),
-                        excludedYears: excludedYears
-                    )
+                let browseTypeFiltered = await filterResultsForBrowseType(
+                    pageResult.results,
+                    mediaType: browseMediaType,
+                    animeAgeRating: animeAgeRating
+                )
+                let filtered = await regionGuardedResults(
+                    contentFilter.filterSearchResultsResolvingRatings(
+                        filterExcludedResults(
+                            browseTypeFiltered,
+                            excludedGenreIds: excludedGenres.compactMap(\.tmdbGenreID),
+                            excludedYears: excludedYears
+                        )
+                    ),
+                    country: country
                 )
 
                 await MainActor.run {
@@ -1384,6 +1820,10 @@ private struct BrowseMediaView: View {
                     currentPage = page
                     hasMorePages = pageResult.hasMore
                     isLoading = false
+
+                    if hasMorePages && results.count < 12 && page < 8 {
+                        loadNextPage()
+                    }
                 }
             } catch {
                 await MainActor.run {
@@ -1472,6 +1912,7 @@ private struct BrowseMediaView: View {
         excludedYears: Set<Int>,
         originCountry: String?,
         sort: BrowseSort,
+        minimumRating: Double,
         page: Int
     ) async throws -> BrowsePageResult {
         let selectedKeywordNames = genres.compactMap(\.keyword)
@@ -1485,6 +1926,9 @@ private struct BrowseMediaView: View {
         let effectiveCountry = originCountry
         let effectiveLanguage = isAnime ? animeLanguage(for: effectiveCountry) : nil
         let requestedYears = years.filter { !excludedYears.contains($0) }
+
+        let ratingFloor: Double? = minimumRating > 0 ? minimumRating : nil
+        let voteCountFloor: Int? = minimumRating > 0 ? max(100, sort.minimumVoteCount ?? 0) : sort.minimumVoteCount
 
         guard !requestedYears.isEmpty || years.isEmpty else {
             return BrowsePageResult(results: [], hasMore: false)
@@ -1500,7 +1944,8 @@ private struct BrowseMediaView: View {
                 originCountry: effectiveCountry,
                 originalLanguage: effectiveLanguage,
                 sortBy: sort.tmdbValue(for: self.mediaType),
-                minimumVoteCount: sort.minimumVoteCount,
+                minimumVoteCount: voteCountFloor,
+                voteAverageGte: ratingFloor,
                 page: page
             )
             return BrowsePageResult(results: fetched, hasMore: fetched.count >= 20)
@@ -1519,7 +1964,8 @@ private struct BrowseMediaView: View {
                         originCountry: effectiveCountry,
                         originalLanguage: effectiveLanguage,
                         sortBy: sort.tmdbValue(for: self.mediaType),
-                        minimumVoteCount: sort.minimumVoteCount,
+                        minimumVoteCount: voteCountFloor,
+                        voteAverageGte: ratingFloor,
                         page: page
                     )
                     return BrowsePageResult(results: fetched, hasMore: fetched.count >= 20)
@@ -1560,12 +2006,157 @@ private struct BrowseMediaView: View {
         }
     }
 
+    private func filterResultsForBrowseType(
+        _ fetched: [TMDBSearchResult],
+        mediaType: BrowseMediaType,
+        animeAgeRating: BrowseAnimeAgeRating
+    ) async -> [TMDBSearchResult] {
+        let typeFiltered = fetched.filter { result in
+            switch mediaType {
+            case .movie:
+                return true
+            case .tv:
+                return BrowseAnimeClassifier.shouldIncludeInTV(result)
+            case .anime:
+                return BrowseAnimeClassifier.isAnime(result)
+            }
+        }
+
+        guard mediaType.isAnime, animeAgeRating == .excludeAdults else {
+            return typeFiltered
+        }
+
+        return await excludingAdultAnime(
+            Array(typeFiltered.prefix(maximumAnimeAgeRatingCandidatesPerPage))
+        )
+    }
+
+    private func excludingAdultAnime(_ results: [TMDBSearchResult]) async -> [TMDBSearchResult] {
+        guard !results.isEmpty else { return [] }
+
+        let maximumConcurrentChecks = min(maximumConcurrentAnimeAgeRatingChecks, results.count)
+        let restrictedIDs = await withTaskGroup(of: (String, Bool).self) { group in
+            var pendingResults = results.makeIterator()
+
+            for _ in 0..<maximumConcurrentChecks {
+                guard let result = pendingResults.next() else { break }
+                group.addTask {
+                    let isAdult = await self.isAdultAnime(result)
+                    return (result.stableIdentity, isAdult)
+                }
+            }
+
+            var ids = Set<String>()
+            while let (id, isAdult) = await group.next() {
+                if isAdult {
+                    ids.insert(id)
+                }
+
+                if let result = pendingResults.next() {
+                    group.addTask {
+                        let isAdult = await self.isAdultAnime(result)
+                        return (result.stableIdentity, isAdult)
+                    }
+                }
+            }
+            return ids
+        }
+
+        return results.filter { !restrictedIDs.contains($0.stableIdentity) }
+    }
+
+    private func isAdultAnime(_ result: TMDBSearchResult) async -> Bool {
+        if result.adult == true || TMDBContentFilter.hasExplicitAnimeMetadata(result) {
+            return true
+        }
+
+        guard let detail = try? await tmdbService.getTVShowDetails(id: result.id) else {
+
+            return true
+        }
+
+        guard let contentRatings = detail.contentRatings,
+              contentRatings.results.contains(where: { !$0.rating.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
+
+            return true
+        }
+
+        return containsAdultAgeRating(contentRatings)
+    }
+
+    private func containsAdultAgeRating(_ contentRatings: TMDBContentRatings) -> Bool {
+        return contentRatings.results
+            .map(\.rating)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .contains(where: isAdultAgeRating)
+    }
+
+    private func isAdultAgeRating(_ rating: String) -> Bool {
+        let normalized = rating
+            .uppercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let compact = normalized.components(separatedBy: CharacterSet.alphanumerics.inverted).joined()
+
+        switch compact {
+        case "TVMA", "TV18", "NC17", "R18", "M18", "C18", "18", "18A", "19", "R21", "21", "X", "XXX", "ADULT", "ADULTONLY":
+            return true
+        default:
+            return compact.hasPrefix("R18")
+                || compact.hasPrefix("M18")
+                || compact.hasPrefix("C18")
+                || compact.hasPrefix("18")
+                || compact.hasPrefix("19")
+                || compact.hasPrefix("R21")
+                || compact.hasPrefix("21")
+                || compact.contains("AB18")
+                || normalized.contains("18禁")
+                || compact.contains("청소년관람불가")
+                || compact.contains("성인")
+                || normalized.contains("限制級")
+                || normalized.contains("成人")
+        }
+    }
+
     private func animeLanguage(for country: String?) -> String? {
         switch country {
         case "JP": return "ja"
         case "CN", "TW": return "zh"
         case "KR": return "ko"
         default: return nil
+        }
+    }
+
+    private func expectedLanguages(for country: String) -> Set<String>? {
+        switch country {
+        case "US", "GB", "AU": return ["en"]
+        case "CA": return ["en", "fr"]
+        case "JP": return ["ja"]
+        case "KR": return ["ko"]
+        case "CN", "TW": return ["zh", "cn"]
+        case "FR": return ["fr"]
+        case "DE": return ["de"]
+        case "ES": return ["es", "ca"]
+        case "MX": return ["es"]
+        case "BR": return ["pt"]
+        case "TH": return ["th"]
+        case "IN": return nil
+        default: return nil
+        }
+    }
+
+    private func regionGuardedResults(_ results: [TMDBSearchResult], country: String?) -> [TMDBSearchResult] {
+        guard let country, !country.isEmpty else { return results }
+        let acceptableLanguages = expectedLanguages(for: country)
+        return results.filter { result in
+            if let origins = result.originCountry, !origins.isEmpty {
+                return origins.contains(country)
+            }
+            if let acceptableLanguages,
+               let language = result.originalLanguage,
+               !language.isEmpty {
+                return acceptableLanguages.contains(language.lowercased())
+            }
+            return true
         }
     }
 
@@ -1609,7 +2200,7 @@ private struct BrowseMediaView: View {
 struct SearchBarEclipse: View {
     @Binding var text: String
     var onSearchButtonClicked: () -> Void
-    
+
     var body: some View {
         HStack {
             TextField(LocalizedStringKey("Search Placeholder"), text: $text)
@@ -1628,7 +2219,7 @@ struct SearchBarEclipse: View {
                             .foregroundColor(.secondary)
                             .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                             .padding(.leading, 8)
-                        
+
                         if !text.isEmpty {
                             Button(action: {
                                 self.text = ""

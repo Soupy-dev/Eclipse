@@ -6,60 +6,116 @@ on:
   pull_request:
     branches:
       - main
+
+permissions:
+  contents: read
+
 jobs:
   build-ios:
-    name: Build iOS IPA
+    name: Build and test iOS
     runs-on: macos-26
+    timeout-minutes: 120
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Validate immutable MPVKit revision
+        env:
+          MPVKIT_SOURCE_REVISION: ${{ vars.MPVKIT_SOURCE_REVISION }}
+        run: |
+          set -euo pipefail
+
+          if ! [[ "$MPVKIT_SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::MPVKIT_SOURCE_REVISION must be an explicitly reviewed lowercase 40-character commit SHA. Mutable MPVKit branches are not accepted."
+            exit 1
+          fi
       - name: Checkout canonical MPVKit
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: Soupy-dev/MPVKit
-          ref: eclipse-mpv-metal
+          ref: ${{ vars.MPVKIT_SOURCE_REVISION }}
           path: MPVKit
+      - name: Verify immutable MPVKit checkout
+        env:
+          MPVKIT_SOURCE_REVISION: ${{ vars.MPVKIT_SOURCE_REVISION }}
+        run: test "$(git -C MPVKit rev-parse HEAD)" = "$MPVKIT_SOURCE_REVISION"
       - name: Expose sibling MPVKit package
         run: ln -sfn "$GITHUB_WORKSPACE/MPVKit" "$GITHUB_WORKSPACE/../MPVKit"
       - name: Set up Xcode
-        uses: maxim-lobanov/setup-xcode@v1
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
           xcode-version: latest-stable
-      - name: Create local build config
-        env:
-          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
-          ANILIST_CLIENT_ID: ${{ secrets.ANILIST_CLIENT_ID }}
-          ANILIST_CLIENT_SECRET: ${{ secrets.ANILIST_CLIENT_SECRET }}
-          TRAKT_CLIENT_ID: ${{ secrets.TRAKT_CLIENT_ID }}
-          TRAKT_CLIENT_SECRET: ${{ secrets.TRAKT_CLIENT_SECRET }}
-          MAL_CLIENT_ID: ${{ secrets.MAL_CLIENT_ID }}
-          MAL_CLIENT_SECRET: ${{ secrets.MAL_CLIENT_SECRET }}
+      - name: Build iOS app without distribution credentials
         run: |
-          for name in TMDB_API_KEY ANILIST_CLIENT_ID ANILIST_CLIENT_SECRET TRAKT_CLIENT_ID TRAKT_CLIENT_SECRET MAL_CLIENT_ID MAL_CLIENT_SECRET; do
-            if [ -z "${!name}" ]; then
-              echo "::warning::$name is not configured in GitHub Actions secrets; building with an empty value"
-            fi
-          done
+          set -euo pipefail
 
-          {
-            printf 'TMDB_API_KEY = %s\n' "$TMDB_API_KEY"
-            printf 'ANILIST_CLIENT_ID = %s\n' "$ANILIST_CLIENT_ID"
-            printf 'ANILIST_CLIENT_SECRET = %s\n' "$ANILIST_CLIENT_SECRET"
-            printf '%s\n' 'ANILIST_REDIRECT_URI = luna:/$()/anilist-callback'
-            printf 'TRAKT_CLIENT_ID = %s\n' "$TRAKT_CLIENT_ID"
-            printf 'TRAKT_CLIENT_SECRET = %s\n' "$TRAKT_CLIENT_SECRET"
-            printf '%s\n' 'TRAKT_REDIRECT_URI = luna:/$()/trakt-callback'
-            printf 'MAL_CLIENT_ID = %s\n' "$MAL_CLIENT_ID"
-            printf 'MAL_CLIENT_SECRET = %s\n' "$MAL_CLIENT_SECRET"
-            printf '%s\n' 'MAL_REDIRECT_URI = luna:/$()/mal-callback'
-          } > Build.local.xcconfig
-      - name: Make build script executable
-        run: chmod +x ./ipabuild.sh
-      - name: Build iOS IPA
-        run: ./ipabuild.sh ios
-      - name: Upload iOS IPA artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: Eclipse-iOS
-          path: build/Eclipse.ipa
-          if-no-files-found: error
+          # Ordinary public CI proves the source compiles. It must never embed release
+          # credentials or publish an installable app before the owner deliberately runs a
+          # distribution workflow after the App Store release is live.
+          test ! -e Build.local.xcconfig
+          xcodebuild build \
+            -project Eclipse.xcodeproj \
+            -scheme Eclipse \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -sdk iphoneos \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            ENABLE_USER_SCRIPT_SANDBOXING=NO
+
+      - name: Select iOS simulator
+        run: |
+          set -euo pipefail
+
+          SIMULATOR_UDID="$(python3 - <<'PY'
+          import json
+          import subprocess
+
+          inventory = json.loads(
+              subprocess.check_output(
+                  ["xcrun", "simctl", "list", "devices", "available", "-j"]
+              )
+          )
+          candidates = []
+          for runtime, devices in inventory.get("devices", {}).items():
+              if ".SimRuntime.iOS-" not in runtime:
+                  continue
+              version = tuple(
+                  int(part)
+                  for part in runtime.rsplit(".SimRuntime.iOS-", 1)[1].split("-")
+              )
+              for device in devices:
+                  if device.get("isAvailable", True) is False:
+                      continue
+                  if ".SimDeviceType.iPhone-" not in device.get("deviceTypeIdentifier", ""):
+                      continue
+                  candidates.append((version, device["name"], device["udid"]))
+          if not candidates:
+              raise SystemExit("error: no available iOS iPhone simulator was found")
+          print(max(candidates)[2])
+          PY
+          )"
+          echo "SIMULATOR_UDID=$SIMULATOR_UDID" >> "$GITHUB_ENV"
+
+      - name: Run secretless iOS tests
+        run: |
+          set -euo pipefail
+
+          if [ ! -d Tests ]; then
+            echo "Test sources are local-only and not tracked; skipping test run."
+            exit 0
+          fi
+
+          xcodebuild test \
+            -project Eclipse.xcodeproj \
+            -scheme Eclipse \
+            -destination "platform=iOS Simulator,id=$SIMULATOR_UDID" \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/SourcePackages" \
+            -disableAutomaticPackageResolution \
+            -skipPackagePluginValidation \
+            -skipMacroValidation \
+            -parallel-testing-enabled NO \
+            CODE_SIGNING_ALLOWED=NO

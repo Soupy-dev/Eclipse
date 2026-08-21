@@ -1,10 +1,8 @@
-// Created on 27/02/26.
-
 import SwiftUI
 
 struct FloatingSettingsButton: View {
     @Binding var isPresented: Bool
-    
+
     var body: some View {
         Button(action: {
             withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
@@ -50,7 +48,7 @@ struct ModeSwitchButtonPulse: View {
 }
 
 struct FloatingModeSwitchButton: View {
-    @AppStorage("showKanzen") private var showKanzen: Bool = false
+    @AppStorage("showKanzen", store: .standard) private var showKanzen: Bool = false
     @AppStorage(ModeSwitchAnimationSettings.enabledKey) private var modeSwitchAnimationEnabled = ModeSwitchAnimationSettings.defaultEnabled
     @EnvironmentObject private var modeSwitchTransitionCoordinator: ModeSwitchTransitionCoordinator
     @State private var isLaunching = false
@@ -107,8 +105,8 @@ struct FloatingModeSwitchButton: View {
             isLaunching = true
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) {
-            withAnimation(.easeInOut(duration: 0.84)) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.10) {
+            withAnimation(.timingCurve(0.2, 0.75, 0.25, 1, duration: 0.82)) {
                 showKanzen = true
             }
         }
@@ -125,12 +123,12 @@ struct FloatingModeSwitchButton: View {
 
 struct FloatingSettingsOverlay: View {
     @Binding var showingSettings: Bool
-    
+
     var body: some View {
         ZStack(alignment: .topTrailing) {
             Color.clear
                 .allowsHitTesting(false)
-            
+
             HStack(spacing: 10) {
 #if !os(tvOS)
                 FloatingModeSwitchButton()

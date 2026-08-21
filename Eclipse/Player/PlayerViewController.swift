@@ -1,13 +1,16 @@
-// test
+//
+//  PlayerViewController.swift
+//  test
+//
+//  Created by Francesco on 28/09/25.
+//
 
 import UIKit
 import SwiftUI
 import AVFoundation
+import Combine
 #if os(iOS)
 import GroupActivities
-#endif
-#if os(iOS) && canImport(GoogleCast)
-import GoogleCast
 #endif
 #if canImport(Darwin)
 import Darwin
@@ -25,9 +28,65 @@ import AVKit
 import MediaPlayer
 #endif
 
-/// Padded, monospaced label backing the MoltenVK/mpv performance HUD. Subclassing UILabel keeps
-/// the overlay a single constrained view while still giving the text breathing room inside its
-/// rounded background.
+/// Shared progress persistence for local playback. ProgressManager remains
+/// authoritative for completion/removal rules, while Trakt receives the same
+/// normalized position and episode identity.
+@MainActor
+private enum PlaybackProgressPersistence {
+    static func persist(
+        mediaInfo: MediaInfo,
+        position: Double,
+        duration: Double,
+        playbackContext: EpisodePlaybackContext?,
+        owner: UUID,
+        progressAuthority: ProgressManager.ProfileMutationAuthority?,
+        traktAction: TraktScrobbleAction? = nil
+    ) {
+        guard position.isFinite,
+              duration.isFinite,
+              duration >= 5,
+              position >= 0,
+              position <= duration + 2 else { return }
+        let safePosition = min(position, duration)
+
+        switch mediaInfo {
+        case .movie(let id, let title, let posterURL, _):
+            ProgressManager.shared.updateMovieProgress(
+                movieId: id,
+                title: title,
+                currentTime: safePosition,
+                totalDuration: duration,
+                posterURL: posterURL,
+                owner: owner
+            )
+        case .episode(let showID, let season, let episode, let showTitle, let posterURL, let isAnime):
+            ProgressManager.shared.updateEpisodeProgress(
+                showId: showID,
+                seasonNumber: season,
+                episodeNumber: episode,
+                currentTime: safePosition,
+                totalDuration: duration,
+                showTitle: showTitle,
+                showPosterURL: posterURL,
+                playbackContext: playbackContext,
+                isAnime: isAnime || playbackContext?.hasAnimeMediaId == true,
+                owner: owner
+            )
+        }
+
+        if let traktAction, safePosition > 0.5 {
+            TrackerManager.shared.scrobbleTraktPlayback(
+                traktAction,
+                for: mediaInfo,
+                progress: min(max(safePosition / duration, 0), 1),
+                playbackContext: playbackContext,
+                requiredOwner: owner,
+                progressAuthority: progressAuthority
+            )
+        }
+    }
+}
+
 final class PlayerPerformanceOverlayLabel: UILabel {
     var textInsets = UIEdgeInsets(top: 6, left: 9, bottom: 6, right: 9)
 
@@ -52,20 +111,6 @@ final class PlayerPerformanceOverlayLabel: UILabel {
     }
 }
 
-#if os(iOS) && canImport(GoogleCast)
-/// Google Cast owns the state artwork, but its image view expands to the full control bounds on
-/// some SDK/iOS combinations. Scale only that artwork so the 36 pt control keeps its full hit area.
-private final class PlayerCastButton: GCKUICastButton {
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        guard let imageView else { return }
-        imageView.contentMode = .scaleAspectFit
-        let artworkExtent = max(imageView.bounds.width, imageView.bounds.height)
-        let scale = artworkExtent > 0 ? min(1, 24 / artworkExtent) : 1
-        imageView.transform = CGAffineTransform(scaleX: scale, y: scale)
-    }
-}
-#endif
 
 #if !os(tvOS)
 private final class NextEpisodePreviewButton: UIButton {
@@ -245,7 +290,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         v.clipsToBounds = true
         return v
     }()
-    
+
     private let tapOverlayView: UIView = {
         let v = UIView()
         v.translatesAutoresizingMaskIntoConstraints = false
@@ -253,10 +298,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         v.isUserInteractionEnabled = true
         return v
     }()
-    
+
     private let displayLayer = AVSampleBufferDisplayLayer()
     private weak var mpvRenderingView: UIView?
-    
+
     private func createSymbolButton(symbolName: String, pointSize: CGFloat = 18, weight: UIImage.SymbolWeight = .semibold, backgroundColor: UIColor? = nil) -> UIButton {
         let b = UIButton(type: .system)
         b.translatesAutoresizingMaskIntoConstraints = false
@@ -273,7 +318,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
         return b
     }
-    
+
     private let centerPlayPauseButton: UIButton = {
         let b = UIButton(type: .system)
         b.translatesAutoresizingMaskIntoConstraints = false
@@ -286,7 +331,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         b.clipsToBounds = true
         return b
     }()
-    
+
     private let loadingIndicator: UIView = {
         let v = UIView()
         v.translatesAutoresizingMaskIntoConstraints = false
@@ -309,7 +354,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var activePlayerSkinTintControlsOnly = false
     private var activePlayerSkinAnimationsEnabled = MPVPlayerSkinSettings.defaultAnimationsEnabled
     private var activePlayerSkinAnimationStyle: MPVPlayerSkinAnimationStyle = .glow
-    
+
     private let controlsOverlayView: UIView = {
         let v = UIView()
         v.translatesAutoresizingMaskIntoConstraints = false
@@ -388,7 +433,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         stack.spacing = 4
         return stack
     }()
-    
+
     private lazy var errorBanner: UIView = {
         let container = UIView()
         container.translatesAutoresizingMaskIntoConstraints = false
@@ -398,18 +443,18 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         container.layer.cornerRadius = 10
         container.clipsToBounds = true
         container.alpha = 0.0
-        
+
         let icon = UIImageView(image: UIImage(systemName: "exclamationmark.triangle.fill"))
         icon.tintColor = .white
         icon.translatesAutoresizingMaskIntoConstraints = false
-        
+
         let label = UILabel()
         label.translatesAutoresizingMaskIntoConstraints = false
         label.textColor = .white
         label.font = .systemFont(ofSize: 13, weight: .semibold)
         label.numberOfLines = 2
         label.tag = 101
-        
+
         let btn = UIButton(type: .system)
         btn.translatesAutoresizingMaskIntoConstraints = false
         btn.setTitle("View Logs", for: .normal)
@@ -417,30 +462,30 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         btn.titleLabel?.font = .systemFont(ofSize: 13, weight: .semibold)
         btn.backgroundColor = UIColor(white: 1.0, alpha: 0.12)
         btn.layer.cornerRadius = 6
-        
+
         if #unavailable(tvOS 15) {
             btn.contentEdgeInsets = UIEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
         }
         btn.addTarget(self, action: #selector(viewLogsTapped), for: .touchUpInside)
-        
+
         container.addSubview(icon)
         container.addSubview(label)
         container.addSubview(btn)
-        
+
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 10),
             icon.centerYAnchor.constraint(equalTo: container.centerYAnchor),
             icon.widthAnchor.constraint(equalToConstant: 20),
             icon.heightAnchor.constraint(equalToConstant: 20),
-            
+
             label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 8),
             label.centerYAnchor.constraint(equalTo: icon.centerYAnchor),
-            
+
             btn.leadingAnchor.constraint(equalTo: label.trailingAnchor, constant: 12),
             btn.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -10),
             btn.centerYAnchor.constraint(equalTo: container.centerYAnchor)
         ])
-        
+
         return container
     }()
 
@@ -471,7 +516,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         return container
     }()
-    
+
     private let closeButton: UIButton = {
         let b = UIButton(type: .system)
         b.translatesAutoresizingMaskIntoConstraints = false
@@ -482,7 +527,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         b.alpha = 0.0
         return b
     }()
-    
+
     private let pipButton: UIButton = {
         let b = UIButton(type: .system)
         b.translatesAutoresizingMaskIntoConstraints = false
@@ -520,32 +565,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         button.accessibilityHint = "Starts or manages secure synchronized playback with SharePlay"
         return button
     }()
-#if canImport(GoogleCast)
-    private let castButton: GCKUICastButton = {
-        let button = PlayerCastButton(frame: .zero)
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.tintColor = .white
-        button.contentHorizontalAlignment = .center
-        button.contentVerticalAlignment = .center
-        button.contentMode = .center
-        button.imageView?.contentMode = .scaleAspectFit
-        button.setContentCompressionResistancePriority(.required, for: .horizontal)
-        button.setContentCompressionResistancePriority(.required, for: .vertical)
-        button.alpha = 0.0
-        button.accessibilityLabel = "Cast"
-        button.accessibilityHint = "Choose a Google Cast TV or streaming device"
-        return button
-    }()
-
-    private let castConflictButton: UIButton = {
-        let button = UIButton(type: .custom)
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.backgroundColor = .clear
-        button.isHidden = true
-        button.accessibilityLabel = "Cast"
-        return button
-    }()
-#endif
 #endif
 
     private let playerTitleLabel: UILabel = {
@@ -560,7 +579,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         return label
     }()
-    
+
     private let skipBackwardButton: UIButton = {
         let b = UIButton(type: .system)
         b.translatesAutoresizingMaskIntoConstraints = false
@@ -571,7 +590,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         b.alpha = 0.0
         return b
     }()
-    
+
     private let skipForwardButton: UIButton = {
         let b = UIButton(type: .system)
         b.translatesAutoresizingMaskIntoConstraints = false
@@ -582,7 +601,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         b.alpha = 0.0
         return b
     }()
-    
+
     private let speedIndicatorLabel: UILabel = {
         let label = UILabel()
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -595,7 +614,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         label.alpha = 0.0
         return label
     }()
-    
+
     private let subtitleButton: UIButton = {
         let b = UIButton(type: .system)
         b.translatesAutoresizingMaskIntoConstraints = false
@@ -605,7 +624,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         b.tintColor = .white
         b.alpha = 0.0
         b.isHidden = true
-        // Will be set dynamically based on renderer type
+
         b.showsMenuAsPrimaryAction = false
         return b
     }()
@@ -646,7 +665,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         label.alpha = 0.0
         return label
     }()
-    
+
     private let speedButton: UIButton = {
         let b = UIButton(type: .system)
         b.translatesAutoresizingMaskIntoConstraints = false
@@ -658,7 +677,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         b.showsMenuAsPrimaryAction = true
         return b
     }()
-    
+
     private let audioButton: UIButton = {
         let b = UIButton(type: .system)
         b.translatesAutoresizingMaskIntoConstraints = false
@@ -754,7 +773,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }()
 #endif
 #endif
-    
+
     private let progressContainer: UIView = {
         let v = UIView()
         v.translatesAutoresizingMaskIntoConstraints = false
@@ -763,7 +782,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }()
     private var progressHostingController: UIHostingController<AnyView>?
     private var lastHostedDuration: Double = 0
-    
+
     class ProgressModel: ObservableObject {
         @Published var position: Double = 0
         @Published var duration: Double = 1
@@ -798,16 +817,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private let legacyDoubleTapSeekEnabledKey = "vlcDoubleTapSeekEnabled"
     private let playerSeekSecondsKey = "playerDoubleTapSeekSeconds"
     private let legacyPlayerSeekSecondsKey = "vlcDoubleTapSeekSeconds"
-    
+
     private lazy var renderer: PlayerRenderer = {
 #if os(iOS) && ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE
-        // GPU gpu-next is the default MoltenVK renderer. Use the MoltenVK
-        // sample-buffer path only when the user opts out or gpu-next is unavailable.
+
         if !Settings.shared.mpvUseLegacyCPURenderer, MPVGPUPlayerBridge.isAvailable {
             let gpuQualityProfile = metalSampleBufferQualityProfile()
             Logger.shared.log("[PlayerVC.MPV] using GPU inline renderer (mpv gpu-next/MoltenVK inline, sample-buffer PiP) \(gpuQualityProfile.logDescription) \(MPVRenderBackendSupport.diagnosticsSummary)", type: "MPV")
             let r = MPVGPUPlayerBridge(pictureInPictureDisplayLayer: displayLayer, qualityProfile: gpuQualityProfile)
             r.delegate = self
+            r.contentIsAnimation = isAnimationContent()
             return r
         }
         let qualityProfile = metalSampleBufferQualityProfile()
@@ -824,8 +843,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return r
 #endif
     }()
-    
-    // Helper properties to access renderer methods regardless of type
+
     private var mpvRenderer: MPVNativeRenderer? {
         return renderer as? MPVNativeRenderer
     }
@@ -835,9 +853,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return renderer as? MPVSampleBufferPiPBridge
     }
 
-    /// The GPU inline renderer (mpv gpu-next), when the opt-in GPU path is active. Distinct from
-    /// `metalMPVRenderer` (the CPU sample-buffer path) so sample-buffer-only logic (quality
-    /// profiles, software perf overlay, render throttle) is correctly skipped for it.
     private var gpuMPVRenderer: MPVGPUPlayerBridge? {
         return renderer as? MPVGPUPlayerBridge
     }
@@ -851,8 +866,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
     }
 
-    /// True for any MoltenVK-based advanced mpv renderer (CPU sample-buffer *or* GPU gpu-next).
-    /// Gates warmup/staging/advanced controls/resume-retry, which both paths support.
     private var isMetalMPVRenderer: Bool {
 #if os(iOS) && ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE
         return metalMPVRenderer != nil || gpuMPVRenderer != nil
@@ -861,9 +874,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
     }
 
-    /// True only for the CPU sample-buffer renderer, which hosts the display layer inside its own
-    /// rendering view. The GPU renderer instead renders inline via a CAMetalLayer and keeps the
-    /// display layer as a hidden PiP-only layer, so it must take the non-sample-buffer layout path.
     private var isSampleBufferMetalRenderer: Bool {
 #if os(iOS) && ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE
         return metalMPVRenderer != nil
@@ -901,19 +911,18 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         case .auto:
             switch ProcessInfo.processInfo.thermalState {
             case .critical:
-                return .lowHeat(reason: "auto thermal=critical; \(device.reason)")
+                return .lowHeat(reason: "auto thermal=critical; \(device.reason)", isAutomatic: true)
             case .serious:
-                return .lowHeat(reason: "auto thermal=serious; \(device.reason)")
+                return .lowHeat(reason: "auto thermal=serious; \(device.reason)", isAutomatic: true)
             case .fair:
-                // A device that feels warm in the hand is typically only at .fair, iOS reserves .serious/.critical for when it is
-                // already.
-                return .balanced(reason: "auto thermal=fair; \(device.reason)")
+
+                return .balanced(reason: "auto thermal=fair; \(device.reason)", isAutomatic: true)
             default:
                 let safeText = classification.safeReason ?? "no risky stream markers"
                 if let riskReason = classification.riskReason {
-                    return .sharp(reason: "auto starts sharp despite \(riskReason); \(device.reason)")
+                    return .sharp(reason: "auto starts sharp despite \(riskReason); \(device.reason)", isAutomatic: true)
                 }
-                return .sharp(reason: "auto starts sharp \(safeText); \(device.reason)")
+                return .sharp(reason: "auto starts sharp \(safeText); \(device.reason)", isAutomatic: true)
             }
         }
     }
@@ -992,8 +1001,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func evaluateMetalThermalQuality(reason: String) {
         guard Settings.shared.mpvMetalQualityProfile == .auto else { return }
 
-        // Re-resolve and apply on every tick so quality tracks the thermal state in both directions: it steps down further
-        // as things.
         let resolvedProfile = metalSampleBufferQualityProfile()
         let changed: Bool
         if let metalMPVRenderer {
@@ -1007,8 +1014,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             Logger.shared.log("[PlayerVC.MPV] Auto MoltenVK quality changed reason=\(reason) renderer=\(mpvRendererName) \(resolvedProfile.logDescription)", type: "MPV")
         }
 
-        // Notice is one-shot per bad-thermal episode: show it once when we enter a bad
-        // state and re-arm it only after thermals return to normal, so it never spams.
         let thermalState = ProcessInfo.processInfo.thermalState
         let isBadThermalState = thermalState == .serious || thermalState == .critical
         if isBadThermalState {
@@ -1131,24 +1136,25 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var supportsSharedPlayerControls: Bool {
         isMPVRenderer
     }
-    
+
     var mediaInfo: MediaInfo?
     var imdbId: String?
     var playerTitleOverride: String?
-    // Optional override: when true, treat content as anime regardless of tracker mapping
+
     var isAnimeHint: Bool?
-    /// Optional broad-animation hint (TMDB genre 16, anime *and* western cartoons), set by callers that have the
-    /// title's genres in scope.
+
     var isAnimationContentHint: Bool?
-    /// Original TMDB season/episode numbers for anime (before AniList restructuring).
-    /// Used by TheIntroDB which requires TMDB numbering, not AniList-restructured S/E.
+
     var originalTMDBSeasonNumber: Int?
     var originalTMDBEpisodeNumber: Int?
     var episodePlaybackContext: EpisodePlaybackContext?
     var servicesSelectionContext: PlayerServicesSelectionContext?
 
-    // MARK: - Skip Segments & Next Episode
-    /// Called when the user taps "Next Episode" - passes (seasonNumber, nextEpisodeNumber).
+    var servicesOriginalAudioLanguage: String? {
+        Self.normalizedNonemptyString(servicesSelectionContext?.originalAudioLanguage)
+            ?? Self.normalizedNonemptyString(activePlaybackRequest?.servicesOriginalAudioLanguage)
+    }
+
     var onRequestNextEpisode: ((_ seasonNumber: Int, _ nextEpisodeNumber: Int) -> Void)?
     var onRequestResolvedNextEpisode: ((ResolvedNextEpisodeTarget) -> Void)?
     var localNextEpisodeFallback: PlaybackEpisodeCoordinate?
@@ -1242,10 +1248,25 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private var isRendererLoading: Bool = false
     private var isClosing = false
+
+    private let playbackProfileAuthority: (
+        owner: UUID,
+        progress: ProgressManager.ProfileMutationAuthority?
+    ) = {
+        let owner = ProfileManager.shared.activeProfileID
+        return (
+            owner,
+            ProgressManager.shared.profileMutationAuthority(requiredOwner: owner)
+        )
+    }()
+    private var playbackOwnerProfileID: UUID { playbackProfileAuthority.owner }
+
+    private var activeProfileWillChangeCancellable: AnyCancellable?
+    private var reportedAbandonedProfileWrites: Set<String> = []
     private var hasBegunMediaStatePlaybackLease = false
     private var hasEndedMediaStatePlaybackLease = false
     private var hasFinalizedMediaStatePlayback = false
-    private var isRunning = false  // Track if renderer has been started
+    private var isRunning = false
     private var isIdleTimerDisabledForPlayback = false
     private var isVLCPlaybackStartupInProgress = false
     private var canMutateVLCSubtitleTracks = false
@@ -1256,14 +1277,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var playbackReplacementGeneration = 0
     private var isReplacingVLCPlaybackInPlace = false
     private var pipController: PiPController?
-    /// Process-wide automatic-PiP arbitration only. Each scene keeps its own renderer and AVKit
-    /// controller; these weak references merely identify which controller may react to app-level
-    /// background notifications.
+
     private static weak var mostRecentlyActivatedPlaybackController: PlayerViewController?
     private static weak var appExitPictureInPictureOwner: PlayerViewController?
-    /// The scene that owns this playback presentation. UIScene notifications are process-wide;
-    /// keeping the owner prevents another iPad Stage Manager window from driving this player's
-    /// PiP and foreground-renderer lifecycle.
+
     private weak var playbackWindowScene: UIWindowScene?
     private let playerInterfaceCoverageIdentifier = UUID().uuidString
     private var mpvPiPStartAttemptID = 0
@@ -1285,8 +1302,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let controllerIdentifier: ObjectIdentifier?
         let transitionAttemptID: Int?
     }
-    /// Captures the playing intent that authorized an automatic app-exit transition. Manual PiP
-    /// deliberately has no authorization so it can still be opened while playback is paused.
+
     private struct MPVAutomaticPictureInPictureAuthorization {
         let controllerIdentifier: ObjectIdentifier
         let loadGeneration: Int
@@ -1310,9 +1326,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var mpvAppExitPiPStartRequested = false
     private var mpvPendingAppExitPiPWorkItem: DispatchWorkItem?
     private var mpvAppExitPiPSuppressedUntilForeground = false
-    /// UIApplication, UIScene, and SwiftUI scenePhase all publish overlapping lifecycle events.
-    /// Collapse them into one background/foreground transaction per owning playback scene so PiP
-    /// restoration, decoder validation, and PiP rewarming can never race one another.
+
     private var mpvBackgroundLifecycleGeneration = 0
     private var mpvBackgroundLifecycleIsArmed = false
     private var mpvBackgroundLifecycleIsInForegroundPhase = false
@@ -1341,16 +1355,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var initialSubtitleHeadersByURL: [String: [String: String]]?
 #if os(iOS)
     var activePlaybackRequest: PlaybackRequest?
-#if canImport(GoogleCast)
-    private var castLocalWasPausedBeforeHandoff = false
-    private var castLocalWasStopped = false
 #endif
-#endif
-    /// Renderer-neutral audio/subtitle selection captured by PlaybackRequest. Coordinator-driven
-    /// engine handoffs set this so Molten applies the AV session's latest language/visibility
-    /// choices instead of re-reading global defaults. Legacy/direct construction leaves it nil.
+
     private var playbackMediaSelectionIntent: PlaybackMediaSelectionIntent?
     var playbackLaunchContext: PlaybackLaunchContext?
+    private var ephemeralProxySessionLease: PlaybackProxySessionOwnership.Lease?
     var onPlaybackStartupFailure: ((PlaybackFailureReport) -> Void)?
     var onAutomaticPlaybackFallback: ((PlaybackFailureReport) -> Void)?
     var isCoordinatorEngineFallback = false
@@ -1360,12 +1369,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var playbackDidStart = false
     private var playbackFailureHandled = false
     private var cloudflareStartupRecoveryInProgress = false
-    /// Prevents a provider that keeps returning the same rejected source from causing an
-    /// unbounded stop/re-resolve/reload loop. A later expiry gets a fresh budget.
+
     private var mediaSourceRefreshAttemptCount = 0
     private var lastMediaSourceRefreshAttemptAt: Date?
-    /// Exact position captured before replacing an expired media URL. Progress persistence is
-    /// intentionally throttled, so relying on the stored value can rewind a live stream refresh.
+
     private var pendingSourceRefreshResumePosition: Double?
     private var playbackSlowProbeCount = 0
     private var playbackLoadGeneration = 0
@@ -1406,6 +1413,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var isMPVTransportBridgePlaybackActive = false
 #if !os(tvOS)
     private var activeMPVHeaderProxyURLs = Set<URL>()
+    private var midPlaybackStallTimer: Timer?
+    private var midPlaybackStallReferenceDate: Date?
+    private var midPlaybackStallLastPosition: Double?
 #endif
     private var lastIgnoredMPVBridgeDurationLogValue: Double = -1
     private struct BackgroundRecoveryProgressGate {
@@ -1432,8 +1442,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let baselineDuration: Double
         var lastSuppressionLogBucket: Int = -1
     }
-    
-    // Debounce timers for menu updates to avoid excessive rebuilds
+
     private var audioMenuDebounceTimer: Timer?
     private var subtitleMenuDebounceTimer: Timer?
     private var vlcSubtitleOverlayBottomConstraint: NSLayoutConstraint?
@@ -1450,9 +1459,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var nextEpisodeStagingRetryAfterByKey: [String: Date] = [:]
     private let nextEpisodeStagingRetryDelay: TimeInterval = 8
     private var nextEpisodeStagingTask: Task<Void, Never>?
-    /// A fully-resolved playback request for the next episode, captured during staging so the
-    /// "Next" tap can skip the redundant async source re-resolution and load straight from the
-    /// warmed cache. Keyed by the same current-episode key as `experimentalStagedNextEpisodeKey`.
+
     private var stagedNextEpisodeRequest: PlayerResolvedPlaybackRequest?
     private var stagedNextEpisodeRequestKey: String?
     private var nextEpisodePreviewTask: Task<Void, Never>?
@@ -1472,12 +1479,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var nextEpisodeButtonMaxWidthConstraint: NSLayoutConstraint?
     private var nextEpisodeButtonBottomConstraint: NSLayoutConstraint?
 #endif
-#if os(iOS) && canImport(GoogleCast)
-    private var castButtonWidthConstraint: NSLayoutConstraint?
-    private var watchTogetherLeadingFromCastConstraint: NSLayoutConstraint?
-    private var wasGoogleCastControlEnabled: Bool?
-#endif
-    
+
     private struct SubtitleTrackDescriptor {
         let id: Int
         let name: String
@@ -1485,9 +1487,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let isExternalNativeTrack: Bool
     }
 
-    // MARK: - Renderer Wrapper Methods
-    // These methods keep PlayerViewController on the shared PlayerRenderer surface.
-    
     private func rendererLoad(url: URL, preset: PlayerPreset, headers: [String: String]?) {
         if vlcRenderer != nil {
             logVLCUI("rendererLoad target={\(playbackURLSummary(url))} preset=\(preset.id.rawValue) headers=\(headers?.count ?? 0) pendingSeek=\(secondsText(pendingSeekTime)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))", type: "Stream")
@@ -1510,11 +1509,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         renderer.reloadCurrentItem()
         invalidateRendererTrackCaches()
     }
-    
+
     private func rendererApplyPreset(_ preset: PlayerPreset) {
         renderer.applyPreset(preset)
     }
-    
+
     private func rendererStart() throws {
         if vlcRenderer != nil {
             logVLCUI("rendererStart requested isRunning=\(isRunning)", type: "Stream")
@@ -1529,7 +1528,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
         isRunning = true
     }
-    
+
     private func rendererStop(retainingMPVHeaderProxyURL retainedProxyURL: URL? = nil) {
         if vlcRenderer != nil {
             logVLCUI("rendererStop requested cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))", type: "Stream")
@@ -1576,23 +1575,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         rendererStop(retainingMPVHeaderProxyURL: retainedProxyURL)
         await renderer.waitUntilStopped()
     }
-    
+
     private func rendererPlay(recordingPlaybackIntent: Bool = true) {
         if recordingPlaybackIntent {
-            // Any explicit transport command supersedes a pause Eclipse created solely because
-            // background PiP failed to start.
+
             rendererPlaybackIntentGeneration &+= 1
             mpvBackgroundFallbackAutoPaused = false
             mpvBackgroundFallbackPauseIntentGeneration = nil
             mpvBackgroundFallbackPauseLifecycleGeneration = nil
         }
-#if os(iOS) && canImport(GoogleCast)
-        if GoogleCastCoordinator.shared.playIfRemote() {
-            updatePlayPauseButton(isPaused: false)
-            return
-        }
-        if GoogleCastCoordinator.shared.isHandoffLoadPending { return }
-#endif
         if vlcRenderer != nil {
             logVLCUI("rendererPlay requested cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) loading=\(isRendererLoading)", type: "Stream")
         } else {
@@ -1601,7 +1592,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         renderer.play()
         rendererSchedulePictureInPicturePlaybackStateUpdate()
     }
-    
+
     private func rendererPausePlayback(
         preservingBackgroundFallbackOwnership: Bool = false
     ) {
@@ -1611,13 +1602,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             mpvBackgroundFallbackPauseIntentGeneration = nil
             mpvBackgroundFallbackPauseLifecycleGeneration = nil
         }
-#if os(iOS) && canImport(GoogleCast)
-        if GoogleCastCoordinator.shared.pauseIfRemote() {
-            updatePlayPauseButton(isPaused: true)
-            return
-        }
-        if GoogleCastCoordinator.shared.isHandoffLoadPending { return }
-#endif
         if vlcRenderer != nil {
             logVLCUI("rendererPause requested cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) loading=\(isRendererLoading)", type: "Stream")
         } else {
@@ -1626,16 +1610,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         renderer.pausePlayback()
         rendererSchedulePictureInPicturePlaybackStateUpdate()
     }
-    
+
     private func rendererTogglePause() {
         rendererPlaybackIntentGeneration &+= 1
         mpvBackgroundFallbackAutoPaused = false
         mpvBackgroundFallbackPauseIntentGeneration = nil
         mpvBackgroundFallbackPauseLifecycleGeneration = nil
-#if os(iOS) && canImport(GoogleCast)
-        if GoogleCastCoordinator.shared.togglePauseIfRemote() { return }
-        if GoogleCastCoordinator.shared.isHandoffLoadPending { return }
-#endif
         if vlcRenderer != nil {
             logVLCUI("rendererTogglePause requested paused=\(rendererIsPausedState()) loading=\(isRendererLoading) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))", type: "VLCPlayback")
         } else {
@@ -1696,8 +1676,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         )
     }
 
-    /// Anime contexts carry the exact cour/episode identity selected by the metadata resolver.
-    /// Rebuilding one from a fallback MediaInfo episode can silently turn that identity into E1.
     private func playbackContextForCurrentEpisode(
         seasonNumber: Int,
         episodeNumber: Int
@@ -1713,7 +1691,24 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return context.forEpisodeNumber(episodeNumber)
     }
 
+    private func playbackProfileIsStillActive(_ reason: String) -> Bool {
+        if ProfileManager.shared.isStillActive(playbackOwnerProfileID),
+           playbackProfileAuthority.progress.map(
+               ProgressManager.shared.profileMutationAuthorityIsCurrent
+           ) == true {
+            return true
+        }
+        if reportedAbandonedProfileWrites.insert(reason).inserted {
+            Logger.shared.log(
+                "PlayerViewController: abandoned \(reason) because the session's profile is no longer active",
+                type: "Progress"
+            )
+        }
+        return false
+    }
+
     private func sendTraktScrobble(_ action: TraktScrobbleAction, reason: String, force: Bool = false) {
+        guard playbackProfileIsStillActive("a Trakt scrobble") else { return }
         guard let info = mediaInfo,
               let progress = currentTraktProgressFraction() else { return }
         Logger.shared.log("PlayerViewController: Trakt scrobble \(action.rawValue) queued reason=\(reason) progress=\(Int((progress * 100).rounded()))%", type: "Tracker")
@@ -1722,7 +1717,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             for: info,
             progress: progress,
             playbackContext: playbackContextForTraktScrobble(info),
-            force: force
+            force: force,
+            requiredOwner: playbackOwnerProfileID,
+            progressAuthority: playbackProfileAuthority.progress
         )
     }
 
@@ -1744,7 +1741,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         ProgressManager.shared.syncTraktProgressOnPlaybackClose(
             for: mediaInfo,
             playbackContext: episodePlaybackContext,
-            played: true
+            played: true,
+            owner: playbackOwnerProfileID,
+            progressAuthority: playbackProfileAuthority.progress
         )
     }
 
@@ -1762,6 +1761,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     @discardableResult
     private func sendFinalTraktStopScrobbleIfNeeded(for mediaInfo: MediaInfo, reason: String) -> Bool {
+        guard playbackProfileIsStillActive("the final Trakt stop scrobble") else { return false }
         guard !didSendFinalTraktScrobble,
               let progress = finalTraktProgressFraction() else {
             return false
@@ -1773,7 +1773,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             for: mediaInfo,
             progress: progress,
             playbackContext: playbackContextForTraktScrobble(mediaInfo),
-            force: true
+            force: true,
+            requiredOwner: playbackOwnerProfileID,
+            progressAuthority: playbackProfileAuthority.progress
         )
         return true
     }
@@ -1801,6 +1803,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func updateTraktScrobbleFromProgress(position: Double, duration: Double) {
+        guard playbackProfileIsStillActive("a periodic Trakt scrobble") else { return }
         guard !rendererIsPausedState(),
               playbackDidStart,
               position.isFinite,
@@ -1815,7 +1818,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             .start,
             for: info,
             progress: min(max(position / duration, 0), 1),
-            playbackContext: playbackContextForTraktScrobble(info)
+            playbackContext: playbackContextForTraktScrobble(info),
+            requiredOwner: playbackOwnerProfileID,
+            progressAuthority: playbackProfileAuthority.progress
         )
     }
 
@@ -1824,10 +1829,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             Logger.shared.log("PlayerViewController: ignored absolute seek with invalid target=\(secondsText(seconds))", type: "Player")
             return
         }
-#if os(iOS) && canImport(GoogleCast)
-        if GoogleCastCoordinator.shared.seekIfRemote(to: seconds) { return }
-        if GoogleCastCoordinator.shared.isHandoffLoadPending { return }
-#endif
         if vlcRenderer != nil {
             logVLCUI("rendererSeek(to:) target=\(secondsText(seconds)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) loading=\(isRendererLoading)", type: "Progress")
         } else {
@@ -1843,16 +1844,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         guard cachedDuration.isFinite, cachedDuration > 5 else { return safePosition }
         return min(safePosition, cachedDuration)
     }
-    
+
     private func rendererSeek(by seconds: Double) {
         guard seconds.isFinite else {
             Logger.shared.log("PlayerViewController: ignored relative seek with invalid delta=\(secondsText(seconds))", type: "Player")
             return
         }
-#if os(iOS) && canImport(GoogleCast)
-        if GoogleCastCoordinator.shared.seekIfRemote(by: seconds) { return }
-        if GoogleCastCoordinator.shared.isHandoffLoadPending { return }
-#endif
         if vlcRenderer != nil {
             logVLCUI("rendererSeek(by:) delta=\(secondsText(seconds)) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) loading=\(isRendererLoading)", type: "Progress")
         } else {
@@ -1862,15 +1859,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         renderer.seek(by: seconds)
         rendererSchedulePictureInPicturePlaybackStateUpdate()
     }
-    
+
     private func rendererSetSpeed(_ speed: Double, notifyWatchTogether: Bool = true) {
-#if os(iOS) && canImport(GoogleCast)
-        if GoogleCastCoordinator.shared.setPlaybackRateIfRemote(speed) {
-            updateSpeedMenu()
-            return
-        }
-        if GoogleCastCoordinator.shared.isHandoffLoadPending { return }
-#endif
         let previousSpeed = rendererGetSpeed()
         if vlcRenderer != nil {
             logVLCUI("rendererSetSpeed \(String(format: "%.2f", speed))", type: "Player")
@@ -1886,11 +1876,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 #endif
     }
-    
+
     private func rendererGetSpeed() -> Double {
-#if os(iOS) && canImport(GoogleCast)
-        if let speed = GoogleCastCoordinator.shared.remotePlaybackRate { return speed }
-#endif
         return renderer.getSpeed()
     }
 
@@ -2081,15 +2068,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         releaseBackgroundRecoveryProgressGate(reason: "guard-window-expired")
         return true
     }
-    
+
     private func rendererGetAudioTracksDetailed() -> [(Int, String, String)] {
         renderer.getAudioTracksDetailed()
     }
-    
+
     private func rendererGetAudioTracks() -> [(Int, String)] {
         renderer.getAudioTracks()
     }
-    
+
     private func rendererSetAudioTrack(id: Int) {
         if vlcRenderer != nil {
             logVLCUI("rendererSetAudioTrack id=\(id) userSelected=\(userSelectedAudioTrack)", type: "Player")
@@ -2099,11 +2086,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         renderer.setAudioTrack(id: id)
         audioTrackCacheValid = false
     }
-    
+
     private func rendererGetCurrentAudioTrackId() -> Int {
         renderer.getCurrentAudioTrackId()
     }
-    
+
     private func rendererGetSubtitleTracks() -> [(Int, String)] {
         renderer.getSubtitleTracks()
     }
@@ -2120,7 +2107,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             SubtitleTrackDescriptor(id: $0.0, name: $0.1, codec: "", isExternalNativeTrack: false)
         }
     }
-    
+
     private func rendererSetSubtitleTrack(id: Int) {
         if vlcRenderer != nil {
             logVLCUI("rendererSetSubtitleTrack id=\(id) userSelected=\(userSelectedSubtitleTrack) selection=\(vlcSubtitleSelection)", type: "Player")
@@ -2131,11 +2118,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         renderer.setSubtitleTrack(id: id)
         subtitleTrackCacheValid = false
     }
-    
+
     private func rendererGetCurrentSubtitleTrackId() -> Int {
         renderer.getCurrentSubtitleTrackId()
     }
-    
+
     private func rendererDisableSubtitles() {
         if vlcRenderer != nil {
             logVLCUI("rendererDisableSubtitles currentSelection=\(vlcSubtitleSelection)", type: "Player")
@@ -2146,12 +2133,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         renderer.disableSubtitles()
         subtitleTrackCacheValid = false
     }
-    
+
     private func rendererRefreshSubtitleOverlay() {
         renderer.refreshSubtitleOverlay()
     }
 
-    // MARK: - Renderer track cache
     private var cachedMenuSubtitleTrackDescriptors: [SubtitleTrackDescriptor] = []
     private var subtitleTrackCacheValid = false
     private var cachedMenuAudioDetailedTracks: [(Int, String, String)] = []
@@ -2184,7 +2170,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         _ = menuAudioDetailedTracks()
         return cachedMenuCurrentAudioTrackId
     }
-    
+
     private func rendererLoadExternalSubtitles(urls: [String], names: [String]? = nil, enforce: Bool = false) {
         if vlcRenderer != nil {
             logVLCUI("rendererLoadExternalSubtitles count=\(urls.count) names=\(names?.count ?? 0) enforce=\(enforce) urls=\(urls.joined(separator: " | "))", type: "Player")
@@ -2213,11 +2199,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private var vlcSubtitleOverlayBottomConstant: CGFloat {
-        if let value = UserDefaults.standard.object(forKey: "playerSubtitleOverlayBottomConstant") as? Double {
+        if let value = ProfileSettingsStore.active.object(forKey: "playerSubtitleOverlayBottomConstant") as? Double {
             return CGFloat(value)
         }
-        if let legacy = UserDefaults.standard.object(forKey: "vlcSubtitleOverlayBottomConstant") as? Double {
-            UserDefaults.standard.set(legacy, forKey: "playerSubtitleOverlayBottomConstant")
+        if let legacy = ProfileSettingsStore.active.object(forKey: "vlcSubtitleOverlayBottomConstant") as? Double {
+            ProfileSettingsStore.active.set(legacy, forKey: "playerSubtitleOverlayBottomConstant")
             return CGFloat(legacy)
         }
         return -6.0
@@ -2230,8 +2216,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         Logger.shared.log("[PlayerVC.Subtitles] applied VLC overlay bottom constant=\(String(format: "%.1f", constant))", type: "Player")
     }
 
-    /// The last style pushed to the renderer. Used to skip redundant re-applies driven by
-    /// the UserDefaults observer, which also fires for unrelated settings.
     private var lastAppliedSubtitleStyleSnapshot: SubtitleStyle?
 
     private func rendererApplySubtitleStyle(_ style: SubtitleStyle) {
@@ -2255,11 +2239,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             closedCaptionBackground: subtitleModel.closedCaptionBackground
         )
     }
-    
+
     private func rendererIsPausedState() -> Bool {
-#if os(iOS) && canImport(GoogleCast)
-        if let isPaused = GoogleCastCoordinator.shared.remoteIsPaused { return isPaused }
-#endif
         return renderer.isPausedState
     }
 
@@ -2299,8 +2280,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         pipController?.updatePlaybackState()
     }
 
-    /// Invalidates immediately for responsive controls, then once more after MPVKit confirms its
-    /// timeline update. The generation collapses rapid pause/seek/speed bursts to the latest state.
     private func rendererSchedulePictureInPicturePlaybackStateUpdate() {
         guard vlcRenderer == nil, let controller = pipController else { return }
         controller.updatePlaybackState()
@@ -2318,9 +2297,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                   controller.playbackLoadGeneration == loadGeneration,
                   self.isRunning,
                   !self.isClosing else { return }
-#if os(iOS) && canImport(GoogleCast)
-            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
             controller.updatePlaybackState()
         }
     }
@@ -2365,10 +2341,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         )
     }
 
-    /// Returns true for manual PiP (which has no automatic authorization) and for the exact
-    /// automatic attempt whose original playing intent is still current. Call this after trying
-    /// to resume an Eclipse-owned background fallback pause so a genuine user/session pause can
-    /// never be mistaken for that recoverable pause.
     private func validateMPVAutomaticPictureInPicturePlaybackIntent(
         for controller: PiPController,
         attemptID: Int,
@@ -2431,12 +2403,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         attemptID: Int? = nil,
         requiresRunning: Bool = true
     ) -> Bool {
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else {
-            logPictureInPicture("ignored PiP callback while Google Cast owns or is taking playback source=\(source)")
-            return false
-        }
-#endif
         let expectedAttempt = mpvExpectedPiPCallbackAttemptID
         let callbackAttempt = attemptID ?? controller.transitionAttemptID
         let attemptIsCurrentOrActive = callbackAttempt == mpvPiPStartAttemptID
@@ -2456,9 +2422,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return true
     }
 
-    /// Binds MPVKit's terminal shared-GPU failure to this player instance's AVKit controller.
-    /// The identity check is important on iPad: another scene owns a different renderer/controller
-    /// pair and a late callback from this renderer must never stop that scene's PiP session.
     private func configureRendererPictureInPictureStopRequestHandling(for controller: PiPController) {
         renderer.setPictureInPictureStopRequestHandler { [weak self, weak controller] reason in
             guard let self,
@@ -2467,9 +2430,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                   controller.playbackLoadGeneration == self.playbackLoadGeneration,
                   self.isRunning,
                   !self.isClosing else { return }
-#if os(iOS) && canImport(GoogleCast)
-            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
 
             let loadGeneration = self.playbackLoadGeneration
             let transitionAttemptID = controller.transitionAttemptID
@@ -2484,9 +2444,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             controller.setCanStartPictureInPictureAutomaticallyFromInline(false)
 
             if reason.hasPrefix("native-activation-not-active") {
-                // MPVKit synchronously rejected sink activation. Stop immediately, then retire the
-                // AVKit controller on the next main turn so this delegate callback can unwind before
-                // the old controller is detached. A late didStart then has no delegate/source route.
+
                 controller.stopPictureInPicture(source: "renderer-activation-rejected")
                 self.rendererFinishPictureInPicture()
                 DispatchQueue.main.async { [weak self, weak controller] in
@@ -2526,8 +2484,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 return
             }
 
-            // AVKit owns the transition. Its didStop callback restores inline rendering; the
-            // bounded fallback only covers interrupted handoffs for which AVKit omits didStop.
             controller.stopPictureInPicture(source: "renderer-failure")
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self, weak controller] in
                 guard let self,
@@ -2540,9 +2496,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                       !self.isClosing,
                       !controller.isPictureInPictureActive,
                       !controller.isPictureInPictureStartPending else { return }
-#if os(iOS) && canImport(GoogleCast)
-                guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
                 self.rendererFinishPictureInPicture()
                 self.updatePiPButtonVisibility()
             }
@@ -2574,8 +2527,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let restored = await renderer.finishPictureInPictureAndWait(
             restoringInlinePlayback: restoringInlinePlayback
         )
-        // A new AVKit start may have activated the renderer while an older inline restore was
-        // suspended. Never let completion of the old operation clear that newer handoff.
+
         if finishGeneration == mpvPictureInPictureRendererHandoffGeneration {
             mpvPictureInPictureRendererHandoffIsActive = false
         }
@@ -2664,9 +2616,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         _ key: MPVPictureInPictureRestoreKey,
         controller: PiPController
     ) -> Bool {
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return false }
-#endif
         guard ObjectIdentifier(controller) == key.controllerIdentifier,
               pipController === controller,
               key.playbackLoadGeneration == playbackLoadGeneration,
@@ -2794,8 +2743,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             clearMPVAppExitPictureInPictureSuppression(reason: "\(source)-active")
         }
         if mpvBackgroundLifecycleIsArmed {
-            // The serialized foreground transaction performs decoder validation next and owns the
-            // single rewarm. Preparing PiP here too can reclaim the video track mid-validation.
+
             logPictureInPicture("PiP restore deferring rewarm to serialized foreground recovery source=\(source)")
         } else {
             scheduleMPVPictureInPictureForegroundWarmup(
@@ -2829,8 +2777,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         logPictureInPicture("renderer activate layer call renderer=\(mpvRendererName) hasMPVRenderer=\(isMPVRenderer)")
         let activated = renderer.activatePictureInPictureLayer()
         guard activationGeneration == mpvPictureInPictureRendererHandoffGeneration else {
-            // A synchronous renderer failure may call the stop handler, which finishes the
-            // handoff and advances this generation before activate returns.
+
             logPictureInPicture("renderer activation superseded during callback renderer=\(mpvRendererName)")
             return false
         }
@@ -2844,8 +2791,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func rendererSetPictureInPictureSourcePreparedForAutomaticStart(_ prepared: Bool) {
         if !prepared {
             let state = mpvPictureInPictureControllerState()
-            // Never hide AVKit's source underneath an automatic or explicit transition that has
-            // already crossed willStart. The active/failed/restore delegate owns teardown then.
+
             guard !state.active, !state.pending else { return }
         }
         renderer.setPictureInPictureSourcePreparedForAutomaticStart(prepared)
@@ -2857,9 +2803,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     @discardableResult
     private func prepareMPVPictureInPictureRenderer(source: String, activateLayer: Bool) async -> Bool {
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return false }
-#endif
         let active = pipController?.isPictureInPictureActive ?? false
         let possible = pipController?.isPictureInPicturePossible ?? false
         logPictureInPicture("renderer prepare begin source=\(source) active=\(active) possible=\(possible) activateLayer=\(activateLayer)")
@@ -2878,12 +2821,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func rendererResumeForegroundRendering(reason: String) {
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else {
-            logPictureInPicture("foreground render recovery skipped for Google Cast reason=\(reason)")
-            return
-        }
-#endif
         let pipState = mpvPictureInPictureControllerState()
         if pipState.active || pipState.pending {
             logPictureInPicture("foreground render recovery deferred reason=\(reason) active=\(pipState.active) pending=\(pipState.pending) renderer={\(rendererPictureInPictureDebugSnapshot())}")
@@ -2893,12 +2830,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func rendererRecoverForegroundRendering(reason: String) async -> Bool {
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else {
-            logPictureInPicture("foreground render recovery skipped for Google Cast reason=\(reason)")
-            return false
-        }
-#endif
         let pipState = mpvPictureInPictureControllerState()
         guard !pipState.active, !pipState.pending else {
             logPictureInPicture(
@@ -2944,7 +2875,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
         Logger.shared.log("[PlayerVC.PiP] subtitle prepare end source=\(source) subs={\(subtitlePictureInPictureDebugSnapshot())}", type: "Player")
     }
-    
+
     private var subtitleURLs: [String] = []
     private var subtitleNames: [String] = []
     private var currentSubtitleIndex: Int = 0
@@ -2997,11 +2928,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         let isAvailable = rendererIsPictureInPictureAvailable()
         var shouldShow = isAvailable && !isVLCPlayer && Settings.shared.mpvPictureInPictureEnabled
-#if os(iOS) && canImport(GoogleCast)
-        if GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks {
-            shouldShow = false
-        }
-#endif
         pipButton.isHidden = !shouldShow
         pipButton.isEnabled = shouldShow
         if isVLCPlayer {
@@ -3026,8 +2952,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return "unattached-\(playerInterfaceCoverageIdentifier.prefix(8))"
     }
 
-    /// Claims only the right to react to automatic app-background PiP signals. Renderers and
-    /// AVKit controllers remain owned by their individual player scenes.
     @discardableResult
     private func claimMPVAppExitPictureInPictureOwnership(
         reason: String,
@@ -3037,8 +2961,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if recordingActivation {
             Self.mostRecentlyActivatedPlaybackController = self
         } else if Self.mostRecentlyActivatedPlaybackController == nil {
-            // Early presentation can receive an app notification before viewDidAppear. Main-actor
-            // serialization makes this a single vacant claim; later scene activation supersedes it.
+
             Self.mostRecentlyActivatedPlaybackController = self
             logPictureInPicture(
                 "MPV app-exit PiP arbiter claimed vacant candidate reason=\(reason) scene=\(mpvAppExitPictureInPictureSceneIdentifier)"
@@ -3105,8 +3028,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             previousOwner.cancelPendingMPVAppExitPictureInPictureStart(
                 reason: "\(reason)-ownership-transferred"
             )
-            // Cancel only an explicit automatic preparation that has not entered AVKit. An active
-            // or pending controller may represent a manual, scene-local PiP transition.
+
             if previousOwner.mpvAppExitPiPStartRequested,
                !previousState.active,
                !previousState.pending {
@@ -3251,9 +3173,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     @discardableResult
     private func primeMPVPictureInPictureForForegroundPlaybackIfNeeded(source: String, requiresAppExitEnabled: Bool) -> Bool {
         guard isMPVRenderer, !isVLCPlayer else { return false }
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return false }
-#endif
         if requiresAppExitEnabled {
             guard claimMPVAppExitPictureInPictureOwnership(reason: source) else { return false }
         }
@@ -3287,8 +3206,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
         if requiresAppExitEnabled,
            UIApplication.shared.applicationState != .background {
-            // PiP owns `vid` during app exit. Cancel/yield any foreground VideoToolbox rebuild
-            // before async preparation so deactivation cannot lose its only pre-background prime.
+
             renderer.prioritizeAppExitPictureInPictureOverDecoderRecovery()
         }
 
@@ -3307,8 +3225,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return true
         }
         if requiresAppExitEnabled, UIApplication.shared.applicationState == .background {
-            // AVKit must be armed while the player is still inline. Starting a fresh GPU prepare
-            // after suspension is too late and can manufacture transient decoder failures.
+
             logPictureInPicture("MPV app-exit PiP prime skipped source=\(source): renderer was not ready before background")
             return false
         }
@@ -3324,21 +3241,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                   pip.playbackLoadGeneration == loadGeneration,
                   self.isRunning,
                   !self.isClosing else { return }
-#if os(iOS) && canImport(GoogleCast)
-            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
             pip.updatePlaybackState()
             if primed,
                Settings.shared.mpvAppExitPictureInPictureEnabled,
                Settings.shared.mpvPictureInPictureEnabled,
                self.claimMPVAppExitPictureInPictureOwnership(reason: "\(source)-ready") {
-                // Normal foreground warmup is the earliest reliable point at which MPVKit has a
-                // current sample. Arm AVKit here instead of waiting for willResignActive.
+
                 self.configureMPVAppExitPictureInPictureAutomation(reason: "\(source)-ready")
             } else if !primed {
-                // A failed warm owns no PiP output but MPVKit intentionally records `.failed` for
-                // diagnostics. Finish the attempt so it cannot block a later foreground decoder
-                // reconstruction; an explicit future warm can start a new generation.
+
                 self.rendererFinishPictureInPicture()
                 if requiresAppExitEnabled {
                     self.releaseMPVAppExitPictureInPictureOwnership(reason: "\(source)-prepare-failed")
@@ -3353,7 +3264,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         _ = primeMPVPictureInPictureForForegroundPlaybackIfNeeded(source: source, requiresAppExitEnabled: true)
     }
 
-    /// Tracks the last proactive PiP warm so overlapping foreground signals don't re-warm in a loop.
     private var lastMPVPictureInPictureWarmAt: CFTimeInterval = 0
     private var mpvPictureInPictureWarmupGeneration = 0
 
@@ -3363,15 +3273,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         logPictureInPicture("MPV foreground PiP warmups canceled reason=\(reason) generation=\(mpvPictureInPictureWarmupGeneration)")
     }
 
-    /// Proactively reaches MPVKit's explicit ready state during foreground playback. This selects
-    /// and proves the GPU-owned PiP backend before either the manual button or automatic app-exit
-    /// transition needs it. A successful warm also arms automatic PiP when the user enabled it.
     @discardableResult
     private func warmMPVPictureInPictureForForegroundPlaybackIfNeeded(source: String, minInterval: CFTimeInterval = 3.0, force: Bool = false) -> Bool {
         guard isMPVRenderer, !isVLCPlayer else { return false }
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return false }
-#endif
         guard !mpvBackgroundLifecycleIsArmed else {
             logPictureInPicture("MPV foreground PiP warm blocked during serialized lifecycle source=\(source)")
             return false
@@ -3387,9 +3291,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func scheduleMPVPictureInPictureForegroundWarmup(source: String, delays: [TimeInterval], forceFirst: Bool = false) {
         guard isMPVRenderer, !isVLCPlayer else { return }
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
         guard !mpvBackgroundLifecycleIsArmed else {
             logPictureInPicture("MPV foreground PiP warmup deferred to serialized lifecycle source=\(source)")
             return
@@ -3415,9 +3316,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                       generation == self.mpvPictureInPictureWarmupGeneration else {
                     return
                 }
-#if os(iOS) && canImport(GoogleCast)
-                guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
                 _ = self.warmMPVPictureInPictureForForegroundPlaybackIfNeeded(
                     source: "\(source)-warm-\(attempt)",
                     minInterval: 0,
@@ -3444,9 +3342,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         case .movie(_, let title, _, _):
             return trimmedTitle(playerTitleOverride) ?? title
         case .episode(_, let seasonNumber, let episodeNumber, let showTitle, _, _):
-            // `playerTitleOverride` is the preferred show/AniList title, not a complete
-            // episodic display label. Returning it directly used to drop the episode
-            // coordinate from every coordinated MoltenVK launch.
+
             let prefix = trimmedTitle(playerTitleOverride) ?? trimmedTitle(showTitle)
             if isAnimeContent() {
                 let episodeCode = "E\(episodeNumber)"
@@ -3496,7 +3392,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         playbackTraceLastStageAt = now
         let suffix = details.isEmpty ? "" : " \(details)"
         Logger.shared.log(
-            "[PlaybackTrace \(playbackTraceID)] load=\(playbackLoadGeneration) stage=\(stage) total=\(String(format: "%.2f", total))s loadTime=\(String(format: "%.2f", load))s delta=\(String(format: "%.2f", delta))s\(suffix)",
+            "[PlaybackTrace \(playbackTraceID)] owner=appPlayer load=\(playbackLoadGeneration) stage=\(stage) total=\(String(format: "%.2f", total))s loadTime=\(String(format: "%.2f", load))s delta=\(String(format: "%.2f", delta))s\(suffix)",
             type: "PlaybackTrace"
         )
     }
@@ -3667,13 +3563,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         guard let value, value.isFinite else { return "nil" }
         return String(format: "%.2f", value)
     }
-    
+
     class SubtitleModel: ObservableObject {
         @Published var currentAttributedText: NSAttributedString = NSAttributedString()
-        
+
         private var isLoading: Bool = true
         private var shouldPersistChanges: Bool = true
-        
+
         @Published var isVisible: Bool = false {
             didSet {
                 guard isVisible != oldValue else { return }
@@ -3732,14 +3628,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
             isLoading = false
         }
-        
+
         private func saveSubtitleSettings() {
-            let defaults = UserDefaults.standard
+            let defaults = ProfileSettingsStore.active
             defaults.set(isVisible, forKey: "subtitles_isVisible")
             defaults.set(strokeWidth, forKey: "subtitles_strokeWidth")
             defaults.set(fontSize, forKey: "subtitles_fontSize")
             defaults.set(verticalOffset, forKey: "playerSubtitleOverlayBottomConstant")
-            
+
             if let foregroundData = try? NSKeyedArchiver.archivedData(withRootObject: foregroundColor, requiringSecureCoding: false) {
                 defaults.set(foregroundData, forKey: "subtitles_foregroundColor")
             }
@@ -3748,24 +3644,24 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
             defaults.set(closedCaptionBackground, forKey: "subtitles_closedCaptionBackground")
         }
-        
+
         private func loadSubtitleSettings() {
-            let defaults = UserDefaults.standard
-            
+            let defaults = ProfileSettingsStore.active
+
             if defaults.object(forKey: "subtitles_isVisible") != nil {
                 isVisible = defaults.bool(forKey: "subtitles_isVisible")
             }
-            
+
             if defaults.object(forKey: "subtitles_strokeWidth") != nil {
                 let width = CGFloat(defaults.double(forKey: "subtitles_strokeWidth"))
                 strokeWidth = max(0, min(width, 2.0))
             }
-            
+
             if defaults.object(forKey: "subtitles_fontSize") != nil {
                 let size = CGFloat(defaults.double(forKey: "subtitles_fontSize"))
                 fontSize = size > 0 ? size : 30.0
             }
-            
+
             if let foregroundData = defaults.data(forKey: "subtitles_foregroundColor"),
                let color = try? NSKeyedUnarchiver.unarchivedObject(ofClass: UIColor.self, from: foregroundData) {
                 foregroundColor = color
@@ -3794,70 +3690,63 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var subtitleModel = SubtitleModel()
 
     private var isTwoFingerTapEnabled: Bool {
-        if UserDefaults.standard.object(forKey: twoFingerSettingKey) == nil {
-            if let legacyValue = UserDefaults.standard.object(forKey: legacyTwoFingerSettingKey) as? Bool {
-                UserDefaults.standard.set(legacyValue, forKey: twoFingerSettingKey)
+        if ProfileSettingsStore.active.object(forKey: twoFingerSettingKey) == nil {
+            if let legacyValue = ProfileSettingsStore.active.object(forKey: legacyTwoFingerSettingKey) as? Bool {
+                ProfileSettingsStore.active.set(legacyValue, forKey: twoFingerSettingKey)
                 return legacyValue
             }
-            UserDefaults.standard.set(true, forKey: twoFingerSettingKey)
+            ProfileSettingsStore.active.set(true, forKey: twoFingerSettingKey)
             return true
         }
-        return UserDefaults.standard.bool(forKey: twoFingerSettingKey)
+        return ProfileSettingsStore.active.bool(forKey: twoFingerSettingKey)
     }
     private var isDoubleTapSeekEnabled: Bool {
-        if UserDefaults.standard.object(forKey: doubleTapSeekEnabledKey) == nil {
-            let legacy = UserDefaults.standard.object(forKey: legacyDoubleTapSeekEnabledKey) as? Bool ?? true
-            UserDefaults.standard.set(legacy, forKey: doubleTapSeekEnabledKey)
+        if ProfileSettingsStore.active.object(forKey: doubleTapSeekEnabledKey) == nil {
+            let legacy = ProfileSettingsStore.active.object(forKey: legacyDoubleTapSeekEnabledKey) as? Bool ?? true
+            ProfileSettingsStore.active.set(legacy, forKey: doubleTapSeekEnabledKey)
             return legacy
         }
-        return UserDefaults.standard.bool(forKey: doubleTapSeekEnabledKey)
+        return ProfileSettingsStore.active.bool(forKey: doubleTapSeekEnabledKey)
     }
     private var isCenterTapPlayPauseEnabled: Bool {
-        if UserDefaults.standard.object(forKey: centerTapPlayPauseSettingKey) == nil {
-            UserDefaults.standard.set(true, forKey: centerTapPlayPauseSettingKey)
+        if ProfileSettingsStore.active.object(forKey: centerTapPlayPauseSettingKey) == nil {
+            ProfileSettingsStore.active.set(true, forKey: centerTapPlayPauseSettingKey)
             return true
         }
-        return UserDefaults.standard.bool(forKey: centerTapPlayPauseSettingKey)
+        return ProfileSettingsStore.active.bool(forKey: centerTapPlayPauseSettingKey)
     }
     private var playerSeekSeconds: Double {
-        if UserDefaults.standard.object(forKey: playerSeekSecondsKey) == nil,
-           UserDefaults.standard.object(forKey: legacyPlayerSeekSecondsKey) != nil {
-            UserDefaults.standard.set(UserDefaults.standard.double(forKey: legacyPlayerSeekSecondsKey), forKey: playerSeekSecondsKey)
+        if ProfileSettingsStore.active.object(forKey: playerSeekSecondsKey) == nil,
+           ProfileSettingsStore.active.object(forKey: legacyPlayerSeekSecondsKey) != nil {
+            ProfileSettingsStore.active.set(ProfileSettingsStore.active.double(forKey: legacyPlayerSeekSecondsKey), forKey: playerSeekSecondsKey)
         }
-        let savedSeconds = UserDefaults.standard.double(forKey: playerSeekSecondsKey)
+        let savedSeconds = ProfileSettingsStore.active.double(forKey: playerSeekSecondsKey)
         let seconds = savedSeconds > 0 ? savedSeconds : 10.0
         return min(max(seconds, 5.0), 60.0)
     }
     private var defaultPlaybackSpeed: Double {
-        let savedSpeed = UserDefaults.standard.double(forKey: "defaultPlaybackSpeed")
+        let savedSpeed = ProfileSettingsStore.active.double(forKey: "defaultPlaybackSpeed")
         let speed = savedSpeed > 0 ? savedSpeed : 1.0
         return min(max(speed, 0.25), 3.0)
     }
     private var isBrightnessControlEnabled: Bool {
-        if UserDefaults.standard.object(forKey: "playerBrightnessGestureEnabled") == nil,
-           let legacy = UserDefaults.standard.object(forKey: "vlcBrightnessGestureEnabled") as? Bool {
-            UserDefaults.standard.set(legacy, forKey: "playerBrightnessGestureEnabled")
+        if ProfileSettingsStore.active.object(forKey: "playerBrightnessGestureEnabled") == nil,
+           let legacy = ProfileSettingsStore.active.object(forKey: "vlcBrightnessGestureEnabled") as? Bool {
+            ProfileSettingsStore.active.set(legacy, forKey: "playerBrightnessGestureEnabled")
             return legacy
         }
-        return UserDefaults.standard.bool(forKey: "playerBrightnessGestureEnabled")
+        return ProfileSettingsStore.active.bool(forKey: "playerBrightnessGestureEnabled")
     }
     private var isVolumeControlEnabled: Bool {
         let enabled: Bool
-        if UserDefaults.standard.object(forKey: "playerVolumeGestureEnabled") == nil,
-           let legacy = UserDefaults.standard.object(forKey: "vlcVolumeGestureEnabled") as? Bool {
-            UserDefaults.standard.set(legacy, forKey: "playerVolumeGestureEnabled")
+        if ProfileSettingsStore.active.object(forKey: "playerVolumeGestureEnabled") == nil,
+           let legacy = ProfileSettingsStore.active.object(forKey: "vlcVolumeGestureEnabled") as? Bool {
+            ProfileSettingsStore.active.set(legacy, forKey: "playerVolumeGestureEnabled")
             enabled = legacy
         } else {
-            enabled = UserDefaults.standard.bool(forKey: "playerVolumeGestureEnabled")
+            enabled = ProfileSettingsStore.active.bool(forKey: "playerVolumeGestureEnabled")
         }
-#if os(iOS) && canImport(GoogleCast)
-        // Eclipse deliberately does not take over the receiver's volume buttons.
-        // Do not leave a local-volume gesture visible while the receiver owns
-        // (or is in the middle of taking) video/audio playback.
-        return enabled && !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks
-#else
         return enabled
-#endif
     }
     private var isMetalPerformanceOverlayActive: Bool {
 #if os(iOS) && ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE
@@ -3869,11 +3758,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private var originalSpeed: Double = 1.0
     private var holdGesture: UILongPressGestureRecognizer?
-    
+
     private var controlsHideWorkItem: DispatchWorkItem?
-    /// Invalidates stale show/hide animation completions. Without this fence, a
-    /// completed hide animation could mark the skinned overlay hidden after a
-    /// newer tap had already requested that the controls be shown again.
+
     private var controlsVisibilityGeneration = 0
     private var controlsVisible: Bool = true {
         didSet {
@@ -3888,8 +3775,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var metalPerformanceOverlayTimer: Timer?
 #if os(iOS) && ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE && ECLIPSE_MPVKIT_METAL_LIVE_QUALITY_RECONFIGURE
     private var metalThermalQualityTimer: Timer?
-    /// One-shot latch so the thermal notice appears once per bad-thermal episode.
-    /// Re-armed when thermals return to a normal (nominal/fair) state.
+
     private var hasShownThermalQualityNotice = false
 #endif
     private var playerNoticeDismissWorkItem: DispatchWorkItem?
@@ -3899,15 +3785,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private var pendingWatchTogetherPlaybackState: (state: WatchTogetherSharedState, shouldSeek: Bool)?
     private var lastWatchTogetherSharedState: WatchTogetherSharedState?
     private var watchTogetherRendererReady = false
+    private var watchTogetherRateNudgeActive = false
     private weak var episodeSourceSheetController: UIViewController?
     private var episodeSourceSheetTransitionID: UUID?
 #endif
     private var lastCPUProcessTime: TimeInterval?
     private var lastCPUWallTime: CFTimeInterval?
     private var lastCPUUsagePercent: Double?
-    /// Lazily created on first overlay use; nil when IOReport GPU stats are unavailable.
+
     private lazy var gpuUsageSampler: GPUUsageSampler? = GPUUsageSampler()
-    
+
     override func viewDidLoad() {
         super.viewDidLoad()
         bindPlaybackWindowSceneIfAvailable(source: "view-did-load")
@@ -3916,17 +3803,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let initialURLSummary = initialURL.map(playbackURLSummary) ?? "nil"
         logMPV("viewDidLoad initialURL={\(initialURLSummary)} preset=\(initialPreset?.id.rawValue ?? "nil") mediaInfo=\(String(describing: mediaInfo))")
         logVLCUI("viewDidLoad initialURL={\(initialURLSummary)} preset=\(initialPreset?.id.rawValue ?? "nil") mediaInfo=\(String(describing: mediaInfo))", type: "Stream")
-        
+
 #if !os(tvOS)
         modalPresentationCapturesStatusBarAppearance = true
 #endif
         setupLayout()
-#if os(iOS) && canImport(GoogleCast)
-        applyGoogleCastButtonVisibility()
-#endif
         applyPlayerSkinIfNeeded(force: true)
         updatePlayerTitle()
-        
+
         setupActions()
 #if os(iOS)
         applyPlaybackLockState(capturingOrientationIfNeeded: false)
@@ -3945,8 +3829,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             audioButton.showsMenuAsPrimaryAction = false
             updateSubtitleTracksMenu()
         } else {
-            // Ensure subtitle control appears with other buttons immediately on VLC,
-            // even before track discovery finishes.
+
             subtitleButton.showsMenuAsPrimaryAction = true
             speedButton.showsMenuAsPrimaryAction = true
             audioButton.showsMenuAsPrimaryAction = true
@@ -3961,11 +3844,23 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             name: .mediaStateWillChangeCurrentUser,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleActiveProfileDidChange),
+            name: .activeProfileDidChange,
+            object: nil
+        )
+        activeProfileWillChangeCancellable = ProfileManager.shared.$activeProfileID
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] incomingProfileID in
+                self?.handleActiveProfileWillChange(to: incomingProfileID)
+            }
         if isVLCPlayer || isMPVRenderer {
             lastKnownVLCCustomSubtitleOverlayEnabled = isVLCCustomSubtitleOverlayEnabled
             NotificationCenter.default.addObserver(self, selector: #selector(handleUserDefaultsDidChange), name: UserDefaults.didChangeNotification, object: nil)
         }
-        
+
         view.setNeedsLayout()
         view.layoutIfNeeded()
 
@@ -3986,26 +3881,21 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             logPictureInPicture("skipping MPV sample-buffer PiPController renderer=\(mpvRendererName)")
         }
         updatePiPButtonVisibility()
-        
+
         showControlsTemporarily()
-        
+
         if let url = initialURL, let preset = initialPreset {
             logSharedPlayerControl("loading initial target={\(playbackURLSummary(url))} preset=\(preset.id.rawValue)")
             load(url: url, preset: preset, headers: initialHeaders)
         }
-#if os(iOS) && canImport(GoogleCast)
-        if let activePlaybackRequest {
-            GoogleCastCoordinator.shared.prepare(request: activePlaybackRequest, player: self)
-        }
-#endif
-        
+
         updateProgressHostingController()
         updateSpeedMenu()
         updateMetalPerformanceOverlayVisibility()
 #if os(iOS) && ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE && ECLIPSE_MPVKIT_METAL_LIVE_QUALITY_RECONFIGURE
         startMetalThermalQualityMonitoringIfNeeded()
 #endif
-        
+
         NotificationCenter.default.addObserver(self, selector: #selector(appDidEnterBackground), name: UIApplication.didEnterBackgroundNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appWillTerminate), name: UIApplication.willTerminateNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appWillResignActive), name: UIApplication.willResignActiveNotification, object: nil)
@@ -4021,7 +3911,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         NotificationCenter.default.addObserver(self, selector: #selector(sceneDidActivate(_:)), name: UIScene.didActivateNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(appScenePhaseDidChange(_:)), name: .eclipseScenePhaseDidChange, object: nil)
     }
-    
+
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         bindPlaybackWindowSceneIfAvailable(source: "view-did-appear")
@@ -4034,18 +3924,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #if os(iOS)
         presentationController?.delegate = self
         applyPlaybackLockState(capturingOrientationIfNeeded: true)
-#if canImport(GoogleCast)
-        GoogleCastCoordinator.shared.playerVisibilityChanged(true, player: self)
-        // `viewDidLoad` begins a direct-stream eligibility probe early so the
-        // Cast dialog is responsive. If that probe finishes before this view
-        // has a window, the coordinator deliberately discards it rather than
-        // handing off an invisible player. Retry now that the player is truly
-        // visible; `prepare` is a no-op while another Cast handoff owns the
-        // receiver.
-        if let activePlaybackRequest {
-            GoogleCastCoordinator.shared.prepare(request: activePlaybackRequest, player: self)
-        }
-#endif
 #endif
         submitDeferredIPadGPUPlaybackLoadIfReady(source: "view-did-appear")
         playbackHandoffHasAppeared = true
@@ -4063,9 +3941,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
         postPlayerInterfaceCoverage(covered: false)
-#if os(iOS) && canImport(GoogleCast)
-        GoogleCastCoordinator.shared.playerVisibilityChanged(false, player: self)
-#endif
 #if os(iOS)
         if let scene = view.window?.windowScene ?? playbackWindowScene {
             AppDelegate.setOrientationLock(.all, for: scene)
@@ -4101,16 +3976,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             "bound playback window scene source=\(source) scene=\(resolvedScene.session.persistentIdentifier)"
         )
     }
-    
+
 #if !os(tvOS)
     override var prefersStatusBarHidden: Bool { true }
     override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation { .fade }
-    
+
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
         if let lockedMask = PlayerPlaybackLockSettings.lockedOrientationMask() {
             return lockedMask
         }
-        if UserDefaults.standard.bool(forKey: "alwaysLandscape") {
+        if ProfileSettingsStore.active.bool(forKey: "alwaysLandscape") {
             return .landscape
         } else {
             return .all
@@ -4120,7 +3995,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     override var shouldAutorotate: Bool {
         !PlayerPlaybackLockSettings.isLocked()
     }
-    
+
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         bindPlaybackWindowSceneIfAvailable(source: "view-will-appear")
@@ -4132,7 +4007,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             logVLCUIViewSnapshot("viewWillAppear")
         }
     }
-    
+
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
         setNeedsStatusBarAppearanceUpdate()
@@ -4161,22 +4036,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         updatePlayerTitleLayout(forWidth: view.bounds.width)
 #endif
     }
-    
+
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
 #if !os(tvOS)
         updateGestureControlLayoutForCurrentSize()
 #endif
-#if os(iOS) && canImport(GoogleCast)
-        // Google Cast swaps the button image as discovery/session state changes. Reassert
-        // aspect-fit after layout so the SDK-provided glyph cannot stretch in a narrow portrait
-        // controls row even though the outer control remains a fixed 36-point square.
-        castButton.imageView?.contentMode = .scaleAspectFit
-#endif
-        
+
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        
+
         if isVLCPlayer {
             displayLayer.removeFromSuperlayer()
             displayLayer.isHidden = true
@@ -4186,9 +4055,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             displayLayer.frame = videoContainer.bounds
             rendererRenderingLayoutDidChange()
         }
-        
+
         playerSkinDecorationLayer.frame = controlsOverlayView.bounds
-        
+
         CATransaction.commit()
 
         if deferredIPadGPUPlaybackLoad != nil {
@@ -4213,17 +4082,17 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func updatePlayerTitleLayout(forWidth width: CGFloat) {
         guard let playerTitleCenterConstraint else { return }
-        // Compact iPhone portrait has the same fixed-width leading controls as a narrow iPad
-        // window. Let the centered title yield before Auto Layout compresses the cast artwork.
+
         let usesCompactPlayerWidth = width > 0 && width < 524
         let priority: UILayoutPriority = usesCompactPlayerWidth ? .defaultHigh : .required
         guard playerTitleCenterConstraint.priority != priority else { return }
         playerTitleCenterConstraint.priority = priority
     }
 #endif
-    
+
     deinit {
         isClosing = true
+        releaseEphemeralProxyOwnership()
         releaseMPVAppExitPictureInPictureOwnership(
             reason: "deinit",
             clearActivationCandidate: true
@@ -4241,13 +4110,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         playbackStartupWorkItem?.cancel()
         cancelScheduledMPVPictureInPictureWarmups(reason: "deinit")
 #if !os(tvOS)
+        midPlaybackStallTimer?.invalidate()
         outputVolumeObservation?.invalidate()
         outputVolumeObservation = nil
 #endif
         MainActor.assumeIsolated {
-#if os(iOS) && canImport(GoogleCast)
-            GoogleCastCoordinator.shared.playerClosed(self)
-#endif
             renderer.setPictureInPictureStopRequestHandler(nil)
             if let mpv = mpvRenderer {
                 mpv.delegate = nil
@@ -4282,7 +4149,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         dismissEpisodeBrowser(animated: false, reason: "deinit")
         pipController?.invalidate()
         rendererStop()
-        
+
         displayLayer.removeFromSuperlayer()
 
         pendingUserDefaultsChangeWorkItem?.cancel()
@@ -4290,7 +4157,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         finishMediaStatePlaybackLeaseIfNeeded()
         NotificationCenter.default.removeObserver(self)
     }
-    
+
     convenience init(url: URL, preset: PlayerPreset, headers: [String: String]? = nil, subtitles: [String]? = nil, subtitleNames: [String]? = nil, subtitleHeadersByURL: [String: [String: String]]? = nil, mediaSelectionIntent: PlaybackMediaSelectionIntent? = nil, mediaInfo: MediaInfo? = nil, imdbId: String? = nil) {
         self.init(nibName: nil, bundle: nil)
         self.initialURL = url
@@ -4329,33 +4196,18 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             ?? Settings.shared.enableSubtitlesByDefault
     }
 
-    /// Keeps renderer-neutral choices current for later in-place source/episode loads without
-    /// writing the per-session selection back to the user's global defaults.
     private func recordUserMediaSelection(
         audioLanguage: String? = nil,
         subtitleLanguage: String? = nil,
         subtitlesEnabled: Bool? = nil
     ) {
-        // A nil intent is the legacy/direct construction contract: those players continue using
-        // and persisting their global defaults. Only coordinator-owned request sessions keep a
-        // separate renderer-neutral selection snapshot.
+
         guard let current = playbackMediaSelectionIntent else { return }
         playbackMediaSelectionIntent = current.overridingRendererSelection(
             audioLanguage: audioLanguage,
             subtitleLanguage: subtitleLanguage,
             hasSelectedSubtitle: subtitlesEnabled
         )
-#if os(iOS) && canImport(GoogleCast)
-        if let playbackMediaSelectionIntent, let activePlaybackRequest {
-            let updatedRequest = activePlaybackRequest.replacingMediaSelectionIntent(playbackMediaSelectionIntent)
-            self.activePlaybackRequest = updatedRequest
-            // Keep the next Cast handoff aligned with a manual selection made
-            // before a receiver owns playback. The coordinator deliberately
-            // ignores this while a remote session is active, where Cast tracks
-            // are receiver-controlled.
-            GoogleCastCoordinator.shared.update(request: updatedRequest)
-        }
-#endif
     }
 
     private func rendererNeutralLanguage(
@@ -4438,9 +4290,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return false
         }
 
-        // Landscape geometry is stable enough immediately. Portrait gets one short settling
-        // window because an always-landscape iPad presentation commonly attaches before its
-        // rotation transaction has updated the MoltenVK drawable.
         let isLandscape = videoContainer.bounds.width > videoContainer.bounds.height
         return isLandscape || CACurrentMediaTime() - request.queuedAt >= 0.9
     }
@@ -4568,9 +4417,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #if os(iOS) && !targetEnvironment(macCatalyst)
         if isMPVRenderer,
            MPVHeaderProxy.shared.isManagedSkyStreamSessionURL(url) {
-            // The resolver creates the typed session before this controller exists. Adopt that
-            // exact top-level route so normal renderer replacement/close cleanup owns it instead
-            // of leaving a manifest graph alive until the proxy TTL expires.
+
             registerMPVHeaderProxyURL(url)
         }
 #endif
@@ -4581,9 +4428,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         mpvBackgroundFallbackPauseIntentGeneration = nil
         mpvBackgroundFallbackPauseLifecycleGeneration = nil
         releaseMPVAppExitPictureInPictureOwnership(reason: "new-load")
-        // A PiP preparation/start belongs to exactly one media load. Invalidate any task that
-        // prepared the previous item before changing renderer state so it cannot later start PiP
-        // for this load using the previous load's readiness.
+
         cancelMPVPictureInPictureStartRequests(reason: "new-load")
         let previousPiPState = mpvPictureInPictureControllerState()
         if previousPiPState.active || previousPiPState.pending {
@@ -4664,8 +4509,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }()
         Logger.shared.log("PlayerViewController.load: isAnimeHint=\(isAnimeHint ?? false) mediaInfo=\(mediaInfoLabel)", type: "Stream")
         logVLCUI("load prepared mediaInfo=\(mediaInfoLabel) pendingSeek=\(secondsText(pendingSeekTime)) subtitles=\(subtitleURLs.count) openSubsEnabled=\(Settings.shared.playerOpenSubtitlesEnabled) fallback=\(Settings.shared.playerOpenSubtitlesAutoFallbackEnabled)", type: "Stream")
-        
-        // Ensure renderer is started before loading media
+
         if !isRunning {
             do {
                 try rendererStart()
@@ -4677,7 +4521,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
         }
         logPlaybackStage("renderer-started", "running=\(isRunning)")
-        
+
         userSelectedAudioTrack = false
         userSelectedSubtitleTrack = false
         attemptedAudioAutoSelectSignature = nil
@@ -4730,13 +4574,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         rendererPrepareInitialSeek(to: pendingSeekTime)
         if isMPVRenderer {
             if isMetalMPVRenderer && ExperimentalFeatureState.canUseExperimentalMPVPlayback {
-                Logger.shared.log("[PlayerVC.PlaybackStart] MPV warmup candidate source=resolved-playback-url autoMode=\(UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled")) renderer=\(mpvRendererName) target={\(playbackURLSummary(url))}", type: "MPV")
+                Logger.shared.log("[PlayerVC.PlaybackStart] MPV warmup candidate source=resolved-playback-url autoMode=\(AutoModeSettings.isEnabled()) renderer=\(mpvRendererName) target={\(playbackURLSummary(url))}", type: "MPV")
                 ExperimentalMPVPreloadManager.shared.prewarm(
                     url: url,
                     headers: headers,
                     label: mediaInfoLabel
                 )
-            } else if UserDefaults.standard.bool(forKey: ExperimentalFeatureState.mpvPreloadEnabledKey) {
+            } else if ProfileSettingsStore.active.bool(forKey: ExperimentalFeatureState.mpvPreloadEnabledKey) {
                 let reason = isMetalMPVRenderer ? (ExperimentalFeatureState.mpvAdvancedPlaybackUnavailableReason ?? "advanced-unavailable") : "renderer-not-moltenvk-active"
                 Logger.shared.log("[PlayerVC.PlaybackStart] MPV warmup not started reason=\(reason) renderer=\(mpvRendererName) target={\(playbackURLSummary(url))}", type: "MPV")
             }
@@ -4757,7 +4601,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #if os(iOS)
         configureWatchTogetherForCurrentMedia()
 #endif
-        
+
         if let subs = initialSubtitles, !subs.isEmpty {
             loadSubtitles(subs, names: initialSubtitleNames)
         }
@@ -4767,6 +4611,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func preparePlaybackStartupMonitoring(for url: URL, headers: [String: String]) {
         playbackStartupWorkItem?.cancel()
+#if !os(tvOS)
+        stopMidPlaybackStallWatchdog()
+#endif
         playbackDidStart = false
         refreshIdleTimerForPlayback(reason: "startup-monitor-reset")
         playbackFailureHandled = false
@@ -4803,9 +4650,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                   !self.isClosing else {
                 return
             }
-#if os(iOS) && canImport(GoogleCast)
-            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
             self.logPlaybackStage(
                 "watchdog-fired",
                 "probe=\(self.playbackSlowProbeCount + 1) loading=\(self.isRendererLoading) paused=\(self.rendererIsPausedState()) cached=\(self.secondsText(self.cachedPosition))/\(self.secondsText(self.cachedDuration)) renderer={\(self.rendererPictureInPictureDebugSnapshot())}"
@@ -4824,6 +4668,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         playbackDidStart = true
         refreshIdleTimerForPlayback(reason: "playback-started-\(reason)")
         playbackStartupWorkItem?.cancel()
+#if !os(tvOS)
+        armMidPlaybackStallWatchdog()
+#endif
         logPlaybackStage(
             "playback-confirmed",
             "reason=\(reason) progressSamples=\(playbackTraceProgressAdvanceCount) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration)) loading=\(isRendererLoading)"
@@ -4833,14 +4680,81 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             SourceHealthStore.shared.recordPlaybackSuccess(sourceId: context.sourceId, sourceName: context.sourceName)
             Logger.shared.log("[PlayerVC.PlaybackStart] \(context.sourceName) started via \(reason)", type: "Stream")
         }
-        // Warm the separate PiP instance shortly after playback starts so the first manual or
-        // automatic PiP entry does not have to do the sample-buffer prepare work under pressure.
+
         scheduleMPVPictureInPictureForegroundWarmup(
             source: "playback-started-\(reason)",
             delays: [0.35, 1.50],
             forceFirst: true
         )
     }
+
+#if !os(tvOS)
+    private func armMidPlaybackStallWatchdog() {
+        stopMidPlaybackStallWatchdog()
+        guard isMPVRenderer, !activeMPVHeaderProxyURLs.isEmpty else { return }
+        midPlaybackStallReferenceDate = Date()
+        midPlaybackStallLastPosition = cachedPosition
+        let timer = Timer(timeInterval: 5.0, repeats: true) { [weak self] _ in
+            self?.evaluateMidPlaybackStallWatchdog()
+        }
+        midPlaybackStallTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    private func stopMidPlaybackStallWatchdog() {
+        midPlaybackStallTimer?.invalidate()
+        midPlaybackStallTimer = nil
+        midPlaybackStallReferenceDate = nil
+        midPlaybackStallLastPosition = nil
+    }
+
+    private func evaluateMidPlaybackStallWatchdog() {
+        guard playbackDidStart, !playbackFailureHandled, !isClosing, isMPVRenderer else {
+            stopMidPlaybackStallWatchdog()
+            return
+        }
+        let now = Date()
+        let position = cachedPosition
+        guard !rendererIsPausedState(), !isSeeking, pendingInitialResumeTarget == nil else {
+            midPlaybackStallReferenceDate = now
+            midPlaybackStallLastPosition = position
+            return
+        }
+        guard let lastPosition = midPlaybackStallLastPosition,
+              abs(position - lastPosition) <= 0.05,
+              var referenceDate = midPlaybackStallReferenceDate else {
+            midPlaybackStallLastPosition = position
+            midPlaybackStallReferenceDate = now
+            return
+        }
+        let healthSnapshots = activeMPVHeaderProxyURLs.compactMap {
+            MPVHeaderProxy.shared.upstreamHealth(for: $0)
+        }
+        guard !healthSnapshots.isEmpty else {
+            midPlaybackStallReferenceDate = now
+            return
+        }
+        if let lastSuccessAt = healthSnapshots.compactMap(\.lastSuccessAt).max(),
+           lastSuccessAt > referenceDate {
+            midPlaybackStallReferenceDate = lastSuccessAt
+            referenceDate = lastSuccessAt
+        }
+        let elapsed = now.timeIntervalSince(referenceDate)
+        guard elapsed >= 45 else { return }
+        guard let lastFailureAt = healthSnapshots.compactMap(\.lastFailureAt).max(),
+              lastFailureAt >= referenceDate else { return }
+        let failureCount = healthSnapshots.reduce(0) { $0 + $1.failureCount }
+        stopMidPlaybackStallWatchdog()
+        Logger.shared.log(
+            "[PlayerVC.StallWatchdog] triggered elapsed=\(Int(elapsed))s upstreamFailures=\(failureCount) position=\(secondsText(position)) loading=\(isRendererLoading)",
+            type: "Plugin"
+        )
+        handleUnrecoverableMediaSourceRejection(
+            "Playback stalled for \(Int(elapsed)) seconds and the stream host stopped responding.",
+            reason: "stalled-upstream"
+        )
+    }
+#endif
 
     private func runPlaybackStartupProbe(url: URL, headers: [String: String], generation: Int) {
         logPlaybackStage("probe-begin", "attempt=\(playbackSlowProbeCount + 1)")
@@ -4854,9 +4768,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                       !self.isClosing else {
                     return
                 }
-#if os(iOS) && canImport(GoogleCast)
-                guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
 
                 switch result {
                 case .reachable:
@@ -4903,9 +4814,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func handlePlaybackStartupFailure(_ message: String, isSourceFailure: Bool) {
         guard !playbackDidStart, !playbackFailureHandled else { return }
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
         releaseMPVAppExitPictureInPictureOwnership(reason: "playback-startup-failure")
         logPlaybackStage(
             "startup-failure",
@@ -4929,6 +4837,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
         playbackFailureHandled = true
         playbackStartupWorkItem?.cancel()
+        logPlaybackAttribution(reason: "startup-failure", message: message)
 
         guard let context = playbackLaunchContext else {
             Logger.shared.log("[PlayerVC.PlaybackStart] startup failed without launch context: \(message)", type: "MPV")
@@ -5016,9 +4925,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         guard !isClosing,
               !isBeingDismissed else { return }
         guard viewIfLoaded?.window != nil else {
-            // Renderer startup can fail synchronously from viewDidLoad, before UIKit attaches the
-            // full-screen player to a window. Keep the terminal state visible once presentation
-            // finishes rather than losing the only recovery controls.
+
             pendingPlaybackFailureAlert = alert
             return
         }
@@ -5037,8 +4944,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         present(alert, animated: true)
     }
 
-    /// Wait for the renderer's event/GPU queues to drain before reusing the same instance. A main
-    /// queue turn is not a teardown boundary now that MPVKit stop is intentionally nonblocking.
     private func restartRendererAndRetryPlayback(afterLoadGeneration failedGeneration: Int) {
         pendingRendererRestartRetryGeneration = failedGeneration
         Task { @MainActor [weak self] in
@@ -5052,9 +4957,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                   self.viewIfLoaded?.window != nil,
                   self.pendingRendererRestartRetryGeneration == failedGeneration,
                   self.playbackLoadGeneration == failedGeneration else { return }
-#if os(iOS) && canImport(GoogleCast)
-            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
             self.pendingRendererRestartRetryGeneration = nil
             self.retryPlaybackAfterFailure()
         }
@@ -5079,8 +4981,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         load(url: url, preset: preset, headers: context.headers)
     }
 
-    /// Restores a primary player when its coordinator handoff loses the presenter race instead of
-    /// leaving the failed controller frozen with no fallback or error UI.
     func playbackEngineHandoffDidFail(_ report: PlaybackFailureReport) {
         guard !isClosing, !isBeingDismissed, viewIfLoaded?.window != nil else { return }
         onAutomaticPlaybackFallback = nil
@@ -5093,6 +4993,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func dismissAfterPlaybackFailure(_ report: PlaybackFailureReport) {
+        releaseEphemeralProxyOwnership()
         let finish: () -> Void = { [weak self] in
             guard let self else { return }
             self.rendererStop()
@@ -5105,18 +5006,18 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             finish()
         }
     }
-    
+
     private func prepareSeekToLastPosition(for mediaInfo: MediaInfo) {
         let lastPlayedTime: Double
-        
+
         switch mediaInfo {
         case .movie(let id, let title, _, _):
             lastPlayedTime = ProgressManager.shared.getMovieCurrentTime(movieId: id, title: title)
-            
+
         case .episode(let showId, let seasonNumber, let episodeNumber, _, _, _):
             lastPlayedTime = ProgressManager.shared.getEpisodeCurrentTime(showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber)
         }
-        
+
         if lastPlayedTime != 0 {
             let progress: Double
             switch mediaInfo {
@@ -5125,7 +5026,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             case .episode(let showId, let seasonNumber, let episodeNumber, _, _, _):
                 progress = ProgressManager.shared.getEpisodeProgress(showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber)
             }
-            
+
             if progress < 0.95 {
                 pendingSeekTime = lastPlayedTime
                 pendingInitialResumeTarget = lastPlayedTime
@@ -5136,12 +5037,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
         }
     }
-    
+
     private func setupPlayerLoadingIndicator() {
         guard loadingIndicatorHostingController == nil else { return }
         let host = UIHostingController(rootView: AnyView(
             EclipseLoadingIndicator(tint: .white, diameter: 40)
                 .accessibilityLabel("Loading video")
+                .profileScopedAppStorage()
         ))
         addChild(host)
         host.view.translatesAutoresizingMaskIntoConstraints = false
@@ -5205,7 +5107,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func archivedSkinColor(forKey key: String, fallback: UIColor) -> UIColor {
-        guard let data = UserDefaults.standard.data(forKey: key),
+        guard let data = ProfileSettingsStore.active.data(forKey: key),
               let color = try? NSKeyedUnarchiver.unarchivedObject(ofClass: UIColor.self, from: data) else {
             return fallback
         }
@@ -5267,7 +5169,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func applyPlayerSkinIfNeeded(force: Bool = false) {
-        let defaults = UserDefaults.standard
+        let defaults = ProfileSettingsStore.active
         let selectedSkin = isMPVRenderer ? MPVPlayerSkinSettings.selected(defaults: defaults) : .defaultSkin
         let primaryDataHash = defaults.data(forKey: MPVPlayerSkinSettings.customPrimaryColorKey)?.hashValue ?? 0
         let secondaryDataHash = defaults.data(forKey: MPVPlayerSkinSettings.customSecondaryColorKey)?.hashValue ?? 0
@@ -5301,9 +5203,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         ]
 #if os(iOS)
         themedButtons.append(playbackLockButton)
-#if canImport(GoogleCast)
-        themedButtons.append(castButton)
-#endif
 #endif
         for button in themedButtons {
             button.tintColor = appearance.primary
@@ -5314,9 +5213,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 #if os(iOS)
         watchTogetherButton.tintColor = appearance.primary
-#if canImport(GoogleCast)
-        castButton.tintColor = appearance.primary
-#endif
 #endif
 #if !os(tvOS)
         if var configuration = skipButton.configuration {
@@ -5473,10 +5369,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func setupLayout() {
         view.addSubview(videoContainer)
-        
-        // Keep the sample-buffer layer attached for MPV playback; VLC renders through its own drawable.
+
         displayLayer.frame = videoContainer.bounds
-        // Keep full video visible; avoid cropping for downloaded media
+
         displayLayer.videoGravity = .resizeAspect
         displayLayer.isOpaque = (vlcRenderer == nil)
 #if compiler(>=6.0)
@@ -5501,22 +5396,17 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             displayLayer.opacity = 0.0
             logVLCUI("setupLayout skipped sample-buffer displayLayer for VLC renderer", type: "Player")
         } else if isSampleBufferMetalRenderer {
-            // Single-instance MoltenVK sample-buffer renderer hosts and shows the display
-            // layer inside its own rendering view (added below) for both inline and PiP,
-            // so there is no separate hidden PiP-only layer to attach to the container.
+
             displayLayer.isHidden = false
             displayLayer.opacity = 1.0
         } else {
-            // MoltenVK renders inline through its own view; the sample-buffer display layer
-            // stays hidden behind it and is used only
-            // for PiP handoff.
+
             displayLayer.isHidden = true
             displayLayer.opacity = 0.0
             displayLayer.zPosition = -1
             videoContainer.layer.addSublayer(displayLayer)
         }
-        
-        // Add native rendering view FIRST (before all UI elements) so it renders behind controls.
+
         if isMPVRenderer {
             let mpvView = renderer.getRenderingView()
             mpvRenderingView = mpvView
@@ -5533,13 +5423,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             ])
         }
 
-        // Add VLC rendering view FIRST (before all UI elements) so it renders behind controls
         if let vlc = vlcRenderer {
             let vlcView = vlc.getRenderingView()
             videoContainer.addSubview(vlcView)
             vlcView.translatesAutoresizingMaskIntoConstraints = false
             vlcView.layer.zPosition = 0
-            // Ensure container remains interactive for gesture recognition
+
             videoContainer.isUserInteractionEnabled = true
             NSLayoutConstraint.activate([
                 vlcView.topAnchor.constraint(equalTo: videoContainer.topAnchor),
@@ -5556,7 +5445,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             tapOverlayView.trailingAnchor.constraint(equalTo: videoContainer.trailingAnchor),
             tapOverlayView.bottomAnchor.constraint(equalTo: videoContainer.bottomAnchor)
         ])
-        
+
         videoContainer.addSubview(dimmingView)
         videoContainer.addSubview(controlsOverlayView)
         controlsOverlayView.layer.insertSublayer(playerSkinDecorationLayer, at: 0)
@@ -5576,10 +5465,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
         videoContainer.addSubview(pipButton)
 #if os(iOS)
-#if canImport(GoogleCast)
-        videoContainer.addSubview(castButton)
-        videoContainer.addSubview(castConflictButton)
-#endif
         videoContainer.addSubview(watchTogetherButton)
 #endif
         videoContainer.addSubview(playerTitleLabel)
@@ -5617,7 +5502,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             videoContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             videoContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             videoContainer.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-            
+
             progressContainer.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
             progressContainer.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
             progressContainer.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor),
@@ -5627,7 +5512,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             dimmingView.leadingAnchor.constraint(equalTo: videoContainer.leadingAnchor),
             dimmingView.trailingAnchor.constraint(equalTo: videoContainer.trailingAnchor),
             dimmingView.bottomAnchor.constraint(equalTo: videoContainer.bottomAnchor),
-            
+
             controlsOverlayView.topAnchor.constraint(equalTo: videoContainer.topAnchor),
             controlsOverlayView.leadingAnchor.constraint(equalTo: videoContainer.leadingAnchor),
             controlsOverlayView.trailingAnchor.constraint(equalTo: videoContainer.trailingAnchor),
@@ -5658,15 +5543,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             overlayMenuStackView.bottomAnchor.constraint(equalTo: overlayMenuScrollView.contentLayoutGuide.bottomAnchor),
             overlayMenuStackView.widthAnchor.constraint(equalTo: overlayMenuScrollView.frameLayoutGuide.widthAnchor)
         ])
-        
+
         let playerTitleCenterConstraint = playerTitleLabel.centerXAnchor.constraint(
             equalTo: videoContainer.centerXAnchor
         )
 #if os(tvOS)
         playerTitleCenterConstraint.priority = .required
 #else
-        // Start non-required so the first narrow iPad split-view layout cannot break constraints
-        // before viewWillLayoutSubviews applies the current window-width policy.
+
         playerTitleCenterConstraint.priority = .defaultHigh
         self.playerTitleCenterConstraint = playerTitleCenterConstraint
 #endif
@@ -5701,22 +5585,22 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             playerNoticeBanner.centerXAnchor.constraint(equalTo: view.centerXAnchor),
             playerNoticeBanner.widthAnchor.constraint(lessThanOrEqualTo: view.widthAnchor, multiplier: 0.78),
             playerNoticeBanner.heightAnchor.constraint(greaterThanOrEqualToConstant: 34),
-            
+
             centerPlayPauseButton.centerXAnchor.constraint(equalTo: videoContainer.centerXAnchor),
             centerPlayPauseButton.centerYAnchor.constraint(equalTo: videoContainer.centerYAnchor),
             centerPlayPauseButton.widthAnchor.constraint(equalToConstant: 70),
             centerPlayPauseButton.heightAnchor.constraint(equalToConstant: 70),
-            
+
             loadingIndicator.centerXAnchor.constraint(equalTo: centerPlayPauseButton.centerXAnchor),
             loadingIndicator.centerYAnchor.constraint(equalTo: centerPlayPauseButton.centerYAnchor),
             loadingIndicator.widthAnchor.constraint(equalToConstant: 76),
             loadingIndicator.heightAnchor.constraint(equalToConstant: 76),
-            
+
             closeButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 16),
             closeButton.leadingAnchor.constraint(equalTo: progressContainer.leadingAnchor, constant: 4),
             closeButton.widthAnchor.constraint(equalToConstant: 36),
             closeButton.heightAnchor.constraint(equalToConstant: 36),
-            
+
             pipButton.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
             pipLeadingConstraint,
             pipButton.widthAnchor.constraint(equalToConstant: 36),
@@ -5725,17 +5609,17 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             playerTitleLabel.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
             playerTitleCenterConstraint,
             playerTitleLabel.trailingAnchor.constraint(lessThanOrEqualTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -20),
-            
+
             skipBackwardButton.centerYAnchor.constraint(equalTo: centerPlayPauseButton.centerYAnchor),
             skipBackwardButton.trailingAnchor.constraint(equalTo: centerPlayPauseButton.leadingAnchor, constant: -48),
             skipBackwardButton.widthAnchor.constraint(equalToConstant: 50),
             skipBackwardButton.heightAnchor.constraint(equalToConstant: 50),
-            
+
             skipForwardButton.centerYAnchor.constraint(equalTo: centerPlayPauseButton.centerYAnchor),
             skipForwardButton.leadingAnchor.constraint(equalTo: centerPlayPauseButton.trailingAnchor, constant: 48),
             skipForwardButton.widthAnchor.constraint(equalToConstant: 50),
             skipForwardButton.heightAnchor.constraint(equalToConstant: 50),
-            
+
             speedIndicatorLabel.topAnchor.constraint(equalTo: videoContainer.safeAreaLayoutGuide.topAnchor, constant: 20),
             speedIndicatorLabel.centerXAnchor.constraint(equalTo: videoContainer.centerXAnchor),
 
@@ -5747,41 +5631,18 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
             vlcSubtitleOverlayLabel.leadingAnchor.constraint(equalTo: progressContainer.leadingAnchor, constant: 12),
             vlcSubtitleOverlayLabel.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor, constant: -12),
-            
+
             subtitleButton.bottomAnchor.constraint(equalTo: progressContainer.topAnchor, constant: -8),
             subtitleButton.widthAnchor.constraint(equalToConstant: 32),
             subtitleButton.heightAnchor.constraint(equalToConstant: 32)
         ])
 
-        // Keep the title out of the PiP control even when the optional SharePlay control is
-        // hidden. The additional iOS constraint below reserves SharePlay's space when present.
         playerTitleLabel.leadingAnchor.constraint(
             greaterThanOrEqualTo: pipButton.trailingAnchor,
             constant: 12
         ).isActive = true
 
 #if os(iOS)
-#if canImport(GoogleCast)
-        let castButtonWidthConstraint = castButton.widthAnchor.constraint(equalToConstant: 36)
-        let watchTogetherLeadingFromCastConstraint = watchTogetherButton.leadingAnchor.constraint(equalTo: castButton.trailingAnchor, constant: 12)
-        self.castButtonWidthConstraint = castButtonWidthConstraint
-        self.watchTogetherLeadingFromCastConstraint = watchTogetherLeadingFromCastConstraint
-        NSLayoutConstraint.activate([
-            castButton.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
-            castButton.leadingAnchor.constraint(equalTo: pipButton.trailingAnchor, constant: 12),
-            castButtonWidthConstraint,
-            castButton.heightAnchor.constraint(equalToConstant: 36),
-            castConflictButton.centerXAnchor.constraint(equalTo: castButton.centerXAnchor),
-            castConflictButton.centerYAnchor.constraint(equalTo: castButton.centerYAnchor),
-            castConflictButton.widthAnchor.constraint(equalTo: castButton.widthAnchor),
-            castConflictButton.heightAnchor.constraint(equalTo: castButton.heightAnchor),
-            watchTogetherButton.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
-            watchTogetherLeadingFromCastConstraint,
-            watchTogetherButton.widthAnchor.constraint(equalToConstant: 36),
-            watchTogetherButton.heightAnchor.constraint(equalToConstant: 36),
-            playerTitleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: watchTogetherButton.trailingAnchor, constant: 10)
-        ])
-#else
         NSLayoutConstraint.activate([
             watchTogetherButton.centerYAnchor.constraint(equalTo: closeButton.centerYAnchor),
             watchTogetherButton.leadingAnchor.constraint(equalTo: pipButton.trailingAnchor, constant: 12),
@@ -5789,7 +5650,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             watchTogetherButton.heightAnchor.constraint(equalToConstant: 36),
             playerTitleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: watchTogetherButton.trailingAnchor, constant: 10)
         ])
-#endif
 #endif
 
         subtitleTrailingToProgressConstraint = subtitleButton.trailingAnchor.constraint(equalTo: progressContainer.trailingAnchor, constant: 0)
@@ -5887,32 +5747,25 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             ])
         }
 #endif
-        
-        // CRITICAL: After all UI elements are added, ensure VLC view is at the very back
+
         if let vlc = vlcRenderer {
             let vlcView = vlc.getRenderingView()
             videoContainer.sendSubviewToBack(vlcView)
-            // Double-ensure VLC view doesn't steal touches
+
             vlcView.isUserInteractionEnabled = false
             #if !os(tvOS)
             vlcView.isExclusiveTouch = false
             #endif
-            
+
             videoContainer.bringSubviewToFront(tapOverlayView)
         }
     }
-    
+
     private var playerGestureSurfaceView: UIView {
-        // Keep background gestures on the dedicated transparent surface for every
-        // renderer. Attaching MPV gestures to the container made delivery depend on
-        // the active renderer's descendant/layer hierarchy; the full-screen surface
-        // is deliberately kept above video and below the actual player controls.
+
         tapOverlayView
     }
 
-    /// Reassert the renderer/input/control ordering after a renderer or hosted SwiftUI
-    /// view has performed layout. The tap surface must remain above video, while every
-    /// interactive player control remains above the tap surface.
     private func restorePlayerInteractionHierarchy() {
         mpvRenderingView?.isUserInteractionEnabled = false
         tapOverlayView.isHidden = false
@@ -5935,8 +5788,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         skipBackwardButton.accessibilityLabel = "Seek Back \(seconds) Seconds"
         skipForwardButton.accessibilityLabel = "Seek Forward \(seconds) Seconds"
     }
-
-    // MARK: - MoltenVK/mpv performance overlay (HUD)
 
     private func updateMetalPerformanceOverlayVisibility() {
         let active = isMetalPerformanceOverlayActive
@@ -5976,7 +5827,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func metalPerformanceOverlayText() -> NSAttributedString {
         let cpuText = processCPUUsagePercent().map { String(format: "%.0f%%", $0) } ?? "n/a"
-        let ramText = processResidentMemoryBytes().map { String(format: "%.0f MB", Double($0) / 1_048_576.0) } ?? "n/a"
+        let ramText = processMemoryFootprintBytes().map { String(format: "%.0f MB", Double($0) / 1_048_576.0) } ?? "n/a"
         let thermalState = ProcessInfo.processInfo.thermalState
         let text = NSMutableAttributedString()
         text.append(metalPerformanceOverlayRow(label: "CPU", value: cpuText, valueColor: .white))
@@ -5995,9 +5846,28 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             valueColor: metalPerformanceQualityColor()
         ))
 
-        // Stream/source quality - best-effort, from the resolved stream metadata. Reveals the
-        // advertised codec/bit-depth/HDR tags (e.g. "1080p x265 10bit HDR") that the renderer
-        // itself doesn't surface, so a hot vs cool stream can be compared at a glance.
+        if let upscaling = metalPerformanceUpscalingStatus() {
+            let upscalingColor: UIColor
+            if upscaling.isThermallyLimited {
+                upscalingColor = .systemOrange
+            } else if upscaling.isActive {
+                upscalingColor = .systemGreen
+            } else {
+                upscalingColor = .white
+            }
+            text.append(NSAttributedString(string: "\n"))
+            text.append(metalPerformanceOverlayRow(label: "Upscale", value: upscaling.summary, valueColor: upscalingColor))
+        }
+
+        if let neural = metalPerformanceNeuralUpscalerStatus() {
+            text.append(NSAttributedString(string: "\n"))
+            text.append(metalPerformanceOverlayRow(
+                label: "Upscale FX",
+                value: neural.summary,
+                valueColor: neural.isEngaged ? .systemGreen : .systemOrange
+            ))
+        }
+
         if let streamName = playbackLaunchContext?.streamName?
             .replacingOccurrences(of: "\n", with: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines), !streamName.isEmpty {
@@ -6006,8 +5876,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             text.append(metalPerformanceOverlayRow(label: "Stream", value: clipped, valueColor: .white))
         }
 
-        // Authoritative runtime facts from the renderer: what resolution it actually rasterizes,
-        // the dynamic range, and whether the costly high-bit-depth (HDR) path is engaged.
         #if os(iOS) && ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE
         if let diag = metalPerformanceDiagnostics() {
             text.append(NSAttributedString(string: "\n"))
@@ -6043,8 +5911,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 text.append(metalPerformanceOverlayRow(label: "Decode", value: decoderValue, valueColor: decoderColor))
             }
 
-            // Active subtitle codec settles the "are these plain subs?" question: "ass" is styled
-            // (costlier to rasterize), "subrip" is plain text, "off" means hard-subbed/none.
             let subValue = diag.subtitleCodec ?? "off"
             text.append(NSAttributedString(string: "\n"))
             text.append(metalPerformanceOverlayRow(label: "Subs", value: subValue, valueColor: diag.subtitleCodec == "ass" ? .systemYellow : .white))
@@ -6072,8 +5938,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return row
     }
 
-    /// Local (compile-guard-free) thermal name so the overlay builds regardless of which
-    /// renderer feature flags are set. Mirrors `metalThermalStateName(_:)`.
     private func metalPerformanceThermalName(_ state: ProcessInfo.ThermalState) -> String {
         switch state {
         case .nominal: return "Nominal"
@@ -6097,11 +5961,32 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func metalPerformanceQualityText() -> String {
 #if os(iOS) && ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE
         let active = metalMPVRenderer?.activeQualityProfileName ?? gpuMPVRenderer?.activeQualityProfileName ?? "-"
-        // Annotate when the profile is being driven automatically by the thermal system, so a
-        // drop to "Low Heat" is legible as the auto-protection kicking in rather than a manual pick.
+
         return Settings.shared.mpvMetalQualityProfile == .auto ? "\(active) · Auto" : active
 #else
         return "-"
+#endif
+    }
+
+    private func metalPerformanceUpscalingStatus() -> MPVUpscalingStatus? {
+#if os(iOS) && ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE
+        if let gpuMPVRenderer {
+            return gpuMPVRenderer.activeUpscalingStatus
+        }
+        if metalMPVRenderer != nil {
+            return MPVUpscalingStatus(isActive: false, isThermallyLimited: false, summary: "Off · legacy renderer")
+        }
+        return nil
+#else
+        return nil
+#endif
+    }
+
+    private func metalPerformanceNeuralUpscalerStatus() -> MPVNeuralUpscalerStatus? {
+#if os(iOS) && ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE
+        return gpuMPVRenderer?.activeNeuralUpscalerStatus
+#else
+        return nil
 #endif
     }
 
@@ -6124,8 +6009,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
     #endif
 
-    /// Throttles the MoltenVK sample-buffer render rate while the controls/menus are on screen so the
-    /// main-thread software render stops starving menu navigation. No-op on other renderers.
     private func applyInteractiveRenderThrottle() {
 #if os(iOS) && ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE
         metalMPVRenderer?.setInteractiveRenderThrottle(controlsVisible)
@@ -6166,30 +6049,26 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
     }
 
-    private func processResidentMemoryBytes() -> UInt64? {
+    private func processMemoryFootprintBytes() -> UInt64? {
 #if canImport(Darwin)
-        var info = mach_task_basic_info()
-        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / MemoryLayout<integer_t>.size)
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
         let result = withUnsafeMutablePointer(to: &info) { infoPointer in
             infoPointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { integerPointer in
-                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), integerPointer, &count)
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), integerPointer, &count)
             }
         }
         guard result == KERN_SUCCESS else { return nil }
-        return UInt64(info.resident_size)
+        return UInt64(info.phys_footprint)
 #else
         return nil
 #endif
     }
 
-    /// Device GPU utilization (0,100) over the last sample interval, or nil if unavailable.
     private func gpuUsagePercent() -> Double? {
         gpuUsageSampler?.sample()
     }
 
-    /// Best-effort GPU sampler. `init?` fails (to nil, overlay shows "n/a") when the private
-    /// `IOReport` symbols or the "GPU Stats" channel group are unavailable; every step is
-    /// nil-guarded so a missing/renamed symbol degrades gracefully rather than crashing.
     final class GPUUsageSampler {
         private typealias CopyChannelsInGroup = @convention(c)
             (CFString?, CFString?, UInt64, UInt64, UInt64) -> Unmanaged<CFMutableDictionary>?
@@ -6235,9 +6114,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
             guard let channels = copyChannels("GPU Stats" as CFString, nil, 0, 0, 0)?.takeRetainedValue() else { return nil }
             var subbed: Unmanaged<CFMutableDictionary>?
-            // Subscription return value follows the CF Create rule (+1) to takeRetainedValue. The
-            // `subbed` out-param's ownership is ambiguous, so take it unretained (ARC adds its own
-            // retain on store): worst case a 1-object/session leak, never an over-release crash.
+
             guard let sub = createSub(nil, channels, &subbed, 0, nil)?.takeRetainedValue(),
                   let subbedChannels = subbed?.takeUnretainedValue() else { return nil }
 
@@ -6251,9 +6128,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self.subscribedChannels = subbedChannels
         }
 
-        /// Utilization over the interval since the previous call. First call primes the baseline
-        /// and returns nil; thereafter returns a busy/(busy+idle) percentage from the GPU
-        /// performance-state residencies.
         func sample() -> Double? {
             guard let now = createSamples(subscription, subscribedChannels, nil)?.takeRetainedValue() else {
                 return lastValue
@@ -6285,8 +6159,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                         busyLocal += residency
                     }
                 }
-                // Only count channels that actually look like GPU performance-state residencies
-                // (i.e. have an idle state), so simple counters don't pollute the ratio.
+
                 if sawIdle {
                     busy += busyLocal
                     idle += idleLocal
@@ -6319,9 +6192,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         pipButton.addTarget(self, action: #selector(pipTapped), for: .touchUpInside)
 #if os(iOS)
         watchTogetherButton.addTarget(self, action: #selector(watchTogetherTapped), for: .touchUpInside)
-#if canImport(GoogleCast)
-        castConflictButton.addTarget(self, action: #selector(castConflictTapped), for: .touchUpInside)
-#endif
 #endif
         skipBackwardButton.addTarget(self, action: #selector(skipBackwardTapped), for: .touchUpInside)
         skipForwardButton.addTarget(self, action: #selector(skipForwardTapped), for: .touchUpInside)
@@ -6347,8 +6217,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 audioButton.addTarget(self, action: #selector(playerMenuButtonTouchDown(_:)), for: .menuActionTriggered)
             }
         }
-        
-        // Ensure shared player buttons stay interactive above renderer views.
+
         if supportsSharedPlayerControls {
             [centerPlayPauseButton, closeButton, pipButton, skipBackwardButton,
              skipForwardButton, subtitleButton, servicesButton, episodeBrowserButton, speedButton, audioButton].forEach {
@@ -6357,13 +6226,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #if os(iOS)
             playbackLockButton.isUserInteractionEnabled = true
             watchTogetherButton.isUserInteractionEnabled = true
-#if canImport(GoogleCast)
-            castButton.isUserInteractionEnabled = true
-            castConflictButton.isUserInteractionEnabled = true
-#endif
 #endif
         }
-        
+
         let tap = UITapGestureRecognizer(target: self, action: #selector(containerTapped(_:)))
         tap.delegate = self
         tap.cancelsTouchesInView = false
@@ -6376,7 +6241,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     @objc private func pipTouchDown() {
 
     }
-    
+
     private func setupHoldGesture() {
         holdGesture = UILongPressGestureRecognizer(target: self, action: #selector(handleHoldGesture(_:)))
         holdGesture?.minimumPressDuration = 0.5
@@ -6384,14 +6249,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             playerGestureSurfaceView.addGestureRecognizer(holdGesture)
         }
     }
-    
+
     private func setupDoubleTapSkipGestures() {
         let leftDoubleTap = UITapGestureRecognizer(target: self, action: #selector(leftSideDoubleTapped))
         leftDoubleTap.numberOfTapsRequired = 2
         leftDoubleTap.delegate = self
         leftDoubleTapGesture = leftDoubleTap
         playerGestureSurfaceView.addGestureRecognizer(leftDoubleTap)
-        
+
         let rightDoubleTap = UITapGestureRecognizer(target: self, action: #selector(rightSideDoubleTapped))
         rightDoubleTap.numberOfTapsRequired = 2
         rightDoubleTap.delegate = self
@@ -6404,9 +6269,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             twoFingerTap.numberOfTouchesRequired = 2
             twoFingerTap.delegate = self
             playerGestureSurfaceView.addGestureRecognizer(twoFingerTap)
-            // The single-tap reveals the controls; require it to fail when a two-finger tap is
-            // recognized so the play/pause gesture never also wakes the player UI (the previous
-            // cancel-on-handler approach lost the race when the single tap fired afterwards).
+
             containerTapGesture?.require(toFail: twoFingerTap)
         }
         #endif
@@ -6414,9 +6277,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     @objc private func leftSideDoubleTapped(_ gesture: UITapGestureRecognizer) {
         guard isDoubleTapSeekEnabled else { return }
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.isHandoffLoadPending else { return }
-#endif
         let location = gesture.location(in: videoContainer)
         let isLeftSide = location.x < videoContainer.bounds.width / 2
         guard isLeftSide else { return }
@@ -6431,9 +6291,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     @objc private func rightSideDoubleTapped(_ gesture: UITapGestureRecognizer) {
         guard isDoubleTapSeekEnabled else { return }
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.isHandoffLoadPending else { return }
-#endif
         let location = gesture.location(in: videoContainer)
         let isRightSide = location.x >= videoContainer.bounds.width / 2
         guard isRightSide else { return }
@@ -6447,7 +6304,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     @objc private func twoFingerTapped(_ gesture: UITapGestureRecognizer) {
-        // Two-finger tap: toggle play/pause without showing UI
+
         togglePlaybackFromVideoGesture(source: "two-finger-tap")
     }
 
@@ -6703,7 +6560,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
 #else
-    // tvOS stub to satisfy shared call sites when brightness UI is unavailable
+
     private func updateBrightnessControlVisibility() { }
     private func updateVolumeControlVisibility() { }
 #endif
@@ -6718,13 +6575,21 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             break
         }
     }
-    
+
     private func beginHoldSpeed() {
         originalSpeed = rendererGetSpeed()
-        let holdSpeed = UserDefaults.standard.float(forKey: "holdSpeedPlayer")
-        let targetSpeed = holdSpeed > 0 ? Double(holdSpeed) : 2.0
+        let store = ProfileSettingsStore.active
+        let savedSpeed = store.double(forKey: "holdSpeedPlayer")
+        let targetSpeed = PlayerSettingsStore.sanitizedNumericSetting(
+            savedSpeed,
+            default: 2,
+            range: 0.1...3
+        )
+        if savedSpeed != targetSpeed {
+            store.set(targetSpeed, forKey: "holdSpeedPlayer")
+        }
         rendererSetSpeed(targetSpeed)
-        
+
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
             self.speedIndicatorLabel.text = String(format: "%.1fx", targetSpeed)
@@ -6733,10 +6598,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
         }
     }
-    
+
     private func endHoldSpeed() {
         rendererSetSpeed(originalSpeed)
-        
+
         DispatchQueue.main.async { [weak self] in
             UIView.animate(withDuration: 0.2) {
                 self?.speedIndicatorLabel.alpha = 0.0
@@ -6754,11 +6619,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self?.updateSpeedMenu()
         }
     }
-    
+
     @objc private func playPauseTapped() {
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.isHandoffLoadPending else { return }
-#endif
         if rendererIsPausedState() {
             markBackgroundRecoveryForegrounded(source: "play-button")
             rendererPlay()
@@ -6774,16 +6636,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
         }
     }
-    
+
     @objc private func centerPlayPauseTapped() {
         logSharedPlayerControl("center play/pause tapped paused=\(rendererIsPausedState()) loading=\(isRendererLoading) cached=\(secondsText(cachedPosition))/\(secondsText(cachedDuration))")
         playPauseTapped()
     }
-    
+
     @objc private func skipBackwardTapped() {
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.isHandoffLoadPending else { return }
-#endif
         let seconds = playerSeekSeconds
         logSharedPlayerControl("skip backward button tapped seek=\(String(format: "%.1f", seconds))")
         rendererSeek(by: -seconds)
@@ -6793,11 +6652,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         animateButtonTap(skipBackwardButton)
         showControlsTemporarily()
     }
-    
+
     @objc private func skipForwardTapped() {
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.isHandoffLoadPending else { return }
-#endif
         let seconds = playerSeekSeconds
         logSharedPlayerControl("skip forward button tapped seek=\(String(format: "%.1f", seconds))")
         rendererSeek(by: seconds)
@@ -6809,7 +6665,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
     private func updateSubtitleMenu() {
         var trackActions: [UIAction] = []
-        
+
         let disableAction = UIAction(
             title: "Disable Subtitles",
             image: UIImage(systemName: "xmark"),
@@ -6826,7 +6682,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self.updateSubtitleMenu()
         }
         trackActions.append(disableAction)
-        
+
         for (index, _) in subtitleURLs.enumerated() {
             let isSelected = subtitleModel.isVisible && currentSubtitleIndex == index
             let title = index < subtitleNames.count ? subtitleNames[index] : "Subtitle \(index + 1)"
@@ -6848,16 +6704,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
             trackActions.append(action)
         }
-        
+
         let trackMenu = UIMenu(title: "Select Track", image: UIImage(systemName: "list.bullet"), children: trackActions)
-        
+
         let appearanceMenu = createAppearanceMenu()
-        
+
         let mainMenu = UIMenu(title: "Subtitles", children: [trackMenu, appearanceMenu])
         nativeSubtitleMenuContentSignature = nil
         subtitleButton.menu = mainMenu
     }
-    
+
     private func createAppearanceMenu() -> UIMenu {
         let foregroundColors: [(String, UIColor)] = [
             ("White", .white),
@@ -6866,7 +6722,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             ("Green", .green),
             ("Magenta", .magenta)
         ]
-        
+
         let foregroundColorActions = foregroundColors.map { (name, color) in
             UIAction(
                 title: name,
@@ -6877,16 +6733,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 self?.scheduleSubtitleMenuRefresh()
             }
         }
-        
+
         let foregroundColorMenu = UIMenu(title: "Text Color", image: UIImage(systemName: "paintpalette"), children: foregroundColorActions)
-        
+
         let strokeColors: [(String, UIColor)] = [
             ("Black", .black),
             ("Dark Gray", .darkGray),
             ("White", .white),
             ("None", .clear)
         ]
-        
+
         let strokeColorActions = strokeColors.map { (name, color) in
             UIAction(
                 title: name,
@@ -6897,9 +6753,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 self?.scheduleSubtitleMenuRefresh()
             }
         }
-        
+
         let strokeColorMenu = UIMenu(title: "Stroke Color", image: UIImage(systemName: "pencil.tip"), children: strokeColorActions)
-        
+
         let strokeWidths: [(String, CGFloat)] = [
             ("None", 0.0),
             ("Thin", 0.5),
@@ -6907,7 +6763,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             ("Medium", 1.5),
             ("Thick", 2.0)
         ]
-        
+
         let strokeWidthActions = strokeWidths.map { (name, width) in
             UIAction(
                 title: name,
@@ -6918,9 +6774,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 self?.scheduleSubtitleMenuRefresh()
             }
         }
-        
+
         let strokeWidthMenu = UIMenu(title: "Stroke Width", image: UIImage(systemName: "lineweight"), children: strokeWidthActions)
-        
+
         let fontSizes: [(String, CGFloat)] = [
             ("Very Small", 20.0),
             ("Small", 24.0),
@@ -6930,7 +6786,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             ("Huge", 42.0),
             ("Extra Huge", 46.0)
         ]
-        
+
         let fontSizeActions = fontSizes.map { (name, size) in
             UIAction(
                 title: name,
@@ -6941,7 +6797,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 self?.scheduleSubtitleMenuRefresh()
             }
         }
-        
+
         let fontSizeMenu = UIMenu(title: "Font Size", image: UIImage(systemName: "textformat.size"), children: fontSizeActions)
 
         let verticalOffsets: [(String, CGFloat)] = [
@@ -6985,9 +6841,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             closedCaptionBackgroundMenu
         ])
     }
-    
+
     private func updateCurrentSubtitleAppearance() {
-        // Applying the style IS the overlay refresh, every renderer's refreshSubtitleOverlay() simply re-applies.
+
         rendererApplySubtitleStyle(currentSubtitleStyle())
 
         guard isVLCCustomSubtitleOverlayEnabled else { return }
@@ -7030,9 +6886,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private var subtitleMenuRefreshWorkItem: DispatchWorkItem?
 
-    /// Coalesces subtitle-menu rebuilds. Changing appearance options (and the settings
-    /// observer) can trigger several rebuilds of the whole UIMenu tree in quick succession,
-    /// which is the main remaining source of player-menu lag, so debounce them.
     private func scheduleSubtitleMenuRefresh() {
         subtitleMenuRefreshWorkItem?.cancel()
         let item = DispatchWorkItem { [weak self] in
@@ -7049,7 +6902,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             showMPVSubtitleMenu()
         }
     }
-    
+
     private func updateSubtitleButtonAppearance() {
         let cfg = UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
         let imageName = subtitleModel.isVisible ? "captions.bubble.fill" : "captions.bubble"
@@ -7062,12 +6915,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private var isVLCEpisodeBrowserButtonSettingEnabled: Bool {
-        if UserDefaults.standard.object(forKey: "showEpisodeBrowserButton") == nil {
-            let legacy = UserDefaults.standard.object(forKey: "showVLCEpisodeBrowserButton") as? Bool ?? true
-            UserDefaults.standard.set(legacy, forKey: "showEpisodeBrowserButton")
+        if ProfileSettingsStore.active.object(forKey: "showEpisodeBrowserButton") == nil {
+            let legacy = ProfileSettingsStore.active.object(forKey: "showVLCEpisodeBrowserButton") as? Bool ?? true
+            ProfileSettingsStore.active.set(legacy, forKey: "showEpisodeBrowserButton")
             return legacy
         }
-        return UserDefaults.standard.bool(forKey: "showEpisodeBrowserButton")
+        return ProfileSettingsStore.active.bool(forKey: "showEpisodeBrowserButton")
     }
 
     private func updateEpisodeBrowserButtonVisibility() {
@@ -7142,16 +6995,19 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             originalTMDBEpisodeNumber: context.originalTMDBEpisodeNumber,
             specialTitleOnlySearch: context.specialTitleOnlySearch,
             episodePlaybackContext: context.episodePlaybackContext,
-            // This is an explicit manual request. Auto-Select Episodes remains independently
-            // active inside ServicesResultsSheet, but global Auto Mode must not take over.
+
             autoModeOnly: false,
             ignoresAutoMode: true,
             onResolvedPlaybackRequest: { [weak self] request in
-                self?.replacePlayback(with: request, reason: "player-services")
+                guard let self else {
+                    Self.invalidateAbandonedProxyOwnership(request)
+                    return
+                }
+                self.replacePlayback(with: request, reason: "player-services")
             },
             isAnimationGenre16: context.isAnimation
         )
-        let host = UIHostingController(rootView: sheet)
+        let host = UIHostingController(rootView: sheet.profileScopedAppStorage())
         episodeSourceSheetController = host
         episodeSourceSheetTransitionID = nil
         present(host, animated: true) { [weak self, weak host] in
@@ -7207,10 +7063,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 self.dismissEpisodeBrowser(animated: true, reason: "drawer-close")
             },
             onEpisodeSelected: { [weak self] item in
-                self?.handleEpisodeBrowserSelection(item)
+                self?.beginEpisodeBrowserSelection(item)
             }
         )
-        let host = UIHostingController(rootView: AnyView(drawer))
+        let host = UIHostingController(rootView: AnyView(drawer.profileScopedAppStorage()))
         host.view.translatesAutoresizingMaskIntoConstraints = false
         host.view.backgroundColor = .clear
         addChild(host)
@@ -7255,6 +7111,34 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         episodeBrowserHostingController = nil
     }
 
+    private func beginEpisodeBrowserSelection(_ item: PlayerEpisodeBrowserItem) {
+        guard !item.isCurrent else { return }
+#if os(iOS)
+        if case .active = watchTogetherConnectionState {
+            guard pendingWatchTogetherNextEpisodeTarget == nil else { return }
+            if item.isAnime, item.playbackContext?.hasAnimeMediaId != true {
+                showPlayerNotice("Watch Together needs this episode's exact anime identity. Open it from the show page so everyone can move together.")
+                return
+            }
+            let transitionID = UUID()
+            pendingWatchTogetherNextEpisodeTransitionID = transitionID
+            pendingWatchTogetherNextEpisodeTarget = NextEpisodePlaybackTarget(
+                seasonNumber: item.episode.seasonNumber,
+                episodeNumber: item.episode.episodeNumber,
+                playbackContext: item.playbackContext,
+                title: item.seasonTitleOverride ?? item.mediaTitle
+            )
+            handleEpisodeBrowserSelection(
+                item,
+                reason: "episode-browser-watch-together",
+                watchTogetherTransitionID: transitionID
+            )
+            return
+        }
+#endif
+        handleEpisodeBrowserSelection(item)
+    }
+
     private func handleEpisodeBrowserSelection(
         _ item: PlayerEpisodeBrowserItem,
         reason: String = "episode-browser",
@@ -7265,7 +7149,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 
         #if !os(tvOS)
-        if UserDefaults.standard.bool(forKey: "preferDownloadedMedia"),
+
+        if ProfileSettingsStore.active.bool(forKey: "preferDownloadedMedia")
+            || initialURL?.isFileURL == true,
            let request = downloadedPlaybackRequest(for: item) {
             guard commitPendingWatchTogetherNextEpisodeIfNeeded(
                 transitionID: watchTogetherTransitionID
@@ -7297,13 +7183,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             headers: [:],
             subtitles: subtitleArray,
             subtitleNames: nil,
-            mediaInfo: downloadItem.mediaInfo,
+            mediaInfo: .episode(
+                showId: item.showId,
+                seasonNumber: item.episode.seasonNumber,
+                episodeNumber: item.episode.episodeNumber,
+                showTitle: item.showTitle,
+                showPosterURL: item.showPosterURL,
+                isAnime: item.isAnime
+            ),
             imdbId: item.imdbId,
-            isAnimeHint: downloadItem.isAnime,
-            isAnimationContentHint: nil, // offline downloads carry no TMDB genres
+            isAnimeHint: downloadItem.isAnime || item.isAnime,
+            isAnimationContentHint: nil,
             originalTMDBSeasonNumber: item.originalTMDBSeasonNumber,
             originalTMDBEpisodeNumber: item.originalTMDBEpisodeNumber,
-            episodePlaybackContext: downloadItem.episodePlaybackContext ?? item.playbackContext,
+            episodePlaybackContext: item.playbackContext ?? downloadItem.episodePlaybackContext,
             launchContext: nil,
             mediaYear: item.mediaYear
         )
@@ -7339,24 +7232,26 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             specialTitleOnlySearch: item.playbackContext?.titleOnlySearch ?? false,
             episodePlaybackContext: item.playbackContext,
             autoModeOnly: watchTogetherTransitionID != nil
-                || UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"),
+                || AutoModeSettings.isEnabled(),
             watchTogetherExactHandoff: watchTogetherTransitionID != nil,
             onResolvedPlaybackRequest: { [weak self] request in
                 guard let self,
                       self.commitPendingWatchTogetherNextEpisodeIfNeeded(
                         transitionID: watchTogetherTransitionID
-                      ) else { return }
+                      ) else {
+                    Self.invalidateAbandonedProxyOwnership(request)
+                    return
+                }
                 self.replacePlayback(with: request, reason: "\(reason)-resolved-source")
             },
-            // Same show as the one playing - propagate its animation classification.
-            // (Must follow onResolvedPlaybackRequest: it is declared after it on the view.)
+
             isAnimationGenre16: isAnimationContentHint ?? false
         )
         let host = UIHostingController(rootView: sheet.onDisappear { [weak self] in
             self?.schedulePendingWatchTogetherNextEpisodeCleanup(
                 transitionID: watchTogetherTransitionID
             )
-        })
+        }.profileScopedAppStorage())
 #if os(iOS)
         episodeSourceSheetController = host
         episodeSourceSheetTransitionID = watchTogetherTransitionID
@@ -7370,6 +7265,24 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
     }
 
+    private static func hasSameMediaIdentity(_ lhs: MediaInfo?, _ rhs: MediaInfo?) -> Bool {
+        switch (lhs, rhs) {
+        case (.none, .none):
+            return true
+        case let (.movie(leftID, _, _, _), .movie(rightID, _, _, _)):
+            return leftID == rightID
+        case let (
+            .episode(leftShowID, leftSeason, leftEpisode, _, _, _),
+            .episode(rightShowID, rightSeason, rightEpisode, _, _, _)
+        ):
+            return leftShowID == rightShowID
+                && leftSeason == rightSeason
+                && leftEpisode == rightEpisode
+        default:
+            return false
+        }
+    }
+
     private func replacePlayback(
         with request: PlayerResolvedPlaybackRequest,
         reason: String = "episode-browser",
@@ -7378,75 +7291,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     ) {
         DispatchQueue.main.async { [weak self] in
             guard let self, !self.isClosing else {
-#if os(iOS) && canImport(GoogleCast)
-                if let castReplacementTransactionID {
-                    GoogleCastCoordinator.shared.abandonRemoteReplacementCommit(castReplacementTransactionID)
-                }
-#endif
+                Self.invalidateAbandonedProxyOwnership(request)
                 return
             }
-#if os(iOS) && canImport(GoogleCast)
-            if castReplacementAlreadyLoaded {
-                guard let castReplacementTransactionID,
-                      GoogleCastSettings.isEnabled(),
-                      GoogleCastCoordinator.shared.isAwaitingRemoteReplacementCommit(castReplacementTransactionID) else {
-                    if let castReplacementTransactionID {
-                        GoogleCastCoordinator.shared.abandonRemoteReplacementCommit(castReplacementTransactionID)
-                    }
-                    return
-                }
-            }
-            if !castReplacementAlreadyLoaded,
-               GoogleCastCoordinator.shared.isHandoffLoadPending {
-                self.showPlayerNotice("Cast is still connecting. Wait for it to finish before changing sources.")
-                return
-            }
-            if !castReplacementAlreadyLoaded,
-               GoogleCastCoordinator.shared.isReplacementInProgress {
-                self.showPlayerNotice("Cast is still checking the previous source change.")
-                return
-            }
-            if !castReplacementAlreadyLoaded,
-               GoogleCastCoordinator.shared.isRemoteMediaActive {
-                let candidate = self.castReplacementRequest(for: request)
-                self.showPlayerNotice("Checking the new source for your Cast device...")
-                self.showControlsTemporarily()
-                GoogleCastCoordinator.shared.replaceRemoteMedia(with: candidate, player: self) { [weak self] result in
-                    guard let self, !self.isClosing else {
-                        if case .loaded(let transactionID) = result {
-                            GoogleCastCoordinator.shared.abandonRemoteReplacementCommit(transactionID)
-                        }
-                        return
-                    }
-                    switch result {
-                    case .loaded(let transactionID):
-                        guard GoogleCastSettings.isEnabled(),
-                              GoogleCastCoordinator.shared.isAwaitingRemoteReplacementCommit(transactionID) else {
-                            GoogleCastCoordinator.shared.abandonRemoteReplacementCommit(transactionID)
-                            return
-                        }
-                        self.replacePlayback(
-                            with: request,
-                            reason: reason,
-                            castReplacementAlreadyLoaded: true,
-                            castReplacementTransactionID: transactionID
-                        )
-                    case .failed(let message):
-                        guard GoogleCastSettings.isEnabled() else { return }
-                        self.showPlayerNotice("Cast kept playing the current video.")
-                        self.presentCastCompatibilityAlert(title: "Unable to Change Cast Source", message: message)
-                    case .restoredLocally(let message):
-                        guard GoogleCastSettings.isEnabled() else { return }
-                        self.showPlayerNotice("Eclipse restored the current video locally.")
-                        self.presentCastCompatibilityAlert(title: "Unable to Change Cast Source", message: message)
-                    }
-                }
-                return
-            }
-#endif
-            // The coordinator's Automatic fallback closure captures the original immutable
-            // PlaybackRequest. Reusing it after an in-place episode replacement could reopen the
-            // prior episode, so later in-place loads deliberately keep their normal source retry.
+
+            self.retainEphemeralProxyOwnership(
+                request.launchContext?.ephemeralProxyOwnership
+            )
+
             self.onAutomaticPlaybackFallback = nil
             self.isCoordinatorEngineFallback = false
             self.pendingRendererRestartRetryGeneration = nil
@@ -7487,6 +7339,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self.mediaInfo = request.mediaInfo
             self.imdbId = request.imdbId
             self.isAnimeHint = request.isAnimeHint
+            self.isAnimationContentHint = request.isAnimationContentHint ?? self.isAnimationContentHint
+#if os(iOS) && ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE
+
+            self.gpuMPVRenderer?.contentIsAnimation = self.isAnimationContent()
+#endif
             self.originalTMDBSeasonNumber = request.originalTMDBSeasonNumber
             self.originalTMDBEpisodeNumber = request.originalTMDBEpisodeNumber
             self.episodePlaybackContext = request.episodePlaybackContext
@@ -7525,15 +7382,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 servicesOriginalAudioLanguage: self.activePlaybackRequest?.servicesOriginalAudioLanguage,
                 onRequestNextEpisode: self.activePlaybackRequest?.onRequestNextEpisode,
                 onRequestResolvedNextEpisode: self.activePlaybackRequest?.onRequestResolvedNextEpisode,
-                onPlaybackStartupFailure: self.activePlaybackRequest?.onPlaybackStartupFailure,
+                // The launch-site recovery callback is bound to the episode the host launched.
+                // Forwarding it across an episode change lets a failed replacement reopen the
+                // previous episode, so only a same-media source switch may inherit it.
+                onPlaybackStartupFailure: Self.hasSameMediaIdentity(
+                    self.activePlaybackRequest?.mediaInfo,
+                    request.mediaInfo
+                ) ? self.activePlaybackRequest?.onPlaybackStartupFailure : nil,
                 localNextEpisodeFallback: self.activePlaybackRequest?.localNextEpisodeFallback
             )
-#if os(iOS) && canImport(GoogleCast)
-            self.activePlaybackRequest = selectionRequest
-            if castReplacementAlreadyLoaded, let castReplacementTransactionID {
-                GoogleCastCoordinator.shared.confirmRemoteReplacementCommitted(castReplacementTransactionID)
-            }
-#endif
             let existingSelectionStillMatches: Bool = {
                 guard let existing = self.servicesSelectionContext else { return false }
                 switch request.mediaInfo {
@@ -7555,26 +7412,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
             self.updatePlayerTitle()
             self.updateEpisodeBrowserButtonVisibility()
-#if os(iOS) && canImport(GoogleCast)
-            let castOwnsRemotePlayback = castReplacementAlreadyLoaded || GoogleCastCoordinator.shared.isRemoteMediaActive
-            // A selected receiver without Eclipse media (for example, after
-            // the previous source was blocked) must not block the local B
-            // replacement. Start the fresh Cast probe after local loading has
-            // reset A's position, so B cannot inherit A's seek time.
-            let shouldPrepareCastAfterLocalReplacement = !castOwnsRemotePlayback
-                && GoogleCastCoordinator.shared.isSessionConnected
-            if castOwnsRemotePlayback {
-                if !castReplacementAlreadyLoaded {
-                    GoogleCastCoordinator.shared.update(request: selectionRequest)
-                }
-                // Keep Molten released while the receiver owns playback. A
-                // replacement is only committed above after its Cast LOAD has
-                // succeeded, so a failed source leaves this player untouched.
-                self.showPlayerNotice("Loading the new selection on your Cast device...")
-                self.showControlsTemporarily()
-                return
-            }
-#endif
             let shouldSwitchVLCInPlace = wasVLC && self.isRunning
 
             let startReplacementLoad = { [weak self] in
@@ -7586,11 +7423,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     self.isReplacingVLCPlaybackInPlace = true
                 }
                 self.load(url: request.url, preset: request.preset, headers: request.headers)
-#if os(iOS) && canImport(GoogleCast)
-                if shouldPrepareCastAfterLocalReplacement {
-                    GoogleCastCoordinator.shared.update(request: selectionRequest)
-                }
-#endif
                 if shouldSwitchVLCInPlace {
                     self.isReplacingVLCPlaybackInPlace = false
                 }
@@ -7621,47 +7453,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
     }
 
-#if os(iOS) && canImport(GoogleCast)
-    private func castReplacementRequest(for request: PlayerResolvedPlaybackRequest) -> PlaybackRequest {
-        let replacementTitle: String = {
-            switch request.mediaInfo {
-            case .movie(_, let title, _, _): return title
-            case .episode(_, _, _, let showTitle, _, _): return showTitle ?? playerTitleOverride ?? "Show"
-            case .none: return playerTitleOverride ?? ""
-            }
-        }()
-        return PlaybackRequest(
-            url: request.url,
-            preset: request.preset,
-            headers: request.headers ?? [:],
-            subtitles: request.subtitles ?? [],
-            subtitleNames: request.subtitleNames,
-            subtitleHeadersByURL: request.subtitleHeadersByURL,
-            mediaSelectionIntent: playbackMediaSelectionIntent,
-            mediaInfo: request.mediaInfo,
-            mediaYear: request.mediaYear
-                ?? activePlaybackRequest?.mediaYear
-                ?? servicesSelectionContext?.mediaYear,
-            imdbID: request.imdbId,
-            episodePlaybackContext: request.episodePlaybackContext,
-            launchContext: request.launchContext,
-            resumePosition: nil,
-            title: replacementTitle,
-            subtitle: activePlaybackRequest?.subtitle,
-            artworkURL: activePlaybackRequest?.artworkURL,
-            isAnime: request.isAnimeHint,
-            isAnimation: request.isAnimationContentHint ?? isAnimationContentHint ?? false,
-            originalTMDBSeasonNumber: request.originalTMDBSeasonNumber,
-            originalTMDBEpisodeNumber: request.originalTMDBEpisodeNumber,
-            servicesOriginalTitle: activePlaybackRequest?.servicesOriginalTitle,
-            servicesOriginalAudioLanguage: activePlaybackRequest?.servicesOriginalAudioLanguage,
-            onRequestNextEpisode: activePlaybackRequest?.onRequestNextEpisode,
-            onRequestResolvedNextEpisode: activePlaybackRequest?.onRequestResolvedNextEpisode,
-            onPlaybackStartupFailure: activePlaybackRequest?.onPlaybackStartupFailure,
-            localNextEpisodeFallback: activePlaybackRequest?.localNextEpisodeFallback
-        )
-    }
-#endif
 
     private func resetTimedEpisodeStateForNewPlayback() {
 #if !os(tvOS)
@@ -7960,13 +7751,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             ("1.75x", 1.75),
             ("2.0x", 2.0)
         ]
-#if os(iOS) && canImport(GoogleCast)
-        // The Default Media Receiver accepts 0.5x...2x. Do not present a
-        // local-only 0.25x option while the receiver owns playback.
-        if GoogleCastCoordinator.shared.isRemoteMediaActive {
-            speeds.removeAll { $0.1 < 0.5 }
-        }
-#endif
         let actions = speeds.map { name, speed in
             makeOverlayAction(title: name, imageName: "hare.fill", isSelected: abs(currentSpeed - speed) < 0.01) { [weak self] in
                 guard let self else { return }
@@ -8015,7 +7799,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
         showOverlayMenu(title: "Audio Tracks", kind: "audio", sections: [PlayerOverlayMenuSection(title: nil, actions: actions)])
     }
-    
+
     private func updateSpeedMenu() {
         if usesOverlayPlayerMenus {
             if nativeSpeedMenuContentSignature != "overlay" {
@@ -8036,11 +7820,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             ("1.75x", 1.75),
             ("2.0x", 2.0)
         ]
-#if os(iOS) && canImport(GoogleCast)
-        if GoogleCastCoordinator.shared.isRemoteMediaActive {
-            speeds.removeAll { $0.1 < 0.5 }
-        }
-#endif
 
         let menuSignature = "native|\(String(format: "%.2f", currentSpeed))|\(speeds.map { "\($0.0):\(String(format: "%.2f", $0.1))" }.joined(separator: "|"))"
         if menuSignature == nativeSpeedMenuContentSignature {
@@ -8049,7 +7828,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if shouldDeferNativePlayerMenuRefresh(kind: "speed") {
             return
         }
-        
+
         let speedActions = speeds.map { (name, speed) in
             UIAction(
                 title: name,
@@ -8071,24 +7850,23 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 self?.updateSpeedMenu()
             }
         }
-        
+
         let speedMenu = UIMenu(title: "Playback Speed", image: UIImage(systemName: "hare.fill"), children: speedActions)
         speedButton.menu = speedMenu
         nativeSpeedMenuContentSignature = menuSignature
     }
-    
+
     private func updateAudioTracksMenuWhenReady(attempt: Int = 0) {
-        // Tracks may have just appeared/changed (async discovery after load) - re-read fresh.
+
         audioTrackCacheValid = false
-        // Stop retrying if user manually selected a track
+
         if userSelectedAudioTrack {
             updateAudioTracksMenu()
             return
         }
-        
+
         let detailedTracks = rendererGetAudioTracksDetailed()
-        
-        // If tracks are populated, proceed with auto-selection
+
         if !detailedTracks.isEmpty {
             updateAudioTracksMenu()
             return
@@ -8098,15 +7876,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             updateAudioTracksMenu()
             return
         }
-        
-        // Tracks not ready yet - retry shortly (works for both VLC and MPV)
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
             self?.updateAudioTracksMenuWhenReady(attempt: attempt + 1)
         }
     }
 
     private func updateSubtitleTracksMenuWhenReady(attempt: Int = 0) {
-        // Tracks may have just appeared/changed (async discovery after load) - re-read fresh.
+
         subtitleTrackCacheValid = false
         if userSelectedSubtitleTrack {
             updateSubtitleTracksMenu()
@@ -8134,14 +7911,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self?.updateSubtitleTracksMenuWhenReady(attempt: attempt + 1)
         }
     }
-    
+
     private func updateAudioTracksMenu() {
         let detailedTracks = menuAudioDetailedTracks()
         let tracks = detailedTracks.map { ($0.0, $0.1) }
         let isAnime = isAnimeContent()
         let currentAudioTrackId = menuCurrentAudioTrackId()
-        
-        // Always show the audio button so the user can view the menu even when empty
+
         audioButton.isHidden = false
 
         let trackSignature = detailedTracks.map { "\($0.0):\($0.1):\($0.2)" }.joined(separator: "|")
@@ -8226,7 +8002,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 self.userSelectedAudioTrack = true
                 self.recordUserAudioSelection(name: name, languageTag: language)
                 self.rendererSetAudioTrack(id: id)
-                // Debounce menu update to avoid lag - only update after 0.3s of no selection changes
+
                 self.audioMenuDebounceTimer?.invalidate()
                 self.audioMenuDebounceTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { _ in
                     DispatchQueue.main.async { [weak self] in
@@ -8235,7 +8011,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 }
             }
         }
-        
+
         let audioMenu = UIMenu(title: "Audio Tracks", image: UIImage(systemName: "speaker.wave.2"), children: trackActions)
         audioButton.menu = audioMenu
         nativeAudioMenuContentSignature = menuSignature
@@ -8253,19 +8029,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
     }
 
-    /// Classifies the current title into exactly one comfort-audio category. Anime takes priority
-    /// (it's also genre-16, so it must be checked first); a genre-16 hint that isn't anime is a
-    /// western cartoon; everything else (incl. unknown) is live action.
+    private func isAnimationContent() -> Bool {
+        isAnimeContent() || isAnimationContentHint == true
+    }
+
     private func audioComfortCategory() -> AudioComfortContentCategory {
         if isAnimeContent() { return .anime }
         if isAnimationContentHint == true { return .westernAnimation }
         return .liveAction
     }
 
-    // MARK: - Comfort / anime-like audio processing
-
-    /// The `af` chain to apply right now: empty (passthrough) when the mode is Original or the
-    /// current title's category isn't in the selected scope set; otherwise the mode's filter chain.
     private func resolvedAudioComfortFilterChain() -> String {
         let mode = Settings.shared.audioComfortMode
         guard mode != .original else { return "" }
@@ -8274,8 +8047,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func applyAudioComfortFilterIfNeeded(reason: String) {
-        // `af` is an mpv-only feature; the protocol default is a no-op for other backends, but
-        // skip the work (and the log) entirely when no mpv renderer is active.
+
         guard isMPVRenderer else { return }
         let mode = Settings.shared.audioComfortMode
         let scope = Settings.shared.audioComfortScopeCategories.map { $0.rawValue }.sorted().joined(separator: "+")
@@ -8283,8 +8055,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         Logger.shared.log("[PlayerVC.Audio] comfort mode=\(mode.rawValue) scope=[\(scope)] category=\(audioComfortCategory().rawValue) reason=\(reason) -> \(chain.isEmpty ? "(passthrough)" : chain)", type: "MPV")
         renderer.applyAudioFilterChain(chain)
     }
-
-    // MARK: - Skip Data Integration (AniSkip + TheIntroDB)
 
     private func fetchSkipData() {
         guard !skipDataFetched else { return }
@@ -8297,7 +8067,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return
         }
 
-        // Extract TMDB ID, season, episode from mediaInfo
         let tmdbId: Int
         let seasonNumber: Int?
         let episodeNumber: Int?
@@ -8329,7 +8098,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         Task { [weak self] in
             guard let self else { return }
 
-            // Wait for renderer to report a valid duration
             var durationAtFetch: Double = 0
             for attempt in 1...20 {
                 durationAtFetch = await MainActor.run { self.cachedDuration }
@@ -8341,12 +8109,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
 
             var segments: [SkipSegment] = []
-            let skip85sEnabled = UserDefaults.standard.bool(forKey: "skip85sEnabled")
-            let skip85sAlwaysVisible = UserDefaults.standard.bool(forKey: "skip85sAlwaysVisible")
+            let skip85sEnabled = ProfileSettingsStore.active.bool(forKey: "skip85sEnabled")
+            let skip85sAlwaysVisible = ProfileSettingsStore.active.bool(forKey: "skip85sAlwaysVisible")
 
-            let aniSkipEnabled = UserDefaults.standard.object(forKey: "aniSkipEnabled") as? Bool ?? true
-            let introDBEnabled = UserDefaults.standard.object(forKey: "introDBEnabled") as? Bool ?? true
-            let introDBAppEnabled = UserDefaults.standard.object(forKey: "introDBAppEnabled") as? Bool ?? true
+            let aniSkipEnabled = ProfileSettingsStore.active.object(forKey: "aniSkipEnabled") as? Bool ?? true
+            let introDBEnabled = ProfileSettingsStore.active.object(forKey: "introDBEnabled") as? Bool ?? true
+            let introDBAppEnabled = ProfileSettingsStore.active.object(forKey: "introDBAppEnabled") as? Bool ?? true
             var selectedSkipProvider: String?
 
             Logger.shared.log(
@@ -8354,7 +8122,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 type: "Skip"
             )
 
-            // Prefer AniSkip for anime coverage.
             if !aniSkipEnabled {
                 Logger.shared.log("SkipData: AniSkip skipped: disabled in Settings", type: "Skip")
             } else if !isAnime {
@@ -8380,11 +8147,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 }
             }
 
-            // Fall back to TheIntroDB.
-            // For anime, use original TMDB S/E (pre-AniList restructuring) since TheIntroDB uses TMDB numbering
             let introDBSeason = self.originalTMDBSeasonNumber ?? seasonNumber
             let introDBEpisode = self.originalTMDBEpisodeNumber ?? episodeNumber
-            // IntroDB.app's IMDb key follows the currently playing episode for regular anime seasons.
+
             let introDBAppSeason = self.episodePlaybackContext?.isSpecial == true ? introDBSeason : seasonNumber
             let introDBAppEpisode = self.episodePlaybackContext?.isSpecial == true ? introDBEpisode : episodeNumber
             if !introDBEnabled {
@@ -8458,7 +8223,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 return
             }
 
-            // Store segments and normalize for progress bar
             await MainActor.run {
                 Logger.shared.log("SkipData: using \(selectedSkipProvider ?? "unknown provider") with \(segments.count) segments", type: "Skip")
                 self.skipSegments = segments
@@ -8494,17 +8258,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
     }
 
-    /// AniSkip fetch with anime ID resolution, then conversion to the MAL ID the API expects.
     private func fetchAniSkipSegments(tmdbId: Int, seasonNumber: Int, episodeNumber: Int, showTitle: String?, duration: Double) async -> [SkipSegment] {
         let skipAniListTraversal = PerformanceModeSettings.skipsAniListTraversalForAnimeDetails
 
-        // Step 0: Prefer the playback context because it is tied to the selected anime season.
         var animeProviderId = episodePlaybackContext?.anilistMediaId
         if let id = animeProviderId {
             Logger.shared.log("SkipData: AniSkip step 0 - playback context media ID \(id)", type: "Skip")
         }
 
-        // Step 1: Check season-specific cache
         if animeProviderId == nil {
             animeProviderId = trackerManager.cachedAniListSeasonId(tmdbId: tmdbId, seasonNumber: seasonNumber)
             if let id = animeProviderId {
@@ -8512,7 +8273,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
         }
 
-        // Step 2: Fall back to show-level cache
         if animeProviderId == nil {
             animeProviderId = trackerManager.cachedAniListId(for: tmdbId)
             if let id = animeProviderId {
@@ -8520,7 +8280,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
         }
 
-        // Step 3: Full AniList resolution via sequel chain
         if animeProviderId == nil, !skipAniListTraversal, let title = showTitle {
             Logger.shared.log("SkipData: AniSkip step 3 - resolving via AniListService for '\(title)'", type: "Skip")
             do {
@@ -8539,7 +8298,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
         }
 
-        // Step 4: Last resort - simple title search
         if animeProviderId == nil, !skipAniListTraversal {
             animeProviderId = await trackerManager.getAniListMediaId(tmdbId: tmdbId)
         }
@@ -8551,7 +8309,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
         let malId: Int
         if finalId < 0 {
-            malId = abs(finalId)
+            guard let exactMALID = RemoteMediaNumericBoundary.positiveMagnitude(finalId) else {
+                return []
+            }
+            malId = exactMALID
             Logger.shared.log("SkipData: AniSkip using MAL fallback mediaId=\(malId)", type: "Skip")
         } else {
             let resolvedMALId: Int?
@@ -8597,7 +8358,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     @discardableResult
     private func applySkip85sFallbackVisibility() -> Bool {
-        if UserDefaults.standard.bool(forKey: "skip85sEnabled") {
+        if ProfileSettingsStore.active.bool(forKey: "skip85sEnabled") {
             showSkip85sButton()
             return true
         }
@@ -8608,8 +8369,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     private func updateSkipState(position: Double, duration: Double) {
         guard !skipSegments.isEmpty, duration > 0 else { return }
 
-        // Deferred normalization: if fetchSkipData completed before duration was available,
-        // progressModel.skipSegments will still be empty. Populate it now.
         if progressModel.skipSegments.isEmpty {
             progressModel.skipSegments = skipSegments.map { seg in
                 (start: seg.startTime / duration, end: seg.endTime / duration)
@@ -8617,16 +8376,23 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             Logger.shared.log("SkipData: Deferred normalization applied with duration=\(String(format: "%.1f", duration))", type: "Skip")
         }
 
-        // Find if current position is inside any skip segment
         let activeSegment = skipSegments.first { seg in
             guard seg.startTime.isFinite, seg.endTime.isFinite else { return false }
             return position >= seg.startTime && position <= seg.endTime
         }
 
         if let seg = activeSegment {
-            // Auto-skip if enabled and not yet skipped for this segment
-            let autoSkipEnabled = UserDefaults.standard.bool(forKey: "aniSkipAutoSkip")
-            if autoSkipEnabled, !autoSkippedSegments.contains(seg.uniqueKey) {
+
+            let autoSkipEnabled = ProfileSettingsStore.active.bool(forKey: "aniSkipAutoSkip")
+#if os(iOS)
+            let autoSkipSuppressedByWatchTogether =
+                WatchTogetherCoordinator.shared.sessionRole(for: self) == .follower
+#else
+            let autoSkipSuppressedByWatchTogether = false
+#endif
+            if autoSkipEnabled,
+               !autoSkipSuppressedByWatchTogether,
+               !autoSkippedSegments.contains(seg.uniqueKey) {
                 autoSkippedSegments.insert(seg.uniqueKey)
                 Logger.shared.log("SkipData: Auto-skipping \(seg.type.rawValue) from \(secondsText(seg.startTime))s to \(secondsText(seg.endTime))s", type: "Skip")
                 let target = clampedPlaybackPosition(seg.endTime + 1.0)
@@ -8673,7 +8439,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private var shouldUsePosterNextEpisodeButton: Bool {
-        UserDefaults.standard.bool(forKey: "showNextEpisodePosterButton")
+        ProfileSettingsStore.active.bool(forKey: "showNextEpisodePosterButton")
     }
 
     private var shouldSkipFillerForNextEpisode: Bool {
@@ -8983,8 +8749,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             )
         }
 
-        // Callers that can consume a rich target need the metadata-backed resolver result. A
-        // same-season +1 guess is wrong at finales and across anime cour/special boundaries.
         guard onRequestResolvedNextEpisode == nil else { return nil }
 
         let requiresVerifiedAnimeTarget = isAnimeContent()
@@ -8992,7 +8756,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return nil
         }
 
-        let episodeNumber = currentEpisodeNumber + 1
+        guard let episodeNumber = RemoteMediaNumericBoundary.adding(
+            currentEpisodeNumber,
+            1
+        ) else { return nil }
         let currentTitle: String?
         if case .episode(_, _, _, let showTitle, _, _) = mediaInfo {
             currentTitle = showTitle
@@ -9045,8 +8812,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         guard let transitionID else { return pendingWatchTogetherNextEpisodeTarget == nil }
         guard pendingWatchTogetherNextEpisodeTransitionID == transitionID,
               let target = pendingWatchTogetherNextEpisodeTarget else {
-            // A delayed callback from a dismissed source sheet must not consume a newer target
-            // or advance local playback without its matching shared transition.
+
             return false
         }
         pendingWatchTogetherNextEpisodeTarget = nil
@@ -9079,9 +8845,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         transitionID: UUID?
     ) {
         guard let transitionID else { return }
-        // ServicesResultsSheet dismisses before delivering its resolved request. Give that
-        // intentional callback time to consume the exact target; user-dismissed sheets have no
-        // callback and are safely released after this short grace period.
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
             self?.clearPendingWatchTogetherNextEpisodeTarget(transitionID: transitionID)
         }
@@ -9092,10 +8856,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         guard case .episode(let showId, let seasonNumber, let episodeNumber, _, _, _) = mediaInfo else { return }
 
         let enabled: Bool
-        if UserDefaults.standard.object(forKey: "showNextEpisodeButton") == nil {
-            enabled = true // default
+        if ProfileSettingsStore.active.object(forKey: "showNextEpisodeButton") == nil {
+            enabled = true
         } else {
-            enabled = UserDefaults.standard.bool(forKey: "showNextEpisodeButton")
+            enabled = ProfileSettingsStore.active.bool(forKey: "showNextEpisodeButton")
         }
         guard enabled else {
             if nextEpisodeButtonShown { hideNextEpisodeButton() }
@@ -9103,7 +8867,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 
         let threshold: Double
-        let savedThreshold = UserDefaults.standard.double(forKey: "nextEpisodeThreshold")
+        let savedThreshold = ProfileSettingsStore.active.double(forKey: "nextEpisodeThreshold")
         threshold = savedThreshold > 0 ? savedThreshold : 0.90
 
         let progress = position / duration
@@ -9224,7 +8988,19 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return
         }
         let nextSeasonNumber = target?.seasonNumber ?? seasonNumber
-        let nextEpisodeNumber = target?.episodeNumber ?? (episodeNumber + 1)
+        let nextEpisodeNumber: Int
+        if let targetEpisodeNumber = target?.episodeNumber {
+            nextEpisodeNumber = targetEpisodeNumber
+        } else {
+            guard let incrementedEpisodeNumber = RemoteMediaNumericBoundary.adding(
+                episodeNumber,
+                1
+            ) else {
+                hideNextEpisodeButton()
+                return
+            }
+            nextEpisodeNumber = incrementedEpisodeNumber
+        }
         let nextPlaybackContext = target?.playbackContext
             ?? (!currentEpisodeIsAnime && nextSeasonNumber == seasonNumber
                 ? episodePlaybackContext?.forEpisodeNumber(nextEpisodeNumber)
@@ -9250,9 +9026,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
            !(stagedNextEpisodeRequest != nil
                 && stagedNextEpisodeRequestKey == currentNextEpisodeKey),
            matchingPreview == nil {
-            // The legacy notification fallback has no resolved-request acknowledgement and may
-            // not have an owner under Downloads/reader routes. Keep the current shared revision
-            // until an exact preview or staged request is available.
+
             nextEpisodeButton.isEnabled = true
             resolveNextEpisodePreviewIfNeeded(
                 seasonNumber: seasonNumber,
@@ -9263,13 +9037,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 #endif
 
-        // Fence duplicate taps before any validated transition path begins. A rejected exact
-        // Watch Together transition re-enables the control in commitWatchTogetherNextEpisode.
         nextEpisodeButton.isEnabled = false
 
-        // Fast path: if staging already resolved this exact next episode, replay that request
-        // directly instead of re-opening the source sheet and re-resolving the stream over the
-        // network. The warmed starter cache then makes the load start almost immediately.
         if let staged = stagedNextEpisodeRequest,
            stagedNextEpisodeRequestKey == currentNextEpisodeKey {
             guard commitWatchTogetherNextEpisode(
@@ -9286,8 +9055,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return
         }
         if let preview = matchingPreview {
-            // Source selection is not an authoritative media transition yet. Carry the exact
-            // target through the sheet, then broadcast only after a stream request resolves.
+
             let transitionID = UUID()
             pendingWatchTogetherNextEpisodeTransitionID = transitionID
             pendingWatchTogetherNextEpisodeTarget = target ?? NextEpisodePlaybackTarget(
@@ -9351,6 +9119,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
         } else {
             if onRequestResolvedNextEpisode != nil {
+#if os(iOS)
+
+                if initialURL?.isFileURL == true,
+                   DownloadManager.shared.completedEpisodeDownloadItem(
+                       tmdbId: showID,
+                       seasonNumber: nextSeasonNumber,
+                       episodeNumber: nextEpisodeNumber,
+                       playbackContext: nextPlaybackContext
+                   ) == nil {
+                    nextEpisodeButton.isEnabled = true
+                    showPlayerNotice("The next episode isn't downloaded yet.")
+                    return
+                }
+#endif
                 pendingResolvedNextEpisodeRequest = resolvedNextEpisodeTarget(
                     showID: showID,
                     seasonNumber: nextSeasonNumber,
@@ -9437,13 +9219,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         guard isMPVRenderer,
               isMetalMPVRenderer,
               ExperimentalFeatureState.canUseExperimentalMPVPlayback,
-              UserDefaults.standard.bool(forKey: ExperimentalFeatureState.mpvSmoothTransitionEnabledKey) else {
+              ProfileSettingsStore.active.bool(forKey: ExperimentalFeatureState.mpvSmoothTransitionEnabledKey) else {
             return
         }
 
-        // Start staging a few percent BEFORE the user's "next episode" appearance threshold so
-        // the next stream has lead time to resolve + warm (e.g. appearance 90% to stage at 85%).
-        // Clamped so it never fires implausibly early.
         let stageLead = 0.05
         let stageThreshold = max(0.50, threshold - stageLead)
         guard progress >= stageThreshold else { return }
@@ -9458,8 +9237,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             currentSeasonNumber: seasonNumber,
             currentEpisodeNumber: episodeNumber
         ) else {
-            // Filler skipping needs the canonical browser target first. A later progress update
-            // retries as soon as the metadata-backed preview finishes resolving.
+
             return
         }
         guard experimentalStagedNextEpisodeKey != key else { return }
@@ -9481,8 +9259,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         )
     }
 
-    /// Best-effort: resolve the NEXT episode's stream ahead of time and warm its byte cache so the upcoming transition
-    /// is fast.
     private func prewarmNextEpisodeStreamIfPossible(
         showId: Int,
         currentSeasonNumber: Int,
@@ -9492,23 +9268,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         nextEpisodeContext: EpisodePlaybackContext?,
         attemptKey: String
     ) {
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.isRemoteMediaActive else {
-            Logger.shared.log("GoogleCast: skipped local next-episode MPV prewarm", type: "Player")
-            markNextEpisodeStagingAttemptSkipped(key: attemptKey)
-            return
-        }
-#endif
-        // Only when the MoltenVK MPV warmup path is actually usable and both toggles are on.
+
         guard ExperimentalFeatureState.mpvAdvancedPlaybackUnavailableReason == nil,
-              UserDefaults.standard.bool(forKey: ExperimentalFeatureState.mpvPreloadEnabledKey),
-              UserDefaults.standard.bool(forKey: ExperimentalFeatureState.mpvSmoothTransitionEnabledKey) else {
+              ProfileSettingsStore.active.bool(forKey: ExperimentalFeatureState.mpvPreloadEnabledKey),
+              ProfileSettingsStore.active.bool(forKey: ExperimentalFeatureState.mpvSmoothTransitionEnabledKey) else {
             markNextEpisodeStagingAttemptSkipped(key: attemptKey)
             return
         }
 
-        // Stay low-profile: never add resolution/network load (and never risk heating the device) while it is already
-        // under thermal.
         let processInfo = ProcessInfo.processInfo
         guard !processInfo.isLowPowerModeEnabled,
               processInfo.thermalState != .serious,
@@ -9518,18 +9285,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return
         }
 
-        // A globally enabled setting is not sufficient: a user can still manually launch a
-        // source. Only stage when this playback attempt itself came from Auto Mode, where source
-        // and stream selection are deterministic.
-        guard UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"),
+        guard AutoModeSettings.isEnabled(),
               playbackLaunchContext?.autoMode == true else {
             Logger.shared.log("[PlayerVC.MPV] next-episode prewarm skipped reason=not-auto-mode-launch show=\(showId) S\(nextSeasonNumber)E\(nextEpisodeNumber)", type: "MPV")
             markNextEpisodeStagingAttemptSkipped(key: attemptKey)
             return
         }
 
-        // Anime relies on AniList traversal to map episodes correctly. If the user disabled it,
-        // our episode-number matching would risk warming the wrong episode, so skip anime then.
         if case .episode(_, _, _, _, _, let isAnime)? = mediaInfo, isAnime,
            PerformanceModeSettings.skipsAniListTraversalForAnimeDetails {
             Logger.shared.log("[PlayerVC.MPV] next-episode prewarm skipped reason=anilist-traversal-disabled show=\(showId)", type: "MPV")
@@ -9548,8 +9310,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         )
     }
 
-    /// Resolved next-episode lookup, mirroring `ServicesResultsSheet.streamLookupSeasonNumber` /
-    /// `streamLookupEpisodeNumber` /.
     private func nextEpisodeLookupNumbers(
         currentSeasonNumber: Int,
         nextSeasonNumber: Int,
@@ -9558,16 +9318,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     ) -> (season: Int?, episode: Int?, context: EpisodePlaybackContext?)? {
         let isAnime = isAnimeContent()
 
-        // Anime next-episode contexts must come from the verified preview. Projecting the current
-        // cour context can fabricate a plausible-looking but incorrect episode identity.
         let nextContext = nextEpisodeContext ?? (
             !isAnime && nextSeasonNumber == currentSeasonNumber
                 ? episodePlaybackContext?.forEpisodeNumber(nextEpisodeNumber)
                 : nil
         )
 
-        // Anime without a mapping context would let us only guess raw numbers, which for remapped
-        // anime would warm the wrong episode. Skip rather than risk it.
         if isAnime && nextContext == nil {
             return nil
         }
@@ -9595,14 +9351,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return nextContext.localSeasonNumber != nextSeasonNumber
                 || nextContext.hasAnimeMediaId
         }
+        let currentProviderID = currentContext.positiveAniListMediaId
+            ?? currentContext.anilistMediaId
+        let nextProviderID = nextContext.positiveAniListMediaId
+            ?? nextContext.anilistMediaId
         return currentContext.localSeasonNumber != nextContext.localSeasonNumber
-            || currentContext.anilistMediaId != nextContext.anilistMediaId
+            || currentProviderID != nextProviderID
             || currentContext.kitsuMediaId != nextContext.kitsuMediaId
             || currentContext.isSpecial != nextContext.isSpecial
     }
 
-    /// Captures a fully-resolved playback request for the next episode from a staging-time resolution, so
-    /// `nextEpisodeButtonTapped`.
     private func stashStagedNextEpisodeRequest(
         resolution: NextEpisodePrestageResolution,
         localSeasonNumber: Int,
@@ -9654,7 +9412,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             mediaInfo: nextMediaInfo,
             imdbId: imdbId,
             isAnimeHint: isAnime,
-            // Next episode is the same show - carry the current animation classification forward.
+
             isAnimationContentHint: isAnimationContentHint,
             originalTMDBSeasonNumber: tmdbSeason,
             originalTMDBEpisodeNumber: tmdbEpisode,
@@ -9676,6 +9434,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         case stremio(StremioAddon)
 #if os(iOS) && !targetEnvironment(macCatalyst)
         case skyStream(SkyStreamProviderDescriptor)
+        case nuvio(NuvioPluginScraper)
 #endif
 
         var sourceId: String {
@@ -9684,6 +9443,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             case .stremio(let addon): SourceHealth.stremioId(addon)
 #if os(iOS) && !targetEnvironment(macCatalyst)
             case .skyStream(let provider): provider.id
+            case .nuvio(let scraper): scraper.id
 #endif
             }
         }
@@ -9694,6 +9454,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             case .stremio(let addon): addon.manifest.name
 #if os(iOS) && !targetEnvironment(macCatalyst)
             case .skyStream(let provider): provider.displayName
+            case .nuvio(let scraper): scraper.displayName
 #endif
             }
         }
@@ -9704,6 +9465,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             case .stremio(let addon): addon.sortIndex
 #if os(iOS) && !targetEnvironment(macCatalyst)
             case .skyStream(let provider): Int64(provider.sortIndex)
+            case .nuvio: Int64.max
 #endif
             }
         }
@@ -9724,8 +9486,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let providerContentReference: ProviderContentReference?
     }
 
-    /// Prefer the source that successfully launched the current episode, then fall back through
-    /// the user's selected Auto Mode order. Disabled and unselected sources are never probed.
     private func orderedNextEpisodePrestageCandidates(
         showId: Int,
         currentSeasonNumber: Int,
@@ -9752,28 +9512,34 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 .filter(\.isEnabled)
                 .map { .skyStream($0) })
         }
+        if PlatformCapabilities.current.supportsNuvioPlugins {
+            candidates.append(contentsOf: NuvioPluginManager.shared.activeScrapers
+                .map { .nuvio($0) })
+        }
 #endif
+
+        candidates.removeAll {
+            SourceHealthStore.shared.shouldSkipForAutoMode(sourceId: $0.sourceId)
+        }
 
         candidates.sort { lhs, rhs in
             if lhs.sortIndex != rhs.sortIndex { return lhs.sortIndex < rhs.sortIndex }
             return lhs.sourceName.localizedCaseInsensitiveCompare(rhs.sourceName) == .orderedAscending
         }
-        let orderedIds = AutoModeSourceSelection.orderedSelectedSourceIds(
-            availableSourceIds: candidates.map(\.sourceId)
-        )
         let candidateById = candidates.reduce(into: [String: NextEpisodePrestageCandidate]()) { result, candidate in
-            // Imported/corrupt source state can contain duplicate provider identities. Keep the
-            // first stable candidate instead of trapping in Dictionary(uniqueKeysWithValues:).
+
             if result[candidate.sourceId] == nil {
                 result[candidate.sourceId] = candidate
             }
         }
+        let orderedIds = AutoModeSourceSelection.orderedSelectedSourceIds(
+            availableSourceIds: candidates.map(\.sourceId)
+        )
         candidates = orderedIds.compactMap { candidateById[$0] }
 
         if let currentSourceId = launch?.sourceId,
-           let currentIndex = candidates.firstIndex(where: { $0.sourceId == currentSourceId }),
-           currentIndex > 0 {
-            let current = candidates.remove(at: currentIndex)
+           let current = candidateById[currentSourceId] {
+            candidates.removeAll { $0.sourceId == currentSourceId }
             candidates.insert(current, at: 0)
         }
         return candidates
@@ -9798,10 +9564,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             currentEpisodeNumber: currentEpisodeNumber
         )
         if changesAnimeIdentity {
-            // A Service content href belongs to the currently-playing cour. Its single-season
-            // E1 is not evidence for the destination AniList/Kitsu identity. Stremio uses an
-            // exact content ID and SkyStream re-searches the verified destination identity;
-            // neither path reuses the current provider's opaque episode reference.
+
             candidates.removeAll { candidate in
                 if case .service = candidate { return true }
                 return false
@@ -9830,94 +9593,118 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             changesAnimeIdentity: changesAnimeIdentity
         )
         let isAnime = isAnimeContent()
+        let originalAudioLanguage = servicesOriginalAudioLanguage
         let currentIMDbId = imdbId
 
         nextEpisodeStagingTask?.cancel()
         nextEpisodeStagingTask = Task(priority: .utility) { [weak self] in
             guard let self else { return }
-            for candidate in candidates {
-                guard !Task.isCancelled,
-                      self.experimentalStagedNextEpisodeKey == attemptKey else {
-                    return
-                }
-                Logger.shared.log("[PlayerVC.MPV] next-episode candidate resolving source=\(candidate.sourceName) target=S\(nextSeasonNumber)E\(nextEpisodeNumber)", type: "MPV")
+            let outcome = await OrderedSourceResolutionRunner.run(
+                inputs: candidates,
+                isCurrent: {
+                    self.experimentalStagedNextEpisodeKey == attemptKey
+                },
+                resolve: { candidate in
+                    Logger.shared.log("[PlayerVC.MPV] next-episode candidate resolving source=\(candidate.sourceName) target=S\(nextSeasonNumber)E\(nextEpisodeNumber)", type: "MPV")
 
-                let resolution: NextEpisodePrestageResolution?
-                switch candidate {
-                case .service(let service, let contentHref):
-                    resolution = await self.resolveServicePrestageCandidate(
-                        service: service,
-                        knownContentHref: contentHref,
-                        nextSeasonNumber: nextSeasonNumber,
-                        nextEpisodeNumber: nextEpisodeNumber,
-                        nextContext: nextContext,
-                        lookupSeason: lookupSeason,
-                        lookupEpisode: lookupEpisode,
-                        isAnime: isAnime,
-                        titleCandidates: titleCandidates
-                    )
-                case .stremio(let addon):
-                    guard lookup != nil else {
-                        Logger.shared.log("[PlayerVC.MPV] next-episode candidate failed source=\(candidate.sourceName) reason=no-episode-mapping", type: "MPV")
-                        continue
-                    }
-                    resolution = await self.resolveStremioPrestageCandidate(
-                        addon: addon,
-                        showId: showId,
-                        imdbId: currentIMDbId,
-                        lookupSeason: lookupSeason,
-                        lookupEpisode: lookupEpisode,
-                        nextContext: nextContext,
-                        isAnime: isAnime,
-                        titleCandidates: titleCandidates
-                    )
+                    let resolution: NextEpisodePrestageResolution?
+                    switch candidate {
+                    case .service(let service, let contentHref):
+                        resolution = await self.resolveServicePrestageCandidate(
+                            service: service,
+                            knownContentHref: contentHref,
+                            nextSeasonNumber: nextSeasonNumber,
+                            nextEpisodeNumber: nextEpisodeNumber,
+                            nextContext: nextContext,
+                            lookupSeason: lookupSeason,
+                            lookupEpisode: lookupEpisode,
+                            isAnime: isAnime,
+                            originalAudioLanguage: originalAudioLanguage,
+                            titleCandidates: titleCandidates
+                        )
+                    case .stremio(let addon):
+                        guard lookup != nil else {
+                            Logger.shared.log("[PlayerVC.MPV] next-episode candidate failed source=\(candidate.sourceName) reason=no-episode-mapping", type: "MPV")
+                            return nil
+                        }
+                        resolution = await self.resolveStremioPrestageCandidate(
+                            addon: addon,
+                            showId: showId,
+                            imdbId: currentIMDbId,
+                            lookupSeason: lookupSeason,
+                            lookupEpisode: lookupEpisode,
+                            nextContext: nextContext,
+                            isAnime: isAnime,
+                            originalAudioLanguage: originalAudioLanguage,
+                            titleCandidates: titleCandidates
+                        )
 #if os(iOS) && !targetEnvironment(macCatalyst)
-                case .skyStream(let provider):
-                    resolution = await self.resolveSkyStreamPrestageCandidate(
-                        provider: provider,
-                        lookupSeason: lookupSeason,
-                        lookupEpisode: lookupEpisode,
-                        nextContext: nextContext,
-                        isAnime: isAnime,
-                        titleCandidates: titleCandidates
-                    )
+                    case .skyStream(let provider):
+                        resolution = await self.resolveSkyStreamPrestageCandidate(
+                            provider: provider,
+                            lookupSeason: lookupSeason,
+                            lookupEpisode: lookupEpisode,
+                            nextContext: nextContext,
+                            isAnime: isAnime,
+                            originalAudioLanguage: originalAudioLanguage,
+                            titleCandidates: titleCandidates
+                        )
+                    case .nuvio(let scraper):
+                        guard lookup != nil else {
+                            Logger.shared.log("[PlayerVC.MPV] next-episode candidate failed source=\(candidate.sourceName) reason=no-episode-mapping", type: "MPV")
+                            return nil
+                        }
+                        resolution = await self.resolveNuvioPrestageCandidate(
+                            scraper: scraper,
+                            showId: showId,
+                            lookupSeason: lookupSeason,
+                            lookupEpisode: lookupEpisode,
+                            isAnime: isAnime,
+                            originalAudioLanguage: originalAudioLanguage,
+                            titleCandidates: titleCandidates
+                        )
 #endif
-                }
-
-                guard !Task.isCancelled,
-                      self.experimentalStagedNextEpisodeKey == attemptKey else {
+                    }
+                    return resolution
+                },
+                onAccepted: { _, resolution in
+                    Logger.shared.log(
+                        "[PlayerVC.MPV] next-episode candidate selected source=\(resolution.sourceName) target={\(self.playbackURLSummary(resolution.streamURL))}",
+                        type: "MPV"
+                    )
+                    ExperimentalMPVPreloadManager.shared.prewarm(
+                        url: resolution.streamURL,
+                        headers: resolution.headers,
+                        label: "next-S\(nextSeasonNumber)E\(nextEpisodeNumber)"
+                    )
+                    self.stashStagedNextEpisodeRequest(
+                        resolution: resolution,
+                        localSeasonNumber: nextSeasonNumber,
+                        localEpisodeNumber: nextEpisodeNumber,
+                        tmdbSeason: lookupSeason,
+                        tmdbEpisode: lookupEpisode,
+                        context: nextContext
+                    )
+                },
+                discardStale: { resolution in
                     self.discardResolvedProviderPlayback(resolution)
-                    return
-                }
-                guard let resolution else {
+                },
+                onMiss: { candidate in
                     Logger.shared.log("[PlayerVC.MPV] next-episode candidate failed source=\(candidate.sourceName); trying next", type: "MPV")
-                    continue
                 }
+            )
 
-                Logger.shared.log(
-                    "[PlayerVC.MPV] next-episode candidate selected source=\(resolution.sourceName) target={\(self.playbackURLSummary(resolution.streamURL))}",
-                    type: "MPV"
-                )
-                ExperimentalMPVPreloadManager.shared.prewarm(
-                    url: resolution.streamURL,
-                    headers: resolution.headers,
-                    label: "next-S\(nextSeasonNumber)E\(nextEpisodeNumber)"
-                )
-                self.stashStagedNextEpisodeRequest(
-                    resolution: resolution,
-                    localSeasonNumber: nextSeasonNumber,
-                    localEpisodeNumber: nextEpisodeNumber,
-                    tmdbSeason: lookupSeason,
-                    tmdbEpisode: lookupEpisode,
-                    context: nextContext
-                )
+            switch outcome {
+            case .accepted:
                 self.nextEpisodeStagingTask = nil
                 return
+            case .exhausted:
+                self.nextEpisodeStagingTask = nil
+                Logger.shared.log("[PlayerVC.MPV] next-episode prewarm exhausted selected candidates show=\(showId) S\(nextSeasonNumber)E\(nextEpisodeNumber)", type: "MPV")
+                self.markNextEpisodeStagingAttemptSkipped(key: attemptKey)
+            case .invalidated:
+                return
             }
-
-            self.nextEpisodeStagingTask = nil
-            Logger.shared.log("[PlayerVC.MPV] next-episode prewarm exhausted selected candidates show=\(showId) S\(nextSeasonNumber)E\(nextEpisodeNumber)", type: "MPV")
-            self.markNextEpisodeStagingAttemptSkipped(key: attemptKey)
         }
     }
 
@@ -9930,6 +9717,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         lookupSeason: Int,
         lookupEpisode: Int,
         isAnime: Bool,
+        originalAudioLanguage: String?,
         titleCandidates: [String],
         preferredStreamName: String? = nil
     ) async -> NextEpisodePrestageResolution? {
@@ -9944,6 +9732,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 lookupSeason: lookupSeason,
                 lookupEpisode: lookupEpisode,
                 isAnime: isAnime,
+                originalAudioLanguage: originalAudioLanguage,
                 titleCandidates: titleCandidates,
                 preferredStreamName: preferredStreamName
            ) {
@@ -9967,6 +9756,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             lookupSeason: lookupSeason,
             lookupEpisode: lookupEpisode,
             isAnime: isAnime,
+            originalAudioLanguage: originalAudioLanguage,
             titleCandidates: titleCandidates,
             preferredStreamName: preferredStreamName
         )
@@ -9981,6 +9771,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         lookupSeason: Int,
         lookupEpisode: Int,
         isAnime: Bool,
+        originalAudioLanguage: String?,
         titleCandidates: [String],
         preferredStreamName: String? = nil
     ) async -> NextEpisodePrestageResolution? {
@@ -10007,6 +9798,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 sources: result.sources,
                 sourceId: SourceHealth.serviceId(service),
                 isAnime: isAnime,
+                originalAudioLanguage: originalAudioLanguage,
                 preferredLabel: preferredStreamName
               ),
               let streamURL = Self.httpURL(selected.url) else {
@@ -10043,6 +9835,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         lookupEpisode: Int,
         nextContext: EpisodePlaybackContext?,
         isAnime: Bool,
+        originalAudioLanguage: String?,
         titleCandidates: [String]
     ) async -> NextEpisodePrestageResolution? {
         let sourceId = SourceHealth.stremioId(addon)
@@ -10053,19 +9846,28 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             type: "series",
             season: lookupSeason,
             episode: lookupEpisode,
-            anilistId: nextContext?.anilistMediaId,
+            anilistId: nextContext?.positiveAniListMediaId
+                ?? nextContext?.anilistMediaId,
             playbackContext: nextContext,
             titleCandidates: titleCandidates
         )
         guard !Task.isCancelled else { return nil }
         let direct = streams.filter {
-            $0.isDirectHTTP && !StreamLanguageFilter.shouldHide(stremio: $0, sourceId: sourceId, isAnime: isAnime)
+            $0.isDirectHTTP && !StreamLanguageFilter.shouldHide(
+                stremio: $0,
+                sourceId: sourceId,
+                originalAudioLanguage: originalAudioLanguage,
+                isAnime: isAnime
+            )
         }
-        guard let stream = AutoModeStreamSelection.bestStremioStream(
+        let rankedStream = AutoModeStreamSelection.bestStremioStream(
             from: direct,
             sourceId: sourceId,
-            isAnime: isAnime
-        ),
+            streamsAreFiltered: true,
+            isAnime: isAnime,
+            originalAudioLanguage: originalAudioLanguage
+        ) ?? (direct.count == 1 ? direct.first : nil)
+        guard let stream = rankedStream,
               let streamURL = Self.httpURL(stream.url) else {
             return nil
         }
@@ -10092,12 +9894,82 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
 #if os(iOS) && !targetEnvironment(macCatalyst)
+    private func resolveNuvioPrestageCandidate(
+        scraper: NuvioPluginScraper,
+        showId: Int,
+        lookupSeason: Int,
+        lookupEpisode: Int,
+        isAnime: Bool,
+        originalAudioLanguage: String?,
+        titleCandidates: [String]
+    ) async -> NextEpisodePrestageResolution? {
+        guard PlatformCapabilities.current.supportsNuvioPlugins,
+              scraper.isRunnable,
+              showId > 0 else {
+            return nil
+        }
+
+        let streams = await NuvioPluginManager.shared.resolveStreams(
+            scraperID: scraper.id,
+            tmdbId: String(showId),
+            mediaType: "tv",
+            season: lookupSeason,
+            episode: lookupEpisode
+        )
+        guard !Task.isCancelled else { return nil }
+
+        let allowed = streams.filter { stream in
+            !StreamLanguageFilter.shouldHide(
+                languageHints: stream.languageHints,
+                metadata: [stream.displayName] + stream.metadataHints,
+                sourceId: scraper.id,
+                originalAudioLanguage: originalAudioLanguage,
+                isAnime: isAnime
+            )
+        }
+        guard let chosen = AutoModeStreamSelection.bestNuvioStream(from: allowed),
+              let streamURL = URL(string: chosen.url) else {
+            return nil
+        }
+
+        let reference = NuvioProviderContentReference(
+            sourceID: scraper.id,
+            scraperID: scraper.id,
+            tmdbID: String(showId),
+            mediaType: "tv",
+            season: lookupSeason,
+            episode: lookupEpisode
+        )
+        guard reference.isStructurallyValid else { return nil }
+
+        var headers: [String: String] = ["User-Agent": URLSession.randomUserAgent]
+        for (key, value) in chosen.sanitizedHeaders ?? [:] {
+            headers[key] = value
+        }
+
+        return NextEpisodePrestageResolution(
+            streamURL: streamURL,
+            headers: headers,
+            subtitles: chosen.subtitleURLs,
+            subtitleNames: chosen.subtitleNames,
+            subtitleHeadersByURL: chosen.subtitleHeadersByURL,
+            streamName: chosen.displayName,
+            sourceId: scraper.id,
+            sourceName: scraper.displayName,
+            sourceKind: .nuvio,
+            titleCandidates: titleCandidates,
+            serviceContentHref: nil,
+            providerContentReference: .nuvio(reference)
+        )
+    }
+
     private func resolveSkyStreamPrestageCandidate(
         provider: SkyStreamProviderDescriptor,
         lookupSeason: Int,
         lookupEpisode: Int,
         nextContext: EpisodePlaybackContext?,
         isAnime: Bool,
+        originalAudioLanguage: String?,
         titleCandidates: [String]
     ) async -> NextEpisodePrestageResolution? {
         guard PlatformCapabilities.current.supportsSkyStreamPlugins,
@@ -10121,8 +9993,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             isAnime: isAnime,
             isSpecial: nextContext?.isSpecial == true,
             wantsDubbed: nil,
-            // Pre-staging must never warm a merely plausible episode. The normal flow remains
-            // available after a miss, so this optimization can afford to fail closed.
+
             requiresExactIdentity: true
         )
 
@@ -10130,7 +10001,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             let values = try await SkyStreamResolver.shared.resolve(
                 sourceID: provider.id,
                 target: target,
-                mode: .autoMode
+                mode: .autoMode,
+                originalAudioLanguage: originalAudioLanguage
             )
             guard !Task.isCancelled,
                   let resolved = values.first,
@@ -10140,6 +10012,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     languageHints: [],
                     metadata: [resolved.displayName],
                     sourceId: provider.id,
+                    originalAudioLanguage: originalAudioLanguage,
                     isAnime: isAnime
                   ) else {
                 return nil
@@ -10160,9 +10033,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
     }
 
-    /// Converts only a resolver-produced descriptor into one same-session proxy graph. Main media
-    /// and subtitles therefore share the validator's immutable route/header policy; no upstream
-    /// URL, cookie, or header is handed to the renderer.
     private func makeSkyStreamPlaybackResolution(
         _ resolved: SkyStreamResolvedStream,
         titleCandidates: [String],
@@ -10341,8 +10211,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         .map { ($0.1, $0.2) }
     }
 
-    /// Finds the href for the next episode within a flat service episode list. This mirrors the
-    /// normal sheet's exact match first, then its anime absolute/bundled and single-season fallbacks.
     private static func nextEpisodeHref(
         episodes: [EpisodeLink],
         seasonNumber: Int,
@@ -10376,7 +10244,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
               !context.isSpecial,
               let seasonEpisodeCount = context.animeSeasonEpisodeCount,
               seasonEpisodeCount > 0 else {
-            // Non-anime and anime-without-context sources can still use a simple flat list.
+
             if seasons.count <= 1, let match = episodes.first(where: { $0.number == episodeNumber }) {
                 return match.href
             }
@@ -10449,12 +10317,12 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return matches.first?.href
     }
 
-    /// Selects which stream URL to warm.
     private static func selectPrewarmStream(
         streams: [String]?,
         sources: [[String: Any]]?,
         sourceId: String,
         isAnime: Bool = false,
+        originalAudioLanguage: String?,
         preferredLabel: String? = nil
     ) -> (url: String, headers: [String: String]?, label: String, subtitleEntries: [String]?, subtitleHeadersByURL: [String: [String: String]]?)? {
         var candidates: [(url: String, headers: [String: String]?, label: String, scoreLabel: String, subtitleEntries: [String]?, subtitleHeadersByURL: [String: [String: String]]?)] = []
@@ -10480,6 +10348,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     languageHints: languageHints,
                     metadata: metadata + [raw],
                     sourceId: sourceId,
+                    originalAudioLanguage: originalAudioLanguage,
                     isAnime: isAnime
                 ) else { continue }
                 candidates.append((
@@ -10516,6 +10385,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     languageHints: [],
                     metadata: [label, raw],
                     sourceId: sourceId,
+                    originalAudioLanguage: originalAudioLanguage,
                     isAnime: isAnime
                 ) else { continue }
                 candidates.append((raw, nil, label, "\(label) \(raw)", nil, nil))
@@ -10542,9 +10412,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return (candidate.url, candidate.headers, candidate.label, candidate.subtitleEntries, candidate.subtitleHeadersByURL)
         }
 
-        // Multiple options: only commit when Auto Quality is on (otherwise the real flow would
-        // prompt the user, so we can't predict the choice - skip to avoid a wrong warm). Uses the
-        // shared scorer so the pick matches the real service auto-selection exactly.
         let preference = AutoModeQualityPreference.current
         guard preference.usesAutomaticSelection,
               candidates.contains(where: { AutoModeStreamSelection.streamLabelHasDetectedQuality($0.scoreLabel) }) else {
@@ -10686,7 +10553,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return nil
     }
 
-    /// Mirrors `ServicesResultsSheet.safeConvertToHeaders` for the JS `headers` payload.
     private static func headersFromAny(_ value: Any?) -> [String: String]? {
         guard let value, !(value is NSNull) else { return nil }
         if let headers = value as? [String: String] { return headers }
@@ -10702,8 +10568,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return nil
     }
 
-    /// Mirrors the Origin/Referer/User-Agent merge in `ServicesResultsSheet.playStreamURL` so the
-    /// warmup cache key matches the headers the real playback will use.
     private static func mergedPlaybackHeaders(baseURL: String, custom: [String: String]?) -> [String: String] {
         var finalHeaders: [String: String] = [
             "Origin": baseURL,
@@ -10719,8 +10583,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return finalHeaders
     }
 
-    /// Mirrors the User-Agent + custom-headers merge used by the Stremio playback path
-    /// (which, unlike services, do not inject Origin/Referer) so the warmup cache key matches.
     private static func mergedUserAgentHeaders(custom: [String: String]?) -> [String: String] {
         var finalHeaders: [String: String] = ["User-Agent": URLSession.randomUserAgent]
         if let custom {
@@ -10861,7 +10723,28 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         return [lower, name]
     }
 
-    #if !os(tvOS)
+    func retainEphemeralProxyOwnership(_ ownership: PlaybackProxySessionOwnership?) {
+        let replacementLease = ownership?.acquireLease()
+        ephemeralProxySessionLease?.release()
+        ephemeralProxySessionLease = replacementLease
+    }
+
+    private func releaseEphemeralProxyOwnership() {
+        ephemeralProxySessionLease?.release()
+        ephemeralProxySessionLease = nil
+    }
+
+    private static func invalidateAbandonedProxyOwnership(
+        _ request: PlayerResolvedPlaybackRequest
+    ) {
+        request.launchContext?.ephemeralProxyOwnership?.invalidate()
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        guard request.launchContext?.sourceKind == .skyStream else { return }
+        MPVHeaderProxy.shared.invalidateSession(for: request.url)
+#endif
+    }
+
+#if !os(tvOS)
     private func registerMPVHeaderProxyURL(_ proxyURL: URL) {
         activeMPVHeaderProxyURLs.insert(proxyURL)
     }
@@ -10938,9 +10821,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func buildProxyHeaders(for _: URL, baseHeaders: [String: String]) -> [String: String] {
-        // Services often require exact Origin/Referer/Cookie/User-Agent values.
-        // The proxy must preserve the caller-provided header set without filling
-        // anything from the media URL.
+
         return baseHeaders
     }
 
@@ -11005,9 +10886,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         )
     }
 
-    /// Replaces an expired media source instead of trying to verify a generic CDN error page.
-    /// Stopping and loading the freshly resolved URL creates a clean byte/range boundary for both
-    /// startup and mid-playback recovery; the captured time is restored after the new load starts.
     private func handleMPVHeaderProxyCloudflareChallenge(
         challengeURL: URL,
         rejectedCookieHeader: String?,
@@ -11039,6 +10917,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #else
                 return false
 #endif
+            case .nuvio:
+#if os(iOS) && !targetEnvironment(macCatalyst)
+                guard let reference = context.providerContentReference else { return false }
+                return reference.kind == .nuvio
+                    && reference.sourceID == context.sourceId
+                    && reference.nuvio?.isStructurallyValid == true
+#else
+                return false
+#endif
             }
         }()
         if hasRefreshableProviderReference {
@@ -11060,8 +10947,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return
         }
 
-        // Sources without provider re-resolution metadata can only retry an explicit challenge.
-        // A generic CDN rejection has no human widget and retrying its identical URL would loop.
         guard isInteractiveChallenge else {
             handleUnrecoverableMediaSourceRejection(
                 "The media host rejected this URL (HTTP \(statusCode)) and the source could not be refreshed."
@@ -11092,9 +10977,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             guard playbackLoadGeneration == expectedLoadGeneration,
                   !isClosing,
                   !isBeingDismissed else { return }
-#if os(iOS) && canImport(GoogleCast)
-            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
 
             playbackFailureHandled = false
             if solved {
@@ -11160,9 +11042,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             var solvedMediaChallenge = false
             let permitsLegacyInteractiveSolve = context.sourceKind == .service
 
-            // An explicit challenge on the media host may still be the only gate. Prefer provider
-            // re-resolution first (signed URLs commonly rotate). If extraction returns the same
-            // challenged URL, it still needs a fresh media-host session before it can be retried.
             if isInteractiveChallenge,
                permitsLegacyInteractiveSolve,
                resolution == nil || resolution?.streamURL == originalURL {
@@ -11177,17 +11056,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
             cloudflareStartupRecoveryInProgress = false
             guard playbackLoadGeneration == expectedLoadGeneration,
+                  playbackLaunchContext?.traceID == context.traceID,
+                  playbackLaunchContext?.sourceId == context.sourceId,
+                  playbackLaunchContext?.providerContentReference == context.providerContentReference,
                   !isClosing,
                   !isBeingDismissed else {
                 discardResolvedProviderPlayback(resolution)
                 return
             }
-#if os(iOS) && canImport(GoogleCast)
-            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else {
-                discardResolvedProviderPlayback(resolution)
-                return
-            }
-#endif
 
             guard let resolution else {
                 playbackFailureHandled = false
@@ -11232,7 +11108,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
     private func discardResolvedProviderPlayback(_ resolution: NextEpisodePrestageResolution?) {
 #if os(iOS) && !targetEnvironment(macCatalyst)
-        guard let resolution, resolution.sourceKind == .skyStream else { return }
+        guard let resolution,
+              resolution.sourceKind == .skyStream else { return }
         MPVHeaderProxy.shared.invalidateSession(for: resolution.streamURL)
         activeMPVHeaderProxyURLs.remove(resolution.streamURL)
 #endif
@@ -11255,6 +11132,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 
         let isAnime = isAnimeContent()
+        let originalAudioLanguage = servicesOriginalAudioLanguage
         switch mediaInfo {
         case .episode(_, let seasonNumber, let episodeNumber, _, _, _):
             return await resolveServicePrestageCandidate(
@@ -11266,6 +11144,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 lookupSeason: episodePlaybackContext?.resolvedTMDBSeasonNumber ?? seasonNumber,
                 lookupEpisode: episodePlaybackContext?.resolvedTMDBEpisodeNumber ?? episodeNumber,
                 isAnime: isAnime,
+                originalAudioLanguage: originalAudioLanguage,
                 titleCandidates: context.titleCandidates,
                 preferredStreamName: context.streamName
             )
@@ -11291,6 +11170,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                       sources: result.sources,
                       sourceId: context.sourceId,
                       isAnime: isAnime,
+                      originalAudioLanguage: originalAudioLanguage,
                       preferredLabel: context.streamName
                   ),
                   let streamURL = Self.httpURL(selected.url) else {
@@ -11343,7 +11223,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         do {
             let values = try await SkyStreamResolver.shared.refresh(
                 reference,
-                mode: .playbackRefresh
+                mode: .playbackRefresh,
+                originalAudioLanguage: servicesOriginalAudioLanguage
             )
             guard !Task.isCancelled,
                   let resolved = values.first,
@@ -11403,7 +11284,54 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 #endif
 
-    private func handleUnrecoverableMediaSourceRejection(_ message: String) {
+    private func logPlaybackAttribution(reason: String, message: String) {
+        guard let context = playbackLaunchContext else {
+            Logger.shared.log(
+                "[PlayerVC.Attribution] reason=\(reason) blame=eclipse detail=no-launch-context message=\(message)",
+                type: "Error"
+            )
+            return
+        }
+
+        let deliveredURL = context.streamURL
+        let dispatchedURL = initialURL?.absoluteString
+        let defect = SkyStreamRemoteURLPolicy.deliveryDefect(in: deliveredURL)
+        let dispatchedDiffers = dispatchedURL.map { $0 != deliveredURL } ?? false
+        let providerHeaderNames = context.headers.keys.sorted().joined(separator: ",")
+        let dispatchedHeaderNames = (initialHeaders ?? [:]).keys.sorted().joined(separator: ",")
+        let headersDiffer = providerHeaderNames != dispatchedHeaderNames
+
+        let blame: String
+        let detail: String
+        if defect != nil {
+            blame = "provider"
+            detail = "the source handed Eclipse a stream URL that is not a legal URI (\(defect ?? "")); "
+                + "Eclipse dispatched it unchanged"
+        } else if dispatchedDiffers || headersDiffer {
+            blame = "eclipse-suspect"
+            detail = "Eclipse did not dispatch what the source supplied; compare delivered and dispatched below"
+        } else {
+            blame = "provider"
+            detail = "Eclipse dispatched the source's URL and headers verbatim, and the host rejected them"
+        }
+
+        Logger.shared.log(
+            "[PlayerVC.Attribution] reason=\(reason) blame=\(blame) source=\(context.sourceName)"
+                + " kind=\(context.sourceKind) trace=\(context.traceID)"
+                + " deliveredURL=\(SkyStreamRemoteURLPolicy.defectEvidence(of: deliveredURL))"
+                + " dispatchedURL=\(dispatchedURL.map { SkyStreamRemoteURLPolicy.defectEvidence(of: $0) } ?? "none")"
+                + " urlUnchanged=\(!dispatchedDiffers)"
+                + " providerHeaders=[\(providerHeaderNames)] dispatchedHeaders=[\(dispatchedHeaderNames)]"
+                + " detail=\(detail) message=\(message)",
+            type: "Error"
+        )
+    }
+
+    private func handleUnrecoverableMediaSourceRejection(
+        _ message: String,
+        reason: String = "media-source-rejected"
+    ) {
+        logPlaybackAttribution(reason: reason, message: message)
         guard let context = playbackLaunchContext else {
             showErrorBanner(message)
             return
@@ -11802,7 +11730,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             })
         ]
     }
-    
+
     private func updateSubtitleTracksMenu() {
         let useCustomExternalOverlay = isVLCCustomSubtitleOverlayEnabled
         let externalTracks = useCustomExternalOverlay ? externalSubtitleTracksForMenu() : []
@@ -11820,7 +11748,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             Logger.shared.log("PlayerViewController: subtitle tracks external=\(externalTracks.count) embedded=\(embeddedTracks.count) autoSelectableNative=\(autoSelectableEmbeddedTracks.count) userSelected=\(userSelectedSubtitleTrack) renderer=\(vlcRenderer != nil ? "VLC" : "MPV")", type: "Player")
         }
 
-        // Always show the subtitle button so the user can view the menu even when empty
         subtitleButton.isHidden = false
 
         subtitleButton.showsMenuAsPrimaryAction = !usesOverlayPlayerMenus
@@ -11829,7 +11756,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             updateSubtitleButtonAppearance()
         }
 
-        // Apply subtitle defaults while the user has not manually selected a track.
         if !userSelectedSubtitleTrack {
             if automaticSubtitlesEnabled {
                 let preferredLang = automaticSubtitleSelectionLanguage
@@ -11930,7 +11856,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if shouldDeferNativePlayerMenuRefresh(kind: "subtitles") {
             return
         }
-        
+
         var trackActions: [UIAction] = []
 
         let disableAction = UIAction(
@@ -11951,9 +11877,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             Logger.shared.log("[PlayerVC.Subtitles] user disabled subtitles from menu", type: "Player")
         }
         trackActions.append(disableAction)
-        
+
         if externalTracks.isEmpty && embeddedTracks.isEmpty {
-            // Inform the user; keep menu available
+
             let noTracksAction = UIAction(title: "No subtitles in stream", state: .off) { _ in }
             trackActions.append(noTracksAction)
         } else {
@@ -11979,7 +11905,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     self.rendererDisableSubtitles()
                     self.updateVLCSubtitleOverlay(for: self.cachedPosition)
                     self.updateSubtitleButtonAppearance()
-                    // Debounce menu update to avoid lag - only update after 0.3s of no selection changes
+
                     self.subtitleMenuDebounceTimer?.invalidate()
                     self.subtitleMenuDebounceTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { _ in
                         DispatchQueue.main.async { [weak self] in
@@ -12031,7 +11957,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 trackActions.append(contentsOf: embeddedSubtitleActions)
             }
         }
-        
+
         let trackMenu = UIMenu(title: "Select Track", image: UIImage(systemName: "list.bullet"), children: trackActions)
         var menuChildren: [UIMenuElement] = [trackMenu]
         if let stremioMenu = stremioSubtitleMenu() {
@@ -12468,7 +12394,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             type: metadata.type,
             season: metadata.season,
             episode: metadata.episode,
-            anilistId: lookup.playbackContext?.anilistMediaId,
+            anilistId: lookup.playbackContext?.positiveAniListMediaId
+                ?? lookup.playbackContext?.anilistMediaId,
             playbackContext: lookup.playbackContext,
             titleCandidates: lookup.titleCandidates
         )
@@ -12704,7 +12631,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return
         }
 
-        // UserDefaults.didChangeNotification posts once per defaults.set().
         pendingUserDefaultsChangeWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -12716,9 +12642,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func applyUserDefaultsChange() {
-#if os(iOS) && canImport(GoogleCast)
-        applyGoogleCastButtonVisibility()
-#endif
         guard isVLCPlayer || isMPVRenderer else { return }
         if isVLCPlaybackStartupInProgress {
             Logger.shared.log("[PlayerVC.Settings] UserDefaults changed during VLC startup; deferring subtitle/settings rebuild", type: "Player")
@@ -12738,21 +12661,17 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             applyVLCSubtitleModeSettingIfNeeded()
             applyVLCSubtitleOverlayPositionSetting()
         } else {
-            // Only cross into mpv when the subtitle style actually changed - this observer
-            // also fires for unrelated defaults, and a menu-driven change has usually
-            // already applied this exact style.
+
             let style = currentSubtitleStyle()
             if style != lastAppliedSubtitleStyleSnapshot {
                 rendererApplySubtitleStyle(style)
             }
         }
         configureMPVAppExitPictureInPictureAutomation(reason: "settings")
-        // Re-apply the comfort-audio filter so a mode/scope change in Settings takes effect on the
-        // current stream, not just the next load. Reads Settings fresh and clears to passthrough
-        // when set back to Original. Cheap and idempotent (mpv keeps `af` across the session).
+
         applyAudioComfortFilterIfNeeded(reason: "settings")
 #if os(iOS) && ECLIPSE_MPVKIT_MOLTENVK_INLINE_RENDERER && ECLIPSE_MPVKIT_SAMPLE_BUFFER_PIP_BRIDGE
-        // Re-evaluate HDR passthrough on the GPU path when the HDR Output setting changes.
+
         gpuMPVRenderer?.applyHDRConfiguration(reason: "settings")
 #endif
         updatePiPButtonVisibility()
@@ -12814,15 +12733,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         vlcSubtitleSelection = .none
         vlcExternalSubtitlesLoadedNatively = false
         vlcExternalSubtitlePriorityDeadline = nil
-        
+
         if !urls.isEmpty {
             Logger.shared.log("PlayerViewController: loadSubtitles count=\(urls.count) renderer=\(vlcRenderer != nil ? "VLC" : "MPV")", type: "Stream")
             subtitleButton.isHidden = false
             currentSubtitleIndex = 0
             let enableByDefault = automaticSubtitlesEnabled
             setSubtitleVisible(enableByDefault, persist: false)
-            
-            // VLC and native MPV both hand external subtitles to the renderer.
+
             if vlcRenderer != nil {
                 if isVLCCustomSubtitleOverlayEnabled {
                     Logger.shared.log("[PlayerVC.Subtitles] loadSubtitles path=VLC customOverlay", type: "Stream")
@@ -12834,7 +12752,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     rendererLoadExternalSubtitles(urls: urls, names: names)
                     vlcExternalSubtitlesLoadedNatively = true
                     vlcExternalSubtitlePriorityDeadline = Date().addingTimeInterval(1.2)
-                    // Update subtitle menu after VLC loads the external subs
+
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
                         self?.updateSubtitleTracksMenu()
                     }
@@ -12863,7 +12781,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     self?.updateSubtitleTracksMenuWhenReady()
                 }
             }
-            
+
             updateSubtitleButtonAppearance()
             updateSubtitleTracksMenu()
         } else {
@@ -12902,7 +12820,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self?.updateSubtitleTracksMenuWhenReady()
         }
     }
-    
+
     private func loadCurrentSubtitle() {
         guard currentSubtitleIndex < subtitleURLs.count else { return }
         let urlString = subtitleURLs[currentSubtitleIndex]
@@ -12918,7 +12836,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return
         }
 
-        // Handle local file:// URLs directly (e.g. downloaded media subtitles)
         if let url = URL(string: urlString), url.isFileURL {
             Logger.shared.log("[PlayerVC.Subtitles] Loading local subtitle file: \(url.path)", type: "Stream")
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -12943,13 +12860,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return
         }
 
-        Logger.shared.log("Loading subtitle from: \(urlString)", type: "Info")
-        
         guard let url = URL(string: urlString) else {
-            Logger.shared.log("Invalid subtitle URL: \(urlString)", type: "Error")
+            Logger.shared.log("Rejected malformed remote subtitle URL", type: "Error")
             return
         }
-        
+
+        Logger.shared.log(
+            "Loading remote subtitle target={\(playbackURLSummary(url))}",
+            type: "Info"
+        )
+
         var request = URLRequest(url: url)
         if isLocalProxyURL(url) {
             Logger.shared.log("Subtitle download using local proxy URL; preserving proxy headers", type: "Stream")
@@ -12974,14 +12894,14 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
         }
         request.timeoutInterval = 30
-        
-        // Download on background queue to avoid blocking main thread
+
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
-            
-            URLSession.custom.dataTask(with: request) { [weak self] data, response, error in
+
+            let session = URLSession.fetchData(allowRedirects: true)
+            session.dataTask(with: request) { [weak self] data, response, error in
                 guard let self = self else { return }
-                
+
                 if let error = error {
                     Logger.shared.log("Failed to download subtitles: \(error.localizedDescription)", type: "Error")
                     DispatchQueue.main.async { [weak self] in
@@ -12989,7 +12909,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     }
                     return
                 }
-                
+
                 if let httpResponse = response as? HTTPURLResponse {
                     Logger.shared.log("Subtitle download response: \(httpResponse.statusCode)", type: "Info")
                     if httpResponse.statusCode != 200 {
@@ -13000,7 +12920,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                         return
                     }
                 }
-                
+
                 guard let data = data, let subtitleContent = String(data: data, encoding: .utf8) else {
                     Logger.shared.log("Failed to parse subtitle data (size: \(data?.count ?? 0) bytes)", type: "Error")
                     DispatchQueue.main.async { [weak self] in
@@ -13008,18 +12928,19 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     }
                     return
                 }
-                
+
                 Logger.shared.log("Subtitle content loaded: \(subtitleContent.prefix(100))...", type: "Info")
-                
-                // Parse subtitles on background queue (heavy text processing)
+
                 DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                     guard let self = self else { return }
                     self.parseAndDisplaySubtitles(subtitleContent)
                 }
             }.resume()
+
+            session.finishTasksAndInvalidate()
         }
     }
-    
+
     private func parseAndDisplaySubtitles(_ content: String) {
         let entries = SubtitleLoader.parseSubtitles(from: content, fontSize: subtitleModel.fontSize, foregroundColor: subtitleModel.foregroundColor)
 
@@ -13051,24 +12972,21 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self.updateVLCSubtitleOverlay(for: self.cachedPosition)
         }
     }
-    
+
     @objc private func subtitleButtonTapped() {
         if usesOverlayPlayerMenus {
             showMPVSubtitleMenu()
             return
         }
 
-        // Menu-first UI (VLC + MPV). When menu is primary, do not show action sheets.
         if subtitleButton.showsMenuAsPrimaryAction {
             return
         }
 
-        // VLC uses menu system directly; this handler is for MPV only
         if vlcRenderer != nil {
             return
         }
-        
-        // External subtitles present (MPV)
+
         if !subtitleURLs.isEmpty {
             if subtitleURLs.count == 1 {
                 let shouldShow = !subtitleModel.isVisible
@@ -13098,7 +13016,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             return
         }
 
-        // Embedded subtitles flow (MPV only at this point)
         let embeddedTracks = rendererGetSubtitleTracks()
         Logger.shared.log("subtitleButtonTapped: embedded flow, tracks=\(embeddedTracks.count)", type: "Info")
 
@@ -13149,10 +13066,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         present(alert, animated: true)
         showControlsTemporarily()
     }
-    
+
     private func showSubtitleSelectionMenu() {
         let alert = UIAlertController(title: "Select Subtitle", message: nil, preferredStyle: .actionSheet)
-        
+
         let disableAction = UIAlertAction(title: "Disable Subtitles", style: .default) { [weak self] _ in
             guard let self else { return }
             self.setSessionAwareSubtitleVisible(false)
@@ -13165,7 +13082,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self.updateSubtitleTracksMenu()
         }
         alert.addAction(disableAction)
-        
+
         for (index, _) in subtitleURLs.enumerated() {
             let title = index < subtitleNames.count ? subtitleNames[index] : "Subtitle \(index + 1)"
             let action = UIAlertAction(title: title, style: .default) { [weak self] _ in
@@ -13182,20 +13099,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
             alert.addAction(action)
         }
-        
+
         let cancelAction = UIAlertAction(title: "Cancel", style: .cancel, handler: nil)
         alert.addAction(cancelAction)
-        
+
 #if os(iOS)
         if let popover = alert.popoverPresentationController {
             popover.sourceView = subtitleButton
             popover.sourceRect = subtitleButton.bounds
         }
 #endif
-        
+
         present(alert, animated: true, completion: nil)
     }
-    
+
     private func animateButtonTap(_ button: UIButton) {
         UIView.animate(withDuration: 0.1, delay: 0, options: [.curveEaseOut]) {
             button.transform = CGAffineTransform(scaleX: 1.2, y: 1.2)
@@ -13205,7 +13122,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
         }
     }
-    
+
     private func updateProgressHostingController() {
         struct ProgressHostView: View {
             @ObservedObject var model: ProgressModel
@@ -13233,7 +13150,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 )
             }
         }
-        
+
         if progressHostingController != nil {
             return
         }
@@ -13241,10 +13158,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let mpvAdvancedControlsActive = isMPVRenderer && isMetalMPVRenderer && ExperimentalFeatureState.canUseExperimentalMPVPlayback
         let showRemainingTime = !isMPVRenderer
             || !mpvAdvancedControlsActive
-            || (mpvAdvancedControlsActive && UserDefaults.standard.bool(forKey: ExperimentalFeatureState.mpvShowRemainingTimeKey))
+            || (mpvAdvancedControlsActive && ProfileSettingsStore.active.bool(forKey: ExperimentalFeatureState.mpvShowRemainingTimeKey))
         let preciseAdjustment = mpvAdvancedControlsActive
-            && UserDefaults.standard.bool(forKey: ExperimentalFeatureState.mpvPreciseProgressKey)
-        
+            && ProfileSettingsStore.active.bool(forKey: ExperimentalFeatureState.mpvPreciseProgressKey)
+
         let host = UIHostingController(rootView: AnyView(ProgressHostView(
             model: progressModel,
             showRemainingTime: showRemainingTime,
@@ -13266,7 +13183,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     self.showControlsTemporarily()
                 }
             }
-        )))
+        ).profileScopedAppStorage()))
 
         addChild(host)
         host.view.translatesAutoresizingMaskIntoConstraints = false
@@ -13283,7 +13200,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         progressHostingController = host
 
     }
-    
+
     private func updatePlayPauseButton(isPaused: Bool, shouldShowControls: Bool = true) {
         DispatchQueue.main.async {
             if self.isRendererLoading {
@@ -13295,7 +13212,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             let img = UIImage(systemName: name, withConfiguration: config)
             self.centerPlayPauseButton.setImage(img, for: .normal)
             self.centerPlayPauseButton.isHidden = false
-            
+
             UIView.animate(withDuration: 0.2, delay: 0, options: [.curveEaseInOut]) {
                 self.centerPlayPauseButton.transform = CGAffineTransform(scaleX: 1.1, y: 1.1)
             } completion: { _ in
@@ -13303,14 +13220,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     self.centerPlayPauseButton.transform = .identity
                 }
             }
-            
+
             if shouldShowControls {
                 self.showControlsTemporarily()
             }
         }
     }
-    
-    // MARK: - Error display helpers
+
     private func presentErrorAlert(title: String, message: String) {
         DispatchQueue.main.async {
             let ac = UIAlertController(title: title, message: message, preferredStyle: .alert)
@@ -13324,7 +13240,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
         }
     }
-    
+
     private func showTransientErrorBanner(_ message: String, duration: TimeInterval = 4.0) {
         guard shouldShowTopErrorBanner else { return }
         DispatchQueue.main.async {
@@ -13333,7 +13249,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self.perform(#selector(self.hideErrorBanner), with: nil, afterDelay: duration)
         }
     }
-    
+
     @objc private func hideErrorBanner() {
         DispatchQueue.main.async {
             UIView.animate(withDuration: 0.25) {
@@ -13341,7 +13257,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
         }
     }
-    
+
     @objc private func handleLoggerNotification(_ note: Notification) {
         guard shouldShowTopErrorBanner else { return }
         guard let info = note.userInfo,
@@ -13356,7 +13272,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             showTransientErrorBanner(message)
         }
     }
-    
+
     private func showErrorBanner(_ message: String) {
         guard shouldShowTopErrorBanner else { return }
         DispatchQueue.main.async {
@@ -13394,7 +13310,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: workItem)
         }
     }
-    
+
     @objc private func viewLogsTapped() {
         Task { @MainActor in
             let logs = await Logger.shared.getLogsAsync()
@@ -13402,7 +13318,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             vc.view.backgroundColor = UIColor(named: "background")
             let tv = UITextView()
             tv.translatesAutoresizingMaskIntoConstraints = false
-            
+
 #if !os(tvOS)
             tv.isEditable = false
 #endif
@@ -13417,13 +13333,13 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             ])
             vc.navigationItem.title = "Logs"
             let nav = UINavigationController(rootViewController: vc)
-            
+
 #if !os(tvOS)
             nav.modalPresentationStyle = .pageSheet
 #endif
-            
+
             let close: UIBarButtonItem
-            
+
 #if compiler(>=6.0)
             if #available(iOS 26.0, tvOS 26.0, *) {
                 close = UIBarButtonItem(title: "Close", style: .prominent, target: self, action: #selector(dismissLogs))
@@ -13437,11 +13353,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self.present(nav, animated: true, completion: nil)
         }
     }
-    
+
     @objc private func dismissLogs() {
         dismiss(animated: true, completion: nil)
     }
-    
+
     @objc private func containerTapped(_ gesture: UITapGestureRecognizer) {
         pendingContainerTapWorkItem?.cancel()
         if isCenterTapPlayPauseEnabled, isCentralPlaybackTap(gesture) {
@@ -13495,9 +13411,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func togglePlaybackFromVideoGesture(source: String) {
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.isHandoffLoadPending else { return }
-#endif
         pendingContainerTapWorkItem?.cancel()
         suppressNextPlayPauseControlReveal = true
         playPauseRevealSuppressionToken += 1
@@ -13529,14 +13442,11 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         controlsVisibilityGeneration += 1
         let visibilityGeneration = controlsVisibilityGeneration
         controlsVisible = true
-        // Light live-tracking: showing the controls means the user is interacting and PiP is more likely soon, so nudge
-        // the warm PiP.
+
         warmMPVPictureInPictureForForegroundPlaybackIfNeeded(source: "controls-shown-track", minInterval: 10.0)
         updateBrightnessControlVisibility()
         updateVolumeControlVisibility()
 
-        // Ensure the transparent input surface stays above the renderer and all
-        // controls stay above that surface.
         restorePlayerInteractionHierarchy()
         videoContainer.bringSubviewToFront(controlsOverlayView)
         videoContainer.bringSubviewToFront(overlayMenuDismissView)
@@ -13549,10 +13459,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
         videoContainer.bringSubviewToFront(pipButton)
 #if os(iOS)
-#if canImport(GoogleCast)
-        videoContainer.bringSubviewToFront(castButton)
-        videoContainer.bringSubviewToFront(castConflictButton)
-#endif
         videoContainer.bringSubviewToFront(watchTogetherButton)
 #endif
         videoContainer.bringSubviewToFront(playerTitleLabel)
@@ -13575,7 +13481,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         if let browserView = episodeBrowserHostingController?.view {
             videoContainer.bringSubviewToFront(browserView)
         }
-        
+
         DispatchQueue.main.async {
             guard self.controlsVisibilityGeneration == visibilityGeneration,
                   self.controlsVisible else { return }
@@ -13592,10 +13498,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
                 self.pipButton.alpha = self.pipButton.isHidden ? 0.0 : 1.0
 #if os(iOS)
-#if canImport(GoogleCast)
-                self.castButton.alpha = self.castButton.isHidden ? 0.0 : 1.0
-                self.castConflictButton.alpha = self.castConflictButton.isHidden ? 0.0 : 1.0
-#endif
                 self.watchTogetherButton.alpha = self.watchTogetherButton.isHidden ? 0.0 : 1.0
 #endif
                 self.playerTitleLabel.alpha = self.playerTitleLabel.text?.isEmpty == false ? 1.0 : 0.0
@@ -13624,7 +13526,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
             }
         }
-        
+
         let work = DispatchWorkItem { [weak self] in
             guard let self,
                   self.controlsVisibilityGeneration == visibilityGeneration,
@@ -13634,7 +13536,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         controlsHideWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 4.0, execute: work)
     }
-    
+
     private func hideControls() {
         controlsHideWorkItem?.cancel()
         controlsVisibilityGeneration += 1
@@ -13645,7 +13547,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         isBrightnessControlActive = false
         isVolumeControlActive = false
 #endif
-        
+
         DispatchQueue.main.async {
             guard self.controlsVisibilityGeneration == visibilityGeneration,
                   !self.controlsVisible else { return }
@@ -13659,10 +13561,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
                 self.pipButton.alpha = 0.0
 #if os(iOS)
-#if canImport(GoogleCast)
-                self.castButton.alpha = 0.0
-                self.castConflictButton.alpha = 0.0
-#endif
                 self.watchTogetherButton.alpha = 0.0
 #endif
                 self.playerTitleLabel.alpha = 0.0
@@ -13726,17 +13624,16 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
         }
         #endif
-        
-        // Filter double-tap gestures by screen side
+
         let location = touch.location(in: videoContainer)
         let isLeftSide = location.x < videoContainer.bounds.width / 2
-        
+
         if gestureRecognizer === leftDoubleTapGesture {
             return isDoubleTapSeekEnabled && isLeftSide
         } else if gestureRecognizer === rightDoubleTapGesture {
             return isDoubleTapSeekEnabled && !isLeftSide
         }
-        
+
         return true
     }
 
@@ -13793,10 +13690,42 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
         return false
     }
-    
+
     @objc private func closeTapped() {
+#if os(iOS)
+        if case .active = watchTogetherConnectionState,
+           !PlayerPlaybackLockSettings.isLocked(),
+           presentedViewController == nil {
+            presentWatchTogetherCloseConfirmation()
+            return
+        }
+#endif
         closePlayer(allowWhilePlaybackLocked: false)
     }
+
+#if os(iOS)
+    private func presentWatchTogetherCloseConfirmation() {
+        let alert = UIAlertController(
+            title: "Watch Together is Active",
+            message: "Closing the player affects the SharePlay session.",
+            preferredStyle: .actionSheet
+        )
+        alert.addAction(UIAlertAction(title: "Leave Session & Close", style: .destructive) { [weak self] _ in
+            WatchTogetherCoordinator.shared.leaveSession()
+            self?.closePlayer(allowWhilePlaybackLocked: false)
+        })
+        alert.addAction(UIAlertAction(title: "End for Everyone & Close", style: .destructive) { [weak self] _ in
+            WatchTogetherCoordinator.shared.endSessionForEveryone()
+            self?.closePlayer(allowWhilePlaybackLocked: false)
+        })
+        alert.addAction(UIAlertAction(title: "Keep Watching", style: .cancel))
+        if let popover = alert.popoverPresentationController {
+            popover.sourceView = closeButton
+            popover.sourceRect = closeButton.bounds
+        }
+        present(alert, animated: true)
+    }
+#endif
 
     private func closePlayer(allowWhilePlaybackLocked: Bool) {
 #if os(iOS)
@@ -13808,9 +13737,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 #endif
         if isClosing { return }
         isClosing = true
-#if os(iOS) && canImport(GoogleCast)
-        GoogleCastCoordinator.shared.playerClosed(self)
-#endif
+        releaseEphemeralProxyOwnership()
         releaseMPVAppExitPictureInPictureOwnership(
             reason: "close-tapped",
             clearActivationCandidate: true
@@ -13948,13 +13875,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         hasFinalizedMediaStatePlayback = true
         var userInfo: [String: Any] = [:]
         if let mediaInfo {
-#if os(iOS) && canImport(GoogleCast)
-            if !GoogleCastCoordinator.shared.isRemoteMediaActive {
-                syncTraktProgressOnPlaybackCloseIfNeeded(for: mediaInfo, reason: "close")
-            }
-#else
             syncTraktProgressOnPlaybackCloseIfNeeded(for: mediaInfo, reason: "close")
-#endif
             switch mediaInfo {
             case .movie(let id, _, _, _):
                 userInfo["tmdbId"] = id
@@ -13980,6 +13901,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
     }
 
     private func persistCurrentProgressForAccountBoundary() {
+        guard playbackProfileIsStillActive("the final position write") else { return }
         guard cachedPosition.isFinite,
               cachedDuration.isFinite,
               cachedPosition >= 0,
@@ -13995,7 +13917,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 title: title,
                 currentTime: position,
                 totalDuration: cachedDuration,
-                posterURL: posterURL
+                posterURL: posterURL,
+                owner: playbackOwnerProfileID
             )
         case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, let showPosterURL, let isAnime):
             ProgressManager.shared.updateEpisodeProgress(
@@ -14010,7 +13933,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                     seasonNumber: seasonNumber,
                     episodeNumber: episodeNumber
                 ),
-                isAnime: isAnime || episodePlaybackContext?.hasAnimeMediaId == true
+                isAnime: isAnime || episodePlaybackContext?.hasAnimeMediaId == true,
+                owner: playbackOwnerProfileID
             )
         }
     }
@@ -14019,13 +13943,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         guard hasBegunMediaStatePlaybackLease,
               !hasEndedMediaStatePlaybackLease else { return }
 
-        // This notification is synchronous on the main actor. Freeze renderer
-        // callbacks, commit the final outgoing position, and release the lease
-        // before the sync manager installs another account's state.
         isClosing = true
-#if os(iOS) && canImport(GoogleCast)
-        GoogleCastCoordinator.shared.stopForAccountBoundary(self)
-#endif
+        releaseEphemeralProxyOwnership()
         releaseMPVAppExitPictureInPictureOwnership(
             reason: "icloud-account-boundary",
             clearActivationCandidate: true
@@ -14046,7 +13965,55 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         finishMediaStatePlaybackLeaseIfNeeded()
         dismiss(animated: false)
     }
-    
+
+    private func handleActiveProfileWillChange(to incomingProfileID: UUID) {
+        guard incomingProfileID != playbackOwnerProfileID, !isClosing else { return }
+        Logger.shared.log(
+            "PlayerViewController: closing playback before its owning profile changes",
+            type: "Player"
+        )
+        if hasBegunMediaStatePlaybackLease, !hasEndedMediaStatePlaybackLease {
+            handleMediaStateAccountBoundary()
+            return
+        }
+
+        isClosing = true
+        releaseEphemeralProxyOwnership()
+        rendererPausePlayback()
+        rendererStop()
+        postPlayerDidCloseNotification()
+        dismiss(animated: false)
+    }
+
+    @objc private func handleActiveProfileDidChange() {
+
+        guard !isClosing, shouldStopPlaybackForActiveProfile() else { return }
+        Logger.shared.log(
+            "PlayerViewController: stopping playback because the newly active profile may not see this title",
+            type: "Player"
+        )
+
+        rendererPausePlayback()
+        closePlayer(allowWhilePlaybackLocked: true)
+    }
+
+    private func shouldStopPlaybackForActiveProfile() -> Bool {
+        guard ProfileManager.shared.isKidsModeActive else { return false }
+        guard let request = kidsGateRequestForCurrentPlayback() else { return true }
+        return KidsPlaybackGate.decision(for: request) != .allow
+    }
+
+    private func kidsGateRequestForCurrentPlayback() -> PlaybackRequest? {
+        guard let mediaInfo else { return nil }
+        return PlaybackRequest(
+            url: initialURL ?? URL(fileURLWithPath: "/"),
+            mediaInfo: mediaInfo,
+            episodePlaybackContext: episodePlaybackContext,
+            title: playerTitleOverride ?? "",
+            isAnime: isAnimeHint ?? false
+        )
+    }
+
     @objc private func pipTapped() {
         if vlcRenderer != nil {
             Logger.shared.log("[PlayerVC.PiP] button ignored for VLC renderer: unavailable", type: "Player")
@@ -14106,9 +14073,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             controller.stopPictureInPicture(source: "playback-intent-changed")
         }
         rendererFinishPictureInPicture()
-        // Delegate callbacks can reach this path from willStart/didStart. Let that callback unwind
-        // before detaching its AVKit controller, while the attempt generation above already makes
-        // every late callback stale.
+
         DispatchQueue.main.async { [weak self, weak controller] in
             guard let self,
                   let controller,
@@ -14136,9 +14101,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         source: String,
         attemptID: Int
     ) {
-        // The direct MPVKit bridge reports its own synchronous failure through the stop handler,
-        // which advances the attempt before activate returns. Only perform the generic retirement
-        // when no renderer-specific handler has already claimed this exact failure.
+
         guard pipController === controller,
               controller.playbackLoadGeneration == playbackLoadGeneration,
               controller.transitionAttemptID == attemptID,
@@ -14186,12 +14149,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             logPictureInPicture("MPV PiP start ignored source=\(source): active renderer is not MPV")
             return
         }
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else {
-            logPictureInPicture("MPV PiP start skipped for Google Cast source=\(source)")
-            return
-        }
-#endif
         guard let pip = pipController else { return }
         if source == "button" {
             clearMPVAppExitPictureInPictureSuppression(reason: "manual-button-start")
@@ -14229,9 +14186,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 source: source,
                 activateLayer: false
             )
-#if os(iOS) && canImport(GoogleCast)
-            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
             guard attemptID == self.mpvPiPStartAttemptID,
                   loadGeneration == self.playbackLoadGeneration,
                   self.pipController === pip,
@@ -14256,9 +14210,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
 
             self.logPictureInPicture("prepare MPV PiP end source=\(source) attemptID=\(attemptID) primed=\(primed) subs={\(self.subtitlePictureInPictureDebugSnapshot())}")
             if pip.isPictureInPictureActive {
-                // Automatic-from-inline can finish while this explicit preparation task is
-                // suspended. A generation-matched active controller is success; tearing down the
-                // renderer here would black out the PiP session that AVKit just activated.
+
                 self.mpvAppExitPiPStartRequested = false
                 self.mpvActivePiPCallbackAttemptID = attemptID
                 if primed {
@@ -14292,8 +14244,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
 
             pip.updatePlaybackState()
-            // AVKit may publish `isPictureInPicturePossible` one run-loop after the first sample.
-            // Wait only for that controller state; do not issue more renderer primes or reloads.
+
             let possibleDeadline = CACurrentMediaTime() + 1
             while !pip.isPictureInPicturePossible,
                   !pip.isPictureInPictureActive,
@@ -14412,11 +14363,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
     }
 
-    private func updatePosition(_ position: Double, duration: Double, fromGoogleCast: Bool = false) {
+    private func updatePosition(_ position: Double, duration: Double) {
         guard !isClosing else { return }
-#if os(iOS) && canImport(GoogleCast)
-        guard fromGoogleCast || !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
 
         let safePosition: Double
         if position.isFinite, position >= 0 {
@@ -14425,9 +14373,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             safePosition = max(0, cachedPosition)
         }
 
-        // Some transport bridge paths can temporarily report a tiny/unknown duration
-        // while valid playback time is already advancing. Treat that as unknown
-        // instead of letting the slider collapse to the end of a 1-second range.
         let minimumReliableDuration = 5.0
         let mpvBridgeDurationLooksLikeWindow = isMPVTransportBridgePlaybackActive
             && !isVLCPlayer
@@ -14579,7 +14524,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             self.progressModel.position = safePosition
             self.progressModel.duration = max(safeDuration, 1.0)
             self.progressModel.durationIsKnown = durationIsReliable
-            
+
             if self.rendererIsPictureInPictureActive() {
                 self.rendererUpdatePictureInPicturePlaybackState()
             }
@@ -14598,7 +14543,6 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             }
 #endif
 
-            // If playback is progressing, force-hide any lingering loading spinner.
             if self.isRendererLoading && playbackAdvanced {
                 if self.isVLCPlayer {
                     self.logVLCUI("loading cleared by position advance safe=\(self.secondsText(safePosition)) effectiveDuration=\(self.secondsText(effectiveDuration)) waitingResume=\(waitingForInitialResume)", type: "VLCPlayback")
@@ -14614,7 +14558,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         }
 
         guard !waitingForInitialResume else { return }
-        
+
         guard durationIsReliable, effectiveDuration.isFinite, effectiveDuration > 0, safePosition >= 0, let info = mediaInfo else { return }
         let persistPosition = min(safePosition, effectiveDuration)
         guard shouldPersistProgressAfterBackgroundRecovery(
@@ -14631,7 +14575,9 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         ) else {
             return
         }
-        
+
+        guard playbackProfileIsStillActive("a periodic position write") else { return }
+
         let progressPlaybackContext: EpisodePlaybackContext?
         if case .episode(_, let seasonNumber, let episodeNumber, _, _, _) = info {
             progressPlaybackContext = playbackContextForCurrentEpisode(
@@ -14646,6 +14592,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             position: persistPosition,
             duration: effectiveDuration,
             playbackContext: progressPlaybackContext,
+            owner: playbackOwnerProfileID,
+            progressAuthority: playbackProfileAuthority.progress,
             traktAction: !rendererIsPausedState() && playbackDidStart ? .start : nil
         )
     }
@@ -14818,6 +14766,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
     let seed: PlayerEpisodeBrowserSeed
     private var didLoad = false
     private var resolvedMediaYear: Int?
+    private var canonicalCurrentPlaybackContext: EpisodePlaybackContext?
 
     init(seed: PlayerEpisodeBrowserSeed) {
         self.seed = seed
@@ -14834,16 +14783,26 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
         if !didLoad {
             await load()
         }
-        let currentIsSpecial = seed.currentPlaybackContext?.isSpecial == true || seed.currentSeasonNumber == 0
+        if seed.isAnime,
+           seed.currentPlaybackContext?.hasAnimeMediaId == true,
+           canonicalCurrentPlaybackContext == nil {
+            return nil
+        }
+        let currentContext = canonicalCurrentPlaybackContext ?? seed.currentPlaybackContext
+        let currentIsSpecial = canonicalCurrentPlaybackContext?.isSpecial
+            ?? (seed.currentPlaybackContext?.isSpecial == true || seed.currentSeasonNumber == 0)
         let eligibleItems = seasons.flatMap(\.episodes).filter { item in
             guard currentIsSpecial else { return !item.isSpecial }
             guard item.isSpecial,
-                  let currentContext = seed.currentPlaybackContext,
+                  let currentContext,
                   let itemContext = item.playbackContext else {
                 return false
             }
-            if let currentAniListId = currentContext.anilistMediaId {
-                return itemContext.anilistMediaId == currentAniListId
+            if let currentAniListId = currentContext.positiveAniListMediaId {
+                return itemContext.positiveAniListMediaId == currentAniListId
+            }
+            if let currentProviderID = currentContext.anilistMediaId {
+                return itemContext.anilistMediaId == currentProviderID
             }
             if let currentKitsuId = currentContext.kitsuMediaId {
                 return itemContext.kitsuMediaId == currentKitsuId
@@ -14856,9 +14815,8 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
             }
             return lhs.episode.seasonNumber < rhs.episode.seasonNumber
         }
-        guard let index = allItems.firstIndex(where: {
-            $0.episode.seasonNumber == seed.currentSeasonNumber &&
-            $0.episode.episodeNumber == seed.currentEpisodeNumber
+        guard let index = allItems.firstIndex(where: { item in
+            isCanonicalCurrentItem(item, currentContext: currentContext)
         }) else { return nil }
         let nextIndex = allItems.index(after: index)
         guard nextIndex < allItems.endIndex else { return nil }
@@ -14874,8 +14832,6 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
         for item in allItems[nextIndex...] {
             guard !Task.isCancelled else { return nil }
 
-            // Specials and entries without provider mapping are not classified by the regular
-            // season endpoint. Preserve the existing immediate-next behavior for unknown data.
             guard item.isAnime,
                   !item.isSpecial,
                   let providerId = item.playbackContext?.anilistMediaId else {
@@ -14888,7 +14844,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
             } else {
                 let malId: Int?
                 if providerId < 0 {
-                    malId = abs(providerId)
+                    malId = RemoteMediaNumericBoundary.positiveMagnitude(providerId)
                 } else if let cached = TrackerManager.shared.cachedMyAnimeListAnimeId(fromAniListId: providerId) {
                     malId = cached
                 } else {
@@ -14935,6 +14891,10 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
         if let cached = Self.cachedLoad(for: cacheKey) {
             seasons = cached.seasons
             currentItemID = cached.currentItemID
+            canonicalCurrentPlaybackContext = cached.seasons
+                .flatMap(\.episodes)
+                .first(where: { $0.id == cached.currentItemID })?
+                .playbackContext
             isLoading = false
             errorMessage = nil
             Logger.shared.log("Player episode browser cache hit key=\(cacheKey) seasons=\(cached.seasons.count)", type: "Player")
@@ -14945,6 +14905,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
         errorMessage = nil
         seasons = []
         currentItemID = nil
+        canonicalCurrentPlaybackContext = nil
 
         do {
             let tmdbService = TMDBService.shared
@@ -14959,24 +14920,48 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
             var specialContexts: [SpecialEpisodeListContext] = []
 
             if seed.isAnime && !PerformanceModeSettings.skipsAniListTraversalForAnimeDetails {
+                let providerSeed = seed.currentPlaybackContext?.anilistMediaId
+                    ?? seed.currentPlaybackContext?.positiveAniListMediaId
                 animeData = try? await AniListService.shared.fetchAnimeDetailsWithEpisodes(
                     title: seed.showTitle,
                     tmdbShowId: seed.showId,
                     tmdbService: tmdbService,
                     tmdbShowPoster: showPosterURL,
-                    token: nil
+                    token: nil,
+                    seedAniListId: providerSeed,
+                    seedMALId: providerSeed.flatMap { value in
+                        value < 0 ? RemoteMediaNumericBoundary.positiveMagnitude(value) : nil
+                    }
                 )
                 if let animeData {
-                    let mappings = animeData.seasons.map { (seasonNumber: $0.seasonNumber, anilistId: $0.anilistId) }
+                    let mappings = animeData.seasons.map {
+                        (
+                            seasonNumber: $0.seasonNumber,
+                            anilistId: $0.canonicalAniListId ?? $0.anilistId
+                        )
+                    }
                     TrackerManager.shared.registerAniListAnimeData(tmdbId: seed.showId, seasons: mappings)
                 }
 
-                let specialEntries = await AniListService.shared.fetchSpecialSearchEntries(
-                    tmdbShowId: seed.showId,
-                    fallbackPosterURL: showPosterURL,
-                    baseAniListIds: animeData?.seasons.map(\.anilistId) ?? [],
-                    tmdbService: tmdbService
-                )
+                let specialEntries: [AniListSpecialSearchEntry]
+                if let providerSeed, providerSeed < 0 {
+                    if let rootMALID = RemoteMediaNumericBoundary.positiveMagnitude(providerSeed) {
+                        specialEntries = (try? await AniListService.shared.fetchRequiredMALSpecialSearchEntries(
+                            tmdbShowId: seed.showId,
+                            rootMalId: rootMALID,
+                            fallbackPosterURL: showPosterURL
+                        )) ?? []
+                    } else {
+                        specialEntries = []
+                    }
+                } else {
+                    specialEntries = await AniListService.shared.fetchSpecialSearchEntries(
+                        tmdbShowId: seed.showId,
+                        fallbackPosterURL: showPosterURL,
+                        baseAniListIds: animeData?.seasons.map(\.anilistId) ?? [],
+                        tmdbService: tmdbService
+                    )
+                }
                 specialContexts = specialEntries.compactMap {
                     SpecialEpisodeListContext(entry: $0, tmdbShowId: seed.showId)
                 }
@@ -14988,8 +14973,14 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
             let animeAbsoluteEpisodeOffsets = animeData.map {
                 absoluteEpisodeOffsetsBySeason(for: $0.seasons)
             } ?? [:]
+            canonicalCurrentPlaybackContext = canonicalPlaybackContext(
+                animeData: animeData,
+                specialContexts: specialContexts,
+                absoluteEpisodeOffsets: animeAbsoluteEpisodeOffsets
+            )
 
-            if let currentSpecial = currentSpecialContext(from: specialContexts) {
+            if canonicalCurrentPlaybackContext?.isSpecial == true,
+               let currentSpecial = currentSpecialContext(from: specialContexts) {
                 loaded.append(buildSpecialSeason(
                     context: currentSpecial,
                     showTitle: showTitle,
@@ -14999,7 +14990,7 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
                 ))
                 seasons = loaded
             } else if seed.isAnime,
-                      let animeSeason = animeData?.seasons.first(where: { $0.seasonNumber == seed.currentSeasonNumber }) {
+                      let animeSeason = currentRegularSeason(in: animeData) {
                 loaded.append(buildAnimeSeason(
                     animeSeason,
                     absoluteEpisodeOffset: animeAbsoluteEpisodeOffsets[animeSeason.seasonNumber] ?? 0,
@@ -15009,7 +15000,9 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
                     originalAudioLanguage: tvShow.originalLanguage
                 ))
                 seasons = loaded
-            } else if let currentTMDBSeason = tvShow.seasons.first(where: { $0.seasonNumber == seed.currentSeasonNumber }),
+
+            } else if !seed.isAnime || animeData == nil,
+                      let currentTMDBSeason = tvShow.seasons.first(where: { $0.seasonNumber == seed.currentSeasonNumber }),
                       let detail = try? await tmdbService.getSeasonDetails(tvShowId: seed.showId, seasonNumber: currentTMDBSeason.seasonNumber) {
                 loaded.append(buildTMDBSeason(
                     summary: currentTMDBSeason,
@@ -15024,7 +15017,12 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
             }
 
             if seed.isAnime, let animeData {
-                for season in animeData.seasons.sorted(by: { $0.seasonNumber < $1.seasonNumber }) where season.seasonNumber != seed.currentSeasonNumber {
+                let currentProviderID = canonicalCurrentPlaybackContext?.positiveAniListMediaId
+                    ?? canonicalCurrentPlaybackContext?.anilistMediaId
+                let currentKitsuID = canonicalCurrentPlaybackContext?.kitsuMediaId
+                for season in animeData.seasons.sorted(by: { $0.seasonNumber < $1.seasonNumber }) where
+                    (season.canonicalAniListId ?? season.anilistId) != currentProviderID
+                        && (currentKitsuID == nil || season.kitsuId != currentKitsuID) {
                     loaded.append(buildAnimeSeason(
                         season,
                         absoluteEpisodeOffset: animeAbsoluteEpisodeOffsets[season.seasonNumber] ?? 0,
@@ -15084,11 +15082,14 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
     }
 
     private static func cacheKey(for seed: PlayerEpisodeBrowserSeed) -> String {
-        let contextKey = [
-            seed.currentPlaybackContext?.anilistMediaId.map(String.init) ?? "nil",
-            seed.currentPlaybackContext?.kitsuMediaId.map(String.init) ?? "nil",
-            seed.currentPlaybackContext?.isSpecial == true ? "special" : "regular"
-        ].joined(separator: ":")
+        let rawProvider = seed.currentPlaybackContext?.anilistMediaId
+            .map { String($0) } ?? "nil"
+        let canonicalProvider = seed.currentPlaybackContext?.positiveAniListMediaId
+            .map { String($0) } ?? "nil"
+        let kitsuProvider = seed.currentPlaybackContext?.kitsuMediaId
+            .map { String($0) } ?? "nil"
+        let role = seed.currentPlaybackContext?.isSpecial == true ? "special" : "regular"
+        let contextKey = "\(rawProvider):\(canonicalProvider):\(kitsuProvider):\(role)"
         let modeKey: String
         if PerformanceModeSettings.isEnabled && PerformanceModeSettings.skipsAniListTraversalForAnimeDetails {
             modeKey = "performance+skipTraversal"
@@ -15119,11 +15120,213 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
     }
 
     private func currentSpecialContext(from contexts: [SpecialEpisodeListContext]) -> SpecialEpisodeListContext? {
-        guard let current = seed.currentPlaybackContext, current.isSpecial else { return nil }
-        return contexts.first {
-            $0.anilistId == current.anilistMediaId ||
-            $0.localSeasonNumber == current.localSeasonNumber
+
+        guard let current = canonicalCurrentPlaybackContext ?? seed.currentPlaybackContext else { return nil }
+        for context in contexts {
+            let candidates: [TMDBEpisode]
+            if let tmdbSeason = current.resolvedTMDBSeasonNumber,
+               let tmdbEpisode = current.resolvedTMDBEpisodeNumber {
+                candidates = context.episodes.filter {
+                    let candidate = context.playbackContext(for: $0)
+                    return candidate.resolvedTMDBSeasonNumber == tmdbSeason
+                        && candidate.resolvedTMDBEpisodeNumber == tmdbEpisode
+                }
+            } else {
+                candidates = context.episodes.filter {
+                    $0.episodeNumber == current.localEpisodeNumber
+                }
+            }
+            if candidates.contains(where: {
+                AnimeEpisodeIdentityPolicy.isSameEpisode(
+                    current,
+                    context.playbackContext(for: $0)
+                )
+            }) {
+                return context
+            }
         }
+        return nil
+    }
+
+    private func currentRegularSeason(
+        in animeData: AniListAnimeWithSeasons?
+    ) -> AniListSeasonWithPoster? {
+        guard let animeData else { return nil }
+        if let context = canonicalCurrentPlaybackContext {
+            if let providerID = context.positiveAniListMediaId,
+               let season = animeData.seasons.first(where: {
+                   ($0.canonicalAniListId ?? ($0.anilistId > 0 ? $0.anilistId : nil)) == providerID
+               }) {
+                return season
+            }
+            if let providerID = context.anilistMediaId,
+               let season = animeData.seasons.first(where: { $0.anilistId == providerID }) {
+                return season
+            }
+            if let kitsuID = context.kitsuMediaId,
+               let season = animeData.seasons.first(where: { $0.kitsuId == kitsuID }) {
+                return season
+            }
+            return nil
+        }
+        guard seed.currentPlaybackContext?.hasAnimeMediaId != true else { return nil }
+        return animeData.seasons.first(where: { $0.seasonNumber == seed.currentSeasonNumber })
+    }
+
+    private func canonicalPlaybackContext(
+        animeData: AniListAnimeWithSeasons?,
+        specialContexts: [SpecialEpisodeListContext],
+        absoluteEpisodeOffsets: [Int: Int]
+    ) -> EpisodePlaybackContext? {
+        guard seed.isAnime else { return nil }
+        let persisted = seed.currentPlaybackContext
+        let episodeNumber = max(1, persisted?.localEpisodeNumber ?? seed.currentEpisodeNumber)
+
+        var aliases: [Int: Int] = [:]
+        if let animeData {
+            for season in animeData.seasons {
+                if let canonicalID = season.canonicalAniListId
+                        ?? (season.anilistId > 0 ? season.anilistId : nil),
+                   canonicalID > 0 {
+                    aliases[season.anilistId] = canonicalID
+                    if let providerID = RemoteMediaNumericBoundary.negativeProviderIdentifier(
+                        season.malId
+                    ) {
+                        aliases[providerID] = canonicalID
+                    }
+                }
+            }
+        }
+        for special in specialContexts {
+            if let canonicalID = special.canonicalAniListId, canonicalID > 0 {
+                aliases[special.anilistId] = canonicalID
+            }
+        }
+
+        if let animeData {
+            for season in animeData.seasons {
+                let candidates: [AniListEpisode]
+                if let tmdbSeason = persisted?.resolvedTMDBSeasonNumber,
+                   let tmdbEpisode = persisted?.resolvedTMDBEpisodeNumber {
+                    candidates = season.episodes.filter {
+                        $0.tmdbSeasonNumber == tmdbSeason
+                            && $0.tmdbEpisodeNumber == tmdbEpisode
+                    }
+                } else {
+                    candidates = season.episodes.filter {
+                        $0.number == episodeNumber
+                            && (persisted?.hasAnimeMediaId == true
+                                || season.seasonNumber == seed.currentSeasonNumber)
+                    }
+                }
+                for episode in candidates {
+                    let candidate = EpisodePlaybackContext(
+                        localSeasonNumber: season.seasonNumber,
+                        localEpisodeNumber: episode.number,
+                        anilistMediaId: season.anilistId,
+                        canonicalAniListMediaId: season.canonicalAniListId
+                            ?? (season.anilistId > 0 ? season.anilistId : nil),
+                        malMediaId: season.malId,
+                        kitsuMediaId: season.kitsuId,
+                        tmdbSeasonNumber: episode.tmdbSeasonNumber,
+                        tmdbEpisodeNumber: episode.tmdbEpisodeNumber,
+                        tmdbEpisodeOffset: nil,
+                        animeAbsoluteEpisodeNumber: RemoteMediaNumericBoundary.adding(
+                            absoluteEpisodeOffsets[season.seasonNumber] ?? 0,
+                            episode.number
+                        ),
+                        animeSeasonEpisodeCount: season.episodes.count,
+                        isSpecial: false,
+                        titleOnlySearch: false
+                    )
+                    if let persisted {
+                        if AnimeEpisodeIdentityPolicy.isSameEpisode(
+                            persisted,
+                            candidate,
+                            providerAliases: aliases
+                        ) {
+                            return candidate
+                        }
+                    } else if season.seasonNumber == seed.currentSeasonNumber,
+                              episode.number == seed.currentEpisodeNumber {
+                        return candidate
+                    }
+                }
+            }
+        }
+
+        for special in specialContexts {
+            let candidates: [TMDBEpisode]
+            if let tmdbSeason = persisted?.resolvedTMDBSeasonNumber,
+               let tmdbEpisode = persisted?.resolvedTMDBEpisodeNumber {
+                candidates = special.episodes.filter {
+                    let candidate = special.playbackContext(for: $0)
+                    return candidate.resolvedTMDBSeasonNumber == tmdbSeason
+                        && candidate.resolvedTMDBEpisodeNumber == tmdbEpisode
+                }
+            } else {
+                candidates = special.episodes.filter {
+                    $0.episodeNumber == episodeNumber
+                        && (persisted?.hasAnimeMediaId == true
+                            || special.localSeasonNumber == seed.currentSeasonNumber)
+                }
+            }
+            for episode in candidates {
+                let candidate = special.playbackContext(for: episode)
+                if let persisted {
+                    if AnimeEpisodeIdentityPolicy.isSameEpisode(
+                        persisted,
+                        candidate,
+                        providerAliases: aliases
+                    ) {
+                        return candidate
+                    }
+                } else if special.localSeasonNumber == seed.currentSeasonNumber,
+                          episode.episodeNumber == seed.currentEpisodeNumber {
+                    return candidate
+                }
+            }
+        }
+
+        return persisted?.hasAnimeMediaId == true ? nil : persisted
+    }
+
+    private func isCanonicalCurrentItem(
+        _ item: PlayerEpisodeBrowserItem,
+        currentContext: EpisodePlaybackContext?
+    ) -> Bool {
+        isCanonicalCurrentEpisode(
+            item.episode,
+            isSpecial: item.isSpecial,
+            playbackContext: item.playbackContext,
+            currentContext: currentContext
+        )
+    }
+
+    private func isCanonicalCurrentEpisode(
+        _ episode: TMDBEpisode,
+        isSpecial: Bool,
+        playbackContext: EpisodePlaybackContext?,
+        currentContext: EpisodePlaybackContext?
+    ) -> Bool {
+        if seed.isAnime,
+           seed.currentPlaybackContext?.hasAnimeMediaId == true,
+           canonicalCurrentPlaybackContext == nil {
+            return false
+        }
+        guard let currentContext else {
+            return episode.seasonNumber == seed.currentSeasonNumber
+                && episode.episodeNumber == seed.currentEpisodeNumber
+        }
+        if let playbackContext {
+            return isSpecial == currentContext.isSpecial
+                && AnimeEpisodeIdentityPolicy.isSameEpisode(
+                    currentContext,
+                    playbackContext
+                )
+        }
+        return episode.seasonNumber == currentContext.localSeasonNumber
+            && episode.episodeNumber == currentContext.localEpisodeNumber
     }
 
     private func absoluteEpisodeOffsetsBySeason(for seasons: [AniListSeasonWithPoster]) -> [Int: Int] {
@@ -15132,7 +15335,10 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
 
         for season in seasons.sorted(by: { $0.seasonNumber < $1.seasonNumber }) {
             offsets[season.seasonNumber] = absoluteOffset
-            absoluteOffset += season.episodes.count
+            absoluteOffset = RemoteMediaNumericBoundary.adding(
+                absoluteOffset,
+                season.episodes.count
+            ) ?? RemoteMediaNumericBoundary.maximumTotalEpisodeCount
         }
 
         return offsets
@@ -15144,7 +15350,11 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
             .sorted { $0.number < $1.number }
             .map { aniEpisode -> PlayerEpisodeBrowserItem in
                 let episode = TMDBEpisode(
-                    id: seed.showId * 1000 + season.seasonNumber * 100 + aniEpisode.number,
+                    id: RemoteMediaNumericBoundary.syntheticIdentifier([
+                        (seed.showId, 1_000),
+                        (season.seasonNumber, 100),
+                        (aniEpisode.number, 1)
+                    ]),
                     name: aniEpisode.title,
                     overview: aniEpisode.description,
                     stillPath: aniEpisode.stillPath,
@@ -15159,11 +15369,17 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
                     localSeasonNumber: season.seasonNumber,
                     localEpisodeNumber: aniEpisode.number,
                     anilistMediaId: season.anilistId,
+                    canonicalAniListMediaId: season.canonicalAniListId
+                        ?? (season.anilistId > 0 ? season.anilistId : nil),
+                    malMediaId: season.malId,
                     kitsuMediaId: season.kitsuId,
                     tmdbSeasonNumber: aniEpisode.tmdbSeasonNumber,
                     tmdbEpisodeNumber: aniEpisode.tmdbEpisodeNumber,
                     tmdbEpisodeOffset: nil,
-                    animeAbsoluteEpisodeNumber: absoluteEpisodeOffset + aniEpisode.number,
+                    animeAbsoluteEpisodeNumber: RemoteMediaNumericBoundary.adding(
+                        absoluteEpisodeOffset,
+                        aniEpisode.number
+                    ),
                     animeSeasonEpisodeCount: season.episodes.count,
                     isSpecial: false,
                     titleOnlySearch: false
@@ -15299,8 +15515,12 @@ final class PlayerEpisodeBrowserViewModel: ObservableObject {
         )
         #endif
         #endif
-        let isCurrent = episode.seasonNumber == seed.currentSeasonNumber
-            && episode.episodeNumber == seed.currentEpisodeNumber
+        let isCurrent = isCanonicalCurrentEpisode(
+            episode,
+            isSpecial: isSpecial,
+            playbackContext: playbackContext,
+            currentContext: canonicalCurrentPlaybackContext ?? seed.currentPlaybackContext
+        )
         let id = "\(episode.seasonNumber)-\(episode.episodeNumber)-\(episode.id)-\(isSpecial ? "special" : "main")"
         #if os(tvOS)
         return PlayerEpisodeBrowserItem(
@@ -16023,8 +16243,7 @@ extension PlayerViewController: WatchTogetherPlaybackDelegate {
                 title: title
             )
         case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, _, let mediaIsAnime):
-            // EpisodePlaybackContext is already exact for the playing episode. Retargeting it
-            // with a fallback MediaInfo episode can silently rewrite a valid anime context to E1.
+
             let playbackContext = episodePlaybackContext
             return WatchTogetherMediaDescriptor(
                 tmdbID: showId,
@@ -16055,7 +16274,12 @@ extension PlayerViewController: WatchTogetherPlaybackDelegate {
     }
 
     var watchTogetherIsReady: Bool {
-        watchTogetherRendererReady && !isRendererLoading && !isClosing
+        watchTogetherRendererReady && !isClosing
+    }
+
+    var watchTogetherIsStalled: Bool {
+        if isRendererLoading { return true }
+        return false
     }
 
     var watchTogetherIsPlaying: Bool {
@@ -16063,12 +16287,25 @@ extension PlayerViewController: WatchTogetherPlaybackDelegate {
     }
 
     var watchTogetherPlaybackRate: Double {
+        if watchTogetherRateNudgeActive,
+           let baseRate = lastWatchTogetherSharedState?.playbackRate,
+           baseRate.isFinite,
+           (0.25...3.0).contains(baseRate) {
+            return baseRate
+        }
         let playbackRate = rendererGetSpeed()
         return playbackRate.isFinite && (0.25...3.0).contains(playbackRate) ? playbackRate : 1.0
     }
 
     func watchTogetherAdopt(media: WatchTogetherMediaDescriptor) {
         guard let mediaInfo else { return }
+        if media.mediaType == "tv",
+           let localDescriptor = watchTogetherMediaDescriptor,
+           localDescriptor.isSameLogicalMedia(as: media),
+           localDescriptor.playbackContext?.hasAnimeMediaId == true {
+
+            return
+        }
         switch mediaInfo {
         case .movie(let id, _, _, _):
             guard media.mediaType == "movie", media.tmdbID == id else { return }
@@ -16087,7 +16324,7 @@ extension PlayerViewController: WatchTogetherPlaybackDelegate {
                     isAnime: mediaIsAnime || media.isAnime || context.hasAnimeMediaId
                 )
             } else if seasonNumber != media.seasonNumber || episodeNumber != media.episodeNumber {
-                // A different non-anime episode must be resolved as a new player, not relabeled in place.
+
                 return
             }
         }
@@ -16103,7 +16340,7 @@ extension PlayerViewController: WatchTogetherPlaybackDelegate {
             || isRendererLoading
             || pendingSeekTime != nil
             || pendingInitialResumeTarget != nil
-            || abs(watchTogetherPosition - synchronizedPosition) >= 0.35
+            || abs(watchTogetherPosition - synchronizedPosition) >= WatchTogetherCoordinator.driftSeekThreshold
 
         if !watchTogetherRendererReady || isRendererLoading {
             let retainedSeek = pendingWatchTogetherPlaybackState?.shouldSeek == true
@@ -16128,16 +16365,12 @@ extension PlayerViewController: WatchTogetherPlaybackDelegate {
         pendingInitialResumeRetryCount = 0
         pendingInitialResumeLastRetryAt = nil
 
-        if abs(rendererGetSpeed() - state.playbackRate) >= 0.01 {
-            rendererSetSpeed(state.playbackRate, notifyWatchTogether: false)
-            updateSpeedMenu()
-        }
-
         if shouldSeek {
             cachedPosition = synchronizedPosition
             progressModel.position = synchronizedPosition
             rendererSeek(to: synchronizedPosition)
         }
+        applyWatchTogetherPlaybackRate(for: state, didSeek: shouldSeek)
         persistWatchTogetherProgress(at: synchronizedPosition)
 
         if state.isPlaying {
@@ -16148,9 +16381,7 @@ extension PlayerViewController: WatchTogetherPlaybackDelegate {
             }
         } else {
             if rendererIsPausedState() {
-                // The renderer may already be paused only because Eclipse's background fallback
-                // owns it. An authoritative shared pause supersedes that ownership even though no
-                // second transport command is necessary.
+
                 rendererPlaybackIntentGeneration &+= 1
                 mpvBackgroundFallbackAutoPaused = false
                 mpvBackgroundFallbackPauseIntentGeneration = nil
@@ -16163,25 +16394,42 @@ extension PlayerViewController: WatchTogetherPlaybackDelegate {
     }
 
     private func watchTogetherTargetPosition(for state: WatchTogetherSharedState) -> Double {
-        if cachedDuration.isFinite,
-           cachedDuration > 0 {
-            let normalizedProgress: Double?
-            if let sharedDuration = state.duration,
-               sharedDuration.isFinite,
-               sharedDuration > 0 {
-                normalizedProgress = min(max(0, state.projectedPosition() / sharedDuration), 1)
-            } else if let sharedProgress = state.normalizedProgress,
-                      sharedProgress.isFinite,
-                      (0...1).contains(sharedProgress) {
-                normalizedProgress = sharedProgress
-            } else {
-                normalizedProgress = nil
-            }
-            if let normalizedProgress {
-                return watchTogetherClampedPosition(normalizedProgress * cachedDuration)
+        let localDuration = cachedDuration.isFinite && cachedDuration > 0 ? cachedDuration : nil
+        return watchTogetherClampedPosition(
+            WatchTogetherCoordinator.shared.synchronizedPosition(of: state, localDuration: localDuration)
+        )
+    }
+
+    private func restoreWatchTogetherNudgedRateIfNeeded() {
+        guard watchTogetherRateNudgeActive else { return }
+        watchTogetherRateNudgeActive = false
+        let restoredRate = lastWatchTogetherSharedState?.playbackRate ?? 1.0
+        rendererSetSpeed(restoredRate, notifyWatchTogether: false)
+        updateSpeedMenu()
+    }
+
+    private func applyWatchTogetherPlaybackRate(
+        for state: WatchTogetherSharedState,
+        didSeek: Bool
+    ) {
+        let baseRate = state.playbackRate
+        var desiredRate = baseRate
+        if !didSeek,
+           state.isPlaying,
+           !rendererIsPausedState() {
+            let drift = watchTogetherPosition - watchTogetherTargetPosition(for: state)
+            if abs(drift) >= WatchTogetherCoordinator.driftNudgeThreshold {
+                desiredRate = drift > 0 ? baseRate * 0.95 : baseRate * 1.05
             }
         }
-        return watchTogetherClampedPosition(state.projectedPosition())
+        desiredRate = min(max(desiredRate, 0.25), 3.0)
+        watchTogetherRateNudgeActive = abs(desiredRate - baseRate) > 0.001
+        if abs(rendererGetSpeed() - desiredRate) >= 0.01 {
+            rendererSetSpeed(desiredRate, notifyWatchTogether: false)
+            if !watchTogetherRateNudgeActive {
+                updateSpeedMenu()
+            }
+        }
     }
 
     private func drainPendingWatchTogetherStateIfReady() {
@@ -16189,7 +16437,8 @@ extension PlayerViewController: WatchTogetherPlaybackDelegate {
               !isRendererLoading else { return }
         if let pending = pendingWatchTogetherPlaybackState {
             pendingWatchTogetherPlaybackState = nil
-            applyWatchTogetherStateNow(pending.state, shouldSeek: pending.shouldSeek)
+            let freshState = WatchTogetherCoordinator.shared.currentAcceptedState(for: self)
+            applyWatchTogetherStateNow(freshState ?? pending.state, shouldSeek: pending.shouldSeek)
         }
         notifyWatchTogetherPlaybackReadyIfNeeded()
     }
@@ -16203,6 +16452,7 @@ extension PlayerViewController: WatchTogetherPlaybackDelegate {
     }
 
     private func persistWatchTogetherProgress(at position: Double) {
+        guard playbackProfileIsStillActive("a Watch Together position write") else { return }
         guard cachedDuration.isFinite, cachedDuration > 0 else { return }
         let resolvedDuration = cachedDuration
         guard position.isFinite,
@@ -16218,7 +16468,8 @@ extension PlayerViewController: WatchTogetherPlaybackDelegate {
                 title: title,
                 currentTime: safePosition,
                 totalDuration: resolvedDuration,
-                posterURL: posterURL
+                posterURL: posterURL,
+                owner: playbackOwnerProfileID
             )
         case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, let showPosterURL, let isAnime):
             ProgressManager.shared.updateEpisodeProgress(
@@ -16230,7 +16481,8 @@ extension PlayerViewController: WatchTogetherPlaybackDelegate {
                 showTitle: showTitle,
                 showPosterURL: showPosterURL,
                 playbackContext: episodePlaybackContext,
-                isAnime: isAnime || episodePlaybackContext?.hasAnimeMediaId == true
+                isAnime: isAnime || episodePlaybackContext?.hasAnimeMediaId == true,
+                owner: playbackOwnerProfileID
             )
         }
     }
@@ -16250,6 +16502,8 @@ extension PlayerViewController: WatchTogetherPlaybackDelegate {
             watchTogetherButton.alpha = 0.0
             watchTogetherButton.isHidden = true
             WatchTogetherCoordinator.shared.detach(self)
+            pendingWatchTogetherPlaybackState = nil
+            restoreWatchTogetherNudgedRateIfNeeded()
             return
         }
         let wasActive: Bool
@@ -16259,9 +16513,10 @@ extension PlayerViewController: WatchTogetherPlaybackDelegate {
             wasActive = false
         }
         updateWatchTogetherButton(for: state)
-#if canImport(GoogleCast)
-        updateCastConflictInterception()
-#endif
+        if case .ready = state {
+            pendingWatchTogetherPlaybackState = nil
+            restoreWatchTogetherNudgedRateIfNeeded()
+        }
         if !wasActive, case .active(let count, let matches, _) = state, matches {
             let sessionPeople = count == 1 ? "1 person" : "\(count) people"
             showPlayerNotice("Watch Together connected — \(sessionPeople) in the session.")
@@ -16274,225 +16529,6 @@ extension PlayerViewController: WatchTogetherPlaybackDelegate {
 }
 #endif
 
-#if os(iOS) && canImport(GoogleCast)
-private extension PlayerViewController {
-    func applyGoogleCastButtonVisibility() {
-        let shouldShow = GoogleCastSettings.isEnabled()
-        let becameEnabled = wasGoogleCastControlEnabled == false && shouldShow
-        wasGoogleCastControlEnabled = shouldShow
-        castButton.isHidden = !shouldShow
-        castButton.isUserInteractionEnabled = shouldShow
-        castButton.accessibilityElementsHidden = !shouldShow
-        castButtonWidthConstraint?.constant = shouldShow ? 36 : 0
-        watchTogetherLeadingFromCastConstraint?.constant = shouldShow ? 12 : 0
-
-        if !shouldShow {
-            castConflictButton.isHidden = true
-            castConflictButton.isUserInteractionEnabled = false
-            castButton.alpha = 0
-            castConflictButton.alpha = 0
-        } else {
-            castConflictButton.isUserInteractionEnabled = true
-            updateCastConflictInterception()
-            if controlsVisible {
-                castButton.alpha = 1
-                castConflictButton.alpha = castConflictButton.isHidden ? 0 : 1
-            }
-        }
-        viewIfLoaded?.setNeedsLayout()
-        if becameEnabled, let activePlaybackRequest {
-            // A player that opened while Cast was disabled has never given the
-            // coordinator its immutable request. Seed it now so the newly
-            // revealed button can hand off the currently playing item.
-            GoogleCastCoordinator.shared.prepare(request: activePlaybackRequest, player: self)
-        }
-    }
-
-    @objc func castConflictTapped() {
-        guard GoogleCastSettings.isEnabled() else { return }
-        guard case .active = watchTogetherConnectionState else {
-            GoogleCastCoordinator.shared.presentCastDialog()
-            return
-        }
-        guard presentedViewController == nil else {
-            showPlayerNotice("Close the current menu, then try Cast again.")
-            return
-        }
-        let alert = UIAlertController(
-            title: "Leave Watch Together?",
-            message: "Google Cast and SharePlay cannot control the same playback session. Leave this SharePlay session and choose a Cast device?",
-            preferredStyle: .alert
-        )
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-        alert.addAction(UIAlertAction(title: "Leave and Cast", style: .default) { [weak self] _ in
-            WatchTogetherCoordinator.shared.leaveSession()
-            self?.updateCastConflictInterception()
-            GoogleCastCoordinator.shared.presentCastDialog()
-        })
-        present(alert, animated: true)
-    }
-
-    func updateCastConflictInterception() {
-        guard GoogleCastSettings.isEnabled() else {
-            castConflictButton.isHidden = true
-            castConflictButton.alpha = 0
-            return
-        }
-        if case .active = watchTogetherConnectionState {
-            castConflictButton.isHidden = false
-        } else {
-            castConflictButton.isHidden = true
-        }
-        castConflictButton.alpha = controlsVisible && !castConflictButton.isHidden ? 1 : 0
-    }
-}
-
-extension PlayerViewController: GoogleCastPlayerHandoff {
-    var castCurrentPosition: Double { max(0, cachedPosition) }
-    var castCurrentDuration: Double { max(0, cachedDuration) }
-    var castIsPaused: Bool { renderer.isPausedState }
-    var castPlaybackRate: Double { renderer.getSpeed() }
-    var castIsVisible: Bool { viewIfLoaded?.window != nil && !isClosing }
-
-    func castWillBeginHandoff() {
-        castLocalWasPausedBeforeHandoff = renderer.isPausedState
-        castLocalWasStopped = false
-        playbackStartupWorkItem?.cancel()
-        playbackStartupWorkItem = nil
-        pendingRendererRestartRetryGeneration = nil
-        cancelMPVPictureInPictureStartRequests(reason: "google-cast-handoff")
-        cancelScheduledMPVPictureInPictureWarmups(reason: "google-cast-handoff")
-        pipController?.setCanStartPictureInPictureAutomaticallyFromInline(false)
-        if let pip = pipController,
-           pip.isPictureInPictureActive || pip.isPictureInPictureStartPending {
-            pip.stopPictureInPicture(source: "google-cast-handoff")
-            rendererFinishPictureInPicture()
-        }
-        pipButton.isHidden = true
-        pipButton.isEnabled = false
-#if !os(tvOS)
-        updateVolumeControlVisibility()
-#endif
-        rendererPlaybackIntentGeneration &+= 1
-        mpvBackgroundFallbackAutoPaused = false
-        mpvBackgroundFallbackPauseIntentGeneration = nil
-        mpvBackgroundFallbackPauseLifecycleGeneration = nil
-        renderer.pausePlayback()
-        updatePlayPauseButton(isPaused: true, shouldShowControls: false)
-        showPlayerNotice("Connecting to your Cast device...")
-        Logger.shared.log("GoogleCast: Molten paused for receiver handoff", type: "Player")
-    }
-
-    func castDidBecomeActive(deviceName: String?) {
-        if !castLocalWasStopped {
-            rendererStop()
-            castLocalWasStopped = true
-        }
-        pipButton.isHidden = true
-        pipButton.isEnabled = false
-        subtitleButton.isEnabled = false
-        audioButton.isEnabled = false
-#if !os(tvOS)
-        updateVolumeControlVisibility()
-#endif
-        updatePlayPauseButton(isPaused: GoogleCastCoordinator.shared.remoteIsPaused ?? false, shouldShowControls: false)
-        let destination = deviceName?.trimmingCharacters(in: .whitespacesAndNewlines)
-        showPlayerNotice(destination?.isEmpty == false ? "Casting to \(destination!)." : "Casting to TV.")
-    }
-
-    func castDidFailOrCancel(message: String, resumeLocal: Bool, position: Double?) {
-        if resumeLocal {
-            restoreMoltenAfterCast(
-                position: position ?? cachedPosition,
-                shouldResume: !castLocalWasPausedBeforeHandoff
-            )
-        }
-        subtitleButton.isEnabled = true
-        audioButton.isEnabled = true
-#if !os(tvOS)
-        updateVolumeControlVisibility()
-#endif
-        updatePiPButtonVisibility()
-        presentCastCompatibilityAlert(title: "Unable to Cast", message: message)
-    }
-
-    func castDidUpdate(position: Double, duration: Double, isPaused: Bool, playbackRate: Double) {
-        updatePosition(position, duration: duration, fromGoogleCast: true)
-        updatePlayPauseButton(isPaused: isPaused, shouldShowControls: false)
-        if playbackRate.isFinite, playbackRate > 0 {
-            updateSpeedMenu()
-        }
-    }
-
-    func castDidEndUnexpectedly(position: Double, shouldResume: Bool) {
-        restoreMoltenAfterCast(position: position, shouldResume: shouldResume)
-        showPlayerNotice(
-            shouldResume
-                ? "Cast disconnected. Playback resumed in Eclipse."
-                : "Cast disconnected. Playback was restored in Eclipse."
-        )
-    }
-
-    func castRequiresConfirmation(
-        title: String,
-        message: String,
-        continueTitle: String,
-        completion: @escaping (Bool) -> Void
-    ) {
-        guard presentedViewController == nil else {
-            completion(false)
-            showPlayerNotice("Close the current menu, then try Cast again.")
-            return
-        }
-        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completion(false) })
-        alert.addAction(UIAlertAction(title: continueTitle, style: .default) { _ in completion(true) })
-        present(alert, animated: true)
-    }
-
-    private func restoreMoltenAfterCast(position: Double, shouldResume: Bool) {
-        var restoredThroughLoad = false
-        if castLocalWasStopped, let request = activePlaybackRequest {
-            // Go through the normal load path so the renderer receives its
-            // current subtitle, audio, HDR, proxy, and initial-seek settings
-            // instead of a bare URL reload after a Cast disconnect.
-            pendingSourceRefreshResumePosition = max(0, position)
-            load(
-                url: request.url,
-                preset: request.preset,
-                headers: request.headers,
-                playbackShouldResumeAfterLoad: shouldResume
-            )
-            restoredThroughLoad = true
-        } else if position.isFinite, abs(cachedPosition - position) > 2 {
-            renderer.seek(to: max(0, position))
-        }
-        castLocalWasStopped = false
-        if !restoredThroughLoad {
-            applyPlaybackIntentAfterLoad(
-                shouldResume: shouldResume,
-                source: "cast-without-reload"
-            )
-        }
-        subtitleButton.isEnabled = true
-        audioButton.isEnabled = true
-#if !os(tvOS)
-        updateVolumeControlVisibility()
-#endif
-        updatePiPButtonVisibility()
-    }
-
-    private func presentCastCompatibilityAlert(title: String, message: String) {
-        guard presentedViewController == nil else {
-            showPlayerNotice(message)
-            return
-        }
-        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "OK", style: .default))
-        present(alert, animated: true)
-    }
-}
-#endif
 
 #if os(iOS)
 extension PlayerViewController: UIAdaptivePresentationControllerDelegate {
@@ -16510,9 +16546,6 @@ extension PlayerViewController: UIAdaptivePresentationControllerDelegate {
 
     func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
         if isPlayerPresentation(presentationController) {
-#if canImport(GoogleCast)
-            GoogleCastCoordinator.shared.playerClosed(self)
-#endif
             return
         }
         guard episodeSourceSheetController === presentationController.presentedViewController else { return }
@@ -16529,21 +16562,14 @@ extension PlayerViewController: UIAdaptivePresentationControllerDelegate {
 }
 #endif
 
-// MARK: - MPVNativeRendererDelegate
 extension PlayerViewController: MPVNativeRendererDelegate {
     func renderer(_ renderer: PlayerRenderer, didUpdatePosition position: Double, duration: Double) {
         if isClosing { return }
-#if os(iOS) && canImport(GoogleCast)
-        if GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks { return }
-#endif
         updatePosition(position, duration: duration)
     }
 
     func renderer(_ renderer: PlayerRenderer, didChangePause isPaused: Bool) {
         if isClosing { return }
-#if os(iOS) && canImport(GoogleCast)
-        if GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks { return }
-#endif
         if playbackTraceLastPauseValue != isPaused {
             playbackTraceLastPauseValue = isPaused
             logPlaybackStage(
@@ -16566,12 +16592,9 @@ extension PlayerViewController: MPVNativeRendererDelegate {
         updatePlayPauseButton(isPaused: isPaused, shouldShowControls: shouldShowControls)
         pipController?.updatePlaybackState()
     }
-    
+
     func renderer(_ renderer: PlayerRenderer, didChangeLoading isLoading: Bool) {
         if isClosing { return }
-#if os(iOS) && canImport(GoogleCast)
-        if GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks { return }
-#endif
         if playbackTraceLastLoadingValue != isLoading {
             playbackTraceLastLoadingValue = isLoading
             logPlaybackStage(
@@ -16580,22 +16603,17 @@ extension PlayerViewController: MPVNativeRendererDelegate {
             )
         }
         isRendererLoading = isLoading
-        // MPVKit's authoritative PiP rate is zero while cache-paused. Keep AVKit's play/pause
-        // model synchronized with that temporary state and invalidate again when buffering clears.
+
         pipController?.updatePlaybackState()
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-#if os(iOS) && canImport(GoogleCast)
-            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
             if isLoading {
                 self.centerPlayPauseButton.isHidden = true
                 self.setPlayerLoadingIndicatorVisible(true)
             } else {
                 self.setPlayerLoadingIndicatorVisible(false)
                 self.centerPlayPauseButton.isHidden = false
-                // A play/pause GESTURE (center-tap / two-finger) sets suppressNextPlayPauseControlReveal and toggles state; the
-                // kit's async.
+
                 self.updatePlayPauseButton(
                     isPaused: self.rendererIsPausedState(),
                     shouldShowControls: !self.suppressNextPlayPauseControlReveal
@@ -16606,17 +16624,11 @@ extension PlayerViewController: MPVNativeRendererDelegate {
             }
         }
     }
-    
+
     func renderer(_ renderer: PlayerRenderer, didBecomeReadyToSeek: Bool) {
         if isClosing { return }
-#if os(iOS) && canImport(GoogleCast)
-        if GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks { return }
-#endif
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-#if os(iOS) && canImport(GoogleCast)
-            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
             self.logPlaybackStage(
                 "renderer-ready",
                 "pendingSeek=\(self.secondsText(self.pendingSeekTime)) loading=\(self.isRendererLoading) renderer={\(self.rendererPictureInPictureDebugSnapshot())}"
@@ -16626,13 +16638,11 @@ extension PlayerViewController: MPVNativeRendererDelegate {
             self.prefetchOpenSubtitlesIfEnabled(reason: "ready")
             self.prefetchStremioSubtitlesIfAvailable(reason: "ready")
             self.updatePiPButtonVisibility()
-            
+
             if let seekTime = self.pendingSeekTime {
                 self.pendingInitialResumeTarget = seekTime
                 self.pendingInitialResumeDeadline = Date().addingTimeInterval(20)
-                // Every MPV renderer already receives this value through prepareInitialSeek(to:)
-                // and applies it before sending didBecomeReadyToSeek. Issuing the same exact seek
-                // again here tears down fresh range requests and can strand proxy playback.
+
                 self.logPlaybackStage("initial-seek-owned-by-renderer", "target=\(self.secondsText(seekTime))")
                 Logger.shared.log("MPV renderer applied prepared resume seek to \(Int(seekTime))s", type: "Progress")
                 self.pendingSeekTime = nil
@@ -16644,16 +16654,12 @@ extension PlayerViewController: MPVNativeRendererDelegate {
 #endif
             self.applyAudioComfortFilterIfNeeded(reason: "ready")
 
-            // Fetch skip data once MPV is ready
             self.fetchSkipData()
         }
     }
 
     func renderer(_ renderer: PlayerRenderer, didFailWithError message: String) {
         if isClosing { return }
-#if os(iOS) && canImport(GoogleCast)
-        if GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks { return }
-#endif
         logPlaybackStage("renderer-failed", "message=\(message)")
         setIdleTimerDisabledForPlayback(false, reason: "mpv-failure")
         logMPV("delegate didFailWithError message=\(message)")
@@ -16670,14 +16676,8 @@ extension PlayerViewController: MPVNativeRendererDelegate {
 
     func rendererDidChangeTracks(_ renderer: PlayerRenderer) {
         if isClosing { return }
-#if os(iOS) && canImport(GoogleCast)
-        if GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks { return }
-#endif
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-#if os(iOS) && canImport(GoogleCast)
-            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
             self.invalidateRendererTrackCaches()
             self.updateAudioTracksMenu()
             self.updateSubtitleTracksMenu()
@@ -16685,17 +16685,11 @@ extension PlayerViewController: MPVNativeRendererDelegate {
             self.refreshVisibleOverlayMenuIfNeeded(kind: "subtitles")
         }
     }
-    
+
     func renderer(_ renderer: PlayerRenderer, subtitleTrackDidChange trackId: Int) {
         if isClosing { return }
-#if os(iOS) && canImport(GoogleCast)
-        if GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks { return }
-#endif
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-#if os(iOS) && canImport(GoogleCast)
-            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
             let shouldShowSubtitles = trackId >= 0
             if self.subtitleModel.isVisible != shouldShowSubtitles {
                 self.setSessionAwareSubtitleVisible(shouldShowSubtitles)
@@ -16711,7 +16705,6 @@ extension PlayerViewController: MPVNativeRendererDelegate {
 
 }
 
-// MARK: - PiP Support
 extension PlayerViewController: PiPControllerDelegate {
     func pipController(_ controller: PiPController, willStartPictureInPicture: Bool) {
         guard shouldHandleMPVPictureInPictureCallback(
@@ -16735,9 +16728,7 @@ extension PlayerViewController: PiPControllerDelegate {
             source: "delegate-willStart"
         ) else { return }
         if primed, renderer.prefersPictureInPictureLayerActivationBeforeStart {
-            // Automatic-from-inline entry bypasses the manual button's pre-start activation.
-            // Begin the already-primed GPU handoff here so AVKit never reaches didStart on a
-            // hidden/inactive source layer.
+
             guard rendererActivatePictureInPictureLayer() else {
                 logPictureInPicture("delegate willStart renderer activation rejected")
                 retireMPVPictureInPictureAfterRendererActivationFailure(
@@ -16818,9 +16809,7 @@ extension PlayerViewController: PiPControllerDelegate {
                 }
             }
         } else {
-            // An explicit request can fail while AVKit is already accepting this controller's
-            // automatic-from-inline transition. The wrapper normally coalesces that ordering, but
-            // never let a stale terminal callback retire a renderer AVKit now owns.
+
             if controller.isPictureInPictureActive
                 || controller.isPictureInPictureStartPending {
                 logPictureInPicture(
@@ -16869,9 +16858,6 @@ extension PlayerViewController: PiPControllerDelegate {
         disarmMPVPictureInPictureRestartAfterStop(reason: "delegate-willStop")
     }
     func pipController(_ controller: PiPController, didStopPictureInPicture: Bool) {
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
         let restoreKey = mpvPictureInPictureRestoreKey(for: controller)
         let isKnownRestore = mpvPictureInPictureRestoreOperation?.key == restoreKey
             || mpvCompletedPictureInPictureRestore?.key == restoreKey
@@ -16891,8 +16877,7 @@ extension PlayerViewController: PiPControllerDelegate {
         if existingOperation == nil,
            currentMPVPictureInPictureStopAuthorization(for: controller) == nil,
            owningPlaybackSceneIsForegroundActive() {
-            // Match restoreUI's defensive fallback for an unusual AVKit callback sequence that
-            // omits willStop. Never synthesize this authorization while the scene is backgrounded.
+
             authorizeMPVPictureInPictureStop(
                 for: controller,
                 source: "did-stop-foreground-fallback"
@@ -16918,9 +16903,7 @@ extension PlayerViewController: PiPControllerDelegate {
             guard let authorization = currentMPVPictureInPictureStopAuthorization(
                 for: controller
             ), owningPlaybackSceneIsForegroundActive() else {
-                // Closing PiP while this scene remains backgrounded is terminal for AVKit but not
-                // permission to expose or restart the inline renderer. The scene's serialized
-                // foreground transaction will perform the lifecycle-scoped restore later.
+
                 logPictureInPicture(
                     "delegate didStop deferred inline restore: owning scene is not foreground or stop authorization is stale"
                 )
@@ -16947,12 +16930,6 @@ extension PlayerViewController: PiPControllerDelegate {
         }
     }
     func pipController(_ controller: PiPController, restoreUserInterfaceForPictureInPictureStop completionHandler: @escaping (Bool) -> Void) {
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else {
-            completionHandler(false)
-            return
-        }
-#endif
         let restoreKey = mpvPictureInPictureRestoreKey(for: controller)
         let existingOperation = mpvPictureInPictureRestoreOperation?.key == restoreKey
             ? mpvPictureInPictureRestoreOperation
@@ -16975,8 +16952,7 @@ extension PlayerViewController: PiPControllerDelegate {
         if existingOperation == nil,
            currentMPVPictureInPictureStopAuthorization(for: controller) == nil,
            owningPlaybackSceneIsForegroundActive() {
-            // Some programmatic foreground stops do not deliver willStop before restoreUI. It is
-            // safe to synthesize the stop token only while this exact scene is already active.
+
             authorizeMPVPictureInPictureStop(
                 for: controller,
                 source: "restore-ui-foreground-fallback"
@@ -17192,9 +17168,6 @@ extension PlayerViewController: PiPControllerDelegate {
         logVLCUIViewSnapshot("memoryWarning")
     }
 
-    /// Reverses only the pause Eclipse created as an audio-only fallback after a failed background
-    /// PiP start. The lifecycle and transport generations ensure a newer user pause is never
-    /// converted into play by a late AVKit callback.
     @discardableResult
     private func resumeMPVBackgroundFallbackPauseForPictureInPictureIfNeeded(
         source: String
@@ -17206,8 +17179,6 @@ extension PlayerViewController: PiPControllerDelegate {
         let intentMatches = pauseIntentGeneration == rendererPlaybackIntentGeneration
         let rendererWasPaused = rendererIsPausedState()
 
-        // Clear ownership before issuing play so re-entrant playback-state callbacks can never
-        // observe an Eclipse-owned pause after it has been consumed.
         mpvBackgroundFallbackAutoPaused = false
         mpvBackgroundFallbackPauseIntentGeneration = nil
         mpvBackgroundFallbackPauseLifecycleGeneration = nil
@@ -17221,10 +17192,6 @@ extension PlayerViewController: PiPControllerDelegate {
             return false
         }
 
-        // Some renderers publish their cached pause state asynchronously after accepting the mpv
-        // command. The matching lifecycle+intent ownership is the authoritative proof: send play
-        // idempotently so it orders after any queued fallback pause instead of dropping ownership
-        // while that pause is still in flight.
         rendererPlay(recordingPlaybackIntent: false)
         logPictureInPicture(
             "background fallback pause resumed for PiP source=\(source) lifecycle=\(mpvBackgroundLifecycleGeneration) intent=\(rendererPlaybackIntentGeneration)"
@@ -17234,9 +17201,6 @@ extension PlayerViewController: PiPControllerDelegate {
 
     private func noteMPVBackgroundLifecycleIfNeeded(source: String) {
         guard isMPVRenderer, !isVLCPlayer, isRunning, !isClosing else { return }
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
         let wasAlreadyArmed = mpvBackgroundLifecycleIsArmed
         guard !wasAlreadyArmed || mpvBackgroundLifecycleIsInForegroundPhase else {
             logPictureInPicture(
@@ -17279,9 +17243,7 @@ extension PlayerViewController: PiPControllerDelegate {
             return scene.activationState == .foregroundActive
         }
 #if os(iOS)
-        // Stage Manager can keep the process active while this player belongs to an unattached or
-        // background scene. Until presentation supplies a concrete owner, process state is not a
-        // safe proxy for this renderer's foreground eligibility.
+
         if UIDevice.current.userInterfaceIdiom == .pad
             || UIDevice.current.userInterfaceIdiom == .mac {
             return false
@@ -17299,9 +17261,6 @@ extension PlayerViewController: PiPControllerDelegate {
               owningPlaybackSceneIsForegroundActive() else {
             return
         }
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
         cancelMPVBackgroundAudioFallback(reason: "foreground-recovery-\(source)")
         renderer.noteApplicationDidBecomeActive()
         mpvBackgroundLifecycleIsInForegroundPhase = true
@@ -17322,9 +17281,7 @@ extension PlayerViewController: PiPControllerDelegate {
                 source: source,
                 generation: generation
             )
-            // The task may finish while Control Center or another window makes this scene
-            // inactive. Clear this completed generation before checking foreground eligibility so
-            // the next activation is not permanently coalesced behind a dead task.
+
             guard generation == self.mpvBackgroundLifecycleGeneration else { return }
             self.mpvForegroundRecoveryTask = nil
             guard self.mpvBackgroundLifecycleIsArmed,
@@ -17385,9 +17342,6 @@ extension PlayerViewController: PiPControllerDelegate {
             return .failed
         }
 
-        // A pending automatic start is allowed to reach its authoritative AVKit callback. Once it
-        // is active, stop it exactly once. Invalidating the attempt while pending makes didStart
-        // stale and is one of the former black/frozen return paths.
         var requestedStop = false
         var settledInline = false
         for _ in 0..<60 {
@@ -17447,9 +17401,7 @@ extension PlayerViewController: PiPControllerDelegate {
             source: "\(source)-serialized-inline"
         )
         if !inlineRestored {
-            // An idle renderer legitimately has no PiP restore token (for example when PiP is
-            // disabled). Continue to the foreground frame validation, which is the stronger proof
-            // that the inline Metal path is usable and also covers a failed AVKit restore token.
+
             logPictureInPicture(
                 "serialized foreground recovery continuing after absent PiP restore token source=\(source) generation=\(generation)"
             )
@@ -17458,7 +17410,7 @@ extension PlayerViewController: PiPControllerDelegate {
         if resumeMPVBackgroundFallbackPauseForPictureInPictureIfNeeded(
             source: "\(source)-serialized-foreground"
         ) {
-            // Let MPVKit publish the new timeline before decoder validation inspects it.
+
             await Task.yield()
         }
 
@@ -17496,10 +17448,7 @@ extension PlayerViewController: PiPControllerDelegate {
         let phase = notification.userInfo?["phase"] as? String ?? "unknown"
         logPictureInPicture("scenePhase notification received phase=\(phase)")
 #if os(iOS)
-        // ContentView publishes this notification without a scene object. Scoped UIScene
-        // notifications are authoritative on iPad both before and after attachment; accepting an
-        // unscoped phase while the owner is unknown can consume another Stage Manager window's
-        // lifecycle.
+
         let idiom = UIDevice.current.userInterfaceIdiom
         if idiom == .pad || idiom == .mac {
             bindPlaybackWindowSceneIfAvailable(source: "scene-phase-\(phase)")
@@ -17579,9 +17528,7 @@ extension PlayerViewController: PiPControllerDelegate {
         }
         #else
         if UIApplication.shared.applicationState != .background {
-            // `canStartPictureInPictureAutomaticallyFromInline` is already armed against the
-            // primed sample-buffer layer. Starting explicitly during the same deactivation races
-            // AVKit's automatic request and can produce failedToStart followed by didStart.
+
             logPictureInPicture(
                 "MPV app-exit explicit pre-background start deferred to automatic-from-inline source=\(source)"
             )
@@ -17661,8 +17608,7 @@ extension PlayerViewController: PiPControllerDelegate {
         let shouldScheduleBackgroundFallback = source.contains("background")
             || appState == "background"
         defer {
-            // Schedule after this function has armed/joined the PiP attempt so the fallback key
-            // captures the authoritative controller and attempt generations.
+
             if shouldScheduleBackgroundFallback {
                 scheduleMPVBackgroundAudioFallback(source: source)
             }
@@ -17672,8 +17618,7 @@ extension PlayerViewController: PiPControllerDelegate {
            !active,
            !pending,
            !rendererIsPictureInPicturePrimed() {
-            // AVKit/GPU ownership must be established while inline. Never manufacture a fresh
-            // renderer preparation after suspension; retain audio fallback for this exit instead.
+
             logPictureInPicture("MPV app-exit auto PiP skipped source=\(source): renderer was not primed before background")
             return
         }
@@ -17752,15 +17697,12 @@ extension PlayerViewController: PiPControllerDelegate {
 #if os(iOS)
             if UIDevice.current.userInterfaceIdiom == .pad
                 || UIDevice.current.userInterfaceIdiom == .mac {
-                // Do not claim the first process-wide scene notification in a multiwindow
-                // environment. viewWillAppear binds the presentation scene as soon as UIKit
-                // exposes it.
+
                 logPictureInPicture("ignored \(source) while multiwindow playback scene is unattached")
                 return false
             }
 #endif
-            // Preserve the single-window fallback for phone/TV presentations whose scene has not
-            // been attached yet.
+
             return true
         }
         guard notificationScene === owningScene else {
@@ -17783,8 +17725,7 @@ extension PlayerViewController: PiPControllerDelegate {
                         && (owningScene == nil || scene !== owningScene)
                 }
             guard anotherEclipseSceneIsActive else { return true }
-            // The owning Stage Manager/Catalyst scene can resign focus while another Eclipse
-            // scene keeps the process active. That is not an app exit.
+
             logPictureInPicture("ignored \(source) app-exit PiP while another multiwindow scene keeps the app active")
             return false
         }
@@ -17824,8 +17765,7 @@ extension PlayerViewController: PiPControllerDelegate {
         guard shouldHandleSceneLifecycleNotification(notification, source: "scene-did-enter-background") else { return }
         logPictureInPicture("lifecycle notification received source=scene-did-enter-background")
         armBackgroundRecoveryProgressGateIfNeeded(source: "scene-did-enter-background")
-        // Decoder ownership is scene-scoped on iPad. Arm recovery even when another Eclipse
-        // window keeps the process active and app-exit PiP is intentionally suppressed.
+
         noteMPVBackgroundLifecycleIfNeeded(source: "scene-did-enter-background")
         guard shouldHandleIPadSceneDeactivationForAppExitPiP(
             source: "scene-did-enter-background"
@@ -17884,8 +17824,7 @@ extension PlayerViewController: PiPControllerDelegate {
         if mpvBackgroundAudioFallbackKey != key {
             cancelMPVBackgroundAudioFallback(reason: "superseded-\(source)")
             mpvBackgroundAudioFallbackKey = key
-            // Renderer preparation can legitimately cross several lifecycle callbacks. Keep one
-            // fixed deadline instead of consuming a retry budget while AVKit still owns the start.
+
             mpvBackgroundAudioFallbackDeadline = now + 10
         } else if mpvBackgroundAudioFallbackWorkItem != nil {
             let attemptText = key.transitionAttemptID.map { String($0) } ?? "nil"
@@ -17930,12 +17869,6 @@ extension PlayerViewController: PiPControllerDelegate {
             cancelMPVBackgroundAudioFallback(reason: "stale-\(source)")
             return
         }
-#if os(iOS) && canImport(GoogleCast)
-        guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else {
-            cancelMPVBackgroundAudioFallback(reason: "google-cast-\(source)")
-            return
-        }
-#endif
 
         let controller = pipController
         let active = controller?.isPictureInPictureActive ?? false
@@ -17966,8 +17899,7 @@ extension PlayerViewController: PiPControllerDelegate {
         }
 
         if transitionOwned {
-            // A permanently stuck transition must not keep decoding indefinitely in the
-            // background. Retire its exact attempt before entering the owned audio fallback.
+
             logPictureInPicture(
                 "MPV background PiP handoff timed out source=\(source) active=\(active) pending=\(pending) requested=\(requested) rendererHandoff=\(rendererHandoff) primed=\(primed) renderer={\(rendererPictureInPictureDebugSnapshot())}"
             )
@@ -17979,16 +17911,14 @@ extension PlayerViewController: PiPControllerDelegate {
             if active || pending {
                 controller?.stopPictureInPicture(source: "background-fallback-timeout")
             }
-            // Retire preparation as well as an activated handoff. The preparation task may be
-            // suspended while the app backgrounds; replacing its controller ensures a late
-            // willStart/didStart callback cannot target the paused display layer.
+
             rendererFinishPictureInPicture()
             installMPVPictureInPictureController(reason: "background-fallback-timeout")
             rendererSetPictureInPictureSourcePreparedForAutomaticStart(false)
         }
 
         if rendererIsPausedState() {
-            // Either the user paused or a prior generation-owned fallback already did its job.
+
             cancelMPVBackgroundAudioFallback(reason: "renderer-paused-\(source)")
             return
         }
@@ -18002,23 +17932,17 @@ extension PlayerViewController: PiPControllerDelegate {
             "MPV background fallback pause source=\(source) lifecycle=\(mpvBackgroundLifecycleGeneration) load=\(playbackLoadGeneration) renderer={\(rendererPictureInPictureDebugSnapshot())}"
         )
         rendererPausePlayback(preservingBackgroundFallbackOwnership: true)
+#if os(iOS)
+        WatchTogetherCoordinator.shared.sendLifecyclePause(from: self)
+#endif
     }
-    
+
     @objc private func appDidEnterBackground() {
         logPictureInPicture("lifecycle notification received source=did-enter-background")
-#if os(iOS) && canImport(GoogleCast)
-        if GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks {
-            logPictureInPicture("background PiP skipped while Google Cast owns or is taking playback")
-            return
-        }
-#endif
         armBackgroundRecoveryProgressGateIfNeeded(source: "did-enter-background")
         noteMPVBackgroundLifecycleIfNeeded(source: "did-enter-background")
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
-#if os(iOS) && canImport(GoogleCast)
-            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
             self.logVLCUIViewSnapshot("appDidEnterBackground async start")
             if self.vlcRenderer != nil {
                 Logger.shared.log("[PlayerVC.PiP] VLC background auto-start skipped: disabled", type: "Player")
@@ -18040,7 +17964,7 @@ extension PlayerViewController: PiPControllerDelegate {
             syncTraktProgressOnPlaybackCloseIfNeeded(for: mediaInfo, reason: "will-terminate")
         }
     }
-    
+
     @objc private func appWillEnterForeground() {
         logVLCForegroundSnapshot("will-enter-foreground notification")
         DispatchQueue.main.async { [weak self] in
@@ -18058,8 +17982,7 @@ extension PlayerViewController: PiPControllerDelegate {
                 self.scheduleVLCForegroundSnapshots("will-enter-foreground followup", delays: [0.10, 0.50, 1.50, 3.00])
                 return
             }
-            // UIApplication is process-scoped on iPad. The owning scene's didActivate callback is
-            // the sole authority for stopping PiP and restoring this renderer.
+
         }
     }
 
@@ -18074,7 +17997,7 @@ extension PlayerViewController: PiPControllerDelegate {
             scheduleVLCForegroundSnapshots("scene-will-enter-foreground followup", delays: [0.10, 0.75])
             return
         }
-        // Wait for didActivate so the inline CAMetalLayer has a drawable before restoration.
+
     }
 
     @objc private func appDidBecomeActive() {
@@ -18096,9 +18019,6 @@ extension PlayerViewController: PiPControllerDelegate {
                 self.scheduleVLCForegroundSnapshots("did-become-active followup", delays: [0.10, 0.75, 2.00])
                 return
             }
-#if os(iOS) && canImport(GoogleCast)
-            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
             guard self.vlcRenderer == nil else { return }
             self.requestMPVSerializedForegroundRecovery(source: "app-did-become-active")
         }
@@ -18123,9 +18043,6 @@ extension PlayerViewController: PiPControllerDelegate {
                 self.scheduleVLCForegroundSnapshots("scene-did-activate followup", delays: [0.10, 0.75])
                 return
             }
-#if os(iOS) && canImport(GoogleCast)
-            guard !GoogleCastCoordinator.shared.shouldIgnoreLocalRendererCallbacks else { return }
-#endif
             guard self.vlcRenderer == nil else { return }
             self.requestMPVSerializedForegroundRecovery(source: "scene-did-activate")
         }

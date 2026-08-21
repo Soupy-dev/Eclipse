@@ -164,8 +164,6 @@ private final class SkyStreamRepositoryDeadlineCoordinator<Value: Sendable>: @un
     }
 }
 
-/// Fetches only user-entered HTTPS repositories, plugin lists, and archives.
-/// Detection is based on ZIP magic or decoded document structure, never a filename.
 public actor SkyStreamRepositoryManager {
     public static let shared = SkyStreamRepositoryManager()
 
@@ -177,15 +175,11 @@ public actor SkyStreamRepositoryManager {
     private let maximumPluginLists = 32
     private let maximumRepositories = 32
     private let maximumPlugins = 2_000
-    /// Raw list documents and the normalized saved catalog are each bounded well below the
-    /// 8 MiB Core Data envelope, leaving room for installed-package metadata and future fields.
+
     private let maximumExpandedCatalogBytes = 4 * 1_024 * 1_024
     private let maximumConcurrentPluginListFetches = 4
     private let repositoryExpansionDeadline: TimeInterval = 45
 
-    /// Mutable only from the actor-isolated expansion task. The deadline helper
-    /// requires its operation to be `@Sendable`, so the state is explicitly
-    /// boxed while all access remains serialized by this actor.
     private final class RepositoryExpansionState: @unchecked Sendable {
         var visitedRepositoryURLs = Set<String>()
         var repositoryCount = 0
@@ -231,8 +225,7 @@ public actor SkyStreamRepositoryManager {
         guard case .repository(var repository) = refreshed else {
             throw SkyStreamRepositoryError.unsupportedInput
         }
-        // Removing a repository freezes installed-package provenance. Refreshing it does not
-        // transfer ownership; the plugin manager separately verifies the pinned source URL.
+
         repository.frozenAt = nil
         return repository
     }
@@ -313,10 +306,6 @@ public actor SkyStreamRepositoryManager {
             state: state
         )
 
-        // Persist the flattened, already-validated catalog sources. Refreshes
-        // still start from `sourceURL`; normalizing here avoids duplicating
-        // embedded plugin metadata in backups and gives installs one bounded
-        // set of HTTPS provenance URLs regardless of repository shape.
         var storedManifest = manifest
         storedManifest.pluginLists = state.catalogURLs
         storedManifest.includedRepositories = []
@@ -409,8 +398,7 @@ public actor SkyStreamRepositoryManager {
                 throw CancellationError()
             } catch {
                 try Task.checkCancellation()
-                // SkyStream megarepos are aggregators. One stale or malformed
-                // child reference must not hide every other healthy repository.
+
                 continue
             }
             let requestedKey = validated.url.absoluteString
@@ -441,7 +429,7 @@ public actor SkyStreamRepositoryManager {
             let finalKey = response.finalURL.absoluteString
             if finalKey != requestedKey,
                !state.visitedRepositoryURLs.insert(finalKey).inserted {
-                // A redirect landed on an ancestor or already-expanded sibling.
+
                 continue
             }
 
@@ -477,7 +465,6 @@ public actor SkyStreamRepositoryManager {
               !manifest.pluginLists.isEmpty
                 || !manifest.includedRepositories.isEmpty
                 || !manifest.plugins.isEmpty,
-              manifest.pluginLists.isEmpty || manifest.includedRepositories.isEmpty,
               manifest.authors.map({
                   Self.areBoundedDisplayStrings($0, maximumCount: 64)
               }) ?? true else {
@@ -494,9 +481,6 @@ public actor SkyStreamRepositoryManager {
         }
     }
 
-    /// SkyStream currently treats repository manifest versions as forward-compatible
-    /// metadata and already publishes repositories above version 1. The executable
-    /// `.sky` package ABI remains separately version-gated by the package validator.
     static func isSupportedRepositoryManifestVersion(_ version: Int) -> Bool {
         SkyStreamRepositoryManifest.isSupportedManifestVersion(version)
     }
@@ -624,7 +608,7 @@ public actor SkyStreamRepositoryManager {
                             .failure(SkyStreamRepositoryError.expansionTimedOut)
                         )
                     } catch {
-                        // The expansion or caller already won the race.
+
                     }
                 }
                 coordinator.installTasks(operation: operationTask, timeout: timeoutTask)
@@ -663,9 +647,7 @@ public actor SkyStreamRepositoryManager {
                   Self.isBoundedCatalogManifest(entry.manifest) else {
                 throw SkyStreamRepositoryError.invalidPackageEntry(packageName)
             }
-            // Catalog ingestion must stay fast even for a large list. Full DNS and redirect
-            // checks happen again in `downloadArchive`; here we only normalize and reject
-            // malformed/private-literal code URLs without doing one network lookup per row.
+
             let archiveURL = try policy.validateSyntactic(
                 entry.url,
                 purpose: .package,

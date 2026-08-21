@@ -1,9 +1,16 @@
+//
+//  NormalPlayer.swift
+//  Sora · Media Hub
+//
+//  Created by Francesco on 27/11/24.
+//
+
 import AVKit
 import SwiftUI
+import Combine
 
 #if os(iOS)
-/// One visual language for Eclipse-owned AVPlayer controls. Keeping it local to this file
-/// prevents AVPlayer chrome changes from leaking into the MPV/Molten renderer.
+
 private enum IOSAVPlayerControlStyle {
     static func configuration(
         imageName: String,
@@ -38,12 +45,19 @@ private enum IOSAVPlayerControlStyle {
         button.layer.shadowRadius = 5
         button.layer.shadowOffset = CGSize(width: 0, height: 1)
     }
+
+    static func applyChrome(to view: UIView) {
+        view.backgroundColor = UIColor.black.withAlphaComponent(0.46)
+        view.layer.cornerRadius = 22
+        view.layer.cornerCurve = .continuous
+        view.layer.shadowColor = UIColor.black.cgColor
+        view.layer.shadowOpacity = 0.42
+        view.layer.shadowRadius = 5
+        view.layer.shadowOffset = CGSize(width: 0, height: 1)
+    }
 }
 #endif
 
-/// Eclipse's AVKit player. AVPlayerViewController explicitly does not support subclassing, so the
-/// system controller is embedded unchanged while Eclipse owns lifecycle, progress, subtitles, and
-/// next-episode behavior in this container.
 final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPictureInPictureControllerDelegate, UIGestureRecognizerDelegate {
     private let systemPlayerViewController = AVPlayerViewController()
 #if os(iOS)
@@ -83,6 +97,20 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
     private var hasBegunMediaStatePlaybackLease = false
     private var hasEndedMediaStatePlaybackLease = false
     private var hasFinalizedPlaybackSession = false
+
+    private let playbackProfileAuthority: (
+        owner: UUID,
+        progress: ProgressManager.ProfileMutationAuthority?
+    ) = {
+        let owner = ProfileManager.shared.activeProfileID
+        return (
+            owner,
+            ProgressManager.shared.profileMutationAuthority(requiredOwner: owner)
+        )
+    }()
+    private var playbackOwnerProfileID: UUID { playbackProfileAuthority.owner }
+    private var activeProfileWillChangeCancellable: AnyCancellable?
+    private var reportedAbandonedProfileWrites: Set<String> = []
     private var isHandingOffPlaybackEngine = false
     private var pendingPlaybackFailureAlert: UIAlertController?
     private weak var playerInterfaceWindowScene: UIWindowScene?
@@ -93,6 +121,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
     var mediaInfo: MediaInfo?
     var episodePlaybackContext: EpisodePlaybackContext?
     var playbackLaunchContext: PlaybackLaunchContext?
+    private var ephemeralProxySessionLease: PlaybackProxySessionOwnership.Lease?
     var onPlaybackStartupFailure: ((PlaybackFailureReport) -> Void)?
     var onAutomaticPlaybackFallback: ((PlaybackFailureReport) -> Void)?
     var onRequestNextEpisode: ((_ seasonNumber: Int, _ episodeNumber: Int) -> Void)?
@@ -149,6 +178,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
 #endif
 
     func configure(with request: PlaybackRequest) {
+        retainEphemeralProxyOwnership(request.launchContext?.ephemeralProxyOwnership)
         configuredRequest = request
         mediaInfo = request.mediaInfo
         episodePlaybackContext = request.episodePlaybackContext
@@ -163,6 +193,17 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
 
     func configureRemotePlayback(url: URL, headers: [String: String]) {
         installPlayerItem(url: url, headers: headers)
+    }
+
+    private func retainEphemeralProxyOwnership(_ ownership: PlaybackProxySessionOwnership?) {
+        let replacementLease = ownership?.acquireLease()
+        ephemeralProxySessionLease?.release()
+        ephemeralProxySessionLease = replacementLease
+    }
+
+    private func releaseEphemeralProxyOwnership() {
+        ephemeralProxySessionLease?.release()
+        ephemeralProxySessionLease = nil
     }
 
     func beginPlaybackEngineHandoff() {
@@ -189,7 +230,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
             if let player {
                 player.replaceCurrentItem(with: item)
             } else {
-                player = AVPlayer(playerItem: item)
+                player = makeAVPlayer(item: item)
             }
             Logger.shared.log(
                 "NormalPlayer: using loopback header proxy for \(url.host ?? "remote stream")",
@@ -203,8 +244,18 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         if let player {
             player.replaceCurrentItem(with: backedItem.item)
         } else {
-            player = AVPlayer(playerItem: backedItem.item)
+            player = makeAVPlayer(item: backedItem.item)
         }
+    }
+
+    private func makeAVPlayer(item: AVPlayerItem) -> AVPlayer {
+        let player = AVPlayer(playerItem: item)
+#if os(iOS)
+
+        player.allowsExternalPlayback = true
+        player.usesExternalPlaybackWhileExternalScreenIsActive = true
+#endif
+        return player
     }
 
     private func invalidatePlaybackTransport() {
@@ -249,6 +300,18 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
             name: .mediaStateWillChangeCurrentUser,
             object: nil
         )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleActiveProfileDidChange),
+            name: .activeProfileDidChange,
+            object: nil
+        )
+        activeProfileWillChangeCancellable = ProfileManager.shared.$activeProfileID
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] incomingProfileID in
+                self?.handleActiveProfileWillChange(to: incomingProfileID)
+            }
 
 #if os(iOS)
         if configuredRequest == nil {
@@ -291,9 +354,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         }
         hasViewDisappeared = true
         if isPictureInPictureActiveOrStarting {
-            // AVPlayerViewController dismisses its full-screen UI while PiP
-            // keeps playing. The playback lease and progress observer must
-            // remain active until PiP actually stops.
+
             return
         }
 #endif
@@ -331,9 +392,6 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         tearDownPlaybackItemObservers()
     }
 
-    /// Releases only state tied to the current AVPlayerItem. The player, player layer, PiP
-    /// controller, gestures, lock/orientation state, scene coverage, and playback lease survive an
-    /// in-place source or episode transition.
     private func tearDownPlaybackItemObservers() {
 #if os(iOS)
         mediaSelectionTask?.cancel()
@@ -384,13 +442,31 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         invalidatePlaybackTransport()
     }
 
+    private func playbackProfileIsStillActive(_ reason: String) -> Bool {
+        if ProfileManager.shared.isStillActive(playbackOwnerProfileID),
+           playbackProfileAuthority.progress.map(
+               ProgressManager.shared.profileMutationAuthorityIsCurrent
+           ) == true {
+            return true
+        }
+        if reportedAbandonedProfileWrites.insert(reason).inserted {
+            Logger.shared.log(
+                "NormalPlayer: abandoned \(reason) because the session's profile is no longer active",
+                type: "Progress"
+            )
+        }
+        return false
+    }
+
     private func postPlayerDidCloseNotification() {
         var userInfo: [String: Any] = [:]
         if let mediaInfo {
             ProgressManager.shared.syncTraktProgressOnPlaybackClose(
                 for: mediaInfo,
                 playbackContext: episodePlaybackContext,
-                played: playbackDidStart
+                played: playbackDidStart,
+                owner: playbackOwnerProfileID,
+                progressAuthority: playbackProfileAuthority.progress
             )
             switch mediaInfo {
             case .movie(let id, _, _, _):
@@ -417,6 +493,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
     }
 
     private func persistCurrentProgressForAccountBoundary() {
+        guard playbackProfileIsStillActive("the final position write") else { return }
         guard let mediaInfo,
               let item = player?.currentItem else { return }
         let currentTime = player?.currentTime().seconds ?? .nan
@@ -434,7 +511,8 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
                 title: title,
                 currentTime: currentTime,
                 totalDuration: duration,
-                posterURL: posterURL
+                posterURL: posterURL,
+                owner: playbackOwnerProfileID
             )
         case .episode(let showId, let seasonNumber, let episodeNumber, let showTitle, let showPosterURL, let isAnime):
             ProgressManager.shared.updateEpisodeProgress(
@@ -446,7 +524,8 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
                 showTitle: showTitle,
                 showPosterURL: showPosterURL,
                 playbackContext: episodePlaybackContext?.forEpisodeNumber(episodeNumber),
-                isAnime: isAnime || episodePlaybackContext?.hasAnimeMediaId == true
+                isAnime: isAnime || episodePlaybackContext?.hasAnimeMediaId == true,
+                owner: playbackOwnerProfileID
             )
         }
     }
@@ -454,6 +533,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
     private func finalizePlaybackSessionIfNeeded(persistLatestPosition: Bool = false) {
         guard !hasFinalizedPlaybackSession else { return }
         hasFinalizedPlaybackSession = true
+        releaseEphemeralProxyOwnership()
         playbackLoadGeneration &+= 1
         onAutomaticPlaybackFallback = nil
         startupWorkItem?.cancel()
@@ -469,9 +549,11 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
     }
 
     @objc private func handleMediaStateAccountBoundary() {
-        // Notification delivery is synchronous. Finish every outgoing-account
-        // write before the sync manager neutralizes or installs another user.
+
         guard hasBegunMediaStatePlaybackLease, !hasEndedMediaStatePlaybackLease else { return }
+#if os(iOS)
+        stopPictureInPictureForTeardown()
+#endif
         finalizePlaybackSessionIfNeeded(persistLatestPosition: true)
         tearDownPlaybackObservers()
 #if os(iOS)
@@ -482,16 +564,82 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         player = nil
         dismiss(animated: false)
     }
-    
+
+    private func handleActiveProfileWillChange(to incomingProfileID: UUID) {
+        guard incomingProfileID != playbackOwnerProfileID,
+              !hasFinalizedPlaybackSession else { return }
+        Logger.shared.log(
+            "NormalPlayer: closing playback before its owning profile changes",
+            type: "Player"
+        )
+        if hasBegunMediaStatePlaybackLease, !hasEndedMediaStatePlaybackLease {
+            handleMediaStateAccountBoundary()
+            return
+        }
+        player?.pause()
+#if os(iOS)
+        stopPictureInPictureForTeardown()
+#endif
+        releaseEphemeralProxyOwnership()
+        tearDownPlaybackObservers()
+#if os(iOS)
+        isPictureInPictureActiveOrStarting = false
+        isRestoringFromPictureInPicture = false
+        pictureInPictureSessionRetainer = nil
+#endif
+        player = nil
+        dismiss(animated: false)
+    }
+
+    @objc private func handleActiveProfileDidChange() {
+
+        guard !hasFinalizedPlaybackSession, shouldStopPlaybackForActiveProfile() else { return }
+        Logger.shared.log(
+            "NormalPlayer: stopping playback because the newly active profile may not see this title",
+            type: "Player"
+        )
+        player?.pause()
+#if os(iOS)
+        stopPictureInPictureForTeardown()
+#endif
+
+        finalizePlaybackSessionIfNeeded(persistLatestPosition: true)
+        tearDownPlaybackObservers()
+#if os(iOS)
+        isPictureInPictureActiveOrStarting = false
+        isRestoringFromPictureInPicture = false
+        pictureInPictureSessionRetainer = nil
+#endif
+        player = nil
+        dismiss(animated: false)
+    }
+
+    private func shouldStopPlaybackForActiveProfile() -> Bool {
+        guard ProfileManager.shared.isKidsModeActive else { return false }
+        guard let request = kidsGateRequestForCurrentPlayback() else { return true }
+        return KidsPlaybackGate.decision(for: request) != .allow
+    }
+
+    private func kidsGateRequestForCurrentPlayback() -> PlaybackRequest? {
+        guard let mediaInfo else { return nil }
+        return PlaybackRequest(
+            url: configuredRequest?.url ?? URL(fileURLWithPath: "/"),
+            mediaInfo: mediaInfo,
+            kidsPolicyDetails: configuredRequest?.kidsPolicyDetails,
+            episodePlaybackContext: episodePlaybackContext,
+            title: configuredRequest?.title ?? "",
+            isAnime: configuredRequest?.isAnime ?? false
+        )
+    }
+
     deinit {
         NotificationCenter.default.removeObserver(self)
-        // `configure(with:)` creates the transport before UIKit presents this controller. If a
-        // coordinator handoff is cancelled before `viewDidDisappear`, there is no lifecycle
-        // callback available to release that unpresented proxy session.
+
+        releaseEphemeralProxyOwnership()
         invalidatePlaybackTransport()
         finishMediaStatePlaybackLeaseIfNeeded()
     }
-    
+
 #if os(iOS)
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
@@ -518,7 +666,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         if let lockedMask = PlayerPlaybackLockSettings.lockedOrientationMask() {
             return lockedMask
         }
-        if UserDefaults.standard.bool(forKey: "alwaysLandscape") {
+        if ProfileSettingsStore.active.bool(forKey: "alwaysLandscape") {
             return .landscape
         } else {
             return .all
@@ -528,7 +676,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
     override var shouldAutorotate: Bool {
         !PlayerPlaybackLockSettings.isLocked()
     }
-    
+
     private func setupHoldGesture() {
         holdGesture = UILongPressGestureRecognizer(target: self, action: #selector(handleHoldGesture(_:)))
         holdGesture?.minimumPressDuration = 0.5
@@ -549,9 +697,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
     }
 
     private func setupMediaControlsVisibilityGesture() {
-        // A single-tap recognizer must normally wait for double-tap seek to fail. Reveal hidden
-        // controls on touch-down instead, then let the completed tap decide whether an already
-        // visible overlay should hide. UIControls are excluded by the gesture delegate below.
+
         let touchDownGesture = UILongPressGestureRecognizer(
             target: self,
             action: #selector(handleMediaControlsTouchDown(_:))
@@ -595,8 +741,8 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
     @objc private func handleDoubleTap(_ gesture: UITapGestureRecognizer) {
         guard gesture.state == .ended,
               !UIAccessibility.isVoiceOverRunning,
-              UserDefaults.standard.object(forKey: "playerDoubleTapSeekEnabled") == nil
-                || UserDefaults.standard.bool(forKey: "playerDoubleTapSeekEnabled"),
+              ProfileSettingsStore.active.object(forKey: "playerDoubleTapSeekEnabled") == nil
+                || ProfileSettingsStore.active.bool(forKey: "playerDoubleTapSeekEnabled"),
               let player else { return }
         let location = gesture.location(in: view)
         let width = max(view.bounds.width, 1)
@@ -608,7 +754,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         } else {
             return
         }
-        let saved = UserDefaults.standard.double(forKey: "playerDoubleTapSeekSeconds")
+        let saved = ProfileSettingsStore.active.double(forKey: "playerDoubleTapSeekSeconds")
         let interval = min(max(saved > 0 ? saved : 10, 5), 60)
         let current = player.currentTime().seconds
         guard current.isFinite else { return }
@@ -639,9 +785,9 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         }
         return true
     }
-    
+
     private func setupPictureInPictureHandling() {
-        let defaults = UserDefaults.standard
+        let defaults = ProfileSettingsStore.active
         let pictureInPictureEnabled = defaults.object(forKey: "mpvPictureInPictureEnabled") as? Bool ?? true
         let automaticPictureInPictureEnabled = defaults.bool(forKey: "mpvAppExitPictureInPictureEnabled")
         guard AVPictureInPictureController.isPictureInPictureSupported(),
@@ -662,6 +808,12 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
                 )
             }
         }
+    }
+
+    private func stopPictureInPictureForTeardown() {
+        guard isPictureInPictureActiveOrStarting
+                || pictureInPictureController?.isPictureInPictureActive == true else { return }
+        pictureInPictureController?.stopPictureInPicture()
     }
 
     func pictureInPictureControllerWillStartPictureInPicture(
@@ -697,7 +849,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
     func pictureInPictureControllerWillStopPictureInPicture(
         _ pictureInPictureController: AVPictureInPictureController
     ) {
-        // Keep the playback lease until PiP has fully stopped.
+
     }
 
     func pictureInPictureControllerDidStopPictureInPicture(
@@ -745,8 +897,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
     }
 
     func playerViewControllerWillStopPictureInPicture(_ playerViewController: AVPlayerViewController) {
-        // Keep the lease until AVKit has fully stopped producing playback
-        // callbacks; `didStop` is the account-safe release point.
+
     }
 
     func playerViewControllerDidStopPictureInPicture(_ playerViewController: AVPlayerViewController) {
@@ -758,7 +909,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         isRestoringFromPictureInPicture = false
         pictureInPictureSessionRetainer = nil
     }
-    
+
     func playerViewController(_ playerViewController: AVPlayerViewController, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: @escaping (Bool) -> Void) {
         isRestoringFromPictureInPicture = true
         restoreUserInterfaceAfterPictureInPicture(
@@ -777,11 +928,10 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         let candidateScenes: [UIWindowScene]
         if let originatingWindowScene,
            originatingWindowScene.activationState != .unattached {
-            // A PiP session belongs to the scene that launched it. Falling through to another
-            // active Stage Manager scene would reopen playback in the wrong iPad window.
+
             candidateScenes = [originatingWindowScene]
         } else {
-            // If the original scene was destroyed, use the normal active-scene recovery path.
+
             candidateScenes = activeScenes
         }
 
@@ -830,7 +980,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
             )
         }
     }
-    
+
     @objc private func handleHoldGesture(_ gesture: UILongPressGestureRecognizer) {
         switch gesture.state {
         case .began:
@@ -842,17 +992,26 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         }
     }
 #endif
-    
+
     private func beginHoldSpeed() {
         guard let player,
               player.timeControlStatus == .playing,
               player.rate > 0 else { return }
         originalRate = player.rate
         isHoldSpeedActive = true
-        let holdSpeed = UserDefaults.standard.float(forKey: "holdSpeedPlayer")
-        player.rate = holdSpeed > 0 ? holdSpeed : 2.0
+        let store = ProfileSettingsStore.active
+        let savedSpeed = store.double(forKey: "holdSpeedPlayer")
+        let sanitizedSpeed = PlayerSettingsStore.sanitizedNumericSetting(
+            savedSpeed,
+            default: 2,
+            range: 0.1...3
+        )
+        if savedSpeed != sanitizedSpeed {
+            store.set(sanitizedSpeed, forKey: "holdSpeedPlayer")
+        }
+        player.rate = Float(sanitizedSpeed)
     }
-    
+
     private func endHoldSpeed() {
         guard isHoldSpeedActive else { return }
         isHoldSpeedActive = false
@@ -861,14 +1020,13 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
             player.defaultRate = originalRate
         }
         if player.timeControlStatus != .paused {
-            // A buffer transition can set `rate` to zero while the hold is active. Restoring the
-            // requested rate here prevents playback from resuming later at the temporary speed.
+
             player.rate = originalRate
         }
     }
 
     func playAtDefaultSpeed() {
-        let savedSpeed = UserDefaults.standard.double(forKey: "defaultPlaybackSpeed")
+        let savedSpeed = ProfileSettingsStore.active.double(forKey: "defaultPlaybackSpeed")
         let speed = Float(savedSpeed > 0 ? min(max(savedSpeed, 0.25), 3.0) : 1.0)
         if abs(speed - 1.0) < 0.01 {
             player?.play()
@@ -911,8 +1069,6 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
             }
         }
 
-        // AVPlayer itself can fail while its current item remains ready or unknown. Observing only
-        // AVPlayerItem leaves Apple's terminal error screen visible forever on some containers.
         playerStatusObservation = player.observe(\.status, options: [.initial, .new]) { [weak self] player, _ in
             DispatchQueue.main.async { [weak self, weak player] in
                 guard let self,
@@ -994,9 +1150,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
 
         if let context = effectiveFailureContext(),
            let url = URL(string: context.streamURL) {
-            // iPad Automatic must also recover from a corrupt or mislabeled downloaded file
-            // whose AVPlayer state never becomes `.failed`. Explicit AVPlayer keeps the legacy
-            // network-only health probe; probing a local file as if it were HTTP is meaningless.
+
             if automaticallyFallsBackToMolten || !url.isFileURL {
                 schedulePlaybackStartupCheck(
                     url: url,
@@ -1081,7 +1235,9 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
             for: info,
             progress: progress,
             playbackContext: playbackContextForTraktScrobble(info),
-            force: force
+            force: force,
+            requiredOwner: playbackOwnerProfileID,
+            progressAuthority: playbackProfileAuthority.progress
         )
     }
 
@@ -1135,6 +1291,13 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         playbackFailureHandled = true
         startupWorkItem?.cancel()
 
+        let elapsedMilliseconds = Int(
+            max(0, Date().timeIntervalSince(context.traceCreatedAt) * 1_000).rounded()
+        )
+        Logger.shared.log(
+            "[PlaybackTrace \(context.traceID)] owner=appPlayer stage=startup-failure engine=avplayer sourceID=\(context.sourceId) attribution=\(isSourceFailure ? "providerUpstream" : "app") elapsedMs=\(elapsedMilliseconds)",
+            type: "PlaybackTrace"
+        )
         let report = PlaybackFailureReport(context: context, message: message, isSourceFailure: isSourceFailure)
         if let onAutomaticPlaybackFallback,
            (automaticallyFallsBackToMolten
@@ -1206,8 +1369,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         guard !hasFinalizedPlaybackSession,
               !isBeingDismissed else { return }
         guard viewIfLoaded?.window != nil else {
-            // AVPlayer can report a failed item while this container is still in viewDidLoad.
-            // Defer the alert until viewDidAppear so a fast failure cannot strand a blank player.
+
             pendingPlaybackFailureAlert = alert
             return
         }
@@ -1228,6 +1390,7 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
 
     private func dismissAndReportPlaybackFailure(_ report: PlaybackFailureReport) {
         let callback = onPlaybackStartupFailure
+        releaseEphemeralProxyOwnership()
         player?.pause()
         if presentingViewController != nil {
             dismiss(animated: true) {
@@ -1238,8 +1401,6 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         }
     }
 
-    /// Restores a primary player that asked the coordinator to hand off but could not safely be
-    /// replaced (for example, another modal won the presenter while the handoff was connecting).
     func playbackEngineHandoffDidFail(_ report: PlaybackFailureReport) {
         guard !isBeingDismissed, viewIfLoaded?.window != nil else { return }
         isHandingOffPlaybackEngine = false
@@ -1487,8 +1648,6 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         }
     }
 
-    // MARK: - Progress Tracking
-
     func setupProgressTracking(for mediaInfo: MediaInfo) {
         if let token = timeObserverToken {
             player?.removeTimeObserver(token)
@@ -1501,7 +1660,8 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         timeObserverToken = ProgressManager.shared.addPeriodicTimeObserver(
             to: player,
             for: mediaInfo,
-            playbackContext: episodePlaybackContext
+            playbackContext: episodePlaybackContext,
+            owner: playbackOwnerProfileID
         )
     }
 
@@ -1535,12 +1695,12 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
         player?.seek(to: CMTime(seconds: resumePosition, preferredTimescale: 600))
         Logger.shared.log("Resumed AVPlayer playback from \(Int(resumePosition))s", type: "Progress")
     }
-    
+
     private func getProgressPercentage(for mediaInfo: MediaInfo) -> Double {
         switch mediaInfo {
         case .movie(let id, let title, _, _):
             return ProgressManager.shared.getMovieProgress(movieId: id, title: title)
-            
+
         case .episode(let showId, let seasonNumber, let episodeNumber, _, _, _):
             return ProgressManager.shared.getEpisodeProgress(showId: showId, seasonNumber: seasonNumber, episodeNumber: episodeNumber)
         }
@@ -1828,13 +1988,13 @@ private extension NormalPlayer {
             hideNextEpisodeButton()
             return
         }
-        let enabled = UserDefaults.standard.object(forKey: "showNextEpisodeButton") == nil
-            || UserDefaults.standard.bool(forKey: "showNextEpisodeButton")
+        let enabled = ProfileSettingsStore.active.object(forKey: "showNextEpisodeButton") == nil
+            || ProfileSettingsStore.active.bool(forKey: "showNextEpisodeButton")
         guard enabled else {
             hideNextEpisodeButton()
             return
         }
-        let savedThreshold = UserDefaults.standard.double(forKey: "nextEpisodeThreshold")
+        let savedThreshold = ProfileSettingsStore.active.double(forKey: "nextEpisodeThreshold")
         let threshold = min(max(savedThreshold > 0 ? savedThreshold : 0.90, 0.50), 0.99)
         let progress = min(max(position / duration, 0), 1)
         let resolutionLead = max(0.25, threshold - (duration < 900 ? 0.30 : 0.18))
@@ -1870,9 +2030,7 @@ private extension NormalPlayer {
                     let usesLocalOnlyNextEpisode = request.url.isFileURL
                         && request.onRequestResolvedNextEpisode == nil
                     if usesLocalOnlyNextEpisode {
-                        // A local-only callback must never turn a verified E2 prompt into the next
-                        // arbitrary downloaded record (for example E10). Only expose the verified
-                        // target when that exact file is available.
+
                         if let localTarget = request.localNextEpisodeFallback,
                            target.episode.seasonNumber == localTarget.seasonNumber,
                            target.episode.episodeNumber == localTarget.episodeNumber {
@@ -1977,7 +2135,7 @@ private extension NormalPlayer {
         didRequestNextEpisode = true
         nextEpisodeButton.isEnabled = false
         if let target = nextEpisodeTarget {
-            let prefersLocal = UserDefaults.standard.bool(forKey: "preferDownloadedMedia")
+            let prefersLocal = ProfileSettingsStore.active.bool(forKey: "preferDownloadedMedia")
                 || configuredRequest?.url.isFileURL == true
             if prefersLocal,
                let resolved = downloadedNextEpisodeRequest(for: target) {
@@ -2033,7 +2191,7 @@ private extension NormalPlayer {
             originalTMDBEpisodeNumber: target.originalTMDBEpisodeNumber,
             specialTitleOnlySearch: target.playbackContext?.titleOnlySearch ?? false,
             episodePlaybackContext: target.playbackContext,
-            autoModeOnly: UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"),
+            autoModeOnly: AutoModeSettings.isEnabled(),
             onResolvedPlaybackRequest: { [weak self] resolved in
                 guard let self, self.activeSourceSelectionID == selectionID else {
                     Self.invalidateAbandonedSkyStreamPlayback(resolved)
@@ -2053,7 +2211,7 @@ private extension NormalPlayer {
                 selectionID,
                 restoresNextEpisodeControl: true
             )
-        })
+        }.profileScopedAppStorage())
         present(host, animated: true)
     }
 
@@ -2061,9 +2219,7 @@ private extension NormalPlayer {
         _ selectionID: UUID,
         restoresNextEpisodeControl: Bool
     ) {
-        // ModulesSearchResultsSheet dismisses before delivering a resolved request (currently on a
-        // short delay). Give that committed callback priority; only invalidate the token when no
-        // callback claimed it after the dismissal settled.
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             guard let self, self.activeSourceSelectionID == selectionID else { return }
             self.activeSourceSelectionID = nil
@@ -2093,13 +2249,20 @@ private extension NormalPlayer {
             headers: [:],
             subtitles: DownloadManager.shared.localSubtitleURL(for: download).map { [$0.absoluteString] },
             subtitleNames: nil,
-            mediaInfo: download.mediaInfo,
+            mediaInfo: .episode(
+                showId: target.showID,
+                seasonNumber: target.episode.seasonNumber,
+                episodeNumber: target.episode.episodeNumber,
+                showTitle: target.mediaTitle,
+                showPosterURL: target.posterURL,
+                isAnime: target.isAnime
+            ),
             imdbId: target.imdbID ?? configuredRequest?.imdbID,
             isAnimeHint: download.isAnime || target.isAnime,
             isAnimationContentHint: target.isAnimation,
             originalTMDBSeasonNumber: target.originalTMDBSeasonNumber,
             originalTMDBEpisodeNumber: target.originalTMDBEpisodeNumber,
-            episodePlaybackContext: download.episodePlaybackContext ?? target.playbackContext,
+            episodePlaybackContext: target.playbackContext ?? download.episodePlaybackContext,
             launchContext: nil,
             mediaYear: target.mediaYear ?? configuredRequest?.mediaYear
         )
@@ -2152,6 +2315,11 @@ private extension NormalPlayer {
 
     private func nextCompletedDownloadedEpisode(after current: DownloadItem) -> DownloadItem? {
         let manager = DownloadManager.shared
+
+        guard !current.isAnime,
+              current.episodePlaybackContext?.hasAnimeMediaId != true else {
+            return nil
+        }
         let episodes = manager.completedDownloads
             .filter {
                 !$0.isMovie
@@ -2235,18 +2403,18 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
                 selectionID,
                 restoresNextEpisodeControl: false
             )
-        })
+        }.profileScopedAppStorage())
         present(host, animated: true)
     }
 
     private var episodeBrowserButtonEnabled: Bool {
-        if UserDefaults.standard.object(forKey: "showEpisodeBrowserButton") == nil {
-            let legacy = UserDefaults.standard.object(forKey: "showVLCEpisodeBrowserButton") == nil
+        if ProfileSettingsStore.active.object(forKey: "showEpisodeBrowserButton") == nil {
+            let legacy = ProfileSettingsStore.active.object(forKey: "showVLCEpisodeBrowserButton") == nil
                 ? true
-                : UserDefaults.standard.bool(forKey: "showVLCEpisodeBrowserButton")
-            UserDefaults.standard.set(legacy, forKey: "showEpisodeBrowserButton")
+                : ProfileSettingsStore.active.bool(forKey: "showVLCEpisodeBrowserButton")
+            ProfileSettingsStore.active.set(legacy, forKey: "showEpisodeBrowserButton")
         }
-        return UserDefaults.standard.bool(forKey: "showEpisodeBrowserButton")
+        return ProfileSettingsStore.active.bool(forKey: "showEpisodeBrowserButton")
     }
 
     private func makeEpisodeBrowserSeed() -> PlayerEpisodeBrowserSeed? {
@@ -2296,7 +2464,7 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
             onClose: { [weak self] in self?.dismissEpisodeBrowser(animated: true) },
             onEpisodeSelected: { [weak self] item in self?.handleEpisodeBrowserSelection(item) }
         )
-        let host = UIHostingController(rootView: AnyView(drawer))
+        let host = UIHostingController(rootView: AnyView(drawer.profileScopedAppStorage()))
         host.view.translatesAutoresizingMaskIntoConstraints = false
         host.view.backgroundColor = .clear
         addChild(host)
@@ -2332,7 +2500,7 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
     private func handleEpisodeBrowserSelection(_ item: PlayerEpisodeBrowserItem) {
         guard !item.isCurrent, presentedViewController == nil else { return }
         dismissEpisodeBrowser(animated: false)
-        if UserDefaults.standard.bool(forKey: "preferDownloadedMedia"),
+        if ProfileSettingsStore.active.bool(forKey: "preferDownloadedMedia"),
            let resolved = downloadedEpisodeBrowserRequest(for: item) {
             replacePlaybackFromEpisodeBrowser(with: resolved, item: item)
             return
@@ -2357,7 +2525,7 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
             originalTMDBEpisodeNumber: item.originalTMDBEpisodeNumber,
             specialTitleOnlySearch: item.playbackContext?.titleOnlySearch ?? false,
             episodePlaybackContext: item.playbackContext,
-            autoModeOnly: UserDefaults.standard.bool(forKey: "servicesAutoModeEnabled"),
+            autoModeOnly: AutoModeSettings.isEnabled(),
             onResolvedPlaybackRequest: { [weak self] resolved in
                 guard let self, self.activeSourceSelectionID == selectionID else {
                     Self.invalidateAbandonedSkyStreamPlayback(resolved)
@@ -2377,7 +2545,7 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
                 selectionID,
                 restoresNextEpisodeControl: false
             )
-        })
+        }.profileScopedAppStorage())
         present(host, animated: true)
     }
 
@@ -2393,13 +2561,20 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
             headers: [:],
             subtitles: DownloadManager.shared.localSubtitleURL(for: downloadItem).map { [$0.absoluteString] },
             subtitleNames: nil,
-            mediaInfo: downloadItem.mediaInfo,
+            mediaInfo: .episode(
+                showId: item.showId,
+                seasonNumber: item.episode.seasonNumber,
+                episodeNumber: item.episode.episodeNumber,
+                showTitle: item.showTitle,
+                showPosterURL: item.showPosterURL,
+                isAnime: item.isAnime
+            ),
             imdbId: item.imdbId,
-            isAnimeHint: downloadItem.isAnime,
+            isAnimeHint: downloadItem.isAnime || item.isAnime,
             isAnimationContentHint: configuredRequest?.isAnimation,
             originalTMDBSeasonNumber: item.originalTMDBSeasonNumber,
             originalTMDBEpisodeNumber: item.originalTMDBEpisodeNumber,
-            episodePlaybackContext: downloadItem.episodePlaybackContext ?? item.playbackContext,
+            episodePlaybackContext: item.playbackContext ?? downloadItem.episodePlaybackContext,
             launchContext: nil,
             mediaYear: item.mediaYear ?? configuredRequest?.mediaYear
         )
@@ -2408,6 +2583,7 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
     private static func invalidateAbandonedSkyStreamPlayback(
         _ request: PlayerResolvedPlaybackRequest
     ) {
+        request.launchContext?.ephemeralProxyOwnership?.invalidate()
 #if os(iOS) && !targetEnvironment(macCatalyst)
         guard request.launchContext?.sourceKind == .skyStream else { return }
         MPVHeaderProxy.shared.invalidateSession(for: request.url)
@@ -2415,6 +2591,7 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
     }
 
     private static func invalidateAbandonedSkyStreamPlayback(_ request: PlaybackRequest) {
+        request.launchContext?.ephemeralProxyOwnership?.invalidate()
 #if os(iOS) && !targetEnvironment(macCatalyst)
         guard request.launchContext?.sourceKind == .skyStream else { return }
         MPVHeaderProxy.shared.invalidateSession(for: request.url)
@@ -2625,10 +2802,6 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
         }
     }
 
-    /// Services and episode pickers resolve while their SwiftUI host is dismissing. Drain only
-    /// that child presentation, then replace the AVPlayerItem in this controller. Keeping the
-    /// controller alive preserves PiP, gestures, orientation lock, scene ownership, and the single
-    /// media-state playback lease.
     private func replaceCurrentPlayback(with replacement: PlaybackRequest, reason: String) {
         guard !isReplacingCurrentPlayback,
               !hasFinalizedPlaybackSession,
@@ -2757,7 +2930,9 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
             ProgressManager.shared.syncTraktProgressOnPlaybackClose(
                 for: outgoingMediaInfo,
                 playbackContext: outgoingPlaybackContext,
-                played: outgoingPlaybackDidStart
+                played: outgoingPlaybackDidStart,
+                owner: playbackOwnerProfileID,
+                progressAuthority: playbackProfileAuthority.progress
             )
         }
 
@@ -2786,9 +2961,6 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
             return
         }
 
-        // Invalidate queued callbacks before removing observers or changing metadata. The progress
-        // observer is removed before install so the new item's timestamps cannot be written against
-        // the outgoing episode.
         clearOutgoingPlaybackFence()
         playbackLoadGeneration &+= 1
         tearDownPlaybackItemObservers()
@@ -2816,8 +2988,6 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
         nextEpisodeButton.alpha = 0
         nextEpisodeButton.isHidden = true
 
-        // AVPlayer.status is terminal after some decoder failures. A fresh AVPlayer is safe here:
-        // the persistent AVPlayerLayer and PiP content source remain unchanged.
         if player?.status == .failed {
             player = nil
         }
@@ -2846,10 +3016,6 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
         playAtDefaultSpeed()
     }
 
-    /// A resolved source is delivered after the sheet dismisses. Invalidate callbacks belonging
-    /// to the outgoing item as soon as the user commits the source so its startup timeout or
-    /// failure cannot hand the old request to Molten during that gap. The item itself keeps
-    /// playing until the replacement request arrives.
     private func fenceOutgoingPlayback(for selectionID: UUID) {
         guard activeSourceSelectionID == selectionID,
               !hasFinalizedPlaybackSession,
@@ -2882,9 +3048,7 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
     }
 
     private func beginSourceSelection(_ selectionID: UUID) {
-        // A new explicit picker wins over an older delayed callback. If the older choice had
-        // already fenced the current item, re-arm that unchanged item until this new picker also
-        // commits; cancelling the latest picker must not silently leave failure handling disabled.
+
         restoreOutgoingPlaybackFenceIfNeeded()
         activeSourceSelectionID = selectionID
     }
@@ -2894,9 +3058,6 @@ extension NormalPlayer: UIAdaptivePresentationControllerDelegate {
         committedSourceSelectionItem = nil
     }
 
-    /// If a committed sheet never delivers its resolved request, resume monitoring the unchanged
-    /// item instead of leaving it alive without failure handling. A plain sheet cancellation never
-    /// creates a fence and therefore does not disturb current playback at all.
     private func restoreOutgoingPlaybackFenceIfNeeded(for selectionID: UUID? = nil) {
         guard let committedID = committedSourceSelectionID,
               selectionID == nil || selectionID == committedID else { return }
@@ -3019,6 +3180,8 @@ private final class IOSAVPlayerMediaControlsController {
     private let subtitleButton = UIButton(type: .system)
     private let audioButton = UIButton(type: .system)
     private let pictureInPictureButton = UIButton(type: .system)
+    private let airPlayRoutePickerContainer = UIView()
+    private let airPlayRoutePickerView = AVRoutePickerView()
     private let servicesButton = UIButton(type: .system)
     private let episodeBrowserButton = UIButton(type: .system)
     private let rewindButton = UIButton(type: .system)
@@ -3136,9 +3299,6 @@ private final class IOSAVPlayerMediaControlsController {
             self.isLoadingMediaOptions = false
             self.mediaOptionsTask = nil
 
-            // A forced-caption group cannot be disabled. Drop a custom external overlay if one
-            // was optimistically selected before the HLS media-selection group became available,
-            // otherwise both subtitle systems would render at once.
             if subtitleGroup?.allowsEmptySelection == false, self.selectedIndex != nil {
                 self.clearExternalSelection()
                 self.onSelectionChanged?(false, true)
@@ -3178,8 +3338,7 @@ private final class IOSAVPlayerMediaControlsController {
         if startedWithControlsVisible {
             hideControls()
         } else {
-            // Touch-down already revealed the overlay. Refresh the normal auto-hide deadline
-            // without making the user wait for double-tap disambiguation to see any feedback.
+
             showTemporarily()
         }
     }
@@ -3283,7 +3442,7 @@ private final class IOSAVPlayerMediaControlsController {
         label.translatesAutoresizingMaskIntoConstraints = false
         label.numberOfLines = 4
         label.textAlignment = .center
-        label.backgroundColor = UserDefaults.standard.bool(forKey: "subtitles_closedCaptionBackground")
+        label.backgroundColor = ProfileSettingsStore.active.bool(forKey: "subtitles_closedCaptionBackground")
             ? UIColor.black.withAlphaComponent(0.72)
             : .clear
         label.layer.cornerRadius = 8
@@ -3354,6 +3513,8 @@ private final class IOSAVPlayerMediaControlsController {
             self?.onPictureInPicture?()
         }
         setPictureInPictureAvailable(false)
+
+        configureAirPlayRoutePicker()
 
         configureChromeButton(
             rewindButton,
@@ -3438,13 +3599,14 @@ private final class IOSAVPlayerMediaControlsController {
             closeButton,
             playbackLockButton,
             pictureInPictureButton,
+            airPlayRoutePickerContainer,
             titleLabel
         ])
         topStack.translatesAutoresizingMaskIntoConstraints = false
         topStack.axis = .horizontal
         topStack.alignment = .center
         topStack.spacing = 8
-        topStack.setCustomSpacing(14, after: pictureInPictureButton)
+        topStack.setCustomSpacing(14, after: airPlayRoutePickerContainer)
         topRail.contentView.addSubview(topStack)
 
         transportContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -3527,6 +3689,8 @@ private final class IOSAVPlayerMediaControlsController {
             playbackLockButton.heightAnchor.constraint(equalToConstant: 44),
             pictureInPictureButton.widthAnchor.constraint(equalToConstant: 44),
             pictureInPictureButton.heightAnchor.constraint(equalToConstant: 44),
+            airPlayRoutePickerContainer.widthAnchor.constraint(equalToConstant: 44),
+            airPlayRoutePickerContainer.heightAnchor.constraint(equalToConstant: 44),
             transportContainer.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
             transportContainer.centerYAnchor.constraint(equalTo: overlay.centerYAnchor, constant: -4),
             transportContainer.heightAnchor.constraint(equalToConstant: 76),
@@ -3589,6 +3753,28 @@ private final class IOSAVPlayerMediaControlsController {
         }, for: .primaryActionTriggered)
     }
 
+    private func configureAirPlayRoutePicker() {
+
+        airPlayRoutePickerContainer.translatesAutoresizingMaskIntoConstraints = false
+        airPlayRoutePickerContainer.isAccessibilityElement = false
+        IOSAVPlayerControlStyle.applyChrome(to: airPlayRoutePickerContainer)
+
+        airPlayRoutePickerView.translatesAutoresizingMaskIntoConstraints = false
+        airPlayRoutePickerView.tintColor = .white
+        airPlayRoutePickerView.activeTintColor = .white
+        airPlayRoutePickerView.prioritizesVideoDevices = true
+        airPlayRoutePickerView.accessibilityLabel = "AirPlay"
+        airPlayRoutePickerView.accessibilityHint = "Choose an AirPlay device"
+        airPlayRoutePickerView.accessibilityIdentifier = "AVPlayer.AirPlay"
+        airPlayRoutePickerContainer.addSubview(airPlayRoutePickerView)
+        NSLayoutConstraint.activate([
+            airPlayRoutePickerView.leadingAnchor.constraint(equalTo: airPlayRoutePickerContainer.leadingAnchor),
+            airPlayRoutePickerView.trailingAnchor.constraint(equalTo: airPlayRoutePickerContainer.trailingAnchor),
+            airPlayRoutePickerView.topAnchor.constraint(equalTo: airPlayRoutePickerContainer.topAnchor),
+            airPlayRoutePickerView.bottomAnchor.constraint(equalTo: airPlayRoutePickerContainer.bottomAnchor)
+        ])
+    }
+
     private func updateTransport(time: Double) {
         let duration = player?.currentItem?.duration.seconds ?? .nan
         let validDuration = duration.isFinite && duration > 0 ? duration : 0
@@ -3610,10 +3796,9 @@ private final class IOSAVPlayerMediaControlsController {
     private func togglePlayback() {
         guard let player else { return }
         if player.timeControlStatus == .paused {
-            let savedSpeed = UserDefaults.standard.double(forKey: "defaultPlaybackSpeed")
+            let savedSpeed = ProfileSettingsStore.active.double(forKey: "defaultPlaybackSpeed")
             let speed = Float(savedSpeed > 0 ? min(max(savedSpeed, 0.25), 3.0) : 1.0)
-            // This is a direct user command, so do not add AVPlayer's optional buffer-wait
-            // latency before honoring it. Startup playback keeps its existing conservative path.
+
             player.playImmediately(atRate: speed)
         } else {
             player.pause()
@@ -3658,7 +3843,7 @@ private final class IOSAVPlayerMediaControlsController {
 
     private static func formatTime(_ seconds: Double) -> String {
         guard seconds.isFinite, seconds >= 0 else { return "00:00" }
-        let total = Int(seconds.rounded(.down))
+        guard let total = Int(exactly: seconds.rounded(.down)) else { return "--:--" }
         let hours = total / 3_600
         let minutes = (total % 3_600) / 60
         let remainder = total % 60
@@ -3971,7 +4156,7 @@ private final class IOSAVPlayerMediaControlsController {
     }
 
     private static func styledCueText(_ text: String) -> NSAttributedString {
-        let defaults = UserDefaults.standard
+        let defaults = ProfileSettingsStore.active
         let savedFontSize = defaults.double(forKey: "subtitles_fontSize")
         let defaultSize: CGFloat = UIDevice.current.userInterfaceIdiom == .pad ? 30 : 22
         let fontSize = CGFloat(savedFontSize > 0 ? min(max(savedFontSize, 16), 52) : Double(defaultSize))
@@ -3989,7 +4174,7 @@ private final class IOSAVPlayerMediaControlsController {
     }
 
     private static func subtitleColor(forKey key: String, fallback: UIColor) -> UIColor {
-        guard let data = UserDefaults.standard.data(forKey: key),
+        guard let data = ProfileSettingsStore.active.data(forKey: key),
               let color = try? NSKeyedUnarchiver.unarchivedObject(ofClass: UIColor.self, from: data) else {
             return fallback
         }
@@ -3997,7 +4182,7 @@ private final class IOSAVPlayerMediaControlsController {
     }
 
     private static var subtitleBottomConstant: CGFloat {
-        let defaults = UserDefaults.standard
+        let defaults = ProfileSettingsStore.active
         let offset = defaults.object(forKey: "playerSubtitleOverlayBottomConstant") == nil
             ? -6
             : defaults.double(forKey: "playerSubtitleOverlayBottomConstant")
@@ -4030,9 +4215,7 @@ extension UIViewController {
 
 @MainActor
 extension UIApplication {
-    /// Resolve a presenter inside one known WindowGroup scene. When the lightweight scene probe
-    /// has not attached yet, only fall back if there is exactly one foreground scene; multiple
-    /// iPad scenes can each report a key window, so flattening them is not deterministic.
+
     func eclipseTopmostViewController(forSceneSessionIdentifier identifier: String?) -> UIViewController? {
         let foregroundScenes = connectedScenes
             .compactMap { $0 as? UIWindowScene }
@@ -4057,9 +4240,6 @@ extension UIApplication {
         return window?.rootViewController?.topmostViewController()
     }
 
-    /// Resolve presentation from the application's actual key window before falling back to an
-    /// active scene. `connectedScenes.first` is unordered and can target the wrong Stage Manager
-    /// window when Eclipse has more than one scene.
     func eclipseTopmostViewController() -> UIViewController? {
         let windowScenes = connectedScenes.compactMap { $0 as? UIWindowScene }
         let keyWindow = windowScenes

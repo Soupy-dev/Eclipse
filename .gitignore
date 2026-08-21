@@ -134,10 +134,18 @@ iOSInjectionProject/
 
 # End of https://www.toptal.com/developers/gitignore/api/macos,swift,xcode
 
-# Local-only build/audit tooling and tvOS test targets. Keep the validator used
-# by ipabuild.sh tracked because CI invokes it after creating the iOS archive.
+# Local-only build/audit tooling. Keep the validator used by ipabuild.sh tracked
+# because CI invokes it after creating the iOS archive.
 /scripts/*
 !/scripts/validate-ios-privacy-manifest.sh
 /MPVKit
-/EclipseTVTests/
-/EclipseTVUITests/
+
+# Claude Cowork session working area (scripts/logs, never shipped)
+_claude_ops/
+
+# Scratch notes, agent instructions and review write-ups, never shipped. The only
+# tracked Markdown is the repo README and the source of the published privacy
+# policy, which .github/workflows/privacy-policy-pages.yml renders to Pages.
+*.md
+!README.md
+!privacy-policy.md

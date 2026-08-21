@@ -1,4 +1,9 @@
-// Sora-JS
+//
+//  URLSession.swift
+//  Sora-JS
+//
+//  Created by Francesco on 05/01/25.
+//
 
 import Foundation
 
@@ -13,9 +18,6 @@ enum BoundedURLSessionError: LocalizedError, Equatable {
     }
 }
 
-/// Accumulates a response without ever accepting a byte beyond the configured
-/// limit. Keeping this small type separate makes the boundary independently
-/// testable without issuing a real network request.
 struct BoundedResponseBuffer {
     let maximumBytes: Int
     private(set) var data = Data()
@@ -49,22 +51,33 @@ struct BoundedResponseBuffer {
 }
 
 final class FetchDelegate: NSObject, URLSessionDataDelegate {
+
+    typealias RedirectAuthorization = @Sendable (_ source: URL, _ destination: URL) async throws -> Void
+
     private let allowRedirects: Bool
+    private let redirectAuthorization: RedirectAuthorization?
+    private let scopesCrossOriginHeaders: Bool
 
     private final class PendingBoundedResponse {
         let task: URLSessionDataTask
         let continuation: CheckedContinuation<(Data, URLResponse), Error>
         var buffer: BoundedResponseBuffer
         var response: URLResponse?
+        let allowRedirects: Bool?
+        let returnsRedirectResponseImmediately: Bool
 
         init(
             task: URLSessionDataTask,
             maximumResponseBytes: Int,
+            allowRedirects: Bool?,
+            returnsRedirectResponseImmediately: Bool,
             continuation: CheckedContinuation<(Data, URLResponse), Error>
-        ) {
+        ) throws {
             self.task = task
             self.continuation = continuation
-            self.buffer = try! BoundedResponseBuffer(maximumBytes: maximumResponseBytes)
+            self.buffer = try BoundedResponseBuffer(maximumBytes: maximumResponseBytes)
+            self.allowRedirects = allowRedirects
+            self.returnsRedirectResponseImmediately = returnsRedirectResponseImmediately
         }
     }
 
@@ -77,9 +90,19 @@ final class FetchDelegate: NSObject, URLSessionDataDelegate {
     private let boundedRequestLock = NSLock()
     private var boundedRequestRegistrations: [UUID: BoundedRequestRegistration] = [:]
     private var boundedRequestTokensByTask: [ObjectIdentifier: UUID] = [:]
-    
-    init(allowRedirects: Bool) {
+
+    // Header scoping is opt-in and separate from redirect authorization. A plugin's own Cookie
+    // and Authorization must survive the 302 that hands off its session, or the documented
+    // log-in -> redirect -> embed provider shape stops working; authorizing the destination
+    // address is a different concern and must not silently drag header stripping in with it.
+    init(
+        allowRedirects: Bool,
+        redirectAuthorization: RedirectAuthorization? = nil,
+        scopesCrossOriginHeaders: Bool = false
+    ) {
         self.allowRedirects = allowRedirects
+        self.redirectAuthorization = redirectAuthorization
+        self.scopesCrossOriginHeaders = scopesCrossOriginHeaders
     }
 
     static func isAllowedRedirectURL(_ url: URL?) -> Bool {
@@ -91,19 +114,103 @@ final class FetchDelegate: NSObject, URLSessionDataDelegate {
         }
         return true
     }
-    
+
+    static func requestScopedForRedirect(
+        _ request: URLRequest,
+        from source: URL,
+        to destination: URL
+    ) -> URLRequest {
+        guard !isSameOrigin(source, destination) else { return request }
+
+        let crossOriginSafeHeaderNames: Set<String> = [
+            "accept", "accept-language", "cache-control", "dnt", "pragma", "user-agent"
+        ]
+        var scoped = request
+
+        for headerName in (request.allHTTPHeaderFields ?? [:]).keys where
+            !crossOriginSafeHeaderNames.contains(headerName.lowercased()) {
+            scoped.setValue(nil, forHTTPHeaderField: headerName)
+        }
+        return scoped
+    }
+
+    private static func isSameOrigin(_ lhs: URL, _ rhs: URL) -> Bool {
+        guard let lhsScheme = lhs.scheme?.lowercased(),
+              let rhsScheme = rhs.scheme?.lowercased(),
+              let lhsHost = lhs.host?.lowercased(),
+              let rhsHost = rhs.host?.lowercased() else {
+            return false
+        }
+        return lhsScheme == rhsScheme
+            && lhsHost == rhsHost
+            && effectivePort(for: lhs, scheme: lhsScheme) == effectivePort(for: rhs, scheme: rhsScheme)
+    }
+
+    private static func effectivePort(for url: URL, scheme: String) -> Int? {
+        if let port = url.port { return port }
+        switch scheme {
+        case "http": return 80
+        case "https": return 443
+        default: return nil
+        }
+    }
+
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-        guard allowRedirects, Self.isAllowedRedirectURL(request.url) else {
+        var immediateRedirect: PendingBoundedResponse?
+        boundedRequestLock.lock()
+        if let (token, pending) = activeBoundedRequest(for: task),
+           pending.returnsRedirectResponseImmediately {
+            removeActiveBoundedRequest(token: token, task: task)
+            immediateRedirect = pending
+        }
+        boundedRequestLock.unlock()
+        if let immediateRedirect {
+            completionHandler(nil)
+            immediateRedirect.task.cancel()
+            immediateRedirect.continuation.resume(returning: (Data(), response))
+            return
+        }
+
+        guard allowsRedirect(for: task), Self.isAllowedRedirectURL(request.url) else {
             completionHandler(nil)
             return
         }
-        completionHandler(request)
+        guard let destination = request.url else {
+            completionHandler(nil)
+            return
+        }
+
+        let source = response.url ?? task.originalRequest?.url ?? destination
+        guard let redirectAuthorization else {
+            completionHandler(request)
+            return
+        }
+        Task {
+            do {
+                try await redirectAuthorization(source, destination)
+
+                guard self.scopesCrossOriginHeaders else {
+                    completionHandler(request)
+                    return
+                }
+                completionHandler(Self.requestScopedForRedirect(
+                    request,
+                    from: source,
+                    to: destination
+                ))
+            } catch {
+
+                completionHandler(nil)
+            }
+        }
     }
 
     func boundedData(
         in session: URLSession,
         for request: URLRequest,
-        maximumResponseBytes: Int
+        maximumResponseBytes: Int,
+        allowRedirects: Bool? = nil,
+        returnsRedirectResponseImmediately: Bool = false
     ) async throws -> (Data, URLResponse) {
         precondition(maximumResponseBytes > 0)
 
@@ -115,11 +222,19 @@ final class FetchDelegate: NSObject, URLSessionDataDelegate {
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 let task = session.dataTask(with: request)
-                let pending = PendingBoundedResponse(
-                    task: task,
-                    maximumResponseBytes: maximumResponseBytes,
-                    continuation: continuation
-                )
+                let pending: PendingBoundedResponse
+                do {
+                    pending = try PendingBoundedResponse(
+                        task: task,
+                        maximumResponseBytes: maximumResponseBytes,
+                        allowRedirects: allowRedirects,
+                        returnsRedirectResponseImmediately: returnsRedirectResponseImmediately,
+                        continuation: continuation
+                    )
+                } catch {
+                    continuation.resume(throwing: error)
+                    return
+                }
 
                 let shouldStart: Bool
                 boundedRequestLock.lock()
@@ -292,72 +407,63 @@ final class FetchDelegate: NSObject, URLSessionDataDelegate {
         boundedRequestRegistrations[token] = .waiting
         boundedRequestLock.unlock()
     }
+
+    private func allowsRedirect(for task: URLSessionTask) -> Bool {
+        boundedRequestLock.lock()
+        defer { boundedRequestLock.unlock() }
+        guard let token = boundedRequestTokensByTask[ObjectIdentifier(task)],
+              case .active(let pending) = boundedRequestRegistrations[token] else {
+            return allowRedirects
+        }
+        return pending.allowRedirects ?? allowRedirects
+    }
 }
 
 extension URLSession {
     static let userAgents = [
-        // Chrome
+
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.6998.0 Safari/537.36",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
         "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
-        
-        // FireFox
+
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.7; rv:136.0) Gecko/20100101 Firefox/136.0",
         "Mozilla/5.0 (X11; Linux x86_64; rv:136.0) Gecko/20100101 Firefox/136.0",
         "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:136.0) Gecko/20100101 Firefox/136.0",
-        
-        // Edge
+
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36 Edg/134.0.3124.0",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36 Edg/134.0.3124.0",
-        
-        // Safari
+
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15",
-        
-        // Mobile Chrome
+
         "Mozilla/5.0 (Linux; Android 14; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36",
         "Mozilla/5.0 (Linux; Android 15; Pixel 8 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.6998.0 Mobile Safari/537.36",
         "Mozilla/5.0 (Linux; Android 14; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36",
-        
-        // Mobile Safari
+
         "Mozilla/5.0 (iPhone; CPU iPhone OS 17_7_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Mobile/15E148 Safari/604.1",
         "Mozilla/5.0 (iPad; CPU OS 17_7_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Mobile/15E148 Safari/604.1",
         "Mozilla/5.0 (iPhone; CPU iPhone OS 17_7 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Mobile/15E148 Safari/604.1",
-        
-        // Mobile Firefox
+
         "Mozilla/5.0 (Mobile; rv:136.0) Gecko/136.0 Firefox/136.0",
         "Mozilla/5.0 (Android 15; Mobile; rv:136.0) Gecko/136.0 Firefox/136.0",
-        
-        // Mobile Edge
+
         "Mozilla/5.0 (Linux; Android 14; SM-G973F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Mobile Safari/537.36 EdgA/134.0.3124.0",
         "Mozilla/5.0 (iPhone; CPU iPhone OS 17_7_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 EdgiOS/134.3124.77 Mobile/15E148 Safari/605.1.15"
     ]
-    
-    /// Intentionally stable for the process lifetime (evaluated once on first access, not
-    /// per-call): PlayerViewController's next-episode prewarm and the actual play-time
-    /// request both build their header dictionaries from this property independently, and
-    /// ExperimentalMPVPreloadManager's cache key is a hash that includes the User-Agent — the
-    /// two reads have to land on the same value or the prewarm is silently wasted. Call sites
-    /// that need a fresh, internally-consistent identity per webview/request (e.g. Cloudflare
-    /// bypass scraping) should capture this into a local `let` once and reuse it, not rely on
-    /// repeated reads agreeing with each other by chance.
+
     static var randomUserAgent: String = {
         userAgents.randomElement() ?? userAgents[0]
     }()
 
-    /// A desktop-class identity, for webviews whose frame is a fixed desktop size — keeping
-    /// the UA/viewport pairing internally consistent (a mobile UA on a desktop-sized canvas,
-    /// or vice versa, is a bot-detection tell). Re-picked per call: callers that need one
-    /// stable value for a whole request/webview flow should capture it into a local `let`.
     static var randomDesktopUserAgent: String {
         let desktopAgents = userAgents.filter {
             !$0.contains("Mobile") && !$0.contains("iPhone") && !$0.contains("iPad")
         }
         return desktopAgents.randomElement() ?? userAgents[0]
     }
-    
+
     static let custom: URLSession = {
         let configuration = URLSessionConfiguration.default
         configuration.httpAdditionalHeaders = ["User-Agent": randomUserAgent]
@@ -367,28 +473,31 @@ extension URLSession {
             delegateQueue: nil
         )
     }()
-    
-    static func fetchData(allowRedirects:Bool) -> URLSession {
-        let delegate = FetchDelegate(allowRedirects:allowRedirects)
+
+    static func fetchData(
+        allowRedirects: Bool,
+        redirectAuthorization: FetchDelegate.RedirectAuthorization? = nil
+    ) -> URLSession {
+        let delegate = FetchDelegate(
+            allowRedirects: allowRedirects,
+            redirectAuthorization: redirectAuthorization
+        )
         let configuration = URLSessionConfiguration.default
         configuration.httpAdditionalHeaders = ["User-Agent": randomUserAgent]
         return URLSession(configuration: configuration, delegate: delegate, delegateQueue: nil)
     }
 
-    /// Reads a response incrementally and cancels its data task as soon as the
-    /// byte limit is crossed. This avoids the unbounded buffering performed by
-    /// `data(for:)` and the full temporary-file write performed by
-    /// `download(for:)`, while preserving this session's redirect, cookie,
-    /// timeout, cache, and delegate behavior.
     func boundedData(
         for request: URLRequest,
-        maximumResponseBytes: Int
+        maximumResponseBytes: Int,
+        allowRedirects: Bool? = nil
     ) async throws -> (Data, URLResponse) {
         if let fetchDelegate = delegate as? FetchDelegate {
             return try await fetchDelegate.boundedData(
                 in: self,
                 for: request,
-                maximumResponseBytes: maximumResponseBytes
+                maximumResponseBytes: maximumResponseBytes,
+                allowRedirects: allowRedirects
             )
         }
 

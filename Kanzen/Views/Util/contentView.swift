@@ -1,11 +1,24 @@
+//
+//  contentView.swift
+//  Kanzen
+//
+//  Created by Dawud Osman on 27/05/2025.
+//
+
 import SwiftUI
 import Foundation
-import Kingfisher
 #if canImport(UIKit)
 import UIKit
 #endif
 
 #if !os(tvOS)
+
+enum LegacyDetailsResolution {
+    case pending
+    case resolved
+    case failed
+}
+
 struct contentView: View {
     @State var parentModule: ModuleDataContainer?
     @State  var title: String
@@ -13,6 +26,11 @@ struct contentView: View {
     @State  var params: String
     @State var expandedDescription : Bool = false
     @State private var contentData: [String:Any]?
+
+    @State private var detailsResolution: LegacyDetailsResolution = .pending
+    @State private var didRequestContentData: Bool = false
+
+    @State private var detailsFailedAt: Date?
     @State private var contentChapters: [Chapters]?
     @EnvironmentObject var kanzen: KanzenEngine
     @EnvironmentObject var settings: Settings
@@ -21,6 +39,7 @@ struct contentView: View {
     @ObservedObject private var progressManager = MangaReadingProgressManager.shared
     @ObservedObject private var downloadManager = ReaderDownloadManager.shared
     @ObservedObject private var theme = EclipseTheme.shared
+    @ObservedObject private var contentFilter = ReaderContentFilter.shared
     @State private var showAddToCollection: Bool = false
     @State private var shareItem: ReaderDetailShareItem?
     @State private var width: CGFloat = 150
@@ -35,6 +54,8 @@ struct contentView: View {
     @State private var headerAmbientColor: Color = .black
     @AppStorage(ReaderDetailElement.orderStorageKey) private var readerDetailElementOrder = ReaderDetailElement.defaultOrderRawValue
     @AppStorage(ReaderDetailElement.hiddenStorageKey) private var readerDetailHiddenElements = ""
+
+    private static let detailsRetryCooldown: TimeInterval = 3
 
     private var designMetrics: ExperimentalMediaDesignMetrics { .current }
 
@@ -56,14 +77,10 @@ struct contentView: View {
         return theme.scopedAtmosphereColor(dominant: base, isReaderMode: true)
     }
 
-    /// Banner blend color from the cover's extracted dominant (falling back to
-    /// the backdrop tone for a dark/absent cover) - same behavior as a media hero.
     private var readerHeroBlendColor: Color {
         theme.heroBlendColor(dominant: headerAmbientColor, isReaderMode: true)
     }
 
-    /// Cover dominant for the scroll-attached bleed; nil for a near-black cover
-    /// so the app gradient stays clean.
     private var readerBleedColor: Color? {
         EclipseTheme.usableDominant(headerAmbientColor)
     }
@@ -86,7 +103,6 @@ struct contentView: View {
         }
     }
 
-    /// Stable numeric ID derived from module + content params for progress & library.
     private var stableId: Int {
         guard let module = parentModule else { return 0 }
         let combined = "\(module.id.uuidString):\(params)"
@@ -102,7 +118,15 @@ struct contentView: View {
             coverURL: imageURL,
             isNovel: parentModule?.moduleData.novel == true,
             sourceName: parentModule?.moduleData.sourceName,
-            latestChapterNumbers: currentChapterNumbers
+            latestChapterNumbers: currentChapterNumbers,
+            contentRating: derivedContentRating
+        )
+    }
+
+    private var derivedContentRating: Int? {
+        contentFilter.derivedLegacyRating(
+            tags: contentData?["tags"] as? [String],
+            description: contentData?["description"] as? String
         )
     }
 
@@ -132,9 +156,99 @@ struct contentView: View {
             .filter { ReaderDetailElement.isVisible($0, hiddenRawValue: readerDetailHiddenElements) }
             .filter(readerDetailElementHasContent)
     }
-    
-    
+
+    private var isRestrictedForActiveProfile: Bool {
+        guard contentFilter.isKidsProfileActive else { return false }
+        guard detailsResolution == .resolved else { return true }
+        return !contentFilter.allowsLegacy(
+            title: title,
+            tags: contentData?["tags"] as? [String],
+            description: contentData?["description"] as? String
+        )
+    }
+
     var body: some View {
+        Group {
+            if isRestrictedForActiveProfile {
+                if detailsResolution == .pending {
+                    resolvingView
+                } else {
+                    restrictedView
+                }
+            } else {
+                detailBody
+            }
+        }
+
+        .onAppear {
+
+            toggleFavourite = checkIfFavorited()
+            guard !didRequestContentData else {
+                retryContentDataIfStale()
+                return
+            }
+            didRequestContentData = true
+            getContentData()
+        }
+    }
+
+    private func retryContentDataIfStale() {
+        guard detailsResolution == .failed,
+              let failedAt = detailsFailedAt,
+              Date().timeIntervalSince(failedAt) >= Self.detailsRetryCooldown else { return }
+        retryContentData()
+    }
+
+    private func retryContentData() {
+        detailsFailedAt = nil
+        detailsResolution = .pending
+        loadingState = true
+        getContentData()
+    }
+
+    private var resolvingView: some View {
+        EclipseLoadingIndicator("Checking this title...")
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(readerDetailBackground.ignoresSafeArea())
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var restrictedView: some View {
+        let couldNotCheck = detailsResolution == .failed
+        let heading: LocalizedStringKey = couldNotCheck
+            ? "Couldn't check this title"
+            : "Not available on this profile"
+        let message: LocalizedStringKey = couldNotCheck
+            ? "The details needed to check this title didn't load, so it stays hidden for now."
+            : "This title is restricted for the profile you're using."
+        return VStack(spacing: 12) {
+            Image(systemName: couldNotCheck ? "exclamationmark.triangle.fill" : "lock.fill")
+                .font(.system(size: 48))
+                .foregroundColor(.secondary.opacity(0.7))
+            Text(heading)
+                .font(.headline)
+            Text(message)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+
+            if couldNotCheck {
+                Button("Try Again") {
+                    retryContentData()
+                }
+                .padding(.top, 4)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(readerDetailBackground.ignoresSafeArea())
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder
+    private var detailBody: some View {
         let experimental = ExperimentalFeatureState.isEnabledAtLaunch
         ScrollView {
             VStack(alignment: .leading, spacing: experimental ? designMetrics.sectionSpacing : 18) {
@@ -169,9 +283,9 @@ struct contentView: View {
         }
         .coordinateSpace(name: "moduleContentScroll")
         .onPreferenceChange(ScrollOffsetPreferenceKey.self) { scrollOffset = $0 }
-        .onAppear {
-            getContentData()
-            toggleFavourite = checkIfFavorited()
+
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+            selectedChapterData = nil
         }
         .fullScreenCover(item: $selectedChapterData) { chapter in
             if let contentChapters = self.contentChapters{
@@ -193,7 +307,7 @@ struct contentView: View {
                     latestChapterNumbers: currentChapterNumbers
                 )
             }
-            
+
         }
         .navigationTitle("")
         .navigationBarTitleDisplayMode(.inline)
@@ -208,17 +322,24 @@ struct contentView: View {
             ActivityView(items: item.items)
         }
     }
-    
+
     func checkIfFavorited() -> Bool {
         if let module = parentModule {
             return FavouriteManager.shared.isFavourite(moduleId: module.id, contentId: params)
         }
         return false
     }
-    
+
     func getContentData() {
+
+        let owner = ProfileManager.shared.activeProfileID
         kanzen.extractDetails(params: self.params) { result in
-            DispatchQueue.main.async { self.contentData = result }
+            DispatchQueue.main.async {
+                self.contentData = result
+
+                self.detailsResolution = result == nil ? .failed : .resolved
+                self.detailsFailedAt = result == nil ? Date() : nil
+            }
         }
         kanzen.extractChapters(params: self.params) { result in
             DispatchQueue.main.async {
@@ -266,7 +387,7 @@ struct contentView: View {
                     }
 
                     self.contentChapters = temp
-                    if !temp.isEmpty {
+                    if !temp.isEmpty, ProfileManager.shared.isStillActive(owner) {
                         let latestNumbers = chapterNumbers(from: temp) ?? []
                         libraryManager.updateSavedItem(libraryItem)
                         progressManager.updateSourceMetadata(
@@ -284,8 +405,6 @@ struct contentView: View {
             }
         }
     }
-
-    // MARK: - Header
 
     @ViewBuilder
     private var headerSection: some View {
@@ -316,15 +435,14 @@ struct contentView: View {
                     readerHeroBlendColor.opacity(0.58)
                 }
 
-                // Modern: a sharp full-bleed cover banner whose extracted color
-                // drives the gradient + bleed, exactly like a media hero. Legacy:
-                // blurred fill behind a centered cover poster.
-                KFImage(URL(string: imageURL))
-                    .placeholder { Color.black.opacity(0.18) }
-                    .onSuccess { result in
-                        headerAmbientColor = Color.ambientColor(from: result.image)
+                ReaderPinnedRemoteImage(
+                    url: URL(string: imageURL),
+                    onImage: { image in
+                        headerAmbientColor = Color.ambientColor(from: image)
                     }
-                    .resizable()
+                ) {
+                    Color.black.opacity(0.18)
+                }
                     .aspectRatio(contentMode: isIPad && experimental ? .fit : .fill)
                     .frame(width: viewportWidth, height: stretchedHeight)
                     .clipped()
@@ -332,9 +450,9 @@ struct contentView: View {
                     .overlay(Color.black.opacity(experimental ? 0.10 : 0.34))
 
                 if !experimental {
-                    KFImage(URL(string: imageURL))
-                        .placeholder { Color.clear }
-                        .resizable()
+                    ReaderPinnedRemoteImage(url: URL(string: imageURL)) {
+                        Color.clear
+                    }
                         .scaledToFit()
                         .frame(width: posterWidth, height: posterHeight, alignment: .center)
                         .frame(width: viewportWidth, alignment: .center)
@@ -436,8 +554,6 @@ struct contentView: View {
         return contentChapters[index].chapters
     }
 
-    // MARK: - Description
-
     @ViewBuilder
     private func descriptionSection(_ text: String) -> some View {
         let cleaned = text
@@ -494,8 +610,6 @@ struct contentView: View {
             }
         }
     }
-
-    // MARK: - Tags
 
     @ViewBuilder
     private func tagsSection(_ tags: [String]) -> some View {
@@ -575,8 +689,6 @@ struct contentView: View {
         }
     }
 
-    // MARK: - Chapters
-
     @ViewBuilder
     func chaptersView() -> some View {
         if let chaptersData = self.contentChapters, !chaptersData.isEmpty {
@@ -617,6 +729,7 @@ struct contentView: View {
                                 sourceName: parentModule?.moduleData.sourceName,
                                 format: parentModule?.moduleData.novel == true ? "NOVEL" : "MANGA",
                                 chapters: selected.chapters,
+                                contentRating: derivedContentRating,
                                 kanzen: kanzen
                             )
                         } label: {
@@ -837,6 +950,7 @@ struct contentView: View {
                         sourceName: parentModule?.moduleData.sourceName,
                         format: parentModule?.moduleData.novel == true ? "NOVEL" : "MANGA",
                         chapter: chapter,
+                        contentRating: derivedContentRating,
                         kanzen: kanzen
                     )
                 } label: {
@@ -866,8 +980,6 @@ struct contentView: View {
             route: contentRoute
         )
     }
-
-    // MARK: - Read / Continue Button
 
     @ViewBuilder
     private func readButton(chapters: [Chapter]) -> some View {
@@ -993,16 +1105,17 @@ struct MangaModuleContentLoaderView: View {
                 EclipseLoadingIndicator("Loading source...")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .task(id: "\(module.id.uuidString):\(contentParams)") {
-                        loadModule()
+                        await loadModule()
                     }
             }
         }
     }
 
-    private func loadModule() {
+    @MainActor
+    private func loadModule() async {
         do {
             let content = try ModuleManager.shared.getModuleScript(module: module)
-            try kanzen.loadScript(content, isNovel: isNovel)
+            try await kanzen.loadScript(content, module: module)
             moduleLoaded = true
         } catch {
             ReaderLogger.shared.log("Error loading module content: \(error.localizedDescription)", type: "Error")

@@ -15,11 +15,6 @@ import CommonCrypto
 import SwiftSoup
 #endif
 
-// MARK: - Public runtime surface
-
-/// The only plugin entry points Eclipse's SkyStream runtime can invoke.
-/// `getHome` is intentionally absent: SkyStream catalog/home integration is
-/// outside Eclipse's supported source contract.
 public enum SkyStreamABIOperation: String, Sendable, Hashable, CaseIterable {
     case search
     case load
@@ -158,14 +153,8 @@ public struct SkyStreamRuntimeStorageSnapshot: Sendable, Hashable {
     }
 }
 
-/// A bounded, package-scoped store. Every sub-provider of one package shares
-/// this object, matching SkyStream's namespace semantics. Callers may snapshot
-/// it after an operation and persist through their existing state transaction.
 public final class SkyStreamRuntimeDataStore: @unchecked Sendable {
-    /// Per-ABI working copy. Untrusted code never mutates the shared package store directly:
-    /// successful invocations merge only the keys they changed, while failures/cancellation
-    /// simply discard this object. The key-level compare-and-swap in `commit` lets sibling
-    /// providers run concurrently without one overwriting a newer accepted write.
+
     fileprivate final class Transaction {
         private let owner: SkyStreamRuntimeDataStore
         fileprivate let baseline: SkyStreamRuntimeStorageSnapshot
@@ -385,21 +374,17 @@ public final class SkyStreamRuntimeDataStore: @unchecked Sendable {
 public struct SkyStreamRuntimeConfiguration: @unchecked Sendable {
     public var manifest: SkyStreamPluginManifest
     public var providerID: String?
-    /// Whether `providerID` is exposed as `manifest.providerId`. Static/dynamic providers with
-    /// their own baseUrl use the base URL path in the documented ABI and omit providerId.
+
     public var exposesProviderID: Bool
     public var baseURL: String
     public var scriptURL: URL
     public var expectedScriptSHA256: String
     public var settingsFingerprint: String
-    /// Ephemeral manager-issued execution authority. It changes only at explicit package
-    /// revocation boundaries (code/domain/trust/reset/provider-bootstrap publication), not when
-    /// ordinary shared runtime storage evolves.
+
     public var authorityRevision: UUID
     public var dataStore: SkyStreamRuntimeDataStore
     public var limits: SkyStreamRuntimeLimits
-    /// Validation runtimes keep the manifest identity visible to JavaScript while using a unique
-    /// internal namespace for runtime pooling, HTTP sessions, cookies, and package limiters.
+
     fileprivate var validationNamespace: String?
 
     public init(
@@ -489,21 +474,15 @@ public struct SkyStreamStagedValidationResult: Sendable, Hashable {
     }
 }
 
-// MARK: - Bounded concurrency and LRU context pool
-
 private enum SkyStreamHardWatchdogError: Error {
     case expired
 }
 
-/// Tracks the physical lifetime of an operation independently from the caller-facing
-/// continuation. Cancellation is allowed to return promptly, but its ABI permit stays reserved
-/// until JavaScriptCore actually unwinds or the hard deadline classifies the runtime as poisoned.
 private final class SkyStreamOperationLiveness: @unchecked Sendable {
     private let lock = NSLock()
     private var physicallyFinished = false
     private var classifiedUnresponsive = false
 
-    /// Returns true exactly once when physical completion owns resource release.
     func finishPhysically() -> Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -512,7 +491,6 @@ private final class SkyStreamOperationLiveness: @unchecked Sendable {
         return !classifiedUnresponsive
     }
 
-    /// Returns true exactly once when the hard deadline owns quarantine and resource release.
     func classifyUnresponsive() -> Bool {
         lock.lock()
         defer { lock.unlock() }
@@ -528,8 +506,7 @@ private struct SkyStreamLifecycleSnapshot: Sendable {
 }
 
 #if os(iOS) && !targetEnvironment(macCatalyst)
-/// Notification generation detects an active -> background -> active cycle even when both
-/// endpoint application-state reads happen to observe `active`.
+
 private final class SkyStreamLifecycleGeneration: @unchecked Sendable {
     static let shared = SkyStreamLifecycleGeneration()
 
@@ -573,8 +550,6 @@ private final class SkyStreamLifecycleGeneration: @unchecked Sendable {
 }
 #endif
 
-/// A checked continuation that can be completed safely by the runtime task, cancellation, or an
-/// off-queue watchdog. Late JavaScript completion is ignored instead of double-resuming a caller.
 private final class SkyStreamOneShot<Value>: @unchecked Sendable {
     private let lock = NSLock()
     private var continuation: CheckedContinuation<Value, Error>?
@@ -763,27 +738,20 @@ public actor SkyStreamRuntimePool {
 
     private var entries: [String: Entry] = [:]
     private var packageStores: [String: SkyStreamRuntimeDataStore] = [:]
-    // Match the UI's bounded three-provider fanout. Holding only two permits across an entire
-    // async HTTP-backed ABI call serialized one otherwise independent provider into a second
-    // wave and made SkyStream visibly slower than Services/Stremio.
+
     private let abiLimiter = SkyStreamPermitLimiter(limit: 3)
-    /// Admit at most one ABI call per logical source before it can reserve a scarce global
-    /// JavaScript slot. Without this layer, three calls queued behind one wedged provider could
-    /// consume every global permit and starve unrelated healthy sources.
+
     private var sourceABIAdmissionLimiters: [String: SkyStreamPermitLimiter] = [:]
     private var sourceABIAdmissionPackages: [String: String] = [:]
     private let globalHTTPLimiter = SkyStreamPermitLimiter(limit: 12)
     private var packageHTTPLimiters: [String: SkyStreamPermitLimiter] = [:]
-    /// Installed invocations capture this token before entering the global ABI queue. Any package
-    /// invalidation rotates it, so a caller that already owns a stale configuration cannot resume
-    /// after a reset/update and recreate the old package store.
+
     private var packageExecutionEpochs: [String: UUID] = [:]
     private var pendingInstalledABIRequestIDs: [String: Set<UUID>] = [:]
     private var acceptedPackageAuthorityRevisions: [String: UUID] = [:]
     private var packagesBeingInvalidated: Set<String> = []
     private var quarantinedInstalledFingerprintsByPackage: [String: Set<String>] = [:]
-    /// Uncommitted candidates are quarantined by immutable code/configuration identity. A bad
-    /// update must never disable the currently installed healthy package sharing its package ID.
+
     private var quarantinedValidationFingerprints: Set<String> = []
     private var poisonedRuntimeReservationCount = 0
     private var runtimeCircuitIsOpen = false
@@ -846,10 +814,6 @@ public actor SkyStreamRuntimePool {
         )
     }
 
-    /// Runs uncommitted package code in a one-shot runtime whose storage, cookies, HTTP limiter,
-    /// and pool identity cannot alias the installed package. The validation namespace is reset on
-    /// every exit. A hard watchdog can detach the caller from uninterruptible JavaScriptCore work;
-    /// it cannot terminate the underlying JavaScriptCore thread.
     public func validateStagedPackage(
         package: SkyStreamInstalledPluginState,
         scriptURL: URL,
@@ -887,8 +851,6 @@ public actor SkyStreamRuntimePool {
             }
         }
 
-        // A caller may have queued before another poisoned runtime opened the circuit. Re-check
-        // after capacity is actually reserved and only then construct the JavaScript runtime.
         try requireValidationExecutionAllowed(fingerprint: validationFingerprint)
         let namespace = "validation.\(UUID().uuidString.lowercased())"
         var configuration = SkyStreamRuntimeConfiguration(
@@ -988,8 +950,6 @@ public actor SkyStreamRuntimePool {
         )
     }
 
-    /// Isolated discovery for already-installed code. Callers explicitly supply the bounded
-    /// non-secret preference view; runtime storage is always empty and cookies use a throwaway jar.
     public func getProvidersForValidation(
         using originalConfiguration: SkyStreamRuntimeConfiguration,
         safePreferences: [String: SkyStreamJSONValue]
@@ -1066,10 +1026,6 @@ public actor SkyStreamRuntimePool {
         )
     }
 
-    /// Reconciles dynamic providers for code that is already durably accepted. The JavaScript
-    /// context and data store remain one-shot clones, while HTTP intentionally uses the real
-    /// package namespace so an authenticated cookie jar can participate without being copied into
-    /// uncommitted candidate validation.
     public func getProvidersForCommittedRefresh(
         using configuration: SkyStreamRuntimeConfiguration
     ) async throws -> [SkyStreamPluginProvider] {
@@ -1181,9 +1137,6 @@ public actor SkyStreamRuntimePool {
         )
     }
 
-    /// Evaluates a staged entry script after verifying its stored hash. No ABI
-    /// function (including dynamic `getProviders`) is called, so install-time
-    /// smoke evaluation cannot unexpectedly perform plugin network traffic.
     @discardableResult
     public func smokeTest(
         package: SkyStreamInstalledPluginState,
@@ -1217,8 +1170,7 @@ public actor SkyStreamRuntimePool {
     ) {
         packagesBeingInvalidated.insert(packageName)
         defer { packagesBeingInvalidated.remove(packageName) }
-        // Rotate first. Even an acquired permit whose continuation has already been resumed must
-        // fail its post-acquisition epoch check before canonicalizing stale state.
+
         packageExecutionEpochs[packageName] = UUID()
         revokeSourceAdmissions(packageName: packageName)
         let pendingRequestIDs = pendingInstalledABIRequestIDs.removeValue(
@@ -1245,9 +1197,6 @@ public actor SkyStreamRuntimePool {
         }
     }
 
-    /// A deliberate user reset may retry the exact installed code after clearing its package
-    /// state. This does not restore capacity reserved by a physically hung JavaScriptCore call,
-    /// and it never reopens the process-wide poison circuit.
     public func clearInstalledQuarantineForUserReset(packageName: String) {
         quarantinedInstalledFingerprintsByPackage.removeValue(forKey: packageName)
     }
@@ -1312,9 +1261,7 @@ public actor SkyStreamRuntimePool {
         }
         removePendingInstalledABIRequest(permitID, packageName: packageName)
         globalPermitAcquired = true
-        // A queued caller must observe a circuit/quarantine opened while it waited. Creating or
-        // selecting the pooled runtime only after this check also avoids adding more contexts when
-        // the reserved capacity has already been revoked.
+
         try requireRuntimeExecutionAllowed(
             packageName: packageName,
             fingerprint: installedFingerprint,
@@ -1417,8 +1364,7 @@ public actor SkyStreamRuntimePool {
                                    current.generation == lifecycle.generation {
                                     break
                                 }
-                                // Background/suspension wall time is not JavaScript execution
-                                // time. Grant a fresh complete deadline after foreground resumes.
+
                                 lifecycle = try await Self.waitForActiveLifecycle()
                             }
                         }
@@ -1426,29 +1372,22 @@ public actor SkyStreamRuntimePool {
                         return
                     }
                     guard liveness.classifyUnresponsive() else { return }
-                    // Quarantine/count precedes capacity release. A waiter awakened by that
-                    // classification must therefore observe the circuit before it can run.
+
                     await onUnresponsive()
-                    // A classified synchronous JavaScript execution may never unwind. Keep its
-                    // ABI reservation consumed for the process lifetime so live + poisoned work
-                    // can never exceed the three-slot execution budget.
+
                     _ = completion.resolve(.failure(SkyStreamHardWatchdogError.expired))
                     operationBox.cancel()
                 }
                 watchdogBox.install(watchdogTask)
             }
         } onCancel: {
-            // Cancellation controls only the caller-facing continuation. The independent
-            // liveness watchdog and ABI reservation survive until physical completion/deadline.
+
             if completion.resolve(.failure(SkyStreamRuntimeError.cancelled)) {
                 operationBox.cancel()
             }
         }
     }
 
-    /// Queue wait is protected by the predecessor's own watchdog and must not count against this
-    /// call. Once the invocation reaches its provider queue, first-context preparation and the ABI
-    /// operation receive independent foreground-only budgets.
     private static func waitForPhaseAwareHardDeadline(
         phaseState: SkyStreamWatchdogPhaseState,
         preparationSeconds: TimeInterval,
@@ -1544,8 +1483,7 @@ public actor SkyStreamRuntimePool {
         if let accepted = acceptedPackageAuthorityRevisions[packageName] {
             return accepted == proposed
         }
-        // Direct RuntimePool tests and the first authoritative launch call can establish the
-        // initial lease. Every later manager revocation pins a replacement before publication.
+
         acceptedPackageAuthorityRevisions[packageName] = proposed
         return true
     }
@@ -1619,8 +1557,7 @@ public actor SkyStreamRuntimePool {
     ) {
         quarantinedValidationFingerprints.insert(fingerprint)
         recordPoisonedRuntime()
-        // Validation uses a throwaway HTTP/store namespace and never owns live package entries.
-        // Its caller/defer resets that namespace; do not evict the installed healthy package.
+
         runtime.invalidate(reason: .runtimeQuarantined)
     }
 
@@ -1797,8 +1734,6 @@ public actor SkyStreamRuntimePool {
     }
 }
 
-// MARK: - Serialized provider runtime
-
 private final class SkyStreamProviderRuntime: @unchecked Sendable {
     private static let maximumOutstandingChildTasks = 24
     private static let maximumOutstandingTimers = 256
@@ -1850,24 +1785,18 @@ private final class SkyStreamProviderRuntime: @unchecked Sendable {
     )
     private let busyLock = NSLock()
     private var busyValue = false
-    /// Cancellation handlers run off the provider queue so intent remains visible even while
-    /// synchronous JavaScriptCore evaluation is blocking that queue.
+
     private let cancellationIntentLock = NSLock()
     private var trackedInvocationIDs: Set<UUID> = []
     private var cancellationIntentIDs: Set<UUID> = []
 
     private var context: JSContext?
-    /// Owns only the documents parsed by `context`. Keeping this beside the
-    /// JavaScript context makes cache lifetime and cancellation semantics
-    /// explicit: replacing a context also invalidates every native DOM handle
-    /// that untrusted code from that context could still know about.
+
     private var htmlBridge: SkyStreamHTMLBridge?
     private var generation: UInt64 = 0
     private var queued: [Invocation] = []
     private var active: ActiveInvocation?
-    /// A native completion can be called re-entrantly while `JSValue.call` is still executing.
-    /// Buffer it until the synchronous JavaScript frame actually unwinds so callback-then-spin
-    /// code remains covered by the hard watchdog and keeps its global ABI reservation.
+
     private var synchronousInvokeID: UUID?
     private var bufferedJavaScriptCompletion: BufferedJavaScriptCompletion?
     private var nextTimerID = 1
@@ -2023,10 +1952,6 @@ private final class SkyStreamProviderRuntime: @unchecked Sendable {
             ])
             synchronousInvokeID = nil
 
-            // Cancellation can be marked while synchronous JavaScriptCore work owns this queue.
-            // Consume it immediately after the call even if JavaScript synchronously completed
-            // first; the context may have observed partial cancelled-call mutations and is not
-            // eligible for reuse.
             if consumeCancellationIntent(invocation.id) {
                 bufferedJavaScriptCompletion = nil
                 if active?.invocation.id == invocation.id {
@@ -2096,9 +2021,6 @@ private final class SkyStreamProviderRuntime: @unchecked Sendable {
         let manifestObject = try manifestJSONObject()
         created.setObject(manifestObject, forKeyedSubscript: "manifest" as NSString)
 
-        // The documented ABI has no dynamic-code-loading primitive. Disable the
-        // ambient constructors before package evaluation so a plugin cannot fetch
-        // and execute a second, unhashed program after plugin.js was verified.
         _ = created.evaluateScript(Self.runtimeCodeLockdown)
         guard !capturedException, created.exception == nil else {
             created.exception = nil
@@ -2106,9 +2028,6 @@ private final class SkyStreamProviderRuntime: @unchecked Sendable {
             throw SkyStreamRuntimeError.scriptEvaluationFailed
         }
 
-        // Integrity is checked immediately before this untrusted evaluation.
-        // Native shims are constants compiled into Eclipse and are not part of
-        // the installed-code integrity statement.
         _ = created.evaluateScript(script, withSourceURL: configuration.scriptURL)
         guard !capturedException, created.exception == nil else {
             created.exception = nil
@@ -2255,8 +2174,7 @@ private final class SkyStreamProviderRuntime: @unchecked Sendable {
         }
 
         if synchronousInvokeID == id {
-            // The documented completion is one-shot. Ignore duplicate callback attempts, keeping
-            // the first observable result exactly as a Promise continuation would.
+
             if bufferedJavaScriptCompletion == nil {
                 bufferedJavaScriptCompletion = completion
             }
@@ -2305,9 +2223,7 @@ private final class SkyStreamProviderRuntime: @unchecked Sendable {
             current.invocation.continuation.resume(throwing: error)
         }
         updateBusyFlag()
-        // Let a synchronous JavaScript call fully unwind before another invocation enters the
-        // same JSContext. This also gives the post-call cancellation check a chance to replace a
-        // dirtied context before queued work starts.
+
         queue.async { [weak self] in self?.startNextIfPossible() }
     }
 
@@ -2392,9 +2308,6 @@ private final class SkyStreamProviderRuntime: @unchecked Sendable {
         cancellationIntentLock.unlock()
     }
 
-    /// Atomically closes the interval in which an off-queue cancellation can win. A cancellation
-    /// arriving after this returns observes an already-physically-complete invocation and cannot
-    /// create a stale marker; one arriving before it forces context replacement.
     private func finalizeInvocationTracking(_ id: UUID) -> Bool {
         cancellationIntentLock.lock()
         let wasCancelled = cancellationIntentIDs.remove(id) != nil
@@ -2404,9 +2317,6 @@ private final class SkyStreamProviderRuntime: @unchecked Sendable {
     }
 }
 
-/// Converts Foundation's response-header representation into the SkyStream JavaScript ABI.
-/// In particular, `Set-Cookie` remains a list: joining it with commas corrupts the `Expires`
-/// attribute and prevents plugins from selecting an individual cookie.
 enum SkyStreamHTTPResponseHeaderProjection {
     private static let maximumHeaders = 64
     private static let maximumHeaderBytes = 8 * 1_024
@@ -2457,9 +2367,6 @@ enum SkyStreamHTTPResponseHeaderProjection {
         return result
     }
 
-    /// `HTTPURLResponse` may combine repeated Set-Cookie fields into one string. A separator
-    /// comma is recognizable because it is followed by a new cookie-name and `=`; the comma
-    /// in an RFC 1123 Expires value is followed by a date and therefore remains intact.
     private static func splitCombinedSetCookieHeader(_ value: String) -> [String] {
         guard let separator = try? NSRegularExpression(
             pattern: #",(?=\s*[!#$%&'*+\-.^_`|~0-9A-Za-z]+\s*=)"#
@@ -2485,9 +2392,6 @@ enum SkyStreamHTTPResponseHeaderProjection {
     }
 }
 
-/// URLSession owns these transport headers. Official SkyStream packages sometimes include
-/// browser-oriented values for them; dropping only those names preserves Cookie/Referer and
-/// avoids turning an otherwise valid request or playback result into a total failure.
 enum SkyStreamRuntimeHeaderCompatibility {
     private static let controlledNames: Set<String> = [
         "accept-encoding", "connection", "content-length", "host", "keep-alive",
@@ -2506,8 +2410,6 @@ enum SkyStreamRuntimeHeaderCompatibility {
         return controlledNames.contains(normalized) || normalized.hasPrefix("proxy-")
     }
 }
-
-// MARK: Native bridges
 
 private extension SkyStreamProviderRuntime {
     struct HTTPBridgeRequest {
@@ -2698,8 +2600,7 @@ private extension SkyStreamProviderRuntime {
                     if wasCancelled {
                         reject.call(withArguments: [safeError])
                     } else {
-                        // The documented bridge represents transport failure as a status-zero
-                        // response so provider fallback code can try its next endpoint.
+
                         resolve.call(withArguments: [Self.httpFailureJSON()])
                     }
                 }
@@ -2803,9 +2704,7 @@ private extension SkyStreamProviderRuntime {
                 }
                 return try Self.storageResponse(value)
             case "setStorage":
-                // Package evaluation and install smoke tests have no active ABI operation.
-                // Keep reads available for normal module initialization, but do not let
-                // top-level untrusted code leave state that a later operation would persist.
+
                 guard let transaction = active?.transaction else {
                     return "{\"ok\":false}"
                 }
@@ -2916,8 +2815,6 @@ private extension SkyStreamProviderRuntime {
         active?.resources.timers.removeValue(forKey: id)?.cancel()
     }
 }
-
-// MARK: Crypto bridge
 
 private extension SkyStreamProviderRuntime {
     func beginCryptoRequest(_ requestJSON: String, resolve: JSValue, reject: JSValue) {
@@ -3113,16 +3010,6 @@ private extension SkyStreamProviderRuntime {
     }
 }
 
-// MARK: Bounded HTML bridge
-
-/// A native DOM bridge owned by exactly one `SkyStreamProviderRuntime` context.
-///
-/// `parseHtml`/`JSDOM` callers commonly run several selectors over the same page.
-/// Parsing that page for every selector was both CPU-heavy and forced the entire
-/// HTML string through JavaScriptCore for every call. The bridge now returns an
-/// opaque, context-local handle after the first parse and keeps a small LRU of
-/// parsed trees. Raw-HTML requests remain supported for the existing `parse_html`
-/// compatibility path and are deduplicated into the same cache.
 final class SkyStreamHTMLBridge: @unchecked Sendable {
     struct Diagnostics: Equatable {
         let parseCount: Int
@@ -3175,8 +3062,6 @@ final class SkyStreamHTMLBridge: @unchecked Sendable {
         )
     }
 
-    /// Invalid handles return no data after the owning JSContext is cancelled
-    /// or replaced, even if JavaScriptCore happens to retain an old native block.
     func invalidate() {
         lock.lock()
         isInvalidated = true
@@ -3227,8 +3112,7 @@ final class SkyStreamHTMLBridge: @unchecked Sendable {
             fallthrough
 
         case nil:
-            // Legacy/raw path used by parse_html and retained so older bootstrap
-            // variants still work. It shares the same exact-HTML cache.
+
             guard let html = boundedHTML(from: request) else { return "[]" }
             let selector = String((request["selector"] as? String ?? "*").prefix(2_048))
             let attribute = (request["attr"] as? String).map { String($0.prefix(256)) }
@@ -3300,7 +3184,6 @@ final class SkyStreamHTMLBridge: @unchecked Sendable {
         return html
     }
 
-    /// Must be called with `lock` held.
     private func openDocumentLocked(html: String) -> String? {
         guard !isInvalidated else { return nil }
         if let existingHandle = handleByHTML[html],
@@ -3352,7 +3235,6 @@ final class SkyStreamHTMLBridge: @unchecked Sendable {
         return handle
     }
 
-    /// Must be called with `lock` held.
     private func touchDocumentLocked(handle: String) -> CachedDocument? {
         guard var entry = documentsByHandle[handle] else { return nil }
         accessClock &+= 1
@@ -3361,7 +3243,6 @@ final class SkyStreamHTMLBridge: @unchecked Sendable {
         return entry
     }
 
-    /// Must be called with `lock` held.
     private func removeDocumentLocked(handle: String) {
         guard let removed = documentsByHandle.removeValue(forKey: handle) else { return }
         if handleByHTML[removed.html] == handle {
@@ -3370,8 +3251,6 @@ final class SkyStreamHTMLBridge: @unchecked Sendable {
         cachedHTMLBytes = max(0, cachedHTMLBytes - removed.htmlByteCount)
     }
 
-    /// Must be called with `lock` held because SwiftSoup documents are not
-    /// promised to be safe for concurrent traversal.
     private func valuesLocked(
         for entry: CachedDocument,
         selector: String,
@@ -3391,7 +3270,6 @@ final class SkyStreamHTMLBridge: @unchecked Sendable {
 #endif
     }
 
-    /// Must be called with `lock` held.
     private func relativeValueLocked(
         for entry: CachedDocument,
         nodeSelector: String,
@@ -3425,7 +3303,6 @@ final class SkyStreamHTMLBridge: @unchecked Sendable {
 #endif
     }
 
-    /// Must be called with `lock` held.
     private func batchValuesLocked(
         for entry: CachedDocument,
         nodeSelector: String?,
@@ -3554,9 +3431,6 @@ final class SkyStreamHTMLBridge: @unchecked Sendable {
     }
 #endif
 
-    /// Deliberately small fallback for builds that have not linked SwiftSoup.
-    /// It supports tag, #id, .class, tag#id, and tag.class selectors. The
-    /// package integration should link SwiftSoup for full CSS selector parity.
     private static func fallbackValues(
         html: String,
         selector: String,
@@ -3657,8 +3531,6 @@ final class SkyStreamHTMLBridge: @unchecked Sendable {
         return output
     }
 }
-
-// MARK: JavaScript compatibility environment
 
 private extension SkyStreamProviderRuntime {
     static let runtimeCodeLockdown = #"""
@@ -4867,8 +4739,6 @@ private extension SkyStreamProviderRuntime {
     """#
 }
 
-// MARK: - Early normalization
-
 private enum SkyStreamRuntimeMapper {
     private typealias JSONObject = [String: Any]
 
@@ -5244,9 +5114,7 @@ private enum SkyStreamRuntimeMapper {
         explicit: SkyStreamDubStatus?,
         episodeName: String
     ) -> SkyStreamDubStatus? {
-        // The official model treats its constructor's default `.none` like an absent value and
-        // falls back to common episode-name markers. Preserve forward-compatible explicit values,
-        // while still handling Episode({ name: "... (Dub)" }) correctly.
+
         if let explicit, explicit != .none { return explicit }
         let markers = episodeName.lowercased().components(
             separatedBy: CharacterSet.alphanumerics.inverted
@@ -5314,9 +5182,6 @@ private enum SkyStreamRuntimeMapper {
         string(object, keys, maximum: maximum).map(htmlUnescapedDisplayValue)
     }
 
-    /// The documented models HTML-unescape display text. Keep this deliberately small and
-    /// deterministic: named XML/HTML essentials plus bounded numeric entities cover provider
-    /// titles without treating arbitrary entity names as executable or network-resolved data.
     private static func htmlUnescapedDisplayValue(_ value: String) -> String {
         guard value.contains("&") else { return value }
         let named: [String: UnicodeScalar] = [

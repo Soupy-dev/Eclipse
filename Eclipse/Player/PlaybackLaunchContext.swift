@@ -1,14 +1,115 @@
 import Foundation
 
+final class PlaybackProxySessionOwnership {
+    final class Lease {
+        private let lock = NSLock()
+        private var ownership: PlaybackProxySessionOwnership?
+
+        fileprivate init(ownership: PlaybackProxySessionOwnership) {
+            self.ownership = ownership
+        }
+
+        func release() {
+            lock.lock()
+            let ownership = ownership
+            self.ownership = nil
+            lock.unlock()
+            ownership?.releaseLease()
+        }
+
+        deinit {
+            release()
+        }
+    }
+
+    private let lock = NSLock()
+    private let proxyURLs: [URL]
+    private let invalidator: (URL) -> Void
+    private var activeLeaseCount = 0
+    private var hasEverBeenLeased = false
+    private var didInvalidate = false
+
+    convenience init(proxyURLs: [URL]) {
+        self.init(proxyURLs: proxyURLs) { proxyURL in
+            MPVHeaderProxy.shared.invalidateSession(for: proxyURL)
+        }
+    }
+
+    init(proxyURLs: [URL], invalidator: @escaping (URL) -> Void) {
+        var seen = Set<URL>()
+        self.proxyURLs = proxyURLs.filter { seen.insert($0).inserted }
+        self.invalidator = invalidator
+    }
+
+    func acquireLease() -> Lease? {
+        lock.lock()
+        guard !didInvalidate, !proxyURLs.isEmpty else {
+            lock.unlock()
+            return nil
+        }
+        activeLeaseCount += 1
+        hasEverBeenLeased = true
+        lock.unlock()
+        return Lease(ownership: self)
+    }
+
+    func invalidate() {
+        if let work = invalidationWorkIfNeeded(force: true) {
+            work.urls.forEach(work.invalidator)
+        }
+    }
+
+    var isInvalidated: Bool {
+        lock.lock()
+        let value = didInvalidate
+        lock.unlock()
+        return value
+    }
+
+    private func releaseLease() {
+        lock.lock()
+        if activeLeaseCount > 0 {
+            activeLeaseCount -= 1
+        }
+        let shouldInvalidate = hasEverBeenLeased && activeLeaseCount == 0
+        let work = invalidationWorkIfNeededWhileLocked(force: shouldInvalidate)
+        lock.unlock()
+        if let work {
+            work.urls.forEach(work.invalidator)
+        }
+    }
+
+    private func invalidationWorkIfNeeded(
+        force: Bool
+    ) -> (urls: [URL], invalidator: (URL) -> Void)? {
+        lock.lock()
+        let work = invalidationWorkIfNeededWhileLocked(force: force)
+        lock.unlock()
+        return work
+    }
+
+    private func invalidationWorkIfNeededWhileLocked(
+        force: Bool
+    ) -> (urls: [URL], invalidator: (URL) -> Void)? {
+        guard force, !didInvalidate else { return nil }
+        didInvalidate = true
+        return (proxyURLs, invalidator)
+    }
+
+    deinit {
+        invalidate()
+    }
+}
+
 enum PlaybackSourceKind: String {
     case service
     case stremio
     case skyStream
+    case nuvio
 }
 
 struct PlaybackLaunchContext {
-    /// Stable identifier shared by stream resolution, player startup, proxy activity, retries,
-    /// and Auto Mode fallback so one playback attempt can be reconstructed from the log.
+
     let traceID: String
     let traceCreatedAt: Date
     let sourceId: String
@@ -23,14 +124,15 @@ struct PlaybackLaunchContext {
     let subtitleHeadersByURL: [String: [String: String]]?
     let retryCount: Int
     let titleCandidates: [String]
-    /// The service search-result/details URL passed to `extractEpisodes`.
-    /// Service pre-staging needs this show-level URL; an individual episode URL cannot be used
-    /// to refresh the episode list.
+
     let serviceContentHref: String?
-    /// Generalized provider-owned resolution state. Legacy Services continue to populate
-    /// `serviceContentHref`; SkyStream uses this bounded, Codable reference for refresh,
-    /// downloads, and next-episode staging without persisting signed media URLs or headers.
+
     let providerContentReference: ProviderContentReference?
+
+    // Runtime-only ownership for short-lived loopback transports. Playback launch
+    // contexts are deliberately not Codable, so these capability URLs cannot be
+    // persisted with media state or provider references.
+    let ephemeralProxyOwnership: PlaybackProxySessionOwnership?
 
     init(
         traceID: String = String(UUID().uuidString.prefix(8)),
@@ -48,7 +150,8 @@ struct PlaybackLaunchContext {
         retryCount: Int,
         titleCandidates: [String] = [],
         serviceContentHref: String? = nil,
-        providerContentReference: ProviderContentReference? = nil
+        providerContentReference: ProviderContentReference? = nil,
+        ephemeralProxyOwnership: PlaybackProxySessionOwnership? = nil
     ) {
         self.traceID = traceID
         self.traceCreatedAt = traceCreatedAt
@@ -66,6 +169,7 @@ struct PlaybackLaunchContext {
         self.titleCandidates = titleCandidates
         self.serviceContentHref = serviceContentHref
         self.providerContentReference = providerContentReference
+        self.ephemeralProxyOwnership = ephemeralProxyOwnership
     }
 }
 

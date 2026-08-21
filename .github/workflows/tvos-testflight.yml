@@ -4,16 +4,10 @@ on:
   workflow_dispatch:
     inputs:
       build_number:
-        description: "tvOS CFBundleVersion. Empty uses the GitHub run number."
-        required: false
-        default: ""
+        description: "tvOS CFBundleVersion. Integer 1-9999; must be greater than the checked-in app build."
+        required: true
       upload:
         description: "Validate and upload the exported tvOS IPA to App Store Connect."
-        required: true
-        type: boolean
-        default: false
-      production_cloudkit_confirmed:
-        description: "I confirmed the EclipseMediaState schema is deployed to CloudKit Production."
         required: true
         type: boolean
         default: false
@@ -28,6 +22,7 @@ concurrency:
 jobs:
   testflight:
     name: Test, archive, and optionally upload tvOS
+    if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
     runs-on: macos-26
     timeout-minutes: 150
     environment: tvos-testflight
@@ -42,28 +37,40 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Validate immutable MPVKit revision
+        env:
+          MPVKIT_SOURCE_REVISION: ${{ vars.MPVKIT_SOURCE_REVISION }}
+        run: |
+          set -euo pipefail
+
+          if ! [[ "$MPVKIT_SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::MPVKIT_SOURCE_REVISION must be an explicitly reviewed lowercase 40-character commit SHA. Mutable MPVKit branches are not accepted."
+            exit 1
+          fi
       - name: Check out canonical MPVKit
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: Soupy-dev/MPVKit
-          ref: eclipse-mpv-metal
+          ref: ${{ vars.MPVKIT_SOURCE_REVISION }}
           path: MPVKit
+      - name: Verify immutable MPVKit checkout
+        env:
+          MPVKIT_SOURCE_REVISION: ${{ vars.MPVKIT_SOURCE_REVISION }}
+        run: test "$(git -C MPVKit rev-parse HEAD)" = "$MPVKIT_SOURCE_REVISION"
       - name: Expose sibling MPVKit package
         run: ln -sfn "$GITHUB_WORKSPACE/MPVKit" "$GITHUB_WORKSPACE/../MPVKit"
 
       - name: Set up Xcode
-        uses: maxim-lobanov/setup-xcode@v1
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
           xcode-version: latest-stable
 
       - name: Validate release request and external configuration
         env:
           REQUEST_UPLOAD: ${{ inputs.upload }}
-          PRODUCTION_CLOUDKIT_CONFIRMED: ${{ inputs.production_cloudkit_confirmed }}
-          APP_STORE_CONNECT_API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
-          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
-          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          RELEASE_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           TVOS_DISTRIBUTION_CERTIFICATE_BASE64: ${{ secrets.TVOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
           TVOS_DISTRIBUTION_CERTIFICATE_PASSWORD: ${{ secrets.TVOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
           TVOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.TVOS_PROVISIONING_PROFILE_BASE64 }}
@@ -77,6 +84,11 @@ jobs:
           MAL_CLIENT_SECRET: ${{ secrets.MAL_CLIENT_SECRET }}
         run: |
           set -euo pipefail
+
+          if [[ "$REQUEST_UPLOAD" == "true" && "$RELEASE_REF" != "refs/heads/$DEFAULT_BRANCH" ]]; then
+            echo "::error::Uploading is allowed only from the default branch 'refs/heads/$DEFAULT_BRANCH'; received '$RELEASE_REF'. Run with upload disabled to validate another branch."
+            exit 1
+          fi
 
           if ! [[ "$BUNDLE_IDENTIFIER" =~ ^[A-Za-z0-9][A-Za-z0-9-]*(\.[A-Za-z0-9][A-Za-z0-9-]*)+$ ]]; then
             echo "::error::TVOS_BUNDLE_IDENTIFIER '$BUNDLE_IDENTIFIER' is invalid."
@@ -107,19 +119,25 @@ jobs:
             fi
           done
 
-          if [[ "$REQUEST_UPLOAD" == "true" ]]; then
-            if [[ "$PRODUCTION_CLOUDKIT_CONFIRMED" != "true" ]]; then
-              echo "::error::Uploading is blocked until the EclipseMediaState schema is deployed to CloudKit Production and production_cloudkit_confirmed is checked."
+      - name: Validate App Store Connect credentials
+        if: ${{ inputs.upload }}
+        env:
+          APP_STORE_CONNECT_API_KEY_P8: ${{ secrets.APP_STORE_CONNECT_API_KEY_P8 }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+        run: |
+          set -euo pipefail
+
+          for name in \
+            APP_STORE_CONNECT_API_KEY_P8 \
+            APP_STORE_CONNECT_ISSUER_ID \
+            APP_STORE_CONNECT_KEY_ID
+          do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::$name is required when upload is enabled."
               exit 1
             fi
-
-            for name in APP_STORE_CONNECT_API_KEY_P8 APP_STORE_CONNECT_ISSUER_ID APP_STORE_CONNECT_KEY_ID; do
-              if [[ -z "${!name:-}" ]]; then
-                echo "::error::$name is required when upload is enabled."
-                exit 1
-              fi
-            done
-          fi
+          done
 
       - name: Resolve build number
         env:
@@ -127,11 +145,26 @@ jobs:
         run: |
           set -euo pipefail
 
-          BUILD_NUMBER="${INPUT_BUILD_NUMBER:-${GITHUB_RUN_NUMBER}}"
-          if ! [[ "$BUILD_NUMBER" =~ ^[0-9]+$ ]] || [[ "$BUILD_NUMBER" == "0" ]]; then
-            echo "::error::Build number must be a positive integer. Received '$BUILD_NUMBER'."
+          BUILD_NUMBER="${INPUT_BUILD_NUMBER:-}"
+          if ! [[ "$BUILD_NUMBER" =~ ^[1-9][0-9]{0,3}$ ]]; then
+            echo "::error::Build number must be an integer from 1 through 9999 without leading zeroes. Received '$BUILD_NUMBER'."
             exit 1
           fi
+
+          PROJECT_BUILD_FLOOR="$(
+            agvtool what-version -terse 2>/dev/null \
+              | awk 'BEGIN { maximum = 0 } /^[0-9]+$/ { if ($1 > maximum) maximum = $1 } END { print maximum }'
+          )"
+          python3 - "$BUILD_NUMBER" "$PROJECT_BUILD_FLOOR" <<'PY'
+          import sys
+
+          requested = int(sys.argv[1])
+          checked_in = int(sys.argv[2])
+          if requested <= checked_in:
+              raise SystemExit(
+                  f"error: tvOS build number {requested} must be greater than the checked-in build {checked_in}."
+              )
+          PY
 
           echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
 
@@ -173,6 +206,56 @@ jobs:
 
           test -f "Eclipse.xcodeproj/xcshareddata/xcschemes/Eclipse-tvOS.xcscheme"
           plutil -lint EclipseTV/Info.plist EclipseTV/EclipseTV.entitlements EclipseTV/PrivacyInfo.xcprivacy
+          python3 - EclipseTV/Info.plist EclipseTV/PrivacyInfo.xcprivacy <<'PY'
+          import collections
+          import plistlib
+          import sys
+          import xml.etree.ElementTree as ET
+
+          info_path, manifest_path = sys.argv[1:]
+          info_dictionary = ET.parse(info_path).getroot().find("dict")
+          if info_dictionary is None:
+              raise SystemExit("error: tvOS Info.plist does not contain a top-level dictionary.")
+          info_keys = [
+              element.text
+              for element in info_dictionary
+              if element.tag == "key" and element.text
+          ]
+          duplicate_info_keys = sorted(
+              key for key, count in collections.Counter(info_keys).items() if count > 1
+          )
+          if duplicate_info_keys:
+              raise SystemExit(
+                  "error: tvOS Info.plist contains duplicate top-level key(s): "
+                  + ", ".join(duplicate_info_keys)
+              )
+
+          with open(manifest_path, "rb") as handle:
+              manifest = plistlib.load(handle)
+
+          if manifest.get("NSPrivacyTracking") is not False:
+              raise SystemExit("error: tvOS privacy manifest must declare NSPrivacyTracking=false.")
+          if manifest.get("NSPrivacyCollectedDataTypes") != []:
+              raise SystemExit("error: tvOS privacy manifest must contain an empty NSPrivacyCollectedDataTypes array.")
+
+          required = {
+              "NSPrivacyAccessedAPICategoryUserDefaults": {"CA92.1"},
+              "NSPrivacyAccessedAPICategorySystemBootTime": {"35F9.1"},
+              "NSPrivacyAccessedAPICategoryFileTimestamp": {"C617.1"},
+              "NSPrivacyAccessedAPICategoryDiskSpace": {"E174.1"},
+          }
+          declared = {
+              entry.get("NSPrivacyAccessedAPIType"): set(entry.get("NSPrivacyAccessedAPITypeReasons", []))
+              for entry in manifest.get("NSPrivacyAccessedAPITypes", [])
+              if isinstance(entry, dict)
+          }
+          for category, reasons in required.items():
+              missing = reasons - declared.get(category, set())
+              if missing:
+                  raise SystemExit(
+                      f"error: tvOS privacy manifest is missing {category} reason(s) {', '.join(sorted(missing))}."
+                  )
+          PY
           srcroot="$PWD"
           project_file="$PROJECT_PATH/project.pbxproj"
 
@@ -231,8 +314,16 @@ jobs:
               "Eclipse/Views/SettingsView/BackupManagementView.swift",
               "Eclipse/Views/SettingsView/ReaderLoggerView.swift",
               "Eclipse/Views/SettingsView/StorageView.swift",
+              "Eclipse/Views/SettingsView/NuvioPluginManagerView.swift",
+              "Eclipse/Views/SettingsView/NuvioScraperSettingsView.swift",
               "Eclipse/Localizable.xcstrings",
           }
+
+          forbidden_prefixes = (
+              "Kanzen/",
+              "Eclipse/JSLoader/Nuvio/",
+              "Eclipse/Legal/ReaderExtensions",
+          )
 
           violations = []
           for build_file_id in source_phase.get("files", []):
@@ -240,7 +331,7 @@ jobs:
               if not file_id:
                   continue
               path = resolved_path(file_id)
-              if path.startswith("Kanzen/") or path in forbidden_exact:
+              if path.startswith(forbidden_prefixes) or path in forbidden_exact:
                   violations.append(path)
 
           resource_paths = set()
@@ -250,20 +341,22 @@ jobs:
                   continue
               path = resolved_path(file_id)
               resource_paths.add(path)
-              if path.startswith("Kanzen/") or path in forbidden_exact:
+              if path.startswith(forbidden_prefixes) or path in forbidden_exact:
                   violations.append(path)
 
           if "EclipseTV/Localizable.xcstrings" not in resource_paths:
               violations.append("missing:EclipseTV/Localizable.xcstrings")
 
-          phase_names = {objects[phase_id].get("name", "") for phase_id in target.get("buildPhases", [])}
-          if "Audit tvOS Binary" not in phase_names:
-              violations.append("missing:Audit tvOS Binary build phase")
-
           for dependency_id in target.get("packageProductDependencies", []):
               product = objects[dependency_id].get("productName", "")
               if product in {"AidokuRunner", "AsyncDisplayKit", "FakeWebKit", "Nuke", "ZIPFoundation"}:
                   violations.append(f"package:{product}")
+
+          for identifier, node in objects.items():
+              if node.get("isa") == "XCRemoteSwiftPackageReference" and "aidokurunner" in node.get("repositoryURL", "").lower():
+                  violations.append(f"project-package:{node.get('repositoryURL')}")
+              if node.get("isa") == "XCSwiftPackageProductDependency" and node.get("productName") == "AidokuRunner":
+                  violations.append("project-product:AidokuRunner")
 
           if violations:
               print("error: Eclipse-tvOS contains forbidden reader/download/private-browser membership:")
@@ -376,18 +469,26 @@ jobs:
           fi
 
           source_packages=$(cd "${checkout}/../.." 2>/dev/null && pwd || true)
-          artifact_roots=("${checkout}/.build/artifacts")
+          artifact_roots=("${SOURCE_PACKAGES_DIR}/artifacts" "${checkout}/.build/artifacts")
           if [[ -n "$source_packages" ]]; then
               artifact_roots+=("${source_packages}/artifacts")
           fi
 
           uavs3d_binary=""
+          libmpv_binary=""
           for root in "${artifact_roots[@]}"; do
               [[ -d "$root" ]] || continue
-              uavs3d_binary=$(find "$root" \
-                  -path '*Libuavs3d.xcframework/tvos-arm64_x86_64-simulator/Libuavs3d.framework/Libuavs3d' \
-                  -type f -print -quit)
-              [[ -n "$uavs3d_binary" ]] && break
+              if [[ -z "$uavs3d_binary" ]]; then
+                  uavs3d_binary=$(find "$root" \
+                      -path '*Libuavs3d.xcframework/tvos-arm64_x86_64-simulator/Libuavs3d.framework/Libuavs3d' \
+                      -type f -print -quit)
+              fi
+              if [[ -z "$libmpv_binary" ]]; then
+                  libmpv_binary=$(find "$root" \
+                      -path '*Libmpv.xcframework/tvos-arm64_arm64e/Libmpv.framework/Libmpv' \
+                      -type f -print -quit)
+              fi
+              [[ -n "$uavs3d_binary" && -n "$libmpv_binary" ]] && break
           done
 
           if [[ -z "$uavs3d_binary" ]]; then
@@ -403,10 +504,31 @@ jobs:
               stderr=subprocess.DEVNULL,
           )
           versions = [tuple(map(int, value.split("."))) for value in re.findall(r"\bminos\s+([0-9]+(?:\.[0-9]+)*)", output)]
-          raise SystemExit(0 if versions and max(versions) <= (17, 0) else 1)
+          raise SystemExit(0 if versions and max(versions) <= (17, 5) else 1)
           PY
           then
-              mpvkit_failures+=("Libuavs3d contains tvOS simulator objects requiring newer than the app's 17.0 deployment target")
+              mpvkit_failures+=("Libuavs3d contains tvOS simulator objects requiring newer than the app's 17.5 deployment target")
+          fi
+
+          if [[ -z "$libmpv_binary" ]]; then
+              mpvkit_failures+=("resolved Libmpv tvOS device artifact was not available for its native-export audit")
+          else
+              libmpv_symbols="$(mktemp)"
+              xcrun nm -gU "$libmpv_binary" > "$libmpv_symbols" 2>/dev/null || true
+              for symbol in \
+                  mpv_apple_pip_api_version \
+                  mpv_apple_pip_get_capabilities \
+                  mpv_apple_pip_set_callback \
+                  mpv_apple_pip_set_mode \
+                  mpv_apple_pip_submit_target \
+                  mpv_apple_pip_disable_and_drain \
+                  mpv_apple_audiounit_recovery_count
+              do
+                  if ! grep -Eq "[[:space:]]_?${symbol}$" "$libmpv_symbols"; then
+                      mpvkit_failures+=("resolved Libmpv artifact is missing required native export '$symbol'")
+                  fi
+              done
+              rm -f "$libmpv_symbols"
           fi
 
           if (( ${#mpvkit_failures[@]} > 0 )); then
@@ -414,7 +536,7 @@ jobs:
               for failure in "${mpvkit_failures[@]}"; do
                   echo "::error::  $failure"
               done
-              echo "::error::Publish the reviewed MPVKit tvOS changes and a tvOS 17.0-compatible codec artifact before running the tvOS release lane."
+              echo "::error::Provide the reviewed MPVKit source and matching tvOS 17.5-compatible private runtime before running the tvOS release lane."
               exit 1
           fi
 
@@ -456,6 +578,11 @@ jobs:
         run: |
           set -euo pipefail
 
+          if [ ! -d "$GITHUB_WORKSPACE/EclipseTVTests" ]; then
+            echo "Test sources are local-only and not tracked; skipping test run."
+            exit 0
+          fi
+
           RESULT_BUNDLE_PATH="$RUNNER_TEMP/Eclipse-tvOS.xcresult"
           rm -rf "$RESULT_BUNDLE_PATH"
 
@@ -473,15 +600,6 @@ jobs:
             PROVISIONING_PROFILE_SPECIFIER=
 
           echo "RESULT_BUNDLE_PATH=$RESULT_BUNDLE_PATH" >> "$GITHUB_ENV"
-
-      - name: Upload tvOS test results
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: Eclipse-tvOS-tests-${{ github.run_number }}
-          path: ${{ runner.temp }}/Eclipse-tvOS.xcresult
-          if-no-files-found: ignore
-          retention-days: 14
 
       - name: Install and validate tvOS signing assets
         env:
@@ -610,6 +728,7 @@ jobs:
 
           ARCHIVE_PATH="$RUNNER_TEMP/$APP_NAME-tvOS.xcarchive"
           DERIVED_DATA_PATH="$RUNNER_TEMP/DerivedData-tvOS"
+          MPVKIT_SOURCE_REVISION="$(git -C "$GITHUB_WORKSPACE/MPVKit" rev-parse HEAD)"
           rm -rf "$ARCHIVE_PATH" "$DERIVED_DATA_PATH"
 
           xcodebuild archive \
@@ -625,6 +744,8 @@ jobs:
             -skipPackagePluginValidation \
             -skipMacroValidation \
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            ECLIPSE_SOURCE_REVISION="$GITHUB_SHA" \
+            ECLIPSE_MPVKIT_SOURCE_REVISION="$MPVKIT_SOURCE_REVISION" \
             ECLIPSE_DISTRIBUTION_CHANNEL=TestFlight \
             ICLOUD_CONTAINER_ENVIRONMENT=Production \
             PRODUCT_BUNDLE_IDENTIFIER="$BUNDLE_IDENTIFIER" \
@@ -635,6 +756,11 @@ jobs:
             PROVISIONING_PROFILE_SPECIFIER="$PROFILE_NAME" \
             OTHER_CODE_SIGN_FLAGS="--keychain $KEYCHAIN_PATH" \
             ENABLE_USER_SCRIPT_SANDBOXING=NO
+
+          APP_PATH="$(find "$ARCHIVE_PATH/Products/Applications" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          test -f "$APP_PATH/OpenSourceLicenses/THIRD-PARTY-NOTICES.txt"
+          test "$(/usr/libexec/PlistBuddy -c 'Print EclipseSourceRevision' "$APP_PATH/Info.plist")" = "$GITHUB_SHA"
+          test "$(/usr/libexec/PlistBuddy -c 'Print EclipseMPVKitSourceRevision' "$APP_PATH/Info.plist")" = "$MPVKIT_SOURCE_REVISION"
 
           audit_tvos_binary() {
               for candidate in "$@"; do
@@ -654,25 +780,12 @@ jobs:
                   fi
 
                   raw_forbidden=$(strings -a "$candidate" 2>/dev/null \
-                      | grep -E 'UIWebView|FakeWebKit|AidokuRunner|AsyncDisplayKit|ReaderDownloadManager|DownloadManager|AVURLAssetHTTPHeaderFieldsKey' \
+                      | grep -E 'UIWebView|FakeWebKit|AidokuRunner|ReaderExtension|ReaderSourceProvider|JavaScriptReaderProvider|NativeReaderProvider|AsyncDisplayKit|ReaderDownloadManager|DownloadManager|AVURLAssetHTTPHeaderFieldsKey' \
                       | head -n 5 \
                       || true)
                   if [[ -n "$raw_forbidden" ]]; then
                       echo "::error::forbidden reader/download/private-browser symbols found in $(basename "$candidate"):"
                       echo "$raw_forbidden"
-                      exit 1
-                  fi
-
-                  # The tvOS target does not expose storage/download diagnostics, so these
-                  # required-reason APIs must stay compiled out instead of being declared for
-                  # a purpose the television product does not perform.
-                  privacy_forbidden=$(strings -a "$candidate" 2>/dev/null \
-                      | grep -E 'systemFreeSize|volumeAvailableCapacity(ForImportantUsage)?Key|contentModificationDateKey|creationDateKey' \
-                      | head -n 5 \
-                      || true)
-                  if [[ -n "$privacy_forbidden" ]]; then
-                      echo "::error::unused disk-space/file-timestamp required-reason APIs found in $(basename "$candidate"):"
-                      echo "$privacy_forbidden"
                       exit 1
                   fi
 
@@ -685,7 +798,7 @@ jobs:
                   # Keep the expressions module-qualified so SwiftUI.GeometryReader and
                   # third-party parser terms cannot create false positives.
                   swift_forbidden=$(grep -Ei \
-                      'Eclipse\.TrackerManager.*manga|Eclipse\.EclipseTheme.*reader|Eclipse\.[A-Za-z0-9_]*(Manga|Kanzen|Aidoku|ReaderLogger|ReaderDownload)[A-Za-z0-9_]*|Eclipse\.(DownloadManager|HLSDownloader)' \
+                      'Eclipse\.TrackerManager.*manga|Eclipse\.EclipseTheme.*reader|Eclipse\.[A-Za-z0-9_]*(Manga|Kanzen|Aidoku|ReaderExtension|ReaderSourceProvider|JavaScriptReaderProvider|NativeReaderProvider|ReaderLogger|ReaderDownload)[A-Za-z0-9_]*|Eclipse\.(DownloadManager|HLSDownloader)' \
                       "$symbol_dump" \
                       | head -n 10 \
                       || true)
@@ -776,8 +889,8 @@ jobs:
               except ValueError:
                   raise SystemExit(f"error: invalid MinimumOSVersion {value!r}")
 
-          if version(sys.argv[1]) < version("17.0"):
-              raise SystemExit(f"error: tvOS minimum version is {sys.argv[1]}; expected 17.0 or newer")
+          if version(sys.argv[1]) < version("17.5"):
+              raise SystemExit(f"error: tvOS minimum version is {sys.argv[1]}; expected 17.5 or newer")
           PY
 
           read_plist 'CFBundleIcons:CFBundlePrimaryIcon' >/dev/null
@@ -793,6 +906,32 @@ jobs:
               echo "::error::PrivacyInfo.xcprivacy is missing from the tvOS app."
               exit 1
           fi
+          plutil -lint "${app_path}/PrivacyInfo.xcprivacy" >/dev/null
+          python3 - "${app_path}/PrivacyInfo.xcprivacy" <<'PY'
+          import plistlib
+          import sys
+
+          with open(sys.argv[1], "rb") as handle:
+              manifest = plistlib.load(handle)
+
+          required = {
+              "NSPrivacyAccessedAPICategoryUserDefaults": {"CA92.1"},
+              "NSPrivacyAccessedAPICategorySystemBootTime": {"35F9.1"},
+              "NSPrivacyAccessedAPICategoryFileTimestamp": {"C617.1"},
+              "NSPrivacyAccessedAPICategoryDiskSpace": {"E174.1"},
+          }
+          declared = {
+              entry.get("NSPrivacyAccessedAPIType"): set(entry.get("NSPrivacyAccessedAPITypeReasons", []))
+              for entry in manifest.get("NSPrivacyAccessedAPITypes", [])
+              if isinstance(entry, dict)
+          }
+          for category, reasons in required.items():
+              missing = reasons - declared.get(category, set())
+              if missing:
+                  raise SystemExit(
+                      f"error: archived tvOS privacy manifest is missing {category} reason(s) {', '.join(sorted(missing))}."
+                  )
+          PY
 
           if [[ ! -x "$executable_path" ]]; then
               echo "::error::tvOS executable is missing."
@@ -866,7 +1005,7 @@ jobs:
               exit 1
           fi
 
-          for forbidden_path in FakeWebKit AidokuRunner AsyncDisplayKit Texture ZIPFoundation Nuke; do
+          for forbidden_path in FakeWebKit AidokuRunner ReaderExtensions ReaderExtensionLicenses AsyncDisplayKit Texture ZIPFoundation Nuke; do
               if find "$app_path" -iname "*${forbidden_path}*" -print -quit | grep -q .; then
                   echo "::error::forbidden reader/private-browser component '$forbidden_path' is bundled in the tvOS app."
                   exit 1

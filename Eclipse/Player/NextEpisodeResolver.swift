@@ -1,9 +1,5 @@
 import Foundation
 
-/// Renderer-independent identity needed to verify the episode after the one currently playing.
-/// Local season/episode numbers are deliberately kept separate from the optional TMDB mapping:
-/// anime providers search with the local AniList season structure, while skip/scrobble APIs may
-/// use the mapped TMDB coordinates from `playbackContext`.
 struct NextEpisodeSeed: Equatable {
     let showID: Int
     let currentSeasonNumber: Int
@@ -70,8 +66,6 @@ struct NextEpisodeSeed: Equatable {
     }
 }
 
-/// A verified destination suitable for both the player prompt and the TV root's next-source sheet.
-/// Cross-season anime transitions always carry a newly built context for the destination season.
 struct ResolvedNextEpisodeTarget: Identifiable {
     let showID: Int
     let episode: TMDBEpisode
@@ -83,8 +77,7 @@ struct ResolvedNextEpisodeTarget: Identifiable {
     let imdbID: String?
     let isAnime: Bool
     let isAnimation: Bool
-    /// Release/first-air year inherited from the show so search providers can reject same-title
-    /// collisions after a player-driven episode transition. Optional for older launch paths.
+
     var mediaYear: Int? = nil
 
     var id: String {
@@ -100,9 +93,6 @@ struct ResolvedNextEpisodeTarget: Identifiable {
     }
 }
 
-/// `noAvailableEpisode` is a verified absence (including a known future episode).
-/// `unavailable` means metadata could not be verified. Both intentionally suppress the prompt;
-/// neither is allowed to degrade to an unverified `episode + 1` guess.
 enum NextEpisodeResolution {
     case available(ResolvedNextEpisodeTarget)
     case noAvailableEpisode
@@ -114,20 +104,21 @@ enum NextEpisodeResolution {
     }
 }
 
-/// Small injectable metadata surface so sequence and failure behavior can be unit-tested without
-/// exercising the network or depending on a currently presented media-detail screen.
 protocol NextEpisodeMetadataProviding {
     func tvShow(showID: Int) async throws -> TMDBTVShowWithSeasons
     func season(showID: Int, seasonNumber: Int) async throws -> TMDBSeasonDetail
     func animeDetails(
         title: String,
         showID: Int,
-        posterURL: String?
+        posterURL: String?,
+        seedAniListID: Int?,
+        seedMALID: Int?
     ) async throws -> AniListAnimeWithSeasons
     func specialEntries(
         showID: Int,
         posterURL: String?,
-        baseAniListIDs: [Int]
+        baseAniListIDs: [Int],
+        requiredSpecialAniListIDs: [Int]
     ) async throws -> [AniListSpecialSearchEntry]
 }
 
@@ -146,34 +137,48 @@ struct LiveNextEpisodeMetadataProvider: NextEpisodeMetadataProviding {
     func animeDetails(
         title: String,
         showID: Int,
-        posterURL: String?
+        posterURL: String?,
+        seedAniListID: Int?,
+        seedMALID: Int?
     ) async throws -> AniListAnimeWithSeasons {
         try await AnimeMetadataService.shared.fetchAnimeDetailsWithEpisodes(
             title: title,
             tmdbShowId: showID,
             tmdbService: .shared,
             tmdbShowPoster: posterURL,
-            token: nil
+            token: nil,
+            seedAniListId: seedAniListID,
+            seedMALId: seedMALID
         )
     }
 
     func specialEntries(
         showID: Int,
         posterURL: String?,
-        baseAniListIDs: [Int]
+        baseAniListIDs: [Int],
+        requiredSpecialAniListIDs: [Int]
     ) async throws -> [AniListSpecialSearchEntry] {
-        await AnimeMetadataService.shared.fetchSpecialSearchEntries(
+        if let exactMALProviderID = (requiredSpecialAniListIDs + baseAniListIDs)
+            .first(where: { $0 < 0 }) {
+            guard let rootMALID = RemoteMediaNumericBoundary.positiveMagnitude(
+                exactMALProviderID
+            ) else { return [] }
+            return try await AniListService.shared.fetchRequiredMALSpecialSearchEntries(
+                tmdbShowId: showID,
+                rootMalId: rootMALID,
+                fallbackPosterURL: posterURL
+            )
+        }
+        return await AnimeMetadataService.shared.fetchSpecialSearchEntries(
             tmdbShowId: showID,
             fallbackPosterURL: posterURL,
             baseAniListIds: baseAniListIDs,
+            requiredSpecialAniListIds: requiredSpecialAniListIDs,
             tmdbService: .shared
         )
     }
 }
 
-/// Verifies the destination against TMDB/AniList metadata before the TV player exposes a prompt.
-/// The resolver is deliberately stateless; the playback controller owns task cancellation and
-/// caches the single result for its active session.
 struct NextEpisodeResolver {
     private let metadata: any NextEpisodeMetadataProviding
 
@@ -195,16 +200,18 @@ struct NextEpisodeResolver {
         seed: NextEpisodeSeed,
         now: Date = Date()
     ) async -> NextEpisodeResolution {
+        let isAnimeTarget = seed.isAnime
+            || seed.playbackContext?.hasAnimeMediaId == true
+            || seed.playbackContext?.isSpecial == true
+        let hasValidSeason = seed.currentSeasonNumber >= 0
+            || (isAnimeTarget && AnimeSyntheticSeasonKey.isSynthetic(seed.currentSeasonNumber))
         guard seed.showID > 0,
-              seed.currentSeasonNumber >= 0,
+              hasValidSeason,
               seed.currentEpisodeNumber > 0 else {
             return .unavailable
         }
 
-        if seed.playbackContext?.isSpecial == true {
-            return await resolveSpecial(seed: seed, now: now)
-        }
-        if seed.isAnime || seed.playbackContext?.hasAnimeMediaId == true {
+        if isAnimeTarget {
             return await resolveAnime(seed: seed, now: now)
         }
         return await resolveRegularShow(seed: seed, now: now)
@@ -309,13 +316,90 @@ struct NextEpisodeResolver {
     ) async -> NextEpisodeResolution {
         let anime: AniListAnimeWithSeasons
         do {
+            let providerSeed = seed.playbackContext?.anilistMediaId
+                ?? seed.playbackContext?.positiveAniListMediaId
             anime = try await metadata.animeDetails(
                 title: seed.showTitle,
                 showID: seed.showID,
-                posterURL: seed.showPosterURL
+                posterURL: seed.showPosterURL,
+                seedAniListID: providerSeed,
+                seedMALID: providerSeed.flatMap { value in
+                    value < 0 ? RemoteMediaNumericBoundary.positiveMagnitude(value) : nil
+                }
             )
         } catch {
             return .unavailable
+        }
+
+        func aliases(for season: AniListSeasonWithPoster) -> [Int: Int] {
+            var aliases: [Int: Int] = [:]
+            if let positiveAniListID = season.canonicalAniListId
+                    ?? (season.anilistId > 0 ? season.anilistId : nil),
+               positiveAniListID > 0 {
+                aliases[season.anilistId] = positiveAniListID
+                if let providerID = RemoteMediaNumericBoundary.negativeProviderIdentifier(
+                    season.malId
+                ) {
+                    aliases[providerID] = positiveAniListID
+                }
+            }
+            return aliases
+        }
+
+        func resolvedSelection(
+            in season: AniListSeasonWithPoster,
+            context: EpisodePlaybackContext
+        ) -> AniListEpisode? {
+            let candidates: [AniListEpisode]
+            if let tmdbSeason = context.resolvedTMDBSeasonNumber,
+               let tmdbEpisode = context.resolvedTMDBEpisodeNumber {
+                candidates = season.episodes.filter {
+                    $0.tmdbSeasonNumber == tmdbSeason
+                        && $0.tmdbEpisodeNumber == tmdbEpisode
+                }
+            } else {
+                candidates = season.episodes.filter {
+                    $0.number == context.localEpisodeNumber
+                }
+            }
+            return candidates.first { episode in
+                let candidate = EpisodePlaybackContext(
+                    localSeasonNumber: season.seasonNumber,
+                    localEpisodeNumber: episode.number,
+                    anilistMediaId: season.anilistId,
+                    canonicalAniListMediaId: season.canonicalAniListId
+                        ?? (season.anilistId > 0 ? season.anilistId : nil),
+                    malMediaId: season.malId,
+                    kitsuMediaId: season.kitsuId,
+                    tmdbSeasonNumber: episode.tmdbSeasonNumber,
+                    tmdbEpisodeNumber: episode.tmdbEpisodeNumber,
+                    tmdbEpisodeOffset: nil,
+                    animeAbsoluteEpisodeNumber: nil,
+                    animeSeasonEpisodeCount: season.episodes.count,
+                    isSpecial: false,
+                    titleOnlySearch: false
+                )
+                return AnimeEpisodeIdentityPolicy.isSameEpisode(
+                    context,
+                    candidate,
+                    providerAliases: aliases(for: season)
+                )
+            }
+        }
+
+        let currentResolvedSelection = seed.playbackContext.flatMap { context in
+            anime.seasons.lazy.compactMap { season in
+                resolvedSelection(in: season, context: context).map {
+                    (season: season, episode: $0)
+                }
+            }.first
+        }
+        if let context = seed.playbackContext {
+            let belongsToRegularGraph = currentResolvedSelection != nil
+            if !belongsToRegularGraph,
+               context.isSpecial || context.hasAnimeMediaId {
+                return await resolveSpecial(seed: seed, now: now)
+            }
         }
 
         let orderedSeasons = anime.seasons.sorted {
@@ -328,21 +412,23 @@ struct NextEpisodeResolver {
 
         let context = seed.playbackContext
         let currentSeasonIndex: Int? = {
-            if let anilistID = context?.anilistMediaId,
-               let index = orderedSeasons.firstIndex(where: { $0.anilistId == anilistID }) {
+            if let selection = currentResolvedSelection,
+               let index = orderedSeasons.firstIndex(where: {
+                   $0.seasonNumber == selection.season.seasonNumber
+                       && $0.anilistId == selection.season.anilistId
+               }) {
                 return index
             }
-            if let kitsuID = context?.kitsuMediaId,
-               let index = orderedSeasons.firstIndex(where: { $0.kitsuId == kitsuID }) {
-                return index
-            }
+            guard context?.hasAnimeMediaId != true else { return nil }
             let localSeason = context?.localSeasonNumber ?? seed.currentSeasonNumber
             return orderedSeasons.firstIndex(where: { $0.seasonNumber == localSeason })
         }()
         guard let currentSeasonIndex else { return .unavailable }
 
         let currentSeason = orderedSeasons[currentSeasonIndex]
-        let currentEpisodeNumber = context?.localEpisodeNumber ?? seed.currentEpisodeNumber
+        let currentEpisodeNumber = currentResolvedSelection?.episode.number
+            ?? context?.localEpisodeNumber
+            ?? seed.currentEpisodeNumber
         let currentEpisodes = currentSeason.episodes.sorted { $0.number < $1.number }
         guard let currentEpisodeIndex = currentEpisodes.firstIndex(where: {
             $0.number == currentEpisodeNumber
@@ -373,16 +459,23 @@ struct NextEpisodeResolver {
 
         let absoluteOffset = orderedSeasons
             .prefix { $0.anilistId != destinationSeason.anilistId }
-            .reduce(0) { $0 + $1.episodes.count }
+            .map { $0.episodes.count }
+        let absoluteEpisodeNumber = RemoteMediaNumericBoundary.adding(
+            RemoteMediaNumericBoundary.saturatingNonnegativeSum(absoluteOffset),
+            destinationEpisode.number
+        )
         let destinationContext = EpisodePlaybackContext(
             localSeasonNumber: destinationSeason.seasonNumber,
             localEpisodeNumber: destinationEpisode.number,
             anilistMediaId: destinationSeason.anilistId,
+            canonicalAniListMediaId: destinationSeason.canonicalAniListId
+                ?? (destinationSeason.anilistId > 0 ? destinationSeason.anilistId : nil),
+            malMediaId: destinationSeason.malId,
             kitsuMediaId: destinationSeason.kitsuId,
             tmdbSeasonNumber: destinationEpisode.tmdbSeasonNumber,
             tmdbEpisodeNumber: destinationEpisode.tmdbEpisodeNumber,
             tmdbEpisodeOffset: nil,
-            animeAbsoluteEpisodeNumber: absoluteOffset + destinationEpisode.number,
+            animeAbsoluteEpisodeNumber: absoluteEpisodeNumber,
             animeSeasonEpisodeCount: destinationSeason.episodes.count,
             isSpecial: false,
             titleOnlySearch: false
@@ -424,35 +517,85 @@ struct NextEpisodeResolver {
         seed: NextEpisodeSeed,
         now: Date
     ) async -> NextEpisodeResolution {
-        guard let currentContext = seed.playbackContext,
-              currentContext.isSpecial else {
+
+        guard let currentContext = seed.playbackContext else {
             return .unavailable
         }
 
         let entries: [AniListSpecialSearchEntry]
         do {
+            let currentAniListIDs = Set([
+                currentContext.anilistMediaId,
+                currentContext.positiveAniListMediaId
+            ].compactMap { $0 })
             entries = try await metadata.specialEntries(
                 showID: seed.showID,
                 posterURL: seed.showPosterURL,
-                baseAniListIDs: [currentContext.anilistMediaId].compactMap { $0 }
+                baseAniListIDs: Array(currentAniListIDs),
+                requiredSpecialAniListIDs: Array(currentAniListIDs)
             )
         } catch {
             return .unavailable
         }
         guard !entries.isEmpty else { return .unavailable }
 
-        guard let entry = entries.first(where: {
-            if let currentAniListID = currentContext.anilistMediaId,
-               $0.id == currentAniListID {
-                return true
+        let currentSelection = entries.lazy.compactMap { entry -> (AniListSpecialSearchEntry, AniListEpisode)? in
+            guard let localSeasonNumber = Self.specialLocalSeasonNumber(entryID: entry.id) else {
+                return nil
             }
-            return Self.specialLocalSeasonNumber(entryID: $0.id) == currentContext.localSeasonNumber
-        }) else {
+            var aliases: [Int: Int] = [:]
+            if let canonicalID = entry.canonicalAniListId
+                    ?? (entry.id > 0 ? entry.id : nil),
+               canonicalID > 0 {
+                aliases[entry.id] = canonicalID
+                if let providerID = RemoteMediaNumericBoundary.negativeProviderIdentifier(
+                    entry.malId
+                ) {
+                    aliases[providerID] = canonicalID
+                }
+            }
+            let candidates: [AniListEpisode]
+            if let tmdbSeason = currentContext.resolvedTMDBSeasonNumber,
+               let tmdbEpisode = currentContext.resolvedTMDBEpisodeNumber {
+                candidates = entry.episodes.filter {
+                    $0.tmdbSeasonNumber == tmdbSeason
+                        && $0.tmdbEpisodeNumber == tmdbEpisode
+                }
+            } else {
+                candidates = entry.episodes.filter {
+                    $0.number == currentContext.localEpisodeNumber
+                }
+            }
+            return candidates.first(where: { episode in
+                let candidate = EpisodePlaybackContext(
+                    localSeasonNumber: localSeasonNumber,
+                    localEpisodeNumber: episode.number,
+                    anilistMediaId: entry.id,
+                    canonicalAniListMediaId: entry.canonicalAniListId
+                        ?? (entry.id > 0 ? entry.id : nil),
+                    malMediaId: entry.malId,
+                    kitsuMediaId: entry.kitsuId,
+                    tmdbSeasonNumber: episode.tmdbSeasonNumber,
+                    tmdbEpisodeNumber: episode.tmdbEpisodeNumber,
+                    tmdbEpisodeOffset: nil,
+                    animeAbsoluteEpisodeNumber: nil,
+                    animeSeasonEpisodeCount: entry.episodeCount,
+                    isSpecial: true,
+                    titleOnlySearch: entry.episodeCount == 1
+                )
+                return AnimeEpisodeIdentityPolicy.isSameEpisode(
+                    currentContext,
+                    candidate,
+                    providerAliases: aliases
+                )
+            }).map { (entry, $0) }
+        }.first
+        guard let (entry, currentSourceEpisode) = currentSelection else {
             return .unavailable
         }
 
         let episodeCount = max(1, entry.episodeCount)
-        let currentEpisodeNumber = currentContext.localEpisodeNumber
+        let currentEpisodeNumber = currentSourceEpisode.number
         guard (1...episodeCount).contains(currentEpisodeNumber) else {
             return .unavailable
         }
@@ -462,21 +605,32 @@ struct NextEpisodeResolver {
         }
 
         let source = entry.episodes.first(where: { $0.number == nextEpisodeNumber })
-        guard Self.hasAired(source?.airDate, by: now) else {
+        let knownReleaseDate = source?.airDate
+            ?? ((episodeCount == 1 || entry.status?.uppercased().contains("FINISHED") == true) ? entry.releaseDate : nil)
+        guard let knownReleaseDate else {
+            return .unavailable
+        }
+        guard Self.hasAired(knownReleaseDate, by: now) else {
             return .noAvailableEpisode
         }
         let title = Self.nonempty(source?.title)
             ?? (episodeCount == 1 ? entry.preferredTitle : "Episode \(nextEpisodeNumber)")
-        let localSeasonNumber = Self.specialLocalSeasonNumber(entryID: entry.id)
-        let episodeOffset = entry.episodeOffset ?? 0
+        guard let localSeasonNumber = Self.specialLocalSeasonNumber(entryID: entry.id) else {
+            return .unavailable
+        }
+        let exactTMDBSeason = source?.tmdbSeasonNumber
+        let exactTMDBEpisode = source?.tmdbEpisodeNumber
         let context = EpisodePlaybackContext(
             localSeasonNumber: localSeasonNumber,
             localEpisodeNumber: nextEpisodeNumber,
             anilistMediaId: entry.id,
-            kitsuMediaId: nil,
-            tmdbSeasonNumber: entry.tmdbSeasonNumber,
-            tmdbEpisodeNumber: entry.tmdbSeasonNumber == nil ? nil : episodeOffset + nextEpisodeNumber,
-            tmdbEpisodeOffset: episodeOffset,
+            canonicalAniListMediaId: entry.canonicalAniListId
+                ?? (entry.id > 0 ? entry.id : nil),
+            malMediaId: entry.malId,
+            kitsuMediaId: entry.kitsuId,
+            tmdbSeasonNumber: exactTMDBEpisode == nil ? nil : exactTMDBSeason,
+            tmdbEpisodeNumber: exactTMDBEpisode,
+            tmdbEpisodeOffset: nil,
             animeAbsoluteEpisodeNumber: nil,
             animeSeasonEpisodeCount: nil,
             isSpecial: true,
@@ -534,9 +688,6 @@ struct NextEpisodeResolver {
         )
     }
 
-    /// TMDB dates have day precision. Matching the existing app behavior, an episode dated today
-    /// is eligible; a missing date is treated as released, while malformed nonempty metadata fails
-    /// closed instead of accidentally advertising an unverifiable episode.
     static func hasAired(_ rawDate: String?, by now: Date) -> Bool {
         guard let rawDate = nonempty(rawDate) else { return true }
         let components = rawDate.split(separator: "-")
@@ -567,8 +718,8 @@ struct NextEpisodeResolver {
         return trimmed.isEmpty ? nil : trimmed
     }
 
-    private static func specialLocalSeasonNumber(entryID: Int) -> Int {
-        100_000 + entryID
+    private static func specialLocalSeasonNumber(entryID: Int) -> Int? {
+        AnimeSyntheticSeasonKey.make(providerID: entryID)
     }
 
     private static func syntheticEpisodeID(
@@ -576,7 +727,11 @@ struct NextEpisodeResolver {
         seasonNumber: Int,
         episodeNumber: Int
     ) -> Int {
-        showID * 1_000_000 + seasonNumber * 10_000 + episodeNumber
+        RemoteMediaNumericBoundary.syntheticIdentifier([
+            (showID, 1_000_000),
+            (seasonNumber, 10_000),
+            (episodeNumber, 1)
+        ])
     }
 
     private static func syntheticSpecialEpisodeID(
@@ -584,6 +739,10 @@ struct NextEpisodeResolver {
         entryID: Int,
         episodeNumber: Int
     ) -> Int {
-        showID * 1_000_000 + entryID * 100 + episodeNumber
+        RemoteMediaNumericBoundary.syntheticIdentifier([
+            (showID, 1_000_000),
+            (entryID, 100),
+            (episodeNumber, 1)
+        ])
     }
 }

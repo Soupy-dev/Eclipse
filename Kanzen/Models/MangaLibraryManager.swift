@@ -1,8 +1,12 @@
+//
+//  MangaLibraryManager.swift
+//  Kanzen
+//
+//  Created by Eclipse on 2026.
+//
+
 import Foundation
 import Combine
-#if !os(tvOS)
-import AidokuRunner
-#endif
 
 struct MangaLibraryRefreshSummary {
     var refreshed = 0
@@ -31,28 +35,141 @@ final class MangaLibraryManager: ObservableObject {
         }
     }
 
-    private let storageKey = "mangaLibraryCollections"
+    private static let legacyStorageKey = "mangaLibraryCollections"
+
+    private var storageKey: String
+    private var activeProfileID: UUID
     private var collectionCancellables: [UUID: AnyCancellable] = [:]
 
+    private var isSwitchingProfile = false
+
     private init() {
+        let profileID = ProfileManager.shared.activeProfileID
+        activeProfileID = profileID
+        storageKey = Self.storageKey(for: profileID)
+        Self.migrateLegacyStoreIfNeeded()
+        isSwitchingProfile = true
         load()
         createDefaultBookmarksCollection()
+        isSwitchingProfile = false
+        save()
         collections.forEach { observeCollection($0) }
     }
 
-    // MARK: - Persistence
+    static func storageKey(for profileID: UUID) -> String {
+        ProfileScopedStorage.defaultsKey(base: legacyStorageKey, profileID: profileID)
+    }
 
-    private func load() {
-        if let data = UserDefaults.standard.data(forKey: storageKey),
-           let decoded = try? JSONDecoder().decode([MangaLibraryCollection].self, from: data) {
-            collections = decoded
+    private static func migrateLegacyStoreIfNeeded() {
+        ProfileScopedStorage.migrateLegacyStoreIfNeeded(marker: "readerLibrary") {
+            let defaults = UserDefaults.standard
+            let destinationKey = storageKey(for: ProfileManager.defaultProfileID)
+            guard defaults.data(forKey: destinationKey) == nil,
+                  let legacy = defaults.data(forKey: legacyStorageKey) else { return }
+            defaults.set(legacy, forKey: destinationKey)
+            defaults.removeObject(forKey: legacyStorageKey)
         }
     }
 
+    func switchProfile(to profileID: UUID) {
+        guard profileID != activeProfileID else { return }
+        isSwitchingProfile = true
+        activeProfileID = profileID
+        storageKey = Self.storageKey(for: profileID)
+        collectionCancellables.removeAll()
+        collections = Self.adoptCollections(forKey: storageKey)
+        createDefaultBookmarksCollection()
+        isSwitchingProfile = false
+        collections.forEach { observeCollection($0) }
+        save()
+    }
+
+    func discardStore(forProfile profileID: UUID) {
+        guard profileID != activeProfileID else { return }
+        UserDefaults.standard.removeObject(forKey: Self.storageKey(for: profileID))
+    }
+
+    private static func loadCollections(
+        forKey key: String
+    ) -> (collections: [MangaLibraryCollection], unreadable: Bool) {
+        persistedCollections(from: UserDefaults.standard.data(forKey: key))
+    }
+
+    static func persistedCollections(
+        from data: Data?
+    ) -> (collections: [MangaLibraryCollection], unreadable: Bool) {
+        guard let data, !data.isEmpty else {
+            return ([], false)
+        }
+        guard let decoded = try? JSONDecoder().decode([MangaLibraryCollection].self, from: data) else {
+            return ([], true)
+        }
+        return (decoded, false)
+    }
+
+    static func persistedCollectionsSchemaIsValid(_ data: Data) -> Bool {
+        (try? JSONDecoder().decode([MangaLibraryCollection].self, from: data)) != nil
+    }
+
+    private func load() {
+        collections = Self.adoptCollections(forKey: storageKey)
+    }
+
+    private static func adoptCollections(forKey key: String) -> [MangaLibraryCollection] {
+        let loaded = loadCollections(forKey: key)
+        if loaded.unreadable {
+            quarantineUnreadableStore(forKey: key)
+        }
+        return loaded.collections
+    }
+
+    private static func quarantineUnreadableStore(forKey key: String) {
+        let defaults = UserDefaults.standard
+        guard let data = defaults.data(forKey: key) else { return }
+        let quarantineKey = "\(key)-unreadable-\(Int(Date().timeIntervalSince1970))"
+        defaults.set(data, forKey: quarantineKey)
+        defaults.removeObject(forKey: key)
+        ReaderLogger.shared.log(
+            "MangaLibraryManager: moved an unreadable collections store aside as \(quarantineKey) and started a fresh store",
+            type: "Error"
+        )
+    }
+
     private func save() {
+        guard !isSwitchingProfile else { return }
         if let data = try? JSONEncoder().encode(collections) {
             UserDefaults.standard.set(data, forKey: storageKey)
         }
+    }
+
+    func collections(forProfile profileID: UUID) -> [MangaLibraryCollection] {
+        collectionsSnapshot(forProfile: profileID) ?? []
+    }
+
+    func collectionsSnapshot(forProfile profileID: UUID) -> [MangaLibraryCollection]? {
+        let key = profileID == activeProfileID ? storageKey : Self.storageKey(for: profileID)
+        let loaded = Self.loadCollections(forKey: key)
+        guard !loaded.unreadable else {
+            ReaderLogger.shared.log(
+                "MangaLibraryManager: profile \(profileID) has an unreadable collections store; preserving its bytes",
+                type: "Error"
+            )
+            return nil
+        }
+        return loaded.collections
+    }
+
+    func applyRestoredCollections(_ restored: [MangaLibraryCollection], forProfile profileID: UUID) {
+        guard profileID != activeProfileID else {
+            collectionCancellables.removeAll()
+            collections = restored
+            createDefaultBookmarksCollection()
+            collections.forEach { observeCollection($0) }
+            save()
+            return
+        }
+        guard let data = try? JSONEncoder().encode(restored) else { return }
+        UserDefaults.standard.set(data, forKey: Self.storageKey(for: profileID))
     }
 
     private func createDefaultBookmarksCollection() {
@@ -61,8 +178,6 @@ final class MangaLibraryManager: ObservableObject {
             collections.insert(bookmarks, at: 0)
         }
     }
-
-    // MARK: - Collection CRUD
 
     func createCollection(name: String, description: String? = nil) {
         let collection = MangaLibraryCollection(name: name, description: description)
@@ -84,8 +199,6 @@ final class MangaLibraryManager: ObservableObject {
         collections.removeAll { $0.id == collection.id }
     }
 
-    // MARK: - Item CRUD
-
     func addItem(to collectionId: UUID, item: MangaLibraryItem) {
         guard let idx = collections.firstIndex(where: { $0.id == collectionId }),
               !collections[idx].items.contains(where: { $0.id == item.id }) else { return }
@@ -106,8 +219,6 @@ final class MangaLibraryManager: ObservableObject {
         collections.filter { $0.items.contains { $0.id == item.id } }
     }
 
-    // MARK: - Bookmark Shortcuts
-
     func toggleBookmark(_ item: MangaLibraryItem) {
         guard let bookmarks = collections.first(where: { $0.name == "Bookmarks" }) else { return }
         if isItemInCollection(bookmarks.id, item: item) {
@@ -124,8 +235,6 @@ final class MangaLibraryManager: ObservableObject {
         return isItemInCollection(bookmarks.id, item: item)
     }
 
-    // MARK: - Source Refresh
-
     @MainActor
     func refreshAllSources() async -> MangaLibraryRefreshSummary {
         await refreshItems(uniqueSavedItems())
@@ -139,8 +248,6 @@ final class MangaLibraryManager: ObservableObject {
     func updateSavedItem(_ item: MangaLibraryItem) {
         replaceSavedItem(item)
     }
-
-    // MARK: - Observation
 
     private func observeCollection(_ collection: MangaLibraryCollection) {
         if collectionCancellables[collection.id] != nil { return }
@@ -183,15 +290,24 @@ final class MangaLibraryManager: ObservableObject {
         if merged.trackerMALId == nil { merged.trackerMALId = existing.trackerMALId }
         if merged.trackerMatchConfidence == nil { merged.trackerMatchConfidence = existing.trackerMatchConfidence }
         if merged.trackerResolvedAt == nil { merged.trackerResolvedAt = existing.trackerResolvedAt }
+        merged.contentRating = mergedContentRating(incoming: merged.contentRating, existing: existing.contentRating)
         return merged
+    }
+
+    private func mergedContentRating(incoming: Int?, existing: Int?) -> Int? {
+        guard let incoming else { return existing }
+        guard let existing else { return incoming }
+        return max(incoming, existing)
     }
 
     private func replaceSavedItem(_ item: MangaLibraryItem) {
         var changed = false
         for collection in collections {
             guard let index = collection.items.firstIndex(where: { $0.id == item.id }) else { continue }
+            let stored = collection.items[index]
             var updated = item
-            updated.dateAdded = collection.items[index].dateAdded
+            updated.dateAdded = stored.dateAdded
+            updated.contentRating = mergedContentRating(incoming: item.contentRating, existing: stored.contentRating)
             collection.items[index] = updated
             changed = true
         }
@@ -201,11 +317,45 @@ final class MangaLibraryManager: ObservableObject {
         }
     }
 
+    private func replaceSavedItem(_ item: MangaLibraryItem, inStoreForProfile profileID: UUID) {
+        let key = Self.storageKey(for: profileID)
+        let loaded = Self.loadCollections(forKey: key)
+        guard !loaded.unreadable else {
+            ReaderLogger.shared.log(
+                "Dropping a late library write for profile \(profileID): its store could not be read",
+                type: "Error"
+            )
+            return
+        }
+        var changed = false
+        for collection in loaded.collections {
+            guard let index = collection.items.firstIndex(where: { $0.id == item.id }) else { continue }
+            let stored = collection.items[index]
+            var updated = item
+            updated.dateAdded = stored.dateAdded
+            updated.contentRating = mergedContentRating(incoming: item.contentRating, existing: stored.contentRating)
+            collection.items[index] = updated
+            changed = true
+        }
+        guard changed, let data = try? JSONEncoder().encode(loaded.collections) else { return }
+        UserDefaults.standard.set(data, forKey: key)
+    }
+
     @MainActor
     private func refreshItems(_ items: [MangaLibraryItem]) async -> MangaLibraryRefreshSummary {
         var summary = MangaLibraryRefreshSummary()
 
+        let owner = activeProfileID
+
         for item in items {
+            guard activeProfileID == owner else {
+                ReaderLogger.shared.log(
+                    "Library refresh abandoned: the active profile changed while it was running",
+                    type: "Reader"
+                )
+                summary.skipped += items.count - summary.refreshed - summary.failed - summary.skipped
+                return summary
+            }
             guard fallbackRoute(for: item) != nil else {
                 summary.skipped += 1
                 continue
@@ -213,7 +363,11 @@ final class MangaLibraryManager: ObservableObject {
 
             do {
                 let refreshed = try await refreshItem(item)
-                replaceSavedItem(refreshed)
+                if activeProfileID == owner {
+                    replaceSavedItem(refreshed)
+                } else {
+                    replaceSavedItem(refreshed, inStoreForProfile: owner)
+                }
                 MangaReadingProgressManager.shared.updateSourceMetadata(
                     mangaId: refreshed.id,
                     title: refreshed.title,
@@ -221,14 +375,19 @@ final class MangaLibraryManager: ObservableObject {
                     format: refreshed.format,
                     latestChapterNumbers: refreshed.latestChapterNumbers ?? [],
                     route: refreshed.route,
-                    sourceRefreshError: nil
+                    sourceRefreshError: nil,
+                    forProfile: owner
                 )
                 summary.refreshed += 1
             } catch {
                 var failedItem = item
                 failedItem.lastSourceRefresh = Date()
                 failedItem.sourceRefreshError = error.localizedDescription
-                replaceSavedItem(failedItem)
+                if activeProfileID == owner {
+                    replaceSavedItem(failedItem)
+                } else {
+                    replaceSavedItem(failedItem, inStoreForProfile: owner)
+                }
                 ReaderLogger.shared.log("Library refresh failed title='\(item.title)': \(error.localizedDescription)", type: "Reader")
                 summary.failed += 1
             }
@@ -245,8 +404,19 @@ final class MangaLibraryManager: ObservableObject {
         }
 
         switch route {
-        case .aidoku(let sourceId, let mangaKey):
-            return try await refreshAidokuItem(item, sourceId: sourceId, mangaKey: mangaKey)
+        case .readerExtension(let sourceID, let itemKey, let legacyStableKey):
+            return try await refreshReaderExtensionItem(
+                item,
+                sourceID: sourceID,
+                itemKey: itemKey,
+                legacyStableKey: legacyStableKey
+            )
+        case .aidoku:
+            throw NSError(
+                domain: "MangaLibraryRefresh",
+                code: -2,
+                userInfo: [NSLocalizedDescriptionKey: "Previous Reader source unavailable. Reconnect this title to refresh it."]
+            )
         case .legacyModule(let moduleUUID, let contentParams, let isNovel):
             return try await refreshLegacyModuleItem(item, moduleUUIDString: moduleUUID, contentParams: contentParams, isNovel: isNovel)
         }
@@ -266,38 +436,48 @@ final class MangaLibraryManager: ObservableObject {
     }
 
     @MainActor
-    private func refreshAidokuItem(_ item: MangaLibraryItem, sourceId: String, mangaKey: String) async throws -> MangaLibraryItem {
-        let sourceManager = AidokuSourceManager.shared
-        guard let metadata = sourceManager.metadata(id: sourceId) else {
-            throw NSError(domain: "MangaLibraryRefresh", code: -2, userInfo: [NSLocalizedDescriptionKey: "Aidoku source is missing"])
+    private func refreshReaderExtensionItem(
+        _ item: MangaLibraryItem,
+        sourceID: ReaderExtensionSourceID,
+        itemKey: String,
+        legacyStableKey: String?
+    ) async throws -> MangaLibraryItem {
+        let sourceManager = ReaderExtensionManager.shared
+        guard let metadata = sourceManager.installedSources.first(where: { $0.id == sourceID }) else {
+            throw NSError(domain: "MangaLibraryRefresh", code: -2, userInfo: [NSLocalizedDescriptionKey: "Reader Extension is missing"])
         }
-        guard metadata.isEnabled else {
+        guard metadata.enabled else {
             throw NSError(domain: "MangaLibraryRefresh", code: -3, userInfo: [NSLocalizedDescriptionKey: "\(metadata.name) is disabled"])
         }
 
-        let seed = AidokuRunner.Manga(
-            sourceKey: sourceId,
-            key: mangaKey,
+        let provider = try sourceManager.provider(for: sourceID)
+        let seed = ReaderExtensionItem(
+            key: itemKey,
             title: item.title,
-            cover: item.coverURL
+            coverURL: item.coverURL.flatMap(URL.init(string:)),
+            maturity: metadata.maturity
         )
-        let updated = try await sourceManager.mangaUpdate(
-            sourceId: sourceId,
-            manga: seed,
-            needsDetails: true,
-            needsChapters: true
-        )
+        let updated = seed.mergingDetail(try await provider.detail(itemKey: itemKey))
+        let chapters = try await provider.chapters(itemKey: itemKey)
 
         var refreshed = item
         refreshed.title = updated.title
-        refreshed.coverURL = updated.cover ?? item.coverURL
-        refreshed.format = formatTitle(for: updated.viewer)
+        refreshed.coverURL = ReaderExtensionSafeMetadata.sanitizedURLString(
+            updated.coverURL,
+            fallback: item.coverURL
+        )
+        refreshed.format = metadata.mediaType == .novel ? "NOVEL" : "MANGA"
+        refreshed.contentRating = ReaderContentFilter.shared.derivedReaderExtensionRating(for: updated)
         refreshed.sourceName = metadata.name
-        refreshed.latestChapterNumbers = chapterNumbers(from: updated.chapters ?? [])
+        refreshed.latestChapterNumbers = chapterNumbers(from: chapters)
         refreshed.totalChapters = refreshed.latestChapterNumbers?.count
         refreshed.lastSourceRefresh = Date()
         refreshed.sourceRefreshError = nil
-        refreshed.route = .aidoku(sourceId: sourceId, mangaKey: updated.key)
+        refreshed.route = .readerExtension(
+            source: sourceID,
+            itemKey: updated.key,
+            legacyStableKey: legacyStableKey
+        )
         return refreshed
     }
 
@@ -310,11 +490,18 @@ final class MangaLibraryManager: ObservableObject {
 
         let engine = KanzenEngine()
         let script = try ModuleManager.shared.getModuleScript(module: module)
-        try engine.loadScript(script, isNovel: isNovel)
+        try await engine.loadScript(script, module: module)
         let result = try await extractChapters(engine: engine, params: contentParams)
         let numbers = legacyChapterNumbers(from: result)
+        let details = await extractDetails(engine: engine, params: contentParams)
 
         var refreshed = item
+        if let derivedRating = ReaderContentFilter.shared.derivedLegacyRating(
+            tags: details?["tags"] as? [String],
+            description: details?["description"] as? String
+        ) {
+            refreshed.contentRating = derivedRating
+        }
         refreshed.sourceName = module.moduleData.sourceName
         refreshed.format = isNovel ? "NOVEL" : (item.format ?? "MANGA")
         refreshed.latestChapterNumbers = numbers
@@ -329,26 +516,24 @@ final class MangaLibraryManager: ObservableObject {
     }
 
     private func extractChapters(engine: KanzenEngine, params: String) async throws -> Any {
-        try await withCheckedThrowingContinuation { continuation in
-            engine.extractChapters(params: params) { result in
-                guard let result else {
-                    continuation.resume(throwing: NSError(domain: "MangaLibraryRefresh", code: -5, userInfo: [NSLocalizedDescriptionKey: "Source returned no chapters"]))
-                    return
-                }
-                continuation.resume(returning: result)
-            }
+        guard let result = try await engine.extractChapters(params: params) else {
+            throw NSError(
+                domain: "MangaLibraryRefresh",
+                code: -5,
+                userInfo: [NSLocalizedDescriptionKey: "Source returned no chapters"]
+            )
         }
+        return result
     }
 
-    private func chapterNumbers(from chapters: [AidokuRunner.Chapter]) -> [String] {
+    private func extractDetails(engine: KanzenEngine, params: String) async -> [String: Any]? {
+        try? await engine.extractDetails(params: params)
+    }
+
+    private func chapterNumbers(from chapters: [ReaderExtensionChapter]) -> [String] {
         let numbers = chapters.enumerated().map { index, chapter in
-            if let volume = chapter.volumeNumber, let number = chapter.chapterNumber {
-                return "Vol. \(formatNumber(volume)) Ch. \(formatNumber(number))"
-            }
-            if let number = chapter.chapterNumber {
-                return "Chapter \(formatNumber(number))"
-            }
-            if let title = chapter.title, !title.isEmpty {
+            let title = chapter.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !title.isEmpty {
                 return title
             }
             return "Chapter \(index + 1)"
@@ -388,19 +573,21 @@ final class MangaLibraryManager: ObservableObject {
     }
 
     private func formatNumber(_ value: Float) -> String {
-        value.truncatingRemainder(dividingBy: 1) == 0 ? String(Int(value)) : String(value)
+        guard value.isFinite,
+              value.truncatingRemainder(dividingBy: 1) == 0,
+              let integer = Int(exactly: value) else {
+            return String(value)
+        }
+        return String(integer)
     }
 
     private func formatNumber(_ value: Double) -> String {
-        value.truncatingRemainder(dividingBy: 1) == 0 ? String(Int(value)) : String(value)
+        guard value.isFinite,
+              value.truncatingRemainder(dividingBy: 1) == 0,
+              let integer = Int(exactly: value) else {
+            return String(value)
+        }
+        return String(integer)
     }
 
-    private func formatTitle(for viewer: AidokuRunner.Viewer) -> String {
-        switch viewer {
-        case .vertical, .webtoon:
-            return "WEBTOON"
-        default:
-            return "MANGA"
-        }
-    }
 }

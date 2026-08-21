@@ -15,10 +15,18 @@ on:
         description: "GitHub updater release version stamped into the app. Empty uses Build.xcconfig."
         required: false
         default: ""
+      app_store_release_confirmed:
+        description: "I confirm the App Store release is live and intend to expose an unsigned IPA artifact."
+        required: true
+        type: boolean
+        default: false
 
 concurrency:
   group: ios-unsigned-ipa-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   build-unsigned-ipa:
@@ -27,24 +35,52 @@ jobs:
     timeout-minutes: 90
 
     steps:
+      - name: Authorize public unsigned distribution
+        env:
+          APP_STORE_RELEASE_CONFIRMED: ${{ inputs.app_store_release_confirmed }}
+          RELEASE_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$APP_STORE_RELEASE_CONFIRMED" != "true" ]]; then
+            echo "::error::Unsigned IPA distribution is disabled until the App Store release is live and app_store_release_confirmed is checked."
+            exit 1
+          fi
+          if [[ "$RELEASE_REF" != "refs/heads/$DEFAULT_BRANCH" ]]; then
+            echo "::error::Unsigned IPA distribution is allowed only from the default branch 'refs/heads/$DEFAULT_BRANCH'; received '$RELEASE_REF'."
+            exit 1
+          fi
+
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Validate immutable MPVKit revision
+        env:
+          MPVKIT_SOURCE_REVISION: ${{ vars.MPVKIT_SOURCE_REVISION }}
+        run: |
+          set -euo pipefail
+
+          if ! [[ "$MPVKIT_SOURCE_REVISION" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::MPVKIT_SOURCE_REVISION must be an explicitly reviewed lowercase 40-character commit SHA. Mutable MPVKit branches are not accepted."
+            exit 1
+          fi
       - name: Checkout canonical MPVKit
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           repository: Soupy-dev/MPVKit
-          ref: eclipse-mpv-metal
+          ref: ${{ vars.MPVKIT_SOURCE_REVISION }}
           path: MPVKit
+      - name: Verify immutable MPVKit checkout
+        env:
+          MPVKIT_SOURCE_REVISION: ${{ vars.MPVKIT_SOURCE_REVISION }}
+        run: test "$(git -C MPVKit rev-parse HEAD)" = "$MPVKIT_SOURCE_REVISION"
       - name: Expose sibling MPVKit package
         run: ln -sfn "$GITHUB_WORKSPACE/MPVKit" "$GITHUB_WORKSPACE/../MPVKit"
 
       - name: Set up Xcode
-        uses: maxim-lobanov/setup-xcode@v1
+        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
         with:
           xcode-version: latest-stable
-
-      - name: Install iOS pods
-        run: pod install
 
       - name: Resolve unsigned build settings
         env:
@@ -122,12 +158,41 @@ jobs:
         run: |
           set -euo pipefail
 
+          SOURCE_PACKAGES_DIR="$RUNNER_TEMP/SourcePackages"
+          rm -rf "$SOURCE_PACKAGES_DIR"
           xcodebuild -resolvePackageDependencies \
-            -workspace Eclipse.xcworkspace \
+            -project Eclipse.xcodeproj \
             -scheme Eclipse \
+            -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_DIR" \
             -skipPackagePluginValidation \
             -skipMacroValidation
 
+          LIBMPV_BINARY="$(find "$SOURCE_PACKAGES_DIR/artifacts" \
+            -path '*Libmpv.xcframework/ios-arm64/Libmpv.framework/Libmpv' \
+            -type f -print -quit)"
+          if [[ -z "$LIBMPV_BINARY" ]]; then
+            echo "::error::The resolved MPVKit runtime does not contain the iOS Libmpv device slice."
+            exit 1
+          fi
+          LIBMPV_SYMBOLS="$(mktemp)"
+          xcrun nm -gU "$LIBMPV_BINARY" > "$LIBMPV_SYMBOLS" 2>/dev/null || true
+          for symbol in \
+            mpv_apple_pip_api_version \
+            mpv_apple_pip_get_capabilities \
+            mpv_apple_pip_set_callback \
+            mpv_apple_pip_set_mode \
+            mpv_apple_pip_submit_target \
+            mpv_apple_pip_disable_and_drain \
+            mpv_apple_audiounit_recovery_count
+          do
+            if ! grep -Eq "[[:space:]]_?${symbol}$" "$LIBMPV_SYMBOLS"; then
+              echo "::error::The resolved iOS Libmpv artifact is missing required native export '$symbol'. Provide the reviewed MPVKit source and matching private native runtime before distribution."
+              exit 1
+            fi
+          done
+          rm -f "$LIBMPV_SYMBOLS"
+
+          echo "SOURCE_PACKAGES_DIR=$SOURCE_PACKAGES_DIR" >> "$GITHUB_ENV"
           echo "Using local MPVKit checkout: $(git -C MPVKit rev-parse HEAD)"
 
       - name: Build unsigned archive
@@ -136,27 +201,36 @@ jobs:
 
           ARCHIVE_PATH="$RUNNER_TEMP/$APP_NAME.xcarchive"
           DERIVED_DATA_PATH="$RUNNER_TEMP/DerivedData"
+          MPVKIT_SOURCE_REVISION="$(git -C "$GITHUB_WORKSPACE/MPVKit" rev-parse HEAD)"
 
           rm -rf "$ARCHIVE_PATH" "$DERIVED_DATA_PATH"
 
           xcodebuild archive \
-            -workspace Eclipse.xcworkspace \
+            -project Eclipse.xcodeproj \
             -scheme Eclipse \
             -configuration Release \
             -archivePath "$ARCHIVE_PATH" \
             -destination "generic/platform=iOS" \
             -sdk iphoneos \
             -derivedDataPath "$DERIVED_DATA_PATH" \
+            -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_DIR" \
+            -disableAutomaticPackageResolution \
             -skipPackagePluginValidation \
             -skipMacroValidation \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
             AD_HOC_CODE_SIGNING_ALLOWED=NO \
+            ECLIPSE_SOURCE_REVISION="$GITHUB_SHA" \
+            ECLIPSE_MPVKIT_SOURCE_REVISION="$MPVKIT_SOURCE_REVISION" \
             'SWIFT_ACTIVE_COMPILATION_CONDITIONS=$(inherited) ECLIPSE_UNSIGNED_BUILD' \
             ENABLE_USER_SCRIPT_SANDBOXING=NO
 
           APP_PATH="$(find "$ARCHIVE_PATH/Products/Applications" -maxdepth 1 -type d -name '*.app' -print -quit)"
+
+          test -f "$APP_PATH/OpenSourceLicenses/THIRD-PARTY-NOTICES.txt"
+          test "$(/usr/libexec/PlistBuddy -c 'Print EclipseSourceRevision' "$APP_PATH/Info.plist")" = "$GITHUB_SHA"
+          test "$(/usr/libexec/PlistBuddy -c 'Print EclipseMPVKitSourceRevision' "$APP_PATH/Info.plist")" = "$MPVKIT_SOURCE_REVISION"
 
           MANIFEST_PATH="$APP_PATH/PrivacyInfo.xcprivacy"
           if [[ ! -f "$MANIFEST_PATH" ]]; then
@@ -183,6 +257,7 @@ jobs:
               "NSPrivacyAccessedAPICategoryUserDefaults": {"CA92.1"},
               "NSPrivacyAccessedAPICategoryFileTimestamp": {"C617.1"},
               "NSPrivacyAccessedAPICategoryDiskSpace": {"85F4.1", "E174.1"},
+              "NSPrivacyAccessedAPICategorySystemBootTime": {"35F9.1"},
           }
           declared = {
               entry.get("NSPrivacyAccessedAPIType"): set(entry.get("NSPrivacyAccessedAPITypeReasons", []))
@@ -236,8 +311,9 @@ jobs:
           echo "IPA_PATH=$IPA_PATH" >> "$GITHUB_ENV"
 
       - name: Upload unsigned IPA artifact
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: Eclipse-iOS-unsigned-${{ github.run_number }}
           path: ${{ env.IPA_PATH }}
           if-no-files-found: error
+          retention-days: 1

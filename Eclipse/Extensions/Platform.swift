@@ -1,3 +1,10 @@
+//
+//  Platform.swift
+//  Eclipse
+//
+//  Created by Dominic on 02.11.25.
+//
+
 import Foundation
 import SwiftUI
 #if os(iOS)
@@ -33,8 +40,6 @@ enum PlayerInterfaceCoverageNotification {
     }
 }
 
-/// Tracks every visible player independently, grouped by its owning window scene. A set avoids a
-/// transient `false` from one player uncovering a scene while another player is still presented.
 struct PlayerInterfaceCoverageState {
     private static let unscopedSceneKey = "__eclipse_unscoped_scene__"
     private var playerIdentifiersByScene: [String: Set<String>] = [:]
@@ -53,8 +58,6 @@ struct PlayerInterfaceCoverageState {
             playerIdentifier = "legacy-player"
         }
 
-        // A controller may learn its scene between appearance and disappearance. Remove its old
-        // entry everywhere first so an early unscoped event cannot leave stale coverage behind.
         for key in Array(playerIdentifiersByScene.keys) {
             playerIdentifiersByScene[key]?.remove(playerIdentifier)
             if playerIdentifiersByScene[key]?.isEmpty == true {
@@ -72,8 +75,7 @@ struct PlayerInterfaceCoverageState {
             return playerIdentifiersByScene[sceneSessionIdentifier]?.isEmpty == false
                 || playerIdentifiersByScene[Self.unscopedSceneKey]?.isEmpty == false
         }
-        // Preserve the existing single-window behavior until the lightweight UIKit probe has
-        // attached to its window. Once it does, unrelated scene entries are ignored.
+
         return playerIdentifiersByScene.values.contains { !$0.isEmpty }
     }
 }
@@ -90,8 +92,7 @@ extension EnvironmentValues {
 }
 
 #if os(iOS)
-/// Installs a per-WindowGroup session identifier into the SwiftUI environment. Keeping this state
-/// below `WindowGroup` is important: app-level state is shared by every iPad window.
+
 struct EclipseWindowSceneScopeModifier: ViewModifier {
     @State private var sceneSessionIdentifier: String?
 
@@ -157,9 +158,6 @@ private final class EclipseWindowSceneSessionProbeView: UIView {
 }
 #endif
 
-// MARK: - iPad Scaling Utilities
-
-/// Returns `true` when running on an iPad (or Mac Catalyst with iPad idiom).
 var isIPad: Bool {
     #if os(iOS)
         UIDevice.current.userInterfaceIdiom == .pad
@@ -168,14 +166,10 @@ var isIPad: Bool {
     #endif
 }
 
-/// A multiplier used to proportionally scale hard-coded dimensions on iPad.
-/// iPhone is about 1.0, iPad is about 1.45.
 var iPadScale: CGFloat {
     isIPad ? 1.45 : 1.0
 }
 
-/// A smaller multiplier for elements that should grow on iPad but not as
-/// aggressively (e.g. episode thumbnails, spacing).
 var iPadScaleSmall: CGFloat {
     isIPad ? 1.25 : 1.0
 }

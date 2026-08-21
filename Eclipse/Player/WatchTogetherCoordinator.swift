@@ -6,100 +6,6 @@ import GroupActivities
 import UIKit
 #endif
 
-struct WatchTogetherMediaDescriptor: Codable, Equatable, Sendable {
-    let tmdbID: Int
-    let mediaType: String
-    let seasonNumber: Int?
-    let episodeNumber: Int?
-    let playbackContext: EpisodePlaybackContext?
-    let isAnime: Bool
-    let title: String?
-
-    init(
-        tmdbID: Int,
-        mediaType: String,
-        seasonNumber: Int?,
-        episodeNumber: Int?,
-        playbackContext: EpisodePlaybackContext? = nil,
-        isAnime: Bool = false,
-        title: String? = nil
-    ) {
-        self.tmdbID = tmdbID
-        self.mediaType = mediaType.lowercased()
-        self.seasonNumber = seasonNumber
-        self.episodeNumber = episodeNumber
-        self.playbackContext = playbackContext
-        self.isAnime = isAnime
-        let normalizedTitle = title?.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.title = normalizedTitle?.isEmpty == false ? String(normalizedTitle!.prefix(120)) : nil
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case tmdbID
-        case mediaType
-        case seasonNumber
-        case episodeNumber
-        case playbackContext
-        case isAnime
-        case title
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        tmdbID = try container.decode(Int.self, forKey: .tmdbID)
-        mediaType = try container.decode(String.self, forKey: .mediaType).lowercased()
-        seasonNumber = try container.decodeIfPresent(Int.self, forKey: .seasonNumber)
-        episodeNumber = try container.decodeIfPresent(Int.self, forKey: .episodeNumber)
-        playbackContext = try container.decodeIfPresent(EpisodePlaybackContext.self, forKey: .playbackContext)
-        isAnime = try container.decodeIfPresent(Bool.self, forKey: .isAnime) ?? false
-        title = try container.decodeIfPresent(String.self, forKey: .title)
-    }
-
-    var stableKey: String? {
-        guard tmdbID > 0 else { return nil }
-        switch mediaType {
-        case "movie":
-            return "movie:\(tmdbID)"
-        case "tv":
-            if isAnime || playbackContext?.hasAnimeMediaId == true {
-                guard let context = playbackContext, context.hasAnimeMediaId else { return nil }
-                let animeID = context.anilistMediaId.map(String.init)
-                    ?? context.kitsuMediaId.map { "kitsu:\($0)" }
-                    ?? "missing"
-                return "anime-episode:\(tmdbID):\(animeID):\(context.localSeasonNumber):\(context.localEpisodeNumber)"
-            }
-            guard let seasonNumber, let episodeNumber, seasonNumber > 0, episodeNumber > 0 else {
-                return nil
-            }
-            return "episode:\(tmdbID):\(seasonNumber):\(episodeNumber)"
-        default:
-            return nil
-        }
-    }
-
-    var localSeasonNumber: Int? {
-        playbackContext?.localSeasonNumber ?? seasonNumber
-    }
-
-    var localEpisodeNumber: Int? {
-        playbackContext?.localEpisodeNumber ?? episodeNumber
-    }
-
-    var animeContextFailureReason: String? {
-        guard isAnime, mediaType == "tv" else { return nil }
-        guard let playbackContext else {
-            return "This anime episode has no anime playback context. Watch Together stopped instead of guessing an episode. Reopen it from the anime episode list and try again."
-        }
-        guard playbackContext.hasAnimeMediaId else {
-            return "This anime episode has no AniList or Kitsu identity. Watch Together stopped instead of falling back to TMDB. Enable full anime detail metadata, reopen the episode, and try again."
-        }
-        if playbackContext.isSpecial, playbackContext.anilistMediaId == nil {
-            return "This anime special has no AniList identity, so the other device cannot resolve it exactly. Reopen it after full anime metadata loads and try again."
-        }
-        return nil
-    }
-}
-
 struct WatchTogetherSharedState: Codable, Equatable, Sendable {
     let mediaIdentifier: String
     let media: WatchTogetherMediaDescriptor
@@ -110,17 +16,53 @@ struct WatchTogetherSharedState: Codable, Equatable, Sendable {
     let normalizedProgress: Double?
     let isPlaying: Bool
     let playbackRate: Double
-    /// True while the destination renderer is still resolving. This travels with snapshots so
-    /// a successor authority can release the paused transition if the original authority leaves.
+
     let awaitsReadiness: Bool?
     let sentAt: TimeInterval
     let authorityInstanceID: UUID
+    let isStalled: Bool?
+    let pausedByLifecycle: Bool?
 
-    func projectedPosition(at timestamp: TimeInterval = Date().timeIntervalSince1970) -> Double {
+    init(
+        mediaIdentifier: String,
+        media: WatchTogetherMediaDescriptor,
+        mediaRevision: UInt64,
+        stateRevision: UInt64,
+        position: Double,
+        duration: Double?,
+        normalizedProgress: Double?,
+        isPlaying: Bool,
+        playbackRate: Double,
+        awaitsReadiness: Bool?,
+        sentAt: TimeInterval,
+        authorityInstanceID: UUID,
+        isStalled: Bool? = nil,
+        pausedByLifecycle: Bool? = nil
+    ) {
+        self.mediaIdentifier = mediaIdentifier
+        self.media = media
+        self.mediaRevision = mediaRevision
+        self.stateRevision = stateRevision
+        self.position = position
+        self.duration = duration
+        self.normalizedProgress = normalizedProgress
+        self.isPlaying = isPlaying
+        self.playbackRate = playbackRate
+        self.awaitsReadiness = awaitsReadiness
+        self.sentAt = sentAt
+        self.authorityInstanceID = authorityInstanceID
+        self.isStalled = isStalled
+        self.pausedByLifecycle = pausedByLifecycle
+    }
+
+    func projectedPosition(
+        at timestamp: TimeInterval = Date().timeIntervalSince1970,
+        senderClockOffset: Double = 0
+    ) -> Double {
         guard isPlaying else { return position }
-        let elapsed = timestamp - sentAt
-        guard (0...5).contains(elapsed) else { return position }
-        let projected = position + elapsed * playbackRate
+        let elapsed = timestamp - sentAt + senderClockOffset
+        guard (-1...5).contains(elapsed) else { return position }
+        let projected = position + max(0, elapsed) * playbackRate
         if let duration, duration.isFinite, duration > 0 {
             return min(max(0, projected), duration)
         }
@@ -179,6 +121,8 @@ struct WatchTogetherJoinRequest: Identifiable, Equatable {
 extension Notification.Name {
     static let watchTogetherJoinRequested = Notification.Name("watchTogetherJoinRequested")
     static let watchTogetherSessionCleared = Notification.Name("watchTogetherSessionCleared")
+    static let watchTogetherDisabledJoinAttempted = Notification.Name("watchTogetherDisabledJoinAttempted")
+    static let watchTogetherWaitingForHost = Notification.Name("watchTogetherWaitingForHost")
 }
 
 struct EclipseWatchTogetherActivity: GroupActivity, Codable, Sendable {
@@ -240,6 +184,7 @@ protocol WatchTogetherPlaybackDelegate: AnyObject {
     var watchTogetherIsPlaying: Bool { get }
     var watchTogetherPlaybackRate: Double { get }
     var watchTogetherIsReady: Bool { get }
+    var watchTogetherIsStalled: Bool { get }
     func watchTogetherAdopt(media: WatchTogetherMediaDescriptor)
     func watchTogetherApply(state: WatchTogetherSharedState, shouldSeek: Bool)
     func watchTogetherPrepareForMediaTransition(to media: WatchTogetherMediaDescriptor)
@@ -276,6 +221,14 @@ final class WatchTogetherCoordinator {
         let controlAuthorityID: UUID?
         let targetMedia: WatchTogetherMediaDescriptor?
         let state: WatchTogetherSharedState?
+        var echoInstanceID: UUID?
+        var echoSentAt: TimeInterval?
+        var echoReceivedAt: TimeInterval?
+    }
+
+    private struct ClockSyncSample {
+        let offset: Double
+        let roundTripTime: Double
     }
 
     private struct OutboundMessage {
@@ -322,10 +275,22 @@ final class WatchTogetherCoordinator {
     private var startedObserving = false
     private let groupStateObserver = GroupStateObserver()
 
+    private var clockSyncSampleByInstanceID: [UUID: ClockSyncSample] = [:]
+    private var pendingClockEchoByInstanceID: [UUID: (sentAt: TimeInterval, receivedAt: TimeInterval)] = [:]
+    private var stalledResumeIntent: Bool?
+    private var lastNoticedStallStateRevision: UInt64?
+    private var lastNoticedLifecyclePauseRevision: UInt64?
+    private var lastNoticedTransitionMediaRevision: UInt64?
+    private var authorityTransitionTimeoutTask: Task<Void, Never>?
+    private var peerTransitionNoticeTask: Task<Void, Never>?
+    private var pendingDisabledSession: GroupSession<EclipseWatchTogetherActivity>?
+    private var profileObservationInstalled = false
+
     private init() {}
 
     func start() {
-        guard WatchTogetherSettings.isEnabled(), !startedObserving else { return }
+        installProfileObservationIfNeeded()
+        guard WatchTogetherSettings.isAvailableInCurrentBuild, !startedObserving else { return }
         startedObserving = true
         sessionObservationTask = Task { [weak self] in
             for await session in EclipseWatchTogetherActivity.sessions() {
@@ -333,6 +298,53 @@ final class WatchTogetherCoordinator {
                 self?.configure(session)
             }
         }
+    }
+
+    private func installProfileObservationIfNeeded() {
+        guard !profileObservationInstalled else { return }
+        profileObservationInstalled = true
+        NotificationCenter.default.addObserver(
+            forName: .activeProfileDidChange,
+            object: nil,
+            queue: .main
+        ) { _ in
+            Task { @MainActor in
+                WatchTogetherCoordinator.shared.activeProfileDidChange()
+            }
+        }
+    }
+
+    private func activeProfileDidChange() {
+        if WatchTogetherSettings.isEnabled() {
+            start()
+            if let stashed = pendingDisabledSession {
+                pendingDisabledSession = nil
+                configure(stashed)
+            }
+        } else {
+            declinePendingDisabledSession()
+            if session != nil {
+                leaveSession()
+            }
+        }
+    }
+
+    func joinPendingDisabledSession() {
+        guard pendingDisabledSession != nil else { return }
+        guard !ProfileManager.shared.isKidsModeActive else {
+            declinePendingDisabledSession()
+            return
+        }
+        guard let stashed = pendingDisabledSession else { return }
+        pendingDisabledSession = nil
+        ProfileSettingsStore.active.set(true, forKey: WatchTogetherSettings.enabledKey)
+        start()
+        configure(stashed)
+    }
+
+    func declinePendingDisabledSession() {
+        pendingDisabledSession?.leave()
+        pendingDisabledSession = nil
     }
 
     static func mediaIdentifier(forStableKey stableKey: String) -> String {
@@ -368,16 +380,20 @@ final class WatchTogetherCoordinator {
            let state = canonicalStateFromLiveDelegate(baseline: currentSharedState) {
             acceptLocalState(state)
             didReceiveAuthoritativeStateMessage = true
-            pendingAuthorityTransitionRevision = delegate.watchTogetherIsReady
-                ? nil
-                : state.mediaRevision
+            setPendingAuthorityTransition(
+                revision: delegate.watchTogetherIsReady ? nil : state.mediaRevision
+            )
         }
 
         if let state = currentSharedState,
            (didReceiveAuthoritativeStateMessage || isLocalStateAuthority),
-           state.mediaIdentifier == mediaIdentifier {
+           (state.mediaIdentifier == mediaIdentifier
+                || attachedMedia.map({ state.media.isSameLogicalMedia(as: $0) }) == true) {
+            if state.mediaIdentifier != mediaIdentifier {
+
+                attachedMediaIdentifier = state.mediaIdentifier
+            }
             delegate.watchTogetherAdopt(media: state.media)
-            attachedMedia = state.media
             pendingTransitionKey = nil
             joinDeliveryTask?.cancel()
             joinDeliveryTask = nil
@@ -395,7 +411,8 @@ final class WatchTogetherCoordinator {
             }
             if let state = currentSharedState,
                (didReceiveAuthoritativeStateMessage || isLocalStateAuthority),
-               state.mediaIdentifier != mediaIdentifier {
+               state.mediaIdentifier != attachedMediaIdentifier,
+               attachedMedia.map({ state.media.isSameLogicalMedia(as: $0) }) != true {
                 routeToSharedMedia(state)
             }
         }
@@ -478,9 +495,7 @@ final class WatchTogetherCoordinator {
         }
 
 #if os(iOS)
-        // Multiple iPad WindowGroup roots may still be attaching their scene probes. Wait for one
-        // to provide an identity so only that root can atomically claim the presentation. iPhone
-        // remains compatible with the original single-window delivery if no scene exists yet.
+
         guard UIDevice.current.userInterfaceIdiom != .pad else { return nil }
 #endif
         return request
@@ -490,11 +505,10 @@ final class WatchTogetherCoordinator {
         guard didReceiveAuthoritativeStateMessage,
               let session,
               session.state == .joined,
-              let currentSharedState,
-              let identifier = Self.mediaIdentifier(for: media) else {
+              let currentSharedState else {
             return false
         }
-        return currentSharedState.mediaIdentifier == identifier
+        return currentSharedState.media.isSameLogicalMedia(as: media)
     }
 
     func leaveSession() {
@@ -505,6 +519,46 @@ final class WatchTogetherCoordinator {
     func endSessionForEveryone() {
         session?.end()
         clearSession(leaveCurrent: false)
+    }
+
+    enum SessionRole {
+        case none
+        case authority
+        case follower
+    }
+
+    func sessionRole(for sender: any WatchTogetherPlaybackDelegate) -> SessionRole {
+        guard playbackDelegate === sender,
+              isAttachedToCurrentActivity else {
+            return .none
+        }
+        return isLocalStateAuthority ? .authority : .follower
+    }
+
+    func currentAcceptedState(for sender: any WatchTogetherPlaybackDelegate) -> WatchTogetherSharedState? {
+        guard playbackDelegate === sender,
+              isAttachedToCurrentActivity else {
+            return nil
+        }
+        return currentSharedState
+    }
+
+    func sendLifecyclePause(from sender: any WatchTogetherPlaybackDelegate) {
+        guard playbackDelegate === sender,
+              isAttachedToCurrentActivity,
+              isLocalStateAuthority,
+              currentSharedState?.isPlaying == true || stalledResumeIntent == true else {
+            return
+        }
+        setPendingAuthorityTransition(revision: nil)
+        sendState(
+            reason: .pause,
+            forcedPlayingState: false,
+            forcedAwaitsReadiness: false,
+            advancesRevision: true,
+            markLifecyclePause: true
+        )
+        Logger.shared.log("WatchTogether: broadcast lifecycle pause", type: "Player")
     }
 
     func sendCurrentState(
@@ -521,9 +575,6 @@ final class WatchTogetherCoordinator {
         }
     }
 
-    /// Returns true when the newly-ready authority renderer should begin playback locally.
-    /// Media transitions are announced paused, then released only after the destination
-    /// renderer is actually ready so no participant's timeline advances during resolution.
     func playbackDidBecomeReady(_ sender: any WatchTogetherPlaybackDelegate) -> Bool {
         guard playbackDelegate === sender,
               sender.watchTogetherIsReady,
@@ -537,7 +588,7 @@ final class WatchTogetherCoordinator {
             return false
         }
 
-        pendingAuthorityTransitionRevision = nil
+        setPendingAuthorityTransition(revision: nil)
         sendState(
             reason: .play,
             forcedPosition: sender.watchTogetherPosition,
@@ -556,7 +607,7 @@ final class WatchTogetherCoordinator {
         guard playbackDelegate === sender,
               sender.watchTogetherIsReady,
               isAttachedToCurrentActivity else { return }
-        pendingAuthorityTransitionRevision = nil
+        setPendingAuthorityTransition(revision: nil)
         sendState(
             reason: .play,
             forcedPlayingState: true,
@@ -569,7 +620,7 @@ final class WatchTogetherCoordinator {
         guard playbackDelegate === sender,
               sender.watchTogetherIsReady,
               isAttachedToCurrentActivity else { return }
-        pendingAuthorityTransitionRevision = nil
+        setPendingAuthorityTransition(revision: nil)
         sendState(
             reason: .pause,
             forcedPlayingState: false,
@@ -584,7 +635,7 @@ final class WatchTogetherCoordinator {
               isAttachedToCurrentActivity,
               position.isFinite,
               position >= 0 else { return }
-        pendingAuthorityTransitionRevision = nil
+        setPendingAuthorityTransition(revision: nil)
         sendState(
             reason: .seek,
             forcedPosition: position,
@@ -599,7 +650,7 @@ final class WatchTogetherCoordinator {
               isAttachedToCurrentActivity,
               playbackRate.isFinite,
               (0.25...3.0).contains(playbackRate) else { return }
-        pendingAuthorityTransitionRevision = nil
+        setPendingAuthorityTransition(revision: nil)
         sendState(
             reason: .playbackRate,
             forcedPlaybackRate: playbackRate,
@@ -615,12 +666,17 @@ final class WatchTogetherCoordinator {
         playbackContext: EpisodePlaybackContext? = nil,
         from sender: any WatchTogetherPlaybackDelegate
     ) -> WatchTogetherNextEpisodeResult {
+        let hasValidTargetSeason = seasonNumber > 0
+            || (playbackContext?.hasAnimeMediaId == true
+                && AnimeSyntheticSeasonKey.isSynthetic(
+                    playbackContext?.localSeasonNumber ?? seasonNumber
+                ))
         guard playbackDelegate === sender,
               sender.watchTogetherIsReady,
               isAttachedToCurrentActivity,
               let currentMedia = currentSharedState?.media ?? sender.watchTogetherMediaDescriptor,
               currentMedia.mediaType == "tv",
-              seasonNumber > 0,
+              hasValidTargetSeason,
               episodeNumber > 0,
               let session,
               session.state == .joined else {
@@ -663,7 +719,7 @@ final class WatchTogetherCoordinator {
             sentAt: Date().timeIntervalSince1970,
             authorityInstanceID: senderInstanceID
         )
-        pendingAuthorityTransitionRevision = nextMediaRevision
+        setPendingAuthorityTransition(revision: nextMediaRevision)
         acceptLocalState(state)
         send(
             message(
@@ -736,13 +792,19 @@ final class WatchTogetherCoordinator {
         guard let delegate = playbackDelegate,
               let media = delegate.watchTogetherMediaDescriptor,
               media.animeContextFailureReason == nil,
-              let mediaIdentifier = Self.mediaIdentifier(for: media) else {
+              let computedMediaIdentifier = Self.mediaIdentifier(for: media) else {
             return nil
         }
 
+        let preservesBaselineIdentity = baseline?.media.isSameLogicalMedia(as: media) == true
+        let mediaIdentifier = preservesBaselineIdentity
+            ? (baseline?.mediaIdentifier ?? computedMediaIdentifier)
+            : computedMediaIdentifier
+        let sharedMedia = preservesBaselineIdentity ? (baseline?.media ?? media) : media
+
         let mediaRevision: UInt64
         if let baseline {
-            mediaRevision = baseline.mediaIdentifier == mediaIdentifier
+            mediaRevision = preservesBaselineIdentity || baseline.mediaIdentifier == mediaIdentifier
                 ? baseline.mediaRevision
                 : incrementedRevision(baseline.mediaRevision)
         } else {
@@ -753,7 +815,7 @@ final class WatchTogetherCoordinator {
         let position = clampedPosition(delegate.watchTogetherPosition, duration: duration)
         return WatchTogetherSharedState(
             mediaIdentifier: mediaIdentifier,
-            media: media,
+            media: sharedMedia,
             mediaRevision: mediaRevision,
             stateRevision: stateRevision,
             position: position,
@@ -769,8 +831,27 @@ final class WatchTogetherCoordinator {
 
     private func configure(_ newSession: GroupSession<EclipseWatchTogetherActivity>) {
         guard WatchTogetherSettings.isEnabled() else {
-            newSession.leave()
+            guard WatchTogetherSettings.isAvailableInCurrentBuild else {
+                Logger.shared.log(
+                    "WatchTogether: dropped an incoming session because this build cannot enable Watch Together",
+                    type: "Player"
+                )
+                newSession.leave()
+                return
+            }
+            pendingDisabledSession?.leave()
+            pendingDisabledSession = newSession
+            Logger.shared.log(
+                "WatchTogether: incoming session arrived while the setting is off; asking the user",
+                type: "Player"
+            )
+            NotificationCenter.default.post(name: .watchTogetherDisabledJoinAttempted, object: nil)
             return
+        }
+        if pendingDisabledSession === newSession {
+            pendingDisabledSession = nil
+        } else {
+            declinePendingDisabledSession()
         }
 
         activationTimeoutTask?.cancel()
@@ -787,9 +868,7 @@ final class WatchTogetherCoordinator {
         let liveOriginatorState = isOriginator
             ? canonicalStateFromLiveDelegate(baseline: activitySeedState)
             : nil
-        // Keep the immutable activity state only as a revision baseline if the originator's
-        // replacement player has not attached yet. It remains provisional until that live
-        // delegate rebuilds the canonical state in attach(_:mediaIdentifier:title:).
+
         let seedState = isOriginator
             ? (liveOriginatorState ?? activitySeedState)
             : activitySeedState
@@ -803,7 +882,7 @@ final class WatchTogetherCoordinator {
            let liveOriginatorState,
            playbackDelegate?.watchTogetherIsReady != true,
            liveOriginatorState.awaitsReadiness == true {
-            pendingAuthorityTransitionRevision = liveOriginatorState.mediaRevision
+            setPendingAuthorityTransition(revision: liveOriginatorState.mediaRevision)
         }
 
         let messenger = GroupSessionMessenger(session: newSession)
@@ -934,7 +1013,7 @@ final class WatchTogetherCoordinator {
                 position: nil,
                 isPlaying: nil,
                 playbackRate: nil,
-                sentAt: nil,
+                sentAt: Date().timeIntervalSince1970,
                 controlClock: nil,
                 controlAuthorityID: nil,
                 targetMedia: nil,
@@ -955,7 +1034,7 @@ final class WatchTogetherCoordinator {
                 position: nil,
                 isPlaying: nil,
                 playbackRate: nil,
-                sentAt: nil,
+                sentAt: Date().timeIntervalSince1970,
                 controlClock: nil,
                 controlAuthorityID: nil,
                 targetMedia: nil,
@@ -971,7 +1050,9 @@ final class WatchTogetherCoordinator {
         forcedPlaybackRate: Double? = nil,
         forcedAwaitsReadiness: Bool? = nil,
         advancesRevision: Bool = false,
-        to participants: Participants = .all
+        markLifecyclePause: Bool = false,
+        to participants: Participants = .all,
+        echoInstanceID: UUID? = nil
     ) {
         guard let current = currentSharedState,
               let session,
@@ -979,23 +1060,47 @@ final class WatchTogetherCoordinator {
             return
         }
 
-        let delegateMatches = attachedMediaIdentifier == current.mediaIdentifier
+        let delegateAttached = attachedMediaIdentifier == current.mediaIdentifier
+            && playbackDelegate != nil
+        let delegateMatches = delegateAttached
             && playbackDelegate?.watchTogetherIsReady == true
         guard didReceiveAuthoritativeStateMessage || delegateMatches else {
-            // Never publish an immutable activity payload as live state while the originator's
-            // replacement renderer is still attaching.
+
             return
         }
-        let delegate = delegateMatches ? playbackDelegate : nil
-        let duration = validDuration(delegate?.watchTogetherDuration) ?? current.duration
-        let rawPosition = forcedPosition ?? delegate?.watchTogetherPosition ?? current.projectedPosition()
-        let position = clampedPosition(rawPosition, duration: duration)
         let awaitsReadiness = forcedAwaitsReadiness ?? current.awaitsReadiness
-        let playingState = awaitsReadiness == true
+        guard delegateAttached || awaitsReadiness == true else {
+            return
+        }
+        let delegate = delegateAttached ? playbackDelegate : nil
+        let delegateIsStalled = delegate.map {
+            !$0.watchTogetherIsReady || $0.watchTogetherIsStalled
+        } ?? false
+        let duration = validDuration(delegate?.watchTogetherDuration) ?? current.duration
+        let rawPosition = forcedPosition ?? delegate?.watchTogetherPosition ?? current.position
+        let position = clampedPosition(rawPosition, duration: duration)
+        var playingState = awaitsReadiness == true
             ? false
             : forcedPlayingState ?? delegate?.watchTogetherIsPlaying ?? current.isPlaying
-        let playbackRate = validatedPlaybackRate(forcedPlaybackRate ?? delegate?.watchTogetherPlaybackRate)
-            ?? current.playbackRate
+        if awaitsReadiness == true {
+            stalledResumeIntent = nil
+        } else if delegateIsStalled {
+            if let forcedPlayingState {
+                stalledResumeIntent = forcedPlayingState
+            } else if stalledResumeIntent == nil {
+                stalledResumeIntent = current.isPlaying
+            }
+            playingState = false
+        } else if let intent = stalledResumeIntent, forcedPlayingState == nil {
+            playingState = intent
+            stalledResumeIntent = nil
+        } else if forcedPlayingState != nil {
+            stalledResumeIntent = nil
+        }
+        let playbackRate = delegateIsStalled
+            ? current.playbackRate
+            : validatedPlaybackRate(forcedPlaybackRate ?? delegate?.watchTogetherPlaybackRate)
+                ?? current.playbackRate
 
         let revision: UInt64
         let authorityID: UUID
@@ -1008,6 +1113,15 @@ final class WatchTogetherCoordinator {
             authorityID = senderInstanceID
         }
 
+        let stalledFlag: Bool? = awaitsReadiness != true && delegateIsStalled ? true : nil
+        let lifecyclePauseFlag: Bool?
+        if markLifecyclePause {
+            lifecyclePauseFlag = true
+        } else if !playingState, current.pausedByLifecycle == true {
+            lifecyclePauseFlag = true
+        } else {
+            lifecyclePauseFlag = nil
+        }
         let state = WatchTogetherSharedState(
             mediaIdentifier: current.mediaIdentifier,
             media: current.media,
@@ -1020,10 +1134,12 @@ final class WatchTogetherCoordinator {
             playbackRate: playbackRate,
             awaitsReadiness: awaitsReadiness,
             sentAt: Date().timeIntervalSince1970,
-            authorityInstanceID: authorityID
+            authorityInstanceID: authorityID,
+            isStalled: stalledFlag,
+            pausedByLifecycle: lifecyclePauseFlag
         )
         acceptLocalState(state)
-        send(message(reason: reason, state: state), to: participants)
+        send(message(reason: reason, state: state), to: participants, echoInstanceID: echoInstanceID)
     }
 
     private func message(
@@ -1048,9 +1164,28 @@ final class WatchTogetherCoordinator {
         )
     }
 
-    private func send(_ message: PlaybackMessage, to participants: Participants = .all) {
+    private func send(
+        _ message: PlaybackMessage,
+        to participants: Participants = .all,
+        echoInstanceID targetedEchoInstanceID: UUID? = nil
+    ) {
         guard messenger != nil else { return }
-        outboundMessages.append(OutboundMessage(message: message, participants: participants))
+        var outboundMessage = message
+        if outboundMessage.sentAt != nil {
+            if let targetedEchoInstanceID {
+                if let echo = pendingClockEchoByInstanceID.removeValue(forKey: targetedEchoInstanceID) {
+                    outboundMessage.echoInstanceID = targetedEchoInstanceID
+                    outboundMessage.echoSentAt = echo.sentAt
+                    outboundMessage.echoReceivedAt = echo.receivedAt
+                }
+            } else if let echo = pendingClockEchoByInstanceID.first {
+                outboundMessage.echoInstanceID = echo.key
+                outboundMessage.echoSentAt = echo.value.sentAt
+                outboundMessage.echoReceivedAt = echo.value.receivedAt
+                pendingClockEchoByInstanceID.removeValue(forKey: echo.key)
+            }
+        }
+        outboundMessages.append(OutboundMessage(message: outboundMessage, participants: participants))
         drainOutboundMessagesIfNeeded()
     }
 
@@ -1094,6 +1229,7 @@ final class WatchTogetherCoordinator {
         guard message.sequence > lastSequence else { return }
         lastSequenceBySender[senderKey] = message.sequence
         participantIDByInstanceID[message.senderInstanceID] = context.source.id
+        recordClockEvidence(from: message)
 
         if message.reason == .hello {
             if message.senderInstanceID == stateAuthorityInstanceID {
@@ -1107,7 +1243,11 @@ final class WatchTogetherCoordinator {
 
         if message.reason == .requestState {
             guard isLocalStateResponder(to: context.source, in: session) else { return }
-            sendState(reason: .snapshot, to: .only(context.source))
+            sendState(
+                reason: .snapshot,
+                to: .only(context.source),
+                echoInstanceID: message.senderInstanceID
+            )
             return
         }
 
@@ -1122,14 +1262,153 @@ final class WatchTogetherCoordinator {
         didReceiveAuthoritativeStateMessage = true
         stateAuthorityInstanceID = incoming.authorityInstanceID
         stateAuthorityParticipantID = context.source.id
+        if incoming.authorityInstanceID != senderInstanceID {
+            stalledResumeIntent = nil
+        }
         authorityMappingGraceTask?.cancel()
         authorityMappingGraceTask = nil
         if incoming.awaitsReadiness == true {
-            pendingAuthorityTransitionRevision = incoming.mediaRevision
+            setPendingAuthorityTransition(revision: incoming.mediaRevision)
         } else if incoming.authorityInstanceID != senderInstanceID {
-            pendingAuthorityTransitionRevision = nil
+            setPendingAuthorityTransition(revision: nil)
         }
+        schedulePeerTransitionNoticeIfNeeded(for: incoming)
         handleAcceptedState(incoming, reason: message.reason)
+    }
+
+    private func recordClockEvidence(from message: PlaybackMessage) {
+        let now = Date().timeIntervalSince1970
+        if let sentAt = message.sentAt, sentAt.isFinite {
+            pendingClockEchoByInstanceID[message.senderInstanceID] = (sentAt, now)
+        }
+        guard message.echoInstanceID == senderInstanceID,
+              let echoSentAt = message.echoSentAt,
+              let echoReceivedAt = message.echoReceivedAt,
+              let replySentAt = message.sentAt,
+              echoSentAt.isFinite,
+              echoReceivedAt.isFinite,
+              replySentAt.isFinite else {
+            return
+        }
+        let roundTripTime = (now - echoSentAt) - (replySentAt - echoReceivedAt)
+        guard roundTripTime >= 0, roundTripTime <= 30 else { return }
+        let offset = ((echoReceivedAt - echoSentAt) + (replySentAt - now)) / 2
+        guard offset.isFinite, abs(offset) <= 12 * 60 * 60 else { return }
+        let sample = ClockSyncSample(offset: offset, roundTripTime: roundTripTime)
+        if let existing = clockSyncSampleByInstanceID[message.senderInstanceID],
+           roundTripTime > existing.roundTripTime + 0.05 {
+            return
+        }
+        clockSyncSampleByInstanceID[message.senderInstanceID] = sample
+    }
+
+    private func clockOffset(forInstanceID instanceID: UUID) -> Double {
+        guard instanceID != senderInstanceID else { return 0 }
+        return clockSyncSampleByInstanceID[instanceID]?.offset ?? 0
+    }
+
+    func projectedPosition(of state: WatchTogetherSharedState) -> Double {
+        state.projectedPosition(
+            senderClockOffset: clockOffset(forInstanceID: state.authorityInstanceID)
+        )
+    }
+
+    private func setPendingAuthorityTransition(revision: UInt64?) {
+        pendingAuthorityTransitionRevision = revision
+        authorityTransitionTimeoutTask?.cancel()
+        authorityTransitionTimeoutTask = nil
+        guard let revision else { return }
+        authorityTransitionTimeoutTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 45_000_000_000)
+            } catch {
+                return
+            }
+            guard let self else { return }
+            self.authorityTransitionTimeoutTask = nil
+            self.releaseExpiredAuthorityTransition(revision: revision)
+        }
+    }
+
+    private func releaseExpiredAuthorityTransition(revision: UInt64) {
+        guard pendingAuthorityTransitionRevision == revision,
+              isLocalStateAuthority,
+              let current = currentSharedState,
+              current.mediaRevision == revision,
+              current.awaitsReadiness == true,
+              let session,
+              session.state == .joined else {
+            return
+        }
+        setPendingAuthorityTransition(revision: nil)
+        let state = WatchTogetherSharedState(
+            mediaIdentifier: current.mediaIdentifier,
+            media: current.media,
+            mediaRevision: current.mediaRevision,
+            stateRevision: allocateStateRevision(),
+            position: current.position,
+            duration: current.duration,
+            normalizedProgress: current.normalizedProgress,
+            isPlaying: false,
+            playbackRate: current.playbackRate,
+            awaitsReadiness: false,
+            sentAt: Date().timeIntervalSince1970,
+            authorityInstanceID: senderInstanceID
+        )
+        acceptLocalState(state)
+        send(message(reason: .pause, state: state))
+        playbackDelegate?.watchTogetherShowNotice("The next episode didn't start in time, so playback controls were released for everyone.")
+        Logger.shared.log("WatchTogether: released an expired media transition revision=\(revision)", type: "Player")
+    }
+
+    private func schedulePeerTransitionNoticeIfNeeded(for state: WatchTogetherSharedState) {
+        guard state.awaitsReadiness == true,
+              state.authorityInstanceID != senderInstanceID else {
+            peerTransitionNoticeTask?.cancel()
+            peerTransitionNoticeTask = nil
+            return
+        }
+        guard peerTransitionNoticeTask == nil,
+              lastNoticedTransitionMediaRevision != state.mediaRevision else { return }
+        let revision = state.mediaRevision
+        peerTransitionNoticeTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 15_000_000_000)
+            } catch {
+                return
+            }
+            guard let self else { return }
+            self.peerTransitionNoticeTask = nil
+            guard let current = self.currentSharedState,
+                  current.awaitsReadiness == true,
+                  current.mediaRevision == revision else { return }
+            self.lastNoticedTransitionMediaRevision = revision
+            self.playbackDelegate?.watchTogetherShowNotice(
+                "Still waiting for the host to start the next episode. Tap play to start without them."
+            )
+        }
+    }
+
+    private func presentStateNotices(
+        for state: WatchTogetherSharedState,
+        to delegate: any WatchTogetherPlaybackDelegate
+    ) {
+        if state.isStalled == true {
+            if lastNoticedStallStateRevision != state.stateRevision {
+                lastNoticedStallStateRevision = state.stateRevision
+                delegate.watchTogetherShowNotice("Waiting for the host's stream to buffer...")
+            }
+        } else {
+            lastNoticedStallStateRevision = nil
+        }
+        if !state.isPlaying, state.pausedByLifecycle == true {
+            if lastNoticedLifecyclePauseRevision != state.stateRevision {
+                lastNoticedLifecyclePauseRevision = state.stateRevision
+                delegate.watchTogetherShowNotice("The host stepped away, so playback is paused. Tap play to keep watching.")
+            }
+        } else if state.isPlaying {
+            lastNoticedLifecyclePauseRevision = nil
+        }
     }
 
     private func resolvedState(
@@ -1221,15 +1500,23 @@ final class WatchTogetherCoordinator {
         if state.awaitsReadiness == true, state.isPlaying {
             return nil
         }
+        if state.isStalled == true, state.isPlaying {
+            return nil
+        }
         return state
     }
 
     private func shouldAccept(_ incoming: WatchTogetherSharedState) -> Bool {
-        // The first live message always supersedes the immutable activity bootstrap. Comparing
-        // equal revisions or wall-clock timestamps here can otherwise reject the authority when
-        // devices have clock skew or the originator changed episodes while the session formed.
+
         guard didReceiveAuthoritativeStateMessage else { return true }
         guard let current = currentSharedState else { return true }
+        return Self.prefersIncomingState(incoming, over: current)
+    }
+
+    static func prefersIncomingState(
+        _ incoming: WatchTogetherSharedState,
+        over current: WatchTogetherSharedState
+    ) -> Bool {
         if incoming.mediaRevision != current.mediaRevision {
             return incoming.mediaRevision > current.mediaRevision
         }
@@ -1238,7 +1525,9 @@ final class WatchTogetherCoordinator {
         }
         if incoming.authorityInstanceID == current.authorityInstanceID {
             return incoming.mediaIdentifier == current.mediaIdentifier
-                && incoming.sentAt > current.sentAt
+        }
+        if incoming.isPlaying != current.isPlaying {
+            return !incoming.isPlaying
         }
         return incoming.authorityInstanceID.uuidString > current.authorityInstanceID.uuidString
     }
@@ -1263,7 +1552,22 @@ final class WatchTogetherCoordinator {
         }
         let forceSeek = reason == .seek || reason == .nextEpisode
         applySharedState(state, to: delegate, forceSeek: forceSeek)
+        presentStateNotices(for: state, to: delegate)
         notifyConnectionState()
+    }
+
+    static let driftSeekThreshold: Double = 2.0
+    static let driftNudgeThreshold: Double = 0.35
+
+    func synchronizedPosition(
+        of state: WatchTogetherSharedState,
+        localDuration: Double?
+    ) -> Double {
+        let projected = projectedPosition(of: state)
+        guard let localDuration, localDuration.isFinite, localDuration > 0 else {
+            return projected
+        }
+        return min(projected, max(0, localDuration - 1))
     }
 
     private func applySharedState(
@@ -1271,23 +1575,12 @@ final class WatchTogetherCoordinator {
         to delegate: any WatchTogetherPlaybackDelegate,
         forceSeek: Bool
     ) {
-        let projectedPosition = state.projectedPosition()
-        let synchronizedPosition: Double
-        let localDuration = validDuration(delegate.watchTogetherDuration)
-        if let localDuration,
-           let sharedDuration = validDuration(state.duration) {
-            let projectedProgress = min(max(0, projectedPosition / sharedDuration), 1)
-            synchronizedPosition = projectedProgress * localDuration
-        } else if let localDuration,
-                  let progress = state.normalizedProgress,
-                  progress.isFinite,
-                  (0...1).contains(progress) {
-            synchronizedPosition = progress * localDuration
-        } else {
-            synchronizedPosition = projectedPosition
-        }
-        let drift = abs(delegate.watchTogetherPosition - synchronizedPosition)
-        let shouldSeek = forceSeek || drift >= 0.35
+        let target = synchronizedPosition(
+            of: state,
+            localDuration: validDuration(delegate.watchTogetherDuration)
+        )
+        let drift = abs(delegate.watchTogetherPosition - target)
+        let shouldSeek = forceSeek || drift >= Self.driftSeekThreshold
         delegate.watchTogetherApply(state: state, shouldSeek: shouldSeek)
     }
 
@@ -1450,6 +1743,21 @@ final class WatchTogetherCoordinator {
                     type: "Player"
                 )
             }
+            guard self?.didReceiveAuthoritativeStateMessage == false,
+                  let observedSessionID = session?.id,
+                  self?.session?.id == observedSessionID else { return }
+            NotificationCenter.default.post(name: .watchTogetherWaitingForHost, object: nil)
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: 5_000_000_000)
+                } catch {
+                    return
+                }
+                guard let self, let session, self.session?.id == session.id else { return }
+                guard !self.didReceiveAuthoritativeStateMessage else { return }
+                self.sendHello()
+                self.requestCurrentState()
+            }
         }
     }
 
@@ -1458,8 +1766,7 @@ final class WatchTogetherCoordinator {
         in session: GroupSession<EclipseWatchTogetherActivity>
     ) -> Bool {
         guard didReceiveAuthoritativeStateMessage else {
-            // An activity payload is only a hint for finding the current authority.
-            // It must never be echoed back as if it were live playback state.
+
             return false
         }
         if isLocalStateAuthority {
@@ -1468,8 +1775,7 @@ final class WatchTogetherCoordinator {
         if let authorityID = stateAuthorityInstanceID,
            participantIDByInstanceID[authorityID] == nil,
            !authorityMappingGraceExpired {
-            // Wait for the authority's hello mapping instead of letting an arbitrary participant
-            // answer with a stale bootstrap state while the host is still joining.
+
             return false
         }
         if let authorityParticipantID = stateAuthorityParticipantID {
@@ -1518,8 +1824,7 @@ final class WatchTogetherCoordinator {
                     return
                 }
             } else if !authorityMappingGraceExpired {
-                // The originator instance and SharePlay participant use different UUID spaces.
-                // Do not elect a replacement until hello maps the current authority.
+
                 return
             }
         }
@@ -1530,8 +1835,7 @@ final class WatchTogetherCoordinator {
             let delegateMatches = attachedMediaIdentifier == current.mediaIdentifier
                 && playbackDelegate?.watchTogetherIsReady == true
             guard didReceiveAuthoritativeStateMessage || delegateMatches else {
-                // Never promote the immutable activity bootstrap to authoritative playback.
-                // With no live matching renderer, keep requesting a real state instead.
+
                 stateAuthorityParticipantID = nil
                 requestCurrentState()
                 return
@@ -1539,9 +1843,10 @@ final class WatchTogetherCoordinator {
             stateAuthorityParticipantID = fallback.id
             participantIDByInstanceID[senderInstanceID] = fallback.id
             stateAuthorityInstanceID = senderInstanceID
+            stalledResumeIntent = nil
             let position = delegateMatches
-                ? playbackDelegate?.watchTogetherPosition ?? current.projectedPosition()
-                : current.projectedPosition()
+                ? playbackDelegate?.watchTogetherPosition ?? projectedPosition(of: current)
+                : projectedPosition(of: current)
             let duration = delegateMatches
                 ? validDuration(playbackDelegate?.watchTogetherDuration) ?? current.duration
                 : current.duration
@@ -1564,7 +1869,7 @@ final class WatchTogetherCoordinator {
             acceptLocalState(state)
             didReceiveAuthoritativeStateMessage = true
             if state.awaitsReadiness == true {
-                pendingAuthorityTransitionRevision = state.mediaRevision
+                setPendingAuthorityTransition(revision: state.mediaRevision)
             }
             send(message(reason: .snapshot, state: state))
             if let delegate = playbackDelegate,
@@ -1692,7 +1997,14 @@ final class WatchTogetherCoordinator {
         messenger = nil
         currentSharedState = nil
         pendingTransitionKey = nil
-        pendingAuthorityTransitionRevision = nil
+        setPendingAuthorityTransition(revision: nil)
+        peerTransitionNoticeTask?.cancel()
+        peerTransitionNoticeTask = nil
+        stalledResumeIntent = nil
+        lastNoticedStallStateRevision = nil
+        lastNoticedLifecyclePauseRevision = nil
+        lastNoticedTransitionMediaRevision = nil
+        pendingClockEchoByInstanceID.removeAll()
         didReceiveAuthoritativeStateMessage = false
         logicalStateRevision = 0
         stateAuthorityInstanceID = nil

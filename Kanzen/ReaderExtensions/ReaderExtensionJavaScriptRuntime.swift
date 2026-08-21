@@ -1140,14 +1140,22 @@ enum ReaderExtensionJavaScriptRuntime {
 
     static func date(_ raw: Any?) -> Date? {
         if let number = raw as? NSNumber {
-            let value = number.doubleValue
-            return Date(timeIntervalSince1970: value > 10_000_000_000 ? value / 1_000 : value)
+            return boundedUnixDate(number.doubleValue)
         }
         if let value = raw as? String {
-            if let number = TimeInterval(value) { return Date(timeIntervalSince1970: number > 10_000_000_000 ? number / 1_000 : number) }
+            if let number = TimeInterval(value) { return boundedUnixDate(number) }
             return ISO8601DateFormatter().date(from: value)
         }
         return nil
+    }
+
+    private static func boundedUnixDate(_ rawValue: TimeInterval) -> Date? {
+        let seconds = rawValue > 10_000_000_000 ? rawValue / 1_000 : rawValue
+        guard seconds.isFinite,
+              (-62_135_596_800...253_402_300_799).contains(seconds) else {
+            return nil
+        }
+        return Date(timeIntervalSince1970: seconds)
     }
 
     private static func providerQueue(_ id: ReaderExtensionSourceID) -> DispatchQueue {
@@ -1947,7 +1955,7 @@ final class ReaderExtensionDOMBridge {
               let root = elements[handle],
               admitTraversal(of: root, handle: handle),
               let selected = try? root.select(selector).array() else { return [] }
-        return selected.prefix(ReaderExtensionSecurityPolicy.maximumDOMSelectedRows).compactMap {
+        return selected.filter { $0 !== root }.prefix(ReaderExtensionSecurityPolicy.maximumDOMSelectedRows).compactMap {
             let handle = store($0)
             return handle == 0 ? nil : handle
         }

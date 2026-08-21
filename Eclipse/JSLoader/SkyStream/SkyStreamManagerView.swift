@@ -4,9 +4,6 @@ import CryptoKit
 import UIKit
 import ImageIO
 
-/// Records the user's acknowledgement against the immutable archive bytes, not a package name,
-/// URL, or repository host. A package update therefore gets a new warning automatically when its
-/// archive hash changes, while the same verified archive is not warned about repeatedly.
 enum SkyStreamUntestedWarningAcknowledgement {
     private static let keyPrefix = "skyStreamUntestedWarningSeen.v2."
 
@@ -33,7 +30,7 @@ enum SkyStreamUntestedWarningAcknowledgement {
 
     static func wasSeen(
         forArchiveSHA256 value: String?,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = ProfileSettingsStore.services
     ) -> Bool {
         guard let key = warningKey(forArchiveSHA256: value) else { return false }
         return defaults.bool(forKey: key)
@@ -41,16 +38,13 @@ enum SkyStreamUntestedWarningAcknowledgement {
 
     static func markSeen(
         forArchiveSHA256 value: String?,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = ProfileSettingsStore.services
     ) {
         guard let key = warningKey(forArchiveSHA256: value) else { return }
         defaults.set(true, forKey: key)
     }
 }
 
-/// Coalesces native icon fetches behind the same URL/DNS/redirect/body boundary used by plugin
-/// requests. The small global lane prevents a hostile catalog from turning fast list scrolling
-/// into unbounded cross-host work; exact URL requests share one cancellable task and bounded cache.
 private actor SkyStreamIconFetchCoordinator {
     static let shared = SkyStreamIconFetchCoordinator()
 
@@ -70,8 +64,7 @@ private actor SkyStreamIconFetchCoordinator {
     private var activeFetches = 0
     private var slotWaiters: [SlotWaiter] = []
     private var inFlightByURL: [String: InFlight] = [:]
-    /// A separate client prevents any valid third-party package identifier from sharing request
-    /// slots or reset/invalidation lifecycle with UI metadata fetches.
+
     private let httpClient = SkyStreamHTTPClient()
     private let cache: NSCache<NSString, NSData> = {
         let cache = NSCache<NSString, NSData>()
@@ -135,8 +128,7 @@ private actor SkyStreamIconFetchCoordinator {
         if let result {
             cache.setObject(result as NSData, forKey: key as NSString, cost: result.count)
         }
-        // The shared task has completed. Other waiters retain their local task handle and receive
-        // the same result even after this registry entry is removed.
+
         inFlightByURL.removeValue(forKey: key)
         return result
     }
@@ -223,7 +215,7 @@ private actor SkyStreamIconFetchCoordinator {
     private func releaseSlot() {
         if !slotWaiters.isEmpty {
             let next = slotWaiters.removeFirst()
-            // Transfer this occupied slot directly; `activeFetches` remains unchanged.
+
             next.continuation.resume()
         } else {
             activeFetches = max(0, activeFetches - 1)
@@ -241,9 +233,6 @@ private struct SkyStreamDecodedIcon: @unchecked Sendable {
     let memoryCost: Int
 }
 
-/// SkyStream icon strings have already crossed the package/repository validation boundary, but
-/// persisted state can outlive validation changes. Recheck and fetch through the bounded native
-/// loader, then decode only a small first-frame thumbnail off the main thread.
 private struct SkyStreamIconView: View {
     let rawURL: String?
     let size: CGFloat
@@ -259,16 +248,29 @@ private struct SkyStreamIconView: View {
         return cache
     }()
 
+    private static let validatedURLCache: NSCache<NSString, NSString> = {
+        let cache = NSCache<NSString, NSString>()
+        cache.countLimit = 256
+        return cache
+    }()
+
     private var validatedURLString: String? {
-        guard let rawURL,
-              let validated = try? SkyStreamRemoteURLPolicy.shared.validateSyntactic(
+        guard let rawURL else { return nil }
+        let cacheKey = rawURL as NSString
+        if let memoized = Self.validatedURLCache.object(forKey: cacheKey) {
+            return memoized.length == 0 ? nil : memoized as String
+        }
+        guard let validated = try? SkyStreamRemoteURLPolicy.shared.validateSyntactic(
                 rawURL,
                 purpose: .icon
               ),
               validated.url.scheme?.lowercased() == "https" else {
+            Self.validatedURLCache.setObject("" as NSString, forKey: cacheKey)
             return nil
         }
-        return validated.url.absoluteString
+        let resolved = validated.url.absoluteString
+        Self.validatedURLCache.setObject(resolved as NSString, forKey: cacheKey)
+        return resolved
     }
 
     var body: some View {
@@ -366,6 +368,8 @@ struct SkyStreamManagerView: View {
     @State private var pendingReplacement: PendingInstall?
     @State private var showUntestedWarning = false
     @State private var showReplacementWarning = false
+    @State private var isRetryingLoad = false
+    @State private var showResetConfirmation = false
 
     private struct PendingInstall: Identifiable {
         enum Source {
@@ -395,6 +399,10 @@ struct SkyStreamManagerView: View {
                                 .font(.caption)
                         }
                     }
+                }
+
+                if manager.stateLoadDidFail || !manager.unreadablePackageIDs.isEmpty {
+                    stateLoadFailureSection
                 }
 
                 Section {
@@ -459,12 +467,18 @@ struct SkyStreamManagerView: View {
                 }
             }
             .overlay {
-                if !manager.isLoaded {
+                if !manager.isLoaded && !manager.stateLoadDidFail {
                     ProgressView("Loading SkyStream…")
                 }
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
+        .alert("Reset SkyStream Data?", isPresented: $showResetConfirmation) {
+            Button("Cancel", role: .cancel) { }
+            Button("Reset", role: .destructive) { performReset() }
+        } message: {
+            Text("This removes every saved SkyStream repository and installed package from this device. You can add them again afterwards.")
+        }
         .alert("Untested Plugin", isPresented: $showUntestedWarning) {
             Button("Cancel", role: .cancel) { pendingInstall = nil }
             Button("Install") {
@@ -490,6 +504,78 @@ struct SkyStreamManagerView: View {
             Button("OK", role: .cancel) { errorMessage = nil }
         } message: {
             Text(errorMessage ?? "Unknown error")
+        }
+    }
+
+    private var stateLoadFailureHeadline: String {
+        if manager.stateLoadDidFail {
+            return "SkyStream could not read its saved data, so no repositories or packages are available."
+        }
+        if manager.unreadablePackageIDs.count == 1 {
+            return "1 installed SkyStream package could not be read and was skipped."
+        }
+        return "\(manager.unreadablePackageIDs.count) installed SkyStream packages could not be read and were skipped."
+    }
+
+    private var stateLoadFailureSection: some View {
+        Section {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "exclamationmark.octagon.fill")
+                        .foregroundStyle(.red)
+                    Text(stateLoadFailureHeadline)
+                        .font(.subheadline)
+                }
+                if manager.stateLoadDidFail, let detail = manager.lastErrorMessage {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Button {
+                retryLoad()
+            } label: {
+                HStack {
+                    Label("Try Again", systemImage: "arrow.clockwise")
+                    Spacer()
+                    if isRetryingLoad {
+                        ProgressView()
+                    }
+                }
+            }
+            .disabled(isRetryingLoad)
+
+            Button(role: .destructive) {
+                showResetConfirmation = true
+            } label: {
+                Label("Reset SkyStream Plugin Data", systemImage: "trash")
+            }
+            .disabled(isRetryingLoad)
+        } footer: {
+            Text("Resetting clears the saved repositories and installed packages on this device so SkyStream can start over.")
+        }
+    }
+
+    private func retryLoad() {
+        guard !isRetryingLoad else { return }
+        isRetryingLoad = true
+        Task {
+            await manager.retryLoadingPersistedState()
+            isRetryingLoad = false
+        }
+    }
+
+    private func performReset() {
+        guard !isRetryingLoad else { return }
+        isRetryingLoad = true
+        Task {
+            do {
+                try await manager.resetPluginData()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            isRetryingLoad = false
         }
     }
 
@@ -590,8 +676,7 @@ struct SkyStreamManagerView: View {
                         replacementPolicy: policy
                     )
                 }
-                // Commit the acknowledgement only after the exact archive was installed. Failed
-                // validation or a cancelled replacement must not silently suppress the warning.
+
                 SkyStreamUntestedWarningAcknowledgement.markSeen(
                     forArchiveSHA256: installed.archiveSHA256
                 )
@@ -834,8 +919,7 @@ private struct SkyStreamRepositoryDetailView: View {
                 ) {
                     install(request, policy: .normal)
                 } else {
-                    // Hashless catalogs cannot prove that a URL still serves acknowledged bytes,
-                    // so they deliberately warn on every explicit install/update attempt.
+
                     showUntestedWarning = true
                 }
             }
@@ -844,9 +928,6 @@ private struct SkyStreamRepositoryDetailView: View {
         }
     }
 
-    /// Catalog metadata cannot certify executable behavior because the archive has not been
-    /// downloaded or smoke-tested yet. Only surface limitations that are provable from the
-    /// bounded manifest; every ordinary package remains Untested.
     private func catalogCompatibility(
         for manifest: SkyStreamPluginManifest
     ) -> SkyStreamCompatibilityResult {
@@ -920,13 +1001,11 @@ private struct SkyStreamRepositoryDetailView: View {
         _ entry: SkyStreamPluginListEntry,
         installed: SkyStreamInstalledPluginState
     ) -> Bool {
-        // A same-version row with a new signed archive hash is still new code. Keep its Replace
-        // action enabled so the new hash receives both the Untested and replacement confirmations.
+
         guard let expected = SkyStreamUntestedWarningAcknowledgement.normalizedArchiveSHA256(
             entry.expectedArchiveSHA256
         ) else {
-            // A hashless catalog cannot establish a code change without downloading the archive.
-            // Preserve the existing version-based button behavior; an enabled install still warns.
+
             return true
         }
         return installed.archiveSHA256.caseInsensitiveCompare(expected) == .orderedSame
@@ -965,12 +1044,17 @@ struct SkyStreamPluginSettingsView: View {
     let packageName: String
     @Environment(\.dismiss) private var dismiss
     @StateObject private var manager = SkyStreamPluginManager.shared
+    @StateObject private var profileManager = ProfileManager.shared
     @State private var showResetConfirmation = false
     @State private var showUninstallConfirmation = false
     @State private var errorMessage: String?
 
     private var plugin: SkyStreamInstalledPluginState? {
         manager.plugin(packageName: packageName)
+    }
+
+    private var canAdminister: Bool {
+        profileManager.activeProfile?.isKidsProfile != true
     }
 
     var body: some View {
@@ -998,6 +1082,7 @@ struct SkyStreamPluginSettingsView: View {
                         Picker("Domain", selection: Binding(
                             get: { plugin.selectedDomainURL ?? domains.first?.url ?? plugin.manifest.baseURL },
                             set: { value in
+                                guard canAdminister else { return }
                                 Task {
                                     do { try await manager.setSelectedDomain(packageName: packageName, domainURL: value) }
                                     catch { errorMessage = error.localizedDescription }
@@ -1009,6 +1094,7 @@ struct SkyStreamPluginSettingsView: View {
                             }
                         }
                     }
+                    .disabled(!canAdminister)
                 }
 
                 Section("Source") {
@@ -1021,23 +1107,33 @@ struct SkyStreamPluginSettingsView: View {
                             .foregroundStyle(.orange)
                     }
                     Button("Check for Update") {
+                        guard canAdminister else { return }
                         Task {
                             do { try await manager.updateIfAvailable(packageName: packageName) }
                             catch { errorMessage = error.localizedDescription }
                         }
                     }
                     .disabled(
-                        (plugin.provenance.kind != .repository
-                            && plugin.provenance.kind != .directArchive)
+                        !canAdminister
+                            || (plugin.provenance.kind != .repository
+                                && plugin.provenance.kind != .directArchive)
                             || plugin.provenance.frozenAt != nil
                     )
                 }
 
-                Section {
-                    Button("Reset Plugin Preferences") { showResetConfirmation = true }
-                    Button("Uninstall Plugin", role: .destructive) { showUninstallConfirmation = true }
-                } footer: {
-                    Text("Uninstalling removes the whole package and all of its provider rows.")
+                if canAdminister {
+                    Section {
+                        Button("Reset Plugin Preferences") { showResetConfirmation = true }
+                        Button("Uninstall Plugin", role: .destructive) { showUninstallConfirmation = true }
+                    } footer: {
+                        Text("Uninstalling removes the whole package and all of its provider rows.")
+                    }
+                } else {
+                    Section {
+                        Text("This is a kids profile, so it can see this plugin but not change or remove it. Switch to a grown-up profile to make those changes.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
         }
@@ -1045,6 +1141,7 @@ struct SkyStreamPluginSettingsView: View {
         .alert("Reset Preferences?", isPresented: $showResetConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Reset", role: .destructive) {
+                guard canAdminister else { return }
                 Task {
                     do { try await manager.resetPreferences(packageName: packageName) }
                     catch { errorMessage = error.localizedDescription }
@@ -1054,6 +1151,7 @@ struct SkyStreamPluginSettingsView: View {
         .alert("Uninstall Plugin?", isPresented: $showUninstallConfirmation) {
             Button("Cancel", role: .cancel) {}
             Button("Uninstall", role: .destructive) {
+                guard canAdminister else { return }
                 Task {
                     do {
                         try await manager.uninstall(packageName: packageName)
@@ -1091,6 +1189,7 @@ struct SkyStreamProviderRow: View {
     let provider: SkyStreamProviderDescriptor
     @ObservedObject var manager: SkyStreamPluginManager
     @ObservedObject var healthStore: SourceHealthStore
+    var canAdminister = true
     @State private var errorMessage: String?
     @State private var showingSettings = false
 
@@ -1099,9 +1198,8 @@ struct SkyStreamProviderRow: View {
     }
 
     private var healthState: SourceHealthDisplayState {
-        _ = healthStore.version
         guard currentProvider.isEnabled else { return .unchecked }
-        return healthStore.displayState(for: provider.id)
+        return healthStore.displayStates[provider.id] ?? .unchecked
     }
 
     var body: some View {
@@ -1133,13 +1231,15 @@ struct SkyStreamProviderRow: View {
             }
             .buttonStyle(.plain)
 
-            Button {
-                showingSettings = true
-            } label: {
-                Image(systemName: "gearshape")
+            if canAdminister {
+                Button {
+                    showingSettings = true
+                } label: {
+                    Image(systemName: "gearshape")
+                }
+                .buttonStyle(.borderless)
+                .accessibilityLabel("Settings for \(currentProvider.displayName)")
             }
-            .buttonStyle(.borderless)
-            .accessibilityLabel("Settings for \(currentProvider.displayName)")
         }
         .sheet(isPresented: $showingSettings) {
             NavigationView {

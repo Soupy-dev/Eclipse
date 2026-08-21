@@ -1,32 +1,64 @@
-// Local recommendation engine that builds a genre taste profile
-// from watch history and bookmarks, then scores catalog items.
-
 import Foundation
 
 final class RecommendationEngine {
     static let shared = RecommendationEngine()
+    static let maximumPersistedCacheBytes = 4 * 1_024 * 1_024
+    static let maximumCachedResults = 100
     private init() {
-        let forYou = Self.loadFromDisk()
+        activeProfileID = ProfileManager.shared.activeProfileID
+        Self.migrateLegacyCachesIfNeeded()
+        let forYou = Self.loadFromDisk(fileURL: Self.fileURL(for: activeProfileID))
         cachedRecommendations = forYou.results
         cacheDate = forYou.date
 
-        let byw = Self.loadBYWFromDisk()
+        let byw = Self.loadBYWFromDisk(fileURL: Self.bywFileURL(for: activeProfileID))
         becauseYouWatchedTitle = byw.title
         becauseYouWatchedResults = byw.results
         becauseYouWatchedCacheDate = byw.date
     }
 
-    // Cache to avoid recomputing every time HomeViewModel loads
+    private var activeProfileID: UUID
+
+    func switchProfile(to profileID: UUID) {
+        guard profileID != activeProfileID else { return }
+        flushPendingWrites(forProfile: activeProfileID)
+        activeProfileID = profileID
+
+        let forYou = Self.loadFromDisk(fileURL: Self.fileURL(for: profileID))
+        cachedRecommendations = forYou.results
+        cacheDate = forYou.date
+
+        let byw = Self.loadBYWFromDisk(fileURL: Self.bywFileURL(for: profileID))
+        becauseYouWatchedTitle = byw.title
+        becauseYouWatchedResults = byw.results
+        becauseYouWatchedCacheDate = byw.date
+    }
+
+    func flushPendingWrites(forProfile outgoing: UUID) {
+        saveToDisk(forProfile: outgoing)
+        saveBYWToDisk(forProfile: outgoing)
+    }
+
+    func discardStore(forProfile profileID: UUID) {
+        discardCaches(forProfile: profileID)
+    }
+
+    func discardCaches(forProfile profileID: UUID) {
+        try? FileManager.default.removeItem(at: Self.fileURL(for: profileID))
+        try? FileManager.default.removeItem(at: Self.bywFileURL(for: profileID))
+        if profileID == activeProfileID {
+            invalidateCache()
+        }
+    }
+
     private var cachedRecommendations: [TMDBSearchResult] = []
     private var cacheDate: Date?
-    private let cacheTTL: TimeInterval = 21600 // 6 hours
+    private let cacheTTL: TimeInterval = 21600
 
-    // "Because you watched" cache
     private var becauseYouWatchedTitle: String = ""
     private var becauseYouWatchedResults: [TMDBSearchResult] = []
     private var becauseYouWatchedCacheDate: Date?
 
-    // Codable wrappers for disk persistence (including cache date)
     private struct ForYouCache: Codable {
         let results: [TMDBSearchResult]
         let date: Date
@@ -38,41 +70,61 @@ final class RecommendationEngine {
         let date: Date
     }
 
-    private static let fileURL: URL = {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return docs.appendingPathComponent("RecommendationCache.json")
-    }()
+    private static var documentsDirectory: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+    }
 
-    private static let bywFileURL: URL = {
-        let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return docs.appendingPathComponent("BecauseYouWatchedCache.json")
-    }()
+    private static func fileURL(for profileID: UUID) -> URL {
+        documentsDirectory.appendingPathComponent(
+            ProfileScopedStorage.documentFileName(
+                base: "RecommendationCache",
+                fileExtension: "json",
+                profileID: profileID
+            )
+        )
+    }
 
-    /// Generate "Just For You" recommendations by scoring items from existing catalogs
-    /// against the user's genre taste profile. Optionally fetches TMDB recommendations
-    /// for the user's top watched items (throttled to avoid rate limiting).
+    private static func migrateLegacyCachesIfNeeded() {
+        ProfileScopedStorage.migrateLegacyStoreIfNeeded(marker: "recommendations") {
+            let fileManager = FileManager.default
+            for name in ["RecommendationCache.json", "BecauseYouWatchedCache.json"] {
+                try? fileManager.removeItem(at: documentsDirectory.appendingPathComponent(name))
+            }
+        }
+    }
+
+    private static func bywFileURL(for profileID: UUID) -> URL {
+        documentsDirectory.appendingPathComponent(
+            ProfileScopedStorage.documentFileName(
+                base: "BecauseYouWatchedCache",
+                fileExtension: "json",
+                profileID: profileID
+            )
+        )
+    }
+
     func generateRecommendations(
         catalogResults: [String: [TMDBSearchResult]],
         tmdbService: TMDBService
     ) async -> [TMDBSearchResult] {
-        // Return cache if fresh
+
         if let cacheDate, Date().timeIntervalSince(cacheDate) < cacheTTL, !cachedRecommendations.isEmpty {
             return cachedRecommendations
         }
 
+        let owner = activeProfileID
+
         let profile = buildTasteProfile()
 
-        // No signals = no recommendations
         guard !profile.genreWeights.isEmpty else { return [] }
 
-        // 1. Score every item from existing catalogs
         var candidateScores: [Int: (result: TMDBSearchResult, score: Double)] = [:]
         let watchedIds = profile.watchedIds
         let bookmarkedIds = profile.bookmarkedIds
 
         for (_, results) in catalogResults {
             for item in results {
-                // Skip already-watched and bookmarked items
+
                 guard !watchedIds.contains(item.id), !bookmarkedIds.contains(item.id) else { continue }
                 guard candidateScores[item.id] == nil else { continue }
 
@@ -83,12 +135,11 @@ final class RecommendationEngine {
             }
         }
 
-        // 2. Fetch TMDB recommendations for top 3 most-watched items (throttled)
         let tmdbRecs = await fetchTMDBRecommendations(profile: profile, tmdbService: tmdbService)
         for item in tmdbRecs {
             guard !watchedIds.contains(item.id), !bookmarkedIds.contains(item.id) else { continue }
             if let existing = candidateScores[item.id] {
-                // Boost score for items that also appear in TMDB recs
+
                 candidateScores[item.id] = (existing.result, existing.score * 1.5)
             } else {
                 let score = scoreItem(item, profile: profile)
@@ -96,15 +147,17 @@ final class RecommendationEngine {
             }
         }
 
-        // 3. Rank, deduplicate, and take top 20
         let ranked = candidateScores.values
             .sorted { $0.score > $1.score }
             .prefix(20)
             .map { $0.result }
 
-        cachedRecommendations = Array(ranked)
+        let results = Array(ranked)
+        guard owner == activeProfileID else { return results }
+
+        cachedRecommendations = results
         cacheDate = Date()
-        saveToDisk()
+        saveToDisk(forProfile: owner)
         return cachedRecommendations
     }
 
@@ -114,32 +167,27 @@ final class RecommendationEngine {
         becauseYouWatchedResults = []
         becauseYouWatchedTitle = ""
         becauseYouWatchedCacheDate = nil
-        try? FileManager.default.removeItem(at: Self.fileURL)
-        try? FileManager.default.removeItem(at: Self.bywFileURL)
+        try? FileManager.default.removeItem(at: Self.fileURL(for: activeProfileID))
+        try? FileManager.default.removeItem(at: Self.bywFileURL(for: activeProfileID))
     }
 
-    // MARK: - Because You Watched
-
-    /// Picks the most-recently-watched item with meaningful progress and fetches
-    /// TMDB recommendations for it. Returns (displayTitle, recommendations).
     func generateBecauseYouWatched(
         tmdbService: TMDBService
     ) async -> (title: String, results: [TMDBSearchResult]) {
-        // Return cache if fresh
+
         if let cacheDate = becauseYouWatchedCacheDate,
            Date().timeIntervalSince(cacheDate) < cacheTTL,
            !becauseYouWatchedResults.isEmpty {
             return (becauseYouWatchedTitle, becauseYouWatchedResults)
         }
 
+        let owner = activeProfileID
         let progressData = ProgressManager.shared.getProgressData()
 
-        // Recently watched movies at 30% or more.
         let movieCandidates = progressData.movieProgress
             .filter { $0.progress >= 0.3 }
             .sorted { $0.lastUpdated > $1.lastUpdated }
 
-        // Recently watched shows with any episode at 30% or more.
         var showLastWatched: [Int: Date] = [:]
         for ep in progressData.episodeProgress where ep.progress >= 0.3 {
             if let existing = showLastWatched[ep.showId] {
@@ -149,7 +197,6 @@ final class RecommendationEngine {
             }
         }
 
-        // Build a unified candidate list with title and date
         struct Candidate {
             let id: Int
             let title: String
@@ -167,12 +214,10 @@ final class RecommendationEngine {
             }
         }
 
-        // Sort by most recent and pick randomly from the top 5
         candidates.sort { $0.date > $1.date }
         let topCandidates = Array(candidates.prefix(5))
         guard let pick = topCandidates.randomElement() else { return ("", []) }
 
-        // Fetch TMDB recommendations for this item
         var recs: [TMDBSearchResult] = []
         if pick.isMovie {
             if let movies = try? await tmdbService.getMovieRecommendations(id: pick.id) {
@@ -200,79 +245,89 @@ final class RecommendationEngine {
             }
         }
 
-        // Filter out already-watched items
         let watchedIds = Set(progressData.movieProgress.map { $0.id } +
                             Array(showLastWatched.keys))
         recs = recs.filter { !watchedIds.contains($0.id) }
 
+        guard owner == activeProfileID else { return (pick.title, recs) }
+
         becauseYouWatchedTitle = pick.title
         becauseYouWatchedResults = recs
         becauseYouWatchedCacheDate = Date()
-        saveBYWToDisk()
+        saveBYWToDisk(forProfile: owner)
         return (pick.title, recs)
     }
 
-    // MARK: - Persistence
-
-    private func saveToDisk() {
+    private func saveToDisk(forProfile profileID: UUID) {
         guard !cachedRecommendations.isEmpty, let cacheDate else { return }
         do {
-            let cache = ForYouCache(results: cachedRecommendations, date: cacheDate)
+            let cache = ForYouCache(
+                results: Self.sanitizedResults(cachedRecommendations),
+                date: cacheDate
+            )
             let data = try JSONEncoder().encode(cache)
-            try data.write(to: Self.fileURL, options: .atomic)
+            guard data.count <= Self.maximumPersistedCacheBytes else { return }
+            try data.write(to: Self.fileURL(for: profileID), options: .atomic)
         } catch { }
     }
 
-    private static func loadFromDisk() -> (results: [TMDBSearchResult], date: Date?) {
+    private static func loadFromDisk(fileURL: URL) -> (results: [TMDBSearchResult], date: Date?) {
         guard FileManager.default.fileExists(atPath: fileURL.path),
-              let data = try? Data(contentsOf: fileURL),
+              let data = try? BoundedLocalStoreReader.read(
+                from: fileURL,
+                maximumBytes: maximumPersistedCacheBytes
+              ),
               let cache = try? JSONDecoder().decode(ForYouCache.self, from: data) else {
             return ([], nil)
         }
-        return (cache.results, cache.date)
+        return (sanitizedResults(cache.results), cache.date)
     }
 
-    private func saveBYWToDisk() {
+    private func saveBYWToDisk(forProfile profileID: UUID) {
         guard !becauseYouWatchedResults.isEmpty, let becauseYouWatchedCacheDate else { return }
         do {
             let cache = BecauseYouWatchedDiskCache(
                 title: becauseYouWatchedTitle,
-                results: becauseYouWatchedResults,
+                results: Self.sanitizedResults(becauseYouWatchedResults),
                 date: becauseYouWatchedCacheDate
             )
             let data = try JSONEncoder().encode(cache)
-            try data.write(to: Self.bywFileURL, options: .atomic)
+            guard data.count <= Self.maximumPersistedCacheBytes else { return }
+            try data.write(to: Self.bywFileURL(for: profileID), options: .atomic)
         } catch { }
     }
 
-    private static func loadBYWFromDisk() -> (title: String, results: [TMDBSearchResult], date: Date?) {
+    private static func loadBYWFromDisk(fileURL bywFileURL: URL) -> (title: String, results: [TMDBSearchResult], date: Date?) {
         guard FileManager.default.fileExists(atPath: bywFileURL.path),
-              let data = try? Data(contentsOf: bywFileURL),
+              let data = try? BoundedLocalStoreReader.read(
+                from: bywFileURL,
+                maximumBytes: maximumPersistedCacheBytes
+              ),
               let cache = try? JSONDecoder().decode(BecauseYouWatchedDiskCache.self, from: data) else {
             return ("", [], nil)
         }
-        return (cache.title, cache.results, cache.date)
+        return (cache.title, sanitizedResults(cache.results), cache.date)
     }
 
-    /// Returns the current recommendation cache for backup
     func getRecommendationCache() -> [TMDBSearchResult] {
-        return cachedRecommendations
+        Self.sanitizedResults(cachedRecommendations)
     }
 
-    /// Restores recommendation cache from backup
     func restoreRecommendationCache(_ items: [TMDBSearchResult]) {
-        cachedRecommendations = items
+        cachedRecommendations = Self.sanitizedResults(items)
         cacheDate = Date()
-        saveToDisk()
+        saveToDisk(forProfile: activeProfileID)
     }
 
-    // MARK: - Taste Profile
+    private static func sanitizedResults(_ results: [TMDBSearchResult]) -> [TMDBSearchResult] {
+        Array(results.compactMap(\.sanitizedForPersistence).prefix(maximumCachedResults))
+    }
 
     private struct TasteProfile {
-        var genreWeights: [Int: Double] // genreId -> weight
+        var genreWeights: [Int: Double]
         var watchedIds: Set<Int>
         var bookmarkedIds: Set<Int>
-        var topWatchedMovieIds: [Int] // sorted by recency, for TMDB recs
+        var topWatchedMovieIds: [Int]
         var topWatchedShowIds: [Int]
     }
 
@@ -283,17 +338,15 @@ final class RecommendationEngine {
         var movieEntries: [(id: Int, date: Date)] = []
         var showEntries: [(id: Int, date: Date)] = []
 
-        // 1. Watch history - strongest signal
         let progressData = ProgressManager.shared.getProgressData()
 
         for movie in progressData.movieProgress {
             watchedIds.insert(movie.id)
-            if movie.progress >= 0.3 { // At least 30% watched = meaningful signal
+            if movie.progress >= 0.3 {
                 movieEntries.append((movie.id, movie.lastUpdated))
             }
         }
 
-        // Group episodes by show
         var showLastWatched: [Int: Date] = [:]
         for episode in progressData.episodeProgress {
             watchedIds.insert(episode.showId)
@@ -309,24 +362,22 @@ final class RecommendationEngine {
             showEntries.append((showId, date))
         }
 
-        // 2. Bookmarks - secondary signal
         let collections = LibraryManager.shared.collections
         for collection in collections {
             for item in collection.items {
                 bookmarkedIds.insert(item.searchResult.id)
                 if let genres = item.searchResult.genreIds {
                     for genreId in genres {
-                        // Bookmarked = moderate weight
+
                         genreWeights[genreId, default: 0] += 2.0
                     }
                 }
             }
         }
 
-        // 3. User star ratings - direct signal
         for rating in UserRatingManager.shared.allRatings() {
-            // Highly-rated items boost their genres; low-rated items dampen them.
-            let ratingWeight: Double = (Double(rating.stars) - 5.5) / 2.25 // about -2 to +2
+
+            let ratingWeight: Double = (Double(rating.stars) - 5.5) / 2.25
             for collection in collections {
                 for item in collection.items where item.searchResult.id == rating.tmdbId {
                     if let genres = item.searchResult.genreIds {
@@ -338,12 +389,6 @@ final class RecommendationEngine {
             }
         }
 
-        // 4. Derive genre weights from bookmarked items for watched content
-        //    (watched movies/shows don't carry genreIds in ProgressManager,
-        //     so we use bookmarks + catalog cross-reference)
-        //    The actual genre scoring happens at item-score time using the item's own genreIds.
-
-        // Boost genres from recently watched content found in bookmarks
         let recentWatchedIds = Set(
             (movieEntries.sorted { $0.date > $1.date }.prefix(10).map { $0.id }) +
             (showEntries.sorted { $0.date > $1.date }.prefix(10).map { $0.id })
@@ -352,13 +397,12 @@ final class RecommendationEngine {
             for item in collection.items where recentWatchedIds.contains(item.searchResult.id) {
                 if let genres = item.searchResult.genreIds {
                     for genreId in genres {
-                        genreWeights[genreId, default: 0] += 3.0 // Watched + bookmarked = strong signal
+                        genreWeights[genreId, default: 0] += 3.0
                     }
                 }
             }
         }
 
-        // Sort by recency for TMDB rec fetching
         let topMovies = movieEntries.sorted { $0.date > $1.date }.prefix(3).map { $0.id }
         let topShows = showEntries.sorted { $0.date > $1.date }.prefix(3).map { $0.id }
 
@@ -371,34 +415,27 @@ final class RecommendationEngine {
         )
     }
 
-    // MARK: - Scoring
-
     private func scoreItem(_ item: TMDBSearchResult, profile: TasteProfile) -> Double {
         guard let genres = item.genreIds, !genres.isEmpty else { return 0 }
 
         var score: Double = 0
 
-        // Genre match scoring
         let maxWeight = profile.genreWeights.values.max() ?? 1
         for genreId in genres {
             if let weight = profile.genreWeights[genreId] {
-                score += weight / maxWeight // Normalize to 0-1 per genre
+                score += weight / maxWeight
             }
         }
 
-        // Popularity boost (slight preference for popular content)
         let popularityBoost = min(item.popularity / 100.0, 0.5)
         score += popularityBoost
 
-        // Rating boost
         if let rating = item.voteAverage, rating > 6.0 {
-            score += (rating - 6.0) / 10.0 // 0 to 0.4 boost
+            score += (rating - 6.0) / 10.0
         }
 
         return score
     }
-
-    // MARK: - TMDB Recommendations (throttled)
 
     private func fetchTMDBRecommendations(
         profile: TasteProfile,
@@ -406,7 +443,6 @@ final class RecommendationEngine {
     ) async -> [TMDBSearchResult] {
         var results: [TMDBSearchResult] = []
 
-        // Fetch recs for top 2 movies + top 1 show (max 3 API calls)
         let movieIds = Array(profile.topWatchedMovieIds.prefix(2))
         let showIds = Array(profile.topWatchedShowIds.prefix(1))
 
@@ -431,8 +467,8 @@ final class RecommendationEngine {
                 }
                 results.append(contentsOf: converted)
             }
-            // Brief delay between calls
-            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms
+
+            try? await Task.sleep(nanoseconds: 100_000_000)
         }
 
         for showId in showIds {

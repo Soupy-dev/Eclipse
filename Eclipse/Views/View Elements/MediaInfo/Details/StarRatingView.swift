@@ -1,5 +1,3 @@
-// Expandable 10-star rating and private notes control for media details.
-
 import Foundation
 import SwiftUI
 
@@ -440,7 +438,7 @@ struct ReaderRatingNotesView: View {
     private var trackerButtons: some View {
         let hasAniList = trackerManager.hasConnectedAccount(.anilist)
         let hasMAL = trackerManager.hasConnectedAccount(.myAnimeList)
-        let canWrite = trackerManager.trackerState.syncEnabled && currentRating > 0
+        let canWrite = trackerManager.trackerState.readerSyncEnabled && currentRating > 0
 
         if hasAniList || hasMAL {
             HStack(spacing: 10) {

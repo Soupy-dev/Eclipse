@@ -1,3 +1,10 @@
+//
+//  PlayerSettingsView.swift
+//  Sora
+//
+//  Created by Francesco on 19/09/25.
+//
+
 import SwiftUI
 
 enum ExternalPlayer: String, CaseIterable, Identifiable {
@@ -36,356 +43,433 @@ enum ExternalPlayer: String, CaseIterable, Identifiable {
 }
 
 final class PlayerSettingsStore: ObservableObject {
+
+    private let profileStore: UserDefaults
+
     @Published var playbackEngine: PlaybackEngine {
-        didSet { PlaybackEngine.selected = playbackEngine }
+        didSet { PlaybackEngine.setSelected(playbackEngine, defaults: profileStore) }
     }
 
     @Published var defaultPlaybackSpeed: Double {
-        didSet { UserDefaults.standard.set(defaultPlaybackSpeed, forKey: "defaultPlaybackSpeed") }
+        didSet { profileStore.set(defaultPlaybackSpeed, forKey: "defaultPlaybackSpeed") }
     }
 
     @Published var holdSpeed: Double {
-        didSet { UserDefaults.standard.set(holdSpeed, forKey: "holdSpeedPlayer") }
+        didSet { profileStore.set(holdSpeed, forKey: "holdSpeedPlayer") }
     }
 
     @Published var externalPlayer: ExternalPlayer {
-        didSet { UserDefaults.standard.set(externalPlayer.rawValue, forKey: "externalPlayer") }
+        didSet { profileStore.set(externalPlayer.rawValue, forKey: "externalPlayer") }
     }
 
     @Published var landscapeOnly: Bool {
-        didSet { UserDefaults.standard.set(landscapeOnly, forKey: "alwaysLandscape") }
+        didSet { profileStore.set(landscapeOnly, forKey: "alwaysLandscape") }
     }
 
     @Published var playerPlaybackLockEnabled: Bool {
-        didSet { PlayerPlaybackLockSettings.setEnabled(playerPlaybackLockEnabled) }
+        didSet { PlayerPlaybackLockSettings.setEnabled(playerPlaybackLockEnabled, defaults: profileStore) }
     }
 
     #if !os(tvOS)
     @Published var preferDownloadedMedia: Bool {
-        didSet { UserDefaults.standard.set(preferDownloadedMedia, forKey: "preferDownloadedMedia") }
+        didSet { profileStore.set(preferDownloadedMedia, forKey: "preferDownloadedMedia") }
     }
     #endif
 
     @Published var aniSkipAutoSkip: Bool {
-        didSet { UserDefaults.standard.set(aniSkipAutoSkip, forKey: "aniSkipAutoSkip") }
+        didSet { profileStore.set(aniSkipAutoSkip, forKey: "aniSkipAutoSkip") }
     }
 
     @Published var aniSkipEnabled: Bool {
-        didSet { UserDefaults.standard.set(aniSkipEnabled, forKey: "aniSkipEnabled") }
+        didSet { profileStore.set(aniSkipEnabled, forKey: "aniSkipEnabled") }
     }
 
     @Published var introDBEnabled: Bool {
-        didSet { UserDefaults.standard.set(introDBEnabled, forKey: "introDBEnabled") }
+        didSet { profileStore.set(introDBEnabled, forKey: "introDBEnabled") }
     }
 
     @Published var introDBAppEnabled: Bool {
-        didSet { UserDefaults.standard.set(introDBAppEnabled, forKey: "introDBAppEnabled") }
+        didSet { profileStore.set(introDBAppEnabled, forKey: "introDBAppEnabled") }
     }
 
     @Published var skip85sEnabled: Bool {
-        didSet { UserDefaults.standard.set(skip85sEnabled, forKey: "skip85sEnabled") }
+        didSet { profileStore.set(skip85sEnabled, forKey: "skip85sEnabled") }
     }
 
     @Published var skip85sAlwaysVisible: Bool {
-        didSet { UserDefaults.standard.set(skip85sAlwaysVisible, forKey: "skip85sAlwaysVisible") }
+        didSet { profileStore.set(skip85sAlwaysVisible, forKey: "skip85sAlwaysVisible") }
     }
 
     @Published var showNextEpisodeButton: Bool {
-        didSet { UserDefaults.standard.set(showNextEpisodeButton, forKey: "showNextEpisodeButton") }
+        didSet { profileStore.set(showNextEpisodeButton, forKey: "showNextEpisodeButton") }
     }
 
     @Published var showEpisodeBrowserButton: Bool {
-        didSet { UserDefaults.standard.set(showEpisodeBrowserButton, forKey: "showEpisodeBrowserButton") }
+        didSet { profileStore.set(showEpisodeBrowserButton, forKey: "showEpisodeBrowserButton") }
     }
 
     @Published var showPlayerServicesButton: Bool {
-        didSet { UserDefaults.standard.set(showPlayerServicesButton, forKey: PlayerServicesButtonSettings.key) }
+        didSet { profileStore.set(showPlayerServicesButton, forKey: PlayerServicesButtonSettings.key) }
     }
 
     @Published var showNextEpisodePosterButton: Bool {
-        didSet { UserDefaults.standard.set(showNextEpisodePosterButton, forKey: "showNextEpisodePosterButton") }
+        didSet { profileStore.set(showNextEpisodePosterButton, forKey: "showNextEpisodePosterButton") }
     }
 
     @Published var nextEpisodeThreshold: Double {
-        didSet { UserDefaults.standard.set(nextEpisodeThreshold, forKey: "nextEpisodeThreshold") }
+        didSet { profileStore.set(nextEpisodeThreshold, forKey: "nextEpisodeThreshold") }
     }
 
     @Published var nextEpisodeSkipFillerEnabled: Bool {
-        didSet { UserDefaults.standard.set(nextEpisodeSkipFillerEnabled, forKey: NextEpisodeFillerSettings.enabledKey) }
+        didSet { profileStore.set(nextEpisodeSkipFillerEnabled, forKey: NextEpisodeFillerSettings.enabledKey) }
     }
 
     @Published var playerBrightnessGestureEnabled: Bool {
-        didSet { UserDefaults.standard.set(playerBrightnessGestureEnabled, forKey: "playerBrightnessGestureEnabled") }
+        didSet { profileStore.set(playerBrightnessGestureEnabled, forKey: "playerBrightnessGestureEnabled") }
     }
 
     @Published var playerVolumeGestureEnabled: Bool {
-        didSet { UserDefaults.standard.set(playerVolumeGestureEnabled, forKey: "playerVolumeGestureEnabled") }
+        didSet { profileStore.set(playerVolumeGestureEnabled, forKey: "playerVolumeGestureEnabled") }
     }
 
     @Published var playerTwoFingerTapPlayPauseEnabled: Bool {
-        didSet { UserDefaults.standard.set(playerTwoFingerTapPlayPauseEnabled, forKey: "playerTwoFingerTapPlayPauseEnabled") }
+        didSet { profileStore.set(playerTwoFingerTapPlayPauseEnabled, forKey: "playerTwoFingerTapPlayPauseEnabled") }
     }
 
     @Published var playerCenterTapPlayPauseEnabled: Bool {
-        didSet { UserDefaults.standard.set(playerCenterTapPlayPauseEnabled, forKey: "playerCenterTapPlayPauseEnabled") }
+        didSet { profileStore.set(playerCenterTapPlayPauseEnabled, forKey: "playerCenterTapPlayPauseEnabled") }
     }
 
     @Published var playerDoubleTapSeekEnabled: Bool {
-        didSet { UserDefaults.standard.set(playerDoubleTapSeekEnabled, forKey: "playerDoubleTapSeekEnabled") }
+        didSet { profileStore.set(playerDoubleTapSeekEnabled, forKey: "playerDoubleTapSeekEnabled") }
     }
 
     @Published var playerDoubleTapSeekSeconds: Double {
-        didSet { UserDefaults.standard.set(playerDoubleTapSeekSeconds, forKey: "playerDoubleTapSeekSeconds") }
+        didSet { profileStore.set(playerDoubleTapSeekSeconds, forKey: "playerDoubleTapSeekSeconds") }
     }
 
     @Published var playerOpenSubtitlesEnabled: Bool {
-        didSet { UserDefaults.standard.set(playerOpenSubtitlesEnabled, forKey: "playerOpenSubtitlesEnabled") }
+        didSet { profileStore.set(playerOpenSubtitlesEnabled, forKey: "playerOpenSubtitlesEnabled") }
     }
 
     @Published var playerOpenSubtitlesAutoFallbackEnabled: Bool {
-        didSet { UserDefaults.standard.set(playerOpenSubtitlesAutoFallbackEnabled, forKey: "playerOpenSubtitlesAutoFallbackEnabled") }
+        didSet { profileStore.set(playerOpenSubtitlesAutoFallbackEnabled, forKey: "playerOpenSubtitlesAutoFallbackEnabled") }
     }
 
     @Published var playerSubtitleAppearanceEnabled: Bool {
-        didSet { UserDefaults.standard.set(playerSubtitleAppearanceEnabled, forKey: "playerSubtitleAppearanceEnabled") }
+        didSet { profileStore.set(playerSubtitleAppearanceEnabled, forKey: "playerSubtitleAppearanceEnabled") }
     }
 
     @Published var mpvForegroundFPS: Int {
-        didSet { UserDefaults.standard.set(mpvForegroundFPS == 60 ? 60 : 30, forKey: "mpvForegroundFPS") }
+        didSet { profileStore.set(mpvForegroundFPS == 60 ? 60 : 30, forKey: "mpvForegroundFPS") }
     }
 
     @Published var mpvRenderBackend: MPVRenderBackend {
-        didSet { UserDefaults.standard.set(mpvRenderBackend.rawValue, forKey: "mpvRenderBackend") }
+        didSet { profileStore.set(mpvRenderBackend.rawValue, forKey: "mpvRenderBackend") }
     }
 
     @Published var mpvMetalQualityProfile: MPVMetalQualityProfile {
-        didSet { UserDefaults.standard.set(mpvMetalQualityProfile.rawValue, forKey: "mpvMetalQualityProfile") }
+        didSet { profileStore.set(mpvMetalQualityProfile.rawValue, forKey: "mpvMetalQualityProfile") }
     }
 
     @Published var mpvUpscalingMode: MPVUpscalingMode {
-        didSet { UserDefaults.standard.set(mpvUpscalingMode.rawValue, forKey: "mpvUpscalingMode") }
+        didSet { profileStore.set(mpvUpscalingMode.rawValue, forKey: "mpvUpscalingMode") }
     }
 
+    @Published var mpvNeuralUpscaler: MPVNeuralUpscaler {
+        didSet { profileStore.set(mpvNeuralUpscaler.rawValue, forKey: "mpvNeuralUpscaler") }
+    }
+
+    @Published var mpvNeuralUpscalerTV: MPVNeuralUpscaler {
+        didSet { profileStore.set(mpvNeuralUpscalerTV.rawValue, forKey: "mpvNeuralUpscalerTV") }
+    }
+
+
     @Published var mpvPlayerSkin: MPVPlayerSkin {
-        didSet { UserDefaults.standard.set(mpvPlayerSkin.rawValue, forKey: MPVPlayerSkinSettings.skinKey) }
+        didSet { profileStore.set(mpvPlayerSkin.rawValue, forKey: MPVPlayerSkinSettings.skinKey) }
     }
 
     @Published var mpvPerformanceOverlayEnabled: Bool {
-        didSet { UserDefaults.standard.set(mpvPerformanceOverlayEnabled, forKey: "mpvPerformanceOverlayEnabled") }
+        didSet { profileStore.set(mpvPerformanceOverlayEnabled, forKey: "mpvPerformanceOverlayEnabled") }
     }
 
     @Published var mpvUseLegacyCPURenderer: Bool {
-        didSet { UserDefaults.standard.set(mpvUseLegacyCPURenderer, forKey: "mpvUseLegacyCPURenderer") }
+        didSet { profileStore.set(mpvUseLegacyCPURenderer, forKey: "mpvUseLegacyCPURenderer") }
     }
 
     @Published var mpvAppExitPictureInPictureEnabled: Bool {
-        didSet { UserDefaults.standard.set(mpvAppExitPictureInPictureEnabled, forKey: "mpvAppExitPictureInPictureEnabled") }
+        didSet { profileStore.set(mpvAppExitPictureInPictureEnabled, forKey: "mpvAppExitPictureInPictureEnabled") }
     }
 
     @Published var mpvPictureInPictureEnabled: Bool {
-        didSet { UserDefaults.standard.set(mpvPictureInPictureEnabled, forKey: "mpvPictureInPictureEnabled") }
+        didSet { profileStore.set(mpvPictureInPictureEnabled, forKey: "mpvPictureInPictureEnabled") }
     }
 
     @Published var mpvHDRMode: MPVHDRMode {
-        didSet { UserDefaults.standard.set(mpvHDRMode.rawValue, forKey: "mpvHDRMode") }
+        didSet { profileStore.set(mpvHDRMode.rawValue, forKey: "mpvHDRMode") }
     }
 
     @Published var audioComfortMode: AudioComfortMode {
-        didSet { UserDefaults.standard.set(audioComfortMode.rawValue, forKey: "audioComfortMode") }
+        didSet { profileStore.set(audioComfortMode.rawValue, forKey: "audioComfortMode") }
     }
 
     @Published var audioComfortScopeCategories: Set<AudioComfortContentCategory> {
-        didSet { UserDefaults.standard.set(audioComfortScopeCategories.map { $0.rawValue }, forKey: "audioComfortScopeCategories") }
+        didSet { profileStore.set(audioComfortScopeCategories.map { $0.rawValue }, forKey: "audioComfortScopeCategories") }
     }
 
     @Published var mpvSurroundSoundEnabled: Bool {
-        didSet { UserDefaults.standard.set(mpvSurroundSoundEnabled, forKey: "mpvSurroundSoundEnabled") }
+        didSet { profileStore.set(mpvSurroundSoundEnabled, forKey: "mpvSurroundSoundEnabled") }
     }
 
     @Published var experimentalMPVPreloadEnabled: Bool {
-        didSet { UserDefaults.standard.set(experimentalMPVPreloadEnabled, forKey: ExperimentalFeatureState.mpvPreloadEnabledKey) }
+        didSet { profileStore.set(experimentalMPVPreloadEnabled, forKey: ExperimentalFeatureState.mpvPreloadEnabledKey) }
     }
 
     @Published var experimentalMPVSmoothTransitionEnabled: Bool {
-        didSet { UserDefaults.standard.set(experimentalMPVSmoothTransitionEnabled, forKey: ExperimentalFeatureState.mpvSmoothTransitionEnabledKey) }
+        didSet { profileStore.set(experimentalMPVSmoothTransitionEnabled, forKey: ExperimentalFeatureState.mpvSmoothTransitionEnabledKey) }
     }
 
     @Published var experimentalMPVPreloadCellularEnabled: Bool {
-        didSet { UserDefaults.standard.set(experimentalMPVPreloadCellularEnabled, forKey: ExperimentalFeatureState.mpvPreloadCellularEnabledKey) }
+        didSet { profileStore.set(experimentalMPVPreloadCellularEnabled, forKey: ExperimentalFeatureState.mpvPreloadCellularEnabledKey) }
     }
 
     @Published var experimentalMPVPreloadWifiLimitMB: Int {
-        didSet { UserDefaults.standard.set(ExperimentalFeatureState.clampedMPVPreloadWifiLimitMB(experimentalMPVPreloadWifiLimitMB), forKey: ExperimentalFeatureState.mpvPreloadWifiLimitMBKey) }
+        didSet { profileStore.set(ExperimentalFeatureState.clampedMPVPreloadWifiLimitMB(experimentalMPVPreloadWifiLimitMB), forKey: ExperimentalFeatureState.mpvPreloadWifiLimitMBKey) }
     }
 
     @Published var experimentalMPVPreloadCellularLimitMB: Int {
-        didSet { UserDefaults.standard.set(ExperimentalFeatureState.clampedMPVPreloadCellularLimitMB(experimentalMPVPreloadCellularLimitMB), forKey: ExperimentalFeatureState.mpvPreloadCellularLimitMBKey) }
+        didSet { profileStore.set(ExperimentalFeatureState.clampedMPVPreloadCellularLimitMB(experimentalMPVPreloadCellularLimitMB), forKey: ExperimentalFeatureState.mpvPreloadCellularLimitMBKey) }
     }
 
     @Published var experimentalMPVPreloadAutoClearEnabled: Bool {
-        didSet { UserDefaults.standard.set(experimentalMPVPreloadAutoClearEnabled, forKey: ExperimentalFeatureState.mpvPreloadAutoClearKey) }
+        didSet { profileStore.set(experimentalMPVPreloadAutoClearEnabled, forKey: ExperimentalFeatureState.mpvPreloadAutoClearKey) }
     }
 
     @Published var experimentalMPVShowRemainingTime: Bool {
-        didSet { UserDefaults.standard.set(experimentalMPVShowRemainingTime, forKey: ExperimentalFeatureState.mpvShowRemainingTimeKey) }
+        didSet { profileStore.set(experimentalMPVShowRemainingTime, forKey: ExperimentalFeatureState.mpvShowRemainingTimeKey) }
     }
 
     @Published var experimentalMPVPreciseProgress: Bool {
-        didSet { UserDefaults.standard.set(experimentalMPVPreciseProgress, forKey: ExperimentalFeatureState.mpvPreciseProgressKey) }
+        didSet { profileStore.set(experimentalMPVPreciseProgress, forKey: ExperimentalFeatureState.mpvPreciseProgressKey) }
     }
 
     @Published var experimentalMPVIgnoreSpecialSubtitleStyles: Bool {
-        didSet { UserDefaults.standard.set(experimentalMPVIgnoreSpecialSubtitleStyles, forKey: ExperimentalFeatureState.mpvIgnoreSpecialSubtitleStylesKey) }
+        didSet { profileStore.set(experimentalMPVIgnoreSpecialSubtitleStyles, forKey: ExperimentalFeatureState.mpvIgnoreSpecialSubtitleStylesKey) }
     }
 
-    private static func migratedBool(genericKey: String, legacyKey: String, defaultValue: Bool) -> Bool {
-        if UserDefaults.standard.object(forKey: genericKey) == nil {
-            let value = UserDefaults.standard.object(forKey: legacyKey) as? Bool ?? defaultValue
-            UserDefaults.standard.set(value, forKey: genericKey)
+    private static func migratedBool(store: UserDefaults, genericKey: String, legacyKey: String, defaultValue: Bool) -> Bool {
+        if store.object(forKey: genericKey) == nil {
+            let value = store.object(forKey: legacyKey) as? Bool ?? defaultValue
+            store.set(value, forKey: genericKey)
             return value
         }
-        return UserDefaults.standard.bool(forKey: genericKey)
+        return store.bool(forKey: genericKey)
     }
 
-    private static func migratedDouble(genericKey: String, legacyKey: String, defaultValue: Double) -> Double {
-        if UserDefaults.standard.object(forKey: genericKey) == nil {
-            let value = UserDefaults.standard.double(forKey: legacyKey)
-            let resolved = value > 0 ? value : defaultValue
-            UserDefaults.standard.set(resolved, forKey: genericKey)
+    private static func migratedDouble(store: UserDefaults, genericKey: String, legacyKey: String, defaultValue: Double) -> Double {
+        if store.object(forKey: genericKey) == nil {
+            let value = store.double(forKey: legacyKey)
+            let resolved = value.isFinite && value > 0 ? value : defaultValue
+            store.set(resolved, forKey: genericKey)
             return resolved
         }
-        let value = UserDefaults.standard.double(forKey: genericKey)
-        return value > 0 ? value : defaultValue
+        let value = store.double(forKey: genericKey)
+        return value.isFinite && value > 0 ? value : defaultValue
+    }
+
+    private static func resolvedBool(store: UserDefaults, genericKey: String, legacyKey: String, defaultValue: Bool) -> Bool {
+        if store.object(forKey: genericKey) == nil {
+            return store.object(forKey: legacyKey) as? Bool ?? defaultValue
+        }
+        return store.bool(forKey: genericKey)
+    }
+
+    private static func resolvedDouble(store: UserDefaults, genericKey: String, legacyKey: String, defaultValue: Double) -> Double {
+        if store.object(forKey: genericKey) == nil {
+            let value = store.double(forKey: legacyKey)
+            return value.isFinite && value > 0 ? value : defaultValue
+        }
+        let value = store.double(forKey: genericKey)
+        return value.isFinite && value > 0 ? value : defaultValue
+    }
+
+    static func sanitizedNumericSetting(
+        _ value: Double,
+        default defaultValue: Double,
+        range: ClosedRange<Double>
+    ) -> Double {
+        guard value.isFinite, value > 0 else { return defaultValue }
+        return min(max(value, range.lowerBound), range.upperBound)
+    }
+
+    func migrateLegacyKeysIfNeeded() {
+        let store = profileStore
+
+        if store.object(forKey: "showEpisodeBrowserButton") == nil {
+            store.set(store.object(forKey: "showVLCEpisodeBrowserButton") as? Bool ?? true, forKey: "showEpisodeBrowserButton")
+        }
+
+        _ = Self.migratedBool(store: store, genericKey: "playerBrightnessGestureEnabled", legacyKey: "vlcBrightnessGestureEnabled", defaultValue: false)
+        _ = Self.migratedBool(store: store, genericKey: "playerVolumeGestureEnabled", legacyKey: "vlcVolumeGestureEnabled", defaultValue: false)
+
+        if store.object(forKey: "playerTwoFingerTapPlayPauseEnabled") == nil {
+            store.set(store.object(forKey: "mpvTwoFingerTapEnabled") as? Bool ?? true, forKey: "playerTwoFingerTapPlayPauseEnabled")
+        }
+
+        if store.object(forKey: "playerCenterTapPlayPauseEnabled") == nil {
+            store.set(true, forKey: "playerCenterTapPlayPauseEnabled")
+        }
+
+        _ = Self.migratedBool(store: store, genericKey: "playerDoubleTapSeekEnabled", legacyKey: "vlcDoubleTapSeekEnabled", defaultValue: true)
+        _ = Self.migratedDouble(store: store, genericKey: "playerDoubleTapSeekSeconds", legacyKey: "vlcDoubleTapSeekSeconds", defaultValue: 10.0)
+        _ = Self.migratedBool(store: store, genericKey: "playerOpenSubtitlesEnabled", legacyKey: "vlcOpenSubtitlesEnabled", defaultValue: false)
+        _ = Self.migratedBool(store: store, genericKey: "playerOpenSubtitlesAutoFallbackEnabled", legacyKey: "vlcOpenSubtitlesAutoFallbackEnabled", defaultValue: true)
+        _ = Self.migratedBool(store: store, genericKey: "playerSubtitleAppearanceEnabled", legacyKey: "enableVLCSubtitleEditMenu", defaultValue: true)
+
+        if store.object(forKey: "playerSubtitleOverlayBottomConstant") == nil,
+           store.object(forKey: "vlcSubtitleOverlayBottomConstant") != nil {
+            store.set(store.double(forKey: "vlcSubtitleOverlayBottomConstant"), forKey: "playerSubtitleOverlayBottomConstant")
+        }
     }
 
     init() {
-        self.playbackEngine = PlaybackEngine.selected
-        let savedDefaultSpeed = UserDefaults.standard.double(forKey: "defaultPlaybackSpeed")
-        self.defaultPlaybackSpeed = savedDefaultSpeed > 0 ? savedDefaultSpeed : 1.0
+        let store = ProfileSettingsStore.active
+        self.profileStore = store
+        self.playbackEngine = PlaybackEngine.selected(defaults: store)
+        let savedDefaultSpeed = store.double(forKey: "defaultPlaybackSpeed")
+        self.defaultPlaybackSpeed = Self.sanitizedNumericSetting(
+            savedDefaultSpeed,
+            default: 1.0,
+            range: 0.25...3.0
+        )
 
-        let savedSpeed = UserDefaults.standard.double(forKey: "holdSpeedPlayer")
-        self.holdSpeed = savedSpeed > 0 ? savedSpeed : 2.0
+        let savedSpeed = store.double(forKey: "holdSpeedPlayer")
+        self.holdSpeed = Self.sanitizedNumericSetting(
+            savedSpeed,
+            default: 2.0,
+            range: 0.1...3.0
+        )
 
-        let raw = UserDefaults.standard.string(forKey: "externalPlayer") ?? ExternalPlayer.none.rawValue
+        let raw = store.string(forKey: "externalPlayer") ?? ExternalPlayer.none.rawValue
         self.externalPlayer = ExternalPlayer(rawValue: raw) ?? .none
 
-        self.landscapeOnly = UserDefaults.standard.bool(forKey: "alwaysLandscape")
-        self.playerPlaybackLockEnabled = PlayerPlaybackLockSettings.isEnabled()
+        self.landscapeOnly = store.bool(forKey: "alwaysLandscape")
+        self.playerPlaybackLockEnabled = PlayerPlaybackLockSettings.isEnabled(defaults: store)
 
         #if !os(tvOS)
-        self.preferDownloadedMedia = UserDefaults.standard.bool(forKey: "preferDownloadedMedia")
+        self.preferDownloadedMedia = store.bool(forKey: "preferDownloadedMedia")
         #endif
 
-        self.aniSkipAutoSkip = UserDefaults.standard.bool(forKey: "aniSkipAutoSkip")
+        self.aniSkipAutoSkip = store.bool(forKey: "aniSkipAutoSkip")
 
-        if UserDefaults.standard.object(forKey: "aniSkipEnabled") == nil {
+        if store.object(forKey: "aniSkipEnabled") == nil {
             self.aniSkipEnabled = true
         } else {
-            self.aniSkipEnabled = UserDefaults.standard.bool(forKey: "aniSkipEnabled")
+            self.aniSkipEnabled = store.bool(forKey: "aniSkipEnabled")
         }
 
-        if UserDefaults.standard.object(forKey: "introDBEnabled") == nil {
+        if store.object(forKey: "introDBEnabled") == nil {
             self.introDBEnabled = true
         } else {
-            self.introDBEnabled = UserDefaults.standard.bool(forKey: "introDBEnabled")
+            self.introDBEnabled = store.bool(forKey: "introDBEnabled")
         }
 
-        if UserDefaults.standard.object(forKey: "introDBAppEnabled") == nil {
+        if store.object(forKey: "introDBAppEnabled") == nil {
             self.introDBAppEnabled = true
         } else {
-            self.introDBAppEnabled = UserDefaults.standard.bool(forKey: "introDBAppEnabled")
+            self.introDBAppEnabled = store.bool(forKey: "introDBAppEnabled")
         }
 
-        self.skip85sEnabled = UserDefaults.standard.bool(forKey: "skip85sEnabled")
-        self.skip85sAlwaysVisible = UserDefaults.standard.bool(forKey: "skip85sAlwaysVisible")
+        self.skip85sEnabled = store.bool(forKey: "skip85sEnabled")
+        self.skip85sAlwaysVisible = store.bool(forKey: "skip85sAlwaysVisible")
 
-        // Default to true if key has never been set
-        if UserDefaults.standard.object(forKey: "showNextEpisodeButton") == nil {
+        if store.object(forKey: "showNextEpisodeButton") == nil {
             self.showNextEpisodeButton = true
         } else {
-            self.showNextEpisodeButton = UserDefaults.standard.bool(forKey: "showNextEpisodeButton")
+            self.showNextEpisodeButton = store.bool(forKey: "showNextEpisodeButton")
         }
 
-        if UserDefaults.standard.object(forKey: "showEpisodeBrowserButton") == nil {
-            let legacy = UserDefaults.standard.object(forKey: "showVLCEpisodeBrowserButton") as? Bool ?? true
-            UserDefaults.standard.set(legacy, forKey: "showEpisodeBrowserButton")
-            self.showEpisodeBrowserButton = legacy
-        } else {
-            self.showEpisodeBrowserButton = UserDefaults.standard.bool(forKey: "showEpisodeBrowserButton")
-        }
-        self.showPlayerServicesButton = PlayerServicesButtonSettings.isEnabled()
+        self.showEpisodeBrowserButton = Self.resolvedBool(store: store, genericKey: "showEpisodeBrowserButton", legacyKey: "showVLCEpisodeBrowserButton", defaultValue: true)
+        self.showPlayerServicesButton = PlayerServicesButtonSettings.isEnabled(defaults: store)
 
-        self.showNextEpisodePosterButton = UserDefaults.standard.bool(forKey: "showNextEpisodePosterButton")
+        self.showNextEpisodePosterButton = store.bool(forKey: "showNextEpisodePosterButton")
 
-        let savedThreshold = UserDefaults.standard.double(forKey: "nextEpisodeThreshold")
-        self.nextEpisodeThreshold = savedThreshold > 0 ? savedThreshold : 0.90
-        self.nextEpisodeSkipFillerEnabled = NextEpisodeFillerSettings.isEnabled()
+        let savedThreshold = store.double(forKey: "nextEpisodeThreshold")
+        self.nextEpisodeThreshold = Self.sanitizedNumericSetting(
+            savedThreshold,
+            default: 0.90,
+            range: 0.50...0.99
+        )
+        self.nextEpisodeSkipFillerEnabled = NextEpisodeFillerSettings.isEnabled(defaults: store)
 
-        self.playerBrightnessGestureEnabled = Self.migratedBool(genericKey: "playerBrightnessGestureEnabled", legacyKey: "vlcBrightnessGestureEnabled", defaultValue: false)
-        self.playerVolumeGestureEnabled = Self.migratedBool(genericKey: "playerVolumeGestureEnabled", legacyKey: "vlcVolumeGestureEnabled", defaultValue: false)
+        self.playerBrightnessGestureEnabled = Self.resolvedBool(store: store, genericKey: "playerBrightnessGestureEnabled", legacyKey: "vlcBrightnessGestureEnabled", defaultValue: false)
+        self.playerVolumeGestureEnabled = Self.resolvedBool(store: store, genericKey: "playerVolumeGestureEnabled", legacyKey: "vlcVolumeGestureEnabled", defaultValue: false)
+        self.playerTwoFingerTapPlayPauseEnabled = Self.resolvedBool(store: store, genericKey: "playerTwoFingerTapPlayPauseEnabled", legacyKey: "mpvTwoFingerTapEnabled", defaultValue: true)
+        self.playerCenterTapPlayPauseEnabled = store.object(forKey: "playerCenterTapPlayPauseEnabled") == nil
+            ? true
+            : store.bool(forKey: "playerCenterTapPlayPauseEnabled")
 
-        if UserDefaults.standard.object(forKey: "playerTwoFingerTapPlayPauseEnabled") == nil {
-            if let legacy = UserDefaults.standard.object(forKey: "mpvTwoFingerTapEnabled") as? Bool {
-                UserDefaults.standard.set(legacy, forKey: "playerTwoFingerTapPlayPauseEnabled")
-                self.playerTwoFingerTapPlayPauseEnabled = legacy
-            } else {
-                UserDefaults.standard.set(true, forKey: "playerTwoFingerTapPlayPauseEnabled")
-                self.playerTwoFingerTapPlayPauseEnabled = true
-            }
-        } else {
-            self.playerTwoFingerTapPlayPauseEnabled = UserDefaults.standard.bool(forKey: "playerTwoFingerTapPlayPauseEnabled")
-        }
+        self.playerDoubleTapSeekEnabled = Self.resolvedBool(store: store, genericKey: "playerDoubleTapSeekEnabled", legacyKey: "vlcDoubleTapSeekEnabled", defaultValue: true)
+        self.playerDoubleTapSeekSeconds = Self.sanitizedNumericSetting(
+            Self.resolvedDouble(
+                store: store,
+                genericKey: "playerDoubleTapSeekSeconds",
+                legacyKey: "vlcDoubleTapSeekSeconds",
+                defaultValue: 10.0
+            ),
+            default: 10.0,
+            range: 5.0...60.0
+        )
+        self.playerOpenSubtitlesEnabled = Self.resolvedBool(store: store, genericKey: "playerOpenSubtitlesEnabled", legacyKey: "vlcOpenSubtitlesEnabled", defaultValue: false)
+        self.playerOpenSubtitlesAutoFallbackEnabled = Self.resolvedBool(store: store, genericKey: "playerOpenSubtitlesAutoFallbackEnabled", legacyKey: "vlcOpenSubtitlesAutoFallbackEnabled", defaultValue: true)
+        self.playerSubtitleAppearanceEnabled = Self.resolvedBool(store: store, genericKey: "playerSubtitleAppearanceEnabled", legacyKey: "enableVLCSubtitleEditMenu", defaultValue: true)
 
-        if UserDefaults.standard.object(forKey: "playerCenterTapPlayPauseEnabled") == nil {
-            UserDefaults.standard.set(true, forKey: "playerCenterTapPlayPauseEnabled")
-            self.playerCenterTapPlayPauseEnabled = true
-        } else {
-            self.playerCenterTapPlayPauseEnabled = UserDefaults.standard.bool(forKey: "playerCenterTapPlayPauseEnabled")
-        }
-
-        self.playerDoubleTapSeekEnabled = Self.migratedBool(genericKey: "playerDoubleTapSeekEnabled", legacyKey: "vlcDoubleTapSeekEnabled", defaultValue: true)
-        self.playerDoubleTapSeekSeconds = Self.migratedDouble(genericKey: "playerDoubleTapSeekSeconds", legacyKey: "vlcDoubleTapSeekSeconds", defaultValue: 10.0)
-        self.playerOpenSubtitlesEnabled = Self.migratedBool(genericKey: "playerOpenSubtitlesEnabled", legacyKey: "vlcOpenSubtitlesEnabled", defaultValue: false)
-        self.playerOpenSubtitlesAutoFallbackEnabled = Self.migratedBool(genericKey: "playerOpenSubtitlesAutoFallbackEnabled", legacyKey: "vlcOpenSubtitlesAutoFallbackEnabled", defaultValue: true)
-        self.playerSubtitleAppearanceEnabled = Self.migratedBool(genericKey: "playerSubtitleAppearanceEnabled", legacyKey: "enableVLCSubtitleEditMenu", defaultValue: true)
-
-        self.mpvForegroundFPS = UserDefaults.standard.integer(forKey: "mpvForegroundFPS") == 60 ? 60 : 30
+        self.mpvForegroundFPS = store.integer(forKey: "mpvForegroundFPS") == 60 ? 60 : 30
         self.mpvRenderBackend = .defaultBackend
-        UserDefaults.standard.set(MPVRenderBackend.defaultBackend.rawValue, forKey: "mpvRenderBackend")
-        let metalQualityRaw = UserDefaults.standard.string(forKey: "mpvMetalQualityProfile") ?? MPVMetalQualityProfile.defaultProfile.rawValue
+        let metalQualityRaw = store.string(forKey: "mpvMetalQualityProfile") ?? MPVMetalQualityProfile.defaultProfile.rawValue
         self.mpvMetalQualityProfile = MPVMetalQualityProfile(rawValue: metalQualityRaw) ?? .defaultProfile
-        let upscalingRaw = UserDefaults.standard.string(forKey: "mpvUpscalingMode") ?? MPVUpscalingMode.defaultMode.rawValue
+        let upscalingRaw = store.string(forKey: "mpvUpscalingMode") ?? MPVUpscalingMode.defaultMode.rawValue
         self.mpvUpscalingMode = MPVUpscalingMode(rawValue: upscalingRaw) ?? .defaultMode
-        self.mpvPlayerSkin = MPVPlayerSkinSettings.selected()
-        self.mpvPerformanceOverlayEnabled = UserDefaults.standard.bool(forKey: "mpvPerformanceOverlayEnabled")
-        self.mpvUseLegacyCPURenderer = UserDefaults.standard.bool(forKey: "mpvUseLegacyCPURenderer")
-        self.mpvAppExitPictureInPictureEnabled = UserDefaults.standard.bool(forKey: "mpvAppExitPictureInPictureEnabled")
-        self.mpvPictureInPictureEnabled = UserDefaults.standard.object(forKey: "mpvPictureInPictureEnabled") as? Bool ?? true
-        let hdrModeRaw = UserDefaults.standard.string(forKey: "mpvHDRMode") ?? MPVHDRMode.defaultMode.rawValue
+        let neuralUpscalerRaw = store.string(forKey: "mpvNeuralUpscaler") ?? MPVNeuralUpscaler.defaultUpscaler.rawValue
+        self.mpvNeuralUpscaler = MPVNeuralUpscaler(rawValue: neuralUpscalerRaw) ?? .defaultUpscaler
+        let neuralUpscalerTVRaw = store.string(forKey: "mpvNeuralUpscalerTV") ?? MPVNeuralUpscaler.defaultUpscaler.rawValue
+        self.mpvNeuralUpscalerTV = MPVNeuralUpscaler(rawValue: neuralUpscalerTVRaw) ?? .defaultUpscaler
+        self.mpvPlayerSkin = MPVPlayerSkinSettings.selected(defaults: store)
+        self.mpvPerformanceOverlayEnabled = store.bool(forKey: "mpvPerformanceOverlayEnabled")
+        self.mpvUseLegacyCPURenderer = store.bool(forKey: "mpvUseLegacyCPURenderer")
+        self.mpvAppExitPictureInPictureEnabled = store.bool(forKey: "mpvAppExitPictureInPictureEnabled")
+        self.mpvPictureInPictureEnabled = store.object(forKey: "mpvPictureInPictureEnabled") as? Bool ?? true
+        let hdrModeRaw = store.string(forKey: "mpvHDRMode") ?? MPVHDRMode.defaultMode.rawValue
         self.mpvHDRMode = MPVHDRMode(rawValue: hdrModeRaw) ?? .defaultMode
-        let audioComfortModeRaw = UserDefaults.standard.string(forKey: "audioComfortMode") ?? AudioComfortMode.defaultMode.rawValue
+        let audioComfortModeRaw = store.string(forKey: "audioComfortMode") ?? AudioComfortMode.defaultMode.rawValue
         self.audioComfortMode = AudioComfortMode(rawValue: audioComfortModeRaw) ?? .defaultMode
-        if let rawScopes = UserDefaults.standard.array(forKey: "audioComfortScopeCategories") as? [String] {
+        if let rawScopes = store.array(forKey: "audioComfortScopeCategories") as? [String] {
             self.audioComfortScopeCategories = Set(rawScopes.compactMap { AudioComfortContentCategory(rawValue: $0) })
         } else {
             self.audioComfortScopeCategories = AudioComfortContentCategory.defaultScope
         }
-        self.mpvSurroundSoundEnabled = UserDefaults.standard.object(forKey: "mpvSurroundSoundEnabled") == nil
+        self.mpvSurroundSoundEnabled = store.object(forKey: "mpvSurroundSoundEnabled") == nil
             ? true
-            : UserDefaults.standard.bool(forKey: "mpvSurroundSoundEnabled")
+            : store.bool(forKey: "mpvSurroundSoundEnabled")
 
-        ExperimentalFeatureState.registerDefaults()
-        self.experimentalMPVPreloadEnabled = UserDefaults.standard.bool(forKey: ExperimentalFeatureState.mpvPreloadEnabledKey)
-        self.experimentalMPVSmoothTransitionEnabled = UserDefaults.standard.bool(forKey: ExperimentalFeatureState.mpvSmoothTransitionEnabledKey)
-        self.experimentalMPVPreloadCellularEnabled = UserDefaults.standard.bool(forKey: ExperimentalFeatureState.mpvPreloadCellularEnabledKey)
-        let wifiLimit = UserDefaults.standard.integer(forKey: ExperimentalFeatureState.mpvPreloadWifiLimitMBKey)
+        self.experimentalMPVPreloadEnabled = store.bool(forKey: ExperimentalFeatureState.mpvPreloadEnabledKey)
+        self.experimentalMPVSmoothTransitionEnabled = store.bool(forKey: ExperimentalFeatureState.mpvSmoothTransitionEnabledKey)
+        self.experimentalMPVPreloadCellularEnabled = store.bool(forKey: ExperimentalFeatureState.mpvPreloadCellularEnabledKey)
+        let wifiLimit = store.integer(forKey: ExperimentalFeatureState.mpvPreloadWifiLimitMBKey)
         self.experimentalMPVPreloadWifiLimitMB = ExperimentalFeatureState.resolvedMPVPreloadWifiLimitMB(wifiLimit)
-        let cellularLimit = UserDefaults.standard.integer(forKey: ExperimentalFeatureState.mpvPreloadCellularLimitMBKey)
+        let cellularLimit = store.integer(forKey: ExperimentalFeatureState.mpvPreloadCellularLimitMBKey)
         self.experimentalMPVPreloadCellularLimitMB = ExperimentalFeatureState.resolvedMPVPreloadCellularLimitMB(cellularLimit)
-        self.experimentalMPVPreloadAutoClearEnabled = (UserDefaults.standard.object(forKey: ExperimentalFeatureState.mpvPreloadAutoClearKey) as? Bool) ?? true
-        self.experimentalMPVShowRemainingTime = UserDefaults.standard.bool(forKey: ExperimentalFeatureState.mpvShowRemainingTimeKey)
-        self.experimentalMPVPreciseProgress = UserDefaults.standard.bool(forKey: ExperimentalFeatureState.mpvPreciseProgressKey)
-        self.experimentalMPVIgnoreSpecialSubtitleStyles = UserDefaults.standard.bool(forKey: ExperimentalFeatureState.mpvIgnoreSpecialSubtitleStylesKey)
+        self.experimentalMPVPreloadAutoClearEnabled = (store.object(forKey: ExperimentalFeatureState.mpvPreloadAutoClearKey) as? Bool) ?? true
+        self.experimentalMPVShowRemainingTime = store.bool(forKey: ExperimentalFeatureState.mpvShowRemainingTimeKey)
+        self.experimentalMPVPreciseProgress = store.bool(forKey: ExperimentalFeatureState.mpvPreciseProgressKey)
+        self.experimentalMPVIgnoreSpecialSubtitleStyles = store.bool(forKey: ExperimentalFeatureState.mpvIgnoreSpecialSubtitleStylesKey)
+
+        // Repair legacy, synced, or manually edited numeric values before any
+        // player path reads them directly from the profile store.
+        store.set(self.defaultPlaybackSpeed, forKey: "defaultPlaybackSpeed")
+        store.set(self.holdSpeed, forKey: "holdSpeedPlayer")
+        store.set(self.nextEpisodeThreshold, forKey: "nextEpisodeThreshold")
+        store.set(self.playerDoubleTapSeekSeconds, forKey: "playerDoubleTapSeekSeconds")
     }
 }
 
@@ -448,6 +532,7 @@ enum PlayerSettingsSearchTarget: String, Hashable {
     case pictureInPicture
     case pipWhenLeavingApp
     case upscaling
+    case neuralUpscaling
     case performanceOverlay
     case sampleBufferRenderer
     case hdrOutput
@@ -456,9 +541,6 @@ enum PlayerSettingsSearchTarget: String, Hashable {
     case comfortAudioApplyToAll
     case inlineFrameRate
     case playerSkin
-#if os(iOS) && canImport(GoogleCast)
-    case googleCast
-#endif
 
     var anchorID: String {
         "player-settings-search-\(rawValue)"
@@ -502,7 +584,9 @@ enum PlayerSettingsSearchTarget: String, Hashable {
                 return false
 #endif
 #if os(tvOS)
-            case .theIntroDB,
+
+            case .aniSkip,
+                 .theIntroDB,
                  .introDB,
                  .autoSkip:
                 return false
@@ -561,6 +645,7 @@ enum PlayerSettingsSearchTarget: String, Hashable {
              .pipWhenLeavingApp,
              .moltenVKQuality,
              .upscaling,
+             .neuralUpscaling,
              .performanceOverlay,
              .sampleBufferRenderer,
              .hdrOutput,
@@ -569,10 +654,6 @@ enum PlayerSettingsSearchTarget: String, Hashable {
              .comfortAudioApplyToAll,
              .inlineFrameRate:
             return "rendering"
-#if os(iOS) && canImport(GoogleCast)
-        case .googleCast:
-            return "googleCast"
-#endif
         case .openSubtitles, .openSubtitlesAutoFallback:
             return "openSubs"
         case .skipSegments,
@@ -719,20 +800,20 @@ private struct MPVPlayerSkinSettingsView: View {
             animationStyle = MPVPlayerSkinSettings.animationStyle(for: selection)
             startPreviewAnimationIfNeeded()
         }
-        .onChange(of: animationsEnabled) { enabled in
+        .onChangeComp(of: animationsEnabled) { _, enabled in
             if enabled {
                 startPreviewAnimationIfNeeded()
             } else {
                 stopPreviewAnimation()
             }
         }
-        .onChange(of: reduceMotion) { reduced in
+        .onChangeComp(of: reduceMotion) { _, reduced in
             if reduced { stopPreviewAnimation() } else { startPreviewAnimationIfNeeded() }
         }
-        .onChange(of: selection) { newSkin in
+        .onChangeComp(of: selection) { _, newSkin in
             animationStyle = MPVPlayerSkinSettings.animationStyle(for: newSkin)
         }
-        .onChange(of: animationStyle) { newStyle in
+        .onChangeComp(of: animationStyle) { _, newStyle in
             MPVPlayerSkinSettings.setAnimationStyle(newStyle, for: selection)
             startPreviewAnimationIfNeeded()
         }
@@ -782,6 +863,7 @@ private struct MPVPlayerSkinSettingsView: View {
                     .multilineTextAlignment(.leading)
             }
             .padding(10)
+#if !os(tvOS)
             .background(
                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                     .fill(Color.black.opacity(selection == skin ? 0.52 : 0.30))
@@ -790,8 +872,13 @@ private struct MPVPlayerSkinSettingsView: View {
                             .stroke(selection == skin ? primaryColor(for: skin).opacity(0.9) : Color.white.opacity(0.10), lineWidth: selection == skin ? 1.5 : 1)
                     )
             )
+#endif
         }
+#if os(tvOS)
+        .buttonStyle(TVGlassRowButtonStyle())
+#else
         .buttonStyle(.plain)
+#endif
     }
 
     private func playerPreview(for skin: MPVPlayerSkin, style: MPVPlayerSkinAnimationStyle, large: Bool, animated: Bool) -> some View {
@@ -922,26 +1009,10 @@ struct PlayerSettingsView: View {
 #if !os(tvOS)
     @Environment(\.eclipseSettingsSearchPresentation) private var settingsSearchPresentation
 #endif
-    @State private var subtitleTextColorName: String = "White"
-    @State private var subtitleStrokeColorName: String = "Black"
-    @State private var subtitleStrokeWidth: Double = 1.0
-    @State private var subtitleFontSizePresetName: String = "Medium"
-    @State private var subtitleVerticalOffset: Double = -6.0
-    @State private var subtitleClosedCaptionBackground: Bool = false
     @State private var expandedGroups: Set<String> = []
     @State private var didFocusInitialSearchTarget = false
-    @AppStorage("enableSubtitlesByDefault") private var enableSubtitlesByDefault = false
-    @AppStorage("defaultSubtitleLanguage") private var defaultSubtitleLanguage = "eng"
-    @AppStorage("preferredAutoAudioLanguage") private var preferredAutoAudioLanguage = "eng"
-    @AppStorage("preferredAnimeAudioLanguage") private var preferredAnimeAudioLanguage = "jpn"
-#if os(iOS) && canImport(GoogleCast)
-    @AppStorage(GoogleCastSettings.enabledKey) private var googleCastEnabled = GoogleCastSettings.defaultEnabled
-#endif
     private let playbackSpeedOptions: [Double] = [0.25, 0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0]
     private let doubleTapSeekOptions: [Double] = [5, 10, 15, 20, 30, 45, 60]
-    #if !os(tvOS)
-    private let mpvForegroundFPSOptions: [Int] = [30, 60]
-    #endif
 
     init(initialSearchTarget: PlayerSettingsSearchTarget? = nil) {
         let reachableTarget = Self.reachableSearchTarget(initialSearchTarget)
@@ -958,17 +1029,17 @@ struct PlayerSettingsView: View {
 #if os(tvOS)
             return .pictureInPicture
 #else
-            let masterEnabled = UserDefaults.standard.object(forKey: "mpvPictureInPictureEnabled") as? Bool ?? true
+            let masterEnabled = ProfileSettingsStore.active.object(forKey: "mpvPictureInPictureEnabled") as? Bool ?? true
             return masterEnabled ? target : .pictureInPicture
 #endif
         case .appearanceThreshold, .useEpisodePoster, .skipFillerEpisodes:
 #if os(tvOS)
             if target != .appearanceThreshold { return .showNextEpisodeButton }
 #endif
-            let nextEnabled = UserDefaults.standard.object(forKey: "showNextEpisodeButton") as? Bool ?? true
+            let nextEnabled = ProfileSettingsStore.active.object(forKey: "showNextEpisodeButton") as? Bool ?? true
             return nextEnabled ? target : .showNextEpisodeButton
         case .openSubtitlesAutoFallback:
-            return UserDefaults.standard.bool(forKey: "playerOpenSubtitlesEnabled")
+            return ProfileSettingsStore.active.bool(forKey: "playerOpenSubtitlesEnabled")
                 ? target
                 : .openSubtitles
         default:
@@ -977,26 +1048,6 @@ struct PlayerSettingsView: View {
     }
 
     private var accent: Color { accentColorManager.currentAccentColor }
-
-    private var metalRenderingSettingsAvailable: Bool {
-        #if os(tvOS)
-        true
-        #else
-        MPVRenderBackendSupport.metalIsFullySupported
-        #endif
-    }
-
-    private var canUseMetalMPVAdvancedSettings: Bool {
-        #if os(tvOS)
-        return store.playbackEngine != .avPlayer
-        #else
-        PlaybackLaunchPlan.make(
-            selection: store.playbackEngine,
-            deviceFamily: .current
-        ).primary == .mpv
-            && store.externalPlayer == .none
-        #endif
-    }
 
     private var usesMPVSettings: Bool {
         #if os(tvOS)
@@ -1009,11 +1060,11 @@ struct PlayerSettingsView: View {
         #endif
     }
 
-    private var playerSettingsFooter: String {
+    private var mpvPlayerSettingsSummary: String {
         #if os(tvOS)
-        "Apple TV playback, subtitle, remote, and display settings."
+        "Rendering, subtitles, remote controls, PiP, skipping, and next episode."
         #else
-        "In-app playback, subtitle, and gesture settings."
+        "Rendering, subtitles, gestures, PiP, skipping, and next episode."
         #endif
     }
 
@@ -1023,14 +1074,6 @@ struct PlayerSettingsView: View {
         #else
         "Show Picture in Picture controls when the current stream supports them."
         #endif
-    }
-
-    private var surroundSoundSettingsDescription: String {
-#if os(tvOS)
-        "Use surround audio when the stream and audio route support it."
-#else
-        "Use surround audio on supported receivers. Built-in speakers stay stereo."
-#endif
     }
 
     private var defaultPlayerSettingsDisabled: Bool {
@@ -1049,107 +1092,24 @@ struct PlayerSettingsView: View {
         #endif
     }
 
-    private var mpvAdvancedRequirementMessage: String {
-        #if os(tvOS)
-        if store.playbackEngine == .avPlayer {
-            return "Choose Automatic or MPV to use advanced features."
-        }
-        return "Advanced features use the MoltenVK renderer."
-        #else
-        if PlaybackLaunchPlan.make(
-            selection: store.playbackEngine,
-            deviceFamily: .current
-        ).primary != .mpv {
-            return "Set MPV as the in-app player to use advanced features."
-        }
-        if store.externalPlayer != .none {
-            return "Set external playback to Default to use advanced features."
-        }
-        if !MPVRenderBackendSupport.metalIsFullySupported {
-            return "This build needs the MoltenVK renderer for advanced features."
-        }
-        return "Advanced features use the MoltenVK renderer."
-        #endif
-    }
-
-    private var mpvQualityDescription: String {
-        switch store.mpvMetalQualityProfile {
-        case .auto:
-            return "Balances picture quality and heat automatically. Recommended."
-        case .balanced:
-            return "Uses less heat with little loss in quality."
-        case .lowHeat:
-            return "Uses the least power, but video may look softer."
-        case .sharp:
-            return "Prioritizes picture quality and uses more power."
-        }
-    }
-
-    private var mpvUpscalingDescription: String {
-        switch store.mpvUpscalingMode {
-        case .off:
-            return "No enhancement. Uses the least power."
-        case .upscaleTo1080:
-            return "Enhances video below 1080p while saving power on HD."
-        case .upscaleTo4K:
-            return "Enhances video below 4K. Uses more power."
-        case .oneLevelAlways:
-            return "Enhances every video by one resolution step."
-        case .auto:
-            return "Sharpest picture. Uses the most power."
-        }
-    }
-
-    private var mpvHDRDescription: String {
-        switch store.mpvHDRMode {
-        case .auto:
-            return "Uses HDR on compatible displays and SDR everywhere else. Recommended."
-        case .hdr:
-            return "Forces HDR and may look wrong on non-HDR displays."
-        case .sdr:
-            return "Converts HDR to SDR for a consistent picture."
-        }
-    }
-
-    private var comfortAudioDescription: String {
-        switch store.audioComfortMode {
-        case .original:
-            return "Plays the original audio mix."
-        case .comfort:
-            return "Keeps dialogue and loud moments closer in volume."
-        case .dialogue:
-            return "Makes voices clearer."
-        case .night:
-            return "Reduces sudden loud sounds for late-night viewing."
-        }
-    }
-
     var body: some View {
         Group {
             if showsMPVSettingsOnly {
-                mpvSettingsPage
+                MPVPlayerSettingsPage(store: store, initialSearchTarget: initialSearchTarget)
             } else {
                 playerOverview
             }
         }
-        .onAppear {
-            refreshPlayerSubtitleStyleStateFromDefaults()
-#if os(iOS) && canImport(GoogleCast)
-            GoogleCastCoordinator.shared.refreshEnabledState()
-#endif
+        .task {
+            store.migrateLegacyKeysIfNeeded()
         }
-#if os(iOS) && canImport(GoogleCast)
-        .onChange(of: googleCastEnabled) { enabled in
-            GoogleCastCoordinator.shared.setEnabled(enabled)
-        }
-#endif
     }
 
     private var playerOverview: some View {
         ScrollViewReader { scrollProxy in
             ScrollView {
                 LazyVStack(spacing: 22) {
-                // MARK: - Default Player
+
                 VStack(spacing: 8) {
                     GlassSection(header: "Default Player") {
                         VStack(spacing: 0) {
@@ -1189,7 +1149,6 @@ struct PlayerSettingsView: View {
                     GlassSectionFooter("This setting works exclusively with the Default media player.")
                 }
 
-                // MARK: - Media Player
                 VStack(spacing: 8) {
                     GlassSection(header: "Media Player") {
                         VStack(spacing: 0) {
@@ -1262,7 +1221,6 @@ struct PlayerSettingsView: View {
 #endif
                 }
 
-                // MARK: - MPV Player
                 if usesMPVSettings {
                     VStack(spacing: 8) {
                         GlassSection(header: "MPV Player") {
@@ -1273,7 +1231,7 @@ struct PlayerSettingsView: View {
                                     icon: "play.rectangle.fill",
                                     iconColor: .indigo,
                                     title: "MPV Player Settings",
-                                    subtitle: "Rendering, subtitles, gestures, PiP, Google Cast, skipping, and next episode."
+                                    subtitle: mpvPlayerSettingsSummary
                                 ) {
                                     valueChevron("Open")
                                 }
@@ -1288,15 +1246,15 @@ struct PlayerSettingsView: View {
                     VStack(spacing: 8) {
                         GlassSection(header: "Playback") {
                             VStack(spacing: 0) {
-                                subtitleDefaultsGroup
+                                PlayerSubtitleDefaultsGroup(expandedGroups: $expandedGroups)
                                 GlassDivider()
-                                subtitleAppearanceGroup
+                                PlayerSubtitleAppearanceGroup(store: store, expandedGroups: $expandedGroups, usesMPVSettings: usesMPVSettings)
                                 GlassDivider()
-                                remoteControlsGroup
+                                PlayerRemoteControlsGroup(store: store, expandedGroups: $expandedGroups)
                                 GlassDivider()
-                                skipSegmentsGroup
+                                PlayerSkipSegmentsGroup(store: store, expandedGroups: $expandedGroups)
                                 GlassDivider()
-                                nextEpisodeGroup
+                                PlayerNextEpisodeGroup(store: store, expandedGroups: $expandedGroups)
                                 if PlatformCapabilities.current.supportsPictureInPicture {
                                     GlassDivider()
                                     settingsToggleRow(
@@ -1314,9 +1272,9 @@ struct PlayerSettingsView: View {
                     VStack(spacing: 8) {
                         GlassSection(header: "AVPlayer Core") {
                             VStack(spacing: 0) {
-                                subtitleDefaultsGroup
+                                PlayerSubtitleDefaultsGroup(expandedGroups: $expandedGroups)
                                 GlassDivider()
-                                subtitleAppearanceGroup
+                                PlayerSubtitleAppearanceGroup(store: store, expandedGroups: $expandedGroups, usesMPVSettings: usesMPVSettings)
                                 GlassDivider()
                                 avPlayerGesturesGroup
                                 GlassDivider()
@@ -1373,149 +1331,202 @@ struct PlayerSettingsView: View {
         .eclipseDarkToolbar()
     }
 
-    private var mpvSettingsPage: some View {
-        ScrollViewReader { scrollProxy in
-            ScrollView {
-                LazyVStack(spacing: 8) {
-                    if usesMPVSettings {
-                        GlassSection(header: "MPV Player") {
-                            VStack(spacing: 0) {
-                                NavigationLink(destination: MPVPlayerSkinSettingsView(selection: $store.mpvPlayerSkin)) {
-                                    GlassDetailRow(
-                                        icon: "paintpalette.fill",
-                                        iconColor: .pink,
-                                        title: "Player Skin",
-                                        subtitle: "Customize the MPV control overlay."
-                                    ) {
-                                        valueChevron(store.mpvPlayerSkin.displayName)
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                                .id(PlayerSettingsSearchTarget.playerSkin.anchorID)
-                                GlassDivider()
-                                subtitleDefaultsGroup
-                                GlassDivider()
-                                subtitleAppearanceGroup
-                                GlassDivider()
-                                mpvRenderingGroup
-#if os(iOS) && canImport(GoogleCast)
-                                GlassDivider()
-                                googleCastGroup
-#endif
-                                GlassDivider()
-                                #if os(tvOS)
-                                remoteControlsGroup
-                                GlassDivider()
-                                skipSegmentsGroup
-                                GlassDivider()
-                                nextEpisodeGroup
-                                #else
-                                gesturesGroup
-                                #endif
-#if !os(tvOS)
-                                GlassDivider()
-                                openSubtitlesGroup
-                                GlassDivider()
-                                skipSegmentsGroup
-                                GlassDivider()
-                                if canUseMetalMPVAdvancedSettings {
-                                    experimentalMPVDisclosure
-                                } else {
-                                    HStack(spacing: 10) {
-                                        Image(systemName: "lock.fill")
-                                            .foregroundColor(.white.opacity(0.5))
-                                        Text(mpvAdvancedRequirementMessage)
-                                            .font(.caption)
-                                            .foregroundColor(.white.opacity(0.5))
-                                        Spacer(minLength: 0)
-                                    }
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 12)
-                                }
-                                GlassDivider()
-                                nextEpisodeGroup
-#endif
-                            }
-                        }
-                        .id(PlayerSettingsSearchTarget.mpvSettings.anchorID)
-                        GlassSectionFooter(playerSettingsFooter)
-                    } else {
-                        GlassSection(header: "MPV Player") {
-                            HStack(spacing: 10) {
-                                Image(systemName: "lock.fill")
-                                    .foregroundColor(.white.opacity(0.5))
-                                Text(mpvAdvancedRequirementMessage)
-                                    .font(.subheadline)
-                                    .foregroundColor(.white.opacity(0.5))
-                                Spacer(minLength: 0)
-                            }
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 12)
-                        }
-                        .id(PlayerSettingsSearchTarget.mpvSettings.anchorID)
-                        GlassSectionFooter(mpvLockedFooter)
-                    }
-                }
-                .padding(.top, 16)
-                .padding(.bottom, 32)
-            }
-            .onAppear {
-                focusInitialSearchTarget(using: scrollProxy)
-            }
-        }
-        .navigationTitle("MPV Player")
-        .background(SettingsGradientBackground(allowsAnimatedBackground: false).ignoresSafeArea())
-        .eclipseDarkToolbar()
-        .onAppear {
-            refreshPlayerSubtitleStyleStateFromDefaults()
-        }
-    }
-
     @ViewBuilder
     private var searchableMPVSettingsPage: some View {
 #if os(tvOS)
-        mpvSettingsPage
+        MPVPlayerSettingsPage(store: store, initialSearchTarget: initialSearchTarget)
 #else
         if let settingsSearchPresentation {
-            SettingsSearchContainer(
-                text: settingsSearchPresentation.text,
-                showsResults: true,
-                content: mpvSettingsPage,
+            ScopedSettingsSearchContainer(
+                content: { MPVPlayerSettingsPage(store: store, initialSearchTarget: initialSearchTarget) },
                 results: settingsSearchPresentation.results
             )
         } else {
-            mpvSettingsPage
+            MPVPlayerSettingsPage(store: store, initialSearchTarget: initialSearchTarget)
         }
 #endif
     }
 
-#if os(iOS) && canImport(GoogleCast)
     @ViewBuilder
-    private var googleCastGroup: some View {
-        disclosureHeader("Google Cast", icon: "tv.and.hifispeaker.fill", iconColor: .orange, key: "googleCast")
-            .id(PlayerSettingsSearchTarget.googleCast.anchorID)
-        if isExpanded("googleCast") {
+    private var avPlayerGesturesGroup: some View {
+        disclosureHeader("Playback Gestures", icon: "hand.draw", iconColor: .green, key: "gestures")
+            .id(PlayerSettingsSearchTarget.playbackGestures.anchorID)
+        if isExpanded("gestures") {
             GlassDivider(leadingInset: 16)
             settingsToggleRow(
-                title: "Enable Google Cast",
-                detail: "Enabled by default. Turning it off stops discovery, ends an active Cast session, restores local playback when possible, and hides Cast controls.",
-                binding: $googleCastEnabled
+                title: "Double-Tap Seek",
+                detail: "Double-tap the left or right side of the video to seek without replacing Apple's controls.",
+                binding: $store.playerDoubleTapSeekEnabled
             )
+            .id(PlayerSettingsSearchTarget.doubleTapSeek.anchorID)
             GlassDivider(leadingInset: 16)
-            VStack(alignment: .leading, spacing: 8) {
-                Label("Only direct HTTP or HTTPS MP4, WebM, MPEG-TS, HLS, and DASH streams are sent to the receiver.", systemImage: "link")
-                Label("Streams needing Eclipse-only headers, downloads, local proxies, or unsupported containers stay in the in-app player.", systemImage: "lock.slash")
-                Label("The receiver controls subtitle styling, audio tracks, and supported playback speeds. Picture in Picture and local volume gestures are unavailable while casting.", systemImage: "tv")
+            GlassDetailRow(
+                title: "Seek Amount",
+                subtitle: "Seek \(Int(store.playerDoubleTapSeekSeconds)) seconds with double-tap and system skip controls."
+            ) {
+#if os(tvOS)
+                Picker("", selection: $store.playerDoubleTapSeekSeconds) {
+                    ForEach(doubleTapSeekOptions, id: \.self) { seconds in
+                        Text("\(Int(seconds))s").tag(seconds)
+                    }
+                }
+                .pickerStyle(.menu)
+                .tint(.white.opacity(0.7))
+#else
+                Stepper("", value: $store.playerDoubleTapSeekSeconds, in: 5...60, step: 5)
+                    .labelsHidden()
+#endif
             }
-            .font(.caption)
-            .foregroundColor(.white.opacity(0.58))
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            .id(PlayerSettingsSearchTarget.seekAmount.anchorID)
         }
     }
-#endif
 
-    // MARK: - MPV disclosure groups
+    @ViewBuilder
+    private var avPlayerNextEpisodeGroup: some View {
+        disclosureHeader("Next Episode", icon: "forward.end.fill", iconColor: .yellow, key: "nextEp")
+            .id(PlayerSettingsSearchTarget.nextEpisode.anchorID)
+        if isExpanded("nextEp") {
+            GlassDivider(leadingInset: 16)
+            settingsToggleRow(
+                title: "Show Next Episode Button",
+                detail: "Show a verified next-episode button near the end. It never advances without a tap.",
+                binding: $store.showNextEpisodeButton
+            )
+            .id(PlayerSettingsSearchTarget.showNextEpisodeButton.anchorID)
+            if store.showNextEpisodeButton {
+                GlassDivider(leadingInset: 16)
+                GlassDetailRow(
+                    title: "Appearance Threshold",
+                    subtitle: "How far into the episode before the button appears."
+                ) {
+                    HStack(spacing: 8) {
+                        Text("\(Int(store.nextEpisodeThreshold * 100))%")
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.5))
+#if os(tvOS)
+                        Picker("", selection: $store.nextEpisodeThreshold) {
+                            ForEach(Array(stride(from: 0.50, through: 0.99, by: 0.05)), id: \.self) { value in
+                                Text("\(Int(value * 100))%").tag(value)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .tint(.white.opacity(0.7))
+#else
+                        Stepper("", value: $store.nextEpisodeThreshold, in: 0.50...0.99, step: 0.05)
+                            .labelsHidden()
+#endif
+                    }
+                }
+                .id(PlayerSettingsSearchTarget.appearanceThreshold.anchorID)
+            }
+        }
+    }
+
+    private func isExpanded(_ key: String) -> Bool {
+        expandedGroups.contains(key)
+    }
+
+    private func disclosureHeader(_ title: String, icon: String, iconColor: Color, key: String) -> some View {
+        PlayerSettingsDisclosureHeader(
+            title: title,
+            icon: icon,
+            iconColor: iconColor,
+            key: key,
+            expandedGroups: $expandedGroups
+        )
+    }
+
+    private func valueChevron(_ text: String) -> some View {
+        PlayerSettingsValueChevron(text: text)
+    }
+
+    private func formatSpeed(_ speed: Double) -> String {
+        let oneDecimal = (speed * 10).rounded() / 10
+        if abs(speed - oneDecimal) < 0.001 {
+            return String(format: "%.1fx", speed)
+        }
+        return String(format: "%.2fx", speed)
+    }
+
+    private func focusInitialSearchTarget(using scrollProxy: ScrollViewProxy) {
+        guard !didFocusInitialSearchTarget, let initialSearchTarget else { return }
+        didFocusInitialSearchTarget = true
+
+        if let expandedGroup = initialSearchTarget.expandedGroup {
+            expandedGroups.insert(expandedGroup)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            withAnimation(.easeInOut(duration: 0.28)) {
+                scrollProxy.scrollTo(initialSearchTarget.anchorID, anchor: .center)
+            }
+        }
+    }
+
+    private func settingsToggleRow(title: String, detail: String, binding: Binding<Bool>) -> some View {
+        GlassDetailRow(title: title, subtitle: detail) {
+            Toggle("", isOn: binding)
+                .labelsHidden()
+                .tint(accentColorManager.currentAccentColor)
+        }
+    }
+}
+
+private struct PlayerSettingsDisclosureHeader: View {
+    let title: String
+    let icon: String
+    let iconColor: Color
+    let key: String
+    @Binding var expandedGroups: Set<String>
+
+    var body: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.2)) {
+                if expandedGroups.contains(key) {
+                    expandedGroups.remove(key)
+                } else {
+                    expandedGroups.insert(key)
+                }
+            }
+        } label: {
+            GlassDetailRow(icon: icon, iconColor: iconColor, title: title) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundColor(isTvOS ? Color.secondary : Color.white.opacity(0.4))
+                    .rotationEffect(.degrees(expandedGroups.contains(key) ? 90 : 0))
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct PlayerSettingsValueChevron: View {
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(text)
+                .font(.caption)
+                .foregroundColor(isTvOS ? Color.secondary : Color.white.opacity(0.5))
+            Image(systemName: "chevron.right")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(isTvOS ? Color.secondary : Color.white.opacity(0.3))
+        }
+    }
+}
+
+
+private struct PlayerSubtitleDefaultsGroup: View {
+    @Binding var expandedGroups: Set<String>
+    @StateObject private var accentColorManager = AccentColorManager.shared
+    @AppStorage("enableSubtitlesByDefault") private var enableSubtitlesByDefault = false
+    @AppStorage("defaultSubtitleLanguage") private var defaultSubtitleLanguage = "eng"
+    @AppStorage("preferredAutoAudioLanguage") private var preferredAutoAudioLanguage = "eng"
+    @AppStorage("preferredAnimeAudioLanguage") private var preferredAnimeAudioLanguage = "jpn"
+
+    var body: some View {
+        subtitleDefaultsGroup
+    }
 
     @ViewBuilder
     private var subtitleDefaultsGroup: some View {
@@ -1571,10 +1582,72 @@ struct PlayerSettingsView: View {
         }
     }
 
+    private func getLanguageName(_ code: String) -> String {
+        let languages: [String: String] = [
+            "eng": "English",
+            "jpn": "Japanese",
+            "zho": "Chinese",
+            "kor": "Korean",
+            "spa": "Spanish",
+            "fra": "French",
+            "deu": "German",
+            "ita": "Italian",
+            "por": "Portuguese",
+            "rus": "Russian"
+        ]
+        return languages[code] ?? code.uppercased()
+    }
+    private func isExpanded(_ key: String) -> Bool {
+        expandedGroups.contains(key)
+    }
+
+    private func disclosureHeader(_ title: String, icon: String, iconColor: Color, key: String) -> some View {
+        PlayerSettingsDisclosureHeader(
+            title: title,
+            icon: icon,
+            iconColor: iconColor,
+            key: key,
+            expandedGroups: $expandedGroups
+        )
+    }
+
+    private func valueChevron(_ text: String) -> some View {
+        PlayerSettingsValueChevron(text: text)
+    }
+
+    private func settingsToggleRow(title: String, detail: String, binding: Binding<Bool>) -> some View {
+        GlassDetailRow(title: title, subtitle: detail) {
+            Toggle("", isOn: binding)
+                .labelsHidden()
+                .tint(accentColorManager.currentAccentColor)
+        }
+    }
+
+}
+
+private struct PlayerSubtitleAppearanceGroup: View {
+    @ObservedObject var store: PlayerSettingsStore
+    @Binding var expandedGroups: Set<String>
+    let usesMPVSettings: Bool
+    @StateObject private var accentColorManager = AccentColorManager.shared
+    @State private var subtitleTextColorName: String = "White"
+    @State private var subtitleStrokeColorName: String = "Black"
+    @State private var subtitleStrokeWidth: Double = 1.0
+    @State private var subtitleFontSizePresetName: String = "Medium"
+    @State private var subtitleVerticalOffset: Double = -6.0
+    @State private var subtitleClosedCaptionBackground: Bool = false
+
+    var body: some View {
+        subtitleAppearanceGroup
+    }
+
     @ViewBuilder
     private var subtitleAppearanceGroup: some View {
         disclosureHeader("Subtitle Appearance", icon: "textformat.size", iconColor: .purple, key: "subAppearance")
             .id(PlayerSettingsSearchTarget.subtitleAppearance.anchorID)
+            .onAppear {
+                refreshPlayerSubtitleStyleStateFromDefaults()
+            }
         if isExpanded("subAppearance") {
 #if !os(tvOS)
             if usesMPVSettings {
@@ -1671,6 +1744,520 @@ struct PlayerSettingsView: View {
         }
     }
 
+    private var subtitleTextColorOptions: [(name: String, color: UIColor)] {
+        [("White", .white), ("Yellow", .yellow), ("Cyan", .cyan), ("Green", .green), ("Magenta", .magenta)]
+    }
+
+    private var subtitleStrokeColorOptions: [(name: String, color: UIColor)] {
+        [("Black", .black), ("Dark Gray", .darkGray), ("White", .white), ("None", .clear)]
+    }
+
+    private var subtitleTextColorBinding: Binding<String> {
+        Binding(
+            get: { subtitleTextColorName },
+            set: { selectedName in
+                subtitleTextColorName = selectedName
+                if let selected = subtitleTextColorOptions.first(where: { $0.name == selectedName })?.color {
+                    saveSubtitleColor(selected, forKey: "subtitles_foregroundColor")
+                }
+            }
+        )
+    }
+
+    private var subtitleStrokeColorBinding: Binding<String> {
+        Binding(
+            get: { subtitleStrokeColorName },
+            set: { selectedName in
+                subtitleStrokeColorName = selectedName
+                if let selected = subtitleStrokeColorOptions.first(where: { $0.name == selectedName })?.color {
+                    saveSubtitleColor(selected, forKey: "subtitles_strokeColor")
+                }
+            }
+        )
+    }
+
+    private var subtitleStrokeWidthBinding: Binding<Double> {
+        Binding(
+            get: { subtitleStrokeWidth },
+            set: {
+                let clamped = max(0, min($0, 2.0))
+                subtitleStrokeWidth = clamped
+                ProfileSettingsStore.active.set(clamped, forKey: "subtitles_strokeWidth")
+            }
+        )
+    }
+
+    private var subtitleFontSizeOptions: [(name: String, size: Double)] {
+        [
+            ("Very Small", 20.0),
+            ("Small", 24.0),
+            ("Medium", 30.0),
+            ("Large", 34.0),
+            ("Extra Large", 38.0),
+            ("Huge", 42.0),
+            ("Extra Huge", 46.0)
+        ]
+    }
+
+    private var subtitleFontSizePresetBinding: Binding<String> {
+        Binding(
+            get: { subtitleFontSizePresetName },
+            set: { selectedName in
+                subtitleFontSizePresetName = selectedName
+                if let selected = subtitleFontSizeOptions.first(where: { $0.name == selectedName }) {
+                    ProfileSettingsStore.active.set(selected.size, forKey: "subtitles_fontSize")
+                }
+            }
+        )
+    }
+
+    private var subtitleVerticalOffsetBinding: Binding<Double> {
+        Binding(
+            get: { subtitleVerticalOffset },
+            set: { selectedValue in
+                let clamped = max(-24, min(selectedValue, 24))
+                subtitleVerticalOffset = clamped
+                ProfileSettingsStore.active.set(clamped, forKey: "playerSubtitleOverlayBottomConstant")
+            }
+        )
+    }
+
+    private var subtitleClosedCaptionBackgroundBinding: Binding<Bool> {
+        Binding(
+            get: { subtitleClosedCaptionBackground },
+            set: {
+                subtitleClosedCaptionBackground = $0
+                ProfileSettingsStore.active.set($0, forKey: "subtitles_closedCaptionBackground")
+            }
+        )
+    }
+
+    private static let subtitleColorCache: NSCache<NSData, UIColor> = {
+        let cache = NSCache<NSData, UIColor>()
+        cache.countLimit = 16
+        return cache
+    }()
+
+    private func loadSubtitleColor(forKey key: String, defaultColor: UIColor) -> UIColor {
+        guard let data = ProfileSettingsStore.active.data(forKey: key) else { return defaultColor }
+        let cacheKey = data as NSData
+        if let cached = Self.subtitleColorCache.object(forKey: cacheKey) {
+            return cached
+        }
+        guard let color = try? NSKeyedUnarchiver.unarchivedObject(ofClass: UIColor.self, from: data) else {
+            return defaultColor
+        }
+        Self.subtitleColorCache.setObject(color, forKey: cacheKey)
+        return color
+    }
+
+    private func saveSubtitleColor(_ color: UIColor, forKey key: String) {
+        if let data = try? NSKeyedArchiver.archivedData(withRootObject: color, requiringSecureCoding: false) {
+            ProfileSettingsStore.active.set(data, forKey: key)
+            Self.subtitleColorCache.setObject(color, forKey: data as NSData)
+        }
+    }
+
+    private func resetPlayerSubtitleStyleDefaults() {
+        saveSubtitleColor(.white, forKey: "subtitles_foregroundColor")
+        saveSubtitleColor(.black, forKey: "subtitles_strokeColor")
+        ProfileSettingsStore.active.set(1.0, forKey: "subtitles_strokeWidth")
+        ProfileSettingsStore.active.set(30.0, forKey: "subtitles_fontSize")
+        ProfileSettingsStore.active.set(-6.0, forKey: "playerSubtitleOverlayBottomConstant")
+        ProfileSettingsStore.active.set(false, forKey: "subtitles_closedCaptionBackground")
+        refreshPlayerSubtitleStyleStateFromDefaults()
+    }
+
+    private func refreshPlayerSubtitleStyleStateFromDefaults() {
+        let textColor = loadSubtitleColor(forKey: "subtitles_foregroundColor", defaultColor: .white)
+        subtitleTextColorName = subtitleTextColorOptions.first(where: { $0.color.isEqual(textColor) })?.name ?? "White"
+
+        let strokeColor = loadSubtitleColor(forKey: "subtitles_strokeColor", defaultColor: .black)
+        subtitleStrokeColorName = subtitleStrokeColorOptions.first(where: { $0.color.isEqual(strokeColor) })?.name ?? "Black"
+
+        if ProfileSettingsStore.active.object(forKey: "subtitles_strokeWidth") != nil {
+            let savedStrokeWidth = ProfileSettingsStore.active.double(forKey: "subtitles_strokeWidth")
+            subtitleStrokeWidth = max(0, min(savedStrokeWidth, 2.0))
+        } else {
+            subtitleStrokeWidth = 1.0
+        }
+
+        let savedFontSize = ProfileSettingsStore.active.double(forKey: "subtitles_fontSize")
+        let resolvedFontSize = savedFontSize > 0 ? savedFontSize : 30.0
+        if let exact = subtitleFontSizeOptions.first(where: { abs($0.size - resolvedFontSize) < 0.01 }) {
+            subtitleFontSizePresetName = exact.name
+        } else {
+            let nearest = subtitleFontSizeOptions.min(by: { abs($0.size - resolvedFontSize) < abs($1.size - resolvedFontSize) })
+            subtitleFontSizePresetName = nearest?.name ?? "Medium"
+        }
+
+        if ProfileSettingsStore.active.object(forKey: "playerSubtitleOverlayBottomConstant") != nil {
+            let savedBottomConstant = ProfileSettingsStore.active.double(forKey: "playerSubtitleOverlayBottomConstant")
+            subtitleVerticalOffset = max(-24, min(savedBottomConstant, 24))
+        } else if ProfileSettingsStore.active.object(forKey: "vlcSubtitleOverlayBottomConstant") != nil {
+            let legacyBottomConstant = ProfileSettingsStore.active.double(forKey: "vlcSubtitleOverlayBottomConstant")
+            subtitleVerticalOffset = max(-24, min(legacyBottomConstant, 24))
+        } else {
+            subtitleVerticalOffset = -6.0
+        }
+
+        subtitleClosedCaptionBackground = ProfileSettingsStore.active.bool(forKey: "subtitles_closedCaptionBackground")
+    }
+    private func isExpanded(_ key: String) -> Bool {
+        expandedGroups.contains(key)
+    }
+
+    private func disclosureHeader(_ title: String, icon: String, iconColor: Color, key: String) -> some View {
+        PlayerSettingsDisclosureHeader(
+            title: title,
+            icon: icon,
+            iconColor: iconColor,
+            key: key,
+            expandedGroups: $expandedGroups
+        )
+    }
+
+    private func valueChevron(_ text: String) -> some View {
+        PlayerSettingsValueChevron(text: text)
+    }
+
+    private func settingsToggleRow(title: String, detail: String, binding: Binding<Bool>) -> some View {
+        GlassDetailRow(title: title, subtitle: detail) {
+            Toggle("", isOn: binding)
+                .labelsHidden()
+                .tint(accentColorManager.currentAccentColor)
+        }
+    }
+
+}
+
+#if os(tvOS)
+private struct PlayerRemoteControlsGroup: View {
+    @ObservedObject var store: PlayerSettingsStore
+    @Binding var expandedGroups: Set<String>
+    @StateObject private var accentColorManager = AccentColorManager.shared
+    private let doubleTapSeekOptions: [Double] = [5, 10, 15, 20, 30, 45, 60]
+
+    var body: some View {
+        remoteControlsGroup
+    }
+
+    @ViewBuilder
+    private var remoteControlsGroup: some View {
+        disclosureHeader("Remote Controls", icon: "appletvremote.gen4.fill", iconColor: .green, key: "remote")
+        if isExpanded("remote") {
+            GlassDivider(leadingInset: 16)
+            GlassDetailRow(title: "Seek Amount", subtitle: "Seconds moved by remote skip commands and Picture in Picture controls.") {
+                Picker("", selection: $store.playerDoubleTapSeekSeconds) {
+                    ForEach(doubleTapSeekOptions, id: \.self) { seconds in
+                        Text("\(Int(seconds))s").tag(seconds)
+                    }
+                }
+                .pickerStyle(.menu)
+                .tint(.white.opacity(0.7))
+            }
+            GlassDivider(leadingInset: 16)
+            GlassDetailRow(title: "Match Content", subtitle: "Eclipse automatically requests the video's native frame rate. Apple TV display settings decide whether a mode switch is allowed.") {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundColor(.green)
+            }
+        }
+    }
+    private func isExpanded(_ key: String) -> Bool {
+        expandedGroups.contains(key)
+    }
+
+    private func disclosureHeader(_ title: String, icon: String, iconColor: Color, key: String) -> some View {
+        PlayerSettingsDisclosureHeader(
+            title: title,
+            icon: icon,
+            iconColor: iconColor,
+            key: key,
+            expandedGroups: $expandedGroups
+        )
+    }
+
+    private func valueChevron(_ text: String) -> some View {
+        PlayerSettingsValueChevron(text: text)
+    }
+
+    private func settingsToggleRow(title: String, detail: String, binding: Binding<Bool>) -> some View {
+        GlassDetailRow(title: title, subtitle: detail) {
+            Toggle("", isOn: binding)
+                .labelsHidden()
+                .tint(accentColorManager.currentAccentColor)
+        }
+    }
+
+}
+#endif
+
+private struct PlayerSkipSegmentsGroup: View {
+    @ObservedObject var store: PlayerSettingsStore
+    @Binding var expandedGroups: Set<String>
+    @StateObject private var accentColorManager = AccentColorManager.shared
+
+    var body: some View {
+        skipSegmentsGroup
+    }
+
+    @ViewBuilder
+    private var skipSegmentsGroup: some View {
+        disclosureHeader("Skip Segments", icon: "forward.fill", iconColor: .pink, key: "skip")
+            .id(PlayerSettingsSearchTarget.skipSegments.anchorID)
+        if isExpanded("skip") {
+            GlassDivider(leadingInset: 16)
+            settingsToggleRow(title: "AniSkip", detail: "Fetch skip segments from AniSkip for anime content.", binding: $store.aniSkipEnabled)
+                .id(PlayerSettingsSearchTarget.aniSkip.anchorID)
+            GlassDivider(leadingInset: 16)
+            settingsToggleRow(title: "TheIntroDB", detail: "Fetch skip segments from TheIntroDB for all content.", binding: $store.introDBEnabled)
+                .id(PlayerSettingsSearchTarget.theIntroDB.anchorID)
+            GlassDivider(leadingInset: 16)
+            settingsToggleRow(title: "IntroDB", detail: "Fetch skip segments from introdb.app using IMDb IDs when other skip sources return nothing.", binding: $store.introDBAppEnabled)
+                .id(PlayerSettingsSearchTarget.introDB.anchorID)
+            GlassDivider(leadingInset: 16)
+            settingsToggleRow(title: "Auto Skip", detail: "Automatically skip intros, outros, recaps, and previews when detected. A skip button is always shown regardless of this setting.", binding: $store.aniSkipAutoSkip)
+                .id(PlayerSettingsSearchTarget.autoSkip.anchorID)
+#if !os(tvOS)
+            GlassDivider(leadingInset: 16)
+            settingsToggleRow(title: "Skip 85s Fallback", detail: "Show a skip 85 seconds button when no skip data is returned for the current episode.", binding: $store.skip85sEnabled)
+                .id(PlayerSettingsSearchTarget.skip85sFallback.anchorID)
+            GlassDivider(leadingInset: 16)
+            settingsToggleRow(title: "Always Show Skip 85s", detail: "Keep the Skip 85s button visible even when skip segments are available.", binding: $store.skip85sAlwaysVisible)
+                .id(PlayerSettingsSearchTarget.alwaysShowSkip85s.anchorID)
+#endif
+        }
+    }
+    private func isExpanded(_ key: String) -> Bool {
+        expandedGroups.contains(key)
+    }
+
+    private func disclosureHeader(_ title: String, icon: String, iconColor: Color, key: String) -> some View {
+        PlayerSettingsDisclosureHeader(
+            title: title,
+            icon: icon,
+            iconColor: iconColor,
+            key: key,
+            expandedGroups: $expandedGroups
+        )
+    }
+
+    private func valueChevron(_ text: String) -> some View {
+        PlayerSettingsValueChevron(text: text)
+    }
+
+    private func settingsToggleRow(title: String, detail: String, binding: Binding<Bool>) -> some View {
+        GlassDetailRow(title: title, subtitle: detail) {
+            Toggle("", isOn: binding)
+                .labelsHidden()
+                .tint(accentColorManager.currentAccentColor)
+        }
+    }
+
+}
+
+private struct PlayerNextEpisodeGroup: View {
+    @ObservedObject var store: PlayerSettingsStore
+    @Binding var expandedGroups: Set<String>
+    @StateObject private var accentColorManager = AccentColorManager.shared
+
+    var body: some View {
+        nextEpisodeGroup
+    }
+
+    @ViewBuilder
+    private var nextEpisodeGroup: some View {
+        disclosureHeader("Next Episode", icon: "forward.end.fill", iconColor: .yellow, key: "nextEp")
+            .id(PlayerSettingsSearchTarget.nextEpisode.anchorID)
+        if isExpanded("nextEp") {
+#if !os(tvOS)
+            GlassDivider(leadingInset: 16)
+            settingsToggleRow(title: "Episode Browser Button", detail: "Show the episode drawer button over the player.", binding: $store.showEpisodeBrowserButton)
+                .id(PlayerSettingsSearchTarget.episodeBrowserButton.anchorID)
+#endif
+            GlassDivider(leadingInset: 16)
+            settingsToggleRow(title: "Show Next Episode Button", detail: "Display a button near the end of an episode to quickly open stream search for the next episode.", binding: $store.showNextEpisodeButton)
+                .id(PlayerSettingsSearchTarget.showNextEpisodeButton.anchorID)
+
+            if store.showNextEpisodeButton {
+                #if !os(tvOS)
+                GlassDivider(leadingInset: 16)
+                settingsToggleRow(title: "Use Episode Poster", detail: "Show the next episode image, number, and title when available.", binding: $store.showNextEpisodePosterButton)
+                    .id(PlayerSettingsSearchTarget.useEpisodePoster.anchorID)
+
+                #if os(iOS)
+                GlassDivider(leadingInset: 16)
+                settingsToggleRow(
+                    title: "Skip Filler Episodes",
+                    detail: "For anime, Next Episode and pre-staging jump to the next episode not marked as filler. If filler data is unavailable, Eclipse uses the normal next episode.",
+                    binding: $store.nextEpisodeSkipFillerEnabled
+                )
+                .id(PlayerSettingsSearchTarget.skipFillerEpisodes.anchorID)
+                #endif
+                #endif
+
+                GlassDivider(leadingInset: 16)
+                GlassDetailRow(title: "Appearance Threshold", subtitle: "How far into the episode (%) before the button appears. Default is 90%.") {
+                    HStack(spacing: 8) {
+                        Text("\(Int(store.nextEpisodeThreshold * 100))%")
+                            .font(.subheadline)
+                            .foregroundColor(.white.opacity(0.5))
+#if os(tvOS)
+                        Picker("", selection: $store.nextEpisodeThreshold) {
+                            ForEach(Array(stride(from: 0.50, through: 0.99, by: 0.05)), id: \.self) { value in
+                                Text("\(Int(value * 100))%").tag(value)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .tint(.white.opacity(0.7))
+#else
+                        Stepper("", value: $store.nextEpisodeThreshold, in: 0.50...0.99, step: 0.05)
+                            .labelsHidden()
+#endif
+                    }
+                }
+                .id(PlayerSettingsSearchTarget.appearanceThreshold.anchorID)
+            }
+        }
+    }
+    private func isExpanded(_ key: String) -> Bool {
+        expandedGroups.contains(key)
+    }
+
+    private func disclosureHeader(_ title: String, icon: String, iconColor: Color, key: String) -> some View {
+        PlayerSettingsDisclosureHeader(
+            title: title,
+            icon: icon,
+            iconColor: iconColor,
+            key: key,
+            expandedGroups: $expandedGroups
+        )
+    }
+
+    private func valueChevron(_ text: String) -> some View {
+        PlayerSettingsValueChevron(text: text)
+    }
+
+    private func settingsToggleRow(title: String, detail: String, binding: Binding<Bool>) -> some View {
+        GlassDetailRow(title: title, subtitle: detail) {
+            Toggle("", isOn: binding)
+                .labelsHidden()
+                .tint(accentColorManager.currentAccentColor)
+        }
+    }
+
+}
+
+private struct MPVPlayerSettingsPage: View {
+    @ObservedObject var store: PlayerSettingsStore
+    let initialSearchTarget: PlayerSettingsSearchTarget?
+
+    @StateObject private var accentColorManager = AccentColorManager.shared
+    @State private var expandedGroups: Set<String> = []
+    @State private var didFocusInitialSearchTarget = false
+    private let doubleTapSeekOptions: [Double] = [5, 10, 15, 20, 30, 45, 60]
+    #if !os(tvOS)
+    private let mpvForegroundFPSOptions: [Int] = [30, 60]
+    #endif
+
+    private var accent: Color { accentColorManager.currentAccentColor }
+
+    var body: some View {
+        mpvSettingsPage
+    }
+
+    private var mpvSettingsPage: some View {
+        ScrollViewReader { scrollProxy in
+            ScrollView {
+                LazyVStack(spacing: 8) {
+                    if usesMPVSettings {
+                        GlassSection(header: "MPV Player") {
+                            VStack(spacing: 0) {
+                                NavigationLink(destination: MPVPlayerSkinSettingsView(selection: $store.mpvPlayerSkin)) {
+                                    GlassDetailRow(
+                                        icon: "paintpalette.fill",
+                                        iconColor: .pink,
+                                        title: "Player Skin",
+                                        subtitle: "Customize the MPV control overlay."
+                                    ) {
+                                        valueChevron(store.mpvPlayerSkin.displayName)
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .id(PlayerSettingsSearchTarget.playerSkin.anchorID)
+                                GlassDivider()
+                                PlayerSubtitleDefaultsGroup(expandedGroups: $expandedGroups)
+                                GlassDivider()
+                                PlayerSubtitleAppearanceGroup(store: store, expandedGroups: $expandedGroups, usesMPVSettings: usesMPVSettings)
+                                GlassDivider()
+                                mpvRenderingGroup
+                                GlassDivider()
+                                #if os(tvOS)
+                                PlayerRemoteControlsGroup(store: store, expandedGroups: $expandedGroups)
+                                GlassDivider()
+                                PlayerSkipSegmentsGroup(store: store, expandedGroups: $expandedGroups)
+                                GlassDivider()
+                                PlayerNextEpisodeGroup(store: store, expandedGroups: $expandedGroups)
+                                #else
+                                gesturesGroup
+                                #endif
+#if !os(tvOS)
+                                GlassDivider()
+                                openSubtitlesGroup
+                                GlassDivider()
+                                PlayerSkipSegmentsGroup(store: store, expandedGroups: $expandedGroups)
+                                GlassDivider()
+                                if canUseMetalMPVAdvancedSettings {
+                                    experimentalMPVDisclosure
+                                } else {
+                                    HStack(spacing: 10) {
+                                        Image(systemName: "lock.fill")
+                                            .foregroundColor(.white.opacity(0.5))
+                                        Text(mpvAdvancedRequirementMessage)
+                                            .font(.caption)
+                                            .foregroundColor(.white.opacity(0.5))
+                                        Spacer(minLength: 0)
+                                    }
+                                    .padding(.horizontal, 16)
+                                    .padding(.vertical, 12)
+                                }
+                                GlassDivider()
+                                PlayerNextEpisodeGroup(store: store, expandedGroups: $expandedGroups)
+#endif
+                            }
+                        }
+                        .id(PlayerSettingsSearchTarget.mpvSettings.anchorID)
+                        GlassSectionFooter(playerSettingsFooter)
+                    } else {
+                        GlassSection(header: "MPV Player") {
+                            HStack(spacing: 10) {
+                                Image(systemName: "lock.fill")
+                                    .foregroundColor(.white.opacity(0.5))
+                                Text(mpvAdvancedRequirementMessage)
+                                    .font(.subheadline)
+                                    .foregroundColor(.white.opacity(0.5))
+                                Spacer(minLength: 0)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                        }
+                        .id(PlayerSettingsSearchTarget.mpvSettings.anchorID)
+                        GlassSectionFooter(mpvLockedFooter)
+                    }
+                }
+                .padding(.top, 16)
+                .padding(.bottom, 32)
+            }
+            .onAppear {
+                focusInitialSearchTarget(using: scrollProxy)
+            }
+        }
+        .navigationTitle("MPV Player")
+        .background(SettingsGradientBackground(allowsAnimatedBackground: false).ignoresSafeArea())
+        .eclipseDarkToolbar()
+    }
+
+
     @ViewBuilder
     private var mpvRenderingGroup: some View {
         disclosureHeader("MPV Rendering", icon: "display", iconColor: .cyan, key: "rendering")
@@ -1702,6 +2289,36 @@ struct PlayerSettingsView: View {
                     .tint(.white.opacity(0.7))
                 }
                 .id(PlayerSettingsSearchTarget.upscaling.anchorID)
+
+                if MPVUserShaderLibrary.isAvailable, store.mpvUpscalingMode != .off {
+                    GlassDivider(leadingInset: 16)
+                    GlassDetailRow(title: "Enhanced Upscaling", subtitle: mpvNeuralUpscalerDescription + " Runs only when the video is enlarged past about 5 percent.") {
+                        Picker("", selection: $store.mpvNeuralUpscaler) {
+                            ForEach(MPVUserShaderLibrary.pickerUpscalers(including: store.mpvNeuralUpscaler)) { upscaler in
+                                Text(upscaler.displayName).tag(upscaler)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .tint(.white.opacity(0.7))
+                    }
+                    .id(PlayerSettingsSearchTarget.neuralUpscaling.anchorID)
+                }
+                #endif
+
+                #if os(tvOS)
+                if MPVUserShaderLibrary.isAvailable {
+                    GlassDivider(leadingInset: 16)
+                    GlassDetailRow(title: "Enhanced Upscaling", subtitle: mpvNeuralUpscalerTVDescription + " Helps most on video below 4K. Separate from the iPhone and iPad setting.") {
+                        Picker("", selection: $store.mpvNeuralUpscalerTV) {
+                            ForEach(MPVUserShaderLibrary.pickerUpscalers(including: store.mpvNeuralUpscalerTV)) { upscaler in
+                                Text(upscaler.displayName).tag(upscaler)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .tint(.white.opacity(0.7))
+                    }
+                    .id(PlayerSettingsSearchTarget.neuralUpscaling.anchorID)
+                }
                 #endif
 
                 #if !os(tvOS)
@@ -1833,28 +2450,6 @@ struct PlayerSettingsView: View {
     }
 
     @ViewBuilder
-    private var remoteControlsGroup: some View {
-        disclosureHeader("Remote Controls", icon: "appletvremote.gen4.fill", iconColor: .green, key: "remote")
-        if isExpanded("remote") {
-            GlassDivider(leadingInset: 16)
-            GlassDetailRow(title: "Seek Amount", subtitle: "Seconds moved by remote skip commands and Picture in Picture controls.") {
-                Picker("", selection: $store.playerDoubleTapSeekSeconds) {
-                    ForEach(doubleTapSeekOptions, id: \.self) { seconds in
-                        Text("\(Int(seconds))s").tag(seconds)
-                    }
-                }
-                .pickerStyle(.menu)
-                .tint(.white.opacity(0.7))
-            }
-            GlassDivider(leadingInset: 16)
-            GlassDetailRow(title: "Match Content", subtitle: "Eclipse automatically requests the video's native frame rate. Apple TV display settings decide whether a mode switch is allowed.") {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(.green)
-            }
-        }
-    }
-
-    @ViewBuilder
     private var gesturesGroup: some View {
         disclosureHeader("Playback Gestures", icon: "hand.draw", iconColor: .green, key: "gestures")
             .id(PlayerSettingsSearchTarget.playbackGestures.anchorID)
@@ -1894,30 +2489,6 @@ struct PlayerSettingsView: View {
     }
 
     @ViewBuilder
-    private var avPlayerGesturesGroup: some View {
-        disclosureHeader("Playback Gestures", icon: "hand.draw", iconColor: .green, key: "gestures")
-            .id(PlayerSettingsSearchTarget.playbackGestures.anchorID)
-        if isExpanded("gestures") {
-            GlassDivider(leadingInset: 16)
-            settingsToggleRow(
-                title: "Double-Tap Seek",
-                detail: "Double-tap the left or right side of the video to seek without replacing Apple's controls.",
-                binding: $store.playerDoubleTapSeekEnabled
-            )
-            .id(PlayerSettingsSearchTarget.doubleTapSeek.anchorID)
-            GlassDivider(leadingInset: 16)
-            GlassDetailRow(
-                title: "Seek Amount",
-                subtitle: "Seek \(Int(store.playerDoubleTapSeekSeconds)) seconds with double-tap and system skip controls."
-            ) {
-                Stepper("", value: $store.playerDoubleTapSeekSeconds, in: 5...60, step: 5)
-                    .labelsHidden()
-            }
-            .id(PlayerSettingsSearchTarget.seekAmount.anchorID)
-        }
-    }
-
-    @ViewBuilder
     private var openSubtitlesGroup: some View {
         disclosureHeader("OpenSubtitles", icon: "globe", iconColor: .indigo, key: "openSubs")
         if isExpanded("openSubs") {
@@ -1930,211 +2501,6 @@ struct PlayerSettingsView: View {
                 settingsToggleRow(title: "Use as Auto Fallback", detail: "When auto subtitles are on, search OpenSubtitles if the selected language is missing locally.", binding: $store.playerOpenSubtitlesAutoFallbackEnabled)
                     .id(PlayerSettingsSearchTarget.openSubtitlesAutoFallback.anchorID)
             }
-        }
-    }
-
-    @ViewBuilder
-    private var skipSegmentsGroup: some View {
-        disclosureHeader("Skip Segments", icon: "forward.fill", iconColor: .pink, key: "skip")
-            .id(PlayerSettingsSearchTarget.skipSegments.anchorID)
-        if isExpanded("skip") {
-#if !os(tvOS)
-            GlassDivider(leadingInset: 16)
-            settingsToggleRow(title: "AniSkip", detail: "Fetch skip segments from AniSkip for anime content.", binding: $store.aniSkipEnabled)
-                .id(PlayerSettingsSearchTarget.aniSkip.anchorID)
-#endif
-            GlassDivider(leadingInset: 16)
-            settingsToggleRow(title: "TheIntroDB", detail: "Fetch skip segments from TheIntroDB for all content.", binding: $store.introDBEnabled)
-                .id(PlayerSettingsSearchTarget.theIntroDB.anchorID)
-            GlassDivider(leadingInset: 16)
-            settingsToggleRow(title: "IntroDB", detail: "Fetch skip segments from introdb.app using IMDb IDs when other skip sources return nothing.", binding: $store.introDBAppEnabled)
-                .id(PlayerSettingsSearchTarget.introDB.anchorID)
-            GlassDivider(leadingInset: 16)
-            settingsToggleRow(title: "Auto Skip", detail: "Automatically skip intros, outros, recaps, and previews when detected. A skip button is always shown regardless of this setting.", binding: $store.aniSkipAutoSkip)
-                .id(PlayerSettingsSearchTarget.autoSkip.anchorID)
-#if !os(tvOS)
-            GlassDivider(leadingInset: 16)
-            settingsToggleRow(title: "Skip 85s Fallback", detail: "Show a skip 85 seconds button when no skip data is returned for the current episode.", binding: $store.skip85sEnabled)
-                .id(PlayerSettingsSearchTarget.skip85sFallback.anchorID)
-            GlassDivider(leadingInset: 16)
-            settingsToggleRow(title: "Always Show Skip 85s", detail: "Keep the Skip 85s button visible even when skip segments are available.", binding: $store.skip85sAlwaysVisible)
-                .id(PlayerSettingsSearchTarget.alwaysShowSkip85s.anchorID)
-#endif
-        }
-    }
-
-    @ViewBuilder
-    private var nextEpisodeGroup: some View {
-        disclosureHeader("Next Episode", icon: "forward.end.fill", iconColor: .yellow, key: "nextEp")
-            .id(PlayerSettingsSearchTarget.nextEpisode.anchorID)
-        if isExpanded("nextEp") {
-#if !os(tvOS)
-            GlassDivider(leadingInset: 16)
-            settingsToggleRow(title: "Episode Browser Button", detail: "Show the episode drawer button over the player.", binding: $store.showEpisodeBrowserButton)
-                .id(PlayerSettingsSearchTarget.episodeBrowserButton.anchorID)
-#endif
-            GlassDivider(leadingInset: 16)
-            settingsToggleRow(title: "Show Next Episode Button", detail: "Display a button near the end of an episode to quickly open stream search for the next episode.", binding: $store.showNextEpisodeButton)
-                .id(PlayerSettingsSearchTarget.showNextEpisodeButton.anchorID)
-
-            if store.showNextEpisodeButton {
-                #if !os(tvOS)
-                GlassDivider(leadingInset: 16)
-                settingsToggleRow(title: "Use Episode Poster", detail: "Show the next episode image, number, and title when available.", binding: $store.showNextEpisodePosterButton)
-                    .id(PlayerSettingsSearchTarget.useEpisodePoster.anchorID)
-
-                #if os(iOS)
-                GlassDivider(leadingInset: 16)
-                settingsToggleRow(
-                    title: "Skip Filler Episodes",
-                    detail: "For anime, Next Episode and pre-staging jump to the next episode not marked as filler. If filler data is unavailable, Eclipse uses the normal next episode.",
-                    binding: $store.nextEpisodeSkipFillerEnabled
-                )
-                .id(PlayerSettingsSearchTarget.skipFillerEpisodes.anchorID)
-                #endif
-                #endif
-
-                GlassDivider(leadingInset: 16)
-                GlassDetailRow(title: "Appearance Threshold", subtitle: "How far into the episode (%) before the button appears. Default is 90%.") {
-                    HStack(spacing: 8) {
-                        Text("\(Int(store.nextEpisodeThreshold * 100))%")
-                            .font(.subheadline)
-                            .foregroundColor(.white.opacity(0.5))
-#if os(tvOS)
-                        Picker("", selection: $store.nextEpisodeThreshold) {
-                            ForEach(Array(stride(from: 0.50, through: 0.99, by: 0.05)), id: \.self) { value in
-                                Text("\(Int(value * 100))%").tag(value)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                        .tint(.white.opacity(0.7))
-#else
-                        Stepper("", value: $store.nextEpisodeThreshold, in: 0.50...0.99, step: 0.05)
-                            .labelsHidden()
-#endif
-                    }
-                }
-                .id(PlayerSettingsSearchTarget.appearanceThreshold.anchorID)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var avPlayerNextEpisodeGroup: some View {
-        disclosureHeader("Next Episode", icon: "forward.end.fill", iconColor: .yellow, key: "nextEp")
-            .id(PlayerSettingsSearchTarget.nextEpisode.anchorID)
-        if isExpanded("nextEp") {
-            GlassDivider(leadingInset: 16)
-            settingsToggleRow(
-                title: "Show Next Episode Button",
-                detail: "Show a verified next-episode button near the end. It never advances without a tap.",
-                binding: $store.showNextEpisodeButton
-            )
-            .id(PlayerSettingsSearchTarget.showNextEpisodeButton.anchorID)
-            if store.showNextEpisodeButton {
-                GlassDivider(leadingInset: 16)
-                GlassDetailRow(
-                    title: "Appearance Threshold",
-                    subtitle: "How far into the episode before the button appears."
-                ) {
-                    HStack(spacing: 8) {
-                        Text("\(Int(store.nextEpisodeThreshold * 100))%")
-                            .font(.subheadline)
-                            .foregroundColor(.white.opacity(0.5))
-                        Stepper("", value: $store.nextEpisodeThreshold, in: 0.50...0.99, step: 0.05)
-                            .labelsHidden()
-                    }
-                }
-                .id(PlayerSettingsSearchTarget.appearanceThreshold.anchorID)
-            }
-        }
-    }
-
-    // MARK: - Helpers
-
-    private func isExpanded(_ key: String) -> Bool {
-        expandedGroups.contains(key)
-    }
-
-    private func toggleGroup(_ key: String) {
-        withAnimation(.easeInOut(duration: 0.2)) {
-            if expandedGroups.contains(key) {
-                expandedGroups.remove(key)
-            } else {
-                expandedGroups.insert(key)
-            }
-        }
-    }
-
-    private func disclosureHeader(_ title: String, icon: String, iconColor: Color, key: String) -> some View {
-        Button {
-            toggleGroup(key)
-        } label: {
-            GlassDetailRow(icon: icon, iconColor: iconColor, title: title) {
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.4))
-                    .rotationEffect(.degrees(isExpanded(key) ? 90 : 0))
-            }
-        }
-        .buttonStyle(.plain)
-    }
-
-    private func valueChevron(_ text: String) -> some View {
-        HStack(spacing: 4) {
-            Text(text)
-                .font(.caption)
-                .foregroundColor(.white.opacity(0.5))
-            Image(systemName: "chevron.right")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundColor(.white.opacity(0.3))
-        }
-    }
-
-    private func getLanguageName(_ code: String) -> String {
-        let languages: [String: String] = [
-            "eng": "English",
-            "jpn": "Japanese",
-            "zho": "Chinese",
-            "kor": "Korean",
-            "spa": "Spanish",
-            "fra": "French",
-            "deu": "German",
-            "ita": "Italian",
-            "por": "Portuguese",
-            "rus": "Russian"
-        ]
-        return languages[code] ?? code.uppercased()
-    }
-
-    private func formatSpeed(_ speed: Double) -> String {
-        let oneDecimal = (speed * 10).rounded() / 10
-        if abs(speed - oneDecimal) < 0.001 {
-            return String(format: "%.1fx", speed)
-        }
-        return String(format: "%.2fx", speed)
-    }
-
-    private func focusInitialSearchTarget(using scrollProxy: ScrollViewProxy) {
-        guard !didFocusInitialSearchTarget, let initialSearchTarget else { return }
-        didFocusInitialSearchTarget = true
-
-        if let expandedGroup = initialSearchTarget.expandedGroup {
-            expandedGroups.insert(expandedGroup)
-        }
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            withAnimation(.easeInOut(duration: 0.28)) {
-                scrollProxy.scrollTo(initialSearchTarget.anchorID, anchor: .center)
-            }
-        }
-    }
-
-    private func settingsToggleRow(title: String, detail: String, binding: Binding<Bool>) -> some View {
-        GlassDetailRow(title: title, subtitle: detail) {
-            Toggle("", isOn: binding)
-                .labelsHidden()
-                .tint(accentColorManager.currentAccentColor)
         }
     }
 
@@ -2181,148 +2547,205 @@ struct PlayerSettingsView: View {
     }
     #endif
 
-    private var subtitleTextColorOptions: [(name: String, color: UIColor)] {
-        [("White", .white), ("Yellow", .yellow), ("Cyan", .cyan), ("Green", .green), ("Magenta", .magenta)]
+    private var metalRenderingSettingsAvailable: Bool {
+        #if os(tvOS)
+        true
+        #else
+        MPVRenderBackendSupport.metalIsFullySupported
+        #endif
     }
 
-    private var subtitleStrokeColorOptions: [(name: String, color: UIColor)] {
-        [("Black", .black), ("Dark Gray", .darkGray), ("White", .white), ("None", .clear)]
+    private var canUseMetalMPVAdvancedSettings: Bool {
+        #if os(tvOS)
+        return store.playbackEngine != .avPlayer
+        #else
+        PlaybackLaunchPlan.make(
+            selection: store.playbackEngine,
+            deviceFamily: .current
+        ).primary == .mpv
+            && store.externalPlayer == .none
+        #endif
     }
 
-    private var subtitleTextColorBinding: Binding<String> {
-        Binding(
-            get: { subtitleTextColorName },
-            set: { selectedName in
-                subtitleTextColorName = selectedName
-                if let selected = subtitleTextColorOptions.first(where: { $0.name == selectedName })?.color {
-                    saveSubtitleColor(selected, forKey: "subtitles_foregroundColor")
-                }
-            }
-        )
+    private var usesMPVSettings: Bool {
+        #if os(tvOS)
+        store.playbackEngine != .avPlayer
+        #else
+        PlaybackLaunchPlan.make(
+            selection: store.playbackEngine,
+            deviceFamily: .current
+        ).primary == .mpv
+        #endif
     }
 
-    private var subtitleStrokeColorBinding: Binding<String> {
-        Binding(
-            get: { subtitleStrokeColorName },
-            set: { selectedName in
-                subtitleStrokeColorName = selectedName
-                if let selected = subtitleStrokeColorOptions.first(where: { $0.name == selectedName })?.color {
-                    saveSubtitleColor(selected, forKey: "subtitles_strokeColor")
-                }
-            }
-        )
+    private var playerSettingsFooter: String {
+        #if os(tvOS)
+        "Apple TV playback, subtitle, remote, and display settings."
+        #else
+        "In-app playback, subtitle, and gesture settings."
+        #endif
     }
 
-    private var subtitleStrokeWidthBinding: Binding<Double> {
-        Binding(
-            get: { subtitleStrokeWidth },
-            set: {
-                let clamped = max(0, min($0, 2.0))
-                subtitleStrokeWidth = clamped
-                UserDefaults.standard.set(clamped, forKey: "subtitles_strokeWidth")
-            }
-        )
+    private var pictureInPictureSettingsDescription: String {
+        #if os(tvOS)
+        "Show the Picture in Picture button when supported."
+        #else
+        "Show Picture in Picture controls when the current stream supports them."
+        #endif
     }
 
-    private var subtitleFontSizeOptions: [(name: String, size: Double)] {
-        [
-            ("Very Small", 20.0),
-            ("Small", 24.0),
-            ("Medium", 30.0),
-            ("Large", 34.0),
-            ("Extra Large", 38.0),
-            ("Huge", 42.0),
-            ("Extra Huge", 46.0)
-        ]
+    private var surroundSoundSettingsDescription: String {
+#if os(tvOS)
+        "Use surround audio when the stream and audio route support it."
+#else
+        "Use surround audio on supported receivers. Built-in speakers stay stereo."
+#endif
     }
 
-    private var subtitleFontSizePresetBinding: Binding<String> {
-        Binding(
-            get: { subtitleFontSizePresetName },
-            set: { selectedName in
-                subtitleFontSizePresetName = selectedName
-                if let selected = subtitleFontSizeOptions.first(where: { $0.name == selectedName }) {
-                    UserDefaults.standard.set(selected.size, forKey: "subtitles_fontSize")
-                }
-            }
-        )
+    private var mpvLockedFooter: String {
+        #if os(tvOS)
+        "Choose Automatic or MPV to use MPV features."
+        #else
+        "Use MPV, Default external playback, and MoltenVK to unlock advanced features."
+        #endif
     }
 
-    private var subtitleVerticalOffsetBinding: Binding<Double> {
-        Binding(
-            get: { subtitleVerticalOffset },
-            set: { selectedValue in
-                let clamped = max(-24, min(selectedValue, 24))
-                subtitleVerticalOffset = clamped
-                UserDefaults.standard.set(clamped, forKey: "playerSubtitleOverlayBottomConstant")
-            }
-        )
-    }
-
-    private var subtitleClosedCaptionBackgroundBinding: Binding<Bool> {
-        Binding(
-            get: { subtitleClosedCaptionBackground },
-            set: {
-                subtitleClosedCaptionBackground = $0
-                UserDefaults.standard.set($0, forKey: "subtitles_closedCaptionBackground")
-            }
-        )
-    }
-
-    private func loadSubtitleColor(forKey key: String, defaultColor: UIColor) -> UIColor {
-        guard let data = UserDefaults.standard.data(forKey: key),
-              let color = try? NSKeyedUnarchiver.unarchivedObject(ofClass: UIColor.self, from: data) else {
-            return defaultColor
+    private var mpvAdvancedRequirementMessage: String {
+        #if os(tvOS)
+        if store.playbackEngine == .avPlayer {
+            return "Choose Automatic or MPV to use advanced features."
         }
-        return color
+        return "Advanced features use the MoltenVK renderer."
+        #else
+        if PlaybackLaunchPlan.make(
+            selection: store.playbackEngine,
+            deviceFamily: .current
+        ).primary != .mpv {
+            return "Set MPV as the in-app player to use advanced features."
+        }
+        if store.externalPlayer != .none {
+            return "Set external playback to Default to use advanced features."
+        }
+        if !MPVRenderBackendSupport.metalIsFullySupported {
+            return "This build needs the MoltenVK renderer for advanced features."
+        }
+        return "Advanced features use the MoltenVK renderer."
+        #endif
     }
 
-    private func saveSubtitleColor(_ color: UIColor, forKey key: String) {
-        if let data = try? NSKeyedArchiver.archivedData(withRootObject: color, requiringSecureCoding: false) {
-            UserDefaults.standard.set(data, forKey: key)
+    private var mpvQualityDescription: String {
+        switch store.mpvMetalQualityProfile {
+        case .auto:
+            return "Balances picture quality and heat automatically. Recommended."
+        case .balanced:
+            return "Uses less heat with little loss in quality."
+        case .lowHeat:
+            return "Uses the least power, but video may look softer."
+        case .sharp:
+            return "Prioritizes picture quality and uses more power."
         }
     }
 
-    private func resetPlayerSubtitleStyleDefaults() {
-        saveSubtitleColor(.white, forKey: "subtitles_foregroundColor")
-        saveSubtitleColor(.black, forKey: "subtitles_strokeColor")
-        UserDefaults.standard.set(1.0, forKey: "subtitles_strokeWidth")
-        UserDefaults.standard.set(30.0, forKey: "subtitles_fontSize")
-        UserDefaults.standard.set(-6.0, forKey: "playerSubtitleOverlayBottomConstant")
-        UserDefaults.standard.set(false, forKey: "subtitles_closedCaptionBackground")
-        refreshPlayerSubtitleStyleStateFromDefaults()
+    private var mpvUpscalingDescription: String {
+        switch store.mpvUpscalingMode {
+        case .off:
+            return "No enhancement. Uses the least power."
+        case .upscaleTo1080:
+            return "Enhances video below 1080p while saving power on HD."
+        case .upscaleTo4K:
+            return "Enhances video below 4K. Uses more power."
+        case .oneLevelAlways:
+            return "Enhances every video by one resolution step."
+        case .auto:
+            return "Sharpest picture. Uses the most power."
+        }
     }
 
-    private func refreshPlayerSubtitleStyleStateFromDefaults() {
-        let textColor = loadSubtitleColor(forKey: "subtitles_foregroundColor", defaultColor: .white)
-        subtitleTextColorName = subtitleTextColorOptions.first(where: { $0.color.isEqual(textColor) })?.name ?? "White"
-
-        let strokeColor = loadSubtitleColor(forKey: "subtitles_strokeColor", defaultColor: .black)
-        subtitleStrokeColorName = subtitleStrokeColorOptions.first(where: { $0.color.isEqual(strokeColor) })?.name ?? "Black"
-
-        if UserDefaults.standard.object(forKey: "subtitles_strokeWidth") != nil {
-            let savedStrokeWidth = UserDefaults.standard.double(forKey: "subtitles_strokeWidth")
-            subtitleStrokeWidth = max(0, min(savedStrokeWidth, 2.0))
-        } else {
-            subtitleStrokeWidth = 1.0
-        }
-
-        let savedFontSize = UserDefaults.standard.double(forKey: "subtitles_fontSize")
-        let resolvedFontSize = savedFontSize > 0 ? savedFontSize : 30.0
-        if let exact = subtitleFontSizeOptions.first(where: { abs($0.size - resolvedFontSize) < 0.01 }) {
-            subtitleFontSizePresetName = exact.name
-        } else {
-            let nearest = subtitleFontSizeOptions.min(by: { abs($0.size - resolvedFontSize) < abs($1.size - resolvedFontSize) })
-            subtitleFontSizePresetName = nearest?.name ?? "Medium"
-        }
-
-        if UserDefaults.standard.object(forKey: "playerSubtitleOverlayBottomConstant") == nil,
-           UserDefaults.standard.object(forKey: "vlcSubtitleOverlayBottomConstant") != nil {
-            UserDefaults.standard.set(UserDefaults.standard.double(forKey: "vlcSubtitleOverlayBottomConstant"), forKey: "playerSubtitleOverlayBottomConstant")
-        }
-        let savedBottomConstant = UserDefaults.standard.double(forKey: "playerSubtitleOverlayBottomConstant")
-        subtitleVerticalOffset = UserDefaults.standard.object(forKey: "playerSubtitleOverlayBottomConstant") != nil ? max(-24, min(savedBottomConstant, 24)) : -6.0
-
-        subtitleClosedCaptionBackground = UserDefaults.standard.bool(forKey: "subtitles_closedCaptionBackground")
+    private var mpvNeuralUpscalerDescription: String {
+        Self.neuralUpscalerSummary(store.mpvNeuralUpscaler)
     }
+
+    private var mpvNeuralUpscalerTVDescription: String {
+        Self.neuralUpscalerSummary(store.mpvNeuralUpscalerTV)
+    }
+
+    private static func neuralUpscalerSummary(_ upscaler: MPVNeuralUpscaler) -> String {
+        switch upscaler {
+        case .off:
+            return "No extra shader. Uses the least power."
+        case .automatic:
+            return "ArtCNN on animation, FSR 1 on live action."
+        case .anime:
+            return "Neural network rebuild. Best on animation, uses the most power."
+        case .animeLowBitrate:
+            return "Neural rebuild tuned for blocky, low-bitrate animation."
+        case .general:
+            return "Edge-adaptive scaling and sharpening. Best on live action."
+        }
+    }
+
+    private var mpvHDRDescription: String {
+        switch store.mpvHDRMode {
+        case .auto:
+            return "Uses HDR on compatible displays and SDR everywhere else. Recommended."
+        case .hdr:
+            return "Forces HDR and may look wrong on non-HDR displays."
+        case .sdr:
+            return "Converts HDR to SDR for a consistent picture."
+        }
+    }
+
+    private var comfortAudioDescription: String {
+        switch store.audioComfortMode {
+        case .original:
+            return "Plays the original audio mix."
+        case .comfort:
+            return "Keeps dialogue and loud moments closer in volume."
+        case .dialogue:
+            return "Makes voices clearer."
+        case .night:
+            return "Reduces sudden loud sounds for late-night viewing."
+        }
+    }
+
+    private func focusInitialSearchTarget(using scrollProxy: ScrollViewProxy) {
+        guard !didFocusInitialSearchTarget, let initialSearchTarget else { return }
+        didFocusInitialSearchTarget = true
+
+        if let expandedGroup = initialSearchTarget.expandedGroup {
+            expandedGroups.insert(expandedGroup)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
+            withAnimation(.easeInOut(duration: 0.28)) {
+                scrollProxy.scrollTo(initialSearchTarget.anchorID, anchor: .center)
+            }
+        }
+    }
+    private func isExpanded(_ key: String) -> Bool {
+        expandedGroups.contains(key)
+    }
+
+    private func disclosureHeader(_ title: String, icon: String, iconColor: Color, key: String) -> some View {
+        PlayerSettingsDisclosureHeader(
+            title: title,
+            icon: icon,
+            iconColor: iconColor,
+            key: key,
+            expandedGroups: $expandedGroups
+        )
+    }
+
+    private func valueChevron(_ text: String) -> some View {
+        PlayerSettingsValueChevron(text: text)
+    }
+
+    private func settingsToggleRow(title: String, detail: String, binding: Binding<Bool>) -> some View {
+        GlassDetailRow(title: title, subtitle: detail) {
+            Toggle("", isOn: binding)
+                .labelsHidden()
+                .tint(accentColorManager.currentAccentColor)
+        }
+    }
+
 }

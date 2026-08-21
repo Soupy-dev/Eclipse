@@ -1,3 +1,9 @@
+//
+//  ModuleManager.swift
+//  Kanzen
+//
+//  Created by Dawud Osman on 13/05/2025.
+//
 import Foundation
 class ModuleManager: ObservableObject {
     static let shared = ModuleManager()
@@ -6,26 +12,27 @@ class ModuleManager: ObservableObject {
     private let modulesFileName: String = "modules.json"
     private let maximumModuleMetadataBytes = 1_000_000
     private let maximumModuleScriptBytes = 10_000_000
+    private var metadataLoadFailed = false
 
-    // MARK: - Auto-Update
+    var metadataStoreFailedToLoad: Bool { metadataLoadFailed }
 
     private static let autoUpdateKey = "kanzenAutoUpdateModules"
     private static let lastAutoUpdateKey = "kanzenLastModuleAutoUpdate"
     private let autoUpdateInterval: TimeInterval = 3600
 
     static var isAutoUpdateEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: autoUpdateKey) }
-        set { UserDefaults.standard.set(newValue, forKey: autoUpdateKey) }
+        get { ProfileSettingsStore.services.bool(forKey: autoUpdateKey) }
+        set { ProfileSettingsStore.services.set(newValue, forKey: autoUpdateKey) }
     }
 
     private var lastAutoUpdateDate: Date {
-        get { UserDefaults.standard.object(forKey: ModuleManager.lastAutoUpdateKey) as? Date ?? .distantPast }
-        set { UserDefaults.standard.set(newValue, forKey: ModuleManager.lastAutoUpdateKey) }
+        get { ProfileSettingsStore.services.object(forKey: ModuleManager.lastAutoUpdateKey) as? Date ?? .distantPast }
+        set { ProfileSettingsStore.services.set(newValue, forKey: ModuleManager.lastAutoUpdateKey) }
     }
 
     private init()
     {
-        UserDefaults.standard.register(defaults: [
+        ProfileSettingsStore.services.register(defaults: [
             ModuleManager.autoUpdateKey: true
         ])
 
@@ -44,11 +51,65 @@ class ModuleManager: ObservableObject {
         DispatchQueue.main.async {
             let url = ModuleManager.shared.getModulesFilePath()
             guard let data = try? JSONEncoder().encode(self.modules) else {return}
-            try? data.write(to: url, options: .atomic)
+            guard Self.persistMetadataData(
+                data,
+                to: url,
+                maximumBytes: self.maximumModuleMetadataBytes,
+                storeLoadFailed: self.metadataLoadFailed
+            ) else {
+                ReaderLogger.shared.log(
+                    self.metadataLoadFailed
+                        ? "Refused to overwrite module metadata that failed to load"
+                        : "Refused to save oversized or unavailable module metadata",
+                    type: "Error"
+                )
+                return
+            }
+        }
+    }
+
+    @discardableResult
+    static func persistMetadataData(
+        _ data: Data,
+        to url: URL,
+        maximumBytes: Int,
+        storeLoadFailed: Bool
+    ) -> Bool {
+        guard !storeLoadFailed,
+              maximumBytes >= 0,
+              data.count <= maximumBytes else { return false }
+        do {
+            try data.write(to: url, options: .atomic)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    @discardableResult
+    func replaceWithAccountNeutralMetadata() -> Bool {
+        let url = getModulesFilePath()
+        do {
+            let data = try JSONEncoder().encode([ModuleDataContainer]())
+            try data.write(to: url, options: [.atomic, .completeFileProtection])
+            modules = []
+            metadataLoadFailed = false
+            return true
+        } catch {
+            ReaderLogger.shared.log(
+                "Failed to clear module metadata at account boundary: \(error.localizedDescription)",
+                type: "Error"
+            )
+            return false
         }
     }
     func addModules(_ moduleUrL:String, metaData: ModuleData) async throws -> Void
     {
+        guard !metadataLoadFailed else {
+            throw ModuleCreationError.invalidModuleName(
+                "Module metadata could not be loaded; recover or explicitly reset it before adding modules"
+            )
+        }
         if modules.contains(where: {$0.moduleurl == moduleUrL})
         {
             throw  ModuleCreationError.moduleAlreadyExists("module already exists")
@@ -63,18 +124,54 @@ class ModuleManager: ObservableObject {
             ModuleManager.shared.modules.append(module)
             ModuleManager.shared.saveModules()
         }
-        
+
     }
     func deleteModule(_ module: ModuleDataContainer)
     {
+        guard !metadataLoadFailed else {
+            ReaderLogger.shared.log(
+                "Refused to delete a module while module metadata is unreadable",
+                type: "Error"
+            )
+            return
+        }
+
+        let remainingModules = modules.filter { $0.id != module.id }
+        guard let metadata = try? JSONEncoder().encode(remainingModules) else {
+            ReaderLogger.shared.log(
+                "Refused to delete a module because updated metadata could not be encoded",
+                type: "Error"
+            )
+            return
+        }
+        let metadataRemovalPersisted = Self.persistMetadataData(
+                metadata,
+                to: getModulesFilePath(),
+                maximumBytes: maximumModuleMetadataBytes,
+                storeLoadFailed: metadataLoadFailed
+              )
+        guard metadataRemovalPersisted else {
+            ReaderLogger.shared.log(
+                "Refused to delete a module because updated metadata could not be saved",
+                type: "Error"
+            )
+            return
+        }
+        modules = remainingModules
+
         if let fileUrl = validatedModuleScriptURL(for: module.localPath) {
             try? fileManager.removeItem(at: fileUrl)
         } else {
             ReaderLogger.shared.log("Skipped unsafe module file path: \(module.localPath)", type: "Error")
         }
-        ModuleManager.shared.modules.removeAll(where: {$0.id == module.id})
-        ModuleManager.shared.saveModules()
-        
+        // Clear execution health only after the stable module UUID has been
+        // durably removed from metadata. A failed removal must remain
+        // quarantined rather than silently reopening hostile code.
+        KanzenLegacyJavaScriptQuarantineStore.shared.clearAfterDurableModuleRemoval(
+            moduleID: module.id,
+            metadataRemovalPersisted: metadataRemovalPersisted
+        )
+
     }
     func getModulesFilePath() -> URL
     {
@@ -84,7 +181,14 @@ class ModuleManager: ObservableObject {
         guard let localUrl = validatedModuleScriptURL(for: module.localPath) else {
             throw ModuleLoadingError.missingScriptPath("Unsafe module script path")
         }
-        return try String(contentsOf: localUrl, encoding: .utf8)
+        let data = try BoundedLocalStoreReader.read(
+            from: localUrl,
+            maximumBytes: maximumModuleScriptBytes
+        )
+        guard let script = String(data: data, encoding: .utf8) else {
+            throw ModuleLoadingError.invalidScriptFormat("Module script is not valid UTF-8")
+        }
+        return script
     }
     private func validatedModuleScriptURL(for localPath: String) -> URL? {
         let fileName = (localPath as NSString).lastPathComponent
@@ -118,34 +222,49 @@ class ModuleManager: ObservableObject {
         let fileUrl = getDocumentsDirectory().appendingPathComponent(modulesFileName)
         do
         {
-            let data = try Data(contentsOf: fileUrl)
+            let data = try BoundedLocalStoreReader.read(
+                from: fileUrl,
+                maximumBytes: maximumModuleMetadataBytes
+            )
             let decodedModules = try JSONDecoder().decode([ModuleDataContainer].self, from: data)
             modules = decodedModules
-            
+            metadataLoadFailed = false
+
         }
         catch
         {
-            modules = []
+            metadataLoadFailed = true
             ReaderLogger.shared.log(ModuleLoadingError.moduleDecodeError(error.localizedDescription).localizedDescription,type: "Error")
-            
+
         }
-        
+
     }
     func validateJSfile(_ url: String)  async throws -> String
     {
         guard let scriptUrl = validatedRemoteURL(url) else {
             throw ModuleLoadingError.invalidScriptFormat("Invalid HTTP(S) script URL")
         }
-
-        let (scriptData, response) = try await URLSession.custom.boundedData(
-            from: scriptUrl,
-            maximumResponseBytes: maximumModuleScriptBytes
-        )
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
+        let result: SkyStreamPinnedHTTPClient.Response
+        do {
+            result = try await SkyStreamPinnedHTTPClient().fetch(
+                scriptUrl.absoluteString,
+                purpose: .pluginRequest,
+                allowsCookies: false,
+                followsRedirects: true,
+                maximumRedirects: 10,
+                maximumResponseBytes: maximumModuleScriptBytes,
+                maximumRequestBodyBytes: 0,
+                timeout: 30
+            )
+        } catch {
+            throw ModuleLoadingError.scriptDownloadError(
+                "Script network request failed (\(servicePinnedNetworkErrorToken(error)))"
+            )
+        }
+        guard (200...299).contains(result.response.statusCode) else {
             throw ModuleLoadingError.scriptDownloadError("Script request returned an invalid response")
         }
-        guard let jsContent = String(data:scriptData, encoding: .utf8) else {
+        guard let jsContent = String(data: result.data, encoding: .utf8) else {
             throw ModuleLoadingError.invalidScriptFormat("Invalid Script Format")
         }
 
@@ -156,15 +275,27 @@ class ModuleManager: ObservableObject {
         guard let url = validatedRemoteURL(urlString) else {
             throw ModuleCreationError.invalidScriptUrl("invalid HTTP(S) module URL")
         }
-        let (rawData, response) = try await URLSession.custom.boundedData(
-            from: url,
-            maximumResponseBytes: maximumModuleMetadataBytes
-        )
-        guard let httpResponse = response as? HTTPURLResponse,
-              (200...299).contains(httpResponse.statusCode) else {
+        let result: SkyStreamPinnedHTTPClient.Response
+        do {
+            result = try await SkyStreamPinnedHTTPClient().fetch(
+                url.absoluteString,
+                purpose: .pluginRequest,
+                allowsCookies: false,
+                followsRedirects: true,
+                maximumRedirects: 10,
+                maximumResponseBytes: maximumModuleMetadataBytes,
+                maximumRequestBodyBytes: 0,
+                timeout: 30
+            )
+        } catch {
+            throw ModuleCreationError.invalidScriptUrl(
+                "Module network request failed (\(servicePinnedNetworkErrorToken(error)))"
+            )
+        }
+        guard (200...299).contains(result.response.statusCode) else {
             throw ModuleCreationError.invalidScriptUrl("module request returned an invalid response")
         }
-        return try JSONDecoder().decode(ModuleData.self, from: rawData)
+        return try JSONDecoder().decode(ModuleData.self, from: result.data)
     }
 
     private func validatedRemoteURL(_ value: String) -> URL? {
@@ -183,9 +314,9 @@ class ModuleManager: ObservableObject {
                 guard let fileUrl = validatedModuleScriptURL(for: module.localPath) else {
                     throw ModuleLoadingError.missingScriptPath("Unsafe module script path")
                 }
-                
+
                 let validFilePath =  fileManager.fileExists(atPath: fileUrl.path)
-              
+
                 if(!validFilePath)
                 {
                     ReaderLogger.shared.log("downloading js file for: \(module.moduleData.sourceName)")
@@ -193,15 +324,14 @@ class ModuleManager: ObservableObject {
                     try validJsContent.write(to:fileUrl,atomically: true, encoding: .utf8 )
                 }
                 completion(true)
-                
-                
+
             }
             catch  {
                 ReaderLogger.shared.log("Module Validation Error: (\(module.moduleData.sourceName)) \(error.localizedDescription)",type: "Error")
                 completion(false)
-               
+
             }
-           
+
         }
         }
     func getModule(_ moduleId: UUID) -> ModuleDataContainer?
@@ -209,9 +339,6 @@ class ModuleManager: ObservableObject {
         return ModuleManager.shared.modules.first { $0.id == moduleId }
     }
 
-    // MARK: - Auto-Update
-
-    /// Re-downloads the JS scripts for installed modules whose version has changed.
     func updateModules() async {
         ReaderLogger.shared.log("ModuleManager: Starting module auto-update for \(modules.count) modules", type: "Info")
         for module in modules {
@@ -264,5 +391,5 @@ class ModuleManager: ObservableObject {
         await updateModules()
         ReaderLogger.shared.log("ModuleManager: Automatic module update completed", type: "Info")
     }
-    
+
 }

@@ -149,9 +149,6 @@ extension SkyStreamPackageValidationError: LocalizedError {
 #if os(iOS) && !targetEnvironment(macCatalyst)
 import ZIPFoundation
 
-/// Validates an already-downloaded `.sky` ZIP and atomically publishes its
-/// extracted payload into a new caller-owned staging directory. This type does
-/// not fetch repositories, persist install state, or replace live packages.
 public enum SkyStreamPackageValidator {
     private static let manifestPath = "plugin.json"
     private static let scriptPath = "plugin.js"
@@ -304,7 +301,6 @@ public enum SkyStreamPackageValidator {
             }
         }
 
-        // The copied archive is deliberately not part of the extracted payload.
         try fileManager.removeItem(at: temporaryArchiveURL)
         guard !fileManager.fileExists(atPath: normalizedStagingURL.path) else {
             throw SkyStreamPackageValidationError.stagingDirectoryAlreadyExists
@@ -361,11 +357,6 @@ public enum SkyStreamPackageValidator {
         return result
     }
 
-    /// ZIPFoundation deliberately abstracts most central-directory metadata.
-    /// This bounded preflight rejects encrypted and POSIX-special entries before
-    /// asking ZIPFoundation to decompress them. ZIP64 and multi-disk archives
-    /// are unnecessary under Eclipse's 20 MB package limit and are rejected to
-    /// keep this security decision small and auditable.
     private static func inspectRawZIPMetadata(
         _ data: Data,
         limits: SkyStreamPackageValidationLimits
@@ -640,9 +631,7 @@ public enum SkyStreamPackageValidator {
         limits: SkyStreamPackageValidationLimits,
         fileManager: FileManager
     ) throws -> UInt64 {
-        // This root was created by us and contains no accepted symlinks. Use
-        // the same standardized spelling for both sides so a symlinked system
-        // container parent cannot cause a false containment failure.
+
         let standardizedRoot = rootURL.standardizedFileURL
         let rootPrefix = standardizedRoot.path.hasSuffix("/")
             ? standardizedRoot.path
@@ -658,8 +647,7 @@ public enum SkyStreamPackageValidator {
             }
 
             if checked.archiveEntry.type == .directory {
-                // Directory extras are accepted for compatibility but never
-                // materialized. The runtime exposes only the two root files.
+
                 continue
             }
 
@@ -799,9 +787,7 @@ public enum SkyStreamPackageValidator {
         try validateStrings(manifest.authors, field: "authors", maximumCount: 64)
         try validateStrings(manifest.languages, field: "languages", maximumCount: 64)
         try validateStrings(manifest.categories, field: "categories", maximumCount: 64)
-        // Current SkyStream accepts manifests that omit baseUrl. An empty value
-        // only changes the injected manifest metadata; every actual request is
-        // still independently constrained by SkyStreamRemoteURLPolicy.
+
         guard manifest.baseURL.utf8.count <= 8 * 1_024,
               manifest.baseURL.isEmpty || isHTTPURL(manifest.baseURL) else {
             throw SkyStreamPackageValidationError.invalidURL(field: "baseUrl")
@@ -949,8 +935,6 @@ public enum SkyStreamPackageValidator {
 
 #else
 
-/// Metadata remains decodable on non-iOS targets, but package extraction and
-/// execution are intentionally unavailable there.
 public enum SkyStreamPackageValidator {
     @available(*, unavailable, message: "SkyStream packages are available only on iPhone and iPad.")
     public static func validateAndExtract(

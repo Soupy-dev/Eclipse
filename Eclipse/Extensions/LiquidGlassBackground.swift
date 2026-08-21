@@ -1,3 +1,10 @@
+//
+//  LiquidGlassBackground.swift
+//  Eclipse
+//
+//  Created by Francesco on 02/11/25.
+//
+
 import SwiftUI
 
 extension View {
@@ -21,7 +28,7 @@ extension View {
         oldBackground(cornerRadius: cornerRadius, fallbackFill: fallbackFill, fallbackMaterial: fallbackMaterial)
 #endif
     }
-    
+
     @ViewBuilder
     private func oldBackground(cornerRadius: CGFloat, fallbackFill: Color, fallbackMaterial: Material) -> some View {
         #if !os(tvOS)

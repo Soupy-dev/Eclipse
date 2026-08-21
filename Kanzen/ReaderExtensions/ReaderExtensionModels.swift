@@ -514,6 +514,156 @@ struct ReaderExtensionBackupSnapshot: Codable, Hashable, Sendable {
     var lastAutoUpdate: Date?
 }
 
+struct ReaderExtensionPrivateCloudKeychainConfiguration: Codable, Hashable, Sendable {
+    var secrets: [String: String]
+    var userApprovedDomains: [String]
+
+    static let empty = ReaderExtensionPrivateCloudKeychainConfiguration(
+        secrets: [:],
+        userApprovedDomains: []
+    )
+}
+
+struct ReaderExtensionPrivateCloudSourceConfiguration: Codable, Hashable, Sendable, Identifiable {
+    var id: ReaderExtensionSourceID { sourceID }
+    var sourceID: ReaderExtensionSourceID
+    var upstreamID: String
+    var repositoryID: String
+    var repositoryURL: String
+    var language: String
+    var mediaType: ReaderExtensionMediaType
+    var implementation: ReaderExtensionImplementation
+    var codeProvenanceFingerprint: String
+    var preferenceSchemaFingerprint: String?
+    var ordinaryPreferences: [String: ReaderExtensionPreferenceValue]
+    var keychain: ReaderExtensionPrivateCloudKeychainConfiguration
+
+    init(
+        source: ReaderExtensionInstalledSource,
+        ordinaryPreferences: [String: ReaderExtensionPreferenceValue],
+        keychain: ReaderExtensionPrivateCloudKeychainConfiguration
+    ) {
+        sourceID = source.id
+        upstreamID = source.upstreamID
+        repositoryID = source.repositoryID
+        repositoryURL = ReaderExtensionURLCanonicalizer.canonicalString(source.repositoryURL)
+        language = source.language.lowercased()
+        mediaType = source.mediaType
+        implementation = source.implementation
+        codeProvenanceFingerprint = source.codeProvenanceFingerprint.lowercased()
+        preferenceSchemaFingerprint = source.preferenceSchemaFingerprint?.lowercased()
+        self.ordinaryPreferences = ordinaryPreferences
+        self.keychain = keychain
+    }
+}
+
+struct ReaderExtensionPrivateCloudConfiguration: Codable, Hashable, Sendable {
+    var schemaVersion: Int
+    var profileID: UUID
+    var configurationIsComplete: Bool
+    var sources: [ReaderExtensionPrivateCloudSourceConfiguration]
+
+    init(
+        profileID: UUID,
+        sources: [ReaderExtensionPrivateCloudSourceConfiguration],
+        configurationIsComplete: Bool = true
+    ) {
+        schemaVersion = 1
+        self.profileID = profileID
+        self.configurationIsComplete = configurationIsComplete
+        self.sources = sources
+    }
+}
+
+enum ReaderExtensionPrivateCloudConfigurationPolicy {
+    static let maximumPayloadBytes = 8 * 1_024 * 1_024
+    static let maximumApprovedDomainCount = 64
+
+    static func validate(
+        _ configuration: ReaderExtensionPrivateCloudConfiguration
+    ) throws {
+        guard configuration.schemaVersion == 1,
+              configuration.configurationIsComplete,
+              configuration.sources.count <= ReaderExtensionPersistence.maximumInstalledSourceCount,
+              Set(configuration.sources.map(\.sourceID)).count == configuration.sources.count else {
+            throw ReaderExtensionError.persistenceFailed("Reader private-cloud configuration is incomplete")
+        }
+        for source in configuration.sources {
+            try validate(source)
+        }
+        guard try JSONEncoder().encode(configuration).count <= maximumPayloadBytes else {
+            throw ReaderExtensionError.contentTooLarge
+        }
+    }
+
+    static func validate(
+        _ configuration: ReaderExtensionPrivateCloudSourceConfiguration
+    ) throws {
+        guard configuration.sourceID.isValid,
+              !configuration.upstreamID.isEmpty,
+              configuration.upstreamID.utf8.count <= 128,
+              !configuration.repositoryID.isEmpty,
+              configuration.repositoryID.utf8.count <= 128,
+              configuration.repositoryURL.utf8.count <= 16 * 1_024,
+              configuration.language.utf8.count <= 64,
+              configuration.codeProvenanceFingerprint.count == 64,
+              configuration.codeProvenanceFingerprint.allSatisfy(\.isHexDigit),
+              configuration.preferenceSchemaFingerprint.map({
+                  $0.count == 64 && $0.allSatisfy(\.isHexDigit)
+              }) ?? true,
+              configuration.ordinaryPreferences.count
+                <= ReaderExtensionSecurityPolicy.maximumPreferenceCount,
+              configuration.keychain.secrets.count
+                <= ReaderExtensionSecurityPolicy.maximumPreferenceCount,
+              configuration.keychain.userApprovedDomains.count
+                <= maximumApprovedDomainCount,
+              Set(configuration.ordinaryPreferences.keys)
+                .isDisjoint(with: configuration.keychain.secrets.keys) else {
+            throw ReaderExtensionError.contentTooLarge
+        }
+        guard let repositoryURL = URL(string: configuration.repositoryURL),
+              ReaderExtensionURLCanonicalizer.canonicalString(repositoryURL)
+                == configuration.repositoryURL,
+              (try? ReaderExtensionSecurityPolicy.validateRepositoryURLSyntax(repositoryURL)) != nil else {
+            throw ReaderExtensionError.insecureURL
+        }
+        for (key, value) in configuration.ordinaryPreferences {
+            guard !ReaderExtensionSecurityPolicy.isCredentialLikePreferenceKey(key) else {
+                throw ReaderExtensionError.persistenceFailed("Reader credential preference used ordinary storage")
+            }
+            try ReaderExtensionSecurityPolicy.validatePreference(key: key, value: value)
+        }
+        for (key, value) in configuration.keychain.secrets {
+            try ReaderExtensionSecurityPolicy.validatePreferenceSecret(key: key, value: value)
+        }
+        let domains = Set(configuration.keychain.userApprovedDomains)
+        let canonicalDomains = ReaderExtensionSecurityPolicy.canonicalHosts(domains)
+        guard domains.count == configuration.keychain.userApprovedDomains.count,
+              canonicalDomains == domains,
+              configuration.keychain.userApprovedDomains == domains.sorted() else {
+            throw ReaderExtensionError.insecureURL
+        }
+    }
+
+    static func identityMatches(
+        _ incoming: ReaderExtensionPrivateCloudSourceConfiguration,
+        source: ReaderExtensionInstalledSource
+    ) -> Bool {
+        incoming.sourceID == source.id
+            && incoming.upstreamID == source.upstreamID
+            && incoming.repositoryID == source.repositoryID
+            && incoming.repositoryURL
+                == ReaderExtensionURLCanonicalizer.canonicalString(source.repositoryURL)
+            && incoming.language == source.language.lowercased()
+            && incoming.mediaType == source.mediaType
+            && incoming.implementation == source.implementation
+            && incoming.codeProvenanceFingerprint
+                == source.codeProvenanceFingerprint.lowercased()
+            && incoming.preferenceSchemaFingerprint
+                == source.preferenceSchemaFingerprint?.lowercased()
+    }
+}
+
 enum ReaderExtensionPublicationStatus: String, Codable, Hashable, Sendable {
     case ongoing
     case completed
@@ -889,7 +1039,7 @@ struct ReaderExtensionFilter: Codable, Hashable, Sendable, Identifiable {
         case .string(let selected):
             return options.firstIndex { $0.value == selected }
         case .number(let selected):
-            let index = Int(selected)
+            guard let index = Int(exactly: selected) else { return nil }
             return options.indices.contains(index) ? index : nil
         default:
             return nil
@@ -1029,8 +1179,44 @@ enum ReaderExtensionSourceUpdateConsentPolicy {
         switch error {
         case .updateConsentRequired(let reason): return reason
         case .unknownLicenseNeedsConsent: return unknownLicenseReason
+        case .domainConsentRequired(let domain): return "network access to \(domain)"
         default: return nil
         }
+    }
+}
+
+enum ReaderExtensionMetadataReacquisitionPolicy {
+    static func needsCodeReacquisition(
+        _ source: ReaderExtensionInstalledSource,
+        blockedSourceIDs: Set<ReaderExtensionSourceID>
+    ) -> Bool {
+        guard !blockedSourceIDs.contains(source.id),
+              source.implementation != .unsupportedNative,
+              source.license.kind.permitsInstallation else { return false }
+        return source.requiresReinstall
+            || (source.implementation == .javascript && source.activeContentDigest == nil)
+    }
+
+    static func fetchAuthorizedDomains(
+        allowScopeExpansion: Bool,
+        reacquiresMetadataOnlyInstall: Bool,
+        catalogInstallationDomains: Set<String>,
+        currentInstallationDomains: Set<String>,
+        runtimeAuthorizedDomains: () -> Set<String>
+    ) -> Set<String> {
+        if allowScopeExpansion { return catalogInstallationDomains }
+        if reacquiresMetadataOnlyInstall,
+           catalogInstallationDomains.isSubset(of: currentInstallationDomains) {
+            return catalogInstallationDomains
+        }
+        return runtimeAuthorizedDomains()
+    }
+
+    static func allowsUnknownLicense(
+        allowScopeExpansion: Bool,
+        currentLicenseKind: ReaderExtensionLicenseKind
+    ) -> Bool {
+        allowScopeExpansion || currentLicenseKind == .unknown
     }
 }
 

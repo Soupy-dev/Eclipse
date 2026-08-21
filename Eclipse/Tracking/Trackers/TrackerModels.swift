@@ -1,3 +1,10 @@
+//
+//  TrackerModels.swift
+//  Eclipse
+//
+//  Created by Soupy-dev
+//
+
 import Foundation
 
 enum TrackerService: String, Codable, CaseIterable {
@@ -39,6 +46,20 @@ enum TrackerService: String, Codable, CaseIterable {
     }
 }
 
+struct TrackerAuthenticationNotice: Identifiable, Equatable {
+    let service: TrackerService
+
+    var id: TrackerService { service }
+
+    var title: String {
+        "\(service.displayName) Login Required"
+    }
+
+    var message: String {
+        "Your \(service.displayName) session has expired. Log in again to resume tracker sync."
+    }
+}
+
 struct TrackerAccount: Codable {
     let service: TrackerService
     let username: String
@@ -58,6 +79,9 @@ struct TrackerAccount: Codable {
 struct TrackerState: Codable {
     var accounts: [TrackerAccount] = []
     var syncEnabled: Bool = true
+#if !os(tvOS)
+    var readerSyncEnabled: Bool = true
+#endif
     var autoSyncRatings: Bool = false
 #if !os(tvOS)
     var autoSyncReaderRatings: Bool = false
@@ -67,18 +91,18 @@ struct TrackerState: Codable {
     var traktPublicCatalogsEnabled: Bool = false
     var traktCommentsEnabled: Bool = false
     var traktRelatedEnabled: Bool = false
-    // Map anime episodes onto Trakt's flattened/absolute episode numbering when the
-    // direct TMDB season/episode lookup can't resolve a Trakt episode. Default on:
-    // it only augments the failure path and never changes already-working scrobbles.
+
     var traktAnimeEpisodeMapping: Bool = true
-    // Keep the local "Trakt Watchlist" collection mirrored with the Trakt watchlist
-    // (additive pull, two-way add/remove). Off by default - opt-in.
+
     var traktWatchlistSync: Bool = false
     var lastSyncDate: Date?
 
     enum CodingKeys: String, CodingKey {
         case accounts
         case syncEnabled
+#if !os(tvOS)
+        case readerSyncEnabled
+#endif
         case autoSyncRatings
 #if !os(tvOS)
         case autoSyncReaderRatings
@@ -99,6 +123,10 @@ struct TrackerState: Codable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         accounts = try container.decodeIfPresent([TrackerAccount].self, forKey: .accounts) ?? []
         syncEnabled = try container.decodeIfPresent(Bool.self, forKey: .syncEnabled) ?? true
+#if !os(tvOS)
+
+        readerSyncEnabled = try container.decodeIfPresent(Bool.self, forKey: .readerSyncEnabled) ?? syncEnabled
+#endif
         autoSyncRatings = try container.decodeIfPresent(Bool.self, forKey: .autoSyncRatings) ?? false
 #if !os(tvOS)
         autoSyncReaderRatings = try container.decodeIfPresent(Bool.self, forKey: .autoSyncReaderRatings) ?? false
@@ -122,7 +150,8 @@ struct TrackerState: Codable {
     }
 
     func getAccount(for service: TrackerService) -> TrackerAccount? {
-        accounts.first { $0.service == service && $0.isConnected }
+
+        accounts.first { $0.service == service && $0.isConnected && !$0.accessToken.isEmpty }
     }
 
     mutating func disconnectAccount(for service: TrackerService) {
@@ -156,7 +185,6 @@ struct TraktMediaRating: Codable, Equatable {
     }
 }
 
-// AniList Models
 struct AniListAuthResponse: Codable {
     let accessToken: String
     let tokenType: String
@@ -177,7 +205,7 @@ struct AniListUser: Codable {
 struct AniListMediaListEntry: Codable {
     let id: Int
     let mediaId: Int
-    let status: String  // CURRENT, PLANNING, COMPLETED, DROPPED, PAUSED, REPEATING
+    let status: String
     let progress: Int
     let progressVolumes: Int?
     let score: Int?
@@ -235,7 +263,7 @@ struct AniListRelationEdge: Codable {
 struct AniListRelatedAnime: Codable {
     let id: Int
     let title: AniListTitle
-    
+
     struct AniListTitle: Codable {
         let romaji: String?
         let english: String?
@@ -248,7 +276,6 @@ struct AniListAiringSchedule: Codable {
     let airingAt: Int
 }
 
-// MyAnimeList Models
 struct MALAuthResponse: Codable {
     let accessToken: String
     let tokenType: String?
@@ -268,7 +295,6 @@ struct MALUser: Codable {
     let name: String
 }
 
-// Trakt Models
 struct TraktAuthResponse: Codable {
     let accessToken: String
     let tokenType: String

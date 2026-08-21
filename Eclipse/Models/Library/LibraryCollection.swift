@@ -1,3 +1,10 @@
+//
+//  LibraryCollection.swift
+//  Sora
+//
+//  Created by Francesco on 08/09/25.
+//
+
 import Foundation
 import Combine
 
@@ -6,22 +13,21 @@ final class LibraryCollection: ObservableObject, Codable, Identifiable, Equatabl
     var id: UUID
     @Published var name: String
     var description: String?
-    
+
     init(id: UUID = UUID(), name: String, items: [LibraryItem] = [], description: String? = nil) {
         self.id = id
         self.name = name
         self.items = items
         self.description = description
     }
-    
-    // MARK: - Codable
+
     enum CodingKeys: String, CodingKey {
         case id
         case name
         case items
         case description
     }
-    
+
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(id, forKey: .id)
@@ -29,7 +35,7 @@ final class LibraryCollection: ObservableObject, Codable, Identifiable, Equatabl
         try container.encode(items, forKey: .items)
         try container.encode(description, forKey: .description)
     }
-    
+
     required convenience init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         let id = try container.decode(UUID.self, forKey: .id)
@@ -38,8 +44,7 @@ final class LibraryCollection: ObservableObject, Codable, Identifiable, Equatabl
         let description = try container.decodeIfPresent(String.self, forKey: .description)
         self.init(id: id, name: name, items: items, description: description)
     }
-    
-    // MARK: - Equatable
+
     static func == (lhs: LibraryCollection, rhs: LibraryCollection) -> Bool {
         lhs.id == rhs.id
     }

@@ -1,7 +1,26 @@
+//
+//  StremioModels.swift
+//  Eclipse
+//
+//  Created by Soupy on 2026.
+//
+
 import Foundation
 import CoreData
 
-// MARK: - Stremio Manifest
+enum StremioJSONBoundary {
+    static let limits = SkyStreamJSONEnvelopeValidator.Limits(
+        maximumDepth: 16,
+        maximumTokens: 100_000,
+        maximumValuesPerContainer: 4_096,
+        maximumStringBytes: 16 * 1_024,
+        maximumScalarTokenBytes: 128
+    )
+
+    static func validate(_ data: Data) throws {
+        try SkyStreamJSONEnvelopeValidator.validate(data, limits: limits)
+    }
+}
 
 struct StremioManifest: Codable {
     let id: String
@@ -19,19 +38,60 @@ struct StremioManifest: Codable {
         case id, name, description, version, logo, types, resources, idPrefixes, catalogs, behaviorHints
     }
 
-    /// Whether this addon supports a given ID prefix (e.g. "tt", "tmdb:", "kitsu:")
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try StremioDecodedFieldBoundary.requiredString(
+            container.decode(String.self, forKey: .id),
+            maximumUTF8Bytes: 512,
+            decoder: decoder
+        )
+        name = try StremioDecodedFieldBoundary.requiredString(
+            container.decode(String.self, forKey: .name),
+            maximumUTF8Bytes: 1_024,
+            decoder: decoder
+        )
+        description = StremioDecodedFieldBoundary.optionalString(
+            try container.decodeIfPresent(String.self, forKey: .description),
+            maximumUTF8Bytes: 16 * 1_024
+        )
+        version = StremioDecodedFieldBoundary.optionalString(
+            try container.decodeIfPresent(String.self, forKey: .version),
+            maximumUTF8Bytes: 128
+        )
+        logo = StremioDecodedFieldBoundary.optionalString(
+            try container.decodeIfPresent(String.self, forKey: .logo),
+            maximumUTF8Bytes: 16 * 1_024
+        )
+        types = StremioDecodedFieldBoundary.boundedStrings(
+            try container.decodeIfPresent([String].self, forKey: .types),
+            maximumCount: StremioDecodingLimits.manifestTypes,
+            maximumUTF8Bytes: 64
+        )
+        resources = try container.decodeIfPresent([StremioResource].self, forKey: .resources)
+            .map { Array($0.prefix(StremioDecodingLimits.manifestResources)) }
+        idPrefixes = StremioDecodedFieldBoundary.boundedStrings(
+            try container.decodeIfPresent([String].self, forKey: .idPrefixes),
+            maximumCount: StremioDecodingLimits.manifestIDPrefixes,
+            maximumUTF8Bytes: 256
+        )
+        catalogs = try container.decodeIfPresent([StremioCatalog].self, forKey: .catalogs)
+            .map { Array($0.prefix(StremioDecodingLimits.manifestCatalogs)) }
+        behaviorHints = try container.decodeIfPresent(
+            StremioManifestBehaviorHints.self,
+            forKey: .behaviorHints
+        )
+    }
+
     func supportsPrefix(_ prefix: String) -> Bool {
         guard let prefixes = idPrefixes, !prefixes.isEmpty else { return true }
         return prefixes.contains(where: { prefix.hasPrefix($0) })
     }
 
-    /// Whether this addon supports the "stream" resource
     var supportsStreams: Bool {
         guard let resources = resources else { return false }
         return resources.contains { $0.isStream }
     }
 
-    /// Whether this addon supports the "subtitles" resource
     var supportsSubtitles: Bool {
         guard let resources = resources else { return false }
         return resources.contains { $0.isSubtitles }
@@ -61,8 +121,14 @@ struct StremioManifest: Codable {
 
     var homeCatalogs: [StremioCatalog] {
         guard supportsCatalogs else { return [] }
-        return catalogs?.filter { $0.isHomeFeedCapable && $0.eclipseMediaType != nil } ?? []
+
+        return Array(
+            (catalogs?.filter { $0.isHomeFeedCapable && $0.eclipseMediaType != nil } ?? [])
+                .prefix(maximumHomeCatalogs)
+        )
     }
+
+    private var maximumHomeCatalogs: Int { 512 }
 
     var streamIdPrefixes: [String]? {
         let resourcePrefixes = resources?
@@ -100,8 +166,6 @@ struct StremioManifestBehaviorHints: Codable {
     let configurable: Bool?
     let configurationRequired: Bool?
 }
-
-// MARK: - Resource (can be a string or an object)
 
 enum StremioResource: Codable {
     case simple(String)
@@ -156,7 +220,11 @@ enum StremioResource: Codable {
     init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
         if let string = try? container.decode(String.self) {
-            self = .simple(string)
+            self = .simple(try StremioDecodedFieldBoundary.requiredString(
+                string,
+                maximumUTF8Bytes: 64,
+                decoder: decoder
+            ))
         } else {
             let detail = try container.decode(StremioResourceDetail.self)
             self = .detailed(detail)
@@ -185,15 +253,31 @@ struct StremioResourceDetail: Codable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        name = (try? container.decode(String.self, forKey: .name)) ?? ""
+        name = try StremioDecodedFieldBoundary.requiredString(
+            (try? container.decode(String.self, forKey: .name)) ?? "",
+            maximumUTF8Bytes: 64,
+            decoder: decoder
+        )
         if let values = try? container.decodeIfPresent([String].self, forKey: .types) {
-            types = values
+            types = StremioDecodedFieldBoundary.boundedStrings(
+                values,
+                maximumCount: StremioDecodingLimits.manifestTypes,
+                maximumUTF8Bytes: 64
+            )
         } else if let value = try? container.decodeIfPresent(String.self, forKey: .type) {
-            types = [value]
+            types = StremioDecodedFieldBoundary.boundedStrings(
+                [value],
+                maximumCount: 1,
+                maximumUTF8Bytes: 64
+            )
         } else {
             types = nil
         }
-        idPrefixes = try? container.decodeIfPresent([String].self, forKey: .idPrefixes)
+        idPrefixes = StremioDecodedFieldBoundary.boundedStrings(
+            try? container.decodeIfPresent([String].self, forKey: .idPrefixes),
+            maximumCount: StremioDecodingLimits.manifestIDPrefixes,
+            maximumUTF8Bytes: 256
+        )
     }
 
     func encode(to encoder: Encoder) throws {
@@ -204,13 +288,70 @@ struct StremioResourceDetail: Codable {
     }
 }
 
-// MARK: - Catalog and Meta Responses
-
 struct StremioCatalog: Codable, Hashable {
     let type: String
     let id: String
     let name: String?
     let extra: [StremioCatalogExtra]?
+
+    enum CodingKeys: String, CodingKey { case type, id, name, extra, extraSupported, extraRequired }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        type = try StremioDecodedFieldBoundary.requiredString(
+            container.decode(String.self, forKey: .type),
+            maximumUTF8Bytes: 64,
+            decoder: decoder
+        )
+        id = try StremioDecodedFieldBoundary.requiredString(
+            container.decode(String.self, forKey: .id),
+            maximumUTF8Bytes: 512,
+            decoder: decoder
+        )
+        name = StremioDecodedFieldBoundary.optionalString(
+            try container.decodeIfPresent(String.self, forKey: .name),
+            maximumUTF8Bytes: 1_024
+        )
+        if let declared = try container.decodeIfPresent([StremioCatalogExtra].self, forKey: .extra) {
+            extra = Array(declared.prefix(StremioDecodingLimits.catalogExtras))
+        } else {
+            extra = Self.synthesizedExtra(from: container)
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(type, forKey: .type)
+        try container.encode(id, forKey: .id)
+        try container.encodeIfPresent(name, forKey: .name)
+        try container.encodeIfPresent(extra, forKey: .extra)
+    }
+
+    private static func synthesizedExtra(
+        from container: KeyedDecodingContainer<CodingKeys>
+    ) -> [StremioCatalogExtra]? {
+        let supported = StremioDecodedFieldBoundary.boundedStrings(
+            try? container.decodeIfPresent([String].self, forKey: .extraSupported),
+            maximumCount: StremioDecodingLimits.catalogExtras,
+            maximumUTF8Bytes: 64
+        ) ?? []
+        let required = StremioDecodedFieldBoundary.boundedStrings(
+            try? container.decodeIfPresent([String].self, forKey: .extraRequired),
+            maximumCount: StremioDecodingLimits.catalogExtras,
+            maximumUTF8Bytes: 64
+        ) ?? []
+        guard !supported.isEmpty || !required.isEmpty else { return nil }
+
+        let requiredNames = Set(required)
+        var seen = Set<String>()
+        var synthesized: [StremioCatalogExtra] = []
+        for name in supported + required where seen.insert(name).inserted {
+            synthesized.append(
+                StremioCatalogExtra(name: name, isRequired: requiredNames.contains(name))
+            )
+        }
+        return synthesized.isEmpty ? nil : Array(synthesized.prefix(StremioDecodingLimits.catalogExtras))
+    }
 
     var supportsSearch: Bool {
         extra?.contains { $0.name == "search" } ?? false
@@ -235,12 +376,13 @@ struct StremioCatalog: Codable, Hashable {
     var eclipseMediaType: String? {
         let normalized = type.lowercased()
         if normalized == "movie" { return "movie" }
-        if normalized == "series" || normalized == "tv" { return "tv" }
+        if normalized == "series" || normalized == "tv" || normalized == "anime" { return "tv" }
         return nil
     }
 
     func supportsType(_ requestedType: String) -> Bool {
-        type == requestedType || (requestedType == "series" && type == "tv")
+        type == requestedType
+            || (requestedType == "series" && (type == "tv" || type == "anime"))
     }
 }
 
@@ -250,10 +392,21 @@ struct StremioCatalogExtra: Codable, Hashable {
     let options: [String]?
     let optionsLimit: Int?
 
+    init(name: String, isRequired: Bool?) {
+        self.name = name
+        self.isRequired = isRequired
+        self.options = nil
+        self.optionsLimit = nil
+    }
+
     init(from decoder: Decoder) throws {
         let container = try decoder.singleValueContainer()
         if let name = try? container.decode(String.self) {
-            self.name = name
+            self.name = try StremioDecodedFieldBoundary.requiredString(
+                name,
+                maximumUTF8Bytes: 64,
+                decoder: decoder
+            )
             self.isRequired = nil
             self.options = nil
             self.optionsLimit = nil
@@ -261,10 +414,23 @@ struct StremioCatalogExtra: Codable, Hashable {
         }
 
         let keyed = try decoder.container(keyedBy: CodingKeys.self)
-        name = (try? keyed.decode(String.self, forKey: .name)) ?? ""
+        name = try StremioDecodedFieldBoundary.requiredString(
+            (try? keyed.decode(String.self, forKey: .name)) ?? "",
+            maximumUTF8Bytes: 64,
+            decoder: decoder
+        )
         isRequired = try? keyed.decodeIfPresent(Bool.self, forKey: .isRequired)
-        options = try? keyed.decodeIfPresent([String].self, forKey: .options)
-        optionsLimit = try? keyed.decodeIfPresent(Int.self, forKey: .optionsLimit)
+        options = StremioDecodedFieldBoundary.boundedStrings(
+            try? keyed.decodeIfPresent([String].self, forKey: .options),
+            maximumCount: StremioDecodingLimits.catalogExtraOptions,
+            maximumUTF8Bytes: 512
+        )
+        if let rawLimit = try? keyed.decodeIfPresent(Int.self, forKey: .optionsLimit),
+           (0...10_000).contains(rawLimit) {
+            optionsLimit = rawLimit
+        } else {
+            optionsLimit = nil
+        }
     }
 }
 
@@ -289,7 +455,10 @@ struct StremioCatalogResponse: Codable {
         }
 
         var decoded = [StremioMetaPreview]()
-        while !unkeyedContainer.isAtEnd {
+        var inspected = 0
+        while !unkeyedContainer.isAtEnd,
+              inspected < StremioDecodingLimits.catalogMetasPerResponse {
+            inspected += 1
             if let meta = try? unkeyedContainer.decode(StremioMetaPreview.self) {
                 decoded.append(meta)
             } else {
@@ -331,11 +500,12 @@ struct StremioMetaPreview: Codable, Identifiable, Hashable {
     let releaseInfo: String?
     let released: String?
     let imdbRating: String?
+    let genres: [String]?
     let videos: [StremioVideo]?
     let behaviorHints: StremioMetaBehaviorHints?
 
     enum CodingKeys: String, CodingKey {
-        case id, type, name, poster, background, description, releaseInfo, released, imdbRating, videos, behaviorHints
+        case id, type, name, poster, background, description, releaseInfo, released, imdbRating, genres, videos, behaviorHints
         case imdbId = "imdb_id"
         case imdbIdCamel = "imdbId"
         case tmdbId = "tmdb_id"
@@ -346,22 +516,86 @@ struct StremioMetaPreview: Codable, Identifiable, Hashable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        id = try container.decode(String.self, forKey: .id)
-        type = try container.decodeIfPresent(String.self, forKey: .type)
-        name = try container.decode(String.self, forKey: .name)
-        imdbId = container.decodeIfPresentLossyString(forKey: .imdbId)
-            ?? container.decodeIfPresentLossyString(forKey: .imdbIdCamel)
+        id = try StremioDecodedFieldBoundary.requiredString(
+            container.decode(String.self, forKey: .id),
+            maximumUTF8Bytes: 2 * 1_024,
+            decoder: decoder
+        )
+        type = StremioDecodedFieldBoundary.optionalString(
+            try container.decodeIfPresent(String.self, forKey: .type),
+            maximumUTF8Bytes: 64
+        )
+        name = try StremioDecodedFieldBoundary.requiredString(
+            container.decode(String.self, forKey: .name),
+            maximumUTF8Bytes: 1_024,
+            decoder: decoder
+        )
+        imdbId = StremioDecodedFieldBoundary.optionalString(
+            container.decodeIfPresentLossyString(forKey: .imdbId)
+                ?? container.decodeIfPresentLossyString(forKey: .imdbIdCamel),
+            maximumUTF8Bytes: 64
+        )
         tmdbId = Self.decodeFlexibleInt(from: container, forKey: .tmdbId)
             ?? Self.decodeFlexibleInt(from: container, forKey: .tmdbIdCamel)
             ?? Self.decodeFlexibleInt(from: container, forKey: .moviedbId)
             ?? Self.decodeFlexibleInt(from: container, forKey: .moviedbIdCamel)
-        poster = try container.decodeIfPresent(String.self, forKey: .poster)
-        background = try container.decodeIfPresent(String.self, forKey: .background)
-        description = try container.decodeIfPresent(String.self, forKey: .description)
-        releaseInfo = try container.decodeIfPresent(String.self, forKey: .releaseInfo)
-        released = try container.decodeIfPresent(String.self, forKey: .released)
-        imdbRating = try container.decodeIfPresent(String.self, forKey: .imdbRating)
-        videos = try container.decodeIfPresent([StremioVideo].self, forKey: .videos)
+        poster = StremioDecodedFieldBoundary.optionalString(
+            try container.decodeIfPresent(String.self, forKey: .poster),
+            maximumUTF8Bytes: 16 * 1_024
+        )
+        background = StremioDecodedFieldBoundary.optionalString(
+            try container.decodeIfPresent(String.self, forKey: .background),
+            maximumUTF8Bytes: 16 * 1_024
+        )
+        description = StremioDecodedFieldBoundary.optionalString(
+            try container.decodeIfPresent(String.self, forKey: .description),
+            maximumUTF8Bytes: 16 * 1_024
+        )
+        releaseInfo = StremioDecodedFieldBoundary.optionalString(
+            try container.decodeIfPresent(String.self, forKey: .releaseInfo),
+            maximumUTF8Bytes: 512
+        )
+        released = StremioDecodedFieldBoundary.optionalString(
+            try container.decodeIfPresent(String.self, forKey: .released),
+            maximumUTF8Bytes: 128
+        )
+        imdbRating = StremioDecodedFieldBoundary.optionalString(
+            try container.decodeIfPresent(String.self, forKey: .imdbRating),
+            maximumUTF8Bytes: 128
+        )
+        if let values = try? container.decodeIfPresent([String].self, forKey: .genres) {
+            genres = StremioDecodedFieldBoundary.boundedStrings(
+                values,
+                maximumCount: StremioDecodingLimits.genresPerMeta,
+                maximumUTF8Bytes: 256
+            )
+        } else if let value = try? container.decodeIfPresent(String.self, forKey: .genres) {
+            genres = StremioDecodedFieldBoundary.boundedStrings(
+                value.split(separator: ",").map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                },
+                maximumCount: StremioDecodingLimits.genresPerMeta,
+                maximumUTF8Bytes: 256
+            )
+        } else {
+            genres = nil
+        }
+        if var videoContainer = try? container.nestedUnkeyedContainer(forKey: .videos) {
+            var decodedVideos: [StremioVideo] = []
+            var inspected = 0
+            while !videoContainer.isAtEnd,
+                  inspected < StremioDecodingLimits.videosPerMeta {
+                inspected += 1
+                if let video = try? videoContainer.decode(StremioVideo.self) {
+                    decodedVideos.append(video)
+                } else {
+                    _ = try? videoContainer.decode(AnyCodable.self)
+                }
+            }
+            videos = decodedVideos.isEmpty ? nil : decodedVideos
+        } else {
+            videos = nil
+        }
         behaviorHints = try container.decodeIfPresent(StremioMetaBehaviorHints.self, forKey: .behaviorHints)
     }
 
@@ -378,6 +612,7 @@ struct StremioMetaPreview: Codable, Identifiable, Hashable {
         try container.encodeIfPresent(releaseInfo, forKey: .releaseInfo)
         try container.encodeIfPresent(released, forKey: .released)
         try container.encodeIfPresent(imdbRating, forKey: .imdbRating)
+        try container.encodeIfPresent(genres, forKey: .genres)
         try container.encodeIfPresent(videos, forKey: .videos)
         try container.encodeIfPresent(behaviorHints, forKey: .behaviorHints)
     }
@@ -390,7 +625,7 @@ struct StremioMetaPreview: Codable, Identifiable, Hashable {
             return value
         }
         if let value = try? container.decodeIfPresent(Double.self, forKey: key) {
-            return Int(value)
+            return Int(exactly: value)
         }
         if let value = try? container.decodeIfPresent(String.self, forKey: key) {
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -433,9 +668,117 @@ struct StremioVideo: Codable, Identifiable, Hashable {
     enum CodingKeys: String, CodingKey {
         case id, title, released, season, episode, streams
     }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try StremioDecodedFieldBoundary.requiredString(
+            container.decode(String.self, forKey: .id),
+            maximumUTF8Bytes: 2 * 1_024,
+            decoder: decoder
+        )
+        title = StremioDecodedFieldBoundary.optionalString(
+            try container.decodeIfPresent(String.self, forKey: .title),
+            maximumUTF8Bytes: 1_024
+        )
+        released = StremioDecodedFieldBoundary.optionalString(
+            try container.decodeIfPresent(String.self, forKey: .released),
+            maximumUTF8Bytes: 128
+        )
+        season = try? container.decodeIfPresent(Int.self, forKey: .season)
+        episode = try? container.decodeIfPresent(Int.self, forKey: .episode)
+        if var streamContainer = try? container.nestedUnkeyedContainer(forKey: .streams) {
+            var decodedStreams: [StremioStream] = []
+            var inspected = 0
+            while !streamContainer.isAtEnd,
+                  inspected < StremioDecodingLimits.streamsPerVideo {
+                inspected += 1
+                if let stream = try? streamContainer.decode(StremioStream.self) {
+                    decodedStreams.append(stream)
+                } else {
+                    _ = try? streamContainer.decode(AnyCodable.self)
+                }
+            }
+            streams = decodedStreams.isEmpty ? nil : decodedStreams
+        } else {
+            streams = nil
+        }
+    }
 }
 
-// MARK: - Stream Response
+enum StremioDecodingLimits {
+    // Stream payloads are already byte-bounded by StremioClient. These item
+    // limits additionally prevent a compact hostile array from constructing an
+    // unbounded number of Swift models before the UI applies its own cap.
+    static let streamsPerResponse = 300
+    static let subtitlesPerStream = 64
+    static let subtitlesPerResponse = 2_048
+    static let catalogMetasPerResponse = 300
+    static let videosPerMeta = 128
+    static let streamsPerVideo = 64
+    static let genresPerMeta = 32
+    static let manifestTypes = 32
+    static let manifestResources = 64
+    static let manifestIDPrefixes = 128
+    static let manifestCatalogs = 512
+    static let catalogExtras = 32
+    static let catalogExtraOptions = 64
+}
+
+enum StremioAddonOutcome: Equatable {
+    case results(count: Int)
+    case noResults
+    case unplayableOnly(count: Int)
+    case externalOnly(count: Int)
+    case addonError(String)
+
+    var isFailure: Bool {
+        if case .addonError = self { return true }
+        return false
+    }
+
+    var displayMessage: String {
+        switch self {
+        case .results(let count):
+            return "\(count) result\(count == 1 ? "" : "s")"
+        case .noResults:
+            return "No results found"
+        case .unplayableOnly(let count):
+            return count == 1
+                ? "1 result, but it is a torrent link Eclipse cannot play"
+                : "\(count) results, but they are torrent links Eclipse cannot play"
+        case .externalOnly(let count):
+            return count == 1
+                ? "1 result, but it opens in another service"
+                : "\(count) results, but they open in another service"
+        case .addonError:
+            return "Addon error"
+        }
+    }
+
+    var displayDetail: String? {
+        switch self {
+        case .results, .noResults:
+            return nil
+        case .unplayableOnly:
+            return "Eclipse plays direct links only."
+        case .externalOnly:
+            return "This addon links out to another app instead of handing Eclipse a stream."
+        case .addonError(let message):
+            let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? "This addon did not answer. This is the addon, not Eclipse." : trimmed
+        }
+    }
+
+    var diagnosticToken: String {
+        switch self {
+        case .results: return "results"
+        case .noResults: return "empty"
+        case .unplayableOnly: return "unplayable-only"
+        case .externalOnly: return "external-only"
+        case .addonError: return "addon-error"
+        }
+    }
+}
 
 struct StremioStreamResponse: Codable {
     let streams: [StremioStream]?
@@ -444,18 +787,30 @@ struct StremioStreamResponse: Codable {
         case streams
     }
 
-    /// Lossy decoding: skips individual streams that fail to decode instead of
-    /// dropping the entire array (the default Codable behaviour).
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        // Try decoding each element individually; skip failures
+
         if var unkeyedContainer = try? container.nestedUnkeyedContainer(forKey: .streams) {
             var decoded = [StremioStream]()
-            while !unkeyedContainer.isAtEnd {
+            var seen = Set<String>()
+            var inspected = 0
+            while !unkeyedContainer.isAtEnd,
+                  inspected < StremioDecodingLimits.streamsPerResponse,
+                  decoded.count < StremioDecodingLimits.streamsPerResponse {
+                inspected += 1
                 if let stream = try? unkeyedContainer.decode(StremioStream.self) {
-                    decoded.append(stream)
+                    let key = stream.url?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        ?? stream.infoHash?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        ?? stream.externalUrl?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let key, !key.isEmpty {
+                        if seen.insert(key).inserted {
+                            decoded.append(stream)
+                        }
+                    } else {
+                        decoded.append(stream)
+                    }
                 } else {
-                    // Skip the bad element so the container advances
+
                     _ = try? unkeyedContainer.decode(AnyCodable.self)
                 }
             }
@@ -476,14 +831,10 @@ struct StremioSubtitleResponse: Codable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         if var unkeyedContainer = try? container.nestedUnkeyedContainer(forKey: .subtitles) {
-            var decoded = [StremioSubtitle]()
-            while !unkeyedContainer.isAtEnd {
-                if let subtitle = try? unkeyedContainer.decode(StremioSubtitle.self) {
-                    decoded.append(subtitle)
-                } else {
-                    _ = try? unkeyedContainer.decode(AnyCodable.self)
-                }
-            }
+            let decoded = StremioBoundedSubtitleDecoder.decode(
+                from: &unkeyedContainer,
+                maximumInspected: StremioDecodingLimits.subtitlesPerResponse
+            )
             subtitles = decoded.isEmpty ? nil : decoded
         } else {
             subtitles = nil
@@ -491,7 +842,6 @@ struct StremioSubtitleResponse: Codable, Sendable {
     }
 }
 
-/// Throwaway type used only to advance the unkeyed container past a bad element.
 private struct AnyCodable: Codable {
     init(from decoder: Decoder) throws {
         if var array = try? decoder.unkeyedContainer() {
@@ -540,6 +890,8 @@ struct StremioStream: Codable, Identifiable, Hashable {
 
     let url: String?
     let infoHash: String?
+    let externalUrl: String?
+    let ytId: String?
     let title: String?
     let name: String?
     let description: String?
@@ -549,60 +901,143 @@ struct StremioStream: Codable, Identifiable, Hashable {
     let behaviorHints: StremioStreamBehaviorHints?
     let subtitles: [StremioSubtitle]?
 
+    // Ephemeral resolution provenance. These fields are intentionally absent
+    // from CodingKeys so signed media URLs/headers never become durable state.
+    // They let a download persist only the bounded addon request and a stable
+    // selection intent, then ask the addon for fresh transport data later.
+    private(set) var resolvedContentType: String?
+    private(set) var resolvedContentID: String?
+    private(set) var resolvedStreamOrdinal: Int?
+
     enum CodingKeys: String, CodingKey {
-        case url, infoHash, title, name, description, lang, language, languages, behaviorHints, subtitles
+        case url, infoHash, externalUrl, ytId, title, name, description, lang, language, languages, behaviorHints, subtitles
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        url = try container.decodeIfPresent(String.self, forKey: .url)
-        infoHash = try container.decodeIfPresent(String.self, forKey: .infoHash)
-        title = try container.decodeIfPresent(String.self, forKey: .title)
-        name = try container.decodeIfPresent(String.self, forKey: .name)
-        description = try container.decodeIfPresent(String.self, forKey: .description)
-        lang = try? container.decodeIfPresent(String.self, forKey: .lang)
-        language = try? container.decodeIfPresent(String.self, forKey: .language)
+        url = StremioDecodedFieldBoundary.optionalString(
+            try container.decodeIfPresent(String.self, forKey: .url),
+            maximumUTF8Bytes: 16 * 1_024
+        )
+        infoHash = StremioDecodedFieldBoundary.optionalString(
+            try container.decodeIfPresent(String.self, forKey: .infoHash),
+            maximumUTF8Bytes: 256
+        )
+        externalUrl = StremioDecodedFieldBoundary.optionalString(
+            try? container.decodeIfPresent(String.self, forKey: .externalUrl),
+            maximumUTF8Bytes: 4 * 1_024
+        )
+        ytId = StremioDecodedFieldBoundary.optionalString(
+            try? container.decodeIfPresent(String.self, forKey: .ytId),
+            maximumUTF8Bytes: 128
+        )
+        title = StremioDecodedFieldBoundary.optionalString(
+            try container.decodeIfPresent(String.self, forKey: .title),
+            maximumUTF8Bytes: 1_024
+        )
+        name = StremioDecodedFieldBoundary.optionalString(
+            try container.decodeIfPresent(String.self, forKey: .name),
+            maximumUTF8Bytes: 1_024
+        )
+        description = StremioDecodedFieldBoundary.optionalString(
+            try container.decodeIfPresent(String.self, forKey: .description),
+            maximumUTF8Bytes: 2 * 1_024
+        )
+        lang = StremioDecodedFieldBoundary.optionalString(
+            try? container.decodeIfPresent(String.self, forKey: .lang),
+            maximumUTF8Bytes: 64
+        )
+        language = StremioDecodedFieldBoundary.optionalString(
+            try? container.decodeIfPresent(String.self, forKey: .language),
+            maximumUTF8Bytes: 64
+        )
         if let values = try? container.decodeIfPresent([String].self, forKey: .languages) {
-            languages = values
+            languages = StremioDecodedFieldBoundary.boundedStrings(
+                values,
+                maximumCount: 16,
+                maximumUTF8Bytes: 64
+            )
         } else if let value = try? container.decodeIfPresent(String.self, forKey: .languages) {
-            languages = [value]
+            languages = StremioDecodedFieldBoundary.boundedStrings(
+                [value],
+                maximumCount: 1,
+                maximumUTF8Bytes: 64
+            )
         } else {
             languages = nil
         }
-        // Use try? so unexpected shapes don't kill the whole stream
+
         behaviorHints = try? container.decodeIfPresent(StremioStreamBehaviorHints.self, forKey: .behaviorHints)
-        // Keep valid embedded subtitles even if an aggregator mixes in a malformed entry.
+
         if var subtitleContainer = try? container.nestedUnkeyedContainer(forKey: .subtitles) {
-            var decodedSubtitles: [StremioSubtitle] = []
-            while !subtitleContainer.isAtEnd {
-                if let subtitle = try? subtitleContainer.decode(StremioSubtitle.self) {
-                    decodedSubtitles.append(subtitle)
-                } else {
-                    _ = try? subtitleContainer.decode(AnyCodable.self)
-                }
-            }
+            let decodedSubtitles = StremioBoundedSubtitleDecoder.decode(
+                from: &subtitleContainer,
+                maximumInspected: StremioDecodingLimits.subtitlesPerStream
+            )
             subtitles = decodedSubtitles.isEmpty ? nil : decodedSubtitles
         } else {
             subtitles = nil
         }
-        id = url ?? infoHash ?? UUID().uuidString
+        resolvedContentType = nil
+        resolvedContentID = nil
+        resolvedStreamOrdinal = nil
+        id = url ?? infoHash ?? externalUrl ?? ytId ?? UUID().uuidString
     }
 
-    /// Whether this stream is a direct HTTP(S) link (safe, no torrent)
+    func withResolutionProvenance(
+        contentType: String,
+        contentID: String,
+        streamOrdinal: Int
+    ) -> Self {
+        var copy = self
+        let trimmedType = contentType.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedID = contentID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedType.isEmpty, trimmedType.utf8.count <= 64,
+              !trimmedID.isEmpty, trimmedID.utf8.count <= 2 * 1_024,
+              (0..<StremioDecodingLimits.streamsPerResponse).contains(streamOrdinal) else {
+            return copy
+        }
+        copy.resolvedContentType = trimmedType
+        copy.resolvedContentID = trimmedID
+        copy.resolvedStreamOrdinal = streamOrdinal
+        return copy
+    }
+
     var isDirectHTTP: Bool {
         guard let url = url, !url.isEmpty else { return false }
         let lower = url.lowercased()
         return lower.hasPrefix("http://") || lower.hasPrefix("https://")
     }
 
-    /// Display name for the stream (prefers name, falls back to title)
+    var usesTorrentTransport: Bool {
+        if let infoHash = infoHash?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !infoHash.isEmpty {
+            return true
+        }
+        guard let url = url?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              !url.isEmpty else {
+            return false
+        }
+        return url.hasPrefix("magnet:")
+    }
+
+    var hasExternalDestination: Bool {
+        if let externalUrl = externalUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !externalUrl.isEmpty {
+            return true
+        }
+        guard let ytId = ytId?.trimmingCharacters(in: .whitespacesAndNewlines) else {
+            return false
+        }
+        return !ytId.isEmpty
+    }
+
     var displayName: String {
         if let name = name, !name.isEmpty { return name }
         if let title = title, !title.isEmpty { return title }
         return "Stream"
     }
 
-    /// Extracts proxy headers from behaviorHints if available
     var proxyHeaders: [String: String]? {
         behaviorHints?.proxyHeaders?.request
     }
@@ -633,7 +1068,7 @@ struct StremioStreamBehaviorHints: Codable, Hashable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        // notWebReady can arrive as Bool, Int, or String from various addons
+
         if let b = try? container.decodeIfPresent(Bool.self, forKey: .notWebReady) {
             notWebReady = b
         } else if let i = try? container.decodeIfPresent(Int.self, forKey: .notWebReady) {
@@ -641,13 +1076,20 @@ struct StremioStreamBehaviorHints: Codable, Hashable {
         } else {
             notWebReady = nil
         }
-        bingeGroup = try? container.decodeIfPresent(String.self, forKey: .bingeGroup)
+        bingeGroup = StremioDecodedFieldBoundary.optionalString(
+            try? container.decodeIfPresent(String.self, forKey: .bingeGroup),
+            maximumUTF8Bytes: 1_024
+        )
         proxyHeaders = try? container.decodeIfPresent(StremioProxyHeaders.self, forKey: .proxyHeaders)
-        filename = try? container.decodeIfPresent(String.self, forKey: .filename)
+        filename = StremioDecodedFieldBoundary.optionalString(
+            try? container.decodeIfPresent(String.self, forKey: .filename),
+            maximumUTF8Bytes: 1_024
+        )
         if let size = try? container.decodeIfPresent(Int64.self, forKey: .videoSize) {
             videoSize = size
         } else if let size = try? container.decodeIfPresent(Double.self, forKey: .videoSize) {
-            videoSize = Int64(size)
+            let truncated = size.rounded(.towardZero)
+            videoSize = size.isFinite ? Int64(exactly: truncated) : nil
         } else if let size = try? container.decodeIfPresent(String.self, forKey: .videoSize) {
             videoSize = Int64(size)
         } else {
@@ -658,6 +1100,21 @@ struct StremioStreamBehaviorHints: Codable, Hashable {
 
 struct StremioProxyHeaders: Codable, Hashable {
     let request: [String: String]?
+
+    enum CodingKeys: String, CodingKey { case request }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let raw = try container.decodeIfPresent([String: String].self, forKey: .request) ?? [:]
+        let bounded = raw.sorted { lhs, rhs in
+            lhs.key.localizedStandardCompare(rhs.key) == .orderedAscending
+        }.prefix(64).reduce(into: [String: String]()) { result, pair in
+            guard pair.key.utf8.count <= 128,
+                  pair.value.utf8.count <= 16 * 1_024 else { return }
+            result[pair.key] = pair.value
+        }
+        request = bounded.isEmpty ? nil : bounded
+    }
 }
 
 struct StremioSubtitle: Codable, Sendable, Hashable {
@@ -673,18 +1130,34 @@ struct StremioSubtitle: Codable, Sendable, Hashable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        // Some addons return subtitle id as an integer
+
         if let s = try? container.decodeIfPresent(String.self, forKey: .id) {
-            id = s
+            id = StremioDecodedFieldBoundary.optionalString(s, maximumUTF8Bytes: 256)
         } else if let i = try? container.decodeIfPresent(Int.self, forKey: .id) {
             id = String(i)
         } else {
             id = nil
         }
-        url = Self.firstNonemptyString(in: container, keys: [.url, .file, .src])
-        lang = Self.firstNonemptyString(in: container, keys: [.lang, .language])
-        name = Self.firstNonemptyString(in: container, keys: [.name, .label])
-        title = Self.firstNonemptyString(in: container, keys: [.title])
+        url = Self.firstNonemptyString(
+            in: container,
+            keys: [.url, .file, .src],
+            maximumUTF8Bytes: 16 * 1_024
+        )
+        lang = Self.firstNonemptyString(
+            in: container,
+            keys: [.lang, .language],
+            maximumUTF8Bytes: 64
+        )
+        name = Self.firstNonemptyString(
+            in: container,
+            keys: [.name, .label],
+            maximumUTF8Bytes: 512
+        )
+        title = Self.firstNonemptyString(
+            in: container,
+            keys: [.title],
+            maximumUTF8Bytes: 512
+        )
     }
 
     func encode(to encoder: Encoder) throws {
@@ -698,14 +1171,15 @@ struct StremioSubtitle: Codable, Sendable, Hashable {
 
     private static func firstNonemptyString(
         in container: KeyedDecodingContainer<CodingKeys>,
-        keys: [CodingKeys]
+        keys: [CodingKeys],
+        maximumUTF8Bytes: Int
     ) -> String? {
         for key in keys {
             guard let value = try? container.decodeIfPresent(String.self, forKey: key) else {
                 continue
             }
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
+            if !trimmed.isEmpty, trimmed.utf8.count <= maximumUTF8Bytes {
                 return trimmed
             }
         }
@@ -719,8 +1193,6 @@ struct StremioSubtitle: Codable, Sendable, Hashable {
         return id ?? "Subtitle"
     }
 
-    /// The label handed to the player. Name/title aliases improve aggregator output, while a
-    /// standard language-only subtitle keeps the exact label older addons already produced.
     var playbackDisplayName: String {
         if let name, !name.isEmpty { return name }
         if let title, !title.isEmpty { return title }
@@ -729,7 +1201,76 @@ struct StremioSubtitle: Codable, Sendable, Hashable {
     }
 }
 
-// MARK: - Stremio Addon Model (persisted)
+private enum StremioDecodedFieldBoundary {
+    static func requiredString(
+        _ rawValue: String,
+        maximumUTF8Bytes: Int,
+        decoder: Decoder
+    ) throws -> String {
+        guard let value = optionalString(rawValue, maximumUTF8Bytes: maximumUTF8Bytes) else {
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "Stremio string exceeded its model boundary"
+                )
+            )
+        }
+        return value
+    }
+
+    static func optionalString(
+        _ rawValue: String?,
+        maximumUTF8Bytes: Int
+    ) -> String? {
+        guard let rawValue else { return nil }
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, value.utf8.count <= maximumUTF8Bytes else { return nil }
+        return value
+    }
+
+    static func boundedStrings(
+        _ rawValues: [String]?,
+        maximumCount: Int,
+        maximumUTF8Bytes: Int
+    ) -> [String]? {
+        guard let rawValues else { return nil }
+        var values: [String] = []
+        values.reserveCapacity(min(rawValues.count, maximumCount))
+        for rawValue in rawValues.prefix(maximumCount) {
+            guard let value = optionalString(
+                rawValue,
+                maximumUTF8Bytes: maximumUTF8Bytes
+            ) else { continue }
+            values.append(value)
+        }
+        return values.isEmpty ? nil : values
+    }
+}
+
+private enum StremioBoundedSubtitleDecoder {
+    static func decode(
+        from container: inout UnkeyedDecodingContainer,
+        maximumInspected: Int
+    ) -> [StremioSubtitle] {
+        var decoded: [StremioSubtitle] = []
+        var seenURLs = Set<String>()
+        var inspected = 0
+        while !container.isAtEnd, inspected < maximumInspected {
+            inspected += 1
+            if let subtitle = try? container.decode(StremioSubtitle.self) {
+                guard let url = subtitle.url?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !url.isEmpty,
+                      seenURLs.insert(url.lowercased()).inserted else {
+                    continue
+                }
+                decoded.append(subtitle)
+            } else {
+                _ = try? container.decode(AnyCodable.self)
+            }
+        }
+        return decoded
+    }
+}
 
 struct StremioAddon: Identifiable, Hashable {
     let id: UUID
@@ -746,8 +1287,6 @@ struct StremioAddon: Identifiable, Hashable {
         hasher.combine(id)
     }
 }
-
-// MARK: - StremioAddonEntity (CoreData)
 
 @objc(StremioAddonEntity)
 public class StremioAddonEntity: NSManagedObject { }

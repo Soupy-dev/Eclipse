@@ -308,6 +308,8 @@ final class ReaderExtensionManager: ObservableObject {
     private var loadedScopeID: String
     private var loadedKeychainNamespace: String
     private var canStripLegacyPreferenceMetadata = false
+    private var codeReacquisitionTask: Task<Void, Never>?
+    private var codeReacquisitionGeneration = 0
 
     private init() {
         let migrationSucceeded = ReaderExtensionAidokuMigration.runAllKnownProfilesIfNeeded()
@@ -993,8 +995,11 @@ final class ReaderExtensionManager: ObservableObject {
             // runnable same-version bytes is an explicit update-consent action.
             guard mayRevalidateSameVersion || allowScopeExpansion else { return }
         case .orderedAscending:
-            // Updates never downgrade, including manually consented updates.
-            return
+            // Updates never downgrade runnable code, including manually
+            // consented updates. A metadata-only restored record has no
+            // runnable code, so it may reacquire the repository's current
+            // older version instead of dead-ending.
+            guard isCodeReinstall else { return }
         case nil:
             // A changed version that is not valid SemVer has no safe monotonic
             // ordering. Automatic updates leave it untouched; a foreground
@@ -1018,12 +1023,15 @@ final class ReaderExtensionManager: ObservableObject {
         var resolvedCatalog = catalog
         var artifact: ReaderExtensionJavaScriptArtifact?
         if catalog.implementation == .javascript {
-            let approved = allowScopeExpansion
-                ? newDomains
-                : approvedDomains(
-                    for: sourceID,
-                    namespace: scope.authenticationNamespace
-                )
+            let approved = ReaderExtensionMetadataReacquisitionPolicy.fetchAuthorizedDomains(
+                allowScopeExpansion: allowScopeExpansion,
+                reacquiresMetadataOnlyInstall: mayRevalidateSameVersion,
+                catalogInstallationDomains: newDomains,
+                currentInstallationDomains: oldDomains,
+                runtimeAuthorizedDomains: {
+                    approvedDomains(for: sourceID, namespace: scope.authenticationNamespace)
+                }
+            )
             artifact = try await fetchJavaScriptArtifact(for: catalog, approvedDomains: approved)
             try validateMutationScope(scope)
             guard let refreshedIndex = installedSources.firstIndex(where: { $0.id == sourceID }),
@@ -1036,8 +1044,10 @@ final class ReaderExtensionManager: ObservableObject {
         }
         try enforceLicense(
             resolvedCatalog.license,
-            allowUnknown: allowScopeExpansion
-                || (!requiresCatalogRevalidation && current.license.kind == .unknown)
+            allowUnknown: ReaderExtensionMetadataReacquisitionPolicy.allowsUnknownLicense(
+                allowScopeExpansion: allowScopeExpansion,
+                currentLicenseKind: current.license.kind
+            )
         )
         var replacement = ReaderExtensionInstalledSource(catalog: resolvedCatalog, sortIndex: current.sortIndex)
         // Preserve whether the language was explicitly selected. Legacy
@@ -1051,12 +1061,15 @@ final class ReaderExtensionManager: ObservableObject {
         replacement.rollbackContentDigest = current.rollbackContentDigest
         replacement.rollbackSourceSnapshot = current.rollbackSourceSnapshot
         if let artifact {
-            let approved = allowScopeExpansion
-                ? newDomains
-                : approvedDomains(
-                    for: sourceID,
-                    namespace: scope.authenticationNamespace
-                )
+            let approved = ReaderExtensionMetadataReacquisitionPolicy.fetchAuthorizedDomains(
+                allowScopeExpansion: allowScopeExpansion,
+                reacquiresMetadataOnlyInstall: mayRevalidateSameVersion,
+                catalogInstallationDomains: newDomains,
+                currentInstallationDomains: oldDomains,
+                runtimeAuthorizedDomains: {
+                    approvedDomains(for: sourceID, namespace: scope.authenticationNamespace)
+                }
+            )
             replacement = try await installingScript(
                 for: replacement,
                 artifact: artifact,
@@ -1176,11 +1189,82 @@ final class ReaderExtensionManager: ObservableObject {
         }
     }
 
-    func autoUpdateInstalledSourcesIfNeeded(reason _: String) async {
+    func autoUpdateInstalledSourcesIfNeeded(reason: String) async {
         guard isAvailable else { return }
+        scheduleAutomaticCodeReacquisition(reason: reason)
         guard autoUpdateSources, !installedSources.isEmpty, !isUpdatingSources else { return }
         if let lastAutoUpdate, Date().timeIntervalSince(lastAutoUpdate) < 24 * 60 * 60 { return }
         await updateAllAdmitted(allowsKidsModeAdministrativeBypass: true)
+    }
+
+    var sourceIDsAwaitingCodeReacquisition: [ReaderExtensionSourceID] {
+        guard isAvailable else { return [] }
+        return installedSources.filter { source in
+            guard ReaderExtensionMetadataReacquisitionPolicy.needsCodeReacquisition(
+                source,
+                blockedSourceIDs: blockedSourceIDs
+            ) else { return false }
+            guard let record = repositories.first(where: { $0.id == source.repositoryID }) else {
+                return true
+            }
+            return record.isEnabled
+        }.map(\.id)
+    }
+
+    func scheduleAutomaticCodeReacquisition(reason: String) {
+        guard isAvailable else { return }
+        codeReacquisitionGeneration &+= 1
+        let generation = codeReacquisitionGeneration
+        let predecessor = codeReacquisitionTask
+        predecessor?.cancel()
+        guard !sourceIDsAwaitingCodeReacquisition.isEmpty else {
+            codeReacquisitionTask = nil
+            return
+        }
+        codeReacquisitionTask = Task { [weak self] in
+            await predecessor?.value
+            await self?.reacquireMissingSourceCode(generation: generation, reason: reason)
+        }
+    }
+
+    private func reacquireMissingSourceCode(generation: Int, reason: String) async {
+        guard isAvailable, !isUpdatingSources,
+              codeReacquisitionGeneration == generation, !Task.isCancelled else { return }
+        isUpdatingSources = true
+        defer { isUpdatingSources = false }
+        await refreshAllRepositoriesAdmitted(allowsKidsModeAdministrativeBypass: true)
+        guard codeReacquisitionGeneration == generation, !Task.isCancelled else { return }
+        var repairedCount = 0
+        var failureSummaries: [String] = []
+        for sourceID in sourceIDsAwaitingCodeReacquisition {
+            guard codeReacquisitionGeneration == generation, !Task.isCancelled else { break }
+            do {
+                try await updateAdmitted(
+                    sourceID: sourceID,
+                    allowsKidsModeAdministrativeBypass: true
+                )
+                let stillPending = source(for: sourceID).map {
+                    ReaderExtensionMetadataReacquisitionPolicy.needsCodeReacquisition(
+                        $0,
+                        blockedSourceIDs: blockedSourceIDs
+                    )
+                } ?? true
+                if !stillPending {
+                    repairedCount += 1
+                } else {
+                    failureSummaries.append("\(sourceID.rawValue): still pending after an update pass")
+                }
+            } catch {
+                failureSummaries.append("\(sourceID.rawValue): \(error.localizedDescription)")
+            }
+        }
+        let failureSuffix = failureSummaries.isEmpty
+            ? ""
+            : " [" + failureSummaries.joined(separator: "; ") + "]"
+        Logger.shared.log(
+            "ReaderExtension code reacquisition reason=\(reason) repaired=\(repairedCount) failed=\(failureSummaries.count)\(failureSuffix)",
+            type: "Plugin"
+        )
     }
 
     func uninstall(sourceID: ReaderExtensionSourceID) throws {
@@ -1965,6 +2049,82 @@ final class ReaderExtensionManager: ObservableObject {
         )
     }
 
+    func capturePrivateCloudConfiguration(
+        for profileID: UUID
+    ) throws -> ReaderExtensionPrivateCloudConfiguration {
+        try requireAvailability()
+        guard ProfileManager.shared.rosterStoreIsReadable,
+              ProfileManager.shared.profiles.contains(where: { $0.id == profileID })
+                || profileID == ProfileManager.defaultProfileID else {
+            throw ReaderExtensionError.runtimeUnavailable
+        }
+        let sharesServices = ProfileSettingsStore.sharesServices
+        let profileIDs = Set(ProfileManager.shared.profiles.map(\.id))
+            .union([ProfileManager.defaultProfileID])
+        let namespaceGeneration = ReaderExtensionAuthenticationGenerationRegistry
+            .namespaceGeneration(profileID.uuidString)
+        let profileStore = ProfileSettingsStore.shared.store(for: profileID)
+        let metadataStore = sharesServices ? UserDefaults.standard : profileStore
+        let configuration = try ReaderExtensionPersistence.capturePrivateCloudConfiguration(
+            profileID: profileID,
+            metadataStore: metadataStore,
+            preferenceStore: profileStore
+        )
+        guard ProfileManager.shared.rosterStoreIsReadable,
+              ProfileSettingsStore.sharesServices == sharesServices,
+              Set(ProfileManager.shared.profiles.map(\.id))
+                .union([ProfileManager.defaultProfileID]) == profileIDs,
+              ReaderExtensionAuthenticationGenerationRegistry
+                .namespaceGeneration(profileID.uuidString) == namespaceGeneration else {
+            throw ReaderExtensionError.runtimeUnavailable
+        }
+        return configuration
+    }
+
+    func applyPrivateCloudConfiguration(
+        _ configuration: ReaderExtensionPrivateCloudConfiguration,
+        for profileID: UUID
+    ) throws {
+        try requireAvailability()
+        guard ProfileManager.shared.rosterStoreIsReadable,
+              ProfileManager.shared.profiles.contains(where: { $0.id == profileID })
+                || profileID == ProfileManager.defaultProfileID else {
+            throw ReaderExtensionError.runtimeUnavailable
+        }
+        let sharesServices = ProfileSettingsStore.sharesServices
+        let profileIDs = Set(ProfileManager.shared.profiles.map(\.id))
+            .union([ProfileManager.defaultProfileID])
+        let activeProfileID = ProfileManager.shared.activeProfileID
+        let namespaceGeneration = ReaderExtensionAuthenticationGenerationRegistry
+            .namespaceGeneration(profileID.uuidString)
+        let profileStore = ProfileSettingsStore.shared.store(for: profileID)
+        let metadataStore = sharesServices ? UserDefaults.standard : profileStore
+        try ReaderExtensionPersistence.applyPrivateCloudConfiguration(
+            configuration,
+            profileID: profileID,
+            metadataStore: metadataStore,
+            preferenceStore: profileStore
+        )
+        guard ProfileManager.shared.rosterStoreIsReadable,
+              ProfileSettingsStore.sharesServices == sharesServices,
+              Set(ProfileManager.shared.profiles.map(\.id))
+                .union([ProfileManager.defaultProfileID]) == profileIDs,
+              ProfileManager.shared.activeProfileID == activeProfileID,
+              ReaderExtensionAuthenticationGenerationRegistry
+                .namespaceGeneration(profileID.uuidString) == namespaceGeneration else {
+            throw ReaderExtensionError.runtimeUnavailable
+        }
+        if profileID == activeProfileID {
+            _ = try reloadPersistedStateAfterRestore()
+            for sourceID in installedSources.map(\.id) {
+                NotificationCenter.default.post(
+                    name: .readerExtensionAuthenticationDidChange,
+                    object: sourceID
+                )
+            }
+        }
+    }
+
     func restoreMetadata(from snapshot: ReaderExtensionBackupSnapshot) async throws {
         try requireAvailability()
         try ReaderExtensionPersistence.restoreMetadata(
@@ -2067,6 +2227,7 @@ final class ReaderExtensionManager: ObservableObject {
             loadedRepositories.contains(where: { $0.id == entry.key })
         }
         rebuildCatalogSources()
+        scheduleAutomaticCodeReacquisition(reason: "restore-reload")
         // This API is used as a restore-success gate. A validated no-op reload
         // is still a success and must not cause the caller to roll back.
         return true

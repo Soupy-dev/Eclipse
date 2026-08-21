@@ -1,3 +1,10 @@
+//
+//  TMDBModels.swift
+//  Sora
+//
+//  Created by Francesco on 07/08/25.
+//
+
 import Foundation
 
 private struct LossyDecodableArray<Element: Decodable>: Decodable {
@@ -31,14 +38,13 @@ private struct LossyDecodableValue<Element: Decodable>: Decodable {
     }
 }
 
-// MARK: - Search Response
 struct TMDBSearchResponse: Decodable {
     let page: Int
     let results: [TMDBSearchResult]
     let totalPages: Int
     let totalResults: Int
     let skippedResultCount: Int
-    
+
     enum CodingKeys: String, CodingKey {
         case page, results
         case totalPages = "total_pages"
@@ -81,7 +87,47 @@ struct TMDBFindResponse: Decodable {
     }
 }
 
-// MARK: - Search Result
+struct AnimeMediaIdentitySeed: Codable, Equatable, Sendable {
+    let anilistId: Int
+    let malId: Int?
+    let kitsuId: Int?
+    let format: String?
+
+    init(anilistId: Int, malId: Int? = nil, kitsuId: Int? = nil, format: String? = nil) {
+        self.anilistId = anilistId
+        self.malId = malId
+        self.kitsuId = kitsuId
+        self.format = format
+    }
+
+    var sanitizedForPersistence: AnimeMediaIdentitySeed? {
+        let maximumIdentifier = ProgressPersistencePolicy.maximumIdentifier
+        guard anilistId != 0,
+              anilistId != Int.min,
+              (-maximumIdentifier...maximumIdentifier).contains(anilistId) else {
+            return nil
+        }
+        let safeMAL = malId.flatMap {
+            ProgressPersistencePolicy.validPositiveIdentifier($0) ? $0 : nil
+        }
+        let safeKitsu = kitsuId.flatMap {
+            ProgressPersistencePolicy.validPositiveIdentifier($0) ? $0 : nil
+        }
+        let safeFormat = format.flatMap { value -> String? in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            return String(trimmed.prefix(64))
+        }
+        return AnimeMediaIdentitySeed(
+            anilistId: anilistId,
+            malId: safeMAL,
+            kitsuId: safeKitsu,
+            format: safeFormat
+        )
+    }
+
+}
+
 struct TMDBSearchResult: Codable, Identifiable {
     let id: Int
     let mediaType: String
@@ -99,7 +145,11 @@ struct TMDBSearchResult: Codable, Identifiable {
     let originalLanguage: String?
     let originCountry: [String]?
     let voteCount: Int?
-    
+
+    let isAnimeHint: Bool?
+
+    let animeIdentitySeed: AnimeMediaIdentitySeed?
+
     enum CodingKeys: String, CodingKey {
         case id, overview, popularity, adult
         case mediaType = "media_type"
@@ -113,6 +163,8 @@ struct TMDBSearchResult: Codable, Identifiable {
         case originalLanguage = "original_language"
         case originCountry = "origin_country"
         case voteCount = "vote_count"
+        case isAnimeHint = "is_anime_hint"
+        case animeIdentitySeed = "anime_identity_seed"
     }
 
     init(
@@ -131,7 +183,9 @@ struct TMDBSearchResult: Codable, Identifiable {
         genreIds: [Int]?,
         originalLanguage: String? = nil,
         originCountry: [String]? = nil,
-        voteCount: Int? = nil
+        voteCount: Int? = nil,
+        isAnimeHint: Bool? = nil,
+        animeIdentitySeed: AnimeMediaIdentitySeed? = nil
     ) {
         self.id = id
         self.mediaType = mediaType
@@ -149,24 +203,95 @@ struct TMDBSearchResult: Codable, Identifiable {
         self.originalLanguage = originalLanguage
         self.originCountry = originCountry
         self.voteCount = voteCount
+        self.isAnimeHint = isAnimeHint
+        self.animeIdentitySeed = animeIdentitySeed?.sanitizedForPersistence
     }
-    
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let rawID = try container.decode(Int.self, forKey: .id)
+        guard let validatedID = RemoteMediaNumericBoundary.positiveIdentifier(rawID) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .id,
+                in: container,
+                debugDescription: "TMDB search-result identifier is outside the supported range."
+            )
+        }
+        id = validatedID
+        mediaType = try container.decode(String.self, forKey: .mediaType)
+        title = try container.decodeIfPresent(String.self, forKey: .title)
+        name = try container.decodeIfPresent(String.self, forKey: .name)
+        overview = try container.decodeIfPresent(String.self, forKey: .overview)
+        posterPath = try container.decodeIfPresent(String.self, forKey: .posterPath)
+        backdropPath = try container.decodeIfPresent(String.self, forKey: .backdropPath)
+        releaseDate = try container.decodeIfPresent(String.self, forKey: .releaseDate)
+        firstAirDate = try container.decodeIfPresent(String.self, forKey: .firstAirDate)
+        let decodedVoteAverage = try container.decodeIfPresent(Double.self, forKey: .voteAverage)
+        guard decodedVoteAverage.map({ $0.isFinite && (0...10).contains($0) }) ?? true else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .voteAverage,
+                in: container,
+                debugDescription: "TMDB search-result score is outside the supported range."
+            )
+        }
+        voteAverage = decodedVoteAverage
+        let decodedPopularity = try container.decodeIfPresent(Double.self, forKey: .popularity) ?? 0
+        guard decodedPopularity.isFinite, decodedPopularity >= 0 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .popularity,
+                in: container,
+                debugDescription: "TMDB search-result popularity is outside the supported range."
+            )
+        }
+        popularity = decodedPopularity
+        adult = try container.decodeIfPresent(Bool.self, forKey: .adult)
+        let decodedGenreIDs = try container.decodeIfPresent([Int].self, forKey: .genreIds)
+        guard (decodedGenreIDs?.count ?? 0) <= 128,
+              decodedGenreIDs?.allSatisfy({
+                  RemoteMediaNumericBoundary.positiveIdentifier($0) != nil
+              }) ?? true else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .genreIds,
+                in: container,
+                debugDescription: "TMDB search-result genres contain unsupported identifiers."
+            )
+        }
+        genreIds = decodedGenreIDs
+        originalLanguage = try container.decodeIfPresent(String.self, forKey: .originalLanguage)
+        originCountry = try container.decodeIfPresent([String].self, forKey: .originCountry)
+        let decodedVoteCount = try container.decodeIfPresent(Int.self, forKey: .voteCount)
+        guard decodedVoteCount.map({
+            (0...RemoteMediaNumericBoundary.maximumIdentifier).contains($0)
+        }) ?? true else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .voteCount,
+                in: container,
+                debugDescription: "TMDB search-result vote count is outside the supported range."
+            )
+        }
+        voteCount = decodedVoteCount
+        isAnimeHint = try container.decodeIfPresent(Bool.self, forKey: .isAnimeHint)
+        animeIdentitySeed = try container
+            .decodeIfPresent(AnimeMediaIdentitySeed.self, forKey: .animeIdentitySeed)?
+            .sanitizedForPersistence
+    }
+
     var displayTitle: String {
         return title ?? name ?? "Unknown Title"
     }
-    
+
     var displayDate: String {
         return releaseDate ?? firstAirDate ?? ""
     }
-    
+
     var isMovie: Bool {
         return mediaType == "movie"
     }
-    
+
     var isTVShow: Bool {
         return mediaType == "tv"
     }
-    
+
     var fullPosterURL: String? {
         guard let posterPath = posterPath else { return nil }
         if posterPath.lowercased().hasPrefix("http://") || posterPath.lowercased().hasPrefix("https://") {
@@ -174,7 +299,7 @@ struct TMDBSearchResult: Codable, Identifiable {
         }
         return "\(TMDBService.tmdbImageBaseURL)\(posterPath)"
     }
-    
+
     var fullBackdropURL: String? {
         guard let backdropPath = backdropPath else { return nil }
         if backdropPath.lowercased().hasPrefix("http://") || backdropPath.lowercased().hasPrefix("https://") {
@@ -186,16 +311,80 @@ struct TMDBSearchResult: Codable, Identifiable {
     var stableIdentity: String {
         "\(mediaType)-\(id)"
     }
+
+    /// User-controlled backups and peer/cloud payloads can persist this model
+    /// without passing through TMDB's network decoder. Keep identity-sized
+    /// integers within the range used by progress and episode-key arithmetic,
+    /// while retaining an otherwise usable neighboring result.
+    var sanitizedForPersistence: TMDBSearchResult? {
+        guard ProgressPersistencePolicy.validPositiveIdentifier(id) else {
+            return nil
+        }
+        let normalizedMediaType = mediaType
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard normalizedMediaType == "movie" || normalizedMediaType == "tv",
+              popularity.isFinite,
+              voteAverage.map({ $0.isFinite && (0...10).contains($0) }) ?? true,
+              voteCount.map({ (0...ProgressPersistencePolicy.maximumIdentifier).contains($0) }) ?? true else {
+            return nil
+        }
+        let safeGenreIDs = genreIds.map { values in
+            Array(values.filter(ProgressPersistencePolicy.validPositiveIdentifier).prefix(128))
+        }
+        return TMDBSearchResult(
+            id: id,
+            mediaType: normalizedMediaType,
+            title: title,
+            name: name,
+            overview: overview,
+            posterPath: posterPath,
+            backdropPath: backdropPath,
+            releaseDate: releaseDate,
+            firstAirDate: firstAirDate,
+            voteAverage: voteAverage,
+            popularity: popularity,
+            adult: adult,
+            genreIds: safeGenreIDs,
+            originalLanguage: originalLanguage,
+            originCountry: originCountry,
+            voteCount: voteCount,
+            isAnimeHint: isAnimeHint,
+            animeIdentitySeed: animeIdentitySeed?.sanitizedForPersistence
+        )
+    }
+
+    func withAnimeIdentitySeed(_ seed: AnimeMediaIdentitySeed?) -> TMDBSearchResult {
+        TMDBSearchResult(
+            id: id,
+            mediaType: mediaType,
+            title: title,
+            name: name,
+            overview: overview,
+            posterPath: posterPath,
+            backdropPath: backdropPath,
+            releaseDate: releaseDate,
+            firstAirDate: firstAirDate,
+            voteAverage: voteAverage,
+            popularity: popularity,
+            adult: adult,
+            genreIds: genreIds,
+            originalLanguage: originalLanguage,
+            originCountry: originCountry,
+            voteCount: voteCount,
+            isAnimeHint: isAnimeHint,
+            animeIdentitySeed: seed?.sanitizedForPersistence
+        )
+    }
 }
 
-// MARK: - Movie Search Response
 struct TMDBMovieSearchResponse: Decodable {
     let page: Int
     let results: [TMDBMovie]
     let totalPages: Int
     let totalResults: Int
     let skippedResultCount: Int
-    
+
     enum CodingKeys: String, CodingKey {
         case page, results
         case totalPages = "total_pages"
@@ -222,14 +411,13 @@ struct TMDBMovieSearchResponse: Decodable {
     }
 }
 
-// MARK: - TV Show Search Response
 struct TMDBTVSearchResponse: Decodable {
     let page: Int
     let results: [TMDBTVShow]
     let totalPages: Int
     let totalResults: Int
     let skippedResultCount: Int
-    
+
     enum CodingKeys: String, CodingKey {
         case page, results
         case totalPages = "total_pages"
@@ -256,7 +444,6 @@ struct TMDBTVSearchResponse: Decodable {
     }
 }
 
-// MARK: - Movie Model
 struct TMDBMovie: Codable, Identifiable {
     let id: Int
     let title: String
@@ -268,7 +455,9 @@ struct TMDBMovie: Codable, Identifiable {
     let popularity: Double
     let adult: Bool?
     let genreIds: [Int]?
-    
+    let originalLanguage: String?
+    let originCountry: [String]?
+
     enum CodingKeys: String, CodingKey {
         case id, title, overview, popularity, adult
         case posterPath = "poster_path"
@@ -276,18 +465,20 @@ struct TMDBMovie: Codable, Identifiable {
         case releaseDate = "release_date"
         case voteAverage = "vote_average"
         case genreIds = "genre_ids"
+        case originalLanguage = "original_language"
+        case originCountry = "origin_country"
     }
-    
+
     var fullPosterURL: String? {
         guard let posterPath = posterPath else { return nil }
         return "\(TMDBService.tmdbImageBaseURL)\(posterPath)"
     }
-    
+
     var fullBackdropURL: String? {
         guard let backdropPath = backdropPath else { return nil }
         return "\(TMDBService.tmdbImageBaseURL)\(backdropPath)"
     }
-    
+
     var asSearchResult: TMDBSearchResult {
         return TMDBSearchResult(
             id: id,
@@ -302,12 +493,13 @@ struct TMDBMovie: Codable, Identifiable {
             voteAverage: voteAverage,
             popularity: popularity,
             adult: adult,
-            genreIds: genreIds
+            genreIds: genreIds,
+            originalLanguage: originalLanguage,
+            originCountry: originCountry
         )
     }
 }
 
-// MARK: - TV Show Model
 struct TMDBTVShow: Codable, Identifiable {
     let id: Int
     let name: String
@@ -322,7 +514,7 @@ struct TMDBTVShow: Codable, Identifiable {
     let originalLanguage: String?
     let originCountry: [String]?
     let voteCount: Int?
-    
+
     enum CodingKeys: String, CodingKey {
         case id, name, overview, popularity, adult
         case posterPath = "poster_path"
@@ -334,17 +526,17 @@ struct TMDBTVShow: Codable, Identifiable {
         case originCountry = "origin_country"
         case voteCount = "vote_count"
     }
-    
+
     var fullPosterURL: String? {
         guard let posterPath = posterPath else { return nil }
         return "\(TMDBService.tmdbImageBaseURL)\(posterPath)"
     }
-    
+
     var fullBackdropURL: String? {
         guard let backdropPath = backdropPath else { return nil }
         return "\(TMDBService.tmdbImageBaseURL)\(backdropPath)"
     }
-    
+
     var asSearchResult: TMDBSearchResult {
         return TMDBSearchResult(
             id: id,
@@ -367,7 +559,6 @@ struct TMDBTVShow: Codable, Identifiable {
     }
 }
 
-// MARK: - Movie Detail Model
 struct TMDBMovieDetail: Codable, Identifiable {
     let id: Int
     let title: String
@@ -389,7 +580,7 @@ struct TMDBMovieDetail: Codable, Identifiable {
     let adult: Bool
     let voteCount: Int
     let releaseDates: TMDBReleaseDates?
-    
+
     enum CodingKeys: String, CodingKey {
         case id, title, overview, popularity, runtime, genres, tagline, status, budget, revenue, adult
         case posterPath = "poster_path"
@@ -402,17 +593,17 @@ struct TMDBMovieDetail: Codable, Identifiable {
         case voteCount = "vote_count"
         case releaseDates = "release_dates"
     }
-    
+
     var fullPosterURL: String? {
         guard let posterPath = posterPath else { return nil }
         return "\(TMDBService.tmdbImageBaseURL)\(posterPath)"
     }
-    
+
     var fullBackdropURL: String? {
         guard let backdropPath = backdropPath else { return nil }
         return "\(TMDBService.tmdbImageBaseURL)\(backdropPath)"
     }
-    
+
     var runtimeFormatted: String {
         guard let runtime = runtime, runtime > 0 else { return "Unknown" }
         let hours = runtime / 60
@@ -423,14 +614,13 @@ struct TMDBMovieDetail: Codable, Identifiable {
             return "\(minutes)m"
         }
     }
-    
+
     var yearFromReleaseDate: String {
         guard let releaseDate = releaseDate, !releaseDate.isEmpty else { return "Unknown" }
         return String(releaseDate.prefix(4))
     }
 }
 
-// MARK: - External IDs (for IMDB lookup)
 struct TMDBExternalIds: Codable {
     let imdbId: String?
     let freebaseMid: String?
@@ -453,7 +643,6 @@ struct TMDBExternalIds: Codable {
     }
 }
 
-// MARK: - TV Show Detail Model
 struct TMDBTVShowDetail: Codable, Identifiable {
     let id: Int
     let name: String
@@ -481,7 +670,7 @@ struct TMDBTVShowDetail: Codable, Identifiable {
     let contentRatings: TMDBContentRatings?
     let externalIds: TMDBExternalIds?
     let nextEpisodeToAir: TMDBEpisode?
-    
+
     enum CodingKeys: String, CodingKey {
         case id, name, overview, popularity, genres, tagline, status, adult, languages, type
         case posterPath = "poster_path"
@@ -501,35 +690,33 @@ struct TMDBTVShowDetail: Codable, Identifiable {
         case externalIds = "external_ids"
         case nextEpisodeToAir = "next_episode_to_air"
     }
-    
+
     var fullPosterURL: String? {
         guard let posterPath = posterPath else { return nil }
         return "\(TMDBService.tmdbImageBaseURL)\(posterPath)"
     }
-    
+
     var fullBackdropURL: String? {
         guard let backdropPath = backdropPath else { return nil }
         return "\(TMDBService.tmdbImageBaseURL)\(backdropPath)"
     }
-    
+
     var yearFromFirstAirDate: String {
         guard let firstAirDate = firstAirDate, !firstAirDate.isEmpty else { return "Unknown" }
         return String(firstAirDate.prefix(4))
     }
-    
+
     var episodeRuntimeFormatted: String {
         guard let runtime = episodeRunTime?.first, runtime > 0 else { return "Unknown" }
         return "\(runtime)m"
     }
 }
 
-// MARK: - Genre Model
 struct TMDBGenre: Codable, Identifiable {
     let id: Int
     let name: String
 }
 
-// MARK: - Season Model
 struct TMDBSeason: Codable, Identifiable {
     let id: Int
     let name: String
@@ -538,7 +725,7 @@ struct TMDBSeason: Codable, Identifiable {
     let seasonNumber: Int
     let episodeCount: Int
     let airDate: String?
-    
+
     enum CodingKeys: String, CodingKey {
         case id, name, overview
         case posterPath = "poster_path"
@@ -546,16 +733,15 @@ struct TMDBSeason: Codable, Identifiable {
         case episodeCount = "episode_count"
         case airDate = "air_date"
     }
-    
+
     var fullPosterURL: String? {
         guard let posterPath = posterPath else { return nil }
-        // If we already have a full URL (e.g., AniList CDN), return it directly
+
         if posterPath.hasPrefix("http") { return posterPath }
         return "\(TMDBService.tmdbImageBaseURL)\(posterPath)"
     }
 }
 
-// MARK: - Episode Model
 struct TMDBEpisode: Codable, Identifiable {
     let id: Int
     let name: String
@@ -567,7 +753,7 @@ struct TMDBEpisode: Codable, Identifiable {
     let runtime: Int?
     let voteAverage: Double
     let voteCount: Int
-    
+
     enum CodingKeys: String, CodingKey {
         case id, name, overview, runtime
         case stillPath = "still_path"
@@ -577,19 +763,18 @@ struct TMDBEpisode: Codable, Identifiable {
         case voteAverage = "vote_average"
         case voteCount = "vote_count"
     }
-    
+
     var fullStillURL: String? {
         guard let stillPath = stillPath else { return nil }
         return "\(TMDBService.tmdbImageBaseURL)\(stillPath)"
     }
-    
+
     var runtimeFormatted: String {
         guard let runtime = runtime, runtime > 0 else { return "Unknown" }
         return "\(runtime)m"
     }
 }
 
-// MARK: - Season Detail Model
 struct TMDBSeasonDetail: Codable, Identifiable {
     let id: Int
     let name: String
@@ -598,14 +783,14 @@ struct TMDBSeasonDetail: Codable, Identifiable {
     let seasonNumber: Int
     let airDate: String?
     let episodes: [TMDBEpisode]
-    
+
     enum CodingKeys: String, CodingKey {
         case id, name, overview, episodes
         case posterPath = "poster_path"
         case seasonNumber = "season_number"
         case airDate = "air_date"
     }
-    
+
     var fullPosterURL: String? {
         guard let posterPath = posterPath else { return nil }
         if posterPath.hasPrefix("http") { return posterPath }
@@ -613,7 +798,6 @@ struct TMDBSeasonDetail: Codable, Identifiable {
     }
 }
 
-// MARK: - TV Show with Seasons
 struct TMDBTVShowWithSeasons: Codable, Identifiable {
     let id: Int
     let name: String
@@ -641,7 +825,7 @@ struct TMDBTVShowWithSeasons: Codable, Identifiable {
     let seasons: [TMDBSeason]
     let contentRatings: TMDBContentRatings?
     let externalIds: TMDBExternalIds?
-    
+
     enum CodingKeys: String, CodingKey {
         case id, name, overview, popularity, genres, tagline, status, adult, languages, type, seasons
         case posterPath = "poster_path"
@@ -660,29 +844,139 @@ struct TMDBTVShowWithSeasons: Codable, Identifiable {
         case contentRatings = "content_ratings"
         case externalIds = "external_ids"
     }
-    
+
     var fullPosterURL: String? {
         guard let posterPath = posterPath else { return nil }
         return "\(TMDBService.tmdbImageBaseURL)\(posterPath)"
     }
-    
+
     var fullBackdropURL: String? {
         guard let backdropPath = backdropPath else { return nil }
         return "\(TMDBService.tmdbImageBaseURL)\(backdropPath)"
     }
-    
+
     var yearFromFirstAirDate: String {
         guard let firstAirDate = firstAirDate, !firstAirDate.isEmpty else { return "Unknown" }
         return String(firstAirDate.prefix(4))
     }
-    
+
     var episodeRuntimeFormatted: String {
         guard let runtime = episodeRunTime?.first, runtime > 0 else { return "Unknown" }
         return "\(runtime)m"
     }
 }
 
-// MARK: - Alternative Titles
+extension TMDBEpisode {
+    var isValidRemotePayload: Bool {
+        RemoteMediaNumericBoundary.positiveIdentifier(id) != nil
+            && RemoteMediaNumericBoundary.seasonNumber(seasonNumber, allowsZero: true) != nil
+            && RemoteMediaNumericBoundary.episodeNumber(episodeNumber) != nil
+            && (runtime.map({ (0...24 * 60).contains($0) }) ?? true)
+            && voteAverage.isFinite
+            && (0...10).contains(voteAverage)
+            && (0...RemoteMediaNumericBoundary.maximumIdentifier).contains(voteCount)
+    }
+}
+
+extension TMDBSeasonDetail {
+    var isValidRemotePayload: Bool {
+        guard RemoteMediaNumericBoundary.positiveIdentifier(id) != nil,
+              RemoteMediaNumericBoundary.seasonNumber(seasonNumber, allowsZero: true) != nil,
+              episodes.count <= RemoteMediaNumericBoundary.maximumEpisodeCount else {
+            return false
+        }
+        var seenEpisodeNumbers = Set<Int>()
+        var seenEpisodeIDs = Set<Int>()
+        for episode in episodes {
+            guard episode.isValidRemotePayload,
+                  episode.seasonNumber == seasonNumber,
+                  seenEpisodeNumbers.insert(episode.episodeNumber).inserted,
+                  seenEpisodeIDs.insert(episode.id).inserted else {
+                return false
+            }
+        }
+        return true
+    }
+}
+
+extension TMDBSeason {
+    var isValidRemotePayload: Bool {
+        RemoteMediaNumericBoundary.positiveIdentifier(id) != nil
+            && RemoteMediaNumericBoundary.seasonNumber(seasonNumber, allowsZero: true) != nil
+            && (0...RemoteMediaNumericBoundary.maximumEpisodeCount).contains(episodeCount)
+    }
+}
+
+extension TMDBTVShowDetail {
+    var isValidRemotePayload: Bool {
+        guard RemoteMediaNumericBoundary.positiveIdentifier(id) != nil,
+              voteAverage.isFinite,
+              (0...10).contains(voteAverage),
+              popularity.isFinite,
+              popularity >= 0,
+              (0...RemoteMediaNumericBoundary.maximumIdentifier).contains(voteCount),
+              genres.count <= 128,
+              genres.allSatisfy({ RemoteMediaNumericBoundary.positiveIdentifier($0.id) != nil }),
+              numberOfSeasons.map({
+                  (0...RemoteMediaNumericBoundary.maximumSeasonNumber).contains($0)
+              }) ?? true,
+              numberOfEpisodes.map({
+                  (0...RemoteMediaNumericBoundary.maximumTotalEpisodeCount).contains($0)
+              }) ?? true,
+              validRemoteEpisodeRuntimes(episodeRunTime),
+              languages.map({ $0.count <= 128 }) ?? true,
+              originCountry.map({ $0.count <= 128 }) ?? true,
+              nextEpisodeToAir.map(\.isValidRemotePayload) ?? true else {
+            return false
+        }
+        return true
+    }
+}
+
+extension TMDBTVShowWithSeasons {
+    var isValidRemotePayload: Bool {
+        guard RemoteMediaNumericBoundary.positiveIdentifier(id) != nil,
+              voteAverage.isFinite,
+              (0...10).contains(voteAverage),
+              popularity.isFinite,
+              popularity >= 0,
+              (0...RemoteMediaNumericBoundary.maximumIdentifier).contains(voteCount),
+              genres.count <= 128,
+              genres.allSatisfy({ RemoteMediaNumericBoundary.positiveIdentifier($0.id) != nil }),
+              seasons.count <= RemoteMediaNumericBoundary.maximumSeasonNumber,
+              numberOfSeasons.map({
+                  (0...RemoteMediaNumericBoundary.maximumSeasonNumber).contains($0)
+              }) ?? true,
+              numberOfEpisodes.map({
+                  (0...RemoteMediaNumericBoundary.maximumTotalEpisodeCount).contains($0)
+              }) ?? true,
+              validRemoteEpisodeRuntimes(episodeRunTime),
+              languages.map({ $0.count <= 128 }) ?? true,
+              originCountry.map({ $0.count <= 128 }) ?? true else {
+            return false
+        }
+
+        var seenSeasonNumbers = Set<Int>()
+        var seenSeasonIDs = Set<Int>()
+        var representedEpisodes = 0
+        for season in seasons {
+            guard season.isValidRemotePayload,
+                  seenSeasonNumbers.insert(season.seasonNumber).inserted,
+                  seenSeasonIDs.insert(season.id).inserted,
+                  season.episodeCount <= RemoteMediaNumericBoundary.maximumTotalEpisodeCount - representedEpisodes else {
+                return false
+            }
+            representedEpisodes += season.episodeCount
+        }
+        return true
+    }
+}
+
+private func validRemoteEpisodeRuntimes(_ values: [Int]?) -> Bool {
+    guard let values else { return true }
+    return values.count <= 64 && values.allSatisfy { (0...24 * 60).contains($0) }
+}
+
 struct TMDBAlternativeTitles: Codable {
     let id: Int
     let titles: [TMDBAlternativeTitle]
@@ -692,14 +986,13 @@ struct TMDBAlternativeTitle: Codable {
     let iso31661: String
     let title: String
     let type: String?
-    
+
     enum CodingKeys: String, CodingKey {
         case title, type
         case iso31661 = "iso_3166_1"
     }
 }
 
-// MARK: - TV Alternative Titles
 struct TMDBTVAlternativeTitles: Codable {
     let id: Int
     let results: [TMDBTVAlternativeTitle]
@@ -709,14 +1002,13 @@ struct TMDBTVAlternativeTitle: Codable {
     let iso31661: String
     let title: String
     let type: String?
-    
+
     enum CodingKeys: String, CodingKey {
         case title, type
         case iso31661 = "iso_3166_1"
     }
 }
 
-// MARK: - Content Ratings Models
 struct TMDBReleaseDates: Codable {
     let results: [TMDBReleaseDateResult]
 }
@@ -724,7 +1016,7 @@ struct TMDBReleaseDates: Codable {
 struct TMDBReleaseDateResult: Codable {
     let iso31661: String
     let releaseDates: [TMDBReleaseDate]
-    
+
     enum CodingKeys: String, CodingKey {
         case iso31661 = "iso_3166_1"
         case releaseDates = "release_dates"
@@ -737,7 +1029,7 @@ struct TMDBReleaseDate: Codable {
     let note: String?
     let releaseDate: String
     let type: Int
-    
+
     enum CodingKeys: String, CodingKey {
         case certification, note, type
         case iso6391 = "iso_639_1"
@@ -753,14 +1045,13 @@ struct TMDBContentRating: Codable {
     let descriptors: [String]?
     let iso31661: String
     let rating: String
-    
+
     enum CodingKeys: String, CodingKey {
         case descriptors, rating
         case iso31661 = "iso_3166_1"
     }
 }
 
-// MARK: - Images Response
 struct TMDBImagesResponse: Codable {
     let id: Int
     let backdrops: [TMDBImage]?
@@ -776,7 +1067,7 @@ struct TMDBImage: Codable {
     let iso6391: String?
     let voteAverage: Double?
     let voteCount: Int?
-    
+
     enum CodingKeys: String, CodingKey {
         case height, width
         case aspectRatio = "aspect_ratio"
@@ -785,13 +1076,12 @@ struct TMDBImage: Codable {
         case voteAverage = "vote_average"
         case voteCount = "vote_count"
     }
-    
+
     var fullURL: String {
         return "\(TMDBService.tmdbImageBaseURL)\(filePath)"
     }
 }
 
-// MARK: - Videos Response
 struct TMDBVideosResponse: Codable {
     let id: Int
     let results: [TMDBVideo]
@@ -838,7 +1128,6 @@ struct TMDBVideo: Codable, Identifiable {
     }
 }
 
-// MARK: - Credits / Cast
 struct TMDBCreditsResponse: Codable {
     let id: Int
     let cast: [TMDBCastMember]
@@ -852,13 +1141,13 @@ struct TMDBCastMember: Codable, Identifiable {
     let order: Int?
     let knownForDepartment: String?
     let popularity: Double?
-    
+
     enum CodingKeys: String, CodingKey {
         case id, name, character, order, popularity
         case profilePath = "profile_path"
         case knownForDepartment = "known_for_department"
     }
-    
+
     var fullProfileURL: String? {
         guard let profilePath = profilePath else { return nil }
         return "\(TMDBService.tmdbImageBaseURL)\(profilePath)"

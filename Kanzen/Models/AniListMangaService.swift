@@ -1,6 +1,12 @@
+//
+//  AniListMangaService.swift
+//  Kanzen
+//
+//  Created by Eclipse on 2025.
+//
+
 import Foundation
 
-/// Rate limiter shared with the manga service to stay under AniList's 90 req/min limit.
 private actor MangaRateLimiter {
     static let shared = MangaRateLimiter()
 
@@ -19,8 +25,6 @@ private actor MangaRateLimiter {
     }
 }
 
-// MARK: - Models
-
 struct AniListManga: Identifiable, Codable, Hashable {
     let id: Int
     let title: AniListMangaTitle
@@ -35,6 +39,11 @@ struct AniListManga: Identifiable, Codable, Hashable {
     let countryOfOrigin: String?
     let startDate: AniListMangaStartDate?
 
+    private enum CodingKeys: String, CodingKey {
+        case id, title, chapters, volumes, status, coverImage, format
+        case description, genres, averageScore, countryOfOrigin, startDate
+    }
+
     struct AniListMangaTitle: Codable, Hashable {
         let romaji: String?
         let english: String?
@@ -43,6 +52,10 @@ struct AniListManga: Identifiable, Codable, Hashable {
 
     struct AniListMangaStartDate: Codable, Hashable {
         let year: Int?
+
+        private enum CodingKeys: String, CodingKey {
+            case year
+        }
     }
 
     struct AniListMangaCover: Codable, Hashable {
@@ -50,22 +63,18 @@ struct AniListManga: Identifiable, Codable, Hashable {
         let medium: String?
     }
 
-    /// Preferred display title following the user's language preference.
     var displayTitle: String {
         AniListMangaTitlePicker.title(from: title)
     }
 
-    /// Best available cover URL.
     var coverURL: String? {
         coverImage?.large ?? coverImage?.medium
     }
 
-    /// Start year from AniList.
     var startYear: Int? {
         startDate?.year
     }
 
-    /// All non-nil title variants for multi-language search.
     var allTitleCandidates: [String] {
         var seen = Set<String>()
         return [title.english, title.romaji, title.native].compactMap { $0 }.filter { value in
@@ -74,6 +83,99 @@ struct AniListManga: Identifiable, Codable, Hashable {
             seen.insert(cleaned.lowercased())
             return true
         }
+    }
+}
+
+extension AniListManga.AniListMangaStartDate {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let rawYear = try container.decodeIfPresent(Int.self, forKey: .year)
+        if let rawYear, rawYear != 0 {
+            guard let year = RemoteMediaNumericBoundary.year(rawYear) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .year,
+                    in: container,
+                    debugDescription: "AniList manga year is outside the supported range."
+                )
+            }
+            self.year = year
+        } else {
+            year = nil
+        }
+    }
+}
+
+extension AniListManga {
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        let rawID = try container.decode(Int.self, forKey: .id)
+        guard let id = RemoteMediaNumericBoundary.positiveIdentifier(rawID) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .id,
+                in: container,
+                debugDescription: "AniList manga identifier is outside the supported range."
+            )
+        }
+        self.id = id
+        title = try container.decode(AniListMangaTitle.self, forKey: .title)
+
+        let rawChapters = try container.decodeIfPresent(Int.self, forKey: .chapters)
+        if let rawChapters, rawChapters != 0 {
+            guard let chapters = RemoteMediaNumericBoundary.episodeCount(rawChapters) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .chapters,
+                    in: container,
+                    debugDescription: "AniList manga chapter count is outside the supported range."
+                )
+            }
+            self.chapters = chapters
+        } else {
+            chapters = nil
+        }
+
+        let rawVolumes = try container.decodeIfPresent(Int.self, forKey: .volumes)
+        if let rawVolumes, rawVolumes != 0 {
+            guard let volumes = RemoteMediaNumericBoundary.episodeCount(rawVolumes) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .volumes,
+                    in: container,
+                    debugDescription: "AniList manga volume count is outside the supported range."
+                )
+            }
+            self.volumes = volumes
+        } else {
+            volumes = nil
+        }
+
+        if let rawScore = try container.decodeIfPresent(Int.self, forKey: .averageScore) {
+            guard (0...100).contains(rawScore) else {
+                throw DecodingError.dataCorruptedError(
+                    forKey: .averageScore,
+                    in: container,
+                    debugDescription: "AniList manga score is outside the supported range."
+                )
+            }
+            averageScore = rawScore
+        } else {
+            averageScore = nil
+        }
+
+        status = try container.decodeIfPresent(String.self, forKey: .status)
+        coverImage = try container.decodeIfPresent(AniListMangaCover.self, forKey: .coverImage)
+        format = try container.decodeIfPresent(String.self, forKey: .format)
+        description = try container.decodeIfPresent(String.self, forKey: .description)
+        let decodedGenres = try container.decodeIfPresent([String].self, forKey: .genres)
+        guard (decodedGenres?.count ?? 0) <= 64 else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .genres,
+                in: container,
+                debugDescription: "AniList manga genre collection exceeds the supported limit."
+            )
+        }
+        genres = decodedGenres
+        countryOfOrigin = try container.decodeIfPresent(String.self, forKey: .countryOfOrigin)
+        startDate = try container.decodeIfPresent(AniListMangaStartDate.self, forKey: .startDate)
     }
 }
 
@@ -86,7 +188,7 @@ enum AniListMangaTitlePicker {
     }
 
     static func title(from title: AniListManga.AniListMangaTitle) -> String {
-        let lang = (UserDefaults.standard.string(forKey: "tmdbLanguage") ?? "en-US")
+        let lang = (ProfileSettingsStore.active.string(forKey: "tmdbLanguage") ?? "en-US")
             .split(separator: "-").first.map(String.init) ?? "en"
 
         if lang.hasPrefix("en"), let english = title.english, !english.isEmpty {
@@ -108,14 +210,22 @@ enum AniListMangaTitlePicker {
     }
 }
 
-// MARK: - Service
-
 final class AniListMangaService {
     static let shared = AniListMangaService()
 
+    static func boundedRetryDelay(_ rawValue: String?, fallback: TimeInterval) -> TimeInterval {
+        let boundedFallback = fallback.isFinite ? min(max(fallback, 0.1), 10) : 2
+        guard let rawValue,
+              let value = TimeInterval(rawValue.trimmingCharacters(in: .whitespacesAndNewlines)),
+              value.isFinite,
+              value > 0 else {
+            return boundedFallback
+        }
+        return min(value, 10)
+    }
+
     private let graphQLEndpoint = URL(string: "https://graphql.anilist.co")!
 
-    /// Fragment for the fields we need on every manga query.
     private let mediaFragment = """
         id
         title { romaji english native }
@@ -131,9 +241,6 @@ final class AniListMangaService {
         startDate { year }
     """
 
-    // MARK: - Catalog Fetching
-
-    /// Fetch all manga catalogs in a single aliased GraphQL query.
     func fetchAllMangaCatalogs(limit: Int = 20) async throws -> [String: [AniListManga]] {
         let query = """
         query {
@@ -197,7 +304,6 @@ final class AniListMangaService {
         return result
     }
 
-    /// Fetch all light novel catalogs in a single aliased GraphQL query.
     func fetchAllLightNovelCatalogs(limit: Int = 20) async throws -> [String: [AniListManga]] {
         let query = """
         query {
@@ -241,9 +347,6 @@ final class AniListMangaService {
         return result
     }
 
-    // MARK: - Search
-
-    /// Search AniList for manga matching a query string.
     func searchManga(query searchQuery: String, page: Int = 1, perPage: Int = 20) async throws -> [AniListManga] {
         let sanitized = searchQuery.replacingOccurrences(of: "\"", with: "\\\"")
         let query = """
@@ -267,7 +370,6 @@ final class AniListMangaService {
         return decoded.data.Page.media
     }
 
-    /// Search AniList for light novels matching a query string.
     func searchLightNovels(query searchQuery: String, page: Int = 1, perPage: Int = 20) async throws -> [AniListManga] {
         let sanitized = searchQuery.replacingOccurrences(of: "\"", with: "\\\"")
         let query = """
@@ -291,9 +393,6 @@ final class AniListMangaService {
         return decoded.data.Page.media
     }
 
-    // MARK: - Random
-
-    /// Fetch a random manga by picking a random page from AniList's popularity-sorted results.
     func fetchRandomManga(format: String? = nil) async throws -> AniListManga {
         let randomPage = Int.random(in: 1...300)
         let formatFilter = format != nil ? "format: \(format!)" : "format_not: NOVEL"
@@ -322,9 +421,6 @@ final class AniListMangaService {
         return pick
     }
 
-    // MARK: - Detail
-
-    /// Fetch full details for a single manga by AniList ID.
     func fetchMangaDetail(id: Int) async throws -> AniListManga {
         let query = """
         query {
@@ -344,8 +440,6 @@ final class AniListMangaService {
         return decoded.data.Media
     }
 
-    // MARK: - Network
-
     private func executeGraphQLQuery(_ query: String, maxRetries: Int = 3) async throws -> Data {
         await MangaRateLimiter.shared.waitForSlot()
 
@@ -359,7 +453,10 @@ final class AniListMangaService {
 
         var lastError: Error?
         for attempt in 0..<maxRetries {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await URLSession.shared.boundedData(
+                for: request,
+                maximumResponseBytes: RemoteMediaNumericBoundary.maximumMetadataResponseBytes
+            )
 
             if let httpResponse = response as? HTTPURLResponse {
                 if httpResponse.statusCode == 200 {
@@ -367,9 +464,10 @@ final class AniListMangaService {
                 }
 
                 if httpResponse.statusCode == 429 {
-                    let retryAfter = httpResponse.value(forHTTPHeaderField: "Retry-After")
-                        .flatMap(Double.init) ?? Double(2 * (attempt + 1))
-                    let delay = min(retryAfter, 10)
+                    let delay = Self.boundedRetryDelay(
+                        httpResponse.value(forHTTPHeaderField: "Retry-After"),
+                        fallback: Double(2 * (attempt + 1))
+                    )
                     ReaderLogger.shared.log("AniListManga rate limited (429), retry \(attempt + 1)/\(maxRetries) after \(delay)s", type: "AniList")
                     try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
                     lastError = NSError(domain: "AniListManga", code: 429, userInfo: [NSLocalizedDescriptionKey: "Rate limited"])

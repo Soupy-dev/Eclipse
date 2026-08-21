@@ -1,8 +1,4 @@
-// Created on 27/02/26.
-
 import Foundation
-
-// MARK: - Skip Segment Models
 
 enum SkipType: String, Codable {
     case intro
@@ -25,7 +21,6 @@ struct SkipSegment {
     let endTime: Double
     let type: SkipType
 
-    /// Unique key used to track whether this segment has already been auto-skipped.
     var uniqueKey: String {
         guard startTime.isFinite, startTime >= 0, startTime <= Double(Int.max) else {
             return "\(type.rawValue)_unknown"
@@ -33,8 +28,6 @@ struct SkipSegment {
         return "\(type.rawValue)_\(Int(startTime))"
     }
 }
-
-// MARK: - AniSkip API Response Models
 
 private struct AniSkipResponse: Codable {
     let found: Bool
@@ -54,8 +47,6 @@ private struct AniSkipInterval: Codable {
     let endTime: Double
 }
 
-// MARK: - AniSkip Service
-
 final class AniSkipService {
     static let shared = AniSkipService()
 
@@ -69,7 +60,6 @@ final class AniSkipService {
         self.session = URLSession(configuration: config)
     }
 
-    /// Fetches skip-time segments for an anime episode using MyAnimeList ID.
     func fetchSkipTimes(malId: Int, episodeNumber: Int, episodeDuration: Double) async throws -> [SkipSegment] {
         let durationIsUsable = episodeDuration.isFinite && episodeDuration > 0
         let episodeLength = durationIsUsable ? Int(episodeDuration) : 0
@@ -134,6 +124,7 @@ final class AniSkipService {
 
     private func formatSeconds(_ value: Double) -> String {
         guard value.isFinite else { return "nil" }
-        return "\(Int(value.rounded()))"
+        let rounded = value.rounded()
+        return Int(exactly: rounded).map(String.init) ?? String(rounded)
     }
 }

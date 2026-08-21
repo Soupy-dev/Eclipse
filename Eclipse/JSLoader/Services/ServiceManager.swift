@@ -1,3 +1,10 @@
+//
+//  ServiceManager.swift
+//  Sora
+//
+//  Created by Francesco on 09/08/25.
+//
+
 import CryptoKit
 import Foundation
 import Network
@@ -14,8 +21,6 @@ private final class ServiceCallbackGate<Value>: @unchecked Sendable {
     private var continuation: CheckedContinuation<Value, Never>?
     private var outcome: Outcome?
 
-    /// Returns false when cancellation won before the continuation was
-    /// installed. In that case the continuation is resumed immediately.
     func install(_ continuation: CheckedContinuation<Value, Never>) -> Bool {
         lock.lock()
         if let outcome {
@@ -237,9 +242,6 @@ enum ServiceSettingSecurity {
     }
 }
 
-/// tvOS provider credentials are device-local and are only materialized into
-/// an ephemeral script immediately before JavaScriptCore evaluation. The
-/// persisted script contains a non-secret sentinel instead.
 enum TVServiceSettingVault {
     static func resolve(serviceID: UUID, key: String, persistedValue: String) -> String {
 #if os(tvOS)
@@ -251,17 +253,17 @@ enum TVServiceSettingVault {
     }
 
     @discardableResult
-    static func protect(_ value: String, serviceID: UUID, key: String) -> Bool {
+    static func protect(_ value: String, serviceID: UUID, key: String, profileID: UUID? = nil) -> Bool {
 #if os(tvOS)
         if value.isEmpty {
-            remove(serviceID: serviceID, key: key)
+            remove(serviceID: serviceID, key: key, profileID: profileID)
             return true
         }
         if value == ServiceSettingSecurity.keychainPlaceholder {
-            return load(serviceID: serviceID, key: key) != nil
+            return load(serviceID: serviceID, key: key, profileID: profileID) != nil
         }
         guard let data = value.data(using: .utf8) else { return false }
-        var attributes = query(serviceID: serviceID, key: key)
+        var attributes = query(serviceID: serviceID, key: key, profileID: profileID)
         let updates: [String: Any] = [kSecValueData as String: data]
         let updateStatus = SecItemUpdate(attributes as CFDictionary, updates as CFDictionary)
         if updateStatus == errSecSuccess { return true }
@@ -274,9 +276,96 @@ enum TVServiceSettingVault {
 #endif
     }
 
-    static func remove(serviceID: UUID, key: String) {
+    static func remove(serviceID: UUID, key: String, profileID: UUID? = nil) {
 #if os(tvOS)
-        SecItemDelete(query(serviceID: serviceID, key: key) as CFDictionary)
+        SecItemDelete(query(serviceID: serviceID, key: key, profileID: profileID) as CFDictionary)
+#endif
+    }
+
+    static func removeAll(serviceID: UUID) {
+#if os(tvOS)
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecReturnAttributes as String: true,
+            kSecMatchLimit as String: kSecMatchLimitAll
+        ]
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess || status == errSecItemNotFound else { return }
+        let prefix = "\(serviceID.uuidString):"
+        let rows = result as? [[String: Any]] ?? []
+        for row in rows {
+            guard let account = row[kSecAttrAccount as String] as? String,
+                  account.hasPrefix(prefix) else { continue }
+            query = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: account
+            ]
+            SecItemDelete(query as CFDictionary)
+        }
+#endif
+    }
+
+    static func removeAllAccountsForAccountBoundary() {
+#if os(tvOS)
+        SecItemDelete([
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service
+        ] as CFDictionary)
+#endif
+    }
+
+    static func removeScoped(serviceID: UUID, key: String, profileID: UUID) {
+#if os(tvOS)
+        let account = "\(serviceID.uuidString):\(key)"
+            + ServiceStoreScope.scopedVaultAccountSuffix(forProfile: profileID)
+        SecItemDelete([
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ] as CFDictionary)
+#endif
+    }
+
+    static func transactionSnapshotValue(
+        serviceID: UUID,
+        key: String,
+        scopedProfileID: UUID?
+    ) -> String? {
+#if os(tvOS)
+        let suffix = scopedProfileID.map(ServiceStoreScope.scopedVaultAccountSuffix(forProfile:)) ?? ""
+        return loadExact(account: "\(serviceID.uuidString):\(key)" + suffix)
+#else
+        return nil
+#endif
+    }
+
+    static func restoreTransactionSnapshotValue(
+        _ value: String?,
+        serviceID: UUID,
+        key: String,
+        scopedProfileID: UUID?
+    ) {
+#if os(tvOS)
+        let suffix = scopedProfileID.map(ServiceStoreScope.scopedVaultAccountSuffix(forProfile:)) ?? ""
+        let account = "\(serviceID.uuidString):\(key)" + suffix
+        var query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+        guard let value, let data = value.data(using: .utf8) else {
+            SecItemDelete(query as CFDictionary)
+            return
+        }
+        let updates: [String: Any] = [kSecValueData as String: data]
+        let status = SecItemUpdate(query as CFDictionary, updates as CFDictionary)
+        guard status == errSecItemNotFound else { return }
+        query[kSecValueData as String] = data
+        query[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        _ = SecItemAdd(query as CFDictionary, nil)
 #endif
     }
 
@@ -326,20 +415,39 @@ enum TVServiceSettingVault {
 #if os(tvOS)
     private static let service = "app.Eclipse.Soupy.service-provider-setting"
 
-    private static func account(serviceID: UUID, key: String) -> String {
-        "\(serviceID.uuidString):\(key)"
+    private static func account(serviceID: UUID, key: String, profileID: UUID? = nil) -> String {
+        let suffix = profileID.map(ServiceStoreScope.vaultAccountSuffix(forProfile:))
+            ?? ServiceStoreScope.vaultAccountSuffix
+        return "\(serviceID.uuidString):\(key)" + suffix
     }
 
-    private static func query(serviceID: UUID, key: String) -> [String: Any] {
+    private static func query(serviceID: UUID, key: String, profileID: UUID? = nil) -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account(serviceID: serviceID, key: key)
+            kSecAttrAccount as String: account(serviceID: serviceID, key: key, profileID: profileID)
         ]
     }
 
-    private static func load(serviceID: UUID, key: String) -> String? {
-        var attributes = query(serviceID: serviceID, key: key)
+    private static func load(serviceID: UUID, key: String, profileID: UUID? = nil) -> String? {
+        if let value = loadExact(account: account(serviceID: serviceID, key: key, profileID: profileID)) {
+            return value
+        }
+
+        let suffix = profileID.map(ServiceStoreScope.vaultAccountSuffix(forProfile:))
+            ?? ServiceStoreScope.vaultAccountSuffix
+        guard !suffix.isEmpty,
+              let shared = loadExact(account: "\(serviceID.uuidString):\(key)") else { return nil }
+        _ = protect(shared, serviceID: serviceID, key: key)
+        return shared
+    }
+
+    private static func loadExact(account: String) -> String? {
+        var attributes: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
         attributes[kSecReturnData as String] = true
         attributes[kSecMatchLimit as String] = kSecMatchLimitOne
         var result: CFTypeRef?
@@ -364,9 +472,18 @@ struct ServiceProviderCapabilities: Codable, Hashable {
 
     static let httpOnly = ServiceProviderCapabilities(requirements: [])
 
+    // A static scan cannot tell a module that DEPENDS on solving a challenge from one that
+    // merely names cf_clearance in a string or reads it to report a wall, so an interactive
+    // challenge only warns here. The runtime raises the real interactiveChallengeRequired when
+    // a challenge is actually hit, which is the check that can be trusted to disqualify.
+    static let platformDisqualifyingRequirements: Set<ServiceProviderRequirement> = [
+        .browserAutomation,
+        .torrentOnly
+    ]
+
     var isSupportedOnCurrentPlatform: Bool {
 #if os(tvOS)
-        requirements.isEmpty
+        requirements.isDisjoint(with: Self.platformDisqualifyingRequirements)
 #else
         true
 #endif
@@ -376,13 +493,14 @@ struct ServiceProviderCapabilities: Codable, Hashable {
         if requirements.contains(.browserAutomation) {
             return .browserAutomationRequired
         }
-        if requirements.contains(.interactiveChallenge) {
-            return .interactiveChallengeRequired
-        }
         if requirements.contains(.torrentOnly) {
             return .torrentTransportRequired
         }
         return nil
+    }
+
+    var compatibilityAdvisory: ServiceCompatibilityError? {
+        requirements.contains(.interactiveChallenge) ? .interactiveChallengeRequired : nil
     }
 
     static func analyze(javaScript: String) -> ServiceProviderCapabilities {
@@ -414,9 +532,6 @@ struct ServiceProviderCapabilities: Codable, Hashable {
             requirements.insert(.interactiveChallenge)
         }
 
-        // A mixed provider remains eligible because runtime filtering can keep
-        // its direct rows. Only mark code that emits a torrent result without
-        // any recognizable direct-media result.
         let torrentOutputMarkers = [
             "url:\"magnet:",
             "url:'magnet:",
@@ -439,7 +554,8 @@ struct ServiceProviderCapabilities: Codable, Hashable {
         ]
         let emitsTorrent = torrentOutputMarkers.contains(where: compactSource.contains)
         let emitsDirectMedia = directMediaMarkers.contains(where: compactSource.contains)
-        if emitsTorrent && !emitsDirectMedia {
+        let emitsHTTPLiteral = compactSource.contains("http://") || compactSource.contains("https://")
+        if emitsTorrent, !emitsDirectMedia, !emitsHTTPLiteral {
             requirements.insert(.torrentOnly)
         }
 
@@ -485,7 +601,7 @@ enum PlatformSourceActivation {
 #if os(tvOS)
         var overrides = sourceOverrides()
         overrides[sourceID] = enabled
-        UserDefaults.standard.set(overrides, forKey: sourceOverridesKey)
+        ProfileSettingsStore.services.set(overrides, forKey: sourceOverridesKey)
 #endif
     }
 
@@ -493,12 +609,12 @@ enum PlatformSourceActivation {
 #if os(tvOS)
         var overrides = sourceOverrides()
         overrides.removeValue(forKey: sourceID)
-        UserDefaults.standard.set(overrides, forKey: sourceOverridesKey)
+        ProfileSettingsStore.services.set(overrides, forKey: sourceOverridesKey)
 #endif
     }
 
     private static func sourceOverrides() -> [String: Bool] {
-        UserDefaults.standard.dictionary(forKey: sourceOverridesKey)?.reduce(into: [String: Bool]()) { result, pair in
+        ProfileSettingsStore.services.dictionary(forKey: sourceOverridesKey)?.reduce(into: [String: Bool]()) { result, pair in
             if let value = pair.value as? Bool {
                 result[pair.key] = value
             } else if let value = pair.value as? NSNumber {
@@ -542,15 +658,21 @@ extension Service {
 #if os(tvOS)
         ServiceProviderCapabilitiesCache.shared.capabilities(for: self)
 #else
-        // Provider capability restrictions are specific to Apple TV. Avoid
-        // repeatedly scanning and copying entire scripts on iPhone and iPad,
-        // especially while SwiftUI is constructing the Services list.
+
         .httpOnly
 #endif
     }
 
     var platformCompatibilityError: ServiceCompatibilityError? {
         providerCapabilities.isSupportedOnCurrentPlatform ? nil : providerCapabilities.compatibilityError
+    }
+
+    var platformCompatibilityAdvisory: ServiceCompatibilityError? {
+#if os(tvOS)
+        providerCapabilities.compatibilityAdvisory
+#else
+        nil
+#endif
     }
 }
 
@@ -622,8 +744,16 @@ enum AutoModeQualityPreference: String, CaseIterable, Identifiable {
         self != .manual
     }
 
+    var startsWhenExactTargetArrives: Bool {
+        targetResolutionHeight != nil
+    }
+
+    var waitsForAllProviderResults: Bool {
+        self == .highest
+    }
+
     static var current: AutoModeQualityPreference {
-        let raw = UserDefaults.standard.string(forKey: storageKey)
+        let raw = ProfileSettingsStore.services.string(forKey: storageKey)
         return raw.flatMap(AutoModeQualityPreference.init(rawValue:)) ?? defaultPreference
     }
 
@@ -656,26 +786,102 @@ struct SourceHealthRecord: Codable {
     var lastPlaybackFailureAt: Date?
     var playbackFailureReason: String?
     var lastNoInternetSkipAt: Date?
+    var consecutiveProbeFailureCount: Int? = nil
+    var lastProbeFailureAt: Date? = nil
+    var endpointFailureIsTransient: Bool? = nil
 }
 
-final class SourceHealthStore: ObservableObject {
+final class SourceHealthStore: ObservableObject, @unchecked Sendable {
     static let shared = SourceHealthStore()
 
     @Published private(set) var version = 0
+
+    @Published private(set) var displayStates: [String: SourceHealthDisplayState] = [:]
     private var versionUpdateScheduled = false
 
     private let storageKey = "sourceHealthRecordsV1"
+    private static let maximumPersistedBytes = 4 * 1_024 * 1_024
+    private static let maximumPersistedRecords = 2_048
+    private static let freshEndpointInterval: TimeInterval = 36 * 60 * 60
+    private static let probeFailureEscalationThreshold = 3
     private let queue = DispatchQueue(label: "eclipse.source.health.store")
     private let persistenceQueue = DispatchQueue(label: "eclipse.source.health.persistence")
     private var records: [String: SourceHealthRecord]
 
     private init() {
-        if let data = UserDefaults.standard.data(forKey: storageKey),
-           let decoded = try? JSONDecoder().decode([String: SourceHealthRecord].self, from: data) {
-            records = decoded
-        } else {
-            records = [:]
+        records = Self.loadRecords(storageKey: storageKey)
+        displayStates = Self.evaluatedDisplayStates(from: records)
+
+        NotificationCenter.default.addObserver(
+            forName: ServiceStoreScope.didChangeNotification,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            let reloaded = Self.loadRecords(storageKey: self.storageKey)
+            self.queue.async {
+                self.records = reloaded
+                let states = Self.evaluatedDisplayStates(from: reloaded)
+                DispatchQueue.main.async {
+                    self.displayStates = states
+                    self.version &+= 1
+                }
+            }
         }
+    }
+
+    private static func loadRecords(storageKey: String) -> [String: SourceHealthRecord] {
+        guard let data = ProfileSettingsStore.services.data(forKey: storageKey) else { return [:] }
+        return decodedRecords(from: data) ?? [:]
+    }
+
+    static func decodedRecords(from data: Data) -> [String: SourceHealthRecord]? {
+        guard !data.isEmpty,
+              data.count <= maximumPersistedBytes,
+              let decoded = try? JSONDecoder().decode(
+                [String: SourceHealthRecord].self,
+                from: data
+              ),
+              decoded.count <= maximumPersistedRecords else {
+            return nil
+        }
+        let validDateRange = Date(timeIntervalSince1970: 0)...Date().addingTimeInterval(7 * 24 * 60 * 60)
+        guard decoded.allSatisfy({ key, record in
+            key == record.sourceId
+                && !key.isEmpty
+                && key.utf8.count <= 2_048
+                && !record.sourceName.isEmpty
+                && record.sourceName.utf8.count <= 512
+                && (record.endpointReason?.utf8.count ?? 0) <= 1_024
+                && (record.playbackFailureReason?.utf8.count ?? 0) <= 1_024
+                && (record.consecutiveProbeFailureCount.map {
+                    (0...probeFailureEscalationThreshold).contains($0)
+                } ?? true)
+                && [
+                    record.lastEndpointCheckedAt,
+                    record.lastPlaybackSuccessAt,
+                    record.lastPlaybackFailureAt,
+                    record.lastNoInternetSkipAt,
+                    record.lastProbeFailureAt
+                ].allSatisfy { date in
+                    date.map {
+                        $0.timeIntervalSinceReferenceDate.isFinite && validDateRange.contains($0)
+                    } ?? true
+                }
+        }) else {
+            return nil
+        }
+        return decoded
+    }
+
+    @MainActor
+    func reloadPersistedStateAfterRestore() {
+        let reloaded = Self.loadRecords(storageKey: storageKey)
+        queue.sync {
+            records = reloaded
+        }
+        displayStates = Self.evaluatedDisplayStates(from: reloaded)
+        version &+= 1
     }
 
     func record(for sourceId: String) -> SourceHealthRecord? {
@@ -684,8 +890,19 @@ final class SourceHealthStore: ObservableObject {
 
     func displayState(for sourceId: String) -> SourceHealthDisplayState {
         guard let record = record(for: sourceId) else { return .unchecked }
+        return Self.evaluatedDisplayState(for: record)
+    }
 
-        let endpointFresh = record.lastEndpointCheckedAt.map { Date().timeIntervalSince($0) < 36 * 60 * 60 } ?? false
+    private static func evaluatedDisplayStates(
+        from records: [String: SourceHealthRecord]
+    ) -> [String: SourceHealthDisplayState] {
+        records.mapValues { evaluatedDisplayState(for: $0) }
+    }
+
+    private static func evaluatedDisplayState(for record: SourceHealthRecord) -> SourceHealthDisplayState {
+        let endpointFresh = record.lastEndpointCheckedAt.map {
+            Date().timeIntervalSince($0) < Self.freshEndpointInterval
+        } ?? false
         if record.endpointStatus == .unhealthy, endpointFresh {
             return .warning(record.endpointReason ?? "Source endpoint is unreachable")
         }
@@ -721,16 +938,27 @@ final class SourceHealthStore: ObservableObject {
     func shouldSkipForAutoMode(sourceId: String) -> Bool {
         guard let record = record(for: sourceId),
               record.endpointStatus == .unhealthy,
+              record.endpointFailureIsTransient == false,
               let checkedAt = record.lastEndpointCheckedAt else {
             return false
         }
-        return Date().timeIntervalSince(checkedAt) < 36 * 60 * 60
+        if let succeededAt = record.lastPlaybackSuccessAt, succeededAt >= checkedAt {
+            return false
+        }
+        return Date().timeIntervalSince(checkedAt) < Self.freshEndpointInterval
     }
 
-    func recordEndpoint(sourceId: String, sourceName: String, status: SourceHealthStatus, reason: String?) {
+    func recordEndpoint(
+        sourceId: String,
+        sourceName: String,
+        status: SourceHealthStatus,
+        reason: String?,
+        isTransient: Bool? = nil
+    ) {
         update(sourceId: sourceId, sourceName: sourceName) { record in
             record.endpointStatus = status
             record.endpointReason = reason
+            record.endpointFailureIsTransient = status == .unhealthy ? isTransient : nil
             record.lastEndpointCheckedAt = Date()
         }
     }
@@ -745,7 +973,50 @@ final class SourceHealthStore: ObservableObject {
         update(sourceId: sourceId, sourceName: sourceName) { record in
             record.lastPlaybackSuccessAt = Date()
             record.playbackFailureReason = nil
+            record.consecutiveProbeFailureCount = nil
+            record.lastProbeFailureAt = nil
+            if record.endpointStatus == .unhealthy {
+                record.endpointStatus = .healthy
+                record.endpointReason = nil
+                record.endpointFailureIsTransient = nil
+            }
         }
+    }
+
+    func recordProbeFailure(sourceId: String, sourceName: String) {
+        update(sourceId: sourceId, sourceName: sourceName) { record in
+            let previous = min(
+                max(record.consecutiveProbeFailureCount ?? 0, 0),
+                SourceHealthStore.probeFailureEscalationThreshold
+            )
+            let streak = min(previous + 1, SourceHealthStore.probeFailureEscalationThreshold)
+            record.consecutiveProbeFailureCount = streak
+            record.lastProbeFailureAt = Date()
+
+            if streak >= SourceHealthStore.probeFailureEscalationThreshold {
+                Logger.shared.log(
+                    "[AutoModePreflight] escalated source=\(sourceName) streak=\(streak) blame=provider detail=diagnostic-only",
+                    type: "Plugin"
+                )
+            }
+        }
+    }
+
+    func recordProbeSuccess(sourceId: String, sourceName: String) {
+        update(sourceId: sourceId, sourceName: sourceName) { record in
+            record.consecutiveProbeFailureCount = nil
+            record.lastProbeFailureAt = nil
+        }
+    }
+
+    func shouldSkipForAutoModeProbeHistory(sourceId: String) -> Bool {
+        guard let record = record(for: sourceId),
+              let failureCount = record.consecutiveProbeFailureCount,
+              failureCount >= Self.probeFailureEscalationThreshold,
+              let failedAt = record.lastProbeFailureAt else {
+            return false
+        }
+        return Date().timeIntervalSince(failedAt) < Self.freshEndpointInterval
     }
 
     func recordPlaybackFailure(sourceId: String, sourceName: String, reason: String, isSourceFailure: Bool) {
@@ -758,8 +1029,82 @@ final class SourceHealthStore: ObservableObject {
         }
     }
 
-    private func update(sourceId: String, sourceName: String, mutate: @escaping (inout SourceHealthRecord) -> Void) {
+    func removeRecord(sourceId: String) {
+        removeRecords { $0 == sourceId }
+    }
+
+    func removeRecords(where shouldRemove: @escaping @Sendable (String) -> Bool) {
+
+        let epoch = ServiceStoreScope.generation
+        let store = ProfileSettingsStore.services
+
+        let wasSharingServices = ProfileSettingsStore.sharesServices
         queue.async {
+            if !ServiceStoreScope.isCurrent(epoch) {
+                guard wasSharingServices, ProfileSettingsStore.sharesServices else {
+                    Logger.shared.log(
+                        "SourceHealth: dropped a queued removal; the services store moved before it was applied",
+                        type: "ServiceManager"
+                    )
+                    return
+                }
+            }
+            let previousCount = self.records.count
+            self.records = self.records.filter { !shouldRemove($0.key) }
+            guard self.records.count != previousCount else { return }
+            self.scheduleSaveLocked(into: store)
+            let states = Self.evaluatedDisplayStates(from: self.records)
+            DispatchQueue.main.async {
+                self.displayStates = states
+                self.version &+= 1
+            }
+        }
+    }
+
+    @MainActor
+    func removeRecordsAndWait(
+        where shouldRemove: @escaping @Sendable (String) -> Bool
+    ) async {
+
+        let store = ProfileSettingsStore.services
+        let updatedStates: [String: SourceHealthDisplayState]? = await withCheckedContinuation { continuation in
+            queue.async {
+                let previousCount = self.records.count
+                self.records = self.records.filter { !shouldRemove($0.key) }
+                guard self.records.count != previousCount,
+                      let data = try? JSONEncoder().encode(self.records) else {
+                    continuation.resume(returning: nil)
+                    return
+                }
+                let states = Self.evaluatedDisplayStates(from: self.records)
+
+                self.persistenceQueue.async { [storageKey = self.storageKey] in
+                    store.set(data, forKey: storageKey)
+                    continuation.resume(returning: states)
+                }
+            }
+        }
+        guard let updatedStates else { return }
+        displayStates = updatedStates
+        version &+= 1
+    }
+
+    private func update(sourceId: String, sourceName: String, mutate: @escaping (inout SourceHealthRecord) -> Void) {
+
+        let epoch = ServiceStoreScope.generation
+        let store = ProfileSettingsStore.services
+
+        let wasSharingServices = ProfileSettingsStore.sharesServices
+        queue.async {
+            if !ServiceStoreScope.isCurrent(epoch) {
+                guard wasSharingServices, ProfileSettingsStore.sharesServices else {
+                    Logger.shared.log(
+                        "SourceHealth: dropped a queued verdict for \(sourceId); the services store moved before it was applied",
+                        type: "ServiceManager"
+                    )
+                    return
+                }
+            }
             var record = self.records[sourceId] ?? SourceHealthRecord(
                 sourceId: sourceId,
                 sourceName: sourceName,
@@ -774,8 +1119,11 @@ final class SourceHealthStore: ObservableObject {
             record.sourceName = sourceName
             mutate(&record)
             self.records[sourceId] = record
-            self.scheduleSaveLocked()
+            self.scheduleSaveLocked(into: store)
+            let states = Self.evaluatedDisplayStates(from: self.records)
             DispatchQueue.main.async {
+
+                self.displayStates = states
                 guard !self.versionUpdateScheduled else { return }
                 self.versionUpdateScheduled = true
                 DispatchQueue.main.async {
@@ -786,11 +1134,11 @@ final class SourceHealthStore: ObservableObject {
         }
     }
 
-    private func scheduleSaveLocked() {
+    private func scheduleSaveLocked(into store: UserDefaults) {
         let snapshot = records
         persistenceQueue.async { [storageKey] in
             guard let data = try? JSONEncoder().encode(snapshot) else { return }
-            UserDefaults.standard.set(data, forKey: storageKey)
+            store.set(data, forKey: storageKey)
         }
     }
 }
@@ -799,22 +1147,20 @@ enum AutoModeSourceSelection {
     private static let idsKey = "servicesAutoModeSourceIds"
     private static let orderKey = "servicesAutoModeSourceOrderIds"
 
-    static func selectedSourceIds(defaults: UserDefaults = .standard) -> Set<String> {
+    static func selectedSourceIds(defaults: UserDefaults = ProfileSettingsStore.services) -> Set<String> {
         Set(defaults.stringArray(forKey: idsKey) ?? [])
     }
 
-    static func sourceOrderIds(defaults: UserDefaults = .standard) -> [String] {
+    static func sourceOrderIds(defaults: UserDefaults = ProfileSettingsStore.services) -> [String] {
         var seen = Set<String>()
         return (defaults.stringArray(forKey: orderKey) ?? []).filter {
             seen.insert($0).inserted
         }
     }
 
-    /// Applies the saved selection and order to a caller-provided active-source list. Sources
-    /// missing from the saved order retain the caller's stable fallback order.
     static func orderedSelectedSourceIds(
         availableSourceIds: [String],
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = ProfileSettingsStore.services
     ) -> [String] {
         let selected = selectedSourceIds(defaults: defaults)
         let available = availableSourceIds.filter { selected.contains($0) }
@@ -824,24 +1170,34 @@ enum AutoModeSourceSelection {
         return explicitlyOrdered + available.filter { !alreadyOrdered.contains($0) }
     }
 
-    static func appendSourceIfNeeded(_ sourceId: String) {
-        var ids = Set(UserDefaults.standard.stringArray(forKey: idsKey) ?? [])
-        var order = UserDefaults.standard.stringArray(forKey: orderKey) ?? []
+    static func appendSourceIfNeeded(
+        _ sourceId: String,
+        defaults: UserDefaults = ProfileSettingsStore.services
+    ) {
+        var ids = Set(defaults.stringArray(forKey: idsKey) ?? [])
+        var order = defaults.stringArray(forKey: orderKey) ?? []
 
         ids.insert(sourceId)
         if !order.contains(sourceId) {
             order.append(sourceId)
         }
 
-        UserDefaults.standard.set(Array(ids), forKey: idsKey)
-        UserDefaults.standard.set(order, forKey: orderKey)
+        defaults.set(Array(ids), forKey: idsKey)
+        defaults.set(order, forKey: orderKey)
     }
 
-    /// Adds a newly installed source to the shared display/priority order without
-    /// opting it into Auto Mode. SkyStream providers use this on first install.
+    static func enrollSourceOnFirstAvailability(
+        _ sourceId: String,
+        defaults: UserDefaults = ProfileSettingsStore.services
+    ) {
+        let order = defaults.stringArray(forKey: orderKey) ?? []
+        guard !order.contains(sourceId) else { return }
+        appendSourceIfNeeded(sourceId, defaults: defaults)
+    }
+
     static func appendSourceToOrderIfNeeded(
         _ sourceId: String,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = ProfileSettingsStore.services
     ) {
         var order = defaults.stringArray(forKey: orderKey) ?? []
         guard !order.contains(sourceId) else { return }
@@ -850,22 +1206,19 @@ enum AutoModeSourceSelection {
     }
 
     static func removeSource(_ sourceId: String) {
-        var ids = Set(UserDefaults.standard.stringArray(forKey: idsKey) ?? [])
-        var order = UserDefaults.standard.stringArray(forKey: orderKey) ?? []
+        var ids = Set(ProfileSettingsStore.services.stringArray(forKey: idsKey) ?? [])
+        var order = ProfileSettingsStore.services.stringArray(forKey: orderKey) ?? []
 
         ids.remove(sourceId)
         order.removeAll { $0 == sourceId }
 
-        UserDefaults.standard.set(Array(ids), forKey: idsKey)
-        UserDefaults.standard.set(order, forKey: orderKey)
+        ProfileSettingsStore.services.set(Array(ids), forKey: idsKey)
+        ProfileSettingsStore.services.set(order, forKey: orderKey)
     }
 
-    /// Cleans every shared source-selection seam when a provider is authoritatively
-    /// removed. A missing extra-rules value means "All" and must remain missing;
-    /// explicit arrays remain explicit even when removal makes them empty.
     static func removeSourceAuthoritatively(
         _ sourceId: String,
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = ProfileSettingsStore.services
     ) {
         var selected = Set(defaults.stringArray(forKey: idsKey) ?? [])
         var order = defaults.stringArray(forKey: orderKey) ?? []
@@ -892,15 +1245,21 @@ final class SourceHealthMonitor {
     private let session: URLSession
 
     private init() {
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = 10
-        config.timeoutIntervalForResource = 15
-        session = URLSession(configuration: config)
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 10
+        configuration.timeoutIntervalForResource = 15
+        session = URLSession(
+            configuration: configuration,
+            delegate: FetchDelegate(allowRedirects: true),
+            delegateQueue: nil
+        )
     }
 
     func runDailyEnabledSourceChecksIfNeeded(force: Bool = false) async {
+
+        let scopeEpoch = ServiceStoreScope.generation
         let now = Date()
-        let last = UserDefaults.standard.double(forKey: lastDailyCheckKey)
+        let last = ProfileSettingsStore.services.double(forKey: lastDailyCheckKey)
         if !force, last > 0, now.timeIntervalSince1970 - last < dailyInterval {
             return
         }
@@ -915,17 +1274,26 @@ final class SourceHealthMonitor {
         guard !services.isEmpty || !addons.isEmpty else { return }
 
         guard await hasInternetConnection() else {
-            for service in services {
-                SourceHealthStore.shared.recordNoInternetSkip(
-                    sourceId: SourceHealth.serviceId(service),
-                    sourceName: service.metadata.sourceName
-                )
+
+            let recorded = await MainActor.run { () -> Bool in
+                guard ServiceStoreScope.isCurrent(scopeEpoch) else { return false }
+                for service in services {
+                    SourceHealthStore.shared.recordNoInternetSkip(
+                        sourceId: SourceHealth.serviceId(service),
+                        sourceName: service.metadata.sourceName
+                    )
+                }
+                for addon in addons {
+                    SourceHealthStore.shared.recordNoInternetSkip(
+                        sourceId: SourceHealth.stremioId(addon),
+                        sourceName: addon.manifest.name
+                    )
+                }
+                return true
             }
-            for addon in addons {
-                SourceHealthStore.shared.recordNoInternetSkip(
-                    sourceId: SourceHealth.stremioId(addon),
-                    sourceName: addon.manifest.name
-                )
+            guard recorded else {
+                Logger.shared.log("SourceHealth: abandoned daily source checks, the services store moved", type: "ServiceManager")
+                return
             }
             Logger.shared.log("SourceHealth: skipped daily source checks because internet is unavailable", type: "ServiceManager")
             return
@@ -933,28 +1301,58 @@ final class SourceHealthMonitor {
 
         for service in services {
             let result = await checkServiceEndpoint(service)
-            SourceHealthStore.shared.recordEndpoint(
-                sourceId: SourceHealth.serviceId(service),
-                sourceName: service.metadata.sourceName,
-                status: result.ok ? .healthy : .unhealthy,
-                reason: result.ok ? nil : result.reason
-            )
+            let recorded = await MainActor.run { () -> Bool in
+                guard ServiceStoreScope.isCurrent(scopeEpoch) else { return false }
+                SourceHealthStore.shared.recordEndpoint(
+                    sourceId: SourceHealth.serviceId(service),
+                    sourceName: service.metadata.sourceName,
+                    status: result.ok ? .healthy : .unhealthy,
+                    reason: result.ok ? nil : result.reason,
+                    isTransient: result.ok ? nil : result.isTransient
+                )
+                return true
+            }
+            guard recorded else {
+                Logger.shared.log("SourceHealth: abandoned daily source checks, the services store moved", type: "ServiceManager")
+                return
+            }
         }
 
         for addon in addons {
             let result = await checkAddonEndpoint(addon)
-            SourceHealthStore.shared.recordEndpoint(
-                sourceId: SourceHealth.stremioId(addon),
-                sourceName: addon.manifest.name,
-                status: result.ok ? .healthy : .unhealthy,
-                reason: result.ok ? nil : result.reason
-            )
+            let recorded = await MainActor.run { () -> Bool in
+                guard ServiceStoreScope.isCurrent(scopeEpoch) else { return false }
+                SourceHealthStore.shared.recordEndpoint(
+                    sourceId: SourceHealth.stremioId(addon),
+                    sourceName: addon.manifest.name,
+                    status: result.ok ? .healthy : .unhealthy,
+                    reason: result.ok ? nil : result.reason,
+                    isTransient: result.ok ? nil : result.isTransient
+                )
+                return true
+            }
+            guard recorded else {
+                Logger.shared.log("SourceHealth: abandoned daily source checks, the services store moved", type: "ServiceManager")
+                return
+            }
         }
 
-        UserDefaults.standard.set(now.timeIntervalSince1970, forKey: lastDailyCheckKey)
+        let stamped = await MainActor.run { () -> Bool in
+            guard ServiceStoreScope.isCurrent(scopeEpoch) else { return false }
+            ProfileSettingsStore.services.set(now.timeIntervalSince1970, forKey: lastDailyCheckKey)
+            return true
+        }
+        guard stamped else {
+            Logger.shared.log("SourceHealth: abandoned daily source checks, the services store moved", type: "ServiceManager")
+            return
+        }
     }
 
-    func probeStream(url: URL, headers: [String: String]) async -> StreamProbeResult {
+    func probeStream(
+        url: URL,
+        headers: [String: String],
+        timeout: TimeInterval = 8
+    ) async -> StreamProbeResult {
         guard await hasInternetConnection() else { return .networkUnavailable }
         guard ServiceSandboxState.validatedHTTPURL(url.absoluteString) != nil else {
             return .sourceFailed(ServiceCompatibilityError.unsupportedTransport.localizedDescription)
@@ -962,7 +1360,7 @@ final class SourceHealthMonitor {
 
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
-        request.timeoutInterval = 8
+        request.timeoutInterval = min(max(timeout, 1), 15)
         request.setValue("bytes=0-0", forHTTPHeaderField: "Range")
         for (key, value) in headers where !value.isEmpty {
             request.setValue(value, forHTTPHeaderField: key)
@@ -971,10 +1369,10 @@ final class SourceHealthMonitor {
         do {
             let (_, response) = try await session.boundedData(
                 for: request,
-                maximumResponseBytes: 64 * 1024
+                maximumResponseBytes: 64 * 1_024
             )
             guard let http = response as? HTTPURLResponse else {
-                return .sourceFailed("Stream did not return an HTTP response")
+                return .slowOrIndeterminate("Stream did not return an HTTP response")
             }
             switch http.statusCode {
             case 200...299:
@@ -987,28 +1385,43 @@ final class SourceHealthMonitor {
                 return .slowOrIndeterminate("Stream returned HTTP \(http.statusCode)")
             }
         } catch is BoundedURLSessionError {
-            // Crossing the probe cap proves that the host is actively returning
-            // stream bytes even when it ignores the requested one-byte range.
             return .reachable
         } catch {
             if let urlError = error as? URLError {
                 switch urlError.code {
                 case .timedOut, .cannotFindHost, .dnsLookupFailed, .networkConnectionLost:
-                    return .slowOrIndeterminate(urlError.localizedDescription)
+                    return .slowOrIndeterminate("Stream connection failed (\(urlError.code.rawValue))")
                 case .notConnectedToInternet:
                     return .networkUnavailable
                 default:
                     break
                 }
             }
-            return .sourceFailed(error.localizedDescription)
+            return .sourceFailed("Stream request failed")
         }
     }
 
-    private func checkServiceEndpoint(_ service: Service) async -> (ok: Bool, reason: String?) {
+    static func probeResult(forUnverifiableSecurityFailure error: SkyStreamSecurityError) -> StreamProbeResult? {
+        switch error {
+        case .prohibitedHost, .prohibitedAddress:
+            return .slowOrIndeterminate("Stream endpoint is unverifiable (private-address)")
+        case .insecureTransport, .credentialsInURL, .httpsDowngrade, .tooManyRedirects:
+            return .slowOrIndeterminate("Stream endpoint is unverifiable (unprobeable-transport)")
+        default:
+            return nil
+        }
+    }
+
+    private static func endpointStatusIsTransient(_ statusCode: Int) -> Bool {
+        statusCode != 404 && statusCode != 410
+    }
+
+    private func checkServiceEndpoint(
+        _ service: Service
+    ) async -> (ok: Bool, reason: String?, isTransient: Bool) {
         do {
             guard let metadataURL = ServiceSandboxState.validatedHTTPURL(service.url) else {
-                return (false, "Invalid service metadata URL")
+                return (false, "Invalid service metadata URL", false)
             }
             let (metadataData, metadataResponse) = try await session.boundedData(
                 from: metadataURL,
@@ -1016,11 +1429,16 @@ final class SourceHealthMonitor {
             )
             guard let metadataHTTP = metadataResponse as? HTTPURLResponse,
                   (200...299).contains(metadataHTTP.statusCode) else {
-                return (false, "Metadata returned HTTP \((metadataResponse as? HTTPURLResponse)?.statusCode ?? 0)")
+                let statusCode = (metadataResponse as? HTTPURLResponse)?.statusCode ?? 0
+                return (
+                    false,
+                    "Metadata returned HTTP \(statusCode)",
+                    Self.endpointStatusIsTransient(statusCode)
+                )
             }
             let metadata = try JSONDecoder().decode(ServiceMetadata.self, from: metadataData)
             guard let scriptURL = ServiceSandboxState.validatedHTTPURL(metadata.scriptUrl) else {
-                return (false, "Invalid service script URL")
+                return (false, "Invalid service script URL", false)
             }
             let (scriptData, scriptResponse) = try await session.boundedData(
                 from: scriptURL,
@@ -1028,26 +1446,33 @@ final class SourceHealthMonitor {
             )
             guard let scriptHTTP = scriptResponse as? HTTPURLResponse,
                   (200...299).contains(scriptHTTP.statusCode) else {
-                return (false, "Script returned HTTP \((scriptResponse as? HTTPURLResponse)?.statusCode ?? 0)")
+                let statusCode = (scriptResponse as? HTTPURLResponse)?.statusCode ?? 0
+                return (
+                    false,
+                    "Script returned HTTP \(statusCode)",
+                    Self.endpointStatusIsTransient(statusCode)
+                )
             }
             guard !scriptData.isEmpty else {
-                return (false, "Service script is empty")
+                return (false, "Service script is empty", false)
             }
-            return (true, nil)
+            return (true, nil, false)
         } catch {
-            return (false, error.localizedDescription)
+            return (false, "Service endpoint failed (\(servicePinnedNetworkErrorToken(error)))", true)
         }
     }
 
-    private func checkAddonEndpoint(_ addon: StremioAddon) async -> (ok: Bool, reason: String?) {
+    private func checkAddonEndpoint(
+        _ addon: StremioAddon
+    ) async -> (ok: Bool, reason: String?, isTransient: Bool) {
         do {
             let manifest = try await StremioClient.shared.fetchManifest(from: addon.configuredURL)
             guard manifest.supportsStreams else {
-                return (false, "Addon manifest no longer supports streams")
+                return (false, "Addon manifest no longer supports streams", false)
             }
-            return (true, nil)
+            return (true, nil, false)
         } catch {
-            return (false, error.localizedDescription)
+            return (false, error.localizedDescription, true)
         }
     }
 
@@ -1112,45 +1537,55 @@ class ServiceManager: ObservableObject {
     private(set) var downloadProgress: Double = 0.0
     private(set) var downloadMessage: String = ""
 
-    /// UserDefaults keys for auto-update
     private static let autoUpdateEnabledKey = "autoUpdateServicesEnabled"
     private static let lastAutoUpdateKey = "lastServiceAutoUpdateTimestamp"
-    /// Minimum interval between auto-updates (1 hour)
+
     private static let autoUpdateInterval: TimeInterval = 3600
 
     var isAutoUpdateEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: Self.autoUpdateEnabledKey) }
-        set { UserDefaults.standard.set(newValue, forKey: Self.autoUpdateEnabledKey) }
+        get { ProfileSettingsStore.services.bool(forKey: Self.autoUpdateEnabledKey) }
+        set { ProfileSettingsStore.services.set(newValue, forKey: Self.autoUpdateEnabledKey) }
     }
 
-    /// Register default values so auto-update is on for new installs
     private static func registerDefaults() {
-        UserDefaults.standard.register(defaults: [
+        ProfileSettingsStore.services.register(defaults: [
             autoUpdateEnabledKey: true
         ])
     }
 
     private var lastAutoUpdateDate: Date? {
         get {
-            let timestamp = UserDefaults.standard.double(forKey: Self.lastAutoUpdateKey)
+            let timestamp = ProfileSettingsStore.services.double(forKey: Self.lastAutoUpdateKey)
             return timestamp > 0 ? Date(timeIntervalSince1970: timestamp) : nil
         }
         set {
-            UserDefaults.standard.set(newValue?.timeIntervalSince1970 ?? 0, forKey: Self.lastAutoUpdateKey)
+            ProfileSettingsStore.services.set(newValue?.timeIntervalSince1970 ?? 0, forKey: Self.lastAutoUpdateKey)
         }
     }
 
     private init() {
         Self.registerDefaults()
         loadServicesFromCloud()
+
+        NotificationCenter.default.addObserver(
+            forName: ServiceStoreScope.didChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Self.registerDefaults()
+            self?.loadServicesFromCloud()
+        }
+        NotificationCenter.default.addObserver(
+            forName: .serviceJavaScriptQuarantineDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.objectWillChange.send()
+        }
     }
 
-    // MARK: - Public Functions
+    let delay: UInt64 = 300_000_000
 
-    let delay: UInt64 = 300_000_000 // 300ms
-
-    /// Automatically updates services if auto-update is enabled and enough time has passed.
-    /// Call this on app launch / foreground.
     func autoUpdateServicesIfNeeded() async {
         guard isAutoUpdateEnabled, !services.isEmpty, !isDownloading else { return }
 
@@ -1160,14 +1595,18 @@ class ServiceManager: ObservableObject {
         }
 
         Logger.shared.log("Starting automatic service update", type: "ServiceManager")
-        await updateServices()
-        guard !Task.isCancelled else { return }
+        let completedForOriginalScope = await updateServices()
+        guard completedForOriginalScope, !Task.isCancelled else { return }
         lastAutoUpdateDate = Date()
         Logger.shared.log("Automatic service update completed", type: "ServiceManager")
     }
 
-    func updateServices() async {
-        guard !services.isEmpty else { return }
+    @discardableResult
+    func updateServices() async -> Bool {
+
+        let scopeEpoch = ServiceStoreScope.generation
+        let ownerProfileID = ProfileManager.shared.activeProfileID
+        guard !services.isEmpty else { return false }
 
         isDownloading = true
         downloadProgress = 0.0
@@ -1178,17 +1617,18 @@ class ServiceManager: ObservableObject {
         var completed: Double = 0
 
         for service in services {
-            guard !Task.isCancelled else { break }
+            guard !Task.isCancelled, ServiceStoreScope.isCurrent(scopeEpoch) else { return false }
             await updateProgress(downloadProgress, "Updating \(service.metadata.sourceName)...")
             try? await Task.sleep(nanoseconds: delay)
 
             do {
-                // Download metadata
+
                 await updateProgress(downloadProgress + 0.1 / total, "Downloading metadata for \(service.metadata.sourceName)...")
                 let metadata = try await downloadAndParseMetadata(from: service.url)
+                guard ServiceStoreScope.isCurrent(scopeEpoch) else { return false }
                 try? await Task.sleep(nanoseconds: delay)
+                guard ServiceStoreScope.isCurrent(scopeEpoch) else { return false }
 
-                // Skip update if the version hasn't changed
                 if metadata.version == service.metadata.version {
                     Logger.shared.log("Service \(service.metadata.sourceName) is already up to date (v\(metadata.version))", type: "ServiceManager")
                     completed += 1
@@ -1196,12 +1636,10 @@ class ServiceManager: ObservableObject {
                     continue
                 }
 
-                // Download JavaScript
                 await updateProgress(downloadProgress + 0.5 / total, "Downloading JavaScript for \(service.metadata.sourceName)...")
                 var jsContent = try await downloadJavaScript(from: metadata.scriptUrl)
                 try? await Task.sleep(nanoseconds: delay)
 
-                // Preserve user-modified settings from the existing script
                 let existingScript = service.jsScript
                 let existingSettings = await Task.detached(priority: .utility) {
                     Self.parseSettingsFromJS(existingScript)
@@ -1213,27 +1651,47 @@ class ServiceManager: ObservableObject {
                     }.value
                 }
 #if os(tvOS)
-                guard let securedScript = secureScriptForPersistence(jsContent, serviceID: service.id) else {
+
+                guard ServiceStoreScope.isCurrent(scopeEpoch) else { return false }
+                guard let securedScript = secureScriptForPersistence(
+                    jsContent,
+                    serviceID: service.id,
+                    ownerProfileID: ownerProfileID
+                ) else {
                     throw ServiceError.credentialStorageFailed
                 }
                 jsContent = securedScript
 #endif
 
-                // Save service using existing ID
-                await ServiceStore.shared.storeServiceAsync(
+                guard ServiceStoreScope.isCurrent(scopeEpoch) else {
+                    Logger.shared.log(
+                        "Abandoned service update for \(service.metadata.sourceName): the active profile changed while it downloaded",
+                        type: "ServiceManager"
+                    )
+                    return false
+                }
+
+                let didSave = await ServiceStore.shared.storeServiceAsync(
                     id: service.id,
                     url: service.url,
                     jsonMetadata: String(data: try JSONEncoder().encode(metadata), encoding: .utf8) ?? "",
                     jsScript: jsContent,
-                    isActive: service.isActive
+                    isActive: service.isActive,
+                    expectedScopeGeneration: scopeEpoch
                 )
+                guard didSave, ServiceStoreScope.isCurrent(scopeEpoch) else {
+                    Logger.shared.log(
+                        "Abandoned service update for \(service.metadata.sourceName): its scoped write did not commit",
+                        type: "ServiceManager"
+                    )
+                    return false
+                }
 
                 Logger.shared.log("Service \(service.metadata.sourceName) updated to v\(metadata.version)", type: "ServiceManager")
             } catch {
                 Logger.shared.log("Failed to update service \(service.metadata.sourceName): \(error.localizedDescription)", type: "ServiceManager")
             }
 
-            // Update global progress
             completed += 1
             downloadProgress = completed / total
             try? await Task.sleep(nanoseconds: delay)
@@ -1241,17 +1699,20 @@ class ServiceManager: ObservableObject {
         }
 
         await loadServicesFromCloudAsync()
-        guard !Task.isCancelled else {
+        guard !Task.isCancelled, ServiceStoreScope.isCurrent(scopeEpoch) else {
             downloadProgress = 0
             downloadMessage = ""
-            return
+            return false
         }
         downloadProgress = 1
         downloadMessage = "All services updated!"
+        return true
     }
 
-    // MARK: - Download single service from JSON URL
     func downloadService(from jsonURL: String) async throws {
+        let scopeEpoch = ServiceStoreScope.generation
+        let ownerProfileID = ProfileManager.shared.activeProfileID
+        let servicesDefaults = ProfileSettingsStore.services
         await updateProgress(0.0, "Starting download...")
         try? await Task.sleep(nanoseconds: delay)
 
@@ -1267,19 +1728,42 @@ class ServiceManager: ObservableObject {
             await updateProgress(0.8, "Saving service...")
             let serviceId = generateServiceUUID(from: metadata)
 #if os(tvOS)
-            guard let securedScript = secureScriptForPersistence(jsContent, serviceID: serviceId) else {
+            guard ServiceStoreScope.isCurrent(scopeEpoch) else {
+                throw ServiceError.profileChanged
+            }
+            guard let securedScript = secureScriptForPersistence(
+                jsContent,
+                serviceID: serviceId,
+                ownerProfileID: ownerProfileID
+            ) else {
                 throw ServiceError.credentialStorageFailed
             }
             jsContent = securedScript
 #endif
-            await ServiceStore.shared.storeServiceAsync(
+            guard ServiceStoreScope.isCurrent(scopeEpoch) else {
+                throw ServiceError.profileChanged
+            }
+            let didSave = await ServiceStore.shared.storeServiceAsync(
                 id: serviceId,
                 url: jsonURL,
                 jsonMetadata: String(data: try JSONEncoder().encode(metadata), encoding: .utf8) ?? "",
                 jsScript: jsContent,
-                isActive: true
+                isActive: true,
+                expectedScopeGeneration: scopeEpoch
             )
-            AutoModeSourceSelection.appendSourceIfNeeded("service:\(serviceId.uuidString)")
+            guard didSave else {
+                if !ServiceStoreScope.isCurrent(scopeEpoch) {
+                    throw ServiceError.profileChanged
+                }
+                throw ServiceError.saveFailed
+            }
+            guard ServiceStoreScope.isCurrent(scopeEpoch) else {
+                throw ServiceError.profileChanged
+            }
+            AutoModeSourceSelection.appendSourceIfNeeded(
+                "service:\(serviceId.uuidString)",
+                defaults: servicesDefaults
+            )
             try? await Task.sleep(nanoseconds: delay)
 
             await loadServicesFromCloudAsync()
@@ -1317,6 +1801,9 @@ class ServiceManager: ObservableObject {
             ServiceStore.shared.remove(entity)
         }
         PlatformSourceActivation.removeOverride(sourceID: SourceHealth.serviceId(service))
+        ServiceJavaScriptQuarantineStore.shared.clear(serviceID: service.id)
+
+        SourceHealthStore.shared.removeRecord(sourceId: SourceHealth.serviceId(service))
         loadServicesFromCloud()
     }
 
@@ -1325,6 +1812,11 @@ class ServiceManager: ObservableObject {
     }
 
     func setServiceState(_ service: Service, isActive: Bool) {
+        if isActive {
+            // An explicit user re-enable is the recovery boundary. Background
+            // script updates do not clear a non-yielding-code quarantine.
+            ServiceJavaScriptQuarantineStore.shared.clear(serviceID: service.id)
+        }
 #if os(tvOS)
         guard service.platformCompatibilityError == nil || !isActive else { return }
         PlatformSourceActivation.setEnabled(isActive, sourceID: SourceHealth.serviceId(service))
@@ -1339,6 +1831,9 @@ class ServiceManager: ObservableObject {
 
     func isServiceEnabled(_ service: Service) -> Bool {
         guard service.platformCompatibilityError == nil else { return false }
+        guard !ServiceJavaScriptQuarantineStore.shared.isQuarantined(service) else {
+            return false
+        }
         return PlatformSourceActivation.isEnabled(
             sourceID: SourceHealth.serviceId(service),
             sharedValue: service.isActive
@@ -1374,7 +1869,7 @@ class ServiceManager: ObservableObject {
         await withTaskGroup(of: (UUID, [SearchItem]).self) { group in
             for service in activeList {
                 group.addTask {
-                    let timeoutSeconds: UInt64 = 20_000_000_000 // 20sec
+                    let timeoutSeconds: UInt64 = 20_000_000_000
                     return await self.withTimeout(nanoseconds: timeoutSeconds) {
                         let found = await self.searchInService(service: service, query: query)
                         return (service.id, found)
@@ -1408,7 +1903,7 @@ class ServiceManager: ObservableObject {
         await withTaskGroup(of: (Service, [SearchItem]?).self) { group in
             for service in activeList {
                 group.addTask {
-                    let timeoutSeconds: UInt64 = 20_000_000_000 // 20sec
+                    let timeoutSeconds: UInt64 = 20_000_000_000
                     return await self.withTimeout(nanoseconds: timeoutSeconds) {
                         let found = await self.searchInService(service: service, query: query)
                         return (service, found)
@@ -1425,7 +1920,7 @@ class ServiceManager: ObservableObject {
     }
 
     func searchSingleActiveService(service: Service, query: String) async -> [SearchItem] {
-        let timeoutSeconds: UInt64 = 20_000_000_000 // 20sec
+        let timeoutSeconds: UInt64 = 20_000_000_000
         return await withTimeout(nanoseconds: timeoutSeconds) {
             await self.searchInService(service: service, query: query)
         } ?? []
@@ -1472,8 +1967,6 @@ class ServiceManager: ObservableObject {
          return true
      }
 
-    // MARK: - Private Helpers
-
     private func isValidJSONURL(_ text: String) -> Bool {
         guard let url = ServiceSandboxState.validatedHTTPURL(text) else { return false }
         return url.pathExtension.lowercased() == "json"
@@ -1502,11 +1995,6 @@ class ServiceManager: ObservableObject {
             )
             throw ServiceError.unsupportedTransport
         }
-        guard !ServiceSandboxState.isBlockedTrackingURL(url.absoluteString) else {
-            Logger.shared.log("Service install sandbox blocked tracking \(kind) download target=\(ServiceSandboxState.redactedURL(url.absoluteString))", type: "ServiceSandbox")
-            throw ServiceError.blockedTrackingEndpoint
-        }
-
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpShouldSetCookies = false
         configuration.httpCookieAcceptPolicy = .never
@@ -1518,7 +2006,6 @@ class ServiceManager: ObservableObject {
             "DNT": "1",
             "Sec-GPC": "1"
         ]
-
         let session = URLSession(
             configuration: configuration,
             delegate: FetchDelegate(allowRedirects: true),
@@ -1585,8 +2072,7 @@ class ServiceManager: ObservableObject {
                 }
 
                 jsController.fetchJsSearchResults(keyword: query, module: service) { results in
-                    // A malicious thenable can invoke callbacks more than once;
-                    // the gate keeps the Swift continuation exactly-once.
+
                     callbackGate.finish(with: results)
                 }
             }
@@ -1616,7 +2102,7 @@ class ServiceManager: ObservableObject {
         }
     }
 
-    nonisolated private static func parseSettingsFromJS(_ jsContent: String) -> [ServiceSetting] {
+    nonisolated static func parseSettingsFromJS(_ jsContent: String) -> [ServiceSetting] {
         let lines = jsContent.components(separatedBy: .newlines)
         var settings: [ServiceSetting] = []
         var inSettingsSection = false
@@ -1715,7 +2201,7 @@ class ServiceManager: ObservableObject {
         }
     }
 
-    nonisolated private static func updateSettingsInJS(_ jsContent: String, with settings: [ServiceSetting]) -> String {
+    nonisolated static func updateSettingsInJS(_ jsContent: String, with settings: [ServiceSetting]) -> String {
         var lines = jsContent.components(separatedBy: .newlines)
         let settingRegex = try! NSRegularExpression(pattern: #"const\s+(\w+)\s*=\s*([^;]+);"#)
         let settingsMap = Dictionary(
@@ -1766,10 +2252,18 @@ class ServiceManager: ObservableObject {
     }
 
 #if os(tvOS)
-    private func secureScriptForPersistence(_ script: String, serviceID: UUID) -> String? {
+    private func secureScriptForPersistence(
+        _ script: String,
+        serviceID: UUID,
+        ownerProfileID: UUID? = nil
+    ) -> String? {
         let settings = Self.parseSettingsFromJS(script)
         guard settings.contains(where: \.isSensitive) else { return script }
-        guard let securedSettings = securedSettingsForPersistence(settings, serviceID: serviceID) else {
+        guard let securedSettings = securedSettingsForPersistence(
+            settings,
+            serviceID: serviceID,
+            ownerProfileID: ownerProfileID
+        ) else {
             return nil
         }
         return Self.updateSettingsInJS(
@@ -1780,7 +2274,8 @@ class ServiceManager: ObservableObject {
 
     private func securedSettingsForPersistence(
         _ settings: [ServiceSetting],
-        serviceID: UUID
+        serviceID: UUID,
+        ownerProfileID: UUID? = nil
     ) -> [ServiceSetting]? {
         var persisted: [ServiceSetting] = []
         persisted.reserveCapacity(settings.count)
@@ -1791,7 +2286,12 @@ class ServiceManager: ObservableObject {
                 continue
             }
 
-            if !TVServiceSettingVault.protect(setting.value, serviceID: serviceID, key: setting.key) {
+            if !TVServiceSettingVault.protect(
+                setting.value,
+                serviceID: serviceID,
+                key: setting.key,
+                profileID: ownerProfileID
+            ) {
                 Logger.shared.log(
                     "Service setting credential could not be stored securely service=\(serviceID.uuidString) key=\(setting.key)",
                     type: "Storage"
@@ -1823,11 +2323,6 @@ class ServiceManager: ObservableObject {
     func withTimeout<T>(nanoseconds: UInt64, operation: @escaping @Sendable () async throws -> T) async -> T? {
         guard nanoseconds > 0, !Task.isCancelled else { return nil }
 
-        // Unstructured work is necessary here: a structured task group cannot
-        // leave scope until an uncooperative child finishes, even after
-        // `cancelAll()`. Reservations remain held until the underlying work
-        // actually exits, so legacy work that ignores cancellation is tracked
-        // and globally bounded instead of accumulating without limit.
         let limiter = ServiceTimeoutWorkLimiter.shared
         guard let workToken = limiter.reserve() else {
             Logger.shared.log(
@@ -1868,8 +2363,6 @@ class ServiceManager: ObservableObject {
     }
 }
 
-// MARK: - Extensions
-
 extension String {
     var sha256: String {
         let data = Data(self.utf8)
@@ -1878,10 +2371,10 @@ extension String {
     }
 }
 
-// MARK: - Service Errors
-
 enum ServiceError: LocalizedError {
-    case invalidURL, invalidScriptURL, downloadFailed, scriptDownloadFailed, invalidJSON, invalidScriptContent, blockedTrackingEndpoint, unsupportedTransport, credentialStorageFailed, saveFailed
+    case invalidURL, invalidScriptURL, downloadFailed, scriptDownloadFailed, invalidJSON, invalidScriptContent, unsupportedTransport, credentialStorageFailed, saveFailed
+
+    case profileChanged
 
     var errorDescription: String? {
         switch self {
@@ -1891,10 +2384,10 @@ enum ServiceError: LocalizedError {
         case .scriptDownloadFailed: return "Failed to download JavaScript file"
         case .invalidJSON: return "Invalid JSON format"
         case .invalidScriptContent: return "Invalid JavaScript content"
-        case .blockedTrackingEndpoint: return "Service install blocked a tracking endpoint"
         case .unsupportedTransport: return "Service install URLs must use HTTP or HTTPS"
         case .credentialStorageFailed: return "A provider credential could not be stored securely"
         case .saveFailed: return "The service downloaded, but it could not be saved."
+        case .profileChanged: return "The active profile changed while this service was downloading. Try again."
         }
     }
 }

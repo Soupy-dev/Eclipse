@@ -1,5 +1,3 @@
-// Global + per-catalog control over home shelf orientation and size.
-
 import SwiftUI
 
 #if os(tvOS)
@@ -22,7 +20,7 @@ private enum TVCardDensity: String, CaseIterable, Identifiable {
 #endif
 
 struct HomeLayoutView: View {
-    // Global layout knobs (shared keys with the rest of the app)
+
     @AppStorage(ExperimentalHomeCardShape.storageKey) private var globalCardShape = ExperimentalHomeCardShape.defaultValue.rawValue
     @AppStorage(ExperimentalVisualTuning.mediaCardScaleKey) private var globalCardScale = ExperimentalVisualTuning.defaultMediaCardScale
     @AppStorage(ExperimentalMediaDesignPreset.storageKey) private var designPreset = ExperimentalMediaDesignPreset.defaultValue.rawValue
@@ -36,7 +34,6 @@ struct HomeLayoutView: View {
     @AppStorage("tvCardDensity") private var tvCardDensityRaw = TVCardDensity.standard.rawValue
 #endif
 
-    // Hero
     @AppStorage("heroBannerCatalogId") private var heroBannerCatalogId = "trending"
     @AppStorage("heroBannerBehavior") private var heroBannerBehavior = HeroBannerBehavior.defaultValue.rawValue
 
@@ -69,8 +66,6 @@ struct HomeLayoutView: View {
         }
 #endif
     }
-
-    // MARK: - Global
 
     private var globalSection: some View {
         Section {
@@ -157,8 +152,6 @@ struct HomeLayoutView: View {
         }
     }
 
-    // MARK: - Hero
-
     private var heroSection: some View {
         Section {
             sliderRow(
@@ -188,8 +181,6 @@ struct HomeLayoutView: View {
             Text("Hero")
         }
     }
-
-    // MARK: - Per catalog
 
     private var perCatalogSection: some View {
         Section {
@@ -239,9 +230,6 @@ struct HomeLayoutView: View {
         return parts.isEmpty ? "Global" : parts.joined(separator: " · ")
     }
 
-    // MARK: - Bindings
-
-    /// Maps a stored (possibly legacy `.launch`) value into the reduced selectable set.
     private var heroBehaviorBinding: Binding<String> {
         Binding(
             get: {
@@ -251,8 +239,6 @@ struct HomeLayoutView: View {
             set: { heroBannerBehavior = $0 }
         )
     }
-
-    // MARK: - Row helpers
 
     private func settingRow<Trailing: View>(
         title: String,
@@ -335,8 +321,6 @@ struct HomeLayoutView: View {
         .padding(.vertical, 2)
     }
 }
-
-// MARK: - Per-catalog editor
 
 private struct CatalogLayoutEditorView: View {
     let catalog: Catalog

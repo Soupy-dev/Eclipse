@@ -218,9 +218,10 @@ struct KanzenCustomCatalog: Identifiable, Codable, Equatable {
         guard let index = filter.resolvedOptionIndex else { return true }
         switch filter.abiState {
         case .number(let declared):
-            return Int(declared) == index
+            return Int(exactly: declared) == index
         case .object(let declared):
-            guard case .number(let declaredIndex)? = declared["index"], Int(declaredIndex) == index else {
+            guard case .number(let declaredIndex)? = declared["index"],
+                  Int(exactly: declaredIndex) == index else {
                 return false
             }
             guard case .bool(let declaredAscending)? = declared["ascending"] else { return true }

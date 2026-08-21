@@ -1,3 +1,10 @@
+//
+//  EpisodeCell.swift
+//  Sora
+//
+//  Created by Francesco on 07/08/25.
+//
+
 import SwiftUI
 import Kingfisher
 
@@ -15,8 +22,11 @@ struct EpisodeCell: View {
     var playbackContext: EpisodePlaybackContext? = nil
     var isAnimeContent: Bool = false
     var isFiller: Bool = false
-    
+
     @State private var isWatched: Bool = false
+    @State private var isDownloaded: Bool = false
+
+    @State private var downloadStateRefreshTask: Task<Void, Never>?
     @State private var progressValue: Double = 0
     @AppStorage(MediaDetailPlatformDefaults.horizontalEpisodeListKey) private var horizontalEpisodeList = MediaDetailPlatformDefaults.prefersHorizontalEpisodes
 
@@ -37,7 +47,7 @@ struct EpisodeCell: View {
 #endif
         }
     }
-    
+
     var body: some View {
         if horizontalEpisodeList {
             horizontalLayout
@@ -53,6 +63,8 @@ struct EpisodeCell: View {
             VStack(alignment: .leading, spacing: 10) {
                 ZStack(alignment: .topTrailing) {
                     KFImage(URL(string: episode.fullStillURL ?? ""))
+
+                        .setProcessor(DownsamplingImageProcessor(size: homeImageDecodeSize(width: 420, height: 236)))
                         .placeholder {
                             Rectangle()
                                 .fill(Color.white.opacity(0.08))
@@ -74,6 +86,17 @@ struct EpisodeCell: View {
                             .foregroundColor(.white)
                             .frame(width: 25, height: 25)
                             .background(Circle().fill(Color.blue))
+                            .overlay(Circle().stroke(Color.white.opacity(0.8), lineWidth: 1))
+                            .padding(9)
+                    }
+                }
+                .overlay(alignment: .topLeading) {
+                    if isDownloaded {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(.white)
+                            .frame(width: 25, height: 25)
+                            .background(Circle().fill(Color.green))
                             .overlay(Circle().stroke(Color.white.opacity(0.8), lineWidth: 1))
                             .padding(9)
                     }
@@ -155,13 +178,19 @@ struct EpisodeCell: View {
         .onAppear {
             progressValue = progress
             loadEpisodeProgress()
+            refreshDownloadState()
         }
         .onReceive(ProgressManager.shared.$episodeProgressList) { entries in
             handleEpisodeProgressListChange(entries)
         }
+#if !os(tvOS)
+        .onReceive(DownloadManager.shared.$downloads) { _ in
+            scheduleDownloadStateRefresh()
+        }
+#endif
         .preferredColorScheme(.dark)
     }
-    
+
     @MainActor private var horizontalLayout: some View {
         Group {
             VStack(alignment: .leading, spacing: isTvOS ? 10 : 0) {
@@ -169,6 +198,8 @@ struct EpisodeCell: View {
             VStack(alignment: .leading, spacing: 8) {
                 ZStack {
                     KFImage(URL(string: episode.fullStillURL ?? ""))
+
+                        .setProcessor(DownsamplingImageProcessor(size: homeImageDecodeSize(width: horizontalCellWidth, height: horizontalImageHeight)))
                         .placeholder {
                             Rectangle()
                                 .fill(Color.gray.opacity(0.3))
@@ -182,7 +213,7 @@ struct EpisodeCell: View {
                         .aspectRatio(16/9, contentMode: .fill)
                         .frame(width: horizontalCellWidth, height: horizontalImageHeight)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
-                    
+
                     if progressValue > 0 && progressValue < 0.85 {
                         VStack {
                             Spacer()
@@ -196,20 +227,30 @@ struct EpisodeCell: View {
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
 
-                    if isWatched {
+                    if isDownloaded || isWatched {
                         HStack {
+                            if isDownloaded {
+                                VStack {
+                                    Image(systemName: "arrow.down.circle.fill")
+                                        .foregroundColor(.green)
+                                        .shadow(radius: 2)
+                                    Spacer()
+                                }
+                            }
                             Spacer()
-                            VStack {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundColor(.blue)
-                                    .shadow(radius: 2)
-                                Spacer()
+                            if isWatched {
+                                VStack {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(.blue)
+                                        .shadow(radius: 2)
+                                    Spacer()
+                                }
                             }
                         }
                         .padding(6)
                     }
                 }
-                
+
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
                         Text("Episode \(episode.episodeNumber)")
@@ -219,9 +260,9 @@ struct EpisodeCell: View {
                         if isFiller {
                             fillerBadge
                         }
-                        
+
                         Spacer()
-                        
+
                         HStack {
                             HStack(spacing: 2) {
                                 if episode.voteAverage > 0 {
@@ -231,13 +272,12 @@ struct EpisodeCell: View {
                                     Text(String(format: "%.1f", episode.voteAverage))
                                         .font(.caption2)
                                         .foregroundColor(.white)
-                                    
-                                    
+
                                     Text(" - ")
                                         .font(.caption2)
                                         .foregroundColor(.white)
                                 }
-                                
+
                                 if let runtime = episode.runtime, runtime > 0 {
                                     Text(episode.runtimeFormatted)
                                         .font(.caption2)
@@ -255,7 +295,7 @@ struct EpisodeCell: View {
                         )
                         .clipShape(Capsule())
                     }
-                    
+
                     if !episode.name.isEmpty {
                         Text(episode.name)
                             .font(.subheadline)
@@ -266,7 +306,7 @@ struct EpisodeCell: View {
                         Color.clear
                             .frame(height: horizontalTitleHeight)
                     }
-                    
+
                     if let overview = episode.overview, !overview.isEmpty {
                         Text(overview)
                             .font(.caption2)
@@ -288,7 +328,9 @@ struct EpisodeCell: View {
         }
         .modifier(EpisodePlayButtonModifier())
 #if os(tvOS)
-                tvEpisodeActions(maxWidth: horizontalCellWidth)
+        .contextMenu {
+            episodeContextMenu
+        }
 #endif
             }
         }
@@ -300,20 +342,28 @@ struct EpisodeCell: View {
         .onAppear {
             progressValue = progress
             loadEpisodeProgress()
+            refreshDownloadState()
         }
         .onReceive(ProgressManager.shared.$episodeProgressList) { entries in
             handleEpisodeProgressListChange(entries)
         }
+#if !os(tvOS)
+        .onReceive(DownloadManager.shared.$downloads) { _ in
+            scheduleDownloadStateRefresh()
+        }
+#endif
         .preferredColorScheme(.dark)
     }
-    
+
     @MainActor private var verticalLayout: some View {
         Group {
             VStack(alignment: .leading, spacing: isTvOS ? 10 : 0) {
         Button(action: onTap) {
-            HStack(spacing: 12) {
+            HStack(spacing: isTvOS ? 20 : 12) {
                 ZStack {
                     KFImage(URL(string: episode.fullStillURL ?? ""))
+
+                        .setProcessor(DownsamplingImageProcessor(size: homeImageDecodeSize(width: isTvOS ? 300 : 120 * iPadScaleSmall, height: isTvOS ? 170 : 68 * iPadScaleSmall)))
                         .placeholder {
                             Rectangle()
                                 .fill(Color.gray.opacity(0.3))
@@ -325,9 +375,9 @@ struct EpisodeCell: View {
                         }
                         .resizable()
                         .aspectRatio(16/9, contentMode: .fill)
-                        .frame(width: 120 * iPadScaleSmall, height: 68 * iPadScaleSmall)
+                        .frame(width: isTvOS ? 300 : 120 * iPadScaleSmall, height: isTvOS ? 170 : 68 * iPadScaleSmall)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
-                    
+
                     if progressValue > 0 && progressValue < 0.85 {
                         VStack {
                             Spacer()
@@ -337,56 +387,65 @@ struct EpisodeCell: View {
                                 .padding(.horizontal, 4)
                                 .padding(.bottom, 4)
                         }
-                        .frame(width: 120 * iPadScaleSmall, height: 68 * iPadScaleSmall)
+                        .frame(width: isTvOS ? 300 : 120 * iPadScaleSmall, height: isTvOS ? 170 : 68 * iPadScaleSmall)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                     }
 
-                    if isWatched {
+                    if isDownloaded || isWatched {
                         HStack {
+                            if isDownloaded {
+                                VStack {
+                                    Image(systemName: "arrow.down.circle.fill")
+                                        .foregroundColor(.green)
+                                        .shadow(radius: 2)
+                                    Spacer()
+                                }
+                            }
                             Spacer()
-                            VStack {
-                                Image(systemName: "checkmark.circle.fill")
-                                    .foregroundColor(.blue)
-                                    .shadow(radius: 2)
-                                Spacer()
+                            if isWatched {
+                                VStack {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .foregroundColor(.blue)
+                                        .shadow(radius: 2)
+                                    Spacer()
+                                }
                             }
                         }
                         .padding(6)
                     }
                 }
-                
+
                 VStack(alignment: .leading, spacing: 6) {
                     HStack {
                         Text("Episode \(episode.episodeNumber)")
-                            .font(.caption)
+                            .font(isTvOS ? .system(size: 24) : .caption)
                             .foregroundColor(.secondary)
                             .fontWeight(.medium)
 
                         if isFiller {
                             fillerBadge
                         }
-                        
+
                         Spacer()
-                        
+
                         HStack {
                             HStack(spacing: 2) {
                                 if episode.voteAverage > 0 {
                                     Image(systemName: "star.fill")
-                                        .font(.caption2)
+                                        .font(isTvOS ? .system(size: 24) : .caption2)
                                         .foregroundColor(.yellow)
                                     Text(String(format: "%.1f", episode.voteAverage))
-                                        .font(.caption2)
+                                        .font(isTvOS ? .system(size: 24) : .caption2)
                                         .foregroundColor(.white)
-                                    
-                                    
+
                                     Text(" - ")
-                                        .font(.caption2)
+                                        .font(isTvOS ? .system(size: 24) : .caption2)
                                         .foregroundColor(.white)
                                 }
-                                
+
                                 if let runtime = episode.runtime, runtime > 0 {
                                     Text(episode.runtimeFormatted)
-                                        .font(.caption2)
+                                        .font(isTvOS ? .system(size: 24) : .caption2)
                                 }
                             }
                         }
@@ -400,25 +459,25 @@ struct EpisodeCell: View {
                         )
                         .clipShape(Capsule())
                     }
-                    
+
                     if !episode.name.isEmpty {
                         Text(episode.name)
-                            .font(.subheadline)
-                            .fontWeight(.medium)
+                            .font(isTvOS ? .system(size: 29) : .subheadline)
+                            .fontWeight(isTvOS ? .semibold : .medium)
                             .lineLimit(1)
                             .foregroundColor(.white)
                     }
-                    
+
                     if let overview = episode.overview, !overview.isEmpty {
                         Text(overview)
-                            .font(.caption)
+                            .font(isTvOS ? .system(size: 24) : .caption)
                             .foregroundColor(.secondary)
                             .lineLimit(3)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
-            .padding(12)
+            .padding(isTvOS ? 20 : 12)
             .applyLiquidGlassBackground(cornerRadius: 16)
             .overlay(
                 RoundedRectangle(cornerRadius: 16)
@@ -427,7 +486,9 @@ struct EpisodeCell: View {
         }
         .modifier(EpisodePlayButtonModifier())
 #if os(tvOS)
-                tvEpisodeActions(maxWidth: .infinity)
+        .contextMenu {
+            episodeContextMenu
+        }
 #endif
             }
         }
@@ -439,10 +500,16 @@ struct EpisodeCell: View {
         .onAppear {
             progressValue = progress
             loadEpisodeProgress()
+            refreshDownloadState()
         }
         .onReceive(ProgressManager.shared.$episodeProgressList) { entries in
             handleEpisodeProgressListChange(entries)
         }
+#if !os(tvOS)
+        .onReceive(DownloadManager.shared.$downloads) { _ in
+            scheduleDownloadStateRefresh()
+        }
+#endif
         .preferredColorScheme(.dark)
     }
 
@@ -457,139 +524,44 @@ struct EpisodeCell: View {
             .accessibilityLabel("Filler episode")
     }
 
-#if os(tvOS)
-    private func tvEpisodeActions(maxWidth: CGFloat) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Button {
-                    if isWatched {
-                        markEpisodeAsNotWatched()
-                    } else {
-                        markEpisodeAsWatched()
-                    }
-                } label: {
-                    Label(
-                        isWatched ? "Not Watched" : "Watched",
-                        systemImage: isWatched ? "eye.slash" : "checkmark.circle"
-                    )
-                }
-
-                if progressValue > 0 {
-                    Button {
-                        resetCurrentEpisodeProgress()
-                    } label: {
-                        Label("Reset", systemImage: "arrow.counterclockwise")
-                    }
-                }
-            }
-
-            if episode.episodeNumber > 1 {
-                Menu {
-                    Button {
-                        markPreviousEpisodesAsWatched()
-                    } label: {
-                        Label("Mark Previous as Watched", systemImage: "checkmark.circle")
-                    }
-
-                    Button {
-                        markPreviousEpisodesAsNotWatched()
-                    } label: {
-                        Label("Mark Previous as Not Watched", systemImage: "arrow.uturn.backward")
-                    }
-                } label: {
-                    Label("Previous Episodes", systemImage: "list.bullet")
-                }
-            }
-        }
-        .font(.callout)
-        .controlSize(.small)
-        .buttonStyle(.bordered)
-        .frame(maxWidth: maxWidth, alignment: .leading)
-    }
-
-    private func markPreviousEpisodesAsWatched() {
-        ProgressManager.shared.markPreviousEpisodesAsWatched(
-            showId: showId,
-            seasonNumber: episode.seasonNumber,
-            episodeNumber: episode.episodeNumber,
-            playbackContext: playbackContext,
-            isAnime: isAnimeContent
-        )
-        refreshProgressState()
-    }
-
-    private func markPreviousEpisodesAsNotWatched() {
-        ProgressManager.shared.markPreviousEpisodesAsUnwatched(
-            showId: showId,
-            seasonNumber: episode.seasonNumber,
-            episodeNumber: episode.episodeNumber
-        )
-        refreshProgressState()
-    }
-
-    private func markEpisodeAsNotWatched() {
-        ProgressManager.shared.markEpisodeAsUnwatched(
-            showId: showId,
-            seasonNumber: episode.seasonNumber,
-            episodeNumber: episode.episodeNumber
-        )
-        onResetProgress()
-        isWatched = false
-        refreshProgressState()
-    }
-
-    private func markEpisodeAsWatched() {
-        onMarkWatched()
-        isWatched = true
-        progressValue = 1
-    }
-
-    private func resetCurrentEpisodeProgress() {
-        ProgressManager.shared.resetEpisodeProgress(
-            showId: showId,
-            seasonNumber: episode.seasonNumber,
-            episodeNumber: episode.episodeNumber
-        )
-        onResetProgress()
-        isWatched = false
-        progressValue = 0
-    }
-#endif
-    
     private var episodeContextMenu: some View {
         Group {
             Button(action: onTap) {
                 Label("Play", systemImage: "play.fill")
             }
-            
+
 #if !os(tvOS)
             if let onDownload = onDownload {
-                let isDownloaded = DownloadManager.shared.isDownloaded(
-                    tmdbId: showId, isMovie: false,
+                let completedDownload = DownloadManager.shared.completedEpisodeDownloadItem(
+                    tmdbId: showId,
                     seasonNumber: episode.seasonNumber,
-                    episodeNumber: episode.episodeNumber
+                    episodeNumber: episode.episodeNumber,
+                    playbackContext: playbackContext
                 )
-                let isDownloading = DownloadManager.shared.isDownloading(
-                    tmdbId: showId, isMovie: false,
+                let activeDownload = DownloadManager.shared.activeEpisodeDownloadItem(
+                    tmdbId: showId,
                     seasonNumber: episode.seasonNumber,
-                    episodeNumber: episode.episodeNumber
+                    episodeNumber: episode.episodeNumber,
+                    playbackContext: playbackContext
                 )
-                
-                if isDownloaded {
+
+                if let completedDownload {
                     Button(role: .destructive, action: {
-                        let id = "dl_ep_\(showId)_s\(episode.seasonNumber)_e\(episode.episodeNumber)"
-                        DownloadManager.shared.removeDownload(id: id, deleteFile: true)
+                        DownloadManager.shared.removeDownload(
+                            id: completedDownload.id,
+                            deleteFile: true
+                        )
                     }) {
                         Label("Remove Download", systemImage: "trash")
                     }
-                } else if !isDownloading {
+                } else if activeDownload == nil {
                     Button(action: onDownload) {
                         Label("Download", systemImage: "arrow.down.circle")
                     }
                 }
             }
 #endif
-            
+
             if episode.episodeNumber > 1 {
                 Button(action: {
                     ProgressManager.shared.markPreviousEpisodesAsWatched(
@@ -615,7 +587,7 @@ struct EpisodeCell: View {
                     Label("Mark Previous as Not Watched", systemImage: "arrow.uturn.backward")
                 }
             }
-            
+
             if isWatched {
                 Button(action: {
                     ProgressManager.shared.markEpisodeAsUnwatched(
@@ -638,7 +610,7 @@ struct EpisodeCell: View {
                     Label("Mark as Watched", systemImage: "checkmark.circle")
                 }
             }
-            
+
             if progressValue > 0 {
                 Button(action: {
                     ProgressManager.shared.resetEpisodeProgress(
@@ -655,7 +627,7 @@ struct EpisodeCell: View {
             }
         }
     }
-    
+
     private func loadEpisodeProgress() {
         refreshProgressState()
         let newProgress = ProgressManager.shared.getEpisodeProgress(
@@ -686,6 +658,33 @@ struct EpisodeCell: View {
         )
         if isWatched != newValue {
             isWatched = newValue
+        }
+    }
+
+    private func refreshDownloadState() {
+
+#if !os(tvOS)
+        let present = DownloadManager.shared.completedEpisodeDownloadItem(
+            tmdbId: showId,
+            seasonNumber: episode.seasonNumber,
+            episodeNumber: episode.episodeNumber,
+            playbackContext: playbackContext
+        ) != nil
+#else
+
+        let present = false
+#endif
+        if isDownloaded != present {
+            isDownloaded = present
+        }
+    }
+
+    private func scheduleDownloadStateRefresh() {
+        downloadStateRefreshTask?.cancel()
+        downloadStateRefreshTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard !Task.isCancelled else { return }
+            refreshDownloadState()
         }
     }
 }

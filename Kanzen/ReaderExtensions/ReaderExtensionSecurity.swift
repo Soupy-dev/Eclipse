@@ -1322,6 +1322,28 @@ enum ReaderExtensionAuthenticationGenerationRegistry {
         try lock.withReaderExtensionSecurityLock(operation)
     }
 
+    static func withPrivateCloudConfigurationReadFence<T>(
+        operation: () throws -> T
+    ) rethrows -> T {
+        try lock.withReaderExtensionSecurityLock(operation)
+    }
+
+    static func withPrivateCloudConfigurationMutationFence<T>(
+        sourceIDs: Set<ReaderExtensionSourceID>,
+        namespace: String,
+        operation: () throws -> T
+    ) rethrows -> T {
+        try lock.withReaderExtensionSecurityLock {
+            defer {
+                for sourceID in sourceIDs {
+                    let scope = Scope(sourceID: sourceID, namespace: namespace)
+                    generations[scope] = (generations[scope] ?? 0) &+ 1
+                }
+            }
+            return try operation()
+        }
+    }
+
     static func isCurrent(
         _ generation: UInt64,
         sourceID: ReaderExtensionSourceID,
@@ -1662,6 +1684,83 @@ final class ReaderExtensionKeychainStore: ReaderExtensionPreferenceStore, @unche
                 throw ReaderExtensionError.insecureURL
             }
             try setData(JSONEncoder().encode(canonical), for: "user-domains")
+        }
+    }
+
+    func privateCloudConfigurationUnlocked()
+        throws -> ReaderExtensionPrivateCloudKeychainConfiguration {
+        let keys = try storedSecretKeys()
+        guard keys.count <= ReaderExtensionSecurityPolicy.maximumPreferenceCount else {
+            throw ReaderExtensionError.contentTooLarge
+        }
+        var secrets: [String: String] = [:]
+        secrets.reserveCapacity(keys.count)
+        for key in keys.sorted() {
+            guard let data = try data(for: "secret.\(key)"),
+                  let value = String(data: data, encoding: .utf8) else {
+                throw ReaderExtensionError.persistenceFailed("Reader secret storage is unreadable")
+            }
+            try ReaderExtensionSecurityPolicy.validatePreferenceSecret(key: key, value: value)
+            secrets[key] = value
+        }
+        let userApprovedDomains: [String]
+        if let data = try data(for: "user-domains") {
+            guard data.count <= 32 * 1_024,
+                  let decoded = try? JSONDecoder().decode(Set<String>.self, from: data),
+                  decoded.count <= ReaderExtensionPrivateCloudConfigurationPolicy
+                    .maximumApprovedDomainCount else {
+                throw ReaderExtensionError.persistenceFailed("Reader domain approvals are unreadable")
+            }
+            let canonical = ReaderExtensionSecurityPolicy.canonicalHosts(decoded)
+            guard canonical == decoded else {
+                throw ReaderExtensionError.persistenceFailed("Reader domain approvals are invalid")
+            }
+            userApprovedDomains = canonical.sorted()
+        } else {
+            userApprovedDomains = []
+        }
+        return ReaderExtensionPrivateCloudKeychainConfiguration(
+            secrets: secrets,
+            userApprovedDomains: userApprovedDomains
+        )
+    }
+
+    func replacePrivateCloudConfigurationUnlocked(
+        _ configuration: ReaderExtensionPrivateCloudKeychainConfiguration
+    ) throws {
+        guard configuration.secrets.count
+                <= ReaderExtensionSecurityPolicy.maximumPreferenceCount,
+              configuration.userApprovedDomains.count
+                <= ReaderExtensionPrivateCloudConfigurationPolicy.maximumApprovedDomainCount else {
+            throw ReaderExtensionError.contentTooLarge
+        }
+        let userApprovedDomains = Set(configuration.userApprovedDomains)
+        guard userApprovedDomains.count == configuration.userApprovedDomains.count,
+              ReaderExtensionSecurityPolicy.canonicalHosts(
+                userApprovedDomains
+              ) == userApprovedDomains,
+              configuration.userApprovedDomains == userApprovedDomains.sorted() else {
+            throw ReaderExtensionError.contentTooLarge
+        }
+        for (key, value) in configuration.secrets {
+            try ReaderExtensionSecurityPolicy.validatePreferenceSecret(key: key, value: value)
+        }
+        let existingKeys = try storedSecretKeys()
+        for key in existingKeys.subtracting(configuration.secrets.keys) {
+            try setData(nil, for: "secret.\(key)")
+        }
+        for key in configuration.secrets.keys.sorted() {
+            guard let value = configuration.secrets[key] else { continue }
+            try setData(Data(value.utf8), for: "secret.\(key)")
+        }
+        if userApprovedDomains.isEmpty {
+            try setData(nil, for: "user-domains")
+        } else {
+            let data = try JSONEncoder().encode(userApprovedDomains)
+            guard data.count <= 32 * 1_024 else {
+                throw ReaderExtensionError.contentTooLarge
+            }
+            try setData(data, for: "user-domains")
         }
     }
 
@@ -2477,7 +2576,9 @@ private enum ReaderExtensionPinnedHTTPLoader {
         var finalError: Error = ReaderExtensionError.insecureURL
         let scheme = url.scheme?.lowercased() ?? "https"
         let host = ReaderExtensionSecurityPolicy.canonicalHost(of: url) ?? ""
-        let port = UInt16(url.port ?? (scheme == "https" ? 443 : 80))
+        guard let port = UInt16(exactly: url.port ?? (scheme == "https" ? 443 : 80)) else {
+            throw ReaderExtensionError.insecureURL
+        }
         // Only idempotent requests ride a parked connection: a stale-socket
         // failure mid-POST cannot be safely replayed.
         let mayReuse = ["GET", "HEAD"].contains(method.uppercased())
@@ -2629,7 +2730,8 @@ private final class ReaderExtensionPinnedHTTPConnection: @unchecked Sendable {
 
         guard let scheme = url.scheme?.lowercased(),
               let host = ReaderExtensionSecurityPolicy.canonicalHost(of: url),
-              let port = NWEndpoint.Port(rawValue: UInt16(url.port ?? (scheme == "https" ? 443 : 80))) else {
+              let numericPort = UInt16(exactly: url.port ?? (scheme == "https" ? 443 : 80)),
+              let port = NWEndpoint.Port(rawValue: numericPort) else {
             finish(.failure(ReaderExtensionError.insecureURL))
             return
         }

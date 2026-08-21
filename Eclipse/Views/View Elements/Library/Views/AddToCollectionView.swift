@@ -1,9 +1,16 @@
+//
+//  AddToCollectionView.swift
+//  Sora
+//
+//  Created by Francesco on 08/09/25.
+//
+
 import SwiftUI
 
 struct AddToCollectionView: View {
     let searchResult: TMDBSearchResult
     @Environment(\.dismiss) var dismiss
-    
+
     @StateObject private var accentColorManager = AccentColorManager.shared
     @ObservedObject private var libraryManager = LibraryManager.shared
     @State private var showingCreateSheet = false
@@ -12,13 +19,14 @@ struct AddToCollectionView: View {
     private enum TVFocus: Hashable {
         case collection(UUID)
         case create
+        case done
     }
 
     @FocusState private var tvFocus: TVFocus?
 #endif
-    
+
     var item: LibraryItem { LibraryItem(searchResult: searchResult) }
-    
+
     var body: some View {
         NavigationView {
             VStack {
@@ -63,7 +71,7 @@ struct AddToCollectionView: View {
                         .accessibilityHint("Toggles this title in the collection.")
                     }
                 }
-                
+
                 Button("Create New Collection") {
                     showingCreateSheet = true
                 }
@@ -72,12 +80,25 @@ struct AddToCollectionView: View {
                 .buttonStyle(.borderedProminent)
                 .focused($tvFocus, equals: .create)
 #endif
+
+#if os(tvOS)
+
+                Button("Done") {
+                    dismiss()
+                }
+                .padding(.bottom)
+                .buttonStyle(.bordered)
+                .focused($tvFocus, equals: .done)
+                .accessibilityIdentifier("tv.addToCollection.done")
+#endif
             }
             .navigationTitle("Add to Collection")
+#if !os(tvOS)
             .navigationBarItems(
                 leading: Button("Cancel") { dismiss() },
                 trailing: Button("Done") { dismiss() }
             )
+#endif
         }
         .navigationViewStyle(StackNavigationViewStyle())
         .sheet(isPresented: $showingCreateSheet) {

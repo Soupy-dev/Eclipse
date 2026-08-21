@@ -1,3 +1,10 @@
+//
+//  CatalogsSettingsView.swift
+//  Eclipse
+//
+//  Created by Soupy-dev
+//
+
 import SwiftUI
 
 struct CatalogsSettingsView: View {
@@ -5,7 +12,7 @@ struct CatalogsSettingsView: View {
     @ObservedObject private var trackerManager = TrackerManager.shared
     @StateObject private var accentColorManager = AccentColorManager.shared
     @State private var editMode = EditMode.active
-    
+
     var body: some View {
         catalogsContent
             .navigationTitle("Catalogs")
@@ -87,7 +94,7 @@ struct CatalogsSettingsView: View {
                             Text(catalog.name)
                                 .font(.subheadline)
                                 .fontWeight(.medium)
-                            
+
                             HStack(spacing: 6) {
                                 Text(sourceText(for: catalog))
                                     .font(.caption)
@@ -98,7 +105,7 @@ struct CatalogsSettingsView: View {
                                         .font(.caption2)
                                         .foregroundColor(.secondary)
                                 }
-                                
+
                                 if catalog.displayStyle != .standard {
                                     Text("\u{00B7} \(displayStyleText(for: catalog.displayStyle))")
                                         .font(.caption)
@@ -106,9 +113,9 @@ struct CatalogsSettingsView: View {
                                 }
                             }
                         }
-                        
+
                         Spacer()
-                        
+
                         Toggle("", isOn: Binding(
                             get: { catalogManager.isCatalogEffectivelyEnabled(catalog) },
                             set: { _ in catalogManager.toggleCatalog(id: catalog.id) }

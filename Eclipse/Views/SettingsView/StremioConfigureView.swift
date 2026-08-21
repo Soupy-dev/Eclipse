@@ -1,3 +1,10 @@
+//
+//  StremioConfigureView.swift
+//  Eclipse
+//
+//  Created by Soupy on 2026.
+//
+
 import SwiftUI
 
 #if os(tvOS)
@@ -18,9 +25,6 @@ struct StremioConfigureView: View {
     @State private var authenticationMessage: String?
 #endif
 
-    /// Derive the configure page URL, preserving the current config path.
-    /// e.g. "https://torrentio.strem.fun/sort=qualitysize|..." to ".../sort=qualitysize|.../configure"
-    /// If the base has no config path, falls back to "{origin}/configure".
     private var configureURL: URL? {
         StremioClient.configurationPageURL(from: addon.configuredURL)
     }
@@ -45,13 +49,8 @@ struct StremioConfigureView: View {
 #endif
             }
             .navigationTitle("Configure \(addon.manifest.name)")
-#if os(tvOS)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
-                }
-            }
-#else
+
+#if !os(tvOS)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -131,7 +130,7 @@ struct StremioConfigureView: View {
             Image(systemName: "safari")
                 .font(.system(size: 40))
                 .foregroundColor(.secondary)
-            Text("Open the addon's secure configuration page. If it cannot return automatically, paste the configured manifest URL below.")
+            Text("Open the addon's secure configuration page. If it cannot return automatically, enter the configured manifest URL below.")
                 .font(.body)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -144,7 +143,7 @@ struct StremioConfigureView: View {
                 }
 
                 Text("Configuration is provided by \(url.host ?? "the addon provider").")
-                    .font(.caption)
+                    .font(.system(size: 25))
                     .foregroundColor(.gray)
             }
 
@@ -165,17 +164,25 @@ struct StremioConfigureView: View {
 
             if let authenticationMessage {
                 Text(authenticationMessage)
-                    .font(.caption)
+                    .font(.system(size: 25))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
             }
 
             if let error {
                 Text(error)
-                    .font(.caption)
+                    .font(.system(size: 25))
                     .foregroundStyle(.orange)
                     .multilineTextAlignment(.center)
             }
+
+            Button {
+                dismiss()
+            } label: {
+                Label("Close", systemImage: "xmark.circle")
+            }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("tv.stremioConfigure.close")
         }
         .padding()
     }
@@ -198,14 +205,14 @@ struct StremioConfigureView: View {
                 }
 
                 if sessionError != nil {
-                    self.authenticationMessage = "Configuration did not return to Eclipse. Your typed URL is still here, so you can paste the configured manifest manually."
+                    self.authenticationMessage = "Configuration did not return to Eclipse. Your typed URL is still here, so you can enter the configured manifest manually."
                 }
             }
         }
         authenticationSession = session
         if !session.start() {
             authenticationSession = nil
-            authenticationMessage = "The configuration page could not be opened. Paste the configured manifest URL manually."
+            authenticationMessage = "The configuration page could not be opened. Enter the configured manifest URL manually."
         }
     }
 #endif
@@ -223,8 +230,6 @@ struct StremioConfigureView: View {
         }
     }
 }
-
-// MARK: - WKWebView wrapper (iOS only)
 
 #if !os(tvOS)
 struct StremioConfigureWebView: UIViewRepresentable {
@@ -299,15 +304,11 @@ struct StremioConfigureWebView: UIViewRepresentable {
             self.parent = parent
         }
 
-        // MARK: - WKScriptMessageHandler
-
         func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
             if message.name == "stremioInstall", let urlString = message.body as? String {
                 handleInstallURL(urlString)
             }
         }
-
-        // MARK: - WKUIDelegate
 
         func webView(
             _ webView: WKWebView,
@@ -324,8 +325,6 @@ struct StremioConfigureWebView: UIViewRepresentable {
             }
             return nil
         }
-
-        // MARK: - WKNavigationDelegate
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             DispatchQueue.main.async { self.parent.isLoading = true }

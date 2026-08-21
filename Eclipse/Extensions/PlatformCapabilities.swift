@@ -2,18 +2,20 @@ import Foundation
 #if canImport(AVKit)
 import AVKit
 #endif
+#if canImport(UIKit)
+import UIKit
+#endif
 
 enum EclipsePlatform: String, Sendable {
     case iOS
     case tvOS
-    case macOS
+    case visionOS
 }
 
 enum SettingScope: Sendable {
     case shared
     case iOS
     case tvOS
-    case macOS
     case reader
 }
 
@@ -53,8 +55,6 @@ struct SettingDescriptor<ID: Hashable>: Identifiable {
             return .hidden(reason: "This setting applies only to iPhone and iPad.")
         case .tvOS where capabilities.platform != .tvOS:
             return .hidden(reason: "This setting applies only to Apple TV.")
-        case .macOS where capabilities.platform != .macOS:
-            return .hidden(reason: "This setting applies only to Mac.")
         case .reader where !capabilities.supportsReader:
             return .hidden(reason: "Reader mode is not part of the Apple TV app.")
         default:
@@ -68,9 +68,6 @@ struct SettingDescriptor<ID: Hashable>: Identifiable {
     }
 }
 
-/// The single source of truth for product capabilities that differ between
-/// the iPhone/iPad and Apple TV targets. UI visibility and runtime entry points
-/// should consult the same value so a hidden setting can never remain active.
 struct PlatformCapabilities: Equatable, Sendable {
     let platform: EclipsePlatform
     let supportsReader: Bool
@@ -86,8 +83,11 @@ struct PlatformCapabilities: Equatable, Sendable {
     let supportsCloudKit: Bool
     let supportsGitHubUpdates: Bool
     let supportsSkyStreamPlugins: Bool
+    let supportsNuvioPlugins: Bool
 
-    static var current: PlatformCapabilities {
+    static var current: PlatformCapabilities { resolved }
+
+    private static let resolved: PlatformCapabilities = {
 #if os(tvOS)
         return PlatformCapabilities(
             platform: .tvOS,
@@ -103,31 +103,57 @@ struct PlatformCapabilities: Equatable, Sendable {
             supportsStoreKit: true,
             supportsCloudKit: true,
             supportsGitHubUpdates: false,
-            supportsSkyStreamPlugins: false
+            supportsSkyStreamPlugins: false,
+            supportsNuvioPlugins: false
         )
-#elseif os(macOS)
+#elseif os(visionOS)
         return PlatformCapabilities(
-            platform: .macOS,
-            supportsReader: true,
-            supportsDownloads: true,
-            supportsBrowserAutomation: true,
-            supportsFileSharing: true,
+            platform: .visionOS,
+            supportsReader: false,
+            supportsDownloads: false,
+            supportsBrowserAutomation: false,
+            supportsFileSharing: false,
             supportsTouchInput: false,
             supportsCellularSettings: false,
-            supportsExternalPlayers: true,
-            supportsPictureInPicture: AVPictureInPictureController.isPictureInPictureSupported(),
-            supportsMPV: true,
+            supportsExternalPlayers: false,
+            supportsPictureInPicture: false,
+            supportsMPV: false,
             supportsStoreKit: true,
             supportsCloudKit: true,
-            // Mac App Store builds must receive updates through the App Store.
             supportsGitHubUpdates: false,
-            supportsSkyStreamPlugins: false
+            supportsSkyStreamPlugins: false,
+            supportsNuvioPlugins: false
         )
 #else
+#if canImport(UIKit)
+
+        if #available(iOS 17.0, *),
+           UIDevice.current.userInterfaceIdiom == .vision {
+            return PlatformCapabilities(
+                platform: .visionOS,
+                supportsReader: false,
+                supportsDownloads: false,
+                supportsBrowserAutomation: false,
+                supportsFileSharing: false,
+                supportsTouchInput: false,
+                supportsCellularSettings: false,
+                supportsExternalPlayers: false,
+                supportsPictureInPicture: false,
+                supportsMPV: false,
+                supportsStoreKit: true,
+                supportsCloudKit: true,
+                supportsGitHubUpdates: false,
+                supportsSkyStreamPlugins: false,
+                supportsNuvioPlugins: false
+            )
+        }
+#endif
 #if targetEnvironment(macCatalyst)
         let supportsSkyStreamPlugins = false
+        let supportsNuvioPlugins = false
 #else
         let supportsSkyStreamPlugins = Bundle.main.allowsSkyStreamPlugins
+        let supportsNuvioPlugins = Bundle.main.allowsNuvioPlugins
 #endif
         return PlatformCapabilities(
             platform: .iOS,
@@ -138,17 +164,15 @@ struct PlatformCapabilities: Equatable, Sendable {
             supportsTouchInput: true,
             supportsCellularSettings: true,
             supportsExternalPlayers: true,
-            // PiP is an iOS/iPadOS product capability, so keep its master setting visible.
-            // CoreSimulator deliberately marks iPhone device profiles as lacking its system
-            // PiP overlay while iPad profiles expose it. The player still checks AVKit's live
-            // support result before creating the controller or exposing runtime PiP controls.
+
             supportsPictureInPicture: true,
             supportsMPV: true,
             supportsStoreKit: true,
             supportsCloudKit: true,
             supportsGitHubUpdates: GitHubReleaseChecker.isGitHubReleaseUpdatesAvailable,
-            supportsSkyStreamPlugins: supportsSkyStreamPlugins
+            supportsSkyStreamPlugins: supportsSkyStreamPlugins,
+            supportsNuvioPlugins: supportsNuvioPlugins
         )
 #endif
-    }
+    }()
 }

@@ -1,18 +1,309 @@
-// Local loopback proxy to bridge MPV playback requests.
-
 import Foundation
 import Network
+import Security
+import zlib
 
-#if !os(tvOS)
 private enum MPVHeaderProxyPlaylistMode {
     case preserveUpstream
     case normalizeRewrittenPlaylist
 }
 
+enum MPVHeaderProxyPlaylistRouting {
+    static func effectiveResponseURL(originalRequestURL: URL, responseURL: URL?) -> URL {
+        responseURL ?? originalRequestURL
+    }
+
+    static func resolve(_ reference: String, againstPlaylistURL playlistURL: URL) -> URL? {
+        URL(string: reference, relativeTo: playlistURL.deletingLastPathComponent())?.absoluteURL
+    }
+}
+
+enum MPVHeaderProxyPlaylistFramingPolicy {
+    enum Action: Equatable {
+        case continueBuffering
+        case reject
+    }
+
+    static func action(bufferedByteCount: Int, maximumRewriteBytes: Int) -> Action {
+        bufferedByteCount > maximumRewriteBytes ? .reject : .continueBuffering
+    }
+
+    static func mustRejectIdentifiedPlaylist(isUTF8Decodable: Bool) -> Bool {
+        !isUTF8Decodable
+    }
+}
+
+/// Generic provider response metadata is attacker-controlled. In particular,
+/// an HLS document can be served from a `.mp4` URL or with an
+/// `application/octet-stream` content type and still be sniffed as HLS by the
+/// player. Never use those declarations to bypass the protected HLS probe.
+enum MPVHeaderProxyGenericBodyPolicy {
+    enum InitialAction: Equatable {
+        case bufferIdentifiedPlaylist
+        case probeGenericResponse
+        case probeValidatedResource
+        case streamVerifiedCachedMediaContinuation
+    }
+
+    enum ProbeAction: Equatable {
+        case continueBuffering
+        case identifiedPlaylist
+        case streamNonPlaylist
+        case rejectAmbiguousPrefix
+    }
+
+    static func initialAction(
+        isPlaylistMetadata: Bool,
+        declaredContentType _: String?,
+        pathExtension _: String,
+        expectedContentLength _: Int64,
+        isValidatedResource: Bool,
+        hasVerifiedCachedMediaContinuation: Bool
+    ) -> InitialAction {
+        if isPlaylistMetadata {
+            return .bufferIdentifiedPlaylist
+        }
+        if isValidatedResource {
+            return .probeValidatedResource
+        }
+        if hasVerifiedCachedMediaContinuation {
+            return .streamVerifiedCachedMediaContinuation
+        }
+        return .probeGenericResponse
+    }
+
+    static func probeAction(
+        bufferedData: Data,
+        maximumProbeBytes: Int
+    ) -> ProbeAction {
+        let bytes = [UInt8](bufferedData)
+        guard !bytes.isEmpty else { return .continueBuffering }
+
+        let bom: [UInt8] = [0xEF, 0xBB, 0xBF]
+        let signature = Array("#EXTM3U".utf8)
+        var index = 0
+
+        if bytes[0] == bom[0] {
+            let availableBOMBytes = min(bytes.count, bom.count)
+            if bytes.prefix(availableBOMBytes).elementsEqual(bom.prefix(availableBOMBytes)) {
+                guard availableBOMBytes == bom.count else {
+                    return bytes.count >= maximumProbeBytes
+                        ? .rejectAmbiguousPrefix
+                        : .continueBuffering
+                }
+                index = bom.count
+            } else {
+                return .streamNonPlaylist
+            }
+        }
+
+        while index < bytes.count,
+              bytes[index] == 0x20
+                || bytes[index] == 0x09
+                || bytes[index] == 0x0A
+                || bytes[index] == 0x0D {
+            index += 1
+        }
+
+        guard index < bytes.count else {
+            return bytes.count >= maximumProbeBytes
+                ? .rejectAmbiguousPrefix
+                : .continueBuffering
+        }
+
+        let availableSignatureBytes = min(bytes.count - index, signature.count)
+        guard bytes[index..<(index + availableSignatureBytes)]
+            .elementsEqual(signature.prefix(availableSignatureBytes)) else {
+            return .streamNonPlaylist
+        }
+        if availableSignatureBytes == signature.count {
+            return .identifiedPlaylist
+        }
+        return bytes.count >= maximumProbeBytes
+            ? .rejectAmbiguousPrefix
+            : .continueBuffering
+    }
+}
+
+enum MPVHeaderProxyValidatedRouteResponsePolicy {
+    static func rejectsManifest(
+        role: String?,
+        contentType: String,
+        responseURL _: URL?
+    ) -> Bool {
+        let lowerContentType = contentType.lowercased()
+        return role == "manifest"
+            || lowerContentType.contains("mpegurl")
+            || lowerContentType.contains("dash+xml")
+            || lowerContentType.contains("application/dash")
+    }
+}
+
+enum MPVHeaderProxyCachedContinuationPolicy {
+    static func validatedBodyByteCount(
+        statusCode: Int,
+        contentRange: String?,
+        contentLength: String?,
+        transferEncoding: String?,
+        responseEntityTag: String?,
+        contentEncoding: String?,
+        expectedEntityTag: String,
+        expectedStart: Int64,
+        expectedEnd: Int64,
+        expectedTotal: Int64
+    ) -> Int64? {
+        guard statusCode == 206,
+              transferEncoding == nil,
+              contentEncoding == nil
+                || contentEncoding?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .caseInsensitiveCompare("identity") == .orderedSame,
+              expectedStart >= 0,
+              expectedEnd >= expectedStart,
+              expectedTotal > expectedEnd,
+              responseEntityTag?.trimmingCharacters(in: .whitespacesAndNewlines)
+                == expectedEntityTag,
+              let rawLength = contentLength?.trimmingCharacters(in: .whitespacesAndNewlines),
+              let parsedLength = Int64(rawLength),
+              parsedLength == expectedEnd - expectedStart + 1,
+              let normalizedRange = contentRange?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased(),
+              normalizedRange == "bytes \(expectedStart)-\(expectedEnd)/\(expectedTotal)" else {
+            return nil
+        }
+        return parsedLength
+    }
+}
+
+enum MPVHeaderProxyLogSanitizer {
+    static func summary(for url: URL) -> String {
+        guard let scheme = url.scheme?.lowercased(),
+              let host = url.host,
+              !scheme.isEmpty,
+              !host.isEmpty else {
+            return "unknown-origin"
+        }
+
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = host
+        if let port = url.port, !isDefault(port: port, for: scheme) {
+            components.port = port
+        }
+        return components.string ?? "\(scheme)://redacted-host"
+    }
+
+    private static func isDefault(port: Int, for scheme: String) -> Bool {
+        (scheme == "http" && port == 80) || (scheme == "https" && port == 443)
+    }
+}
+
+enum MPVHeaderProxyPinnedAddressPolicy {
+    static func normalizeApprovedAddress(
+        _ value: String,
+        permitsPrivateApprovedAddresses: Bool
+    ) -> String? {
+        permitsPrivateApprovedAddresses
+            ? SkyStreamRemoteURLPolicy.normalizedNumericAddressString(value)
+            : SkyStreamRemoteURLPolicy.normalizedPublicAddressString(value)
+    }
+}
+
+enum MPVHeaderProxyStremioTargetPolicy {
+    static func permitsPrivateDispatch(
+        to targetURL: URL,
+        authority: SkyStreamPinnedOriginAuthority
+    ) throws -> Bool {
+        return authority.contains(targetURL)
+    }
+
+    static func scopedAuthority(
+        for rootURL: URL,
+        authority: SkyStreamPinnedOriginAuthority?
+    ) throws -> SkyStreamPinnedOriginAuthority? {
+        guard let authority else { return nil }
+        return try permitsPrivateDispatch(to: rootURL, authority: authority)
+            ? authority
+            : nil
+    }
+}
+
+struct MPVHeaderProxyRevokedOriginSet: Equatable {
+    static let maximumTrackedOrigins = 16
+
+    private(set) var originKeys: Set<String> = []
+    private(set) var revokesAllCrossOriginDestinations = false
+
+    static func originKey(for url: URL) -> String? {
+        guard let scheme = url.scheme?.lowercased(),
+              let host = url.host?.lowercased(),
+              scheme == "http" || scheme == "https" else { return nil }
+        let port = url.port ?? (scheme == "https" ? 443 : 80)
+        return "\(scheme)://\(host):\(port)"
+    }
+
+    static func requiresRevocation(
+        from sourceURL: URL,
+        to destinationURL: URL,
+        credentialOriginURL: URL
+    ) -> Bool {
+        guard let sourceKey = originKey(for: sourceURL),
+              let destinationKey = originKey(for: destinationURL) else { return true }
+        if sourceKey == destinationKey { return false }
+        if let credentialKey = originKey(for: credentialOriginURL),
+           destinationKey == credentialKey {
+            return false
+        }
+        return !isDefaultPortSchemeUpgrade(from: sourceURL, to: destinationURL)
+    }
+
+    private static func isDefaultPortSchemeUpgrade(
+        from sourceURL: URL,
+        to destinationURL: URL
+    ) -> Bool {
+        guard sourceURL.scheme?.lowercased() == "http",
+              destinationURL.scheme?.lowercased() == "https",
+              let sourceHost = sourceURL.host?.lowercased(),
+              let destinationHost = destinationURL.host?.lowercased(),
+              sourceHost == destinationHost else { return false }
+        return (sourceURL.port ?? 80) == 80 && (destinationURL.port ?? 443) == 443
+    }
+
+    mutating func revoke(destinationURL: URL) {
+        guard !revokesAllCrossOriginDestinations else { return }
+        guard let key = Self.originKey(for: destinationURL) else {
+            originKeys = []
+            revokesAllCrossOriginDestinations = true
+            return
+        }
+        originKeys.insert(key)
+        if originKeys.count > Self.maximumTrackedOrigins {
+            originKeys = []
+            revokesAllCrossOriginDestinations = true
+        }
+    }
+
+    func revokesCredentials(for targetURL: URL, credentialOriginURL: URL) -> Bool {
+        guard let targetKey = Self.originKey(for: targetURL) else {
+            return revokesAllCrossOriginDestinations
+        }
+        if let credentialKey = Self.originKey(for: credentialOriginURL),
+           targetKey == credentialKey {
+            return false
+        }
+        if revokesAllCrossOriginDestinations { return true }
+        return originKeys.contains(targetKey)
+    }
+}
+
+struct MPVHeaderProxyUpstreamHealth {
+    let failureCount: Int
+    let lastFailureAt: Date?
+    let lastSuccessAt: Date?
+}
+
 private final class MPVHeaderProxyCore {
-    /// Reports a blocked media response once per proxy session. The response may be a real
-    /// browser-solvable challenge, or a generic CDN rejection whose signed source URL must be
-    /// re-resolved through the provider instead.
+
     private final class CloudflareChallengeReporter {
         private let lock = NSLock()
         private var didReport = false
@@ -46,9 +337,6 @@ private final class MPVHeaderProxyCore {
         }
     }
 
-    /// A SkyStream session never accepts an upstream URL from the loopback request. Each local
-    /// URL contains only an unguessable route identifier which selects one immutable resource
-    /// from the validator-produced graph captured here.
     private enum ValidatedManifestKind {
         case hls
         case dash
@@ -103,7 +391,7 @@ private final class MPVHeaderProxyCore {
 
         static func canonicalURLKey(_ url: URL) -> String {
             var components = URLComponents(url: url.absoluteURL, resolvingAgainstBaseURL: false)
-            // Fragments are not sent over HTTP and were removed by the remote URL validator.
+
             components?.fragment = nil
             return components?.url?.absoluteString ?? url.absoluteURL.absoluteString
         }
@@ -158,14 +446,15 @@ private final class MPVHeaderProxyCore {
         let upstreamTransport: UpstreamTransport
         let cloudflareChallengeReporter: CloudflareChallengeReporter?
         let validatedRoutePolicy: ValidatedRoutePolicy?
+        let stremioAuthority: SkyStreamPinnedOriginAuthority?
+        let revokedDestinationOrigins: MPVHeaderProxyRevokedOriginSet
     }
 
     private enum UpstreamBodyMode {
         case stream
         case playlist
         case probe
-        /// A bounded 403/429/503 body probe. It is never forwarded as media and only reports
-        /// recovery when the shared detector confirms Cloudflare/DDoS-Guard markers.
+
         case rejectedResponseProbe
     }
 
@@ -174,6 +463,10 @@ private final class MPVHeaderProxyCore {
         let responseHeaders: [String: String]
         let data: Data
         let upstreamRange: String
+        let strongEntityTag: String
+        let upstreamStart: Int64
+        let upstreamEnd: Int64
+        let expectedTotalLength: Int64
     }
 
     private enum CachedPrefixPlan {
@@ -238,10 +531,7 @@ private final class MPVHeaderProxyCore {
     }
 
     private func logURLSummary(_ url: URL) -> String {
-        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        components?.query = nil
-        components?.fragment = nil
-        return components?.string ?? "\(url.scheme ?? "unknown")://\(url.host ?? "unknown")\(url.path)"
+        MPVHeaderProxyLogSanitizer.summary(for: url)
     }
 
     private static func sanitizedCredentialHeaders(_ headers: [String: String]) -> [String: String] {
@@ -358,11 +648,47 @@ private final class MPVHeaderProxyCore {
                 requestCount: session.requestCount + 1,
                 upstreamTransport: session.upstreamTransport,
                 cloudflareChallengeReporter: session.cloudflareChallengeReporter,
-                validatedRoutePolicy: session.validatedRoutePolicy
+                validatedRoutePolicy: session.validatedRoutePolicy,
+                stremioAuthority: session.stremioAuthority,
+                revokedDestinationOrigins: session.revokedDestinationOrigins
             )
             sessions[id] = updated
             return updated
         }
+    }
+
+    private func recordRevokedRedirectDestinationOrigin(
+        for id: String,
+        sourceURL: URL,
+        destinationURL: URL
+    ) {
+        let logType: String? = withSessionsLock {
+            guard let session = sessions[id],
+                  session.validatedRoutePolicy == nil else { return nil }
+            var revokedOrigins = session.revokedDestinationOrigins
+            revokedOrigins.revoke(destinationURL: destinationURL)
+            guard revokedOrigins != session.revokedDestinationOrigins else { return nil }
+            sessions[id] = Session(
+                headers: session.headers,
+                credentialOriginURL: session.credentialOriginURL,
+                createdAt: session.createdAt,
+                lastAccessed: session.lastAccessed,
+                logType: session.logType,
+                traceID: session.traceID,
+                requestCount: session.requestCount,
+                upstreamTransport: session.upstreamTransport,
+                cloudflareChallengeReporter: session.cloudflareChallengeReporter,
+                validatedRoutePolicy: session.validatedRoutePolicy,
+                stremioAuthority: session.stremioAuthority,
+                revokedDestinationOrigins: revokedOrigins
+            )
+            return session.logType
+        }
+        guard let logType else { return }
+        Logger.shared.log(
+            "\(logPrefix): revoked cross-origin redirect destination session=\(String(id.prefix(8))) sourceHost=\(sourceURL.host?.lowercased() ?? "unknown") destinationHost=\(destinationURL.host?.lowercased() ?? "unknown")",
+            type: logType
+        )
     }
 
     func makeProxyURL(
@@ -370,9 +696,24 @@ private final class MPVHeaderProxyCore {
         headers: [String: String],
         logType: String = "Stream",
         traceID: String? = nil,
+        stremioAuthority: SkyStreamPinnedOriginAuthority? = nil,
         onConfirmedCloudflareChallenge: ((URL, String?, Bool, Int) -> Void)? = nil
     ) -> URL? {
         guard ensureStarted() else { return nil }
+
+        let scopedStremioAuthority: SkyStreamPinnedOriginAuthority?
+        do {
+            scopedStremioAuthority = try MPVHeaderProxyStremioTargetPolicy.scopedAuthority(
+                for: targetURL,
+                authority: stremioAuthority
+            )
+        } catch {
+            Logger.shared.log(
+                "\(logPrefix): rejected a target outside its configured Stremio authority",
+                type: "Error"
+            )
+            return nil
+        }
 
         var activePort = port
         if (activePort ?? 0) == 0 {
@@ -395,9 +736,7 @@ private final class MPVHeaderProxyCore {
         let sessionId = UUID().uuidString
         let now = Date()
         let resolvedTraceID = traceID ?? String(sessionId.prefix(8))
-        // MPV can fill a large demuxer cache far faster than playback consumes it. Some HLS CDNs
-        // rate-limit that burst even though the stream itself is healthy. Pace only MPV HLS proxy
-        // sessions; direct files and AVPlayer keep their existing transport behavior.
+
         let minimumRequestStartInterval: TimeInterval = logType == "MPV" && isLikelyPlaylistURL(targetURL)
             ? 0.15
             : 0
@@ -411,12 +750,15 @@ private final class MPVHeaderProxyCore {
                 traceID: resolvedTraceID,
                 requestCount: 0,
                 upstreamTransport: UpstreamTransport(
-                    minimumRequestStartInterval: minimumRequestStartInterval
+                    minimumRequestStartInterval: minimumRequestStartInterval,
+                    pinsUpstreamAddresses: false
                 ),
                 cloudflareChallengeReporter: onConfirmedCloudflareChallenge.map {
                     CloudflareChallengeReporter(handler: $0)
                 },
-                validatedRoutePolicy: nil
+                validatedRoutePolicy: nil,
+                stremioAuthority: scopedStremioAuthority,
+                revokedDestinationOrigins: MPVHeaderProxyRevokedOriginSet()
             ),
             for: sessionId
         )
@@ -463,8 +805,7 @@ private final class MPVHeaderProxyCore {
                     ? descriptor.proxyOptions
                     : nil)
             if let referer = routeProxyOptions?.referer?.url.absoluteString {
-                // MAGIC v2's referer option is itself a validated remote URL. Materialize it once
-                // into this immutable route instead of letting later callers reinterpret options.
+
                 validatedHeaders["referer"] = referer
             }
             guard let scheme = targetURL.scheme?.lowercased(),
@@ -486,8 +827,7 @@ private final class MPVHeaderProxyCore {
 
             let key = ValidatedRoutePolicy.canonicalURLKey(targetURL)
             if let existingID = routeIDByURL[key], let existing = resourcesByID[existingID] {
-                // One exact URL cannot safely select two credential sets. The validator may emit
-                // the same URL in more than one semantic role, but conflicting headers fail closed.
+
                 guard existing.headers == validatedHeaders else {
                     Logger.shared.log("\(logPrefix): rejected ambiguous SkyStream route credentials", type: "Error")
                     return nil
@@ -568,8 +908,7 @@ private final class MPVHeaderProxyCore {
         let initialRouteID: String?
         if let firstManifest = descriptor.acceptedManifests.first,
            firstManifest.sourceURL == nil {
-            // Validation appends the manifest currently being walked before its descendants, so
-            // the first source-less body is the top-level generated M3U8.
+
             initialRouteID = firstGeneratedRouteID
         } else {
             initialRouteID = routeIDByURL[
@@ -618,14 +957,17 @@ private final class MPVHeaderProxyCore {
                 traceID: resolvedTraceID,
                 requestCount: 0,
                 upstreamTransport: UpstreamTransport(
-                    minimumRequestStartInterval: minimumRequestStartInterval
+                    minimumRequestStartInterval: minimumRequestStartInterval,
+                    pinsUpstreamAddresses: false
                 ),
                 cloudflareChallengeReporter: onValidatedRouteRejection.map { callback in
                     CloudflareChallengeReporter { url, _, isInteractiveChallenge, statusCode in
                         callback(url, statusCode, isInteractiveChallenge)
                     }
                 },
-                validatedRoutePolicy: policy
+                validatedRoutePolicy: policy,
+                stremioAuthority: nil,
+                revokedDestinationOrigins: MPVHeaderProxyRevokedOriginSet()
             )
         guard setValidatedSession(typedSession, for: sessionID) else {
             typedSession.upstreamTransport.invalidateAndCancel()
@@ -721,9 +1063,6 @@ private final class MPVHeaderProxyCore {
         return (String(pathParts[1]), routeID, urlPort)
     }
 
-    /// A read-only ownership check for the top-level URL of a live typed session. It does not
-    /// accept generic proxy URLs or companion routes, which prevents callers from accidentally
-    /// adopting a different session shape merely because it points at this listener.
     func isManagedSkyStreamSessionURL(_ streamProxyURL: URL) -> Bool {
         guard let reference = parsedValidatedProxyURL(streamProxyURL) else { return false }
         return withSessionsLock {
@@ -757,17 +1096,12 @@ private final class MPVHeaderProxyCore {
                     sessionId: reference.sessionID,
                     routeID: resource.routeID
                   ) else { return nil }
-            // Callers hold this exact validator-issued URL. Canonicalization is used only for
-            // policy lookup; exposing a normalized spelling would make an otherwise safe
-            // subtitle fail closed at the handoff boundary.
+
             output[remoteURL.absoluteString] = localURL
         }
         return output
     }
 
-    /// Attaches the owning player's refresh path after the sheet has handed off the typed proxy.
-    /// Replacing an existing callback deliberately retains the reporter's `didReport` latch, so
-    /// one rejected response can never trigger multiple refreshes in the same playback session.
     func setSkyStreamRouteRejectionHandler(
         for streamProxyURL: URL,
         handler: @escaping (URL, Int, Bool) -> Void
@@ -798,7 +1132,9 @@ private final class MPVHeaderProxyCore {
                     cloudflareChallengeReporter: CloudflareChallengeReporter(
                         handler: reporterHandler
                     ),
-                    validatedRoutePolicy: policy
+                    validatedRoutePolicy: policy,
+                    stremioAuthority: session.stremioAuthority,
+                    revokedDestinationOrigins: session.revokedDestinationOrigins
                 )
             }
             return true
@@ -812,10 +1148,7 @@ private final class MPVHeaderProxyCore {
         do {
             let parameters = NWParameters.tcp
             parameters.allowLocalEndpointReuse = true
-            // This is an in-process playback bridge, not a LAN HTTP server. Binding only the
-            // URL to 127.0.0.1 is insufficient: without a required local endpoint NWListener can
-            // accept connections on every interface. Keep the bearer token as defense in depth,
-            // but make the socket itself loopback-only.
+
             parameters.requiredInterfaceType = .loopback
             parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
             let listener = try NWListener(using: parameters, on: NWEndpoint.Port.any)
@@ -1038,9 +1371,10 @@ private final class MPVHeaderProxyCore {
 
         var request = URLRequest(url: targetURL)
         request.httpMethod = method
-        if validatedResource != nil {
-            request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-        }
+        // Classification and byte-range accounting operate on the exact wire
+        // representation; compressed provider bodies could otherwise be
+        // decoded after the response headers were framed.
+        request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
 
         let effectiveSessionHeaders = validatedResource?.headers ?? session.headers
         let credentialHeaderNames = Set(
@@ -1062,17 +1396,30 @@ private final class MPVHeaderProxyCore {
             request.setValue(value, forHTTPHeaderField: key)
         }
 
-        let scopedSessionHeaders = validatedResource?.headers ?? Self.credentialHeaders(
-            session.headers,
-            for: targetURL,
-            originURL: session.credentialOriginURL
-        )
+        var scopedSessionHeaders: [String: String]
+        if let validatedHeaders = validatedResource?.headers {
+            scopedSessionHeaders = validatedHeaders
+        } else {
+            scopedSessionHeaders = Self.credentialHeaders(
+                session.headers,
+                for: targetURL,
+                originURL: session.credentialOriginURL
+            )
+            if session.revokedDestinationOrigins.revokesCredentials(
+                for: targetURL,
+                credentialOriginURL: session.credentialOriginURL
+            ) {
+                for name in ["Authorization", "Cookie", "Cookie2", "Proxy-Authorization"] {
+                    scopedSessionHeaders.keys
+                        .filter { $0.caseInsensitiveCompare(name) == .orderedSame }
+                        .forEach { scopedSessionHeaders.removeValue(forKey: $0) }
+                }
+            }
+        }
         for (key, value) in scopedSessionHeaders {
             request.setValue(value, forHTTPHeaderField: key)
         }
-        // HLS playlists can resolve onto a different CDN host than the original source. Apply
-        // that host's current solved session at request time so a same-source player retry uses
-        // the replacement clearance on the exact playlist/segment host that rejected it.
+
         if validatedResource == nil {
             CloudflareBypassManager.shared.applyCachedBypass(to: &request, for: targetURL)
         }
@@ -1104,6 +1451,7 @@ private final class MPVHeaderProxyCore {
         case .bridge(let continuation):
             cachedPrefix = continuation
             request.setValue(continuation.upstreamRange, forHTTPHeaderField: "Range")
+            request.setValue(continuation.strongEntityTag, forHTTPHeaderField: "If-Range")
         case nil:
             cachedPrefix = nil
         }
@@ -1130,6 +1478,8 @@ private final class MPVHeaderProxyCore {
             validatedRoutePolicy: session.validatedRoutePolicy,
             validatedRouteRole: validatedResource?.role,
             validatedExpectedFiniteContentLength: validatedResource?.expectedFiniteContentLength,
+            stremioAuthority: session.stremioAuthority,
+            revokedDestinationOrigins: session.revokedDestinationOrigins,
             connection: connection,
             cachedPrefix: cachedPrefix
         )
@@ -1145,6 +1495,9 @@ private final class MPVHeaderProxyCore {
         logType: String,
         connection: NWConnection
     ) async -> CachedPrefixPlan? {
+#if os(tvOS)
+        return nil
+#else
         guard method == "GET" else {
             Logger.shared.log("\(logPrefix)[\(requestId)]: MPV warmup cache skipped reason=method-\(method) target=\(logURLSummary(targetURL))", type: logType)
             return nil
@@ -1175,8 +1528,7 @@ private final class MPVHeaderProxyCore {
         }
         let requestedStart = parsedRange?.start ?? 0
         guard requestedStart == 0 else {
-            // The cached starter only contains the beginning of the resource. Reject nonzero
-            // ranges before touching disk or waiting for an exact-key warmup to finish.
+
             Logger.shared.log("\(logPrefix)[\(requestId)]: MPV warmup cache skipped reason=nonzero-request-range range=\(rangeHeader ?? "nil") target=\(logURLSummary(targetURL))", type: logType)
             return nil
         }
@@ -1238,6 +1590,11 @@ private final class MPVHeaderProxyCore {
             return .handled
         }
 
+        guard let strongEntityTag = starter.strongEntityTag else {
+            Logger.shared.log("\(logPrefix)[\(requestId)]: MPV warmup cache skipped reason=missing-strong-entity-validator target=\(logURLSummary(targetURL))", type: logType)
+            return nil
+        }
+
         let upstreamRange = "bytes=\(cachedByteCount)-\(requestedEnd)"
 
         let responseHeaders = cachedResponseHeaders(
@@ -1250,8 +1607,13 @@ private final class MPVHeaderProxyCore {
             responseStatus: rangeHeader == nil ? 200 : 206,
             responseHeaders: responseHeaders,
             data: starter.data,
-            upstreamRange: upstreamRange
+            upstreamRange: upstreamRange,
+            strongEntityTag: strongEntityTag,
+            upstreamStart: cachedByteCount,
+            upstreamEnd: requestedEnd,
+            expectedTotalLength: totalLength
         ))
+#endif
     }
 
     private func parseByteRange(_ value: String?) -> (start: Int64, end: Int64?)? {
@@ -1298,38 +1660,27 @@ private final class MPVHeaderProxyCore {
         return headers
     }
 
-    private func upstreamBodyMode(for http: HTTPURLResponse, targetURL: URL) -> UpstreamBodyMode {
-        if isPlaylistMetadata(http: http, targetURL: targetURL) {
+    private func upstreamBodyMode(
+        for http: HTTPURLResponse,
+        targetURL: URL,
+        isValidatedResource: Bool,
+        hasVerifiedCachedMediaContinuation: Bool
+    ) -> UpstreamBodyMode {
+        switch MPVHeaderProxyGenericBodyPolicy.initialAction(
+            isPlaylistMetadata: isPlaylistMetadata(http: http, targetURL: targetURL),
+            declaredContentType: http.value(forHTTPHeaderField: "Content-Type"),
+            pathExtension: targetURL.pathExtension,
+            expectedContentLength: http.expectedContentLength,
+            isValidatedResource: isValidatedResource,
+            hasVerifiedCachedMediaContinuation: hasVerifiedCachedMediaContinuation
+        ) {
+        case .bufferIdentifiedPlaylist:
             return .playlist
-        }
-
-        if isDefinitelyMediaResponse(http: http, targetURL: targetURL) {
+        case .probeGenericResponse, .probeValidatedResource:
+            return .probe
+        case .streamVerifiedCachedMediaContinuation:
             return .stream
         }
-
-        let expected = http.expectedContentLength
-        if expected >= 0 && expected <= Int64(maxPlaylistBytes) {
-            return .probe
-        }
-
-        return .stream
-    }
-
-    private func isDefinitelyMediaResponse(http: HTTPURLResponse, targetURL: URL) -> Bool {
-        let ext = targetURL.pathExtension.lowercased()
-        if ["ts", "m4s", "mp4", "m4v", "aac", "mp3", "webm", "mkv", "jpg", "jpeg", "png", "webp"].contains(ext) {
-            return true
-        }
-
-        let contentType = (http.value(forHTTPHeaderField: "Content-Type") ?? "").lowercased()
-        if contentType.hasPrefix("video/")
-            || contentType.hasPrefix("audio/")
-            || contentType.hasPrefix("image/")
-            || contentType.contains("octet-stream") {
-            return true
-        }
-
-        return false
     }
 
     private func isPlaylistMetadata(http: HTTPURLResponse, targetURL: URL) -> Bool {
@@ -1356,27 +1707,6 @@ private final class MPVHeaderProxyCore {
         return trimmedPlaylistProbeText(text).hasPrefix("#EXTM3U")
     }
 
-    private func shouldStopPlaylistProbe(_ data: Data) -> Bool {
-        if data.count >= playlistProbeBytes {
-            return true
-        }
-
-        guard let text = String(data: data, encoding: .utf8) else {
-            return data.count >= 16
-        }
-
-        let trimmed = trimmedPlaylistProbeText(text)
-        if trimmed.isEmpty {
-            return false
-        }
-
-        if "#EXTM3U".hasPrefix(trimmed) {
-            return false
-        }
-
-        return !trimmed.hasPrefix("#EXTM3U")
-    }
-
     private func trimmedPlaylistProbeText(_ text: String) -> String {
         let characters = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{feff}"))
         return text.trimmingCharacters(in: characters)
@@ -1387,11 +1717,28 @@ private final class MPVHeaderProxyCore {
         data: Data,
         targetURL: URL,
         sessionId: String,
-        logType: String
+        logType: String,
+        requiresValidEncoding: Bool
     ) -> (Data, [String: String], Bool, Int) {
         var headers: [String: String] = filteredResponseHeaders(from: http)
 
-        if let text = String(data: data, encoding: .utf8), isPlaylistData(data) || isPlaylistMetadata(http: http, targetURL: targetURL) {
+        let identifiedAsPlaylist = isPlaylistData(data)
+            || isPlaylistMetadata(http: http, targetURL: targetURL)
+        if identifiedAsPlaylist,
+           requiresValidEncoding,
+           MPVHeaderProxyPlaylistFramingPolicy.mustRejectIdentifiedPlaylist(
+            isUTF8Decodable: String(data: data, encoding: .utf8) != nil
+           ) {
+            let body = Data("Invalid playlist encoding".utf8)
+            setHeader("Content-Type", value: "text/plain; charset=utf-8", in: &headers)
+            setHeader("Content-Length", value: String(body.count), in: &headers)
+            removeHeader("Content-Encoding", from: &headers)
+            removeHeader("Content-Range", from: &headers)
+            removeHeader("Accept-Ranges", from: &headers)
+            return (body, headers, false, 502)
+        }
+
+        if identifiedAsPlaylist, let text = String(data: data, encoding: .utf8) {
             let rewritten = rewritePlaylist(text: text, baseURL: targetURL, sessionId: sessionId, logType: logType)
             let outData = Data(rewritten.utf8)
             setHeader("Content-Type", value: "application/vnd.apple.mpegurl", in: &headers)
@@ -1412,7 +1759,6 @@ private final class MPVHeaderProxyCore {
 
     private func rewritePlaylist(text: String, baseURL: URL, sessionId: String, logType: String) -> String {
         let lines = text.components(separatedBy: "\n")
-        let base = baseURL.deletingLastPathComponent()
         var mediaLineRewriteCount = 0
         var attributeRewriteCount = 0
 
@@ -1423,10 +1769,10 @@ private final class MPVHeaderProxyCore {
             }
 
             if trimmed.hasPrefix("#") {
-                return rewritePlaylistTagLine(line, baseURL: base, sessionId: sessionId, rewrittenCount: &attributeRewriteCount)
+                return rewritePlaylistTagLine(line, playlistURL: baseURL, sessionId: sessionId, rewrittenCount: &attributeRewriteCount)
             }
 
-            if let proxied = proxiedPlaylistURLString(for: trimmed, baseURL: base, sessionId: sessionId) {
+            if let proxied = proxiedPlaylistURLString(for: trimmed, playlistURL: baseURL, sessionId: sessionId) {
                 mediaLineRewriteCount += 1
                 return proxied.absoluteString
             }
@@ -1438,14 +1784,14 @@ private final class MPVHeaderProxyCore {
         return rewritten.joined(separator: "\n")
     }
 
-    private func rewritePlaylistTagLine(_ line: String, baseURL: URL, sessionId: String, rewrittenCount: inout Int) -> String {
+    private func rewritePlaylistTagLine(_ line: String, playlistURL: URL, sessionId: String, rewrittenCount: inout Int) -> String {
         var output = line
-        rewriteQuotedURIAttributes(in: &output, baseURL: baseURL, sessionId: sessionId, rewrittenCount: &rewrittenCount)
-        rewriteUnquotedURIAttributes(in: &output, baseURL: baseURL, sessionId: sessionId, rewrittenCount: &rewrittenCount)
+        rewriteQuotedURIAttributes(in: &output, playlistURL: playlistURL, sessionId: sessionId, rewrittenCount: &rewrittenCount)
+        rewriteUnquotedURIAttributes(in: &output, playlistURL: playlistURL, sessionId: sessionId, rewrittenCount: &rewrittenCount)
         return output
     }
 
-    private func rewriteQuotedURIAttributes(in line: inout String, baseURL: URL, sessionId: String, rewrittenCount: inout Int) {
+    private func rewriteQuotedURIAttributes(in line: inout String, playlistURL: URL, sessionId: String, rewrittenCount: inout Int) {
         var searchStart = line.startIndex
         while let keyRange = line.range(of: "URI=\"", options: [.caseInsensitive], range: searchStart..<line.endIndex) {
             let valueStart = keyRange.upperBound
@@ -1454,7 +1800,7 @@ private final class MPVHeaderProxyCore {
             }
 
             let original = String(line[valueStart..<valueEnd])
-            guard let proxied = proxiedPlaylistURLString(for: original, baseURL: baseURL, sessionId: sessionId) else {
+            guard let proxied = proxiedPlaylistURLString(for: original, playlistURL: playlistURL, sessionId: sessionId) else {
                 searchStart = valueEnd
                 continue
             }
@@ -1465,7 +1811,7 @@ private final class MPVHeaderProxyCore {
         }
     }
 
-    private func rewriteUnquotedURIAttributes(in line: inout String, baseURL: URL, sessionId: String, rewrittenCount: inout Int) {
+    private func rewriteUnquotedURIAttributes(in line: inout String, playlistURL: URL, sessionId: String, rewrittenCount: inout Int) {
         var searchStart = line.startIndex
         while let keyRange = line.range(of: "URI=", options: [.caseInsensitive], range: searchStart..<line.endIndex) {
             let valueStart = keyRange.upperBound
@@ -1477,7 +1823,7 @@ private final class MPVHeaderProxyCore {
             let valueEnd = line[valueStart...].firstIndex(of: ",") ?? line.endIndex
             let original = String(line[valueStart..<valueEnd]).trimmingCharacters(in: .whitespaces)
             guard !original.isEmpty,
-                  let proxied = proxiedPlaylistURLString(for: original, baseURL: baseURL, sessionId: sessionId) else {
+                  let proxied = proxiedPlaylistURLString(for: original, playlistURL: playlistURL, sessionId: sessionId) else {
                 searchStart = valueEnd
                 continue
             }
@@ -1488,10 +1834,12 @@ private final class MPVHeaderProxyCore {
         }
     }
 
-    private func proxiedPlaylistURLString(for reference: String, baseURL: URL, sessionId: String) -> URL? {
-        guard let resolved = URL(string: reference, relativeTo: baseURL)?.absoluteURL,
-              let scheme = resolved.scheme?.lowercased(),
-              scheme == "http" || scheme == "https" else {
+    private func proxiedPlaylistURLString(for reference: String, playlistURL: URL, sessionId: String) -> URL? {
+        guard let resolved = MPVHeaderProxyPlaylistRouting.resolve(
+            reference,
+            againstPlaylistURL: playlistURL
+        ), let scheme = resolved.scheme?.lowercased(),
+           scheme == "http" || scheme == "https" else {
             return nil
         }
 
@@ -1764,8 +2112,7 @@ private final class MPVHeaderProxyCore {
                 continue
             }
             if text[opening...].hasPrefix("<![CDATA[") {
-                // The validator currently permits CDATA, but a source-less BaseURL hidden in it
-                // cannot be rewritten without changing XML semantics. Fail closed.
+
                 guard !insideBaseURL,
                       let end = text.range(of: "]]>", range: opening..<text.endIndex)?.upperBound else {
                     return nil
@@ -1901,7 +2248,7 @@ private final class MPVHeaderProxyCore {
             let rawName = String(tag[nameStart..<index])
             while index < tag.endIndex, tag[index].isWhitespace { index = tag.index(after: index) }
             guard index < tag.endIndex, tag[index] == "=" else {
-                // The first token is the element name, not an attribute.
+
                 continue
             }
             index = tag.index(after: index)
@@ -1913,8 +2260,7 @@ private final class MPVHeaderProxyCore {
             let localAttributeName = rawName.split(separator: ":").last?.lowercased() ?? ""
             let isReference: Bool
             if localAttributeName == "href" {
-                // The validator treats href as a network reference on every element, including
-                // elements which also have DASH-specific URL attributes.
+
                 isReference = true
             } else {
                 switch localElementName {
@@ -2214,6 +2560,40 @@ private final class MPVHeaderProxyCore {
         removed?.upstreamTransport.invalidateAndCancel()
     }
 
+    func originalTargetURL(for proxyURL: URL) -> URL? {
+        guard let sessionID = managedSessionID(from: proxyURL),
+              withSessionsLock({ sessions[sessionID] != nil }),
+              let components = URLComponents(url: proxyURL, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+
+        let pathParts = components.path.split(separator: "/")
+        let queryItems = components.queryItems ?? []
+        guard pathParts.count == 2,
+              queryItems.filter({ $0.name == "url" }).count == 1,
+              queryItems.filter({ $0.name == "token" }).count == 1,
+              queryItems.allSatisfy({ $0.name == "url" || $0.name == "token" }),
+              let encoded = queryItems.first(where: { $0.name == "url" })?.value else {
+            return nil
+        }
+        return decodeTargetURL(encoded)
+    }
+
+    func upstreamHealth(for proxyURL: URL) -> MPVHeaderProxyUpstreamHealth? {
+        guard let sessionID = managedSessionID(from: proxyURL) else { return nil }
+        let transport = withSessionsLock { sessions[sessionID]?.upstreamTransport }
+        return transport?.upstreamHealthSnapshot()
+    }
+
+    func upstreamProbeTarget(for proxyURL: URL) -> (url: URL, headers: [String: String])? {
+        guard let target = originalTargetURL(for: proxyURL),
+              let sessionID = managedSessionID(from: proxyURL),
+              let headers = withSessionsLock({ sessions[sessionID]?.headers }) else {
+            return nil
+        }
+        return (target, headers)
+    }
+
     private func managedSessionID(from proxyURL: URL) -> String? {
         guard let components = URLComponents(url: proxyURL, resolvingAgainstBaseURL: false),
               components.scheme?.lowercased() == "http",
@@ -2260,9 +2640,6 @@ private final class MPVHeaderProxyCore {
         }
     }
 
-    /// Keeps validator-accepted manifest bodies bounded across every live typed session. Active
-    /// playback naturally stays near the end of the LRU order because each request touches its
-    /// session; abandoned handoffs are therefore reclaimed first.
     private func setValidatedSession(_ newSession: Session, for sessionID: String) -> Bool {
         let incomingBytes = newSession.validatedRoutePolicy?.acceptedManifestByteCount ?? 0
         guard incomingBytes >= 0, incomingBytes <= maxAggregateValidatedManifestBytes else {
@@ -2299,23 +2676,1091 @@ private final class MPVHeaderProxyCore {
         return fits
     }
 
-    // Each proxy playback session owns one ephemeral URLSession. Rewritten HLS playlists keep
-    // the same proxy session ID, so their manifests, keys, and segments share the connection
-    // pool without sharing cookies, credentials, cache, or connections with another playback.
+    private final class PinnedAddressURLProtocol: URLProtocol {
+        private static let approvedAddressesKey = "app.eclipse.mpv-proxy.approved-addresses.v1"
+        private static let poolNamespaceKey = "app.eclipse.mpv-proxy.pool-namespace.v1"
+        private static let permitsPrivateApprovedAddressesKey =
+            "app.eclipse.mpv-proxy.permits-private-approved-addresses.v1"
+        private static let maximumResponseHeaderBytes = 128 * 1_024
+        private static let maximumChunkMetadataBytes = 64 * 1_024
+        private static let connectionSetupTimeout: TimeInterval = 15
+        private static let waitingConnectionTimeout: TimeInterval = 3
+        private static let reuseIdleTimeout: TimeInterval = 30
+        private static let maximumParkedConnections = 8
+        private static let headerTerminator = Data([13, 10, 13, 10])
+        private static let lineTerminator = Data([13, 10])
+
+        private enum BodyFraming {
+            case none
+            case contentLength(Int64)
+            case chunked
+            case untilClose
+        }
+
+        private struct ParkedConnection {
+            let connection: NWConnection
+            let key: String
+            let parkedAt: Date
+            let parkingID: UUID
+        }
+
+        private static let poolQueue = DispatchQueue(label: "app.eclipse.mpv-proxy.pinned-http.pool")
+        private static var parkedConnections: [ParkedConnection] = []
+
+        private static func poolKey(
+            namespace: String,
+            scheme: String,
+            address: String,
+            port: UInt16,
+            host: String
+        ) -> String {
+            "\(namespace)|\(scheme)|\(host.lowercased())|\(address)|\(port)"
+        }
+
+        private static func checkOutParkedConnection(forKey key: String) -> NWConnection? {
+            poolQueue.sync {
+                while let index = parkedConnections.lastIndex(where: { $0.key == key }) {
+                    let parked = parkedConnections.remove(at: index)
+                    let isFresh = Date().timeIntervalSince(parked.parkedAt) < reuseIdleTimeout
+                    if isFresh, case .ready = parked.connection.state {
+                        return parked.connection
+                    }
+                    parked.connection.cancel()
+                }
+                return nil
+            }
+        }
+
+        private static func park(_ connection: NWConnection, forKey key: String) {
+            poolQueue.async {
+                let parkingID = UUID()
+                parkedConnections.append(
+                    ParkedConnection(
+                        connection: connection,
+                        key: key,
+                        parkedAt: Date(),
+                        parkingID: parkingID
+                    )
+                )
+                if parkedConnections.count > maximumParkedConnections {
+                    parkedConnections.removeFirst().connection.cancel()
+                }
+                poolQueue.asyncAfter(deadline: .now() + reuseIdleTimeout) { [weak connection] in
+                    guard let connection,
+                          let index = parkedConnections.firstIndex(where: {
+                              $0.connection === connection && $0.parkingID == parkingID
+                          }) else {
+                        return
+                    }
+                    parkedConnections.remove(at: index)
+                    connection.cancel()
+                }
+            }
+        }
+
+        private final class BodyInflater {
+            private enum Coding {
+                case gzip
+                case deflate
+            }
+
+            private let coding: Coding
+            private var stream = z_stream()
+            private var streamActive = false
+            private var streamEnded = false
+            private var deflateSniffBuffer = Data()
+            private let maximumOutputBytesPerOperation = 8 * 1_024 * 1_024
+            private let maximumExpansionRatio = 256
+            private let expansionAllowanceBytes = 1 * 1_024 * 1_024
+            private var totalInputBytes = 0
+            private var totalOutputBytes = 0
+
+            init?(contentCoding: String) {
+                switch contentCoding {
+                case "gzip", "x-gzip":
+                    coding = .gzip
+                case "deflate":
+                    coding = .deflate
+                default:
+                    return nil
+                }
+            }
+
+            deinit {
+                if streamActive {
+                    inflateEnd(&stream)
+                }
+            }
+
+            func feed(_ data: Data) -> Data? {
+                guard !streamEnded else { return data.isEmpty ? Data() : nil }
+                guard recordInputBytes(data.count) else { return nil }
+                var input = data
+                if !streamActive {
+                    if coding == .deflate {
+                        deflateSniffBuffer.append(input)
+                        guard deflateSniffBuffer.count >= 2 else { return Data() }
+                        input = deflateSniffBuffer
+                        deflateSniffBuffer = Data()
+                    }
+                    guard beginStream(firstBytes: input) else { return nil }
+                }
+                guard !input.isEmpty else { return Data() }
+                var output = Data()
+                let succeeded = input.withUnsafeBytes { rawBuffer -> Bool in
+                    guard let baseAddress = rawBuffer.bindMemory(to: Bytef.self).baseAddress else {
+                        return false
+                    }
+                    stream.next_in = UnsafeMutablePointer<Bytef>(mutating: baseAddress)
+                    stream.avail_in = uInt(input.count)
+                    let chunkSize = 64 * 1_024
+                    var chunk = [UInt8](repeating: 0, count: chunkSize)
+                    while stream.avail_in > 0, !streamEnded {
+                        var status: Int32 = Z_OK
+                        chunk.withUnsafeMutableBufferPointer { buffer in
+                            stream.next_out = buffer.baseAddress
+                            stream.avail_out = uInt(chunkSize)
+                            status = inflate(&stream, Z_NO_FLUSH)
+                            let written = chunkSize - Int(stream.avail_out)
+                            if let outputBase = buffer.baseAddress, written > 0 {
+                                guard output.count <= maximumOutputBytesPerOperation - written,
+                                      recordOutputBytes(written) else {
+                                    status = Z_MEM_ERROR
+                                    return
+                                }
+                                output.append(outputBase, count: written)
+                            }
+                        }
+                        if status == Z_STREAM_END {
+                            guard stream.avail_in == 0 else { return false }
+                            streamEnded = true
+                            break
+                        }
+                        if status == Z_BUF_ERROR, stream.avail_in == 0 {
+                            break
+                        }
+                        guard status == Z_OK else { return false }
+                    }
+                    return true
+                }
+                return succeeded ? output : nil
+            }
+
+            func finish() -> Data? {
+                guard streamActive, !streamEnded else {
+                    return streamEnded ? Data() : nil
+                }
+
+                var output = Data()
+                let chunkSize = 64 * 1_024
+                var chunk = [UInt8](repeating: 0, count: chunkSize)
+                while !streamEnded {
+                    var status: Int32 = Z_OK
+                    chunk.withUnsafeMutableBufferPointer { buffer in
+                        stream.next_in = nil
+                        stream.avail_in = 0
+                        stream.next_out = buffer.baseAddress
+                        stream.avail_out = uInt(chunkSize)
+                        status = inflate(&stream, Z_FINISH)
+                        let written = chunkSize - Int(stream.avail_out)
+                        if let outputBase = buffer.baseAddress, written > 0 {
+                            guard output.count <= maximumOutputBytesPerOperation - written,
+                                  recordOutputBytes(written) else {
+                                status = Z_MEM_ERROR
+                                return
+                            }
+                            output.append(outputBase, count: written)
+                        }
+                    }
+                    if status == Z_STREAM_END {
+                        streamEnded = true
+                        break
+                    }
+                    guard status == Z_OK else { return nil }
+                }
+                return output
+            }
+
+            private func recordInputBytes(_ count: Int) -> Bool {
+                let (next, overflow) = totalInputBytes.addingReportingOverflow(count)
+                guard !overflow else { return false }
+                totalInputBytes = next
+                return true
+            }
+
+            private func recordOutputBytes(_ count: Int) -> Bool {
+                let (nextOutput, outputOverflow) = totalOutputBytes.addingReportingOverflow(count)
+                let (scaledInput, ratioOverflow) = totalInputBytes.multipliedReportingOverflow(
+                    by: maximumExpansionRatio
+                )
+                let (limit, allowanceOverflow) = scaledInput.addingReportingOverflow(
+                    expansionAllowanceBytes
+                )
+                guard !outputOverflow, !ratioOverflow, !allowanceOverflow,
+                      nextOutput <= limit else { return false }
+                totalOutputBytes = nextOutput
+                return true
+            }
+
+            private func beginStream(firstBytes: Data) -> Bool {
+                let windowBits: Int32
+                switch coding {
+                case .gzip:
+                    windowBits = 15 + 16
+                case .deflate:
+                    let bytes = [UInt8](firstBytes.prefix(2))
+                    let looksLikeZlib = bytes.count >= 2
+                        && (Int(bytes[0]) & 0x0F) == 8
+                        && ((Int(bytes[0]) << 8) | Int(bytes[1])) % 31 == 0
+                    windowBits = looksLikeZlib ? 15 : -15
+                }
+                let status = inflateInit2_(&stream, windowBits, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
+                guard status == Z_OK else { return false }
+                streamActive = true
+                return true
+            }
+        }
+
+        private let stateQueue = DispatchQueue(
+            label: "app.eclipse.mpv-proxy.pinned-http.connection.\(UUID().uuidString)",
+            qos: .userInitiated
+        )
+        private var approvedAddresses: [String] = []
+        private var poolNamespace = ""
+        private var nextAddressIndex = 0
+        private var connection: NWConnection?
+        private var connectionReachedReady = false
+        private var connectionWaitingDeadlineScheduled = false
+        private var receiveBuffer = Data()
+        private var responseDelivered = false
+        private var bodyFraming: BodyFraming = .untilClose
+        private var chunkBytesRemaining: Int?
+        private var awaitingChunkTerminator = false
+        private var readingChunkTrailers = false
+        private var stopped = false
+        private var finished = false
+        private var reusedConnection = false
+        private var currentPoolKey: String?
+        private var responseAllowsReuse = false
+        private var anyBytesReceived = false
+        private var bodyInflater: BodyInflater?
+
+        static func requestByPinning(
+            _ request: URLRequest,
+            to rawAddresses: [String],
+            poolNamespace: String,
+            permitsPrivateApprovedAddresses: Bool
+        ) -> URLRequest? {
+            var seen = Set<String>()
+            let addresses = rawAddresses.compactMap {
+                MPVHeaderProxyPinnedAddressPolicy.normalizeApprovedAddress(
+                    $0,
+                    permitsPrivateApprovedAddresses: permitsPrivateApprovedAddresses
+                )
+            }
+                .filter { seen.insert($0).inserted }
+            guard !addresses.isEmpty, !poolNamespace.isEmpty,
+                  let mutable = (request as NSURLRequest).mutableCopy() as? NSMutableURLRequest else {
+                return nil
+            }
+            URLProtocol.setProperty(addresses, forKey: approvedAddressesKey, in: mutable)
+            URLProtocol.setProperty(poolNamespace, forKey: poolNamespaceKey, in: mutable)
+            URLProtocol.setProperty(
+                permitsPrivateApprovedAddresses,
+                forKey: permitsPrivateApprovedAddressesKey,
+                in: mutable
+            )
+            return mutable as URLRequest
+        }
+
+        override class func canInit(with request: URLRequest) -> Bool {
+
+            guard let scheme = request.url?.scheme?.lowercased() else { return false }
+            return scheme == "http" || scheme == "https"
+        }
+
+        override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+            request
+        }
+
+        override func startLoading() {
+            stateQueue.async { [weak self] in
+                self?.startLoadingOnQueue()
+            }
+        }
+
+        override func stopLoading() {
+            stateQueue.async { [weak self] in
+                guard let self else { return }
+                self.stopped = true
+                self.tearDownConnection()
+            }
+        }
+
+        private func startLoadingOnQueue() {
+            guard !stopped, !finished,
+                  let url = request.url,
+                  let scheme = url.scheme?.lowercased(),
+                  scheme == "http" || scheme == "https",
+                  let host = url.host,
+                  let rawAddresses = URLProtocol.property(
+                    forKey: Self.approvedAddressesKey,
+                    in: request
+                  ) as? [String],
+                  let requestPoolNamespace = URLProtocol.property(
+                    forKey: Self.poolNamespaceKey,
+                    in: request
+                  ) as? String,
+                  !requestPoolNamespace.isEmpty else {
+                fail(.unsupportedURL)
+                return
+            }
+            guard request.httpBody == nil, request.httpBodyStream == nil else {
+                fail(.dataLengthExceedsMaximum)
+                return
+            }
+
+            var seen = Set<String>()
+            let permitsPrivateApprovedAddresses = URLProtocol.property(
+                forKey: Self.permitsPrivateApprovedAddressesKey,
+                in: request
+            ) as? Bool ?? false
+            approvedAddresses = rawAddresses.compactMap {
+                MPVHeaderProxyPinnedAddressPolicy.normalizeApprovedAddress(
+                    $0,
+                    permitsPrivateApprovedAddresses: permitsPrivateApprovedAddresses
+                )
+            }
+                .filter { seen.insert($0).inserted }
+            poolNamespace = requestPoolNamespace
+            guard !approvedAddresses.isEmpty,
+                  !host.isEmpty,
+                  serializedRequest(for: url) != nil else {
+                fail(.badURL)
+                return
+            }
+            if let parked = checkOutPooledConnection() {
+                adoptReusedConnection(parked)
+                return
+            }
+            startNextConnection()
+        }
+
+        private func checkOutPooledConnection() -> NWConnection? {
+            guard let url = request.url,
+                  let scheme = url.scheme?.lowercased(),
+                  let host = url.host,
+                  let port = Self.port(for: url, scheme: scheme) else {
+                return nil
+            }
+            for address in approvedAddresses {
+                let key = Self.poolKey(
+                    namespace: poolNamespace,
+                    scheme: scheme,
+                    address: address,
+                    port: port.rawValue,
+                    host: host
+                )
+                if let parked = Self.checkOutParkedConnection(forKey: key) {
+                    currentPoolKey = key
+                    return parked
+                }
+            }
+            return nil
+        }
+
+        private func adoptReusedConnection(_ connection: NWConnection) {
+            reusedConnection = true
+            connectionReachedReady = true
+            self.connection = connection
+            connection.stateUpdateHandler = { [weak self, weak connection] state in
+                guard let self, let connection else { return }
+                self.stateQueue.async { [weak self, weak connection] in
+                    guard let self, let connection, self.connection === connection,
+                          !self.stopped, !self.finished else { return }
+                    if case .failed = state {
+                        self.handleTransportFailure()
+                    }
+                }
+            }
+            sendRequest(on: connection)
+        }
+
+        private var canRetryWithFreshConnection: Bool {
+            reusedConnection && !anyBytesReceived && !stopped && !finished
+        }
+
+        private func handleTransportFailure() {
+            if canRetryWithFreshConnection {
+                retryWithFreshConnection()
+            } else {
+                fail(.networkConnectionLost)
+            }
+        }
+
+        private func retryWithFreshConnection() {
+            reusedConnection = false
+            responseAllowsReuse = false
+            currentPoolKey = nil
+            tearDownConnection()
+            receiveBuffer.removeAll(keepingCapacity: false)
+            startNextConnection()
+        }
+
+        private func startNextConnection() {
+            guard !stopped, !finished, nextAddressIndex < approvedAddresses.count,
+                  let url = request.url,
+                  let scheme = url.scheme?.lowercased(),
+                  let host = url.host else {
+                fail(.cannotConnectToHost)
+                return
+            }
+            let address = approvedAddresses[nextAddressIndex]
+            nextAddressIndex += 1
+            guard let endpointHost = Self.numericEndpointHost(address),
+                  let port = Self.port(for: url, scheme: scheme) else {
+                startNextConnection()
+                return
+            }
+            reusedConnection = false
+            currentPoolKey = Self.poolKey(
+                namespace: poolNamespace,
+                scheme: scheme,
+                address: address,
+                port: port.rawValue,
+                host: host
+            )
+
+            let parameters: NWParameters
+            if scheme == "https" {
+                let tls = NWProtocolTLS.Options()
+                sec_protocol_options_set_tls_server_name(tls.securityProtocolOptions, host)
+                sec_protocol_options_add_tls_application_protocol(
+                    tls.securityProtocolOptions,
+                    "http/1.1"
+                )
+                let trustQueue = stateQueue
+                sec_protocol_options_set_verify_block(
+                    tls.securityProtocolOptions,
+                    { _, trust, complete in
+                        let secTrust = sec_trust_copy_ref(trust).takeRetainedValue()
+                        let policy = SecPolicyCreateSSL(true, host as CFString)
+                        guard SecTrustSetPolicies(secTrust, policy) == errSecSuccess else {
+                            complete(false)
+                            return
+                        }
+                        complete(SecTrustEvaluateWithError(secTrust, nil))
+                    },
+                    trustQueue
+                )
+                parameters = NWParameters(tls: tls, tcp: NWProtocolTCP.Options())
+            } else {
+                parameters = NWParameters(tls: nil, tcp: NWProtocolTCP.Options())
+            }
+
+            connectionReachedReady = false
+            connectionWaitingDeadlineScheduled = false
+            let connection = NWConnection(host: endpointHost, port: port, using: parameters)
+            self.connection = connection
+            connection.stateUpdateHandler = { [weak self, weak connection] state in
+                guard let self, let connection else { return }
+                self.stateQueue.async { [weak self, weak connection] in
+                    guard let self, let connection, self.connection === connection,
+                          !self.stopped, !self.finished else { return }
+                    switch state {
+                    case .ready:
+                        self.connectionReachedReady = true
+                        self.sendRequest(on: connection)
+                    case .failed:
+                        self.handleConnectionFailure()
+                    case .waiting:
+
+                        guard !self.connectionWaitingDeadlineScheduled,
+                              !self.connectionReachedReady,
+                              self.nextAddressIndex < self.approvedAddresses.count else { break }
+                        self.connectionWaitingDeadlineScheduled = true
+                        self.scheduleSetupDeadline(
+                            for: connection,
+                            after: Self.waitingConnectionTimeout
+                        )
+                    case .cancelled:
+                        break
+                    default:
+                        break
+                    }
+                }
+            }
+            scheduleSetupDeadline(for: connection, after: Self.connectionSetupTimeout)
+            connection.start(queue: stateQueue)
+        }
+
+        private func handleConnectionFailure() {
+            if !connectionReachedReady, nextAddressIndex < approvedAddresses.count {
+                tearDownConnection()
+                startNextConnection()
+            } else {
+                fail(.cannotConnectToHost)
+            }
+        }
+
+        private func scheduleSetupDeadline(for connection: NWConnection, after interval: TimeInterval) {
+            stateQueue.asyncAfter(deadline: .now() + interval) { [weak self, weak connection] in
+                guard let self, let connection, self.connection === connection,
+                      !self.stopped, !self.finished, !self.connectionReachedReady else { return }
+                self.handleConnectionFailure()
+            }
+        }
+
+        private func sendRequest(on connection: NWConnection) {
+            guard let url = request.url, let bytes = serializedRequest(for: url) else {
+                fail(.badURL)
+                return
+            }
+            connection.send(content: bytes, completion: .contentProcessed { [weak self, weak connection] error in
+                guard let self, let connection else { return }
+                self.stateQueue.async { [weak self, weak connection] in
+                    guard let self, let connection, self.connection === connection,
+                          !self.stopped, !self.finished else { return }
+                    if error != nil {
+                        self.handleTransportFailure()
+                    } else {
+                        self.receiveNext(on: connection)
+                    }
+                }
+            })
+        }
+
+        private func receiveNext(on connection: NWConnection) {
+            guard !stopped, !finished, self.connection === connection else { return }
+            if task?.state == .suspended {
+                stateQueue.asyncAfter(deadline: .now() + 0.05) { [weak self, weak connection] in
+                    guard let self, let connection else { return }
+                    self.receiveNext(on: connection)
+                }
+                return
+            }
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1_024) {
+                [weak self, weak connection] content, _, isComplete, error in
+                guard let self, let connection else { return }
+                self.stateQueue.async { [weak self, weak connection] in
+                    guard let self, let connection, self.connection === connection,
+                          !self.stopped, !self.finished else { return }
+                    if let content, !content.isEmpty {
+                        self.anyBytesReceived = true
+                        self.receiveBuffer.append(content)
+                        guard self.consumeAvailableBytes() else { return }
+                    }
+                    if error != nil {
+                        self.handleTransportFailure()
+                        return
+                    }
+                    if isComplete {
+                        self.handleEndOfStream()
+                    } else {
+                        self.receiveNext(on: connection)
+                    }
+                }
+            }
+        }
+
+        private func consumeAvailableBytes() -> Bool {
+            if !responseDelivered {
+                while true {
+                    guard let headerRange = receiveBuffer.range(of: Self.headerTerminator) else {
+                        if receiveBuffer.count > Self.maximumResponseHeaderBytes {
+                            fail(.badServerResponse)
+                            return false
+                        }
+                        return true
+                    }
+                    let headerData = receiveBuffer[..<headerRange.lowerBound]
+                    receiveBuffer.removeSubrange(..<headerRange.upperBound)
+                    guard let parsed = parseResponseHeader(Data(headerData)) else {
+                        fail(.badServerResponse)
+                        return false
+                    }
+                    if (100...199).contains(parsed.response.statusCode) {
+                        continue
+                    }
+
+                    if Self.redirectStatusCodes.contains(parsed.response.statusCode),
+                       let location = parsed.location,
+                       let baseURL = request.url,
+                       let destination = URL(string: location, relativeTo: baseURL)?.absoluteURL,
+                       let mutable = (request as NSURLRequest).mutableCopy() as? NSMutableURLRequest {
+                        mutable.url = destination
+                        URLProtocol.removeProperty(
+                            forKey: Self.approvedAddressesKey,
+                            in: mutable
+                        )
+                        URLProtocol.removeProperty(
+                            forKey: Self.permitsPrivateApprovedAddressesKey,
+                            in: mutable
+                        )
+                        signalRedirect(to: mutable as URLRequest, response: parsed.response)
+                        return false
+                    }
+
+                    responseDelivered = true
+                    bodyFraming = parsed.framing
+                    responseAllowsReuse = parsed.connectionAllowsReuse
+                    if case .none = parsed.framing {
+                        bodyInflater = nil
+                    } else if let coding = parsed.contentCoding {
+                        guard let inflater = BodyInflater(contentCoding: coding) else {
+                            fail(.cannotDecodeContentData)
+                            return false
+                        }
+                        bodyInflater = inflater
+                    } else {
+                        bodyInflater = nil
+                    }
+                    client?.urlProtocol(
+                        self,
+                        didReceive: parsed.response,
+                        cacheStoragePolicy: .notAllowed
+                    )
+                    if case .none = bodyFraming {
+                        succeed()
+                        return false
+                    }
+                    break
+                }
+            }
+
+            switch bodyFraming {
+            case .none:
+                succeed()
+                return false
+            case .untilClose:
+                if !receiveBuffer.isEmpty {
+                    let bytes = receiveBuffer
+                    receiveBuffer.removeAll(keepingCapacity: true)
+                    guard deliverBodyBytes(bytes) else { return false }
+                }
+                return true
+            case .contentLength(let initialRemaining):
+                var remaining = initialRemaining
+                guard remaining >= 0 else {
+                    fail(.badServerResponse)
+                    return false
+                }
+                if remaining == 0 {
+                    guard receiveBuffer.isEmpty else {
+                        fail(.badServerResponse)
+                        return false
+                    }
+                    succeed()
+                    return false
+                }
+                guard !receiveBuffer.isEmpty else { return true }
+                let count = min(Int64(receiveBuffer.count), remaining)
+                let bytes = Data(receiveBuffer.prefix(Int(count)))
+                receiveBuffer.removeFirst(Int(count))
+                remaining -= count
+                bodyFraming = .contentLength(remaining)
+                guard deliverBodyBytes(bytes) else { return false }
+                if remaining == 0 {
+                    guard receiveBuffer.isEmpty else {
+                        fail(.badServerResponse)
+                        return false
+                    }
+                    succeed()
+                    return false
+                }
+                return true
+            case .chunked:
+                return consumeChunkedBody()
+            }
+        }
+
+        private func consumeChunkedBody() -> Bool {
+            while !finished {
+                if readingChunkTrailers {
+                    if receiveBuffer.starts(with: Self.lineTerminator) {
+                        receiveBuffer.removeFirst(Self.lineTerminator.count)
+                        guard receiveBuffer.isEmpty else {
+                            fail(.badServerResponse)
+                            return false
+                        }
+                        succeed()
+                        return false
+                    }
+                    guard let trailerEnd = receiveBuffer.range(of: Self.headerTerminator) else {
+                        if receiveBuffer.count > Self.maximumChunkMetadataBytes {
+                            fail(.badServerResponse)
+                            return false
+                        }
+                        return true
+                    }
+                    receiveBuffer.removeSubrange(..<trailerEnd.upperBound)
+                    guard receiveBuffer.isEmpty else {
+                        fail(.badServerResponse)
+                        return false
+                    }
+                    succeed()
+                    return false
+                }
+
+                if awaitingChunkTerminator {
+                    guard receiveBuffer.count >= 2 else { return true }
+                    guard receiveBuffer.prefix(2).elementsEqual(Self.lineTerminator) else {
+                        fail(.badServerResponse)
+                        return false
+                    }
+                    receiveBuffer.removeFirst(2)
+                    awaitingChunkTerminator = false
+                    continue
+                }
+
+                if let remaining = chunkBytesRemaining {
+                    guard !receiveBuffer.isEmpty else { return true }
+                    let count = min(remaining, receiveBuffer.count)
+                    let bytes = Data(receiveBuffer.prefix(count))
+                    receiveBuffer.removeFirst(count)
+                    let nextRemaining = remaining - count
+                    if nextRemaining == 0 {
+                        chunkBytesRemaining = nil
+                        awaitingChunkTerminator = true
+                    } else {
+                        chunkBytesRemaining = nextRemaining
+                    }
+                    if !bytes.isEmpty {
+                        guard deliverBodyBytes(bytes) else { return false }
+                    }
+                    continue
+                }
+
+                guard let lineEnd = receiveBuffer.range(of: Self.lineTerminator) else {
+                    if receiveBuffer.count > Self.maximumChunkMetadataBytes {
+                        fail(.badServerResponse)
+                        return false
+                    }
+                    return true
+                }
+                guard let line = String(
+                    data: receiveBuffer[..<lineEnd.lowerBound],
+                    encoding: .ascii
+                ) else {
+                    fail(.badServerResponse)
+                    return false
+                }
+                receiveBuffer.removeSubrange(..<lineEnd.upperBound)
+                let sizeText = line.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false)[0]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !sizeText.isEmpty,
+                      let size = UInt64(sizeText, radix: 16),
+                      size <= UInt64(Int.max) else {
+                    fail(.badServerResponse)
+                    return false
+                }
+                if size == 0 {
+                    readingChunkTrailers = true
+                } else {
+                    chunkBytesRemaining = Int(size)
+                }
+            }
+            return false
+        }
+
+        private func handleEndOfStream() {
+            guard !finished else { return }
+            if canRetryWithFreshConnection {
+                retryWithFreshConnection()
+                return
+            }
+            guard responseDelivered else {
+                fail(.badServerResponse)
+                return
+            }
+            switch bodyFraming {
+            case .untilClose:
+                if !receiveBuffer.isEmpty {
+                    let bytes = receiveBuffer
+                    receiveBuffer.removeAll()
+                    guard deliverBodyBytes(bytes) else { return }
+                }
+                succeed()
+            case .none:
+                succeed()
+            case .contentLength(let remaining):
+                if remaining == 0 {
+                    succeed()
+                } else {
+                    fail(.networkConnectionLost)
+                }
+            case .chunked:
+                fail(.networkConnectionLost)
+            }
+        }
+
+        private func parseResponseHeader(
+            _ data: Data
+        ) -> (
+            response: HTTPURLResponse,
+            framing: BodyFraming,
+            location: String?,
+            connectionAllowsReuse: Bool,
+            contentCoding: String?
+        )? {
+            guard let text = String(data: data, encoding: .isoLatin1) else { return nil }
+            let lines = text.components(separatedBy: "\r\n")
+            guard let statusLine = lines.first else { return nil }
+            let statusParts = statusLine.split(separator: " ", maxSplits: 2)
+            guard statusParts.count >= 2,
+                  statusParts[0].hasPrefix("HTTP/1."),
+                  let statusCode = Int(statusParts[1]),
+                  (100...599).contains(statusCode),
+                  let url = request.url else { return nil }
+
+            var valuesByLowerName: [String: [String]] = [:]
+            var originalNameByLowerName: [String: String] = [:]
+            for line in lines.dropFirst() {
+                guard !line.isEmpty,
+                      line.first != " ", line.first != "\t",
+                      let separator = line.firstIndex(of: ":") else { return nil }
+                let name = String(line[..<separator])
+                let value = String(line[line.index(after: separator)...])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard Self.isValidHeaderName(name),
+                      !value.contains("\r"), !value.contains("\n") else { return nil }
+                let lower = name.lowercased()
+                originalNameByLowerName[lower] = originalNameByLowerName[lower] ?? name
+                valuesByLowerName[lower, default: []].append(value)
+            }
+
+            var responseHeaders: [String: String] = [:]
+            for (lower, values) in valuesByLowerName {
+                guard let name = originalNameByLowerName[lower] else { continue }
+                responseHeaders[name] = values.joined(separator: ", ")
+            }
+            let contentCodings = (valuesByLowerName["content-encoding"] ?? [])
+                .flatMap { $0.split(separator: ",") }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                .filter { !$0.isEmpty }
+
+            let contentCoding: String?
+            if contentCodings.isEmpty || contentCodings == ["identity"] {
+                contentCoding = nil
+            } else if contentCodings.count == 1,
+                      let single = contentCodings.first,
+                      single == "gzip" || single == "x-gzip" || single == "deflate" {
+                contentCoding = single
+            } else {
+                return nil
+            }
+            if contentCoding != nil {
+                responseHeaders = responseHeaders.filter { name, _ in
+                    let lower = name.lowercased()
+                    return lower != "content-encoding" && lower != "content-length"
+                }
+            }
+
+            let connectionTokens = (valuesByLowerName["connection"] ?? [])
+                .flatMap { $0.split(separator: ",") }
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            let connectionAllowsReuse = statusParts[0] == "HTTP/1.1"
+                && !connectionTokens.contains("close")
+
+            guard let response = HTTPURLResponse(
+                url: url,
+                statusCode: statusCode,
+                httpVersion: "HTTP/1.1",
+                headerFields: responseHeaders
+            ) else { return nil }
+
+            let method = request.httpMethod?.uppercased() ?? "GET"
+            let framing: BodyFraming
+            if method == "HEAD" || statusCode == 204 || statusCode == 304 {
+                framing = .none
+            } else {
+                let transferCodings = (valuesByLowerName["transfer-encoding"] ?? [])
+                    .flatMap { $0.split(separator: ",") }
+                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                    .filter { !$0.isEmpty }
+                if !transferCodings.isEmpty {
+                    guard transferCodings == ["chunked"] else { return nil }
+                    framing = .chunked
+                } else if let rawLengths = valuesByLowerName["content-length"] {
+                    let lengths = rawLengths.flatMap { $0.split(separator: ",") }
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                    guard let first = lengths.first,
+                          lengths.allSatisfy({ $0 == first }),
+                          let length = Int64(first), length >= 0 else { return nil }
+                    framing = .contentLength(length)
+                } else {
+                    framing = .untilClose
+                }
+            }
+            return (
+                response,
+                framing,
+                valuesByLowerName["location"]?.first,
+                connectionAllowsReuse,
+                contentCoding
+            )
+        }
+
+        private func serializedRequest(for url: URL) -> Data? {
+            let method = request.httpMethod?.uppercased() ?? "GET"
+            guard method == "GET" || method == "HEAD",
+                  let scheme = url.scheme?.lowercased(),
+                  let host = url.host,
+                  let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+                return nil
+            }
+            var target = components.percentEncodedPath
+            if target.isEmpty { target = "/" }
+            if let query = components.percentEncodedQuery {
+                target += "?\(query)"
+            }
+            guard !target.contains("\r"), !target.contains("\n") else { return nil }
+
+            let hostForHeader = host.contains(":") ? "[\(host)]" : host
+            let defaultPort = scheme == "https" ? 443 : 80
+            let authority = url.port.map { $0 == defaultPort ? hostForHeader : "\(hostForHeader):\($0)" }
+                ?? hostForHeader
+            var headers: [String: String] = [:]
+            for (name, value) in request.allHTTPHeaderFields ?? [:] {
+                let lower = name.lowercased()
+                guard lower != "host", lower != "connection", lower != "proxy-connection",
+                      lower != "transfer-encoding", lower != "content-length",
+                      lower != "accept-encoding",
+                      Self.isValidHeaderName(name),
+                      !value.contains("\r"), !value.contains("\n") else { continue }
+                headers[name] = value
+            }
+
+            headers["Accept-Encoding"] = "identity"
+
+            var lines = ["\(method) \(target) HTTP/1.1", "Host: \(authority)"]
+            for name in headers.keys.sorted(by: { $0.lowercased() < $1.lowercased() }) {
+                guard let value = headers[name] else { continue }
+                lines.append("\(name): \(value)")
+            }
+            lines.append("")
+            lines.append("")
+            return Data(lines.joined(separator: "\r\n").utf8)
+        }
+
+        private static func numericEndpointHost(_ address: String) -> NWEndpoint.Host? {
+            if IPv4Address(address) != nil || IPv6Address(address) != nil {
+
+                return NWEndpoint.Host(address)
+            }
+            return nil
+        }
+
+        private static func port(for url: URL, scheme: String) -> NWEndpoint.Port? {
+            let rawPort = url.port ?? (scheme == "https" ? 443 : 80)
+            guard rawPort > 0, rawPort <= Int(UInt16.max) else { return nil }
+            return NWEndpoint.Port(rawValue: UInt16(rawPort))
+        }
+
+        private static func isValidHeaderName(_ value: String) -> Bool {
+            guard !value.isEmpty else { return false }
+            let allowed = CharacterSet(charactersIn: "!#$%&'*+-.^_`|~0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz")
+            return value.unicodeScalars.allSatisfy { allowed.contains($0) }
+        }
+
+        private static let redirectStatusCodes: Set<Int> = [301, 302, 303, 307, 308]
+
+        private func deliverBodyBytes(_ bytes: Data) -> Bool {
+            guard !bytes.isEmpty else { return true }
+            guard let inflater = bodyInflater else {
+                client?.urlProtocol(self, didLoad: bytes)
+                return true
+            }
+            guard let inflated = inflater.feed(bytes) else {
+                fail(.cannotDecodeContentData)
+                return false
+            }
+            if !inflated.isEmpty {
+                client?.urlProtocol(self, didLoad: inflated)
+            }
+            return true
+        }
+
+        private func succeed() {
+            guard !finished, !stopped else { return }
+            if let inflater = bodyInflater {
+                guard let finalBytes = inflater.finish() else {
+                    fail(.cannotDecodeContentData)
+                    return
+                }
+                if !finalBytes.isEmpty {
+                    client?.urlProtocol(self, didLoad: finalBytes)
+                }
+                bodyInflater = nil
+            }
+            finished = true
+            client?.urlProtocolDidFinishLoading(self)
+            parkOrTearDownConnection()
+        }
+
+        private func parkOrTearDownConnection() {
+            let framingIsDelimited: Bool
+            switch bodyFraming {
+            case .untilClose:
+                framingIsDelimited = false
+            default:
+                framingIsDelimited = true
+            }
+            guard responseAllowsReuse,
+                  framingIsDelimited,
+                  receiveBuffer.isEmpty,
+                  let connection,
+                  let key = currentPoolKey else {
+                tearDownConnection()
+                return
+            }
+            connection.stateUpdateHandler = nil
+            self.connection = nil
+            Self.park(connection, forKey: key)
+        }
+
+        private func fail(_ code: URLError.Code) {
+            guard !finished, !stopped else { return }
+            finished = true
+            client?.urlProtocol(self, didFailWithError: URLError(code))
+            tearDownConnection()
+        }
+
+        private func signalRedirect(to redirect: URLRequest, response: HTTPURLResponse) {
+            guard !finished, !stopped else { return }
+            finished = true
+            client?.urlProtocol(self, wasRedirectedTo: redirect, redirectResponse: response)
+            client?.urlProtocol(self, didFailWithError: URLError(.cancelled))
+            tearDownConnection()
+        }
+
+        private func tearDownConnection() {
+            connection?.stateUpdateHandler = nil
+            connection?.cancel()
+            connection = nil
+        }
+    }
+
     private final class UpstreamTransport: NSObject, URLSessionDataDelegate {
         private let lock = NSLock()
         private let delegateQueue: OperationQueue
         private let requestStartQueue = DispatchQueue(label: "mpv.header.proxy.request-start")
+        private let connectionPoolNamespace = UUID().uuidString
         private let minimumRequestStartInterval: TimeInterval
+        private let pinsUpstreamAddresses: Bool
         private var urlSession: URLSession!
         private var bridges: [Int: UpstreamBridge] = [:]
         private var nextRequestStartByHost: [String: TimeInterval] = [:]
         private var rateLimitedUntilByHost: [String: TimeInterval] = [:]
         private var rateLimitCountByHost: [String: Int] = [:]
         private var isInvalidated = false
+        private var upstreamFailureCount = 0
+        private var lastUpstreamFailureAt: Date?
+        private var lastUpstreamSuccessAt: Date?
 
-        init(minimumRequestStartInterval: TimeInterval) {
+        init(minimumRequestStartInterval: TimeInterval, pinsUpstreamAddresses: Bool) {
             self.minimumRequestStartInterval = max(0, minimumRequestStartInterval)
+            self.pinsUpstreamAddresses = pinsUpstreamAddresses
             let delegateQueue = OperationQueue()
             delegateQueue.maxConcurrentOperationCount = 1
             delegateQueue.qualityOfService = .userInitiated
@@ -2331,19 +3776,36 @@ private final class MPVHeaderProxyCore {
             configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
             configuration.timeoutIntervalForRequest = 120
             configuration.timeoutIntervalForResource = 6 * 60 * 60
+
+            if pinsUpstreamAddresses {
+                configuration.protocolClasses = [PinnedAddressURLProtocol.self]
+            }
             if minimumRequestStartInterval > 0 {
                 configuration.httpMaximumConnectionsPerHost = 4
             }
             urlSession = URLSession(configuration: configuration, delegate: self, delegateQueue: delegateQueue)
         }
 
-        func start(_ bridge: UpstreamBridge, request: URLRequest) -> Bool {
+        func start(
+            _ bridge: UpstreamBridge,
+            request: URLRequest,
+            approvedAddresses: [String],
+            permitsPrivateApprovedAddresses: Bool
+        ) -> Bool {
             lock.lock()
             guard !isInvalidated else {
                 lock.unlock()
                 return false
             }
-            let task = urlSession.dataTask(with: request)
+            guard let pinnedRequest = pinnedRequest(
+                request,
+                to: approvedAddresses,
+                permitsPrivateApprovedAddresses: permitsPrivateApprovedAddresses
+            ) else {
+                lock.unlock()
+                return false
+            }
+            let task = urlSession.dataTask(with: pinnedRequest)
             bridges[task.taskIdentifier] = bridge
             let hostKey = request.url?.host?.lowercased() ?? "unknown"
             let now = ProcessInfo.processInfo.systemUptime
@@ -2363,16 +3825,29 @@ private final class MPVHeaderProxyCore {
             return true
         }
 
-        /// Records a server-directed rate limit and prevents MPV's immediate segment retry loop
-        /// from hammering the same CDN. The first backoff is short; repeated 429s in one playback
-        /// session rise to an eight-second ceiling. A numeric Retry-After value can extend it.
+        func pinnedRequest(
+            _ request: URLRequest,
+            to approvedAddresses: [String],
+            permitsPrivateApprovedAddresses: Bool = false
+        ) -> URLRequest? {
+            guard pinsUpstreamAddresses else { return request }
+            return PinnedAddressURLProtocol.requestByPinning(
+                request,
+                to: approvedAddresses,
+                poolNamespace: connectionPoolNamespace,
+                permitsPrivateApprovedAddresses: permitsPrivateApprovedAddresses
+            )
+        }
+
         func recordRateLimit(for url: URL, retryAfter: TimeInterval?) -> TimeInterval {
             let hostKey = url.host?.lowercased() ?? "unknown"
             lock.lock()
             let count = min((rateLimitCountByHost[hostKey] ?? 0) + 1, 4)
             rateLimitCountByHost[hostKey] = count
             let exponentialDelay = pow(2.0, Double(count - 1))
-            let serverDelay = retryAfter.map { min(max($0, 0), 30) } ?? 0
+            let serverDelay = retryAfter.flatMap { value in
+                value.isFinite ? min(max(value, 0), 30) : nil
+            } ?? 0
             let delay = max(exponentialDelay, serverDelay)
             let until = ProcessInfo.processInfo.systemUptime + delay
             rateLimitedUntilByHost[hostKey] = max(rateLimitedUntilByHost[hostKey] ?? 0, until)
@@ -2402,8 +3877,7 @@ private final class MPVHeaderProxyCore {
                 let now = ProcessInfo.processInfo.systemUptime
                 let rateLimitedUntil = self.rateLimitedUntilByHost[hostKey] ?? 0
                 if rateLimitedUntil > now {
-                    // A 429 arrived after this task was originally scheduled. Allocate a fresh,
-                    // paced slot after the backoff so queued segments do not all resume together.
+
                     let rescheduledStart = max(
                         rateLimitedUntil,
                         self.nextRequestStartByHost[hostKey] ?? rateLimitedUntil
@@ -2434,6 +3908,29 @@ private final class MPVHeaderProxyCore {
             rateLimitCountByHost.removeAll()
             lock.unlock()
             urlSession.invalidateAndCancel()
+        }
+
+        func upstreamHealthSnapshot() -> MPVHeaderProxyUpstreamHealth {
+            lock.lock()
+            defer { lock.unlock() }
+            return MPVHeaderProxyUpstreamHealth(
+                failureCount: upstreamFailureCount,
+                lastFailureAt: lastUpstreamFailureAt,
+                lastSuccessAt: lastUpstreamSuccessAt
+            )
+        }
+
+        private func recordUpstreamSuccess() {
+            lock.lock()
+            lastUpstreamSuccessAt = Date()
+            lock.unlock()
+        }
+
+        private func recordUpstreamFailure() {
+            lock.lock()
+            upstreamFailureCount += 1
+            lastUpstreamFailureAt = Date()
+            lock.unlock()
         }
 
         private func bridge(for task: URLSessionTask) -> UpstreamBridge? {
@@ -2475,6 +3972,7 @@ private final class MPVHeaderProxyCore {
 
         func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
             guard let bridge = bridge(for: dataTask) else { return }
+            recordUpstreamSuccess()
             bridge.enqueue {
                 bridge.handleData(dataTask: dataTask, data: data)
             }
@@ -2510,6 +4008,16 @@ private final class MPVHeaderProxyCore {
         func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
             guard let bridge = bridge(for: task) else { return }
             let transportWasInvalidated = transportIsInvalidated
+            if !transportWasInvalidated {
+                if let error {
+                    let nsError = error as NSError
+                    if nsError.domain == NSURLErrorDomain, nsError.code != NSURLErrorCancelled {
+                        recordUpstreamFailure()
+                    }
+                } else {
+                    recordUpstreamSuccess()
+                }
+            }
             removeBridge(for: task)
             bridge.enqueue {
                 bridge.handleCompletion(
@@ -2538,6 +4046,7 @@ private final class MPVHeaderProxyCore {
         private let validatedRoutePolicy: ValidatedRoutePolicy?
         private let validatedRouteRole: String?
         private let validatedExpectedFiniteContentLength: Int64?
+        private let stremioAuthority: SkyStreamPinnedOriginAuthority?
         private let connection: NWConnection
         private let cachedPrefix: CachedPrefixContinuation?
         private let callbackQueue: OperationQueue
@@ -2554,13 +4063,13 @@ private final class MPVHeaderProxyCore {
         private var pendingDownstreamBytes = 0
         private var pendingStreamCompletionStatusCode: Int?
         private var rejectedCookieHeader: String?
+        private var revokedDestinationOrigins: MPVHeaderProxyRevokedOriginSet
+        private let configuredPrivateAuthorityRemainsAuthorized: Bool
         private var rateLimitRetryCount = 0
         private let maximumRateLimitRetries = 2
         private var expectedResponseByteCount: Int64?
-        /// Numeric public addresses approved immediately before each typed SkyStream dispatch.
-        /// URLSession metrics are checked against this set so a later resolver answer cannot be
-        /// silently consumed even though URLSession itself does not expose address pinning.
-        private var approvedSkyAddressesByHost: [String: Set<String>] = [:]
+
+        private var initialApprovedAddresses: [String] = []
 
         init(
             proxy: MPVHeaderProxyCore,
@@ -2580,6 +4089,8 @@ private final class MPVHeaderProxyCore {
             validatedRoutePolicy: ValidatedRoutePolicy?,
             validatedRouteRole: String?,
             validatedExpectedFiniteContentLength: Int64?,
+            stremioAuthority: SkyStreamPinnedOriginAuthority?,
+            revokedDestinationOrigins: MPVHeaderProxyRevokedOriginSet,
             connection: NWConnection,
             cachedPrefix: CachedPrefixContinuation? = nil
         ) {
@@ -2600,6 +4111,9 @@ private final class MPVHeaderProxyCore {
             self.validatedRoutePolicy = validatedRoutePolicy
             self.validatedRouteRole = validatedRouteRole
             self.validatedExpectedFiniteContentLength = validatedExpectedFiniteContentLength
+            self.stremioAuthority = stremioAuthority
+            self.revokedDestinationOrigins = revokedDestinationOrigins
+            self.configuredPrivateAuthorityRemainsAuthorized = stremioAuthority?.contains(targetURL) == true
             self.connection = connection
             self.cachedPrefix = cachedPrefix
             self.rejectedCookieHeader = request.value(forHTTPHeaderField: "Cookie")
@@ -2629,15 +4143,16 @@ private final class MPVHeaderProxyCore {
                         )
                     guard ValidatedRoutePolicy.canonicalURLKey(checked.url)
                             == ValidatedRoutePolicy.canonicalURLKey(targetURL),
-                          recordApprovedSkyDispatch(checked) else {
+                          let addresses = approvedAddresses(from: checked) else {
                         throw SkyStreamSecurityError.invalidResponse
                     }
+                    initialApprovedAddresses = addresses
                 } catch {
                     Logger.shared.log(
                         "\(proxy?.logPrefix ?? "MPVHeaderProxy")[\(requestId)]: rejected stale or unsafe SkyStream route before dispatch",
                         type: "Error"
                     )
-                    proxy?.sendSimpleResponse(connection, statusCode: 502, body: "Validated route expired")
+                    proxy?.sendSimpleResponse(connection, statusCode: 502, body: "Upstream route rejected")
                     finish()
                     return
                 }
@@ -2645,7 +4160,12 @@ private final class MPVHeaderProxyCore {
 
             await withCheckedContinuation { continuation in
                 self.continuation = continuation
-                guard upstreamTransport.start(self, request: request) else {
+                guard upstreamTransport.start(
+                    self,
+                    request: request,
+                    approvedAddresses: initialApprovedAddresses,
+                    permitsPrivateApprovedAddresses: permitsPrivateApprovedAddresses(for: targetURL)
+                ) else {
                     proxy?.sendSimpleResponse(connection, statusCode: 502, body: "Upstream session unavailable")
                     finish()
                     return
@@ -2659,33 +4179,46 @@ private final class MPVHeaderProxyCore {
 
         private static func skyNetworkPurpose(for routeRole: String?) -> SkyStreamNetworkPurpose {
             switch routeRole {
-            case SkyStreamValidatedRouteRole.manifest.rawValue:
+            case "manifest":
                 return .manifest
-            case SkyStreamValidatedRouteRole.encryptionKey.rawValue:
+            case "encryptionKey":
                 return .encryptionKey
-            case SkyStreamValidatedRouteRole.subtitle.rawValue:
+            case "subtitle":
                 return .subtitle
-            case SkyStreamValidatedRouteRole.streamRoot.rawValue:
+            case "streamRoot":
                 return .streamRoot
-            case SkyStreamValidatedRouteRole.mediaSegment.rawValue,
-                 SkyStreamValidatedRouteRole.initialization.rawValue,
-                 SkyStreamValidatedRouteRole.dashResource.rawValue:
+            case "mediaSegment", "initialization", "dashResource":
                 return .mediaSegment
             default:
                 return .streamRoot
             }
         }
 
-        @discardableResult
-        private func recordApprovedSkyDispatch(_ checked: SkyStreamValidatedRemoteURL) -> Bool {
-            let addresses = Set(
-                checked.checkedAddresses.compactMap(
-                    SkyStreamRemoteURLPolicy.normalizedPublicAddressString
+        private func genericNetworkPurpose(for url: URL) -> SkyStreamNetworkPurpose {
+            ValidatedRoutePolicy.canonicalURLKey(url)
+                == ValidatedRoutePolicy.canonicalURLKey(credentialOriginURL)
+                ? .streamRoot
+                : .mediaSegment
+        }
+
+        private func approvedAddresses(
+            from checked: SkyStreamValidatedRemoteURL
+        ) -> [String]? {
+            var seen = Set<String>()
+            let permitsPrivate = permitsPrivateApprovedAddresses(for: checked.url)
+            let addresses = checked.checkedAddresses.compactMap {
+                MPVHeaderProxyPinnedAddressPolicy.normalizeApprovedAddress(
+                    $0,
+                    permitsPrivateApprovedAddresses: permitsPrivate
                 )
-            )
-            guard !addresses.isEmpty else { return false }
-            approvedSkyAddressesByHost[checked.origin.host, default: []].formUnion(addresses)
-            return true
+            }
+                .filter { seen.insert($0).inserted }
+            return addresses.isEmpty ? nil : addresses
+        }
+
+        private func permitsPrivateApprovedAddresses(for url: URL) -> Bool {
+            configuredPrivateAuthorityRemainsAuthorized
+                && stremioAuthority?.contains(url) == true
         }
 
         func handleResponse(
@@ -2718,10 +4251,7 @@ private final class MPVHeaderProxyCore {
             guard (200...299).contains(http.statusCode) else {
                 if validatedRoutePolicy != nil,
                    http.statusCode == 401 || http.statusCode == 410 {
-                    // Signed SkyStream resources commonly use 401/410 for an expired route.
-                    // There is no useful browser challenge body to inspect, so immediately ask
-                    // the owning player to re-resolve the same provider. Legacy proxy sessions
-                    // retain their existing response handling.
+
                     let rejectedURL = http.url ?? targetURL
                     Logger.shared.log(
                         "\(proxy.logPrefix)[\(requestId)]: validated media route expired status=\(http.statusCode) target=\(logTarget(rejectedURL))",
@@ -2745,17 +4275,12 @@ private final class MPVHeaderProxyCore {
                 }
 
                 if [403, 429, 503].contains(http.statusCode), method != "HEAD" {
-                    // Challenge classification needs the small HTML body. Buffer at most 1 MiB;
-                    // ordinary blocked responses still pass through as the original HTTP status
-                    // and never invoke verification.
+
                     mode = .rejectedResponseProbe
                     completionHandler(.allow)
                     return
                 }
 
-                // Never pass an HTML error document to MPV as a media segment. A 429 response for
-                // an image-named HLS segment used to become a bogus JPEG frame and caused both
-                // visual artifacts and long playback hitches.
                 let backoffDescription: String
                 if http.statusCode == 429 {
                     let retryAfter = http.value(forHTTPHeaderField: "Retry-After")
@@ -2793,11 +4318,11 @@ private final class MPVHeaderProxyCore {
             }
 
             if validatedRoutePolicy != nil {
-                let lowerContentType = contentType.lowercased()
-                let looksLikeManifest = lowerContentType.contains("mpegurl")
-                    || lowerContentType.contains("dash+xml")
-                    || lowerContentType.contains("application/dash")
-                guard validatedRouteRole != "manifest", !looksLikeManifest else {
+                guard !MPVHeaderProxyValidatedRouteResponsePolicy.rejectsManifest(
+                    role: validatedRouteRole,
+                    contentType: contentType,
+                    responseURL: http.url
+                ) else {
                     Logger.shared.log(
                         "\(proxy.logPrefix)[\(requestId)]: rejected a refetched SkyStream manifest",
                         type: "Error"
@@ -2817,16 +4342,57 @@ private final class MPVHeaderProxyCore {
                 return
             }
 
-            mode = validatedRoutePolicy == nil
-                ? proxy.upstreamBodyMode(for: http, targetURL: targetURL)
-                : .stream
+            let effectiveResponseURL = MPVHeaderProxyPlaylistRouting.effectiveResponseURL(
+                originalRequestURL: targetURL,
+                responseURL: http.url
+            )
+            let verifiedCachedMediaContinuation: Bool
+            if let cachedPrefix, http.statusCode == 206 {
+                guard let continuationBodyByteCount = MPVHeaderProxyCachedContinuationPolicy
+                    .validatedBodyByteCount(
+                        statusCode: http.statusCode,
+                        contentRange: http.value(forHTTPHeaderField: "Content-Range"),
+                        contentLength: http.value(forHTTPHeaderField: "Content-Length"),
+                        transferEncoding: http.value(forHTTPHeaderField: "Transfer-Encoding"),
+                        responseEntityTag: http.value(forHTTPHeaderField: "ETag"),
+                        contentEncoding: http.value(forHTTPHeaderField: "Content-Encoding"),
+                        expectedEntityTag: cachedPrefix.strongEntityTag,
+                        expectedStart: cachedPrefix.upstreamStart,
+                        expectedEnd: cachedPrefix.upstreamEnd,
+                        expectedTotal: cachedPrefix.expectedTotalLength
+                    ) else {
+                    Logger.shared.log(
+                        "\(proxy.logPrefix)[\(requestId)]: rejected changed or malformed cached media continuation",
+                        type: errorLogType
+                    )
+                    proxy.sendSimpleResponse(
+                        connection,
+                        statusCode: 502,
+                        body: "Cached media identity changed"
+                    )
+                    completionHandler(.cancel)
+                    finish()
+                    return
+                }
+                expectedResponseByteCount = Int64(cachedPrefix.data.count)
+                    + continuationBodyByteCount
+                verifiedCachedMediaContinuation = true
+            } else {
+                verifiedCachedMediaContinuation = false
+            }
+            mode = proxy.upstreamBodyMode(
+                for: http,
+                targetURL: effectiveResponseURL,
+                isValidatedResource: validatedRoutePolicy != nil,
+                hasVerifiedCachedMediaContinuation: verifiedCachedMediaContinuation
+            )
             switch mode {
             case .playlist, .probe:
                 completionHandler(.allow)
             case .rejectedResponseProbe:
                 completionHandler(.allow)
             case .stream:
-                if let cachedPrefix, http.statusCode == 206 {
+                if let cachedPrefix, verifiedCachedMediaContinuation {
                     proxy.sendResponseHeaders(connection, statusCode: cachedPrefix.responseStatus, headers: cachedPrefix.responseHeaders) { [weak self] error in
                         guard let self else { return }
                         if let error {
@@ -2879,20 +4445,36 @@ private final class MPVHeaderProxyCore {
             switch mode {
             case .playlist:
                 bufferedData.append(data)
-                if bufferedData.count > proxy.maxPlaylistBytes {
-                    Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: playlist exceeded rewrite limit; streaming original target=\(logTarget()) bytes=\(bufferedData.count)", type: errorLogType)
-                    startStreamingBufferedData(dataTask: dataTask)
+                if MPVHeaderProxyPlaylistFramingPolicy.action(
+                    bufferedByteCount: bufferedData.count,
+                    maximumRewriteBytes: proxy.maxPlaylistBytes
+                ) == .reject {
+                    rejectOversizedPlaylist(dataTask: dataTask)
                 }
             case .probe:
                 bufferedData.append(data)
-                if proxy.isPlaylistData(bufferedData) {
-                    mode = .playlist
-                    if bufferedData.count > proxy.maxPlaylistBytes {
-                        Logger.shared.log("\(proxy.logPrefix)[\(requestId)]: playlist exceeded rewrite limit during probe; streaming original target=\(logTarget()) bytes=\(bufferedData.count)", type: errorLogType)
-                        startStreamingBufferedData(dataTask: dataTask)
+                switch MPVHeaderProxyGenericBodyPolicy.probeAction(
+                    bufferedData: bufferedData,
+                    maximumProbeBytes: proxy.playlistProbeBytes
+                ) {
+                case .identifiedPlaylist:
+                    if validatedRoutePolicy != nil {
+                        rejectUnexpectedValidatedPlaylist(dataTask: dataTask)
+                        return
                     }
-                } else if proxy.shouldStopPlaylistProbe(bufferedData) {
+                    mode = .playlist
+                    if MPVHeaderProxyPlaylistFramingPolicy.action(
+                        bufferedByteCount: bufferedData.count,
+                        maximumRewriteBytes: proxy.maxPlaylistBytes
+                    ) == .reject {
+                        rejectOversizedPlaylist(dataTask: dataTask)
+                    }
+                case .streamNonPlaylist:
                     startStreamingBufferedData(dataTask: dataTask)
+                case .rejectAmbiguousPrefix:
+                    rejectAmbiguousProbe(dataTask: dataTask)
+                case .continueBuffering:
+                    break
                 }
             case .stream:
                 streamChunk(data, dataTask: dataTask)
@@ -2903,9 +4485,7 @@ private final class MPVHeaderProxyCore {
                 }
 
                 let confirmedChallenge = confirmedCloudflareChallenge()
-                // Let a generic 429 reach task completion so this bridge can transparently
-                // restart the same upstream request after backoff. Completing early and
-                // cancelling here would race the old task's cancellation against the retry.
+
                 if confirmedChallenge
                     || (bufferedData.count >= proxy.maxRejectedResponseProbeBytes
                         && httpResponse?.statusCode != 429) {
@@ -2951,9 +4531,6 @@ private final class MPVHeaderProxyCore {
                     return
                 }
 
-                // The route graph proves identity and credentials, but its earlier DNS answer may
-                // be stale. Repeat the uncached check at the exact redirect handoff before allowing
-                // URLSession to issue the next request.
                 Task { [weak self] in
                     guard let self else {
                         completionHandler(nil)
@@ -2966,12 +4543,12 @@ private final class MPVHeaderProxyCore {
                                 purpose: Self.skyNetworkPurpose(for: destination.role)
                             )
                         guard ValidatedRoutePolicy.canonicalURLKey(checked.url)
-                                == ValidatedRoutePolicy.canonicalURLKey(destinationURL) else {
+                                == ValidatedRoutePolicy.canonicalURLKey(destinationURL),
+                              let approvedAddresses = self.approvedAddresses(from: checked) else {
                             throw SkyStreamSecurityError.invalidResponse
                         }
                         self.enqueue { [weak self] in
-                            guard let self, !self.finished,
-                                  self.recordApprovedSkyDispatch(checked) else {
+                            guard let self, !self.finished else {
                                 completionHandler(nil)
                                 return
                             }
@@ -2999,7 +4576,12 @@ private final class MPVHeaderProxyCore {
                                 "\(proxy.logPrefix)[\(self.requestId)]: following validated SkyStream redirect",
                                 type: self.logType
                             )
-                            completionHandler(redirected)
+                            completionHandler(
+                                self.upstreamTransport.pinnedRequest(
+                                    redirected,
+                                    to: approvedAddresses
+                                )
+                            )
                         }
                     } catch {
                         self.enqueue { [weak self] in
@@ -3024,12 +4606,40 @@ private final class MPVHeaderProxyCore {
                 return
             }
 
+            guard let destinationURL = request.url else {
+                completionHandler(nil)
+                return
+            }
+            let sourceURL = response.url ?? targetURL
+            if MPVHeaderProxyRevokedOriginSet.requiresRevocation(
+                from: sourceURL,
+                to: destinationURL,
+                credentialOriginURL: credentialOriginURL
+            ) {
+                revokedDestinationOrigins.revoke(destinationURL: destinationURL)
+                proxy?.recordRevokedRedirectDestinationOrigin(
+                    for: sessionId,
+                    sourceURL: sourceURL,
+                    destinationURL: destinationURL
+                )
+            }
+            followRedirect(
+                response: response,
+                request: request,
+                approvedAddresses: [],
+                completionHandler: completionHandler
+            )
+        }
+
+        private func followRedirect(
+            response: HTTPURLResponse,
+            request: URLRequest,
+            approvedAddresses: [String],
+            completionHandler: @escaping (URLRequest?) -> Void
+        ) {
             var redirected = request
             redirected.httpMethod = self.request.httpMethod
 
-            // URLSession strips standard credentials on cross-origin redirects, but provider
-            // headers can use arbitrary names. Remove every caller-supplied credential header
-            // and then reapply only the subset allowed for the redirect destination.
             let credentialHeaderNames = Set(
                 MPVHeaderProxyCore.sanitizedCredentialHeaders(credentialHeaders)
                     .keys
@@ -3039,60 +4649,48 @@ private final class MPVHeaderProxyCore {
             where credentialHeaderNames.contains(key.lowercased()) {
                 redirected.setValue(nil, forHTTPHeaderField: key)
             }
-            for (key, value) in MPVHeaderProxyCore.credentialHeaders(
+            let destinationURL = request.url ?? targetURL
+            let destinationOriginIsRevoked = revokedDestinationOrigins.revokesCredentials(
+                for: destinationURL,
+                credentialOriginURL: credentialOriginURL
+            )
+            var scopedHeaders = MPVHeaderProxyCore.credentialHeaders(
                 credentialHeaders,
-                for: request.url ?? targetURL,
+                for: destinationURL,
                 originURL: credentialOriginURL
-            ) {
+            )
+            if destinationOriginIsRevoked {
+                for name in ["Authorization", "Cookie", "Cookie2", "Proxy-Authorization"] {
+                    scopedHeaders.keys
+                        .filter { $0.caseInsensitiveCompare(name) == .orderedSame }
+                        .forEach { scopedHeaders.removeValue(forKey: $0) }
+                }
+            }
+            for (key, value) in scopedHeaders {
                 redirected.setValue(value, forHTTPHeaderField: key)
             }
             CloudflareBypassManager.shared.applyCachedBypass(
                 to: &redirected,
-                for: request.url ?? targetURL
+                for: destinationURL
             )
             rejectedCookieHeader = redirected.value(forHTTPHeaderField: "Cookie")
-            // A signed provider credential may live in either the query or the path. Typed
-            // SkyStream routes already retain their destination internally, so their lifecycle
-            // log needs only a non-sensitive marker; generic proxy sessions keep the existing
-            // query/fragment-stripped diagnostic summary.
+
             let redirectTarget = validatedRoutePolicy != nil
                 ? "validated-route"
                 : (redirected.url.flatMap { proxy?.logURLSummary($0) } ?? "nil")
             Logger.shared.log("\(proxy?.logPrefix ?? "MPVHeaderProxy")[\(requestId)]: following redirect status=\(response.statusCode) target=\(redirectTarget)", type: logType)
-            completionHandler(redirected)
+            completionHandler(
+                upstreamTransport.pinnedRequest(
+                    redirected,
+                    to: approvedAddresses,
+                    permitsPrivateApprovedAddresses: permitsPrivateApprovedAddresses(
+                        for: redirected.url ?? targetURL
+                    )
+                )
+            )
         }
 
         func handleMetrics(_ metrics: URLSessionTaskMetrics, task: URLSessionTask) {
-            if validatedRoutePolicy != nil {
-                for transaction in metrics.transactionMetrics {
-                    guard let remote = transaction.remoteAddress else { continue }
-                    let host = transaction.request.url?.host.map(
-                        SkyStreamRemoteURLPolicy.canonicalHost
-                    )
-                    let normalized = SkyStreamRemoteURLPolicy
-                        .normalizedPublicAddressString(remote)
-                    guard let host, let normalized,
-                          approvedSkyAddressesByHost[host]?.contains(normalized) == true else {
-                        Logger.shared.log(
-                            "\(proxy?.logPrefix ?? "MPVHeaderProxy")[\(requestId)]: rejected SkyStream connected-address drift",
-                            type: "Error"
-                        )
-                        task.cancel()
-                        if !responseHeadersSent {
-                            proxy?.sendSimpleResponse(
-                                connection,
-                                statusCode: 502,
-                                body: "Validated route expired"
-                            )
-                        } else {
-                            connection.cancel()
-                        }
-                        finish()
-                        return
-                    }
-                }
-            }
-
             guard shouldLogLifecycle else { return }
             let transactions = metrics.transactionMetrics
             let reusedTransactions = transactions.filter(\.isReusedConnection).count
@@ -3137,14 +4735,50 @@ private final class MPVHeaderProxyCore {
                 return
             }
 
+            if case .probe = mode, !bufferedData.isEmpty {
+                switch MPVHeaderProxyGenericBodyPolicy.probeAction(
+                    bufferedData: bufferedData,
+                    maximumProbeBytes: proxy.playlistProbeBytes
+                ) {
+                case .identifiedPlaylist:
+                    if validatedRoutePolicy != nil {
+                        proxy.sendSimpleResponse(
+                            connection,
+                            statusCode: 502,
+                            body: "Unexpected nested playlist"
+                        )
+                        finish()
+                        return
+                    }
+                    mode = .playlist
+                case .continueBuffering, .rejectAmbiguousPrefix:
+                    if validatedRoutePolicy != nil {
+                        proxy.sendSimpleResponse(
+                            connection,
+                            statusCode: 502,
+                            body: "Incomplete protected media classification"
+                        )
+                        finish()
+                        return
+                    }
+                case .streamNonPlaylist:
+                    break
+                }
+            }
+
             switch mode {
             case .playlist, .probe:
+                let effectiveResponseURL = MPVHeaderProxyPlaylistRouting.effectiveResponseURL(
+                    originalRequestURL: targetURL,
+                    responseURL: http.url
+                )
                 let (body, headers, rewritten, responseStatus) = proxy.rewrittenPlaylistResponse(
                     http: http,
                     data: bufferedData,
-                    targetURL: targetURL,
+                    targetURL: effectiveResponseURL,
                     sessionId: sessionId,
-                    logType: logType
+                    logType: logType,
+                    requiresValidEncoding: validatedRoutePolicy != nil
                 )
                 if shouldLogLifecycle {
                     Logger.shared.log("[MPVProxyTrace \(traceID)] stage=playlist-complete req=\(requestSequence) status=\(http.statusCode) responseStatus=\(responseStatus) bytes=\(bufferedData.count) responseBytes=\(body.count) rewritten=\(rewritten)", type: "PlaybackTrace")
@@ -3184,6 +4818,7 @@ private final class MPVHeaderProxyCore {
             if http.statusCode == 429, !confirmedChallenge {
                 let retryAfter = http.value(forHTTPHeaderField: "Retry-After")
                     .flatMap { TimeInterval($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                    .flatMap { $0.isFinite ? $0 : nil }
                 let backoff = upstreamTransport.recordRateLimit(
                     for: targetURL,
                     retryAfter: retryAfter
@@ -3199,20 +4834,23 @@ private final class MPVHeaderProxyCore {
                         "\(proxy.logPrefix)[\(requestId)]: retrying rate-limited media request attempt=\(rateLimitRetryCount)/\(maximumRateLimitRetries)\(backoffDescription) target=\(logTarget())",
                         type: errorLogType
                     )
-                    if upstreamTransport.start(self, request: request) {
+                    if upstreamTransport.start(
+                        self,
+                        request: request,
+                        approvedAddresses: initialApprovedAddresses,
+                        permitsPrivateApprovedAddresses: permitsPrivateApprovedAddresses(
+                            for: targetURL
+                        )
+                    ) {
                         return
                     }
-                    // If the transport cannot schedule the retry, surface recovery immediately.
+
                     rateLimitRetryCount = maximumRateLimitRetries
                 }
             } else {
                 backoffDescription = ""
             }
 
-            // A real challenge can be solved on this exact URL. A generic media-host 403/503
-            // cannot; report it as a source rejection so the player can rerun provider
-            // extraction and obtain a fresh signed CDN URL. Generic 429 responses first get
-            // bounded transparent retries, then enter the same source-refresh path if exhausted.
             if confirmedChallenge
                 || http.statusCode != 429
                 || rateLimitRetryCount >= maximumRateLimitRetries {
@@ -3268,6 +4906,82 @@ private final class MPVHeaderProxyCore {
                 self.responseHeadersSent = true
                 self.streamChunk(initialData, dataTask: dataTask, suspendBeforeSend: false)
             }
+        }
+
+        private func rejectOversizedPlaylist(dataTask: URLSessionDataTask) {
+            guard let proxy else {
+                dataTask.cancel()
+                connection.cancel()
+                finish()
+                return
+            }
+            if validatedRoutePolicy == nil {
+                Logger.shared.log(
+                    "\(proxy.logPrefix)[\(requestId)]: playlist exceeded rewrite limit; streaming original target=\(logTarget()) bytes=\(bufferedData.count)",
+                    type: errorLogType
+                )
+                startStreamingBufferedData(dataTask: dataTask)
+                return
+            }
+            Logger.shared.log(
+                "\(proxy.logPrefix)[\(requestId)]: rejected playlist above rewrite limit bytes=\(bufferedData.count)",
+                type: errorLogType
+            )
+            dataTask.cancel()
+            proxy.sendSimpleResponse(
+                connection,
+                statusCode: 502,
+                body: "Playlist exceeds protected rewrite limit"
+            )
+            finish()
+        }
+
+        private func rejectAmbiguousProbe(dataTask: URLSessionDataTask) {
+            guard let proxy else {
+                dataTask.cancel()
+                connection.cancel()
+                finish()
+                return
+            }
+            if validatedRoutePolicy == nil {
+                Logger.shared.log(
+                    "\(proxy.logPrefix)[\(requestId)]: media prefix remained ambiguous; streaming original target=\(logTarget()) bytes=\(bufferedData.count)",
+                    type: errorLogType
+                )
+                startStreamingBufferedData(dataTask: dataTask)
+                return
+            }
+            Logger.shared.log(
+                "\(proxy.logPrefix)[\(requestId)]: rejected ambiguous media prefix bytes=\(bufferedData.count)",
+                type: errorLogType
+            )
+            dataTask.cancel()
+            proxy.sendSimpleResponse(
+                connection,
+                statusCode: 502,
+                body: "Unable to classify protected media response"
+            )
+            finish()
+        }
+
+        private func rejectUnexpectedValidatedPlaylist(dataTask: URLSessionDataTask) {
+            guard let proxy else {
+                dataTask.cancel()
+                connection.cancel()
+                finish()
+                return
+            }
+            Logger.shared.log(
+                "\(proxy.logPrefix)[\(requestId)]: rejected nested playlist body on validated route",
+                type: errorLogType
+            )
+            dataTask.cancel()
+            proxy.sendSimpleResponse(
+                connection,
+                statusCode: 502,
+                body: "Unexpected nested playlist"
+            )
+            finish()
         }
 
         private func sendCachedPrefixBeforeUpstream(
@@ -3480,6 +5194,7 @@ final class MPVHeaderProxy {
         headers: [String: String],
         logType: String = "MPV",
         traceID: String? = nil,
+        stremioAuthority: SkyStreamPinnedOriginAuthority? = nil,
         onConfirmedCloudflareChallenge: ((URL, String?, Bool, Int) -> Void)? = nil
     ) -> URL? {
         proxy.makeProxyURL(
@@ -3487,18 +5202,17 @@ final class MPVHeaderProxy {
             headers: headers,
             logType: logType,
             traceID: traceID,
+            stremioAuthority: stremioAuthority,
             onConfirmedCloudflareChallenge: onConfirmedCloudflareChallenge
         )
     }
 
 #if os(iOS) && !targetEnvironment(macCatalyst)
-    /// Confirms that a URL is the exact top-level route of a live typed SkyStream session.
+
     func isManagedSkyStreamSessionURL(_ streamProxyURL: URL) -> Bool {
         proxy.isManagedSkyStreamSessionURL(streamProxyURL)
     }
 
-    /// Converts only the validator's unforgeable playback descriptor into a loopback URL. Raw
-    /// plugin URLs and headers deliberately cannot enter this boundary.
     func makeSkyStreamProxyURL(
         for descriptor: SkyStreamValidatedPlaybackDescriptor,
         traceID: String? = nil,
@@ -3511,8 +5225,6 @@ final class MPVHeaderProxy {
         )
     }
 
-    /// Returns same-session loopback routes for validated subtitle URLs. Callers must not pass
-    /// the descriptor's upstream subtitle headers to the player.
     func skyStreamSubtitleProxyURLs(
         for descriptor: SkyStreamValidatedPlaybackDescriptor,
         streamProxyURL: URL
@@ -3520,7 +5232,6 @@ final class MPVHeaderProxy {
         proxy.skyStreamSubtitleProxyURLs(for: descriptor, streamProxyURL: streamProxyURL)
     }
 
-    /// Installs the same-source refresh callback on an already-created typed SkyStream session.
     @discardableResult
     func setSkyStreamRouteRejectionHandler(
         for streamProxyURL: URL,
@@ -3533,5 +5244,16 @@ final class MPVHeaderProxy {
     func invalidateSession(for proxyURL: URL) {
         proxy.invalidateSession(for: proxyURL)
     }
+
+    func originalTargetURL(for proxyURL: URL) -> URL? {
+        proxy.originalTargetURL(for: proxyURL)
+    }
+
+    func upstreamHealth(for proxyURL: URL) -> MPVHeaderProxyUpstreamHealth? {
+        proxy.upstreamHealth(for: proxyURL)
+    }
+
+    func upstreamProbeTarget(for proxyURL: URL) -> (url: URL, headers: [String: String])? {
+        proxy.upstreamProbeTarget(for: proxyURL)
+    }
 }
-#endif

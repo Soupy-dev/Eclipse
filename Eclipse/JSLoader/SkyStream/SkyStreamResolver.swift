@@ -52,8 +52,7 @@ public struct SkyStreamResolutionTarget: Sendable, Hashable {
 
 public enum SkyStreamResolutionMode: Sendable, Hashable {
     case manual
-    /// Low-latency first row for the manual picker. Unlike Auto Mode, this never skips a source
-    /// merely because its health backoff is active; the full manual pass can expand it later.
+
     case manualFast
     case autoMode
     case playbackRefresh
@@ -61,10 +60,7 @@ public enum SkyStreamResolutionMode: Sendable, Hashable {
 
     fileprivate var maximumLoadedCandidates: Int {
         switch self {
-        // The full picker may backfill through the same 80-result ceiling used by Services and
-        // Stremio. This remains deadline-bound, so a slow provider cannot turn the larger pool
-        // into unbounded foreground work. Fast/automatic paths still inspect only their first
-        // ranked match.
+
         case .manual: return 80
         case .manualFast, .autoMode, .playbackRefresh, .downloadRefresh: return 1
         }
@@ -85,9 +81,6 @@ public enum SkyStreamResolutionMode: Sendable, Hashable {
         }
     }
 
-    /// Expiry recovery must execute the provider and VOD preflight again. Reusing any layer of
-    /// the normal picker cache can simply hand the caller the same expired URL, cookie, or
-    /// manifest graph that triggered recovery.
     fileprivate var bypassesResolutionCaches: Bool {
         switch self {
         case .playbackRefresh, .downloadRefresh: return true
@@ -275,7 +268,7 @@ public final class SkyStreamResolver {
         mode: SkyStreamResolutionMode,
         preferredStreamLabel: String? = nil,
         purpose: SkyStreamResolutionPurpose = .playback,
-        originalAudioLanguage: String? = nil
+        originalAudioLanguage: String?
     ) async throws -> [SkyStreamResolvedStream] {
         try await withResolutionDeadline(mode: mode) { [self] in
             try await resolveWithoutDeadline(
@@ -414,9 +407,7 @@ public final class SkyStreamResolver {
                     status: .healthy,
                     reason: nil
                 )
-                // Commit package-scoped storage only after a complete successful resolution.
-                // Failed/cancelled ABI calls may have mutated their temporary runtime store and
-                // must not turn that partial state into durable user data.
+
                 scheduleRuntimeSnapshotPersistence(for: plugin)
                 return accepted
             }
@@ -432,16 +423,22 @@ public final class SkyStreamResolver {
 
     public func refresh(
         _ reference: SkyStreamProviderContentReference,
-        mode: SkyStreamResolutionMode = .playbackRefresh
+        mode: SkyStreamResolutionMode = .playbackRefresh,
+        originalAudioLanguage: String?
     ) async throws -> [SkyStreamResolvedStream] {
         try await withResolutionDeadline(mode: mode) { [self] in
-            try await refreshWithoutDeadline(reference, mode: mode)
+            try await refreshWithoutDeadline(
+                reference,
+                mode: mode,
+                originalAudioLanguage: originalAudioLanguage
+            )
         }
     }
 
     private func refreshWithoutDeadline(
         _ reference: SkyStreamProviderContentReference,
-        mode: SkyStreamResolutionMode
+        mode: SkyStreamResolutionMode,
+        originalAudioLanguage: String?
     ) async throws -> [SkyStreamResolvedStream] {
         pruneCaches()
         guard reference.isStructurallyValid else {
@@ -484,15 +481,15 @@ public final class SkyStreamResolver {
                     provider: provider,
                     authorityRevision: authority.revision,
                     target: target,
-                    mode: mode
+                    mode: mode,
+                    originalAudioLanguage: originalAudioLanguage
                 )
             } catch is CancellationError {
                 throw CancellationError()
             } catch SkyStreamResolverError.staleContentReference {
                 throw SkyStreamResolverError.staleContentReference
             } catch {
-                // Provider item identifiers can expire or disappear independently of stream
-                // URLs. Fall back to one exact search instead of failing refresh outright.
+
             }
         }
         return try await resolveWithoutDeadline(
@@ -501,21 +498,18 @@ public final class SkyStreamResolver {
             mode: mode,
             preferredStreamLabel: reference.preferredStreamLabel,
             purpose: mode == .downloadRefresh ? .offlineDownload : .playback,
-            originalAudioLanguage: nil
+            originalAudioLanguage: originalAudioLanguage
         )
     }
 
-    /// Fast refresh path for the bounded, device-local provider identifiers retained by a
-    /// content reference. It still re-executes `load`/`loadStreams`, current settings filters,
-    /// payload identity checks, and the complete VOD validator; no previously playable URL is
-    /// trusted or handed directly to playback.
     private func refreshUsingStoredProviderURLs(
         _ reference: SkyStreamProviderContentReference,
         plugin: SkyStreamInstalledPluginState,
         provider: SkyStreamProviderDescriptor,
         authorityRevision: UUID,
         target: SkyStreamResolutionTarget,
-        mode: SkyStreamResolutionMode
+        mode: SkyStreamResolutionMode,
+        originalAudioLanguage: String?
     ) async throws -> [SkyStreamResolvedStream] {
         try Task.checkCancellation()
         let configuration = try runtimeConfiguration(
@@ -567,7 +561,7 @@ public final class SkyStreamResolver {
                 episode: selectedEpisode,
                 sourceID: provider.id,
                 target: target,
-                originalAudioLanguage: nil
+                originalAudioLanguage: originalAudioLanguage
             )
         }
 
@@ -650,7 +644,7 @@ public final class SkyStreamResolver {
                         }
                         coordinator.resolve(.failure(SkyStreamResolverError.resolutionTimedOut))
                     } catch {
-                        // The operation or caller already won the race.
+
                     }
                 }
                 coordinator.installTasks(operation: operationTask, timeout: timeoutTask)
@@ -849,8 +843,7 @@ public final class SkyStreamResolver {
 
         var acceptedByID: [String: SkyStreamValidatedPlaybackDescriptor] = [:]
         if mode == .manual {
-            // VOD probes are intentionally only two-wide. This gives the manual picker
-            // progressive speed without letting one provider starve playback refresh work.
+
             for start in stride(from: 0, to: candidates.count, by: 2) {
                 try Task.checkCancellation()
                 let batch = Array(candidates[start..<min(start + 2, candidates.count)])
@@ -951,8 +944,7 @@ public final class SkyStreamResolver {
             ?? plugin.manifest.baseURL
         var runtimeManifest = plugin.manifest
         if plugin.usesDynamicProviders == true {
-            // Discovered providers are persisted for Eclipse's stable source rows, but the
-            // package bootstrap manifest remains the original empty-provider declaration.
+
             runtimeManifest.providers = []
         }
         let store = SkyStreamRuntimeDataStore(
@@ -967,9 +959,7 @@ public final class SkyStreamResolver {
             let isSecret: Bool
             let isRedacted: Bool
         }
-        // Fingerprint exactly the bounded preference values the runtime can observe, plus their
-        // trust classification. `updatedAt` is synchronization metadata and must not create fresh
-        // contexts or evade a quarantine when behavior is otherwise unchanged.
+
         let effectivePreferences = store.snapshot().preferences
         let fingerprintPreferences: [RuntimePreferenceFingerprintValue] = effectivePreferences
             .keys.sorted().compactMap { key -> RuntimePreferenceFingerprintValue? in
@@ -1102,8 +1092,7 @@ public final class SkyStreamResolver {
         let scriptSHA256 = plugin.scriptSHA256
         runtimePersistenceTasks[packageName]?.cancel()
         runtimePersistenceTasks[packageName] = Task { [runtime, pluginManager] in
-            // Fast/full picker passes commonly finish back-to-back. Coalesce them into one disk
-            // transaction and snapshot the actor only after the final successful pass settles.
+
             do {
                 try await Task.sleep(nanoseconds: 350_000_000)
             } catch {
@@ -1152,9 +1141,6 @@ public final class SkyStreamResolver {
             return values
         }
 
-        // Auto Mode has a four-query budget. Reserve those first slots for canonical/romaji/
-        // localized/cour aliases instead of exhausting them on decorations of only one title.
-        // Manual mode then gains the primary episode forms before less common aliases.
         var queries = Array(titles.prefix(4))
         queries.append(contentsOf: decoratedQueries(for: primaryTitle))
         queries.append(contentsOf: titles.dropFirst(4))
@@ -1192,14 +1178,22 @@ public final class SkyStreamResolver {
         }.max() ?? 0
     }
 
-    /// SkyStream's identity boundary is intentionally independent of the Services result-ranking
-    /// preference. Plugin search hits below 85% are never loaded, while exact handoffs retain the
-    /// stricter 90% boundary.
     nonisolated static func acceptsTitleMatch(
         score: Double,
-        requiresExactIdentity: Bool
+        requiresExactIdentity: Bool,
+        defaults: UserDefaults = ProfileSettingsStore.services
     ) -> Bool {
-        score >= (requiresExactIdentity ? 0.90 : 0.85)
+        if requiresExactIdentity {
+            return score >= 0.90
+        }
+        guard ServicesResultRankingSettings.dropsMismatchedResults(defaults: defaults) else {
+            return score >= 0.85
+        }
+        let manualThreshold = max(
+            0.85,
+            ServicesResultRankingSettings.minimumSimilarity(defaults: defaults)
+        )
+        return score >= manualThreshold
     }
 
     private static func matchScore(_ hit: SkyStreamSearchRecord, target: SkyStreamResolutionTarget) -> Double {
@@ -1244,9 +1238,7 @@ public final class SkyStreamResolver {
         )
         guard matchesMediaGuards(hit, target: target) else { return false }
         if target.requiresExactIdentity, !permitsMissingTitle, !target.title.isEmpty {
-            // Search ranking accepts canonical, localized, romaji, and cour aliases. Apply the
-            // same identity vocabulary after `load()` so a provider cannot pass search with a
-            // legitimate alias and then be rejected solely for returning that alias as its title.
+
             let score = titleMatchScore(
                 candidateTitle: loaded.title,
                 candidateAlternateTitles: loaded.alternateTitles,
@@ -1292,9 +1284,6 @@ public final class SkyStreamResolver {
 
         guard !numbers.isEmpty else { return nil }
 
-        // The SDK makes season optional, while its Episode helper materializes an omitted season
-        // as zero. Accept that representation only when the returned positive episode number is
-        // unambiguous; array position is never treated as identity.
         let numberMatches = episodes.filter {
             guard ($0.season == nil || $0.season == 0),
                   $0.episode.map(numbers.contains) == true,
@@ -1323,9 +1312,6 @@ public final class SkyStreamResolver {
             return numberMatches[0]
         }
 
-        // Some conforming plugins omit both numeric fields and put the identity in the label.
-        // Parse only explicit episode forms; URL digits and array order are intentionally ignored
-        // because either can silently select a different season.
         let labelMatches = episodes.filter { candidate in
             guard !episodeNameLooksSpecial(candidate.name),
                   let identity = explicitEpisodeIdentity(
@@ -1545,8 +1531,7 @@ public final class SkyStreamResolver {
     }
 
     private static func streamURLMetadataHint(_ stream: SkyStreamStreamRecord) -> String? {
-        // Normal provider URLs often carry the only language/quality marker in their filename.
-        // Do not feed large MAGIC/generated-manifest payloads into ranking regular expressions.
+
         guard stream.url.utf8.count <= 16_384 else { return nil }
         return stream.url
     }
@@ -1585,9 +1570,7 @@ public final class SkyStreamResolver {
             drmKeyID: stream.drmKeyID,
             drmKey: stream.drmKey,
             licenseURL: stream.licenseURL,
-            // SkyStream's item-level playbackPolicy is display metadata (for example,
-            // "Internal Player Only"), not a stream-level external-player requirement.
-            // MoltenVK still has to pass the normal URL, live, torrent, and DRM checks.
+
             externalPlayerPolicy: nil,
             policyHints: [:]
         )

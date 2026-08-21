@@ -1,16 +1,21 @@
-import Foundation
+//
+//  MangaReadingProgressManager.swift
+//  Kanzen
+//
+//  Created by Eclipse on 2026.
+//
 
-// MARK: - Progress Model
+import Foundation
 
 struct MangaProgress: Codable {
     var readChapterNumbers: Set<String> = []
     var lastReadChapter: String?
     var lastReadDate: Date?
-    /// Page index keyed by chapter number, so reader can resume mid-chapter.
+
     var pagePositions: [String: Int] = [:]
-    /// Page count keyed by chapter number, so detail rows can display resume progress.
+
     var pageCounts: [String: Int] = [:]
-    // Display metadata for history
+
     var title: String?
     var coverURL: String?
     var format: String?
@@ -22,7 +27,7 @@ struct MangaProgress: Codable {
     var trackerMALId: Int?
     var trackerMatchConfidence: Double?
     var trackerResolvedAt: Date?
-    // Module routing (for module-search sourced content)
+
     var moduleUUID: String?
     var contentParams: String?
     var isNovel: Bool?
@@ -79,7 +84,7 @@ struct MangaProgress: Codable {
 
     func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(readChapterNumbers, forKey: .readChapterNumbers)
+        try container.encode(readChapterNumbers.sorted(), forKey: .readChapterNumbers)
         try container.encodeIfPresent(lastReadChapter, forKey: .lastReadChapter)
         try container.encodeIfPresent(lastReadDate, forKey: .lastReadDate)
         try container.encode(pagePositions, forKey: .pagePositions)
@@ -102,21 +107,54 @@ struct MangaProgress: Codable {
     }
 }
 
-// MARK: - Progress Manager
-
 final class MangaReadingProgressManager: ObservableObject {
     static let shared = MangaReadingProgressManager()
 
-    /// Key = AniList manga ID, Value = progress data
     @Published private(set) var progressMap: [Int: MangaProgress] = [:]
 
-    private let storageKey = "mangaReadingProgress"
+    private static let legacyStorageKey = "mangaReadingProgress"
+
+    private var storageKey: String
+    private var activeProfileID: UUID
+
+    private var activeStoreLoadFailed = false
 
     private init() {
+        let profileID = ProfileManager.shared.activeProfileID
+        activeProfileID = profileID
+        storageKey = Self.storageKey(for: profileID)
+        Self.migrateLegacyStoreIfNeeded()
         load()
     }
 
-    // MARK: - Queries
+    static func storageKey(for profileID: UUID) -> String {
+        ProfileScopedStorage.defaultsKey(base: legacyStorageKey, profileID: profileID)
+    }
+
+    private static func migrateLegacyStoreIfNeeded() {
+        ProfileScopedStorage.migrateLegacyStoreIfNeeded(marker: "readerProgress") {
+            let defaults = UserDefaults.standard
+            let destinationKey = storageKey(for: ProfileManager.defaultProfileID)
+            guard defaults.data(forKey: destinationKey) == nil,
+                  let legacy = defaults.data(forKey: legacyStorageKey) else { return }
+            defaults.set(legacy, forKey: destinationKey)
+            defaults.removeObject(forKey: legacyStorageKey)
+        }
+    }
+
+    func switchProfile(to profileID: UUID) {
+        guard profileID != activeProfileID else { return }
+        activeProfileID = profileID
+        storageKey = Self.storageKey(for: profileID)
+
+        progressMap = [:]
+        load()
+    }
+
+    func discardStore(forProfile profileID: UUID) {
+        guard profileID != activeProfileID else { return }
+        UserDefaults.standard.removeObject(forKey: Self.storageKey(for: profileID))
+    }
 
     func isChapterRead(mangaId: Int, chapterNumber: String) -> Bool {
         guard let progress = progressMap[mangaId] else { return false }
@@ -133,6 +171,14 @@ final class MangaReadingProgressManager: ObservableObject {
 
     func pagePosition(mangaId: Int, chapterNumber: String) -> Int {
         guard let positions = progressMap[mangaId]?.pagePositions else { return 0 }
+        return storedValue(in: positions, for: chapterNumber) ?? 0
+    }
+
+    func pagePosition(mangaId: Int, chapterNumber: String, forProfile profileID: UUID) -> Int {
+        guard profileID != activeProfileID else {
+            return pagePosition(mangaId: mangaId, chapterNumber: chapterNumber)
+        }
+        guard let positions = progress(forProfile: profileID)[mangaId]?.pagePositions else { return 0 }
         return storedValue(in: positions, for: chapterNumber) ?? 0
     }
 
@@ -153,6 +199,48 @@ final class MangaReadingProgressManager: ObservableObject {
         progressMap[mangaId]
     }
 
+    private func storedProgress(mangaId: Int, forProfile profileID: UUID) -> MangaProgress {
+        if profileID == activeProfileID {
+            return progressMap[mangaId] ?? MangaProgress()
+        }
+        return progress(forProfile: profileID)[mangaId] ?? MangaProgress()
+    }
+
+    private func commitProgress(_ entry: MangaProgress, mangaId: Int, forProfile profileID: UUID) {
+        guard profileID != activeProfileID else {
+            progressMap[mangaId] = entry
+            save()
+            return
+        }
+        let key = Self.storageKey(for: profileID)
+        var map: [Int: MangaProgress] = [:]
+        if let data = UserDefaults.standard.data(forKey: key) {
+
+            guard let decoded = try? JSONDecoder().decode([Int: MangaProgress].self, from: data) else {
+                ReaderLogger.shared.log(
+                    "Dropping late reading progress for profile \(profileID): its store could not be read",
+                    type: "Error"
+                )
+                return
+            }
+            map = decoded
+        }
+        map[mangaId] = entry
+        guard let encoded = try? JSONEncoder().encode(map) else { return }
+        UserDefaults.standard.set(encoded, forKey: key)
+    }
+
+    private func canSyncTracker(forProfile profileID: UUID) -> Bool {
+        guard profileID == activeProfileID else {
+            ReaderLogger.shared.log(
+                "Skipping tracker sync for profile \(profileID): no longer the active profile",
+                type: "Tracker"
+            )
+            return false
+        }
+        return true
+    }
+
     func savePagePosition(
         mangaId: Int,
         chapterNumber: String,
@@ -169,9 +257,11 @@ final class MangaReadingProgressManager: ObservableObject {
         route: MangaContentRoute? = nil,
         trackerAniListId: Int? = nil,
         trackerMALId: Int? = nil,
-        readThreshold: Double = 0.8
+        readThreshold: Double = 0.8,
+        forProfile profileID: UUID? = nil
     ) {
-        var progress = progressMap[mangaId] ?? MangaProgress()
+        let owner = profileID ?? activeProfileID
+        var progress = storedProgress(mangaId: mangaId, forProfile: owner)
         let safePageCount = pageCount.map { max($0, 0) }
         let safePage = max(page, 0)
         let chapterKeys = chapterKeyCandidates(for: chapterNumber)
@@ -212,10 +302,9 @@ final class MangaReadingProgressManager: ObservableObject {
             }
         }
 
-        progressMap[mangaId] = progress
-        save()
+        commitProgress(progress, mangaId: mangaId, forProfile: owner)
 
-        if didMarkRead, let numericChapter = extractChapterNumber(from: chapterNumber) {
+        if didMarkRead, canSyncTracker(forProfile: owner), let numericChapter = extractChapterNumber(from: chapterNumber) {
             syncTrackerProgress(
                 mangaId: mangaId,
                 progress: progress,
@@ -226,15 +315,13 @@ final class MangaReadingProgressManager: ObservableObject {
         }
     }
 
-    // MARK: - Mutations
-
-    /// Mark a chapter as read and optionally sync to AniList.
-    func markChapterRead(mangaId: Int, chapterNumber: String, mangaTitle: String? = nil, coverURL: String? = nil, format: String? = nil, totalChapters: Int? = nil, latestChapterNumbers: [String]? = nil, moduleUUID: String? = nil, contentParams: String? = nil, isNovel: Bool? = nil, route: MangaContentRoute? = nil, trackerAniListId: Int? = nil, trackerMALId: Int? = nil) {
-        var progress = progressMap[mangaId] ?? MangaProgress()
+    func markChapterRead(mangaId: Int, chapterNumber: String, mangaTitle: String? = nil, coverURL: String? = nil, format: String? = nil, totalChapters: Int? = nil, latestChapterNumbers: [String]? = nil, moduleUUID: String? = nil, contentParams: String? = nil, isNovel: Bool? = nil, route: MangaContentRoute? = nil, trackerAniListId: Int? = nil, trackerMALId: Int? = nil, forProfile profileID: UUID? = nil) {
+        let owner = profileID ?? activeProfileID
+        var progress = storedProgress(mangaId: mangaId, forProfile: owner)
         let uniqueLatestChapterNumbers = latestChapterNumbers.map(ChapterIdentityNormalizer.deduplicatedNumbers)
 
         guard !containsChapter(chapterNumber, in: progress.readChapterNumbers) else {
-            // Still update metadata if provided even for already-read chapters
+
             var changed = false
             if let t = mangaTitle, progress.title != t { progress.title = t; changed = true }
             if let c = coverURL, progress.coverURL != c { progress.coverURL = c; changed = true }
@@ -261,7 +348,7 @@ final class MangaReadingProgressManager: ObservableObject {
                 applyRoute(route, to: &progress)
                 changed = true
             }
-            if changed { progressMap[mangaId] = progress; save() }
+            if changed { commitProgress(progress, mangaId: mangaId, forProfile: owner) }
             return
         }
 
@@ -283,10 +370,9 @@ final class MangaReadingProgressManager: ObservableObject {
         if let trackerAniListId { progress.trackerAniListId = trackerAniListId }
         if let trackerMALId { progress.trackerMALId = trackerMALId }
         applyRoute(route, to: &progress)
-        progressMap[mangaId] = progress
-        save()
+        commitProgress(progress, mangaId: mangaId, forProfile: owner)
 
-        if let numericChapter = extractChapterNumber(from: chapterNumber) {
+        if canSyncTracker(forProfile: owner), let numericChapter = extractChapterNumber(from: chapterNumber) {
             syncTrackerProgress(
                 mangaId: mangaId,
                 progress: progress,
@@ -297,7 +383,6 @@ final class MangaReadingProgressManager: ObservableObject {
         }
     }
 
-    /// Mark a chapter as unread.
     func markChapterUnread(mangaId: Int, chapterNumber: String) {
         guard var progress = progressMap[mangaId] else { return }
         removeChapter(chapterNumber, from: &progress.readChapterNumbers)
@@ -305,8 +390,14 @@ final class MangaReadingProgressManager: ObservableObject {
         save()
     }
 
-    /// Mark multiple chapters as read and sync the highest chapter to AniList.
     func markAllRead(mangaId: Int, chapterNumbers: [String], mangaTitle: String? = nil, coverURL: String? = nil, format: String? = nil, totalChapters: Int? = nil, latestChapterNumbers: [String]? = nil, moduleUUID: String? = nil, contentParams: String? = nil, isNovel: Bool? = nil, route: MangaContentRoute? = nil, trackerAniListId: Int? = nil, trackerMALId: Int? = nil) {
+        guard !activeStoreLoadFailed else {
+            ReaderLogger.shared.log(
+                "MangaReadingProgressManager: refusing to mark all chapters read for profile \(activeProfileID): its progress store is unreadable; preserving its bytes",
+                type: "Error"
+            )
+            return
+        }
         var progress = progressMap[mangaId] ?? MangaProgress()
         let uniqueChapterNumbers = ChapterIdentityNormalizer.deduplicatedNumbers(chapterNumbers)
         let uniqueLatestChapterNumbers = latestChapterNumbers.map(ChapterIdentityNormalizer.deduplicatedNumbers)
@@ -347,8 +438,9 @@ final class MangaReadingProgressManager: ObservableObject {
         }
     }
 
-    func updateSourceMetadata(mangaId: Int, title: String? = nil, coverURL: String? = nil, format: String? = nil, latestChapterNumbers: [String], route: MangaContentRoute? = nil, sourceRefreshError: String? = nil) {
-        var progress = progressMap[mangaId] ?? MangaProgress()
+    func updateSourceMetadata(mangaId: Int, title: String? = nil, coverURL: String? = nil, format: String? = nil, latestChapterNumbers: [String], route: MangaContentRoute? = nil, sourceRefreshError: String? = nil, forProfile profileID: UUID? = nil) {
+        let owner = profileID ?? activeProfileID
+        var progress = storedProgress(mangaId: mangaId, forProfile: owner)
         let uniqueLatestChapterNumbers = ChapterIdentityNormalizer.deduplicatedNumbers(latestChapterNumbers)
         if let title { progress.title = title }
         if let coverURL { progress.coverURL = coverURL }
@@ -358,8 +450,7 @@ final class MangaReadingProgressManager: ObservableObject {
         progress.lastSourceRefresh = Date()
         progress.sourceRefreshError = sourceRefreshError
         applyRoute(route, to: &progress)
-        progressMap[mangaId] = progress
-        save()
+        commitProgress(progress, mangaId: mangaId, forProfile: owner)
     }
 
     func updateTrackerMatch(mangaId: Int, aniListId: Int?, malId: Int?, confidence: Double?) {
@@ -392,10 +483,16 @@ final class MangaReadingProgressManager: ObservableObject {
         }
     }
 
-    /// Import chapters without syncing back to trackers. Existing local reads are only advanced.
     func bulkMarkChaptersReadForImport(mangaId: Int, throughChapter: Int, mangaTitle: String? = nil, coverURL: String? = nil, totalChapters: Int? = nil) {
         guard throughChapter >= 1 else { return }
 
+        guard !activeStoreLoadFailed else {
+            ReaderLogger.shared.log(
+                "MangaReadingProgressManager: refusing a bulk import mark-read for profile \(activeProfileID): its progress store is unreadable; preserving its bytes",
+                type: "Error"
+            )
+            return
+        }
         var progress = progressMap[mangaId] ?? MangaProgress()
         for chapter in 1...throughChapter {
             progress.readChapterNumbers.insert(String(chapter))
@@ -412,7 +509,6 @@ final class MangaReadingProgressManager: ObservableObject {
         save()
     }
 
-    /// Mark all chapters as unread.
     func markAllUnread(mangaId: Int) {
         guard var progress = progressMap[mangaId] else { return }
         progress.readChapterNumbers.removeAll()
@@ -442,24 +538,74 @@ final class MangaReadingProgressManager: ObservableObject {
         save()
     }
 
-    // MARK: - Persistence
+    private static func loadProgress(
+        forKey key: String
+    ) -> (progress: [Int: MangaProgress], unreadable: Bool) {
+        guard let data = UserDefaults.standard.data(forKey: key) else {
+            return ([:], false)
+        }
+        guard let decoded = try? JSONDecoder().decode([Int: MangaProgress].self, from: data) else {
+            return ([:], true)
+        }
+        return (decoded, false)
+    }
+
+    static func persistedProgressSchemaIsValid(_ data: Data) -> Bool {
+        (try? JSONDecoder().decode([Int: MangaProgress].self, from: data)) != nil
+    }
 
     private func load() {
-        if let data = UserDefaults.standard.data(forKey: storageKey),
-           let decoded = try? JSONDecoder().decode([Int: MangaProgress].self, from: data) {
-            progressMap = decoded
+        let loaded = Self.loadProgress(forKey: storageKey)
+        activeStoreLoadFailed = loaded.unreadable
+        progressMap = loaded.progress
+        if loaded.unreadable {
+            ReaderLogger.shared.log(
+                "MangaReadingProgressManager: profile \(activeProfileID) has an unreadable progress store; preserving its bytes",
+                type: "Error"
+            )
         }
     }
 
     private func save() {
+        guard !activeStoreLoadFailed else { return }
         if let data = try? JSONEncoder().encode(progressMap) {
             UserDefaults.standard.set(data, forKey: storageKey)
         }
     }
 
-    // MARK: - History
+    private func allowOverwritingUnreadableStore() {
+        activeStoreLoadFailed = false
+    }
 
-    /// Returns all manga IDs that have reading progress, sorted by most recently read.
+    func progress(forProfile profileID: UUID) -> [Int: MangaProgress] {
+        progressSnapshot(forProfile: profileID) ?? [:]
+    }
+
+    func progressSnapshot(forProfile profileID: UUID) -> [Int: MangaProgress]? {
+        let key = profileID == activeProfileID ? storageKey : Self.storageKey(for: profileID)
+        let loaded = Self.loadProgress(forKey: key)
+        guard !loaded.unreadable else {
+            ReaderLogger.shared.log(
+                "MangaReadingProgressManager: profile \(profileID) has an unreadable progress store; preserving its bytes",
+                type: "Error"
+            )
+            return nil
+        }
+        return loaded.progress
+    }
+
+    func applyRestoredProgress(_ progress: [Int: MangaProgress], forProfile profileID: UUID) {
+        guard profileID != activeProfileID else {
+            allowOverwritingUnreadableStore()
+            progressMap = progress
+            save()
+            objectWillChange.send()
+            return
+        }
+        guard let data = try? JSONEncoder().encode(progress) else { return }
+        UserDefaults.standard.set(data, forKey: Self.storageKey(for: profileID))
+    }
+
     func recentlyReadMangaIds() -> [(id: Int, progress: MangaProgress)] {
         progressMap
             .filter { $0.value.lastReadDate != nil }
@@ -467,17 +613,14 @@ final class MangaReadingProgressManager: ObservableObject {
             .map { (id: $0.key, progress: $0.value) }
     }
 
-    /// Bulk-replace progress map (used during backup restore).
     func replaceProgressMapForRestore(_ newMap: [Int: MangaProgress]) {
+        allowOverwritingUnreadableStore()
         progressMap = newMap
         save()
     }
 
-    // MARK: - Helpers
-
-    /// Extracts the leading integer from a chapter string like "Ch. 129" or "127.2".
     private func extractChapterNumber(from string: String) -> Int? {
-        // Look for patterns like "Ch. 129", "Chapter 5", or just "129.2"
+
         let pattern = #"(\d+)"#
         guard let regex = try? NSRegularExpression(pattern: pattern),
               let match = regex.firstMatch(in: string, range: NSRange(string.startIndex..., in: string)),

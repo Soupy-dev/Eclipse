@@ -1,3 +1,10 @@
+//
+//  SettingsView.swift
+//  Sora
+//
+//  Created by Francesco on 07/08/25.
+//
+
 import SwiftUI
 #if os(tvOS)
 import CoreImage.CIFilterBuiltins
@@ -12,39 +19,42 @@ struct SettingsView: View {
     private enum TVFocusTarget: Hashable {
         case services
         case diagnostics
+        case logger
     }
 #endif
 
-    /// Provided by full-screen Settings hosts. Sheet and tvOS presentations
-    /// continue to use their native dismissal behavior.
     private let onRootDismiss: (() -> Void)?
 
     init(onRootDismiss: (() -> Void)? = nil) {
         self.onRootDismiss = onRootDismiss
     }
 
-    @AppStorage("githubReleaseAutoCheckEnabled") private var autoCheckGitHubReleases = true
-    @AppStorage("githubReleaseUpdateAvailable") private var githubReleaseUpdateAvailable = false
-    @AppStorage("githubReleaseLatestVersion") private var githubReleaseLatestVersion = ""
-    @AppStorage("githubReleaseURL") private var githubReleaseURL = ""
+    @AppStorage("githubReleaseAutoCheckEnabled", store: .standard) private var autoCheckGitHubReleases = true
+    @AppStorage("githubReleaseUpdateAvailable", store: .standard) private var githubReleaseUpdateAvailable = false
+    @AppStorage("githubReleaseLatestVersion", store: .standard) private var githubReleaseLatestVersion = ""
+    @AppStorage("githubReleaseURL", store: .standard) private var githubReleaseURL = ""
     @AppStorage("defaultScheduleMode") private var defaultScheduleModeRaw = ScheduleMode.anime.rawValue
     @AppStorage(ScheduleWindow.storageKey) private var scheduleWindowDays = ScheduleWindow.defaultValue.rawValue
     @AppStorage(PerformanceModeSettings.enabledKey) private var performanceModeEnabled = PerformanceModeSettings.defaultEnabled
     @AppStorage(PerformanceModeSettings.skipAniListTraversalForAnimeDetailsKey) private var skipAniListTraversalForAnimeDetails = false
 #if !os(tvOS)
-    @AppStorage("showKanzen") private var showKanzen: Bool = false
+    @AppStorage("showKanzen", store: .standard) private var showKanzen: Bool = false
     @State private var settingsSearchText = ""
     @State private var installedServiceSearchEntries: [SettingsSearchEntry] = []
     @State private var installedStremioSearchEntries: [SettingsSearchEntry] = []
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    @State private var installedNuvioSearchEntries: [SettingsSearchEntry] = []
+#endif
     @State private var notificationAuthorizationDisplayName = "Not enabled"
 #else
     @FocusState private var tvFocusTarget: TVFocusTarget?
 #endif
     @State private var isCheckingGitHubRelease = false
+    @StateObject private var profileManager = ProfileManager.shared
 
     private let koFiURL = URL(string: "https://ko-fi.com/soupydev")!
-    private let discordURL = URL(string: "https://discord.gg/UjHgGaEbn")!
-    private let sourceCodeURL = URL(string: "https://github.com/Soupy-dev/Eclipse")!
+    private let discordURL = URL(string: "https://discord.gg/cuhAwNwh25")!
+    private var sourceCodeURL: URL { Bundle.main.eclipseSourceURL }
     private let originalProjectURL = URL(string: "https://github.com/cranci1/Luna")!
     private let licenseURL = URL(string: "https://www.gnu.org/licenses/gpl-3.0.html")!
     private let privacyPolicyURL = URL(string: "https://soupy-dev.github.io/Eclipse/privacy-policy/")!
@@ -59,6 +69,17 @@ struct SettingsView: View {
 
     private var supportsGitHubReleaseUpdates: Bool {
         PlatformCapabilities.current.supportsGitHubUpdates
+    }
+
+    private var activeProfileSummary: String {
+        guard let active = profileManager.activeProfile else { return "1 profile" }
+        return profileManager.profiles.count > 1
+            ? "\(active.name) · \(profileManager.profiles.count)"
+            : active.name
+    }
+
+    private var isAdministrable: Bool {
+        profileManager.activeProfile?.isKidsProfile != true
     }
 
 #if !os(tvOS)
@@ -90,7 +111,7 @@ struct SettingsView: View {
             }
     }
 
-    private var settingsSearchEntries: [SettingsSearchEntry] {
+    private static let baseSettingsSearchEntries: [SettingsSearchEntry] = {
         var entries: [SettingsSearchEntry] = [
             .init(id: "performance-mode", title: "Performance Mode", location: "Basic", icon: "bolt.fill", color: .yellow, keywords: ["fast", "AniList", "catalog"], action: .destination(.performance)),
             .init(id: "media-player", title: "Media Player", location: "Basic", icon: "play.fill", color: .white, keywords: ["MPV", "VLC", "AVPlayer", "default player"], action: .destination(.player)),
@@ -126,6 +147,7 @@ struct SettingsView: View {
             .init(id: "pip-when-leaving", title: "PiP When Leaving App", location: "Media Player > Player Controls", icon: "pip", color: .indigo, keywords: ["automatic picture in picture", "background playback", "exit app"], action: .destination(.playerTarget(.pipWhenLeavingApp))),
             .init(id: "moltenvk-quality", title: "MoltenVK Quality", location: "Media Player > MPV Rendering", icon: "sparkles.rectangle.stack", color: .cyan, keywords: ["Metal", "render quality", "heat", "power"], action: .destination(.playerTarget(.moltenVKQuality))),
             .init(id: "upscaling", title: "Upscaling", location: "Media Player > MPV Rendering", icon: "sparkles.rectangle.stack", color: .cyan, keywords: ["upscale", "resolution", "1080p", "4K", "MoltenVK"], action: .destination(.playerTarget(.upscaling))),
+            .init(id: "neural-upscaling", title: "Enhanced Upscaling", location: "Media Player > MPV Rendering", icon: "sparkles.rectangle.stack", color: .cyan, keywords: ["ArtCNN", "FSR", "FidelityFX", "anime upscale", "animation", "shader", "neural", "spatial", "sharpen", "MoltenVK"], action: .destination(.playerTarget(.neuralUpscaling))),
             .init(id: "performance-overlay", title: "Performance Overlay", location: "Media Player > MPV Rendering", icon: "gauge.with.dots.needle.67percent", color: .cyan, keywords: ["fps", "stats", "playback performance", "quality"], action: .destination(.playerTarget(.performanceOverlay))),
             .init(id: "sample-buffer-renderer", title: "Sample-Buffer Renderer", location: "Media Player > MPV Rendering", icon: "rectangle.3.group", color: .cyan, keywords: ["sample buffer", "gpu-next", "renderer"], action: .destination(.playerTarget(.sampleBufferRenderer))),
             .init(id: "hdr-output", title: "HDR Output", location: "Media Player > MPV Rendering", icon: "sun.max.fill", color: .cyan, keywords: ["high dynamic range", "Dolby Vision", "video range"], action: .destination(.playerTarget(.hdrOutput))),
@@ -158,7 +180,10 @@ struct SettingsView: View {
             .init(id: "appearance-hide-splash", title: "Hide Splash Screen", location: "Appearance > Motion & Startup", icon: "rectangle.slash", color: .purple, keywords: ["launch screen", "startup", "splash"], action: .destination(.appearanceTarget(.hideSplashScreen))),
             .init(id: "appearance-season-menu", title: "Alternative Season Menu", location: "Appearance > Detail Pages", icon: "list.bullet", color: .purple, keywords: ["season dropdown", "specials", "OVAs"], action: .destination(.appearanceTarget(.alternativeSeasonMenu))),
             .init(id: "appearance-horizontal-episodes", title: "Horizontal Episode List", location: "Appearance > Detail Pages", icon: "rectangle.split.3x1", color: .purple, keywords: ["episode layout", "vertical episodes"], action: .destination(.appearanceTarget(.horizontalEpisodeList))),
+            .init(id: "appearance-unaired-episodes", title: "Show Unaired Episodes", location: "Appearance > Detail Pages", icon: "calendar.badge.clock", color: .purple, keywords: ["hide future episodes", "upcoming episodes", "aired episodes", "episode visibility"], action: .destination(.appearanceTarget(.showUnairedEpisodes))),
             .init(id: "appearance-title-art", title: "TMDB Title Art", location: "Appearance > Detail Pages", icon: "text.below.photo", color: .purple, keywords: ["logo artwork", "title logo", "media artwork"], action: .destination(.appearanceTarget(.tmdbTitleArt))),
+            .init(id: "appearance-library-bookmarks", title: "Show Bookmarks", location: "Appearance > Library", icon: "bookmark", color: .purple, keywords: ["hide bookmarks", "library sections", "collections only"], action: .destination(.appearanceTarget(.libraryBookmarks))),
+            .init(id: "appearance-library-layout", title: "Collection Layout", location: "Appearance > Library", icon: "rectangle.grid.1x2", color: .purple, keywords: ["library collections", "horizontal", "vertical", "grid"], action: .destination(.appearanceTarget(.libraryCollectionLayout))),
             .init(id: "schedule", title: "Schedule", location: "Basic", icon: "calendar", color: .red, keywords: ["calendar", "anime", "western", "default tab", "range", "days"], action: .destination(.schedule)),
             .init(id: "schedule-range", title: "Schedule Range", location: "Schedule", icon: "calendar.badge.clock", color: .red, keywords: ["7 days", "14 days", "21 days", "30 days", "window", "performance", "upcoming episodes"], action: .destination(.schedule)),
             .init(id: "notifications", title: "Notifications", location: "Basic", icon: "bell.badge.fill", color: .orange, keywords: ["alerts", "reminders", "episodes", "airing", "seasons", "local"], action: .destination(.notifications)),
@@ -174,6 +199,9 @@ struct SettingsView: View {
             .init(id: "services-auto-select-episodes", title: "Auto-Select Episodes", location: "Services > Auto Mode", icon: "forward.end.fill", color: .indigo, keywords: ["automatic episode selection", "next episode", "auto source"], action: .destination(.servicesTarget(.autoSelectEpisodes))),
             .init(id: "services-auto-quality", title: "Auto Quality", location: "Services > Auto Mode", icon: "dial.medium", color: .indigo, keywords: ["automatic quality", "resolution", "stream quality"], action: .destination(.servicesTarget(.autoQuality))),
             .init(id: "services-quality-preference", title: "Auto Quality Preference", location: "Services > Auto Mode", icon: "slider.horizontal.3", color: .indigo, keywords: ["preferred quality", "1080p", "720p", "best quality"], action: .destination(.servicesTarget(.autoQualityPreference))),
+            .init(id: "services-auto-mode-error-intelligence", title: "Auto Mode Error Intelligence", location: "Services > Auto Mode", icon: "checkmark.shield", color: .indigo, keywords: ["dead source", "skip broken", "stream check", "unavailable", "preflight"], action: .destination(.servicesTarget(.autoModeErrorIntelligence))),
+            .init(id: "services-block-addon-subtitles", title: "Block Add-on Subtitles", location: "Services > Extra Source Settings > Content Blocking", icon: "captions.bubble.fill", color: .orange, keywords: ["subtitle kill switch", "disable addon subtitles", "content blocking"], action: .destination(.servicesTarget(.blockAddonSubtitles))),
+            .init(id: "services-block-addon-catalogs", title: "Block Add-on Catalogs", location: "Services > Extra Source Settings > Content Blocking", icon: "square.grid.2x2.fill", color: .orange, keywords: ["catalog kill switch", "disable addon catalogs", "content blocking"], action: .destination(.servicesTarget(.blockAddonCatalogs))),
             .init(id: "services-include-language", title: "Languages to Include", location: "Services > Extra Source Settings", icon: "checkmark.bubble", color: .green, keywords: ["include language", "allow", "whitelist", "streams", "Stremio"], action: .destination(.servicesTarget(.languagesToInclude))),
             .init(id: "services-exclude-language", title: "Languages to Exclude", location: "Services > Extra Source Settings", icon: "xmark.bubble", color: .red, keywords: ["exclude language", "block", "hide", "streams", "Stremio"], action: .destination(.servicesTarget(.languagesToExclude))),
             .init(id: "services-assume-original-audio", title: "Assume Original Language", location: "Services > Extra Source Settings", icon: "waveform", color: .orange, keywords: ["original language", "untagged streams", "missing language", "TMDB language", "stream language"], action: .destination(.servicesTarget(.assumeOriginalAudio))),
@@ -190,13 +218,17 @@ struct SettingsView: View {
             .init(id: "storage", title: "Storage", location: "Data", icon: "internaldrive", color: .gray, keywords: ["downloads", "cache", "files", "clear"], action: .destination(.storage)),
             .init(id: "backup", title: "Backup & Restore", location: "Data", icon: "arrow.triangle.2.circlepath", color: .teal, keywords: ["export", "import", "settings"], action: .destination(.backup)),
             .init(id: "logger", title: "Logger", location: "Data", icon: "doc.text", color: .yellow, keywords: ["logs", "diagnostics", "errors", "export"], action: .destination(.logger)),
-            .init(id: "support", title: "Support Eclipse", location: "Support", icon: "heart.fill", color: .pink, keywords: ["tip", "subscription", "Ko-fi", "Discord"], action: .anchor("settings-support")),
+            .init(id: "support", title: "Support Eclipse", location: "Support", icon: "heart.fill", color: .pink, keywords: ["tip", "donate", "Ko-fi", "Discord"], action: .anchor("settings-support")),
             .init(id: "reader-mode", title: "Switch to Reader Mode", location: "Others", icon: "book.fill", color: .orange, keywords: ["Kanzen", "manga", "reader"], action: .readerMode),
             .init(id: "legal", title: "Legal & Source", location: "Others", icon: "scroll.fill", color: .cyan, keywords: ["privacy", "license", "GitHub", "source code"], action: .destination(.legal))
         ]
 
+        if ExperimentalFeatureState.isEnabledAtLaunch
+            || MediaStateCloudKitSuspension.needsUserVisibleResume {
+            entries.append(.init(id: "cloud-sync", title: "Cloud Sync", location: "Data", icon: "cloud", color: .blue, keywords: ["iCloud", "sync", "library", "progress", "settings", "preferences", "across devices", "resume"], action: .destination(.cloud)))
+        }
+
         if ExperimentalFeatureState.isEnabledAtLaunch {
-            entries.append(.init(id: "cloud-sync", title: "Cloud Sync", location: "Data", icon: "cloud", color: .blue, keywords: ["iCloud", "sync", "library", "progress"], action: .destination(.cloud)))
             entries.append(contentsOf: [
                 .init(id: "warmup-cache", title: "Stream Warmup Cache", location: "Media Player > MPV Advanced", icon: "bolt.horizontal.circle", color: .purple, keywords: ["preload", "warmup", "buffer", "faster retries"], action: .destination(.playerTarget(.streamWarmupCache))),
                 .init(id: "next-episode-staging", title: "Next Episode Staging", location: "Media Player > MPV Advanced", icon: "forward.end.fill", color: .purple, keywords: ["preload next episode", "prewarm", "smooth transition"], action: .destination(.playerTarget(.nextEpisodeStaging))),
@@ -212,27 +244,23 @@ struct SettingsView: View {
         if !WatchTogetherSettings.isAvailableInCurrentBuild {
             entries.removeAll { $0.id == "watch-together" }
         }
-#if os(iOS) && canImport(GoogleCast)
-        if GoogleCastSettings.isAvailableInCurrentBuild {
-            entries.append(
-                .init(
-                    id: "google-cast",
-                    title: "Google Cast",
-                    location: "Media Player > MPV Player",
-                    icon: "tv.and.hifispeaker.fill",
-                    color: .orange,
-                    keywords: ["Chromecast", "Cast", "TV", "receiver", "enable", "disable", "discovery", "subtitles"],
-                    action: .destination(.playerTarget(.googleCast))
-                )
-            )
-        }
-#endif
-        if supportsGitHubReleaseUpdates {
+        if PlatformCapabilities.current.supportsGitHubUpdates {
             entries.append(.init(id: "updates", title: "App Updates", location: "Updates", icon: "arrow.triangle.2.circlepath", color: .mint, keywords: ["GitHub releases", "check", "auto check", "latest version"], action: .anchor("settings-updates")))
         }
 
-        entries.append(contentsOf: installedServiceSearchEntries)
-        entries.append(contentsOf: installedStremioSearchEntries)
+        return entries
+    }()
+
+    private var settingsSearchEntries: [SettingsSearchEntry] {
+        var entries = Self.baseSettingsSearchEntries
+            + installedServiceSearchEntries
+            + installedStremioSearchEntries
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        entries += installedNuvioSearchEntries
+#endif
+        if !isAdministrable {
+            entries.removeAll { $0.id == "backup" || $0.id == "cloud-sync" }
+        }
         return entries
     }
 
@@ -279,6 +307,40 @@ struct SettingsView: View {
             )
         }
     }
+
+#if os(iOS) && !targetEnvironment(macCatalyst)
+    private static func makeInstalledNuvioSearchEntries(
+        _ state: NuvioStoredPluginsState
+    ) -> [SettingsSearchEntry] {
+        let repositoryNames = state.repositories.reduce(into: [String: String]()) { names, repository in
+            if names[repository.id] == nil {
+                names[repository.id] = repository.displayName
+            }
+        }
+        return state.scrapers.map { scraper in
+            SettingsSearchEntry(
+                id: "installed-nuvio-\(scraper.id)",
+                title: scraper.displayName,
+                location: "Services > Installed Nuvio Providers",
+                icon: "puzzlepiece.extension",
+                color: .purple,
+                keywords: [
+                    "Nuvio",
+                    "plugin",
+                    "provider",
+                    "installed",
+                    scraper.providerKey,
+                    scraper.description,
+                    scraper.author ?? "",
+                    scraper.version,
+                    repositoryNames[scraper.repositoryId] ?? ""
+                ] + scraper.contentLanguage,
+                action: .destination(.servicesTarget(.installedSource(scraper.id)))
+            )
+        }
+    }
+#endif
+
 #endif
 
     var body: some View {
@@ -288,11 +350,11 @@ struct SettingsView: View {
         #else
             if #available(iOS 16.0, *) {
                 NavigationStack {
-                    settingsSearchableContent(settingsRootContent, showsResults: false)
+                    settingsRootSearchableContent(settingsRootContent)
                 }
             } else {
                 NavigationView {
-                    settingsSearchableContent(settingsRootContent, showsResults: false)
+                    settingsRootSearchableContent(settingsRootContent)
                 }
                 .navigationViewStyle(StackNavigationViewStyle())
             }
@@ -302,15 +364,18 @@ struct SettingsView: View {
             AppPerformanceRuntimeContext.shared.setSurface("settings")
         }
 #if !os(tvOS)
-        // Listen only to the collection publishers needed by Settings search.
-        // Service progress and notification-history churn must not invalidate the
-        // complete Settings navigation tree.
+
         .onReceive(ServiceManager.shared.$services) { services in
             installedServiceSearchEntries = Self.makeInstalledServiceSearchEntries(services)
         }
         .onReceive(StremioAddonManager.shared.$addons) { addons in
             installedStremioSearchEntries = Self.makeInstalledStremioSearchEntries(addons)
         }
+#if os(iOS) && !targetEnvironment(macCatalyst)
+        .onReceive(NuvioPluginManager.shared.$state) { state in
+            installedNuvioSearchEntries = Self.makeInstalledNuvioSearchEntries(state)
+        }
+#endif
         .onReceive(LocalNotificationManager.shared.$authorizationStatus) { _ in
             notificationAuthorizationDisplayName = LocalNotificationManager.shared.authorizationDisplayName
         }
@@ -318,21 +383,27 @@ struct SettingsView: View {
     }
 
 #if !os(tvOS)
-    @ViewBuilder
+
     private func settingsSearchableContent<Content: View>(
-        _ content: Content,
-        showsResults: Bool = true
+        _ content: @autoclosure @escaping () -> Content
     ) -> some View {
-        SettingsSearchContainer(
-            text: $settingsSearchText,
-            showsResults: showsResults,
+        ScopedSettingsSearchContainer(
             content: content,
             results: { query in AnyView(subpageSettingsSearchResults(for: query)) }
         )
     }
 
-    /// The exit gesture lives on the Settings root rather than its full-screen
-    /// host, so scrolling and a pushed settings page keep their native gestures.
+    private func settingsRootSearchableContent<Content: View>(
+        _ content: Content
+    ) -> some View {
+        SettingsSearchContainer(
+            text: $settingsSearchText,
+            showsResults: false,
+            content: content,
+            results: { query in AnyView(subpageSettingsSearchResults(for: query)) }
+        )
+    }
+
     @ViewBuilder
     private var settingsRootContent: some View {
         if let onRootDismiss {
@@ -386,7 +457,7 @@ struct SettingsView: View {
             ScrollView {
                 LazyVStack(spacing: ExperimentalFeatureState.isEnabledAtLaunch ? 22 : 28) {
                     if settingsSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                // MARK: - Support
+
                 GlassSection(header: "Support") {
                     VStack(spacing: 0) {
                         if Bundle.main.allowsExternalDonationLinks {
@@ -414,7 +485,7 @@ struct SettingsView: View {
                             NavigationLink(destination: settingsSearchableContent(StoreKitSupportView())) {
                                 GlassSettingsRow(icon: "heart.fill", iconColor: .pink, title: "Support Eclipse") {
                                     HStack(spacing: 4) {
-                                        Text("Tips & subscription")
+                                        Text("Tips")
                                             .font(.subheadline)
                                             .foregroundColor(.white.opacity(0.5))
                                         Image(systemName: "chevron.right")
@@ -441,7 +512,6 @@ struct SettingsView: View {
                 }
                 .id("settings-support")
 
-                // MARK: - Basic
                 GlassSection(header: "Basic") {
                     VStack(spacing: 0) {
                         NavigationLink(destination: settingsSearchableContent(PerformanceModeSettingsView())) {
@@ -545,7 +615,24 @@ struct SettingsView: View {
                     }
                 }
 
-                // MARK: - Data
+                GlassSection(header: "Profiles") {
+                    VStack(spacing: 0) {
+                        NavigationLink(destination: settingsSearchableContent(ProfilesSettingsView())) {
+                            GlassSettingsRow(icon: "person.2.fill", iconColor: .mint, title: "Profiles") {
+                                HStack(spacing: 4) {
+                                    Text(activeProfileSummary)
+                                        .font(.subheadline)
+                                        .foregroundColor(.white.opacity(0.5))
+                                    Image(systemName: "chevron.right")
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundColor(.white.opacity(0.3))
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+
                 GlassSection(header: "Data") {
                     VStack(spacing: 0) {
                         NavigationLink(destination: settingsSearchableContent(StorageView())) {
@@ -553,24 +640,27 @@ struct SettingsView: View {
                         }
                         .buttonStyle(.plain)
 
-                        GlassDivider()
-
-                        NavigationLink(destination: settingsSearchableContent(BackupManagementView())) {
-                            GlassSettingsRow(icon: "arrow.triangle.2.circlepath", iconColor: .teal, title: "Backup & Restore")
-                        }
-                        .buttonStyle(.plain)
-
-                        if ExperimentalFeatureState.isEnabledAtLaunch {
+                        if isAdministrable {
                             GlassDivider()
 
-                            NavigationLink(destination: settingsSearchableContent(ExperimentalCloudSyncView())) {
-                                GlassSettingsRow(icon: "cloud", iconColor: .blue, title: "Cloud Sync") {
-                                    Text("Available")
-                                        .font(.subheadline)
-                                        .foregroundColor(.white.opacity(0.5))
-                                }
+                            NavigationLink(destination: settingsSearchableContent(BackupManagementView())) {
+                                GlassSettingsRow(icon: "arrow.triangle.2.circlepath", iconColor: .teal, title: "Backup & Restore")
                             }
                             .buttonStyle(.plain)
+
+                            if ExperimentalFeatureState.isEnabledAtLaunch
+                                || MediaStateCloudKitSuspension.needsUserVisibleResume {
+                                GlassDivider()
+
+                                NavigationLink(destination: settingsSearchableContent(ExperimentalCloudSyncView())) {
+                                    GlassSettingsRow(icon: "cloud", iconColor: .blue, title: "Cloud Sync") {
+                                        Text("Available")
+                                            .font(.subheadline)
+                                            .foregroundColor(.white.opacity(0.5))
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
 
                         GlassDivider()
@@ -582,7 +672,6 @@ struct SettingsView: View {
                     }
                 }
 
-                // MARK: - Others
                 GlassSection(header: "Others") {
                     VStack(spacing: 0) {
                         Button {
@@ -606,7 +695,6 @@ struct SettingsView: View {
                     }
                 }
 
-                // MARK: - Updates
                 if supportsGitHubReleaseUpdates {
                     GlassSection(header: "Updates") {
                         VStack(spacing: 0) {
@@ -654,7 +742,6 @@ struct SettingsView: View {
                     .id("settings-updates")
                 }
 
-                // MARK: - Version Info
                 VStack(spacing: 4) {
                     Text("Eclipse v\(Bundle.main.appVersion) (\(Bundle.main.buildNumber))")
                         .font(.footnote)
@@ -768,9 +855,7 @@ struct SettingsView: View {
     private func settingsSearchSuggestionLink(for entry: SettingsSearchEntry) -> some View {
         switch entry.action {
         case .destination(let destination):
-            NavigationLink(destination: settingsSearchDestination(destination).onAppear {
-                settingsSearchText = ""
-            }) {
+            NavigationLink(destination: LazySettingsPage { settingsSearchDestination(destination) }) {
                 settingsSearchRow(entry)
             }
             .buttonStyle(.plain)
@@ -796,9 +881,7 @@ struct SettingsView: View {
     private func settingsSearchLink(for entry: SettingsSearchEntry, scrollProxy: ScrollViewProxy) -> some View {
         switch entry.action {
         case .destination(let destination):
-            NavigationLink(destination: settingsSearchDestination(destination).onAppear {
-                settingsSearchText = ""
-            }) {
+            NavigationLink(destination: LazySettingsPage { settingsSearchDestination(destination) }) {
                 settingsSearchRow(entry)
             }
             .buttonStyle(.plain)
@@ -892,7 +975,6 @@ struct SettingsView: View {
     }
 #endif
 
-    // Keep tvOS list-based layout as fallback
     @ViewBuilder
     private var settingsListContent: some View {
 #if os(tvOS) && canImport(StoreKit)
@@ -929,6 +1011,7 @@ struct SettingsView: View {
             NavigationLink(destination: ServicesView()) { Text("Services") }
             #endif
             NavigationLink(destination: TrackersSettingsView()) { Text("Trackers") }
+            NavigationLink(destination: ProfilesSettingsView()) { Text("Profiles") }
         }
 
         Section {
@@ -943,9 +1026,7 @@ struct SettingsView: View {
 #if os(tvOS)
             NavigationLink(destination: TVDiagnosticsView()
                 .onAppear {
-                    // The destination owns Remote focus while it is visible.
-                    // Keeping the source link focused leaves a hidden focus
-                    // item behind the pushed screen and prevents Menu/Back.
+
                     tvFocusTarget = nil
                 }
                 .onDisappear {
@@ -956,6 +1037,19 @@ struct SettingsView: View {
             }
             .focused($tvFocusTarget, equals: .diagnostics)
             .accessibilityIdentifier("tv.settings.diagnostics")
+
+            NavigationLink(destination: LoggerView()
+                .onAppear {
+                    tvFocusTarget = nil
+                }
+                .onDisappear {
+                    restoreTVFocus(to: .logger)
+                }
+            ) {
+                Text("Logger")
+            }
+            .focused($tvFocusTarget, equals: .logger)
+            .accessibilityIdentifier("tv.settings.logger")
 #endif
             NavigationLink(destination: LegalNoticeView(
                 sourceCodeURL: sourceCodeURL,
@@ -998,8 +1092,34 @@ struct SettingsView: View {
 
 #if !os(tvOS)
 struct SettingsSearchPresentation {
-    let text: Binding<String>
     let results: (String) -> AnyView
+}
+
+struct LazySettingsPage<Content: View>: View {
+    private let build: () -> Content
+
+    init(_ build: @escaping () -> Content) {
+        self.build = build
+    }
+
+    var body: some View {
+        build()
+    }
+}
+
+struct ScopedSettingsSearchContainer<Content: View>: View {
+    @State private var text = ""
+    let content: () -> Content
+    let results: (String) -> AnyView
+
+    var body: some View {
+        SettingsSearchContainer(
+            text: $text,
+            showsResults: true,
+            content: content(),
+            results: results
+        )
+    }
 }
 
 private struct SettingsSearchPresentationKey: EnvironmentKey {
@@ -1034,7 +1154,7 @@ struct SettingsSearchContainer<Content: View>: View {
             .textInputAutocapitalization(.never)
             .environment(
                 \.eclipseSettingsSearchPresentation,
-                SettingsSearchPresentation(text: $text, results: results)
+                SettingsSearchPresentation(results: results)
             )
     }
 
@@ -1189,8 +1309,12 @@ private struct WatchTogetherSettingsView: View {
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
         .onChange(of: watchTogetherEnabled) { enabled in
-            guard !enabled else { return }
-            WatchTogetherCoordinator.shared.leaveSession()
+            if enabled {
+                WatchTogetherCoordinator.shared.start()
+            } else {
+                WatchTogetherCoordinator.shared.declinePendingDisabledSession()
+                WatchTogetherCoordinator.shared.leaveSession()
+            }
         }
     }
 }
@@ -1526,13 +1650,13 @@ private struct NotificationSettingsView: View {
         }
     }
 
-    private func searchableDestination<Content: View>(_ content: Content) -> AnyView {
+    private func searchableDestination<Content: View>(
+        _ content: @autoclosure @escaping () -> Content
+    ) -> AnyView {
         guard let presentation = settingsSearchPresentation else {
-            return AnyView(content)
+            return AnyView(LazySettingsPage(content))
         }
-        return AnyView(SettingsSearchContainer(
-            text: presentation.text,
-            showsResults: true,
+        return AnyView(ScopedSettingsSearchContainer(
             content: content,
             results: presentation.results
         ))
@@ -2192,6 +2316,7 @@ private struct NotificationSubscriptionSettingsRow: View {
                 title: subscription.title,
                 titleAliases: subscription.titleAliases,
                 animeMediaIDs: subscription.animeMediaIDs,
+                animeSpecialMediaIDs: subscription.animeSpecialMediaIDs,
                 westernSeasonIDs: subscription.knownWesternSeasonIDs,
                 episodeNotifications: episodes,
                 futureSeasonNotifications: seasons
@@ -2287,32 +2412,63 @@ private final class TVNetworkStatusMonitor: ObservableObject {
 }
 
 private struct TVDataSettingsView: View {
+    @AppStorage(
+        ExperimentalFeatureState.iCloudSyncEnabledKey,
+        store: ProfileSettingsStore.device
+    ) private var iCloudSyncEnabled = false
     @StateObject private var syncManager = MediaStateSyncManager.shared
+    @StateObject private var profileManager = ProfileManager.shared
     @State private var cacheMessage = ""
+    @State private var showResetCacheConfirmation = false
+
+    private var isAdministrable: Bool {
+        profileManager.activeProfile?.isKidsProfile != true
+    }
+
+    private var iCloudSyncBinding: Binding<Bool> {
+        Binding(
+            get: { iCloudSyncEnabled },
+            set: { enabled in
+                guard isAdministrable else { return }
+                iCloudSyncEnabled = enabled
+            }
+        )
+    }
 
     var body: some View {
         List {
             Section {
-                Label(syncManager.phase.title, systemImage: syncManager.phase == .ready ? "checkmark.icloud.fill" : "icloud.fill")
-                Text(syncManager.phase.message)
-                    .font(.footnote)
-                    .foregroundColor(.secondary)
+                Toggle("Sync with iCloud", isOn: iCloudSyncBinding)
+                    .disabled(!isAdministrable)
 
-                Button(syncManager.phase == .ready ? "Sync Now" : "Retry Sync") {
-                    syncManager.syncNow()
+                if iCloudSyncEnabled {
+                    Label(syncManager.phase.title, systemImage: syncManager.phase == .ready ? "checkmark.icloud.fill" : "icloud.fill")
+                    Text(syncManager.phase.message)
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+
+                    Button(syncManager.phase == .ready ? "Sync Now" : "Retry Sync") {
+                        guard isAdministrable else { return }
+                        syncManager.syncNow()
+                    }
+                    .disabled(!isAdministrable)
+                } else {
+                    Text("Media state stays on this Apple TV until you turn sync on.")
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
                 }
             } header: {
                 Text("Cloud Sync")
             } footer: {
-                Text("Library, playback progress, and TV-safe preferences use your private iCloud database. Service and tracker credentials stay in this Apple TV user's Keychain.")
+                Text("Cloud Sync starts off. Turning it on stores library, playback progress, TV-safe preferences, installed-source configuration, and tracker credentials in your private iCloud database. Turning it off stops syncing without deleting either copy. Cloud-provider login tokens, ephemeral playback URLs, and session cookies stay local.")
             }
 
             Section {
                 Button("Reset TV Cache", role: .destructive) {
-                    let purgeResult = TVPurgeableCache.clear()
-                    syncManager.resetLocalCacheWithoutDeletingRemoteState()
-                    cacheMessage = "\(purgeResult) Media state is being restored from iCloud when available."
+                    guard isAdministrable else { return }
+                    showResetCacheConfirmation = true
                 }
+                .disabled(!isAdministrable)
                 if !cacheMessage.isEmpty {
                     Text(cacheMessage)
                         .font(.footnote)
@@ -2321,10 +2477,32 @@ private struct TVDataSettingsView: View {
             } header: {
                 Text("Storage")
             } footer: {
-                Text("This removes temporary artwork, metadata, player files, and the local sync cache. It refetches media state without creating CloudKit deletion records or removing the remote library.")
+                Text(iCloudSyncEnabled
+                    ? "This removes temporary artwork, metadata, player files, and the local sync cache. It refetches media state without creating CloudKit deletion records or removing the remote library."
+                    : "This removes temporary artwork, metadata, and player files. Your local library and the remote iCloud copy are not changed while sync is off.")
             }
         }
         .navigationTitle("Cloud Sync & Cache")
+        .alert("Reset TV Cache?", isPresented: $showResetCacheConfirmation) {
+            Button("Reset", role: .destructive) {
+                guard isAdministrable else { return }
+                let purgeResult = TVPurgeableCache.clear()
+                if iCloudSyncEnabled {
+                    syncManager.resetLocalCacheWithoutDeletingRemoteState()
+                    cacheMessage = "\(purgeResult) Media state is being restored from iCloud when available."
+                } else {
+                    cacheMessage = purgeResult
+                }
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text(iCloudSyncEnabled
+                ? "This removes temporary artwork, metadata, player files, and the local sync cache. Your remote iCloud library is not deleted."
+                : "This removes temporary artwork, metadata, and player files. Your local library and remote iCloud copy are not deleted.")
+        }
+        .onChange(of: iCloudSyncEnabled) { enabled in
+            MediaStateSyncBootstrap.setCloudKitSyncEnabled(enabled)
+        }
     }
 }
 
@@ -2349,19 +2527,38 @@ private enum TVPurgeableCache {
 }
 #endif
 
-#if canImport(StoreKit)
-private enum SupportProductKind {
-    case tip
-    case subscription
-}
+#if os(tvOS)
+private struct TVFocusableInfoBlock<Content: View>: View {
+    @FocusState private var isFocused: Bool
+    private let content: Content
 
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        content
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(Color.white.opacity(isFocused ? 0.08 : 0))
+            )
+            .focusable()
+            .focused($isFocused)
+            .animation(.easeInOut(duration: 0.15), value: isFocused)
+    }
+}
+#endif
+
+let supportTermsOfUseURL = URL(string: "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/")!
+let supportPrivacyPolicyURL = URL(string: "https://soupy-dev.github.io/Eclipse/privacy-policy/")!
+
+#if canImport(StoreKit)
 private struct SupportProductDefinition {
     let id: String
     let fallbackName: String
     let fallbackPrice: String
     let icon: String
     let color: Color
-    let kind: SupportProductKind
 
     var isConfigured: Bool {
         !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -2375,32 +2572,21 @@ private enum SupportPurchaseCatalog {
             fallbackName: "Tip",
             fallbackPrice: "$1",
             icon: "heart.fill",
-            color: .pink,
-            kind: .tip
+            color: .pink
         ),
         SupportProductDefinition(
             id: "idkbruh2",
             fallbackName: "Big Tip",
             fallbackPrice: "$5",
             icon: "heart.circle.fill",
-            color: .purple,
-            kind: .tip
+            color: .purple
         ),
         SupportProductDefinition(
             id: "idkbruh3",
             fallbackName: "Huge Tip",
             fallbackPrice: "$10",
             icon: "sparkles",
-            color: .orange,
-            kind: .tip
-        ),
-        SupportProductDefinition(
-            id: "idkbruh4",
-            fallbackName: "Monthly Support",
-            fallbackPrice: "$3/month",
-            icon: "arrow.triangle.2.circlepath.circle.fill",
-            color: .cyan,
-            kind: .subscription
+            color: .orange
         )
     ]
 
@@ -2484,16 +2670,6 @@ private final class SupportPurchaseStore: ObservableObject {
         }
     }
 
-    func restorePurchases() async {
-        message = nil
-        do {
-            try await AppStore.sync()
-            message = "Purchases restored."
-        } catch {
-            message = "Restore could not be completed."
-        }
-    }
-
     private func verifiedTransaction(
         from result: VerificationResult<StoreKit.Transaction>
     ) throws -> StoreKit.Transaction {
@@ -2531,9 +2707,6 @@ private enum SupportPurchaseError: Error {
     case unverifiedTransaction
 }
 
-private let supportTermsOfUseURL = URL(string: "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/")!
-private let supportPrivacyPolicyURL = URL(string: "https://soupy-dev.github.io/Eclipse/privacy-policy/")!
-
 private struct StoreKitSupportView: View {
     var body: some View {
         ScrollView {
@@ -2562,29 +2735,31 @@ private struct StoreKitSupportView: View {
 
     private func storeLinkRow(title: String, icon: String, color: Color, url: URL) -> some View {
 #if os(tvOS)
-        VStack(alignment: .leading, spacing: 12) {
-            GlassDetailRow(icon: icon, iconColor: color, title: title) {
-                Text("Scan QR")
-                    .font(.caption)
-                    .foregroundColor(.white.opacity(0.5))
-            }
-
-            HStack(spacing: 18) {
-                if let image = supportQRCode(for: url) {
-                    Image(uiImage: image)
-                        .interpolation(.none)
-                        .resizable()
-                        .frame(width: 150, height: 150)
-                        .background(Color.white)
-                        .accessibilityLabel("QR code for \(title)")
+        TVFocusableInfoBlock {
+            VStack(alignment: .leading, spacing: 12) {
+                GlassDetailRow(icon: icon, iconColor: color, title: title) {
+                    Text("Scan QR")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.5))
                 }
-                Text(url.absoluteString)
-                    .font(.caption)
-                    .foregroundColor(.white.opacity(0.68))
-                    .lineLimit(4)
+
+                HStack(spacing: 18) {
+                    if let image = supportQRCode(for: url) {
+                        Image(uiImage: image)
+                            .interpolation(.none)
+                            .resizable()
+                            .frame(width: 150, height: 150)
+                            .background(Color.white)
+                            .accessibilityLabel("QR code for \(title)")
+                    }
+                    Text(url.absoluteString)
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.68))
+                        .lineLimit(4)
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 14)
             }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 14)
         }
 #else
         Link(destination: url) {
@@ -2670,19 +2845,6 @@ private struct StoreKitSupportSection: View {
                         GlassDivider()
                     }
                 }
-
-                GlassDivider()
-
-                Button {
-                    Task { await store.restorePurchases() }
-                } label: {
-                    GlassSettingsRow(icon: "arrow.clockwise.circle.fill", iconColor: .green, title: "Restore Purchases") {
-                        Text("Optional")
-                            .font(.subheadline)
-                            .foregroundColor(.white.opacity(0.5))
-                    }
-                }
-                .buttonStyle(.plain)
             }
 
             if let message = store.message, !message.isEmpty {
@@ -2709,12 +2871,12 @@ private struct StoreKitSupportPreviewRow: View {
             HStack(spacing: 6) {
                 Text(definition.fallbackPrice)
                     .font(.subheadline)
-                    .foregroundColor(.white.opacity(0.5))
+                    .foregroundColor(isTvOS ? Color.secondary : Color.white.opacity(0.5))
                     .lineLimit(1)
                     .minimumScaleFactor(0.82)
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.32))
+                    .foregroundColor(isTvOS ? Color.secondary : Color.white.opacity(0.32))
             }
         }
     }
@@ -2737,14 +2899,7 @@ private struct StoreKitSupportButton: View {
     }
 
     private var priceText: String {
-        guard let period = product.subscription?.subscriptionPeriod else {
-            return product.displayPrice
-        }
-        return "\(product.displayPrice) / \(period.billingUnitText)"
-    }
-
-    private var subscriptionLengthText: String? {
-        product.subscription?.subscriptionPeriod.renewalLengthText
+        product.displayPrice
     }
 
     var body: some View {
@@ -2761,57 +2916,16 @@ private struct StoreKitSupportButton: View {
                         EclipseLoadingIndicator(diameter: 16)
                     }
 
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text(isPurchasing ? "Purchasing" : priceText)
-                            .font(.subheadline)
-                            .foregroundColor(.white.opacity(0.5))
-                            .lineLimit(1)
-                            .minimumScaleFactor(0.82)
-
-                        if !isPurchasing, let subscriptionLengthText {
-                            Text(subscriptionLengthText)
-                                .font(.caption2)
-                                .foregroundColor(.white.opacity(0.42))
-                                .lineLimit(1)
-                        }
-                    }
+                    Text(isPurchasing ? "Purchasing" : priceText)
+                        .font(.subheadline)
+                        .foregroundColor(isTvOS ? Color.secondary : Color.white.opacity(0.5))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.82)
                 }
             }
         }
         .buttonStyle(.plain)
         .disabled(isPurchasing || store.purchasingProductID != nil)
-    }
-}
-
-private extension Product.SubscriptionPeriod {
-    var billingUnitText: String {
-        switch unit {
-        case .day:
-            return value == 1 ? "day" : "\(value) days"
-        case .week:
-            return value == 1 ? "week" : "\(value) weeks"
-        case .month:
-            return value == 1 ? "month" : "\(value) months"
-        case .year:
-            return value == 1 ? "year" : "\(value) years"
-        @unknown default:
-            return value == 1 ? "period" : "\(value) periods"
-        }
-    }
-
-    var renewalLengthText: String {
-        switch unit {
-        case .day:
-            return value == 1 ? "Renews daily" : "Renews every \(value) days"
-        case .week:
-            return value == 1 ? "Renews weekly" : "Renews every \(value) weeks"
-        case .month:
-            return value == 1 ? "Renews monthly" : "Renews every \(value) months"
-        case .year:
-            return value == 1 ? "Renews yearly" : "Renews every \(value) years"
-        @unknown default:
-            return value == 1 ? "Auto-renewable" : "Renews every \(value) periods"
-        }
     }
 }
 
@@ -2914,67 +3028,40 @@ struct LegalNoticeView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 22) {
-                GlassSection(header: "License") {
+                GlassSection(header: "Documents & Attribution") {
                     VStack(spacing: 0) {
-                        infoText("Eclipse is released under the GNU General Public License version 3.")
-                        GlassDivider(leadingInset: 16)
-                        linkRow(title: "View GPLv3 License", icon: "doc.plaintext.fill", color: .blue, url: licenseURL)
-                    }
-                }
-
-                GlassSection(header: "Privacy") {
-                    VStack(spacing: 0) {
-                        infoText("Eclipse's privacy policy explains what data the app stores locally and how optional third-party services are handled.")
-#if os(tvOS)
-                        GlassDivider(leadingInset: 16)
-                        infoText("On Apple TV, media state may sync through your private iCloud database. Tracker tokens and token-bearing addon URLs stay in the active Apple TV user's Keychain and are excluded from CloudKit, diagnostics, and backups. Eclipse adds no analytics SDK.")
-#endif
-                        GlassDivider(leadingInset: 16)
-                        linkRow(title: "Privacy Policy", icon: "hand.raised.fill", color: .teal, url: privacyPolicyURL)
-                    }
-                }
-
-                GlassSection(header: "Source") {
-                    VStack(spacing: 0) {
-                        infoText("Eclipse is a GPL-licensed media app with substantial original changes by Soupy-dev.")
-                        GlassDivider(leadingInset: 16)
-                        linkRow(title: "Eclipse Source Code", icon: "chevron.left.forwardslash.chevron.right", color: .cyan, url: sourceCodeURL)
+                        destinationRow(
+                            title: "Eclipse License & Source",
+                            icon: "chevron.left.forwardslash.chevron.right",
+                            color: .cyan,
+                            destination: EclipseLicenseAndSourceView(
+                                sourceCodeURL: sourceCodeURL,
+                                originalProjectURL: originalProjectURL,
+                                licenseURL: licenseURL
+                            )
+                        )
                         GlassDivider()
-                        linkRow(title: "Original Upstream Project", icon: "arrow.up.right.square.fill", color: .indigo, url: originalProjectURL)
+                        destinationRow(
+                            title: "Privacy & Terms",
+                            icon: "hand.raised.fill",
+                            color: .teal,
+                            destination: LegalPrivacyAndTermsView(privacyPolicyURL: privacyPolicyURL)
+                        )
+                        GlassDivider()
+                        destinationRow(
+                            title: "Open-Source Licenses",
+                            icon: "doc.text.fill",
+                            color: .blue,
+                            destination: OpenSourceLicensesView()
+                        )
+                        GlassDivider()
+                        destinationRow(
+                            title: "Credits & Acknowledgements",
+                            icon: "person.3.fill",
+                            color: .indigo,
+                            destination: ThirdPartyAcknowledgementsView()
+                        )
                     }
-                }
-
-                GlassSection(header: "Credits") {
-                    VStack(spacing: 0) {
-#if !os(tvOS)
-                        infoText("Reader mode includes Aidoku source compatibility work inspired by the Aidoku project.")
-                        GlassDivider(leadingInset: 16)
-                        linkRow(title: "Aidoku/Aidoku", icon: "book.fill", color: .orange, url: URL(string: "https://github.com/Aidoku/Aidoku")!)
-                        GlassDivider()
-                        infoText("Eclipse's SkyStream compatibility layer supports the plugin format defined by Akash's independent SkyStream project and adapts reference behavior from SkyStream Tools.")
-                        GlassDivider(leadingInset: 16)
-                        linkRow(title: "Akash's SkyStream", icon: "puzzlepiece.extension.fill", color: .purple, url: URL(string: "https://github.com/akashdh11/skystream")!)
-                        GlassDivider(leadingInset: 16)
-                        linkRow(title: "SkyStream Tools", icon: "wrench.and.screwdriver.fill", color: .purple, url: URL(string: "https://github.com/akashdh11/skystream-tools")!)
-                        GlassDivider()
-#endif
-                        infoText("This product uses the TMDB API but is not endorsed or certified by TMDB.")
-                        GlassDivider(leadingInset: 16)
-                        tmdbLinkRow
-                        GlassDivider()
-                        NavigationLink(destination: ThirdPartyAcknowledgementsView()) {
-                            GlassDetailRow(icon: "person.3.fill", iconColor: .indigo, title: "Third-Party Acknowledgements") {
-                                Image(systemName: "chevron.right")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundColor(.white.opacity(0.3))
-                            }
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-
-                GlassSection(header: "Warranty") {
-                    infoText("This program comes with no warranty, to the extent permitted by law.")
                 }
             }
             .padding(.top, 16)
@@ -2985,7 +3072,118 @@ struct LegalNoticeView: View {
         .eclipseDarkToolbar()
     }
 
-    private func infoText(_ text: String) -> some View {
+    private func destinationRow<Destination: View>(
+        title: String,
+        icon: String,
+        color: Color,
+        destination: Destination
+    ) -> some View {
+        NavigationLink(destination: destination) {
+            GlassDetailRow(icon: icon, iconColor: color, title: title) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(isTvOS ? Color.secondary : Color.white.opacity(0.3))
+            }
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct EclipseLicenseAndSourceView: View {
+    let sourceCodeURL: URL
+    let originalProjectURL: URL
+    let licenseURL: URL
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 22) {
+                GlassSection(header: "License") {
+                    VStack(spacing: 0) {
+                        LegalInfoText("Eclipse is released under the GNU General Public License version 3.")
+                        GlassDivider(leadingInset: 16)
+                        LegalExternalLinkRow(title: "View GPLv3 License", icon: "doc.plaintext.fill", color: .blue, url: licenseURL)
+                        GlassDivider(leadingInset: 16)
+                        LegalInfoText("This program comes with no warranty, to the extent permitted by law.")
+                    }
+                }
+
+                GlassSection(header: "Corresponding Source") {
+                    VStack(spacing: 0) {
+                        LegalInfoText("Eclipse is a GPL-licensed media app with substantial original changes by Soupy-dev. Official releases identify the exact source used for the app and playback framework.")
+                        GlassDivider(leadingInset: 16)
+                        LegalExternalLinkRow(
+                            title: revisionTitle("Eclipse Source", revision: Bundle.main.eclipseSourceRevision),
+                            icon: "chevron.left.forwardslash.chevron.right",
+                            color: .cyan,
+                            url: sourceCodeURL
+                        )
+                        GlassDivider(leadingInset: 16)
+                        LegalExternalLinkRow(
+                            title: revisionTitle("MPVKit Build Source", revision: Bundle.main.mpvKitSourceRevision),
+                            icon: "play.rectangle.fill",
+                            color: .purple,
+                            url: Bundle.main.mpvKitSourceURL
+                        )
+                        GlassDivider(leadingInset: 16)
+                        LegalExternalLinkRow(title: "Luna — Original Upstream Project", icon: "arrow.up.right.square.fill", color: .indigo, url: originalProjectURL)
+                    }
+                }
+            }
+            .padding(.top, 16)
+            .padding(.bottom, 32)
+        }
+        .navigationTitle("License & Source")
+        .background(SettingsGradientBackground().ignoresSafeArea())
+        .eclipseDarkToolbar()
+    }
+
+    private func revisionTitle(_ title: String, revision: String?) -> String {
+        guard let revision else { return title }
+        return "\(title) · \(revision.prefix(12))"
+    }
+}
+
+private struct LegalPrivacyAndTermsView: View {
+    let privacyPolicyURL: URL
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 22) {
+                GlassSection(header: "Privacy") {
+                    VStack(spacing: 0) {
+                        LegalInfoText("Eclipse's privacy policy explains what data the app stores locally and how optional third-party services are handled.")
+                        GlassDivider(leadingInset: 16)
+                        LegalInfoText("Cloud Sync starts off on each device. When you turn it on, selected app data, including your library, progress, installed-source configuration, provider settings, and tracker sessions, may sync through your private cloud account. Reproducing that setup on another device can include source code, credentials, and capability-bearing URLs inside the private cloud payload. Turning Cloud Sync off stops syncing without deleting either the local or remote copy. Cloud-provider login tokens, ephemeral playback URLs, session cookies, downloads, caches, and logs are excluded. Eclipse adds no analytics SDK.")
+                        GlassDivider(leadingInset: 16)
+                        LegalExternalLinkRow(title: "Privacy Policy", icon: "hand.raised.fill", color: .teal, url: privacyPolicyURL)
+                    }
+                }
+
+                GlassSection(header: "Terms") {
+                    VStack(spacing: 0) {
+                        LegalInfoText("App Store and TestFlight distributions use Apple's standard Licensed Application End User License Agreement.")
+                        GlassDivider(leadingInset: 16)
+                        LegalExternalLinkRow(title: "Terms of Use (EULA)", icon: "doc.text.fill", color: .blue, url: supportTermsOfUseURL)
+                    }
+                }
+            }
+            .padding(.top, 16)
+            .padding(.bottom, 32)
+        }
+        .navigationTitle("Privacy & Terms")
+        .background(SettingsGradientBackground().ignoresSafeArea())
+        .eclipseDarkToolbar()
+    }
+}
+
+private struct LegalInfoText: View {
+    let text: String
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    var body: some View {
         Text(text)
             .font(.subheadline)
             .foregroundColor(.white.opacity(0.7))
@@ -2994,33 +3192,42 @@ struct LegalNoticeView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
     }
+}
 
-    private func linkRow(title: String, icon: String, color: Color, url: URL) -> some View {
+private struct LegalExternalLinkRow: View {
+    let title: String
+    let icon: String
+    let color: Color
+    let url: URL
+
+    var body: some View {
 #if os(tvOS)
-        VStack(alignment: .leading, spacing: 12) {
-            GlassDetailRow(icon: icon, iconColor: color, title: title) {
-                Text("Scan QR")
-                    .font(.caption)
-                    .foregroundColor(.white.opacity(0.5))
-            }
-
-            HStack(spacing: 18) {
-                if let image = qrCode(for: url) {
-                    Image(uiImage: image)
-                        .interpolation(.none)
-                        .resizable()
-                        .frame(width: 150, height: 150)
-                        .background(Color.white)
-                        .accessibilityLabel("QR code for \(title)")
+        TVFocusableInfoBlock {
+            VStack(alignment: .leading, spacing: 12) {
+                GlassDetailRow(icon: icon, iconColor: color, title: title) {
+                    Text("Scan QR")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.5))
                 }
 
-                Text(url.absoluteString)
-                    .font(.caption)
-                    .foregroundColor(.white.opacity(0.68))
-                    .lineLimit(4)
+                HStack(spacing: 18) {
+                    if let image = qrCode {
+                        Image(uiImage: image)
+                            .interpolation(.none)
+                            .resizable()
+                            .frame(width: 150, height: 150)
+                            .background(Color.white)
+                            .accessibilityLabel("QR code for \(title)")
+                    }
+
+                    Text(url.absoluteString)
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.68))
+                        .lineLimit(4)
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 14)
             }
-            .padding(.horizontal, 16)
-            .padding(.bottom, 14)
         }
 #else
         Link(destination: url) {
@@ -3034,28 +3241,8 @@ struct LegalNoticeView: View {
 #endif
     }
 
-    private var tmdbLinkRow: some View {
-        Link(destination: URL(string: "https://www.themoviedb.org")!) {
-            HStack(spacing: 14) {
-                Image("TMDBLogo")
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: 120, height: 24, alignment: .leading)
-                    .accessibilityLabel("The Movie Database")
-                Spacer(minLength: 12)
-                Image(systemName: "arrow.up.right")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.35))
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-    }
-
 #if os(tvOS)
-    private func qrCode(for url: URL) -> UIImage? {
+    private var qrCode: UIImage? {
         let filter = CIFilter.qrCodeGenerator()
         filter.message = Data(url.absoluteString.utf8)
         filter.correctionLevel = "M"
@@ -3068,56 +3255,312 @@ struct LegalNoticeView: View {
 #endif
 }
 
+private struct OpenSourceLicenseDocument: Identifiable {
+    let url: URL
+    let title: String
+
+    var id: URL { url }
+}
+
+private struct OpenSourceLicenseGroup: Identifiable {
+    let title: String
+    let documents: [OpenSourceLicenseDocument]
+
+    var id: String { title }
+}
+
+private struct OpenSourceLicensesView: View {
+    private static let inventory = document(
+        "Third-Party Notices & Inventory",
+        file: "THIRD-PARTY-NOTICES"
+    )
+
+    private static let groups: [OpenSourceLicenseGroup] = {
+        var readerAndShaderDocuments = documents([
+            ("ArtCNN Shader — MIT", "LICENSE-MIT-ArtCNN"),
+            ("FidelityFX FSR Shader — MIT", "LICENSE-MIT-FidelityFX-FSR"),
+            ("Shader Components — GPL 3.0", "LICENSE-GPL-3.0"),
+            ("Shader Components — LGPL 3.0", "LICENSE-LGPL-3.0")
+        ], subdirectory: "Shaders")
+#if !os(tvOS)
+        readerAndShaderDocuments.insert(contentsOf: documents([
+            ("Reader Extensions — Provenance & Notices", "NOTICE"),
+            ("Reader Extensions — Apache 2.0", "LICENSE-APACHE-2.0")
+        ], subdirectory: "ReaderExtensions"), at: 0)
+#endif
+
+        return [
+            OpenSourceLicenseGroup(title: "App Libraries", documents: documents([
+                ("Kingfisher — MIT", "Kingfisher-MIT"),
+                ("Nuke — MIT", "Nuke-MIT"),
+                ("PLCrashReporter — MIT", "PLCrashReporter-MIT"),
+                ("SwiftSoup — MIT", "SwiftSoup-MIT"),
+                ("Texture — Apache 2.0", "Texture-Apache-2.0"),
+                ("ZIPFoundation — MIT", "ZIPFoundation-MIT")
+            ])),
+            OpenSourceLicenseGroup(title: "Playback & MPVKit", documents: documents([
+                ("FFmpeg", "FFmpeg-License"),
+                ("FreeType — FreeType License", "FreeType-FTL"),
+                ("FreeType — GPL 2.0", "FreeType-License"),
+                ("FriBidi — LGPL 2.1", "FriBidi-LGPL-2.1"),
+                ("GMP — GPL 2.0", "GMP-GPL-2.0"),
+                ("GMP — LGPL 3.0", "GMP-LGPL-3.0"),
+                ("GnuTLS — GPL 3.0", "GnuTLS-GPL-3.0"),
+                ("GnuTLS — LGPL 2.1", "GnuTLS-LGPL-2.1"),
+                ("HarfBuzz", "HarfBuzz-License"),
+                ("Little CMS — MIT", "LittleCMS-MIT"),
+                ("MPVKit — LGPL 3.0", "MPVKit-LGPL-3.0"),
+                ("MoltenVK — Apache 2.0", "MoltenVK-Apache-2.0"),
+                ("Nettle — LGPL 3.0", "Nettle-LGPL-3.0"),
+                ("OpenSSL — Apache 2.0", "OpenSSL-Apache-2.0"),
+                ("Samba — GPL 3.0", "Samba-GPL-3.0"),
+                ("SPIRV-Cross — Apache 2.0", "SPIRV-Cross-Apache-2.0"),
+                ("SPIRV-Headers — MIT", "SPIRV-Headers-MIT"),
+                ("SPIRV-Tools — Apache 2.0", "SPIRV-Tools-Apache-2.0"),
+                ("dav1d — BSD 2-Clause", "dav1d-BSD-2-Clause"),
+                ("glslang", "glslang-License"),
+                ("libass — ISC", "libass-ISC"),
+                ("libbluray — LGPL 2.1", "libbluray-LGPL-2.1"),
+                ("libdovi — MIT", "libdovi-MIT"),
+                ("libplacebo — LGPL 2.1", "libplacebo-LGPL-2.1"),
+                ("libunibreak — zlib", "libunibreak-zlib"),
+                ("mpv — Copyright & License", "mpv-Copyright"),
+                ("shaderc — Apache 2.0", "shaderc-Apache-2.0"),
+                ("uavs3d — BSD 3-Clause", "uavs3d-BSD-3-Clause"),
+                ("uchardet — MPL 1.1", "uchardet-MPL-1.1")
+            ])),
+            OpenSourceLicenseGroup(title: "Reader & Shaders", documents: readerAndShaderDocuments),
+            OpenSourceLicenseGroup(title: "Common License Texts", documents: documents([
+                ("GNU GPL 2.0", "GPL-2.0"),
+                ("GNU GPL 3.0", "GPL-3.0"),
+                ("GNU LGPL 2.1", "LGPL-2.1"),
+                ("GNU LGPL 3.0", "LGPL-3.0")
+            ]))
+        ].filter { !$0.documents.isEmpty }
+    }()
+
+    var body: some View {
+        ScrollView {
+            VStack(spacing: 22) {
+                if let inventory = Self.inventory {
+                    GlassSection(header: "Overview") {
+                        documentRow(inventory)
+                    }
+                }
+
+                GlassSection(header: "License Categories") {
+                    VStack(spacing: 0) {
+                        ForEach(Array(Self.groups.enumerated()), id: \.element.id) { index, group in
+                            NavigationLink(destination: OpenSourceLicenseGroupView(group: group)) {
+                                GlassDetailRow(icon: icon(for: group), iconColor: color(for: group), title: group.title) {
+                                    HStack(spacing: 7) {
+                                        Text("\(group.documents.count)")
+                                            .font(.caption)
+                                            .foregroundColor(.white.opacity(0.5))
+                                        Image(systemName: "chevron.right")
+                                            .font(.system(size: 12, weight: .semibold))
+                                            .foregroundColor(isTvOS ? Color.secondary : Color.white.opacity(0.3))
+                                    }
+                                }
+                            }
+                            .buttonStyle(.plain)
+
+                            if index < Self.groups.count - 1 {
+                                GlassDivider(leadingInset: 16)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.top, 16)
+            .padding(.bottom, 32)
+        }
+        .navigationTitle("Open-Source Licenses")
+        .background(SettingsGradientBackground().ignoresSafeArea())
+        .eclipseDarkToolbar()
+    }
+
+    private func documentRow(_ document: OpenSourceLicenseDocument) -> some View {
+        NavigationLink(destination: OpenSourceLicenseDocumentView(document: document)) {
+            GlassDetailRow(icon: "doc.text.fill", iconColor: .teal, title: document.title) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(isTvOS ? Color.secondary : Color.white.opacity(0.3))
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func icon(for group: OpenSourceLicenseGroup) -> String {
+        switch group.title {
+        case "App Libraries": return "shippingbox.fill"
+        case "Playback & MPVKit": return "play.rectangle.fill"
+        case "Reader & Shaders": return "wand.and.stars"
+        default: return "doc.plaintext.fill"
+        }
+    }
+
+    private func color(for group: OpenSourceLicenseGroup) -> Color {
+        switch group.title {
+        case "App Libraries": return .blue
+        case "Playback & MPVKit": return .purple
+        case "Reader & Shaders": return .orange
+        default: return .gray
+        }
+    }
+
+    private static func documents(
+        _ entries: [(title: String, file: String)],
+        subdirectory: String = "OpenSourceLicenses"
+    ) -> [OpenSourceLicenseDocument] {
+        entries.compactMap { document($0.title, file: $0.file, subdirectory: subdirectory) }
+    }
+
+    private static func document(
+        _ title: String,
+        file: String,
+        subdirectory: String = "OpenSourceLicenses"
+    ) -> OpenSourceLicenseDocument? {
+        guard let url = Bundle.main.url(forResource: file, withExtension: "txt", subdirectory: subdirectory) else {
+            return nil
+        }
+        return OpenSourceLicenseDocument(url: url, title: title)
+    }
+}
+
+private struct OpenSourceLicenseGroupView: View {
+    let group: OpenSourceLicenseGroup
+
+    var body: some View {
+        ScrollView {
+            GlassSection(header: group.title) {
+                VStack(spacing: 0) {
+                    ForEach(Array(group.documents.enumerated()), id: \.element.id) { index, document in
+                        NavigationLink(destination: OpenSourceLicenseDocumentView(document: document)) {
+                            GlassDetailRow(icon: "doc.plaintext", iconColor: .blue, title: document.title) {
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(isTvOS ? Color.secondary : Color.white.opacity(0.3))
+                            }
+                        }
+                        .buttonStyle(.plain)
+
+                        if index < group.documents.count - 1 {
+                            GlassDivider(leadingInset: 16)
+                        }
+                    }
+                }
+            }
+            .padding(.top, 16)
+            .padding(.bottom, 32)
+        }
+        .navigationTitle(group.title)
+        .background(SettingsGradientBackground().ignoresSafeArea())
+        .eclipseDarkToolbar()
+    }
+}
+
+private struct OpenSourceLicenseDocumentView: View {
+    let document: OpenSourceLicenseDocument
+
+    var body: some View {
+        ScrollView {
+            Text(contents)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundColor(.white.opacity(0.74))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(16)
+        }
+        .navigationTitle(document.title)
+        .background(SettingsGradientBackground().ignoresSafeArea())
+        .eclipseDarkToolbar()
+    }
+
+    private var contents: String {
+        (try? String(contentsOf: document.url, encoding: .utf8))
+            ?? "This bundled legal document could not be loaded."
+    }
+}
+
 private struct ThirdPartyAcknowledgement: Identifiable {
     let title: String
     let detail: String
     let projectURL: URL
     let licenseName: String?
     let licenseURL: URL?
+    let sourceURL: URL?
 
     var id: String { title }
 
-    init(_ title: String, detail: String, project: String, licenseName: String? = nil, license: String? = nil) {
+    init(_ title: String, detail: String, project: String, licenseName: String? = nil, license: String? = nil, source: String? = nil) {
         self.title = title
         self.detail = detail
         self.projectURL = URL(string: project)!
         self.licenseName = licenseName
         self.licenseURL = license.flatMap(URL.init(string:))
+        self.sourceURL = source.flatMap(URL.init(string:))
     }
 }
 
 private struct ThirdPartyAcknowledgementsView: View {
-    private static let lineage: [ThirdPartyAcknowledgement] = [
+    private static let mpvKitBuildSource = Bundle.main.mpvKitSourceURL.absoluteString
+    private static let mpvKitBuildLicense: String = {
+        guard let revision = Bundle.main.mpvKitSourceRevision else {
+            return "https://github.com/Soupy-dev/MPVKit/blob/eclipse-mpv-metal/LICENSE"
+        }
+        return "https://github.com/Soupy-dev/MPVKit/blob/\(revision)/LICENSE"
+    }()
+    private static let lineage: [ThirdPartyAcknowledgement] = sharedLineage + iOSOnlyLineage
+
+    private static let sharedLineage: [ThirdPartyAcknowledgement] = [
         .init("Luna", detail: "Original upstream project from which Eclipse was derived.", project: "https://github.com/cranci1/Luna", licenseName: "GPLv3", license: "https://github.com/cranci1/Luna/blob/main/LICENSE"),
+        .init("SoraCore", detail: "cranci1's service runtime. No longer linked as a dependency, but Eclipse's local service runtime and network layer are adapted from it.", project: "https://github.com/cranci1/SoraCore", licenseName: "GPLv3", license: "https://github.com/cranci1/SoraCore/blob/main/LICENSE"),
         .init("SkyStream", detail: "Akash's independent project defined the plugin format supported by Eclipse's compatibility layer. SkyStream plugins are not bundled with Eclipse.", project: "https://github.com/akashdh11/skystream"),
-        .init("SkyStream Tools", detail: "Reference SDK and extractor behavior adapted by Eclipse's local SkyStream compatibility layer.", project: "https://github.com/akashdh11/skystream-tools", licenseName: "GPLv3", license: "https://github.com/akashdh11/skystream-tools/blob/main/LICENSE"),
-        .init("Aidoku", detail: "Reader Mode and Aidoku source compatibility.", project: "https://github.com/Aidoku/Aidoku", licenseName: "GPLv3", license: "https://github.com/Aidoku/Aidoku/blob/main/LICENSE"),
-        .init("AidokuRunner", detail: "Runtime used for Aidoku-compatible reader sources.", project: "https://github.com/Aidoku/AidokuRunner")
+        .init("SkyStream Tools", detail: "Reference SDK and extractor behavior adapted by Eclipse's local SkyStream compatibility layer.", project: "https://github.com/akashdh11/skystream-tools", licenseName: "GPLv3", license: "https://github.com/akashdh11/skystream-tools/blob/main/LICENSE")
     ]
 
-    private static let libraries: [ThirdPartyAcknowledgement] = [
-        .init("FakeWebKit", detail: "Copyright © 2025 DevsForge (undeaDD).", project: "https://github.com/undeaDD/FakeWebKit", licenseName: "GPLv3", license: "https://github.com/undeaDD/FakeWebKit/blob/main/LICENSE.md"),
+#if os(tvOS)
+    private static let iOSOnlyLineage: [ThirdPartyAcknowledgement] = []
+#else
+    private static let iOSOnlyLineage: [ThirdPartyAcknowledgement] = [
+        .init("Eclipse Reader Extensions", detail: "Eclipse's substantially modified Swift implementation adapts Apache-2.0 interface and runtime behavior from Mangayomi revision 4eec7aca and five generic parser families from the archived official Mangayomi Extensions revision 6004f1f8. Eclipse bundles no provider catalog, provider scripts, provider logos, or site-specific parser configuration.", project: "https://github.com/kodjodevf/mangayomi/tree/4eec7aca6f1c8bd563d0bc79bcf895f46bb30b74", licenseName: "Apache 2.0", license: "https://github.com/kodjodevf/mangayomi/blob/4eec7aca6f1c8bd563d0bc79bcf895f46bb30b74/LICENSE", source: "https://github.com/kodjodevf/mangayomi-extensions/tree/6004f1f8d1a56f882dadb734ce26f50c626a3850")
+    ]
+#endif
+
+    private static let libraries: [ThirdPartyAcknowledgement] = (sharedLibraries + iOSOnlyLibraries)
+        .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+
+    private static let sharedLibraries: [ThirdPartyAcknowledgement] = [
         .init("Kingfisher", detail: "Copyright © 2019 Wei Wang.", project: "https://github.com/onevcat/Kingfisher", licenseName: "MIT", license: "https://github.com/onevcat/Kingfisher/blob/master/LICENSE"),
+        .init("PLCrashReporter", detail: "Copyright © Microsoft Corporation and © 2008–2014 Plausible Labs Cooperative, Inc.", project: "https://github.com/microsoft/plcrashreporter", licenseName: "License", license: "https://github.com/microsoft/plcrashreporter/blob/master/LICENSE")
+    ]
+
+#if os(tvOS)
+    private static let iOSOnlyLibraries: [ThirdPartyAcknowledgement] = []
+#else
+    private static let iOSOnlyLibraries: [ThirdPartyAcknowledgement] = [
         .init("Nuke", detail: "Copyright © 2015–2026 Alexander Grebenyuk.", project: "https://github.com/kean/Nuke", licenseName: "MIT", license: "https://github.com/kean/Nuke/blob/main/LICENSE"),
-        .init("PLCrashReporter", detail: "Copyright © Microsoft Corporation and © 2008–2014 Plausible Labs Cooperative, Inc.", project: "https://github.com/microsoft/plcrashreporter", licenseName: "License", license: "https://github.com/microsoft/plcrashreporter/blob/master/LICENSE"),
-        .init("SoraCore", detail: "Service runtime by cranci1.", project: "https://github.com/cranci1/SoraCore", licenseName: "GPLv3", license: "https://github.com/cranci1/SoraCore/blob/main/LICENSE"),
-        .init("SwiftSoup", detail: "Copyright © 2009–2025 Jonathan Hedley; Swift port © 2016–2025 Nabil Chatbi.", project: "https://github.com/scinfu/SwiftSoup", licenseName: "MIT", license: "https://github.com/scinfu/SwiftSoup/blob/master/LICENSE"),
-        .init("Sybau", detail: "JavaScript runtime dependency by cranci1.", project: "https://github.com/cranci1/Sybau", licenseName: "GPLv3", license: "https://github.com/cranci1/Sybau/blob/main/LICENSE"),
+        .init("SwiftSoup", detail: "Version 2.13.6 at immutable revision ead56133. Copyright © 2009–2025 Jonathan Hedley; Swift port © 2016–2025 Nabil Chatbi. The full MIT license is included in the app's bundled open-source license documents.", project: "https://github.com/scinfu/SwiftSoup/tree/ead56133a693d0184d8c2db1a6d6394410cacfd6", licenseName: "MIT", license: "https://github.com/scinfu/SwiftSoup/blob/ead56133a693d0184d8c2db1a6d6394410cacfd6/LICENSE"),
         .init("Texture / AsyncDisplayKit", detail: "Created by Pinterest as a continuation of AsyncDisplayKit, originally developed by Facebook.", project: "https://github.com/Skittyblock/Texture", licenseName: "Apache 2.0", license: "https://github.com/Skittyblock/Texture/blob/master/LICENSE"),
-        .init("Wasm3", detail: "Copyright © 2023–2025 Skittyblock.", project: "https://github.com/Skittyblock/Wasm3", licenseName: "MIT", license: "https://github.com/Skittyblock/Wasm3/blob/main/LICENSE"),
         .init("ZIPFoundation", detail: "Copyright © 2017–2025 Thomas Zoechling.", project: "https://github.com/weichsel/ZIPFoundation", licenseName: "MIT", license: "https://github.com/weichsel/ZIPFoundation/blob/development/LICENSE")
     ]
+#endif
 
     private static let playback: [ThirdPartyAcknowledgement] = [
-        .init("Eclipse MPVKit fork", detail: "Eclipse's in-app playback framework, based on MPVKit.", project: "https://github.com/Soupy-dev/MPVKit", licenseName: "LGPLv3 / GPL components", license: "https://github.com/Soupy-dev/MPVKit/blob/eclipse-mpv-metal/LICENSE"),
+        .init("Eclipse MPVKit fork", detail: "Eclipse's in-app playback framework, based on MPVKit. Official builds link the exact framework source revision.", project: mpvKitBuildSource, licenseName: "LGPLv3 / GPL components", license: mpvKitBuildLicense),
         .init("MPVKit", detail: "Original Apple-platform mpv framework.", project: "https://github.com/mpvkit/MPVKit", licenseName: "LGPLv3 / GPL components", license: "https://github.com/mpvkit/MPVKit/blob/main/LICENSE"),
         .init("mpv", detail: "Media player and playback engine.", project: "https://github.com/mpv-player/mpv", licenseName: "GPLv2+ / LGPLv2.1+", license: "https://github.com/mpv-player/mpv/blob/master/Copyright"),
         .init("FFmpeg", detail: "Multimedia codecs, demuxing, filtering, and related playback components.", project: "https://github.com/FFmpeg/FFmpeg", licenseName: "LGPLv2.1+ / GPLv2+", license: "https://github.com/FFmpeg/FFmpeg/blob/master/LICENSE.md"),
-        .init("MoltenVK", detail: "Vulkan implementation for Apple platforms used by the MoltenVK renderer.", project: "https://github.com/KhronosGroup/MoltenVK", licenseName: "Apache 2.0", license: "https://github.com/KhronosGroup/MoltenVK/blob/main/LICENSE")
+        .init("MoltenVK", detail: "Vulkan implementation for Apple platforms used by the MoltenVK renderer.", project: "https://github.com/KhronosGroup/MoltenVK", licenseName: "Apache 2.0", license: "https://github.com/KhronosGroup/MoltenVK/blob/main/LICENSE"),
+        .init("ArtCNN", detail: "Copyright © 2024 Joao Chrisostomo, Kacper Michajłow. The ArtCNN C4F16 and C4F16 DS shaders are bundled as Eclipse's animation Enhanced Upscaling options, and are what Automatic selects for animated content. Their activation threshold is relaxed from 1.3x to 1.05x scaling so small high-density phone enlargements can still benefit.", project: "https://github.com/Artoriuz/ArtCNN", licenseName: "MIT", license: "https://github.com/Artoriuz/ArtCNN/blob/main/LICENSE"),
+        .init("AMD FidelityFX Super Resolution 1", detail: "Copyright © 2021 Advanced Micro Devices, Inc. FSR 1 EASU and RCAS are bundled as Eclipse's live-action Enhanced Upscaling option, and are what Automatic selects for live action. Eclipse's mpv GLSL adaptation is based on hooke007's AMD_FSR1_RT port and fixes RGB MAIN-stage processing, conservative noise-aware sharpening, and a 1.05x activation threshold, with no additional user setting.", project: "https://github.com/GPUOpen-Effects/FidelityFX-FSR", licenseName: "MIT", license: "https://github.com/GPUOpen-Effects/FidelityFX-FSR/blob/master/license.txt", source: "https://github.com/Soupy-dev/Eclipse/blob/main/Eclipse/Player/Shaders/AMD_FSR1_EASU_RCAS.glsl")
     ]
 
-    private static let services: [ThirdPartyAcknowledgement] = [
-        .init("Google Cast SDK", detail: "Optional Google Cast playback support; subject to Google's SDK terms.", project: "https://developers.google.com/cast", licenseName: "Terms", license: "https://developers.google.com/terms"),
+    private static let services: [ThirdPartyAcknowledgement] = iOSOnlyServices + sharedServices
+
+    private static let iOSOnlyServices: [ThirdPartyAcknowledgement] = []
+
+    private static let sharedServices: [ThirdPartyAcknowledgement] = [
         .init("TMDB", detail: "Movie and television metadata and images. This product uses the TMDB API but is not endorsed or certified by TMDB.", project: "https://www.themoviedb.org"),
         .init("AniList", detail: "Anime and manga metadata, schedules, and optional tracking.", project: "https://anilist.co"),
         .init("MyAnimeList", detail: "Optional anime and manga tracking.", project: "https://myanimelist.net"),
@@ -3136,24 +3579,40 @@ private struct ThirdPartyAcknowledgementsView: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 22) {
-                GlassSection(header: "Project Lineage & Compatibility") {
-                    acknowledgementRows(Self.lineage)
-                }
-
-                GlassSection(header: "Libraries") {
-                    acknowledgementRows(Self.libraries)
-                }
-
-                GlassSection(header: "Playback Stack") {
-                    acknowledgementRows(Self.playback)
-                }
-
-                GlassSection(header: "Data, Tracking & Services") {
-                    acknowledgementRows(Self.services)
+                GlassSection(header: "Acknowledgement Categories") {
+                    VStack(spacing: 0) {
+                        categoryRow(
+                            title: "Project Lineage & Compatibility",
+                            icon: "point.3.connected.trianglepath.dotted",
+                            color: .indigo,
+                            items: Self.lineage
+                        )
+                        GlassDivider(leadingInset: 16)
+                        categoryRow(
+                            title: "App Libraries",
+                            icon: "shippingbox.fill",
+                            color: .blue,
+                            items: Self.libraries
+                        )
+                        GlassDivider(leadingInset: 16)
+                        categoryRow(
+                            title: "Playback & Shaders",
+                            icon: "play.rectangle.fill",
+                            color: .purple,
+                            items: Self.playback
+                        )
+                        GlassDivider(leadingInset: 16)
+                        categoryRow(
+                            title: "Data, Tracking & Services",
+                            icon: "network",
+                            color: .teal,
+                            items: Self.services
+                        )
+                    }
                 }
 
                 GlassSection(header: "Notice") {
-                    Text("Names and trademarks belong to their respective owners. These acknowledgements do not imply affiliation or endorsement. Each project and service remains subject to its linked license or terms. Eclipse's corresponding source is available from the Source section.")
+                    Text("Names and trademarks belong to their respective owners. These acknowledgements do not imply affiliation or endorsement. Each project and service remains subject to its linked license or terms. Eclipse's corresponding source is available from the License & Source page.")
                         .font(.footnote)
                         .foregroundColor(.white.opacity(0.68))
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -3163,24 +3622,68 @@ private struct ThirdPartyAcknowledgementsView: View {
             .padding(.top, 16)
             .padding(.bottom, 32)
         }
-        .navigationTitle("Acknowledgements")
+        .navigationTitle("Credits & Acknowledgements")
         .background(SettingsGradientBackground().ignoresSafeArea())
         .eclipseDarkToolbar()
     }
 
-    @ViewBuilder
-    private func acknowledgementRows(_ items: [ThirdPartyAcknowledgement]) -> some View {
-        VStack(spacing: 0) {
-            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                acknowledgementRow(item)
-                if index < items.count - 1 {
-                    GlassDivider(leadingInset: 16)
+    private func categoryRow(
+        title: String,
+        icon: String,
+        color: Color,
+        items: [ThirdPartyAcknowledgement]
+    ) -> some View {
+        NavigationLink(destination: ThirdPartyAcknowledgementCategoryView(title: title, items: items)) {
+            GlassDetailRow(icon: icon, iconColor: color, title: title) {
+                HStack(spacing: 7) {
+                    Text("\(items.count)")
+                        .font(.caption)
+                        .foregroundColor(.white.opacity(0.5))
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(isTvOS ? Color.secondary : Color.white.opacity(0.3))
                 }
             }
         }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct ThirdPartyAcknowledgementCategoryView: View {
+    let title: String
+    let items: [ThirdPartyAcknowledgement]
+
+    var body: some View {
+        ScrollView {
+            GlassSection(header: title) {
+                VStack(spacing: 0) {
+                    ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
+                        acknowledgementRow(item)
+                        if index < items.count - 1 {
+                            GlassDivider(leadingInset: 16)
+                        }
+                    }
+                }
+            }
+            .padding(.top, 16)
+            .padding(.bottom, 32)
+        }
+        .navigationTitle(title)
+        .background(SettingsGradientBackground().ignoresSafeArea())
+        .eclipseDarkToolbar()
     }
 
     private func acknowledgementRow(_ item: ThirdPartyAcknowledgement) -> some View {
+#if os(tvOS)
+        TVFocusableInfoBlock {
+            acknowledgementRowContent(item)
+        }
+#else
+        acknowledgementRowContent(item)
+#endif
+    }
+
+    private func acknowledgementRowContent(_ item: ThirdPartyAcknowledgement) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(item.title)
                 .font(.headline)
@@ -3191,14 +3694,31 @@ private struct ThirdPartyAcknowledgementsView: View {
                 .foregroundColor(.white.opacity(0.64))
                 .fixedSize(horizontal: false, vertical: true)
 
+#if os(tvOS)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(item.projectURL.absoluteString)
+                if let licenseName = item.licenseName, let licenseURL = item.licenseURL {
+                    Text("\(licenseName): \(licenseURL.absoluteString)")
+                }
+                if let sourceURL = item.sourceURL {
+                    Text("Source: \(sourceURL.absoluteString)")
+                }
+            }
+            .font(.caption)
+            .foregroundColor(.white.opacity(0.68))
+#else
             HStack(spacing: 16) {
                 Link("Project", destination: item.projectURL)
                 if let licenseName = item.licenseName, let licenseURL = item.licenseURL {
                     Link(licenseName, destination: licenseURL)
                 }
+                if let sourceURL = item.sourceURL {
+                    Link("Source", destination: sourceURL)
+                }
             }
             .font(.caption.weight(.semibold))
             .foregroundColor(.cyan)
+#endif
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.horizontal, 16)
@@ -3275,11 +3795,21 @@ struct PerformanceModeSettingsView: View {
 
 #if !os(tvOS)
 struct ExperimentalCloudSyncView: View {
-    @AppStorage(ExperimentalFeatureState.iCloudSyncEnabledKey) private var iCloudSyncEnabled = false
-    @AppStorage(CloudSyncProvider.googleDrive.syncEnabledKey) private var googleDriveSyncEnabled = false
-    @AppStorage(CloudSyncProvider.oneDrive.syncEnabledKey) private var oneDriveSyncEnabled = false
+    @AppStorage(ExperimentalFeatureState.iCloudSyncEnabledKey, store: ProfileSettingsStore.device) private var iCloudSyncEnabled = false
+    @AppStorage(EclipseSettingsSyncPreference.enabledKey, store: ProfileSettingsStore.device) private var syncSettingsAcrossDevices = true
+    @AppStorage(CloudSyncTotalBudget.storageKey, store: .standard) private var cloudSyncTotalBudgetBytes = 0
+    @State private var pendingCloudDataDeletionProvider: CloudSyncProvider?
+
+    private var resolvedCloudSyncBudget: CloudSyncTotalBudget {
+        CloudSyncTotalBudget(rawValue: cloudSyncTotalBudgetBytes) ?? .fallback
+    }
+    @State private var showSettingsSyncDirectionChoice = false
+    @State private var showSettingsSyncDirectionFailure = false
+    @AppStorage(CloudSyncProvider.googleDrive.syncEnabledKey, store: ProfileSettingsStore.device) private var googleDriveSyncEnabled = false
+    @AppStorage(CloudSyncProvider.oneDrive.syncEnabledKey, store: ProfileSettingsStore.device) private var oneDriveSyncEnabled = false
     @StateObject private var cloudSyncManager = ExperimentalCloudSyncManager.shared
     @StateObject private var accentColorManager = AccentColorManager.shared
+    @StateObject private var profileManager = ProfileManager.shared
 
     private var availability: ExperimentalCloudSyncAvailability {
         ExperimentalCloudSyncAvailability.current
@@ -3287,12 +3817,17 @@ struct ExperimentalCloudSyncView: View {
 
     private var accent: Color { accentColorManager.currentAccentColor }
 
+    private var isAdministrable: Bool {
+        profileManager.activeProfile?.isKidsProfile != true
+    }
+
     private var includedData: [(String, String)] {
         [
             ("Settings", "gearshape"),
+            ("Profiles, avatars, and kids mode", "person.2"),
             ("Libraries and collections", "books.vertical"),
             ("Watch and read progress", "play.rectangle"),
-            ("Catalogs, services, and addons", "server.rack"),
+            ("Catalogs, services, addons, and plugins", "server.rack"),
             ("Tracker connections and preferences", "chart.bar")
         ]
     }
@@ -3310,7 +3845,7 @@ struct ExperimentalCloudSyncView: View {
                             Text("Cloud Sync")
                                 .font(.headline)
                                 .foregroundColor(.white)
-                            Text("Periodically reconcile selected Eclipse data through iCloud, Google Drive, or OneDrive.")
+                            Text("Automatically keep selected Eclipse data in sync through iCloud, Google Drive, or OneDrive.")
                                 .font(.caption)
                                 .foregroundColor(.white.opacity(0.55))
                                 .fixedSize(horizontal: false, vertical: true)
@@ -3322,12 +3857,79 @@ struct ExperimentalCloudSyncView: View {
                     .padding(.vertical, 14)
                 }
 
-                providerSection(.iCloud)
-                providerSection(.googleDrive)
-                providerSection(.oneDrive)
+                if isAdministrable {
+                    GlassSection(header: "Preferences") {
+                        VStack(spacing: 0) {
+                            GlassSettingsRow(
+                                icon: "slider.horizontal.3",
+                                iconColor: .blue,
+                                title: "Sync Settings Across Devices"
+                            ) {
+                                Toggle("", isOn: Binding(
+                                    get: { syncSettingsAcrossDevices },
+                                    set: { isOn in
+                                        guard isAdministrable else { return }
+                                        if isOn {
+                                            showSettingsSyncDirectionChoice = true
+                                        } else {
+                                            syncSettingsAcrossDevices = false
+                                        }
+                                    }
+                                ))
+                                    .labelsHidden()
+                                    .tint(.blue)
+                            }
 
-                GlassSectionFooter("Eclipse checks enabled providers at launch, when the app becomes active, after local changes, and about every 15 minutes while the app remains open. Provider rate limits may delay a retry.")
-                GlassSectionFooter("Multiple providers can stay active. The Primary provider is reconciled first; Eclipse then safely reconciles the resulting local state with the other enabled providers.")
+                            GlassDivider()
+
+                            GlassSettingsRow(
+                                icon: "externaldrive.badge.checkmark",
+                                iconColor: .teal,
+                                title: "Cloud Storage Budget"
+                            ) {
+                                Menu {
+                                    ForEach(CloudSyncTotalBudget.allCases) { budget in
+                                        Button {
+                                            cloudSyncTotalBudgetBytes = budget.rawValue
+                                        } label: {
+                                            if budget.rawValue == resolvedCloudSyncBudget.rawValue {
+                                                Label(budget.displayName, systemImage: "checkmark")
+                                            } else {
+                                                Text(budget.displayName)
+                                            }
+                                        }
+                                    }
+                                } label: {
+                                    HStack(spacing: 4) {
+                                        Text(resolvedCloudSyncBudget.displayName)
+                                        Image(systemName: "chevron.up.chevron.down")
+                                            .font(.caption2)
+                                    }
+                                    .foregroundColor(.white.opacity(0.7))
+                                }
+                            }
+                        }
+                    }
+                    GlassSectionFooter("Keep preferences such as subtitle appearance, audio language, player behaviour, and home layout the same on every device signed in to your account. Turn this off to give this device its own settings. Your library, watch progress, and ratings keep syncing either way.")
+                    GlassSectionFooter("Cloud Storage Budget is the most space Eclipse will take up in one connected cloud account. Eclipse keeps a few recent copies so it can recover from a bad sync; when the total approaches the budget, the oldest copies are removed first. Your newest backup is always kept, even if it is larger than the budget, so backing up never silently stops. Each device applies its own budget, and this figure covers Eclipse's own files only — not any version history your cloud provider keeps on its side.")
+
+                    providerSection(.iCloud)
+                    providerSection(.googleDrive)
+                    providerSection(.oneDrive)
+
+                    if #available(iOS 17.0, *) {
+                        CloudSyncHealthSection()
+                    }
+
+                    if ExperimentalFeatureState.isEnabledAtLaunch {
+                        GlassSectionFooter("Eclipse checks enabled providers at launch, when the app becomes active, after local changes, and about every 15 minutes while the app remains open. Provider rate limits may delay a retry.")
+                    } else {
+                        GlassSectionFooter("Experimental Features are off, so Eclipse does not create full-app backup snapshots automatically. Provider switches still control media-state sync, and Sync Now writes a single snapshot on demand.")
+                    }
+                    GlassSectionFooter("Multiple providers can stay active. The Primary provider is synced first; Eclipse then safely merges the result with the other enabled providers.")
+                } else {
+                    GlassSectionFooter("This is a kids profile, so it cannot connect providers, sync, or restore cloud data. Switch to a grown-up profile to make those changes.")
+                }
 
                 GlassSection(header: "Notice") {
                     HStack(alignment: .top, spacing: 14) {
@@ -3345,7 +3947,7 @@ struct ExperimentalCloudSyncView: View {
                     .padding(.vertical, 14)
                 }
 
-                GlassSectionFooter("Downloaded media, preload caches, images, logs, temporary files, cloud account tokens, and unsafe source secrets are excluded.")
+                GlassSectionFooter("Installed-source settings and tracker credentials are included so another device can reproduce your setup. Downloaded media, preload caches, images, logs, temporary files, cloud-provider login tokens, ephemeral playback URLs, and session cookies are excluded.")
 
                 GlassSection(header: "Included Data") {
                     VStack(spacing: 0) {
@@ -3370,20 +3972,23 @@ struct ExperimentalCloudSyncView: View {
         .alert(
             "Cloud Sync Needs Your Choice",
             isPresented: Binding(
-                get: { cloudSyncManager.overwriteWarning != nil },
-                set: { isPresented in
-                    if !isPresented {
-                        cloudSyncManager.cancelOverwriteWarning()
-                    }
-                }
+                get: {
+                    cloudSyncManager.overwriteWarning != nil
+                        && isAdministrable
+                        && !cloudSyncManager.isSyncing
+                },
+                set: { _ in }
             ),
             presenting: cloudSyncManager.overwriteWarning
-        ) { _ in
-            Button("Restore Cloud Data") {
-                cloudSyncManager.restoreCloudAfterOverwriteWarning()
+        ) { warning in
+            Button(
+                "Restore Cloud Data",
+                role: warning.direction == .accountChanged ? .destructive : nil
+            ) {
+                restoreCloudAfterOverwriteWarning()
             }
             Button("Replace Cloud Backup", role: .destructive) {
-                cloudSyncManager.replaceCloudAfterOverwriteWarning()
+                replaceCloudAfterOverwriteWarning()
             }
             Button("Cancel", role: .cancel) {
                 cloudSyncManager.cancelOverwriteWarning()
@@ -3391,8 +3996,57 @@ struct ExperimentalCloudSyncView: View {
         } message: { warning in
             Text(warning.alertMessage)
         }
+        .alert("Which Settings Should Win?", isPresented: $showSettingsSyncDirectionChoice) {
+            Button("Use My Other Devices") {
+                guard isAdministrable else { return }
+                let enabled = MediaStateSyncBootstrap.adoptRemoteSettingsAfterEnablingSync()
+                syncSettingsAcrossDevices = enabled
+                showSettingsSyncDirectionFailure = !enabled
+            }
+            Button("Use This Device") {
+                guard isAdministrable else { return }
+                let enabled = MediaStateSyncBootstrap.publishLocalSettingsAfterEnablingSync()
+                syncSettingsAcrossDevices = enabled
+                showSettingsSyncDirectionFailure = !enabled
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Your settings may have changed on this device while syncing was off. \"Use My Other Devices\" replaces this device's settings with the ones already shared across your account. \"Use This Device\" makes these settings the shared ones and updates your other devices. Settings sync stays off until you choose.")
+        }
+        .alert("Settings Sync Is Paused", isPresented: $showSettingsSyncDirectionFailure) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Eclipse could not change the settings-sync direction while a restore, account change, or recovery is still active. Settings sync remains off. Wait for Cloud Sync to become ready, then try again.")
+        }
+        .adaptiveConfirmationDialog(
+            "Delete Cloud Data",
+            isPresented: Binding(
+                get: { pendingCloudDataDeletionProvider != nil },
+                set: { if !$0 { pendingCloudDataDeletionProvider = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                if let provider = pendingCloudDataDeletionProvider {
+                    deleteCloudData(provider)
+                }
+                pendingCloudDataDeletionProvider = nil
+            }
+            Button("Cancel", role: .cancel) {
+                pendingCloudDataDeletionProvider = nil
+            }
+        } message: {
+            Text(cloudDataDeletionMessage)
+        }
+        .onAppear {
+            cloudSyncManager.refreshRemoteUsageForVisibleProviders()
+            cloudSyncManager.refreshConnectedAccountEmails()
+        }
         .onChange(of: iCloudSyncEnabled) { enabled in
             cloudSyncManager.setProviderEnabled(.iCloud, enabled: enabled)
+            if enabled, cloudSyncManager.isAppleAccountMediaStateSuspended {
+                cloudSyncManager.resumeAppleAccountMediaStateSync()
+            }
             if enabled {
                 cloudSyncManager.syncSnapshot(provider: .iCloud, reason: "enabled")
             }
@@ -3425,10 +4079,28 @@ struct ExperimentalCloudSyncView: View {
                         .foregroundColor(providerStateColor(provider, connected: connected, enabled: enabled))
                 }
 
+                if let email = cloudSyncManager.connectedAccountEmail(for: provider) {
+                    GlassDivider()
+
+                    GlassDetailRow(
+                        icon: "person.crop.circle",
+                        iconColor: providerColor(provider),
+                        title: "Connected Account"
+                    ) {
+                        Text(email)
+                            .font(.caption.weight(.semibold))
+                            .foregroundColor(.white.opacity(0.7))
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                    }
+                }
+
                 if provider.requiresAccountConnection {
                     GlassDivider()
 
                     Button {
+                        guard isAdministrable else { return }
                         if connected {
                             cloudSyncManager.disconnectProvider(provider)
                         } else {
@@ -3444,7 +4116,7 @@ struct ExperimentalCloudSyncView: View {
                         }
                     }
                     .buttonStyle(.plain)
-                    .disabled(cloudSyncManager.isSyncing)
+                    .disabled(!isAdministrable || cloudSyncManager.isSyncing)
                 }
 
                 GlassDivider()
@@ -3453,13 +4125,35 @@ struct ExperimentalCloudSyncView: View {
                     Toggle("", isOn: syncBinding(for: provider))
                         .labelsHidden()
                         .tint(accent)
-                        .disabled(!canUse || cloudSyncManager.isSyncing)
+                        .disabled(!isAdministrable || !canUse || cloudSyncManager.isSyncing)
+                }
+
+                if provider == .iCloud, cloudSyncManager.isAppleAccountMediaStateSuspended {
+                    GlassDivider()
+
+                    Button {
+                        guard isAdministrable else { return }
+                        cloudSyncManager.resumeAppleAccountMediaStateSync()
+                    } label: {
+                        GlassDetailRow(
+                            icon: "arrow.clockwise.icloud",
+                            iconColor: providerColor(provider),
+                            title: "Resume Library Sync"
+                        ) {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundColor(.white.opacity(0.3))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!isAdministrable || cloudSyncManager.isSyncing)
                 }
 
                 if enabled, cloudSyncManager.primaryProvider != provider {
                     GlassDivider()
 
                     Button {
+                        guard isAdministrable else { return }
                         cloudSyncManager.makePrimary(provider)
                     } label: {
                         GlassDetailRow(icon: "star", iconColor: .yellow, title: "Make Primary") {
@@ -3469,32 +4163,71 @@ struct ExperimentalCloudSyncView: View {
                         }
                     }
                     .buttonStyle(.plain)
-                    .disabled(cloudSyncManager.isSyncing)
+                    .disabled(!isAdministrable || cloudSyncManager.isSyncing)
                 }
 
                 GlassDivider()
 
                 Button {
+                    guard isAdministrable else { return }
                     cloudSyncManager.syncSnapshot(provider: provider, reason: "manual")
                 } label: {
-                    GlassDetailRow(icon: "arrow.triangle.2.circlepath", iconColor: .cyan, title: "Reconcile Now") {
+                    GlassDetailRow(icon: "arrow.triangle.2.circlepath", iconColor: .cyan, title: "Sync Now") {
                         providerAccessory(provider)
                     }
                 }
                 .buttonStyle(.plain)
-                .disabled(!enabled || !canUse || cloudSyncManager.isSyncing)
+                .disabled(!isAdministrable || !enabled || !canUse || cloudSyncManager.isSyncing)
 
                 GlassDivider()
 
                 Button {
-                    cloudSyncManager.restoreRemoteSnapshot(provider: provider)
+                    restoreRemoteSnapshot(provider)
                 } label: {
                     GlassDetailRow(icon: "arrow.down.doc", iconColor: .indigo, title: "Restore from \(provider.displayName)") {
                         providerAccessory(provider)
                     }
                 }
                 .buttonStyle(.plain)
-                .disabled(!enabled || !canUse || cloudSyncManager.isSyncing)
+                .disabled(!isAdministrable || !enabled || !canUse || cloudSyncManager.isSyncing)
+
+                if connected {
+                    GlassDivider(leadingInset: 16)
+
+                    GlassDetailRow(
+                        icon: "externaldrive.fill",
+                        iconColor: providerColor(provider),
+                        title: "Storage Used"
+                    ) {
+                        if cloudSyncManager.isMeasuringRemoteUsage(for: provider) {
+                            EclipseLoadingIndicator()
+                                .tint(.white.opacity(0.6))
+                        } else {
+                            Text(storageUsedText(for: provider))
+                                .font(.caption.weight(.semibold))
+                                .foregroundColor(.white.opacity(0.55))
+                        }
+                    }
+                }
+
+                if isAdministrable {
+                    GlassDivider(leadingInset: 16)
+
+                    Button {
+                        guard isAdministrable else { return }
+                        pendingCloudDataDeletionProvider = provider
+                    } label: {
+                        GlassDetailRow(
+                            icon: "trash",
+                            iconColor: .red,
+                            title: "Delete Cloud Data"
+                        ) {
+                            providerAccessory(provider)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!connected || cloudSyncManager.isSyncing)
+                }
 
                 let status = cloudSyncManager.statusMessage(for: provider)
                 if !status.isEmpty {
@@ -3516,6 +4249,54 @@ struct ExperimentalCloudSyncView: View {
                 }
             }
         }
+    }
+
+    private func restoreRemoteSnapshot(_ provider: CloudSyncProvider) {
+        guard isAdministrable else { return }
+        cloudSyncManager.restoreRemoteSnapshot(provider: provider)
+    }
+
+    private func deleteCloudData(_ provider: CloudSyncProvider) {
+        guard isAdministrable else { return }
+        cloudSyncManager.deleteRemoteData(for: provider)
+    }
+
+    private func storageUsedText(for provider: CloudSyncProvider) -> String {
+        guard let usage = cloudSyncManager.remoteUsage(for: provider) else {
+            return "Unavailable"
+        }
+        guard !usage.isEmpty else { return "Not synced yet" }
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        let used = formatter.string(fromByteCount: usage.byteCount)
+        let prefix = usage.isComplete ? used : "About \(used)"
+        guard !resolvedCloudSyncBudget.isUnlimited else { return prefix }
+        return "\(prefix) of \(resolvedCloudSyncBudget.displayName)"
+    }
+
+    private var cloudDataDeletionMessage: String {
+        let provider = pendingCloudDataDeletionProvider
+        let name = provider?.displayName ?? "this provider"
+        var message = "This removes every Eclipse backup file from \(name) and cannot be undone. Nothing on this device is deleted, and Eclipse stops uploading backup files here afterwards."
+        if provider == .iCloud {
+            message += cloudSyncManager.canDeleteAppleAccountMediaState
+                ? "\n\nThis covers Eclipse's backup files in iCloud Drive and the library and watch progress Eclipse keeps in your Apple account. This device then stops syncing library and watch progress through your Apple account until you tap Resume Library Sync here."
+                : "\n\nThis covers Eclipse's backup files in iCloud Drive. This device cannot reach Eclipse's iCloud database, so library and watch progress stored there are left alone."
+        }
+        message += provider == .iCloud && cloudSyncManager.canDeleteAppleAccountMediaState
+            ? "\n\nYour other devices are not erased and keep syncing. The next one you open uploads its own copy again, so delete from each device you want the account to stay empty for."
+            : "\n\nYour other devices are not erased. If any of them still has sync on, the next one you open will upload its own copy again — turn sync off there first if you want the account to stay empty."
+        return message
+    }
+
+    private func restoreCloudAfterOverwriteWarning() {
+        guard isAdministrable else { return }
+        cloudSyncManager.restoreCloudAfterOverwriteWarning()
+    }
+
+    private func replaceCloudAfterOverwriteWarning() {
+        guard isAdministrable else { return }
+        cloudSyncManager.replaceCloudAfterOverwriteWarning()
     }
 
     @ViewBuilder
@@ -3582,11 +4363,110 @@ struct ExperimentalCloudSyncView: View {
     private func syncBinding(for provider: CloudSyncProvider) -> Binding<Bool> {
         switch provider {
         case .iCloud:
-            return $iCloudSyncEnabled
+            return Binding(
+                get: { iCloudSyncEnabled },
+                set: { enabled in
+                    guard isAdministrable else { return }
+                    iCloudSyncEnabled = enabled
+                }
+            )
         case .googleDrive:
-            return $googleDriveSyncEnabled
+            return Binding(
+                get: { googleDriveSyncEnabled },
+                set: { enabled in
+                    guard isAdministrable else { return }
+                    googleDriveSyncEnabled = enabled
+                }
+            )
         case .oneDrive:
-            return $oneDriveSyncEnabled
+            return Binding(
+                get: { oneDriveSyncEnabled },
+                set: { enabled in
+                    guard isAdministrable else { return }
+                    oneDriveSyncEnabled = enabled
+                }
+            )
+        }
+    }
+}
+
+@available(iOS 17.0, *)
+private struct CloudSyncHealthSection: View {
+    @StateObject private var mediaStateSyncManager = MediaStateSyncManager.shared
+    @State private var showRecoveryConfirmation = false
+    @State private var showRecoveryFailure = false
+
+    var body: some View {
+        if let detail = mediaStateSyncManager.canonicalArchiveUnavailabilityDetail {
+            GlassSection(header: "Sync Health") {
+                VStack(spacing: 0) {
+                    HStack(alignment: .top, spacing: 14) {
+                        Image(systemName: "exclamationmark.icloud.fill")
+                            .font(.title3)
+                            .foregroundColor(.orange)
+                            .frame(width: 30)
+
+                        Text(detail)
+                            .font(.footnote)
+                            .foregroundColor(.white.opacity(0.7))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 14)
+
+                    if mediaStateSyncManager.isRetainingAccountBoundaryRecovery {
+                        GlassDivider()
+
+                        Button {
+                            showRecoveryConfirmation = true
+                        } label: {
+                            GlassDetailRow(
+                                icon: "arrow.counterclockwise.circle",
+                                iconColor: .orange,
+                                title: "Restore From Recovery Point"
+                            ) {
+                                Image(systemName: "chevron.right")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundColor(.white.opacity(0.3))
+                            }
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            GlassSectionFooter("This device's media state needs recovery, so cloud uploads are paused and incoming sync is held to protect your other devices.")
+                .alert("Restore From Recovery Point", isPresented: $showRecoveryConfirmation) {
+                    Button("Restore and Resume Sync", role: .destructive) {
+                        showRecoveryFailure = !mediaStateSyncManager
+                            .recoverRetainedAccountBoundaryArchiveAfterUserConfirmation()
+                    }
+                    Button("Cancel", role: .cancel) { }
+                } message: {
+                    Text("Eclipse kept a recovery point from before the interrupted account change. Restoring it replaces this device's media state with that recovery point and resumes sync. The unreadable data stays on this device.")
+                }
+                .alert("Recovery Not Completed", isPresented: $showRecoveryFailure) {
+                    Button("OK", role: .cancel) { }
+                } message: {
+                    Text("Eclipse could not finish the recovery and left the recovery point in place. Try again after relaunching the app.")
+                }
+        } else if mediaStateSyncManager.isRetainingAccountBoundaryRecovery {
+            GlassSection(header: "Sync Health") {
+                HStack(alignment: .top, spacing: 14) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.title3)
+                        .foregroundColor(.orange)
+                        .frame(width: 30)
+
+                    Text("A sync recovery point is waiting to finish. Cloud uploads stay paused until Eclipse completes it, usually at the next app activation.")
+                        .font(.footnote)
+                        .foregroundColor(.white.opacity(0.7))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+            }
         }
     }
 }

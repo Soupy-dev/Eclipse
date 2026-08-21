@@ -1,10 +1,17 @@
+//
+//  ErrorDefinitions.swift
+//  Kanzen
+//
+//  Created by Dawud Osman on 12/05/2025.
+//
+
 import Foundation
 
 enum ScriptExecutionError: Error,CustomStringConvertible {
-    case jsRuntimeError(String)   // JavaScript runtime error with a message
-    case invalidReturnValue      // The script returned an invalid value
-    case scriptLoadError(String) // Failed to load a script (e.g., file not found)
-    // Custom description for printing
+    case jsRuntimeError(String)
+    case invalidReturnValue
+    case scriptLoadError(String)
+
     var description: String {
         switch self {
         case .jsRuntimeError(let message):
@@ -17,7 +24,6 @@ enum ScriptExecutionError: Error,CustomStringConvertible {
     }
 }
 
-// Module Creation ERRORS
 enum ModuleCreationError: Error,CustomStringConvertible {
     case invalidScriptUrl(String)
     case moduleAlreadyExists(String)
@@ -34,14 +40,13 @@ enum ModuleCreationError: Error,CustomStringConvertible {
     }
 }
 
-// LOADING MODULE ERRORS
 enum ModuleLoadingError: Error,CustomStringConvertible {
     case moduleNotFound(String)
     case moduleDecodeError(String)
     case missingScriptPath(String)
     case scriptDownloadError(String)
     case invalidScriptFormat(String)
-    
+
     var description: String {
         switch self
         {

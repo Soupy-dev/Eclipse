@@ -1,5 +1,11 @@
+//
+//  MangaDetailView.swift
+//  Kanzen
+//
+//  Created by Eclipse on 2025.
+//
+
 import SwiftUI
-import Kingfisher
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -13,24 +19,28 @@ struct MangaDetailView: View {
     @ObservedObject private var progressManager = MangaReadingProgressManager.shared
     @ObservedObject private var downloadManager = ReaderDownloadManager.shared
     @ObservedObject private var theme = EclipseTheme.shared
+    @ObservedObject private var contentFilter = ReaderContentFilter.shared
 
-    /// Full manga detail fetched from AniList (populated on appear if initial data is sparse)
     @State private var manga: AniListManga
     @State private var fetchedFullDetail = false
+
+    @State private var detailsResolution: LegacyDetailsResolution = .pending
+
+    @State private var detailsFailedAt: Date?
+
+    private static let detailsRetryCooldown: TimeInterval = 3
 
     init(manga: AniListManga) {
         self.initialManga = manga
         _manga = State(initialValue: manga)
     }
 
-    // UI state
     @State private var expandedDescription: Bool = false
     @State private var showAddToCollection: Bool = false
     @State private var shareItem: ReaderDetailShareItem?
     @State private var scrollOffset: CGFloat = 0
     @State private var headerAmbientColor: Color = .black
 
-    // Source / chapter state
     @State private var selectedSource: SourceMatch?
     @State private var chapterEngine = KanzenEngine()
     @State private var loadingChapters: Bool = false
@@ -63,14 +73,10 @@ struct MangaDetailView: View {
         return theme.scopedAtmosphereColor(dominant: base, isReaderMode: true)
     }
 
-    /// Banner blend color from the cover's extracted dominant (falling back to
-    /// the backdrop tone for a dark/absent cover) - same behavior as a media hero.
     private var readerHeroBlendColor: Color {
         theme.heroBlendColor(dominant: headerAmbientColor, isReaderMode: true)
     }
 
-    /// Cover dominant for the scroll-attached bleed; nil for a near-black cover
-    /// so the app gradient stays clean.
     private var readerBleedColor: Color? {
         EclipseTheme.usableDominant(headerAmbientColor)
     }
@@ -102,7 +108,8 @@ struct MangaDetailView: View {
                 coverURL: selectedSource.manga.imageURL.isEmpty ? manga.coverURL : selectedSource.manga.imageURL,
                 isNovel: selectedSource.module.moduleData.novel == true,
                 sourceName: selectedSource.module.moduleData.sourceName,
-                latestChapterNumbers: currentChapterNumbers
+                latestChapterNumbers: currentChapterNumbers,
+                contentRating: derivedContentRating
             )
         }
 
@@ -112,7 +119,15 @@ struct MangaDetailView: View {
             coverURL: manga.coverURL,
             format: manga.format,
             totalChapters: manga.chapters,
-            latestChapterNumbers: currentChapterNumbers
+            latestChapterNumbers: currentChapterNumbers,
+            contentRating: derivedContentRating
+        )
+    }
+
+    private var derivedContentRating: Int? {
+        contentFilter.derivedLegacyRating(
+            tags: manga.genres,
+            description: manga.description
         )
     }
 
@@ -187,7 +202,110 @@ struct MangaDetailView: View {
         return selectedSource.manga.imageURL
     }
 
+    private var isRestrictedForActiveProfile: Bool {
+        guard contentFilter.isKidsProfileActive else { return false }
+        guard detailsResolution == .resolved else { return true }
+        return !contentFilter.allowsLegacy(
+            title: manga.displayTitle,
+            tags: manga.genres,
+            description: manga.description
+        )
+    }
+
     var body: some View {
+        Group {
+            if isRestrictedForActiveProfile {
+                if detailsResolution == .pending {
+                    resolvingView
+                } else {
+                    restrictedView
+                }
+            } else {
+                detailBody
+            }
+        }
+
+        .task {
+            await resolveDetailsIfNeeded()
+            await retryDetailsIfStale()
+        }
+    }
+
+    private func resolveDetailsIfNeeded() async {
+        guard detailsResolution == .pending else { return }
+        guard manga.description == nil, !fetchedFullDetail else {
+            detailsResolution = .resolved
+            return
+        }
+        fetchedFullDetail = true
+        guard let full = try? await AniListMangaService.shared.fetchMangaDetail(id: manga.id) else {
+            detailsResolution = .failed
+            detailsFailedAt = Date()
+            return
+        }
+        manga = full
+        detailsResolution = .resolved
+        detailsFailedAt = nil
+    }
+
+    private func retryDetailsIfStale() async {
+        guard detailsResolution == .failed,
+              let failedAt = detailsFailedAt,
+              Date().timeIntervalSince(failedAt) >= Self.detailsRetryCooldown else { return }
+        await retryDetailResolution()
+    }
+
+    private func retryDetailResolution() async {
+
+        fetchedFullDetail = false
+        detailsFailedAt = nil
+        detailsResolution = .pending
+        await resolveDetailsIfNeeded()
+    }
+
+    private var resolvingView: some View {
+        EclipseLoadingIndicator("Checking this title...")
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(readerDetailBackground.ignoresSafeArea())
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var restrictedView: some View {
+        let couldNotCheck = detailsResolution == .failed
+        let heading: LocalizedStringKey = couldNotCheck
+            ? "Couldn't check this title"
+            : "Not available on this profile"
+        let message: LocalizedStringKey = couldNotCheck
+            ? "The details needed to check this title didn't load, so it stays hidden for now."
+            : "This title is restricted for the profile you're using."
+        return VStack(spacing: 12) {
+            Image(systemName: couldNotCheck ? "exclamationmark.triangle.fill" : "lock.fill")
+                .font(.system(size: 48))
+                .foregroundColor(.secondary.opacity(0.7))
+            Text(heading)
+                .font(.headline)
+            Text(message)
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+
+            if couldNotCheck {
+                Button("Try Again") {
+                    Task { await retryDetailResolution() }
+                }
+                .padding(.top, 4)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(readerDetailBackground.ignoresSafeArea())
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder
+    private var detailBody: some View {
         let experimental = ExperimentalFeatureState.isEnabledAtLaunch
         ScrollView {
             VStack(alignment: .leading, spacing: experimental ? designMetrics.sectionSpacing : 18) {
@@ -234,6 +352,10 @@ struct MangaDetailView: View {
         .sheet(item: $shareItem) { item in
             ActivityView(items: item.items)
         }
+
+        .onReceive(NotificationCenter.default.publisher(for: .activeProfileDidChange)) { _ in
+            selectedChapterData = nil
+        }
         .fullScreenCover(item: $selectedChapterData) { chapter in
             if let chapters = loadedChapters, chapterLanguageIdx < chapters.count {
                 let chapterList = chapters[chapterLanguageIdx].chapters
@@ -257,21 +379,13 @@ struct MangaDetailView: View {
             }
         }
         .task {
-            // If opened from library (sparse data), fetch full detail from AniList
-            if manga.description == nil, !fetchedFullDetail {
-                fetchedFullDetail = true
-                if let full = try? await AniListMangaService.shared.fetchMangaDetail(id: manga.id) {
-                    manga = full
-                }
-            }
+
             guard !moduleManager.modules.isEmpty else { return }
-            // Don't re-search if we already have results or are searching
+
             guard sourceFinder.matches.isEmpty, !sourceFinder.isSearching, !sourceFinder.hasFinished else { return }
             sourceFinder.searchAllModules(for: manga)
         }
     }
-
-    // MARK: - Header
 
     @ViewBuilder
     private var headerSection: some View {
@@ -303,15 +417,14 @@ struct MangaDetailView: View {
                     readerHeroBlendColor.opacity(0.58)
                 }
 
-                // Modern: a sharp full-bleed cover banner whose extracted color
-                // drives the gradient + bleed, exactly like a media hero. Legacy:
-                // blurred fill behind a centered cover poster.
-                KFImage(URL(string: coverURLString))
-                    .placeholder { Color.black.opacity(0.18) }
-                    .onSuccess { result in
-                        headerAmbientColor = Color.ambientColor(from: result.image)
+                ReaderPinnedRemoteImage(
+                    url: URL(string: coverURLString),
+                    onImage: { image in
+                        headerAmbientColor = Color.ambientColor(from: image)
                     }
-                    .resizable()
+                ) {
+                    Color.black.opacity(0.18)
+                }
                     .aspectRatio(contentMode: isIPad && experimental ? .fit : .fill)
                     .frame(width: viewportWidth, height: stretchedHeight)
                     .clipped()
@@ -319,9 +432,9 @@ struct MangaDetailView: View {
                     .overlay(Color.black.opacity(experimental ? 0.10 : 0.34))
 
                 if !experimental {
-                    KFImage(URL(string: coverURLString))
-                        .placeholder { Color.clear }
-                        .resizable()
+                    ReaderPinnedRemoteImage(url: URL(string: coverURLString)) {
+                        Color.clear
+                    }
                         .scaledToFit()
                         .frame(width: posterWidth, height: posterHeight, alignment: .center)
                         .frame(width: viewportWidth, alignment: .center)
@@ -486,8 +599,6 @@ struct MangaDetailView: View {
         return items
     }
 
-    // MARK: - Description
-
     @ViewBuilder
     private func descriptionSection(_ text: String) -> some View {
         let cleaned = text
@@ -544,8 +655,6 @@ struct MangaDetailView: View {
             }
         }
     }
-
-    // MARK: - Genres
 
     @ViewBuilder
     private func genresSection(_ genres: [String]) -> some View {
@@ -628,8 +737,6 @@ struct MangaDetailView: View {
         }
     }
 
-    // MARK: - Sources Section
-
     @ViewBuilder
     private var sourcesSection: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -687,8 +794,13 @@ struct MangaDetailView: View {
     private func sourceMatchRow(_ match: SourceMatch) -> some View {
         HStack(spacing: 12) {
             if let iconURL = URL(string: match.module.moduleData.iconURL) {
-                KFImage(iconURL)
-                    .resizable()
+                ReaderPinnedRemoteImage(
+                    url: iconURL,
+                    maximumPixelSize: 256
+                ) {
+                    Image(systemName: "puzzlepiece.extension")
+                        .resizable()
+                }
                     .scaledToFit()
                     .frame(width: 36, height: 36)
                     .cornerRadius(8)
@@ -724,17 +836,20 @@ struct MangaDetailView: View {
         .padding(.vertical, 6)
     }
 
-    // MARK: - Chapters Section (inline after source selection)
-
     @ViewBuilder
     private var chaptersSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // Selected source header with change button
+
             if let source = selectedSource {
                 HStack {
                     if let iconURL = URL(string: source.module.moduleData.iconURL) {
-                        KFImage(iconURL)
-                            .resizable()
+                        ReaderPinnedRemoteImage(
+                            url: iconURL,
+                            maximumPixelSize: 192
+                        ) {
+                            Image(systemName: "puzzlepiece.extension")
+                                .resizable()
+                        }
                             .scaledToFit()
                             .frame(width: 24, height: 24)
                             .cornerRadius(6)
@@ -841,6 +956,7 @@ struct MangaDetailView: View {
                             sourceName: selectedSource?.module.moduleData.sourceName,
                             format: selectedSourceFormat,
                             chapters: selected.chapters,
+                            contentRating: derivedContentRating,
                             kanzen: chapterEngine
                         )
                     } label: {
@@ -869,7 +985,7 @@ struct MangaDetailView: View {
 
                 HStack(spacing: 0) {
                     VStack(alignment: .leading, spacing: 3) {
-                        // Chapter number + title
+
                         if !chapterTitle.isEmpty {
                             Text(chapter.chapterNumber)
                                 .font(.subheadline)
@@ -888,7 +1004,6 @@ struct MangaDetailView: View {
                                 .lineLimit(1)
                         }
 
-                        // Scanlation group
                         if let data = chapter.chapterData, let first = data.first, !first.scanlationGroup.isEmpty {
                             Text(first.scanlationGroup)
                                 .font(.caption2)
@@ -1053,6 +1168,7 @@ struct MangaDetailView: View {
                         sourceName: selectedSource?.module.moduleData.sourceName,
                         format: selectedSourceFormat,
                         chapter: chapter,
+                        contentRating: derivedContentRating,
                         kanzen: chapterEngine
                     )
                 } label: {
@@ -1084,8 +1200,6 @@ struct MangaDetailView: View {
         )
     }
 
-    // MARK: - Read / Continue Button
-
     @ViewBuilder
     private func readButton(chapters: [Chapter]) -> some View {
         let lastRead = progressManager.lastReadChapter(for: progressMangaId)
@@ -1093,10 +1207,9 @@ struct MangaDetailView: View {
         let readKeys = Set(readChapters.map { ChapterIdentityNormalizer.key(for: $0) })
         let hasProgress = lastRead != nil || !readChapters.isEmpty
 
-        // Find the chapter to resume/start
         let targetChapter: Chapter? = {
             if let lastRead = lastRead {
-                // Find the last-read chapter so we resume in it
+
                 let lastReadKey = ChapterIdentityNormalizer.key(for: lastRead)
                 if !readKeys.contains(lastReadKey),
                    let ch = chapters.first(where: {
@@ -1106,7 +1219,7 @@ struct MangaDetailView: View {
                     return ch
                 }
             }
-            // No progress - start from first chapter
+
             if let unread = chronologicalChapters(chapters).first(where: {
                 !readKeys.contains(ChapterIdentityNormalizer.key(for: $0.chapterNumber))
             }) {
@@ -1181,110 +1294,101 @@ struct MangaDetailView: View {
         }
     }
 
-    // MARK: - Source Selection & Chapter Loading
-
     private func selectSource(_ match: SourceMatch) {
         selectedSource = match
+        let owner = ProfileManager.shared.activeProfileID
         loadingChapters = true
         loadedChapters = nil
         chapterLoadError = nil
         chapterLanguageIdx = 0
 
-        let engine = KanzenEngine()
-        do {
-            let script = try ModuleManager.shared.getModuleScript(module: match.module)
-            let isNovel = match.module.moduleData.novel == true
-            ReaderLogger.shared.log("MangaDetail.selectSource: loading module '\(match.module.moduleData.sourceName)', isNovel=\(isNovel)", type: "Debug")
-            try engine.loadScript(script, isNovel: isNovel)
-            ReaderLogger.shared.log("MangaDetail.selectSource: module loaded successfully", type: "Debug")
-        } catch {
-            loadingChapters = false
-            chapterLoadError = "Failed to load module: \(error.localizedDescription)"
-            return
-        }
+        Task { @MainActor in
+            do {
+                let engine = KanzenEngine()
+                let script = try ModuleManager.shared.getModuleScript(module: match.module)
+                try await engine.loadScript(script, module: match.module)
+                guard selectedSource?.module.id == match.module.id,
+                      selectedSource?.manga.mangaId == match.manga.mangaId else { return }
+                chapterEngine = engine
 
-        // Store engine for the reader to use later
-        chapterEngine = engine
-
-        ReaderLogger.shared.log("MangaDetail.selectSource: calling extractChapters with mangaId='\(match.manga.mangaId)'", type: "Debug")
-        engine.extractChapters(params: match.manga.mangaId) { result in
-            DispatchQueue.main.async {
-                ReaderLogger.shared.log("MangaDetail.selectSource: extractChapters returned type=\(type(of: result as Any)), isNil=\(result == nil)", type: "Debug")
-                if let result = result {
-                    var parsed: [Chapters] = []
-
-                    if let dictResult = result as? [String: Any] {
-                        ReaderLogger.shared.log("MangaDetail.selectSource: Kanzen format, keys=\(Array(dictResult.keys))", type: "Debug")
-                        // Kanzen format: {language: [[chapterName, [{scanlation_group, id}]]]}
-                        for (key, value) in dictResult {
-                            var chapterList: [Chapter] = []
-                            if let chapters = value as? [Any?] {
-                                for (idx, chapter) in chapters.enumerated() {
-                                    if let chapter = chapter as? [Any?],
-                                       chapter.count >= 2,
-                                       let name = chapter[0] as? String,
-                                       let rawData = chapter[1] as? [[String: Any]],
-                                       let data = rawData.compactMap({ ChapterData(dict: $0) }) as? [ChapterData] {
-                                        chapterList.append(Chapter(chapterNumber: name, idx: idx, chapterData: data))
-                                    }
-                                }
-                            }
-                            if !chapterList.isEmpty {
-                                parsed.append(Chapters(language: key, chapters: chapterList))
-                            }
-                        }
-                    } else if let arrResult = result as? [[String: Any]] {
-                        // Sora format: [{number, title, href}, ...]
-                        ReaderLogger.shared.log("MangaDetail.selectSource: Sora format, \(arrResult.count) chapters", type: "Debug")
-                        if let first = arrResult.first {
-                            ReaderLogger.shared.log("MangaDetail.selectSource: first chapter keys=\(Array(first.keys)), values=\(first)", type: "Debug")
-                        }
-                        var chapterList: [Chapter] = []
-                        for (idx, chapterDict) in arrResult.enumerated() {
-                            let name = (chapterDict["number"] as? Int).map { String($0) }
-                                ?? (chapterDict["title"] as? String)
-                                ?? "Chapter \(idx + 1)"
-                            if let data = ChapterData(dict: chapterDict) {
-                                chapterList.append(Chapter(chapterNumber: name, idx: idx, chapterData: [data]))
-                            }
-                        }
-                        if !chapterList.isEmpty {
-                            parsed.append(Chapters(language: "default", chapters: chapterList))
-                        }
-                    }
-
-                    parsed = parsed.map {
-                        Chapters(
-                            language: $0.language,
-                            chapters: ChapterIdentityNormalizer.deduplicatedChapters($0.chapters, reindex: true)
-                        )
-                    }
-
-                    ReaderLogger.shared.log("MangaDetail.selectSource: parsed \(parsed.count) language groups, total chapters=\(parsed.reduce(0) { $0 + $1.chapters.count })", type: "Debug")
-                    self.loadedChapters = parsed
-                    if !parsed.isEmpty {
-                        let latestNumbers = self.chapterNumbers(from: parsed) ?? []
-                        self.libraryManager.updateSavedItem(self.libraryItem)
-                        self.progressManager.updateSourceMetadata(
-                            mangaId: self.progressMangaId,
-                            title: self.selectedSourceDisplayTitle,
-                            coverURL: self.selectedSourceCoverURL,
-                            format: self.selectedSourceFormat,
-                            latestChapterNumbers: latestNumbers,
-                            route: self.selectedContentRoute,
-                            sourceRefreshError: nil
-                        )
-                    }
-                } else {
-                    ReaderLogger.shared.log("MangaDetail.selectSource: result is not dict or array, actual type=\(type(of: result))", type: "Error")
-                    self.loadedChapters = []
+                guard let result = try await engine.extractChapters(params: match.manga.mangaId) else {
+                    loadedChapters = []
+                    loadingChapters = false
+                    return
                 }
-                self.loadingChapters = false
+                let parsed = parsedLegacyChapters(result)
+                loadedChapters = parsed
+                loadingChapters = false
+                if !parsed.isEmpty, ProfileManager.shared.isStillActive(owner) {
+                    let latestNumbers = chapterNumbers(from: parsed) ?? []
+                    libraryManager.updateSavedItem(libraryItem)
+                    progressManager.updateSourceMetadata(
+                        mangaId: progressMangaId,
+                        title: selectedSourceDisplayTitle,
+                        coverURL: selectedSourceCoverURL,
+                        format: selectedSourceFormat,
+                        latestChapterNumbers: latestNumbers,
+                        route: selectedContentRoute,
+                        sourceRefreshError: nil
+                    )
+                }
+            } catch {
+                guard selectedSource?.module.id == match.module.id,
+                      selectedSource?.manga.mangaId == match.manga.mangaId else { return }
+                loadingChapters = false
+                chapterLoadError = "Failed to load module: \(error.localizedDescription)"
             }
         }
     }
 
-    // MARK: - Helpers
+    private func parsedLegacyChapters(_ result: Any) -> [Chapters] {
+        var parsed: [Chapters] = []
+        if let dictResult = result as? [String: Any] {
+            for (key, value) in dictResult {
+                var chapterList: [Chapter] = []
+                if let chapters = value as? [Any?] {
+                    for (idx, chapter) in chapters.enumerated() {
+                        if let chapter = chapter as? [Any?],
+                           chapter.count >= 2,
+                           let name = chapter[0] as? String,
+                           let rawData = chapter[1] as? [[String: Any]] {
+                            let data = rawData.compactMap(ChapterData.init(dict:))
+                            chapterList.append(
+                                Chapter(chapterNumber: name, idx: idx, chapterData: data)
+                            )
+                        }
+                    }
+                }
+                if !chapterList.isEmpty {
+                    parsed.append(Chapters(language: key, chapters: chapterList))
+                }
+            }
+        } else if let arrResult = result as? [[String: Any]] {
+            var chapterList: [Chapter] = []
+            for (idx, chapterDict) in arrResult.enumerated() {
+                let name = (chapterDict["number"] as? Int).map(String.init)
+                    ?? (chapterDict["title"] as? String)
+                    ?? "Chapter \(idx + 1)"
+                if let data = ChapterData(dict: chapterDict) {
+                    chapterList.append(
+                        Chapter(chapterNumber: name, idx: idx, chapterData: [data])
+                    )
+                }
+            }
+            if !chapterList.isEmpty {
+                parsed.append(Chapters(language: "default", chapters: chapterList))
+            }
+        }
+        return parsed.map {
+            Chapters(
+                language: $0.language,
+                chapters: ChapterIdentityNormalizer.deduplicatedChapters(
+                    $0.chapters,
+                    reindex: true
+                )
+            )
+        }
+    }
 
     private func formatLabel(_ format: String) -> String {
         switch format {
@@ -1317,8 +1421,6 @@ struct MangaDetailView: View {
         }
     }
 }
-
-// MARK: - Flow Layout
 
 @available(iOS 16.0, macOS 13.0, *)
 struct FlowLayout: Layout {

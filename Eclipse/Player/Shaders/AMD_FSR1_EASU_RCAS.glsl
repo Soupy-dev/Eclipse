@@ -86,7 +86,6 @@ void FsrEasuTapF(
 	aC += c * w;
 	aW += w;
 }
-
 void FsrEasuSetF(
 	inout FSR_FLOAT2 dir,
 	inout FSR_FLOAT len,
@@ -377,4 +376,3 @@ vec4 hook() {
 	return vec4(pixR, pixG, pixB, alpha);
 
 }
-

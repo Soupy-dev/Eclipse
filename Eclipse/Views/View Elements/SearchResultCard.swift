@@ -1,3 +1,10 @@
+//
+//  SearchResultCard.swift
+//  Sora
+//
+//  Created by Francesco on 07/08/25.
+//
+
 import SwiftUI
 import Kingfisher
 
@@ -5,7 +12,7 @@ struct SearchResultCard: View {
     let result: TMDBSearchResult
     @Environment(\.heroNamespace) private var heroNamespace
     private var heroID: String { "search-\(result.stableIdentity)" }
-    
+
     var body: some View {
         NavigationLink(destination: MediaDetailView(searchResult: result)
             .heroDestination(id: heroID, namespace: heroNamespace)
@@ -15,13 +22,13 @@ struct SearchResultCard: View {
                     .clipShape(RoundedRectangle(cornerRadius: 16))
                     .shadow(color: .black.opacity(0.25), radius: 8, x: 0, y: 4)
                     .heroSource(id: heroID, namespace: heroNamespace)
-                
+
                 Text(result.displayTitle)
-                    .font(.caption)
-                    .fontWeight(.medium)
+                    .font(isTvOS ? .system(size: 28) : .caption)
+                    .fontWeight(isTvOS ? .semibold : .medium)
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
-                    .frame(height: 34)
+                    .frame(height: isTvOS ? 76 : 34)
                     .foregroundColor(.primary)
             }
             .frame(maxWidth: .infinity)
@@ -35,7 +42,7 @@ struct SearchResultCard: View {
 
     @ViewBuilder
     private var posterArtwork: some View {
-        if isIPad {
+        if isTvOS || isIPad {
             Color.clear
                 .aspectRatio(2/3, contentMode: .fit)
                 .overlay {
@@ -53,7 +60,7 @@ struct SearchResultCard: View {
             .placeholder {
                 FallbackImageView(
                     isMovie: result.isMovie,
-                    size: CGSize(width: 120, height: 180)
+                    size: isTvOS ? CGSize(width: 260, height: 390) : CGSize(width: 120, height: 180)
                 )
             }
             .resizable()
