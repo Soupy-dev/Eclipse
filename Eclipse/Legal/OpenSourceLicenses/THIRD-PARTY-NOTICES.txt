@@ -1,0 +1,183 @@
+ECLIPSE THIRD-PARTY NOTICES
+===========================
+
+This file inventories the open-source software distributed in Eclipse. Full
+license texts and copyright notices are included alongside this file in the
+OpenSourceLicenses directory of the application bundle. Eclipse itself is
+distributed under GNU GPL version 3; the exact source revision for an official
+build is linked from Settings > Legal & Source.
+
+DIRECT SWIFT PACKAGE DEPENDENCIES
+---------------------------------
+
+Kingfisher 8.10.0
+  Project: https://github.com/onevcat/Kingfisher
+  License: MIT (Kingfisher-MIT.txt)
+
+Nuke 12.9.0
+  Project: https://github.com/kean/Nuke
+  License: MIT (Nuke-MIT.txt)
+
+PLCrashReporter 1.12.2
+  Project: https://github.com/microsoft/plcrashreporter
+  License: MIT and component notices (PLCrashReporter-MIT.txt)
+
+SwiftSoup 2.13.6
+  Project: https://github.com/scinfu/SwiftSoup
+  License: MIT (SwiftSoup-MIT.txt)
+
+Texture / AsyncDisplayKit 3.1.1
+  Project: https://github.com/Skittyblock/Texture
+  License: Apache License 2.0 (Texture-Apache-2.0.txt)
+
+ZIPFoundation 0.9.20
+  Project: https://github.com/weichsel/ZIPFoundation
+  License: MIT (ZIPFoundation-MIT.txt)
+
+MPVKIT-GPL PLAYBACK STACK
+-------------------------
+
+Eclipse links the MPVKit-GPL product. The framework and the resulting Eclipse
+binary are distributed under GNU GPL version 3. The MPVKit source revision for
+an official build is linked from Settings > Legal & Source. MPVKit build scripts
+and upstream source locations are available at https://github.com/Soupy-dev/MPVKit.
+
+MPVKit
+  Project: https://github.com/Soupy-dev/MPVKit
+  License: LGPLv3 source; GPLv3 when built as MPVKit-GPL
+  Files: MPVKit-LGPL-3.0.txt, GPL-3.0.txt, LGPL-3.0.txt
+
+mpv 0.41.0
+  Project: https://github.com/mpv-player/mpv
+  License: GPLv2-or-later / LGPLv2.1-or-later; GPL features are enabled
+  Files: mpv-Copyright.txt, GPL-2.0.txt, LGPL-2.1.txt
+
+FFmpeg n8.1.2
+  Project: https://github.com/FFmpeg/FFmpeg
+  License: LGPLv2.1-or-later / GPLv2-or-later; GPL features are enabled
+  Files: FFmpeg-License.txt, GPL-2.0.txt, GPL-3.0.txt, LGPL-2.1.txt,
+         LGPL-3.0.txt
+
+OpenSSL 3.3.5 (Libssl and Libcrypto)
+  Project: https://github.com/openssl/openssl
+  License: Apache License 2.0 (OpenSSL-Apache-2.0.txt)
+
+GnuTLS 3.8.11
+  Project: https://github.com/gnutls/gnutls
+  License: LGPLv2.1-or-later; included tools and source carry GPLv3 notices
+  Files: GnuTLS-LGPL-2.1.txt, GnuTLS-GPL-3.0.txt
+
+Nettle 3.10 and Hogweed
+  Project: https://git.lysator.liu.se/nettle/nettle
+  License: LGPLv3-or-later / GPLv2-or-later
+  Files: Nettle-LGPL-3.0.txt, GPL-2.0.txt
+
+GNU MP 6.2.1
+  Project: https://gmplib.org
+  License: LGPLv3-or-later / GPLv2-or-later
+  Files: GMP-LGPL-3.0.txt, GMP-GPL-2.0.txt
+
+libass 0.17.5
+  Project: https://github.com/libass/libass
+  License: ISC (libass-ISC.txt)
+
+libunibreak 6.1
+  Project: https://github.com/adah1972/libunibreak
+  License: zlib-style license (libunibreak-zlib.txt)
+
+FreeType 2.14.3
+  Project: https://github.com/freetype/freetype
+  License: FreeType License or GPLv2
+  Files: FreeType-License.txt, FreeType-FTL.txt, GPL-2.0.txt
+
+FriBidi 1.0.16
+  Project: https://github.com/fribidi/fribidi
+  License: LGPLv2.1-or-later (FriBidi-LGPL-2.1.txt)
+
+HarfBuzz 14.2.0
+  Project: https://github.com/harfbuzz/harfbuzz
+  License: Old MIT and component notices (HarfBuzz-License.txt)
+
+Samba 4.15.13 (Libsmbclient)
+  Project: https://github.com/samba-team/samba
+  License: GPLv3-or-later (Samba-GPL-3.0.txt)
+
+Little CMS 2.17
+  Project: https://github.com/mm2/Little-CMS
+  License: MIT (LittleCMS-MIT.txt)
+
+libplacebo 7.360.1
+  Project: https://code.videolan.org/videolan/libplacebo
+  License: LGPLv2.1-or-later (libplacebo-LGPL-2.1.txt)
+
+SPIRV-Cross, Vulkan SDK 1.4.309.0 revision
+  Project: https://github.com/KhronosGroup/SPIRV-Cross
+  License: Apache License 2.0 (SPIRV-Cross-Apache-2.0.txt)
+
+dav1d 1.5.2
+  Project: https://code.videolan.org/videolan/dav1d
+  License: BSD 2-Clause (dav1d-BSD-2-Clause.txt)
+
+libdovi 3.3.2
+  Project: https://github.com/quietvoid/dovi_tool
+  License: MIT (libdovi-MIT.txt)
+
+MoltenVK 1.4.1
+  Project: https://github.com/KhronosGroup/MoltenVK
+  License: Apache License 2.0 (MoltenVK-Apache-2.0.txt)
+
+shaderc 2025.5
+  Project: https://github.com/google/shaderc
+  License: Apache License 2.0 (shaderc-Apache-2.0.txt)
+  The combined shaderc library also incorporates the following pinned projects:
+    glslang 7a47e2531cb334982b2a2dd8513dca0a3de4373d
+      License and component notices: glslang-License.txt
+    SPIRV-Headers b824a462d4256d720bebb40e78b9eb8f78bbb305
+      License and component notices: SPIRV-Headers-MIT.txt
+    SPIRV-Tools 262bdab48146c937467f826699a40da0fdfc0f1a
+      License: Apache License 2.0 (SPIRV-Tools-Apache-2.0.txt)
+
+uchardet 0.0.8
+  Project: https://gitlab.freedesktop.org/uchardet/uchardet
+  License: MPL 1.1 / GPLv2-or-later / LGPLv2.1-or-later
+  Files: uchardet-MPL-1.1.txt, GPL-2.0.txt, LGPL-2.1.txt
+
+libbluray 1.4.0
+  Project: https://code.videolan.org/videolan/libbluray
+  License: LGPLv2.1-or-later (libbluray-LGPL-2.1.txt)
+
+uavs3d (MPVKit binary release 1.2.1)
+  Project: https://github.com/uavs3/uavs3d
+  License: BSD 3-Clause (uavs3d-BSD-3-Clause.txt)
+
+BUNDLED PLAYER SHADERS
+----------------------
+
+ArtCNN C4F16 and C4F16 DS
+  Project: https://github.com/Artoriuz/ArtCNN
+  License: MIT
+  The complete notice is embedded in each shader and bundled as
+  Shaders/LICENSE-MIT-ArtCNN.txt.
+
+AMD FidelityFX Super Resolution 1
+  Project: https://github.com/GPUOpen-Effects/FidelityFX-FSR
+  License: MIT
+  Eclipse's mpv GLSL adaptation is based on hooke007's AMD_FSR1_RT port. The
+  complete AMD notice and provenance are embedded in the shader, and the license
+  is bundled as Shaders/LICENSE-MIT-FidelityFX-FSR.txt.
+
+OTHER ADAPTED OR DERIVED CODE
+-----------------------------
+
+Eclipse's GPLv3 source preserves attribution and provenance for Luna, SoraCore,
+SkyStream Tools, and other adapted GPL-compatible code. Reader Extension
+provenance, Apache License 2.0 text, and the SwiftSoup notice are separately
+bundled in the ReaderExtensions legal directory. See Settings > Legal & Source >
+Credits & Acknowledgements for project links and immutable audited revisions.
+
+NO ENDORSEMENT
+--------------
+
+All product names, trademarks, services, and projects belong to their respective
+owners. Inclusion in this notice is attribution and does not imply affiliation or
+endorsement.

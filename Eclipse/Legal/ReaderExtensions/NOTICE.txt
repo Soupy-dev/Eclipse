@@ -1,0 +1,61 @@
+Eclipse Reader Extensions
+Copyright 2026 Eclipse contributors
+
+This product includes an Eclipse-owned Reader Extensions implementation that
+was substantially modified and reimplemented in Swift from interfaces and
+reference behavior published by the following Apache License 2.0 projects.
+The upstream Dart sources are not shipped in the application bundle.
+
+Upstream copyright for Mangayomi and Mangayomi Extensions:
+Copyright 2023 Moustapha Kodjo Amadou
+
+Mangayomi
+Repository: https://github.com/kodjodevf/mangayomi
+Audited revision: 4eec7aca6f1c8bd563d0bc79bcf895f46bb30b74
+Immutable source: https://github.com/kodjodevf/mangayomi/tree/4eec7aca6f1c8bd563d0bc79bcf895f46bb30b74
+License at revision: https://github.com/kodjodevf/mangayomi/blob/4eec7aca6f1c8bd563d0bc79bcf895f46bb30b74/LICENSE
+
+Reference files and SHA-256 digests:
+a79196d1725ebfd234dbb66a8af498a9a2e98d27fe502c196ade4bff38f60bb4  lib/eval/javascript/service.dart
+a69f037e56efe6d605a81d4072b196918bbaa5b79dee82c9c0e60429cc507d21  lib/eval/javascript/http.dart
+8bc5885aa3dae8298dc9a37f1427751acf9ddb00492b1879300c81d5b90a19e5  lib/eval/javascript/dom_selector.dart
+59de2c969203aab2d5e8f13a1c8aef4308f692c13dc784ed854bba7458449624  lib/eval/javascript/preferences.dart
+4454cb9588c0aaa0d5389dfd978918f38f70c0da6a05afe866986d3bcfdd7eed  lib/eval/javascript/utils.dart
+
+Official Mangayomi Extensions archive
+Repository: https://github.com/kodjodevf/mangayomi-extensions
+Audited revision: 6004f1f8d1a56f882dadb734ce26f50c626a3850
+Immutable source: https://github.com/kodjodevf/mangayomi-extensions/tree/6004f1f8d1a56f882dadb734ce26f50c626a3850
+License at revision: https://github.com/kodjodevf/mangayomi-extensions/blob/6004f1f8d1a56f882dadb734ce26f50c626a3850/LICENSE
+
+Generic parser reference files and SHA-256 digests:
+b685afe23581647e6ecf9350a45d0599250002acdfadd2da17bb64894cd9b456  dart/manga/multisrc/madara/madara.dart
+43ae9c14fd83abdea848406ef7de8c718b7803aea418cabac5402a7f90b189bd  dart/manga/multisrc/madara/sources.dart
+0a97ae51ca4a08c891732f6280093e27a5e0d4386e3bd936c2027104cacbbc6e  dart/manga/multisrc/mangabox/mangabox.dart
+4e3bd3499062bfea22d03cd9419cf78fd036e27bb4eed786607859ebff788938  dart/manga/multisrc/mangabox/sources.dart
+479a63cef4a19b8ed707e4cc3fe3d971275124fb1b0f83dc8059380f18bc8581  dart/manga/multisrc/mangareader/mangareader.dart
+9ef9ab39f3c9ba4a087e8a12e6fd2c8c649f532fa1e7efdf7a637bfcc8d241f0  dart/manga/multisrc/mangareader/sources.dart
+965ba3cecc671f657f5c9a4ceb3dc53ec3599de12e1472f6b4cb7b4060cc5d48  dart/manga/multisrc/mmrcms/mmrcms.dart
+af3a25fccea0230dfe33be912cfb86af76c0eb75c7789a70ab458c28d7a1a688  dart/manga/multisrc/mmrcms/sources.dart
+0f8b122f3950af18a036d7dc974596f7c6c0ac85f358fae4321c15d90b3eb957  dart/manga/multisrc/nepnep/nepnep.dart
+0af7df8715e44970bd86cbb0e333a4c7ca10e39f097db3902c14b575c506f2fe  dart/manga/multisrc/nepnep/sources.dart
+
+Neither audited upstream revision contains a NOTICE file. The complete Apache
+License 2.0 text governing these works is bundled beside this notice as
+LICENSE-APACHE-2.0.txt. Modified Swift source files retain prominent provenance
+headers and refer back to this notice.
+
+SwiftSoup
+Repository: https://github.com/scinfu/SwiftSoup
+Pinned revision: ead56133a693d0184d8c2db1a6d6394410cacfd6 (version 2.13.6)
+Immutable source: https://github.com/scinfu/SwiftSoup/tree/ead56133a693d0184d8c2db1a6d6394410cacfd6
+Copyright (c) 2009-2025 Jonathan Hedley <https://jsoup.org/>
+Copyright (c) 2016-2025 Nabil Chatbi (Swift port)
+License: MIT; the complete text is bundled beside this notice as
+LICENSE-SWIFTSOUP-MIT.txt.
+
+Eclipse does not bundle a provider catalog, provider scripts, site logos, or
+site-specific parser configuration. User-added extension code is obtained
+directly by the user and remains subject to its own detected license and the
+provider's terms. Inclusion of these acknowledgements does not imply upstream
+affiliation or endorsement.
