@@ -28,7 +28,7 @@
 
 ## Why Eclipse
 
-Eclipse was designed to bridge Luna services (more well known as Sora modules) with Stremio addons in one polished app. The goal is simple: search faster, pick the right result with better metadata, watch with stronger controls, keep progress synced, and continue across anime, movies, shows, manga, and novels. Star the repo, join the Discord, or support on Ko-fi if you like my work!
+Eclipse was designed to bridge Luna services (more well known as Sora modules) with Stremio addons in one polished app. The goal is simple: search faster, pick the right result with better metadata, watch with stronger controls, keep progress synced, and continue across anime, movies, shows, manga, and novels. Now powered by Mangayomi, SkyStream, and Nuvio as well. Star the repo, join the Discord, or support on Ko-fi if you like my work!
 
 ## Screenshots
 
@@ -68,7 +68,7 @@ Eclipse was designed to bridge Luna services (more well known as Sora modules) w
 - MPV playback with subtitle defaults, language defaults, next episode actions, AniSkip, IntroDB, and TheIntroDB support
 - A redesigned interface built around browsing, watching, reading, and managing progress
 - Customizable UI
-- User-added Reader Extensions for manga and web novels
+- Mangayomi, SkyStream, Nuvio support
 - And more!
 
 ## Install
@@ -79,7 +79,7 @@ https://testflight.apple.com/join/FDXvrxVg
 
 ## Support
 
-- Join the Discord server for help, updates, and community discussion: https://discord.gg/cuhAwNwh25
+- Join the Discord server for help, updates, and community discussion: https://discord.gg/UjHgGaEbn
 - Ko-fi is available if you want to support development: https://ko-fi.com/soupydev but it will never unlock features or paywall anything. It's just a way to support development if you want to. And no, ads/telemetry will never be a thing in this app, so you don't have to worry about that either.
 
 ## Notes
@@ -108,18 +108,17 @@ Eclipse is built on the work of many projects and services:
 - [SkyStream](https://github.com/akashdh11/skystream), created by Akash, defined the plugin format and behavior supported by Eclipse's SkyStream compatibility layer. SkyStream plugins are independent projects and are not bundled with Eclipse.
 - [SkyStream Tools](https://github.com/akashdh11/skystream-tools) (GPLv3) provides the reference SDK and extractor behavior adapted by Eclipse's local compatibility layer.
 - [Nuvio](https://github.com/NuvioMedia/NuvioMobile) defined the plugin format and behavior supported by Eclipse's Nuvio compatibility layer. Nuvio plugins are independent projects and are not bundled with Eclipse.
-- Eclipse's substantially modified Reader Extensions implementation adapts Apache-2.0 interface/runtime behavior from immutable [Mangayomi revision `4eec7aca`](https://github.com/kodjodevf/mangayomi/tree/4eec7aca6f1c8bd563d0bc79bcf895f46bb30b74) and five generic parser families from the archived official [Mangayomi Extensions revision `6004f1f8`](https://github.com/kodjodevf/mangayomi-extensions/tree/6004f1f8d1a56f882dadb734ce26f50c626a3850). Released Eclipse app binaries bundle no provider catalog, provider scripts, provider logos, or site-specific parser configuration. The test-only compatibility fixtures are separately pinned and attributed in `Eclipse/Legal/ReaderExtensions/NOTICE.txt`.
 - [SoraCore](https://github.com/cranci1/SoraCore) (GPLv3) is no longer linked as a dependency, but Eclipse's local service runtime and network layer are adapted from it.
-- Runtime libraries and components include [Kingfisher](https://github.com/onevcat/Kingfisher) (MIT), [Nuke](https://github.com/kean/Nuke) (MIT), [PLCrashReporter](https://github.com/microsoft/plcrashreporter), [SwiftSoup 2.13.6](https://github.com/scinfu/SwiftSoup/tree/ead56133a693d0184d8c2db1a6d6394410cacfd6) (MIT), [Texture](https://github.com/Skittyblock/Texture) (Apache 2.0), and [ZIPFoundation](https://github.com/weichsel/ZIPFoundation) (MIT).
+- Runtime libraries and components include [FakeWebKit](https://github.com/undeaDD/FakeWebKit) (GPLv3), [Kingfisher](https://github.com/onevcat/Kingfisher) (MIT), [Nuke](https://github.com/kean/Nuke) (MIT), [PLCrashReporter](https://github.com/microsoft/plcrashreporter), [SwiftSoup](https://github.com/scinfu/SwiftSoup) (MIT), [Texture](https://github.com/Skittyblock/Texture) (Apache 2.0), [Wasm3](https://github.com/Skittyblock/Wasm3) (MIT), and [ZIPFoundation](https://github.com/weichsel/ZIPFoundation) (MIT).
 - Playback uses Eclipse's [MPVKit fork](https://github.com/Soupy-dev/MPVKit), based on [MPVKit](https://github.com/mpvkit/MPVKit), and the multimedia projects bundled by MPVKit, including [mpv](https://github.com/mpv-player/mpv), [FFmpeg](https://github.com/FFmpeg/FFmpeg), and [MoltenVK](https://github.com/KhronosGroup/MoltenVK).
-- The Enhanced Upscaling options bundle third-party mpv user shaders under `Eclipse/Player/Shaders`, each alongside its full license text: [ArtCNN](https://github.com/Artoriuz/ArtCNN) (`ArtCNN_C4F16.glsl` for clean animation and the denoise-and-sharpen `ArtCNN_C4F16_DS.glsl` for noisy animation, MIT, © 2024 Joao Chrisostomo and Kacper Michajłow), and [AMD FidelityFX Super Resolution 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR) (`AMD_FSR1_EASU_RCAS.glsl`, MIT, © 2021 Advanced Micro Devices, Inc.; Eclipse's mpv GLSL adaptation is based on hooke007's `AMD_FSR1_RT` port) for live action. Eclipse uses RGB MAIN-stage processing, a 1.05x activation threshold, fixed conservative RCAS sharpening, and no additional shader settings. The shader files are also their corresponding source.
+- The Neural Upscaling options bundle third-party mpv user shaders verbatim under `Eclipse/Player/Shaders`, each alongside its full license text: [ArtCNN](https://github.com/Artoriuz/ArtCNN) (`ArtCNN_C4F16.glsl` and the denoising `ArtCNN_C4F16_DN.glsl`, MIT, © 2024 Joao Chrisostomo and Kacper Michajłow) for anime, and [mpv-prescalers](https://github.com/bjin/mpv-prescalers) (`ravu-lite-ar-r3.hook`, RAVU-Lite-AR by Bin Jin, LGPLv3) for everything else. The shader files are also their corresponding source; RAVU's generator scripts live on the upstream [source branch](https://github.com/bjin/mpv-prescalers/tree/source).
 - Optional metadata, tracking, subtitle, schedule, mapping, and skip-data features use services including [TMDB](https://www.themoviedb.org), [AniList](https://anilist.co), [MyAnimeList](https://myanimelist.net), [Trakt](https://trakt.tv), [TVmaze](https://www.tvmaze.com), [Jikan](https://jikan.moe), [Kitsu](https://kitsu.io), [AniMap](https://animap.s0n1c.ca), [AniSkip](https://aniskip.com), [TheIntroDB](https://theintrodb.org), [IntroDB](https://introdb.app), [OpenSubtitles](https://www.opensubtitles.com), and the [Stremio addon protocol](https://github.com/Stremio/stremio-addon-sdk).
 
 This product uses the TMDB API but is not endorsed or certified by TMDB.
 
 All product names, trademarks, services, and projects belong to their respective owners. Their inclusion above is an acknowledgement, not a claim of affiliation or endorsement. Each dependency and service remains subject to its own license or terms.
 
-License links, copyright notices, and the expanded component inventory are available in Eclipse under **Settings > Legal & Source > Open-Source Licenses** and in the repository's [third-party notices inventory](Eclipse/Legal/OpenSourceLicenses/THIRD-PARTY-NOTICES.txt).
+License links, copyright notices, and the expanded component inventory are available in Eclipse under **Settings > Legal & Source > Third-Party Acknowledgements**.
 
 ## License
 
