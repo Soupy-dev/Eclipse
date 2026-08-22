@@ -354,6 +354,34 @@ class StremioAddonManager: ObservableObject {
         )
     }
 
+    private static func logDroppedDownloadHeaders(
+        _ names: [String],
+        unusable: [String],
+        hostManaged: [String]
+    ) {
+        if !hostManaged.isEmpty {
+            Logger.shared.log(
+                "Stremio download headers removed as host-managed names=[\(hostManaged.sorted().joined(separator: ","))];"
+                    + " the transport writes its own value for these, so the addon's version never reaches the wire",
+                type: "Stremio"
+            )
+        }
+        if !names.isEmpty {
+            Logger.shared.log(
+                "Stremio download headers dropped by Eclipse droppedKeys=[\(names.sorted().joined(separator: ","))]"
+                    + " caps=64/128B/16KiB/64KiB; a 403 on the download after this is Eclipse's header set, not the addon's",
+                type: "Stremio"
+            )
+        }
+        if !unusable.isEmpty {
+            Logger.shared.log(
+                "Stremio download headers unusable names=[\(unusable.sorted().joined(separator: ","))];"
+                    + " the addon supplied a header name or value Eclipse cannot put on the wire, so this is the addon's data, not an Eclipse cap",
+                type: "Stremio"
+            )
+        }
+    }
+
     private static func boundedDownloadHeaders(_ headers: [String: String]) -> [String: String] {
         let managedNames: Set<String> = [
             "accept-encoding", "connection", "content-length", "host", "keep-alive",
@@ -365,6 +393,9 @@ class StremioAddonManager: ObservableObject {
         )
         var accepted: [String: String] = [:]
         var totalBytes = 0
+        var droppedNames: [String] = []
+        var unusableNames: [String] = []
+        var hostManagedNames: [String] = []
         for (rawName, rawValue) in headers.sorted(by: { $0.key.lowercased() < $1.key.lowercased() }) {
             let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
             let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -382,11 +413,26 @@ class StremioAddonManager: ObservableObject {
                   nameIsValid,
                   valueIsValid,
                   !managedNames.contains(name.lowercased()) else {
+                if !name.isEmpty,
+                   nameIsValid,
+                   valueIsValid,
+                   !managedNames.contains(name.lowercased()) {
+                    droppedNames.append(name.lowercased())
+                } else if managedNames.contains(name.lowercased()) {
+                    hostManagedNames.append(name.lowercased())
+                } else {
+                    unusableNames.append(name.isEmpty ? "<empty>" : name.lowercased())
+                }
                 continue
             }
             accepted[name] = value
             totalBytes += entryBytes
         }
+        logDroppedDownloadHeaders(
+            droppedNames,
+            unusable: unusableNames,
+            hostManaged: hostManagedNames
+        )
         return accepted
     }
 
@@ -1128,6 +1174,13 @@ class StremioAddonManager: ObservableObject {
                 return ([], .externalOnly(count: externalOnlyCount))
             }
             if let lastError {
+                if let eclipseRefusal = eclipseRefusalReason(lastError) {
+                    Logger.shared.log(
+                        "Stremio addon=\(addon.manifest.name) returned nothing because Eclipse refused its response: \(eclipseRefusal). This empty result is an Eclipse problem, not a dead addon.",
+                        type: "Stremio"
+                    )
+                    return ([], .appFailure(eclipseRefusal))
+                }
                 return ([], .addonError(addonErrorReason(lastError)))
             }
             return ([], .noResults)
@@ -1203,6 +1256,26 @@ class StremioAddonManager: ObservableObject {
         }
 
         return resolution(for: [])
+    }
+
+    private static func eclipseRefusalReason(_ error: Error?) -> String? {
+        guard let error else { return nil }
+        if error is BoundedURLSessionError {
+            return "the response was larger than Eclipse's own limit"
+        }
+        if let compatibility = error as? ServiceCompatibilityError,
+           compatibility == .responseTooLarge {
+            return "the response was larger than Eclipse's own limit"
+        }
+        if let envelope = error as? SkyStreamJSONEnvelopeError {
+            switch envelope {
+            case .excessiveDepth, .excessiveTokens, .excessiveContainerValues, .excessiveTokenBytes:
+                return "its response went past Eclipse's own JSON envelope limits"
+            case .empty, .malformedStructure:
+                return nil
+            }
+        }
+        return nil
     }
 
     private static func addonErrorReason(_ error: Error) -> String {

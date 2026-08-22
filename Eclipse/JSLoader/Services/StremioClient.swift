@@ -70,7 +70,9 @@ final class StremioClient {
         }
 
         try Self.validateJSONEnvelope(data)
-        let manifest = try JSONDecoder().decode(StremioManifest.self, from: data)
+        let manifest = try StremioFieldTruncationLedger.measuring(context: "manifest") {
+            try JSONDecoder().decode(StremioManifest.self, from: data)
+        }
         Logger.shared.log(
             "Stremio: Manifest OK resources=\(manifest.resources?.count ?? 0) idPrefixCount=\(manifest.idPrefixes?.count ?? 0)",
             type: "Stremio"
@@ -146,7 +148,9 @@ final class StremioClient {
                     throw StremioError.httpError(statusCode)
                 }
                 try Self.validateJSONEnvelope(data)
-                let streamResponse = try JSONDecoder().decode(StremioStreamResponse.self, from: data)
+                let streamResponse = try StremioFieldTruncationLedger.measuring(context: "streams") {
+                    try JSONDecoder().decode(StremioStreamResponse.self, from: data)
+                }
                 let allStreams = streamResponse.streams ?? []
 
                 var safeStreams: [StremioStream] = []
@@ -276,7 +280,9 @@ final class StremioClient {
 
         do {
             try Self.validateJSONEnvelope(data)
-            let response = try JSONDecoder().decode(StremioCatalogResponse.self, from: data)
+            let response = try StremioFieldTruncationLedger.measuring(context: "catalog") {
+                try JSONDecoder().decode(StremioCatalogResponse.self, from: data)
+            }
             Logger.shared.log("Stremio: Catalog returned \(response.metas.count) meta candidate(s)", type: "Stremio")
             return response.metas
         } catch {
@@ -315,7 +321,9 @@ final class StremioClient {
 
         do {
             try Self.validateJSONEnvelope(data)
-            let response = try JSONDecoder().decode(StremioMetaResponse.self, from: data)
+            let response = try StremioFieldTruncationLedger.measuring(context: "meta") {
+                try JSONDecoder().decode(StremioMetaResponse.self, from: data)
+            }
             return response.meta
         } catch {
             Logger.shared.log("Stremio: Meta decode FAILED endpoint=\(endpoint) bytes=\(data.count) error=\(Self.safeErrorDescription(error))", type: "Stremio")
@@ -354,7 +362,9 @@ final class StremioClient {
         let subtitleResponse: StremioSubtitleResponse
         do {
             try Self.validateJSONEnvelope(data)
-            subtitleResponse = try JSONDecoder().decode(StremioSubtitleResponse.self, from: data)
+            subtitleResponse = try StremioFieldTruncationLedger.measuring(context: "subtitles") {
+                try JSONDecoder().decode(StremioSubtitleResponse.self, from: data)
+            }
         } catch {
             Logger.shared.log("Stremio: Subtitle decode FAILED endpoint=\(endpoint) bytes=\(data.count) error=\(Self.safeErrorDescription(error))", type: "Stremio")
             throw error

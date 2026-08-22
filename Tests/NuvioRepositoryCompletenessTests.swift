@@ -1031,6 +1031,125 @@ final class NuvioRepositoryCompletenessTests: XCTestCase {
         XCTAssertEqual(values, ["token": "a+b", "mode": "full"])
     }
 
+    func testProviderCodeURLMustShareTheDeliveredRepositoryOrigin() throws {
+        let manifest = try NuvioPluginSupport.normalizeManifestURL("https://plugins.example/repo")
+        let origin = try XCTUnwrap(NuvioPluginSupport.executableOrigin(of: manifest))
+
+        let relative = NuvioPluginSupport.codeURL(manifestURL: manifest, filename: "providers/movie.js")
+        XCTAssertTrue(NuvioPluginSupport.sharesExecutableOrigin(relative, with: origin))
+
+        let sameOriginAbsolute = NuvioPluginSupport.codeURL(
+            manifestURL: manifest,
+            filename: "https://plugins.example/elsewhere/movie.js"
+        )
+        XCTAssertTrue(NuvioPluginSupport.sharesExecutableOrigin(sameOriginAbsolute, with: origin))
+
+        for foreign in [
+            "https://cdn.evil.example/movie.js",
+            "http://plugins.example/movie.js",
+            "https://plugins.example:8443/movie.js",
+            "https://plugins.example.evil.test/movie.js"
+        ] {
+            let resolved = NuvioPluginSupport.codeURL(manifestURL: manifest, filename: foreign)
+            XCTAssertFalse(
+                NuvioPluginSupport.sharesExecutableOrigin(resolved, with: origin),
+                "\(foreign) must not be treated as the repository's own origin"
+            )
+        }
+    }
+
+    func testProviderCodeOriginAcceptsBothTypedAndRedirectedRepositoryOrigins() throws {
+        let typed = try NuvioPluginSupport.normalizeManifestURL("https://plugins.example/repo")
+        let delivered = "https://www.plugins.example/repo/manifest.json"
+        let authorized = [typed, delivered].compactMap(NuvioPluginSupport.executableOrigin)
+        XCTAssertEqual(authorized.count, 2)
+
+        let onTyped = NuvioPluginSupport.codeURL(
+            manifestURL: delivered,
+            filename: "https://plugins.example/providers/movie.js"
+        )
+        XCTAssertTrue(
+            NuvioPluginSupport.sharesExecutableOrigin(onTyped, withAny: authorized),
+            "a manifest naming its code on the origin the user typed must survive an apex-to-www redirect"
+        )
+
+        let onDelivered = NuvioPluginSupport.codeURL(manifestURL: delivered, filename: "providers/movie.js")
+        XCTAssertTrue(NuvioPluginSupport.sharesExecutableOrigin(onDelivered, withAny: authorized))
+
+        XCTAssertFalse(
+            NuvioPluginSupport.sharesExecutableOrigin("https://cdn.evil.example/movie.js", withAny: authorized)
+        )
+    }
+
+    func testAnUpgradedRepositoryDropsItsCleartextOriginFromTheAuthorizedSet() throws {
+        let upgraded = NuvioPluginSupport.authorizedExecutableOrigins(
+            typed: "http://repo.example/manifest.json",
+            delivered: "https://repo.example/manifest.json"
+        )
+        XCTAssertEqual(upgraded.count, 1)
+        XCTAssertEqual(upgraded.first?.scheme, "https")
+        XCTAssertFalse(
+            NuvioPluginSupport.sharesExecutableOrigin("http://repo.example/x.js", withAny: upgraded),
+            "once the server upgrades the manifest to https, code must not be pulled back onto cleartext"
+        )
+
+        let redirected = NuvioPluginSupport.authorizedExecutableOrigins(
+            typed: "https://plugins.example/manifest.json",
+            delivered: "https://www.plugins.example/manifest.json"
+        )
+        XCTAssertEqual(redirected.count, 2)
+
+        let plaintextOnly = NuvioPluginSupport.authorizedExecutableOrigins(
+            typed: "http://repo.example/manifest.json",
+            delivered: "http://repo.example/manifest.json"
+        )
+        XCTAssertEqual(plaintextOnly.count, 1)
+        XCTAssertEqual(plaintextOnly.first?.scheme, "http")
+    }
+
+    func testExecutableSchemeDowngradeIsRefusedSoCodeNeverMovesToCleartext() throws {
+        XCTAssertTrue(
+            NuvioPluginSupport.isExecutableSchemeDowngrade(
+                from: "https://repo.example/manifest.json",
+                to: "http://repo.example/manifest.json"
+            ),
+            "an https repository must never let a redirect move its executable code onto http"
+        )
+        XCTAssertFalse(
+            NuvioPluginSupport.isExecutableSchemeDowngrade(
+                from: "http://repo.example/manifest.json",
+                to: "https://repo.example/manifest.json"
+            ),
+            "an upgrade to https is not a downgrade"
+        )
+        XCTAssertFalse(
+            NuvioPluginSupport.isExecutableSchemeDowngrade(
+                from: "https://repo.example/manifest.json",
+                to: "https://www.repo.example/manifest.json"
+            )
+        )
+        XCTAssertFalse(
+            NuvioPluginSupport.isExecutableSchemeDowngrade(
+                from: "http://repo.example/manifest.json",
+                to: "http://www.repo.example/manifest.json"
+            ),
+            "an http-typed repository stays supported, since normalizeManifestURL preserves an explicit http prefix"
+        )
+    }
+
+    func testExecutableOriginNormalizesTheDefaultPortSoAnExplicitPortStillMatches() throws {
+        let implicit = try XCTUnwrap(NuvioPluginSupport.executableOrigin(of: "https://plugins.example/repo/manifest.json"))
+        let explicit = try XCTUnwrap(NuvioPluginSupport.executableOrigin(of: "https://PLUGINS.example:443/other/path"))
+        XCTAssertEqual(implicit, explicit)
+
+        let plaintext = try XCTUnwrap(NuvioPluginSupport.executableOrigin(of: "http://plugins.example/repo"))
+        XCTAssertNotEqual(implicit, plaintext)
+
+        XCTAssertNil(NuvioPluginSupport.executableOrigin(of: "file:///etc/passwd"))
+        XCTAssertNil(NuvioPluginSupport.executableOrigin(of: "https:///no-host"))
+        XCTAssertNil(NuvioPluginSupport.executableOrigin(of: ""))
+    }
+
     func testRuntimeResponseCapRefusalBlamesEclipseWithoutCountingATransportFailure() {
         let tally = NuvioFetchTally()
         tally.recordEclipseRefusal(.responseTooLarge)

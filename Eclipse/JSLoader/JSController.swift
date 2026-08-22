@@ -464,8 +464,7 @@ final class ServiceSandboxState {
             return true
         }
 
-        let blockedHostTokens = ["analytics", "telemetry", "metrics", "tracking", "tracker", "beacon"]
-        return blockedHostTokens.contains(where: host.contains)
+        return false
     }
 
     static func redactedURL(_ value: String?) -> String {
@@ -1028,8 +1027,11 @@ final class ServiceJavaScriptWorkerPool: @unchecked Sendable {
     static let shared = ServiceJavaScriptWorkerPool(maximumConcurrentWorkers: 4)
 
     private let lock = NSLock()
-    private let lanes: [ServiceJavaScriptWorkerLane]
+    private var lanes: [ServiceJavaScriptWorkerLane]
     private var nextLane = 0
+    private var replacementLanesGranted = 0
+    private let maximumReplacementLanes = 2
+    private var replacementBudgetExhaustionLogged = false
 
     init(maximumConcurrentWorkers: Int) {
         precondition(maximumConcurrentWorkers > 0)
@@ -1039,18 +1041,36 @@ final class ServiceJavaScriptWorkerPool: @unchecked Sendable {
 
     func leaseLane() -> ServiceJavaScriptWorkerLane? {
         lock.lock()
+        defer { lock.unlock() }
         let start = nextLane
-        var lane: ServiceJavaScriptWorkerLane?
         repeat {
             let candidate = lanes[nextLane]
             nextLane = (nextLane + 1) % lanes.count
             if candidate.isAvailable {
-                lane = candidate
-                break
+                return candidate
             }
         } while nextLane != start
-        lock.unlock()
-        return lane
+
+        guard replacementLanesGranted < maximumReplacementLanes else {
+            if !replacementBudgetExhaustionLogged {
+                replacementBudgetExhaustionLogged = true
+                Logger.shared.log(
+                    "Service JavaScript worker pool exhausted lanes=\(lanes.count) replacements=\(replacementLanesGranted)/\(maximumReplacementLanes); every lane is wedged and the replacement budget is spent, so further work is refused until relaunch",
+                    type: "Plugin"
+                )
+            }
+            return nil
+        }
+        replacementLanesGranted += 1
+        let replacement = ServiceJavaScriptWorkerLane(index: lanes.count)
+        replacement.installPool(self)
+        lanes.append(replacement)
+        nextLane = 0
+        Logger.shared.log(
+            "Service JavaScript worker lane replaced after a non-yielding boundary lanes=\(lanes.count) replacements=\(replacementLanesGranted)/\(maximumReplacementLanes); the wedged thread stays abandoned but service execution continues without a relaunch",
+            type: "ServiceSandbox"
+        )
+        return replacement
     }
 
     fileprivate func reroute(

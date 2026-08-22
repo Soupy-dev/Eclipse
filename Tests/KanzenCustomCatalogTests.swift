@@ -31,6 +31,15 @@ final class KanzenLegacyJavaScriptIsolationTests: XCTestCase {
         )
     }
 
+    private func makeGenerousTimeouts() -> KanzenModuleRunner.Timeouts {
+        KanzenModuleRunner.Timeouts(
+            loadNanoseconds: 3_000_000_000,
+            functionNanoseconds: 3_000_000_000,
+            callbackNanoseconds: 3_000_000_000,
+            promiseNanoseconds: 3_000_000_000
+        )
+    }
+
     @discardableResult
     private func capturedError(
         _ operation: () async throws -> Void,
@@ -118,7 +127,7 @@ final class KanzenLegacyJavaScriptIsolationTests: XCTestCase {
         XCTAssertEqual(healthyCount, 0)
     }
 
-    func testQueuedHealthyControllerRehomesThenItsOwnHangRetiresReplacementWithoutThirdLane() async throws {
+    func testQueuedHealthyControllerRehomesThenAWedgedPoolGrantsABoundedReplacementBudget() async throws {
         let pool = KanzenLegacyJavaScriptWorkerPool()
         let store = makeStore()
         let badID = UUID()
@@ -171,19 +180,75 @@ final class KanzenLegacyJavaScriptIsolationTests: XCTestCase {
         XCTAssertEqual(pool.availableLaneCount, 0)
         XCTAssertEqual(pool.physicalLaneCount, 2)
 
-        let noThirdLane = KanzenEngine(
+        let replacementLane = KanzenEngine(
+            workerPool: pool,
+            quarantineStore: store,
+            timeouts: makeGenerousTimeouts()
+        )
+        try await replacementLane.loadScript(
+            "function searchResults() { return []; }",
+            moduleID: UUID(),
+            moduleName: "runs-on-a-replacement-lane"
+        )
+        XCTAssertEqual(
+            pool.physicalLaneCount,
+            3,
+            "a wedged pool must grant a replacement instead of dying until relaunch"
+        )
+        let replacementResultCount = try await replacementLane.searchInput("healthy")?.count
+        XCTAssertEqual(
+            replacementResultCount,
+            0,
+            "the replacement lane must actually execute module JavaScript"
+        )
+
+        try await replacementLane.loadScript(
+            "function searchResults() { while (true) {} }",
+            moduleID: UUID(),
+            moduleName: "wedges-the-first-replacement"
+        )
+        _ = await capturedError {
+            _ = try await replacementLane.searchInput("now-hang")
+        }
+        let secondReplacement = KanzenEngine(
+            workerPool: pool,
+            quarantineStore: store,
+            timeouts: makeGenerousTimeouts()
+        )
+        try await secondReplacement.loadScript(
+            "function searchResults() { while (true) {} }",
+            moduleID: UUID(),
+            moduleName: "second-replacement-lane"
+        )
+        XCTAssertEqual(pool.physicalLaneCount, 4)
+
+        _ = await capturedError {
+            _ = try await secondReplacement.searchInput("now-hang")
+        }
+        let mustFailClosed = KanzenEngine(
             workerPool: pool,
             quarantineStore: store,
             timeouts: makeTimeouts()
         )
-        _ = await capturedError {
-            try await noThirdLane.loadScript(
+        let exhausted = await capturedError {
+            try await mustFailClosed.loadScript(
                 "function searchResults() { return []; }",
                 moduleID: UUID(),
                 moduleName: "must-fail-closed"
             )
         }
-        XCTAssertEqual(pool.physicalLaneCount, 2)
+        guard case .workerBudgetExhausted? = exhausted as? KanzenLegacyJavaScriptError else {
+            XCTFail(
+                "past the budget the pool must refuse for lack of a lane, not fail for some"
+                    + " unrelated reason; got \(exhausted)"
+            )
+            return
+        }
+        XCTAssertEqual(
+            pool.physicalLaneCount,
+            4,
+            "the replacement budget is finite; past it the pool still fails closed"
+        )
     }
 
     func testUnresolvedPromiseTimesOutWithoutQuarantineOrLaneLoss() async throws {

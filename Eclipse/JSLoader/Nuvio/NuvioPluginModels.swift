@@ -479,6 +479,8 @@ struct NuvioPluginSubtitle: Codable, Hashable {
 struct NuvioSubtitleTrackAccumulator {
     private(set) var tracks: [NuvioPluginSubtitle] = []
     private var seenURLs = Set<String>()
+
+    var seenURLValues: Set<String> { seenURLs }
     let limit: Int
 
     init(limit: Int = NuvioSubtitleBoundary.maximumTracksPerStream) {
@@ -487,6 +489,21 @@ struct NuvioSubtitleTrackAccumulator {
     }
 
     var isFull: Bool { tracks.count >= limit }
+
+    private(set) var refusedWhenFull = 0
+
+    mutating func noteRefused(_ count: Int) {
+        guard count > 0 else { return }
+        refusedWhenFull += count
+    }
+
+    mutating func noteRefusedURLs(_ urls: [String]) {
+        for url in urls {
+            let normalized = url.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalized.isEmpty, seenURLs.insert(normalized).inserted else { continue }
+            refusedWhenFull += 1
+        }
+    }
 
     mutating func append(_ subtitle: NuvioPluginSubtitle) {
         guard !isFull else { return }
@@ -498,7 +515,10 @@ struct NuvioSubtitleTrackAccumulator {
     mutating func append<S: Sequence>(contentsOf subtitles: S)
     where S.Element == NuvioPluginSubtitle {
         for subtitle in subtitles {
-            guard !isFull else { return }
+            guard !isFull else {
+                noteRefusedURLs([subtitle.url])
+                continue
+            }
             append(subtitle)
         }
     }
@@ -506,23 +526,51 @@ struct NuvioSubtitleTrackAccumulator {
 
 enum NuvioSubtitleBoundary {
     static let maximumTracksPerStream = 64
-    static let maximumTracksPerValidationBatch = 64
+    static let maximumTracksPerValidationBatch = 512
 
     static func boundedForNetworkValidation(
         _ streams: [NuvioPluginStream]
-    ) -> [NuvioPluginStream] {
+    ) -> (streams: [NuvioPluginStream], droppedByBatchBudget: Int) {
+        let carryingSubtitles = streams.reduce(into: 0) { total, stream in
+            total += (stream.subtitles?.isEmpty == false) ? 1 : 0
+        }
+        guard carryingSubtitles > 0 else { return (streams.map { $0.withSubtitles(nil) }, 0) }
+
+        let fairShare = max(1, maximumTracksPerValidationBatch / carryingSubtitles)
         var remaining = maximumTracksPerValidationBatch
-        return streams.map { stream in
-            guard remaining > 0, let subtitles = stream.subtitles, !subtitles.isEmpty else {
-                return stream.withSubtitles(nil)
+        var refusedByCap = 0
+        var streamsServed = 0
+        var bounded: [NuvioPluginStream] = []
+        bounded.reserveCapacity(streams.count)
+        for stream in streams {
+            guard let subtitles = stream.subtitles, !subtitles.isEmpty else {
+                bounded.append(stream.withSubtitles(nil))
+                continue
             }
+            guard remaining > 0 else {
+                var distinct = Set<String>()
+                for subtitle in subtitles {
+                    let normalized = subtitle.url.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !normalized.isEmpty else { continue }
+                    distinct.insert(normalized)
+                }
+                refusedByCap += min(distinct.count, maximumTracksPerStream)
+                bounded.append(stream.withSubtitles(nil))
+                continue
+            }
+            let streamsStillNeedingShare = max(1, carryingSubtitles - streamsServed)
+            let share = max(fairShare, remaining / streamsStillNeedingShare)
             var accumulator = NuvioSubtitleTrackAccumulator(
-                limit: min(maximumTracksPerStream, remaining)
+                limit: min(maximumTracksPerStream, share, remaining)
             )
             accumulator.append(contentsOf: subtitles)
+            refusedByCap += accumulator.refusedWhenFull
             remaining -= accumulator.tracks.count
-            return stream.withSubtitles(accumulator.tracks.isEmpty ? nil : accumulator.tracks)
+            streamsServed += 1
+            bounded.append(stream.withSubtitles(accumulator.tracks.isEmpty ? nil : accumulator.tracks))
         }
+
+        return (bounded, refusedByCap)
     }
 }
 
@@ -1103,6 +1151,58 @@ enum NuvioPluginSupport {
             throw NuvioPluginError.invalidRepositoryURL
         }
         return normalized
+    }
+
+    static func executableOrigin(of urlString: String) -> URL? {
+        guard let parsed = URLComponents(string: urlString.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = parsed.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              let host = parsed.host?.lowercased(),
+              !host.isEmpty else {
+            return nil
+        }
+        var origin = URLComponents()
+        origin.scheme = scheme
+        origin.host = host
+        origin.port = parsed.port ?? (scheme == "https" ? 443 : 80)
+        return origin.url
+    }
+
+    static func sharesExecutableOrigin(_ candidate: String, with origin: URL) -> Bool {
+        sharesExecutableOrigin(candidate, withAny: [origin])
+    }
+
+    static func sharesExecutableOrigin(_ candidate: String, withAny origins: [URL]) -> Bool {
+        guard let candidateOrigin = executableOrigin(of: candidate) else { return false }
+        return origins.contains(candidateOrigin)
+    }
+
+    static func authorizedExecutableOrigins(typed: String, delivered: String) -> [URL] {
+        let candidates = [typed, delivered].compactMap(executableOrigin)
+        let secureHosts = Set(
+            candidates
+                .filter { $0.scheme?.lowercased() == "https" }
+                .compactMap { $0.host?.lowercased() }
+        )
+        var authorized: [URL] = []
+        for origin in candidates {
+            if origin.scheme?.lowercased() == "http",
+               let host = origin.host?.lowercased(),
+               secureHosts.contains(host) {
+                continue
+            }
+            if !authorized.contains(origin) { authorized.append(origin) }
+        }
+        return authorized
+    }
+
+    static func isExecutableSchemeDowngrade(from typed: String, to delivered: String) -> Bool {
+        guard let typedOrigin = executableOrigin(of: typed),
+              let deliveredOrigin = executableOrigin(of: delivered) else {
+            return false
+        }
+        return typedOrigin.scheme?.lowercased() == "https"
+            && deliveredOrigin.scheme?.lowercased() == "http"
     }
 
     static func codeURL(manifestURL: String, filename: String) -> String {

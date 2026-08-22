@@ -507,6 +507,7 @@ final class ModulesSearchResultsViewModel: ObservableObject {
     @Published var subtitleOptions: [(title: String, url: String)] = []
 
     @Published var stremioResults: [UUID: [StremioStream]] = [:]
+    @Published var stremioOutcomes: [UUID: StremioAddonOutcome] = [:]
     @Published var stremioSearchedAddons: Set<UUID> = []
     @Published var isSearchingStremio = false
     @Published var selectedStremioStream: StremioStream? = nil
@@ -1376,6 +1377,7 @@ struct ModulesSearchResultsSheet: View {
         var serviceAttentionFailedCount = 0
         var serviceResults: [SearchItem]?
         var stremioStreams: [StremioStream] = []
+        var stremioFailureOutcome: StremioAddonOutcome?
 #if os(iOS) && !targetEnvironment(macCatalyst)
         var skyStreamOptions: [ValidatedSkyStreamOption] = []
         var skyStreamIsSearching = false
@@ -1639,10 +1641,12 @@ struct ModulesSearchResultsSheet: View {
                     serviceResults: filtered.highQuality + filtered.lowQuality
                 )
             case .stremio(let addon):
+                let outcome = viewModel.stremioOutcomes[addon.id]
                 return StremioStyleSourcePlan(
                     index: offset,
                     item: item,
-                    stremioStreams: visibleStremioStreams(for: addon)
+                    stremioStreams: visibleStremioStreams(for: addon),
+                    stremioFailureOutcome: outcome?.explainsAnEmptyList == true ? outcome : nil
                 )
 #if os(iOS) && !targetEnvironment(macCatalyst)
             case .skyStream(let provider):
@@ -1769,6 +1773,8 @@ struct ModulesSearchResultsSheet: View {
                     ForEach(Array(streams.prefix(sourceLimit).enumerated()), id: \.offset) { _, stream in
                         stremioStyleStreamRow(stream: stream, addon: addon)
                     }
+                } else if visibleLimit > 0, let outcome = plan.stremioFailureOutcome {
+                    stremioOutcomeRow(outcome)
                 }
 #if os(iOS) && !targetEnvironment(macCatalyst)
             case .skyStream(let provider):
@@ -2110,7 +2116,40 @@ struct ModulesSearchResultsSheet: View {
         }
     }
 
+    private func filteredOutRow(count: Int) -> some View {
+        HStack(alignment: .top) {
+            Image(systemName: "line.3.horizontal.decrease.circle")
+                .foregroundColor(.orange)
+            Text(
+                count == 1
+                    ? "1 stream returned, hidden by your stream filters"
+                    : "\(count) streams returned, all hidden by your stream filters"
+            )
+            .foregroundColor(.secondary)
+            Spacer()
+        }
+        .padding(.vertical, 8)
+    }
+
     @ViewBuilder
+    private func stremioOutcomeRow(_ outcome: StremioAddonOutcome) -> some View {
+        HStack(alignment: .top) {
+            Image(systemName: "exclamationmark.triangle")
+                .foregroundColor(.orange)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(outcome.displayMessage)
+                    .foregroundColor(.secondary)
+                if let detail = outcome.displayDetail, !detail.isEmpty {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+            Spacer()
+        }
+        .padding(.vertical, 8)
+    }
+
     private var noResultsRow: some View {
         HStack {
             Image(systemName: "exclamationmark.triangle")
@@ -2968,7 +3007,7 @@ struct ModulesSearchResultsSheet: View {
         guard rawCount > 0, visibleCount == 0 else { return nil }
         Logger.shared.log(
             "Auto Mode blame=eclipse-filter source=\(sourceName) hiddenOptions=\(rawCount)",
-            type: "Stream"
+            type: "Plugin"
         )
         return "All \(rawCount) streams from \(sourceName) are hidden by your Extra Source Settings"
     }
@@ -3290,6 +3329,7 @@ struct ModulesSearchResultsSheet: View {
     @MainActor
     private func clearAllStremioStreams() {
         viewModel.stremioResults.removeAll()
+        viewModel.stremioOutcomes.removeAll()
         visibleStremioStreamsByAddon.removeAll()
     }
 
@@ -4482,6 +4522,7 @@ struct ModulesSearchResultsSheet: View {
 #endif
         viewModel.searchedServices.removeAll()
         viewModel.stremioSearchedAddons.removeAll()
+        viewModel.stremioOutcomes.removeAll()
         viewModel.failedServices.removeAll()
         viewModel.streamError = nil
         viewModel.showingStreamError = false
@@ -5567,8 +5608,10 @@ struct ModulesSearchResultsSheet: View {
         showManualPicker = true
         viewModel.moduleResults.removeAll()
         viewModel.stremioResults.removeAll()
+        viewModel.stremioOutcomes.removeAll()
         viewModel.searchedServices.removeAll()
         viewModel.stremioSearchedAddons.removeAll()
+        viewModel.stremioOutcomes.removeAll()
         viewModel.failedServices.removeAll()
 #if os(iOS) && !targetEnvironment(macCatalyst)
         skyStreamResults.removeAll()
@@ -5908,6 +5951,8 @@ struct ModulesSearchResultsSheet: View {
                 clearAllStremioStreams()
                 viewModel.searchedServices.removeAll()
                 viewModel.stremioSearchedAddons.removeAll()
+                viewModel.stremioOutcomes.removeAll()
+        viewModel.stremioOutcomes.removeAll()
                 viewModel.failedServices.removeAll()
 #if os(iOS) && !targetEnvironment(macCatalyst)
                 skyStreamResults.removeAll()
@@ -5990,6 +6035,8 @@ struct ModulesSearchResultsSheet: View {
                 clearAllStremioStreams()
                 viewModel.searchedServices.removeAll()
                 viewModel.stremioSearchedAddons.removeAll()
+                viewModel.stremioOutcomes.removeAll()
+        viewModel.stremioOutcomes.removeAll()
                 viewModel.failedServices.removeAll()
                 startProgressiveSearch()
                 startStremioSearch()
@@ -6638,6 +6685,7 @@ struct ModulesSearchResultsSheet: View {
         }
 
         viewModel.isSearchingStremio = true
+        viewModel.stremioOutcomes.removeAll()
 
         let type = isMovie ? "movie" : "series"
 
@@ -6661,6 +6709,10 @@ struct ModulesSearchResultsSheet: View {
                         self.viewModel.stremioSearchedAddons.insert(addon.id)
                     }
                 },
+                onOutcome: { addon, outcome in
+                    guard self.isCurrentManualSearchGeneration(searchGeneration) else { return }
+                    self.viewModel.stremioOutcomes[addon.id] = outcome
+                },
                 onComplete: {
                     Task { @MainActor in
                         guard self.isCurrentManualSearchGeneration(searchGeneration) else { return }
@@ -6681,7 +6733,15 @@ struct ModulesSearchResultsSheet: View {
             Section(header: stremioAddonHeader(for: addon, streamCount: streams.count, isSearching: false)) {
                 healthWarningRow(sourceId: SourceHealth.stremioId(addon))
                 if streams.isEmpty {
-                    noResultsRow
+                    let outcome = viewModel.stremioOutcomes[addon.id]
+                    let returnedCount = viewModel.stremioResults[addon.id]?.count ?? 0
+                    if let outcome, outcome.explainsAnEmptyList {
+                        stremioOutcomeRow(outcome)
+                    } else if returnedCount > 0 {
+                        filteredOutRow(count: returnedCount)
+                    } else {
+                        noResultsRow
+                    }
                 } else {
                     stremioMediaRow(streams: streams, addon: addon)
                 }
@@ -7068,7 +7128,8 @@ struct ModulesSearchResultsSheet: View {
         if let provider = selectedSkyStreamProvider {
             let visible = visibleSkyStreamOptions(for: provider)
             let allowedIDs = Set(skyStreamPickerOptions.map(\.id))
-            ForEach(visible.filter { allowedIDs.contains($0.id) }) { stream in
+            let shown = visible.filter { allowedIDs.contains($0.id) }
+            ForEach(shown) { stream in
                 Button(stream.option.name) {
                     showingSkyStreamPicker = false
                     if viewModel.pendingPlaybackAutoMode {
@@ -7097,7 +7158,15 @@ struct ModulesSearchResultsSheet: View {
 
     @ViewBuilder
     private var skyStreamPickerMessage: some View {
-        Text("Choose a verified VOD stream to \(actionVerb.lowercased())")
+        let shownCount = selectedSkyStreamProvider.map { provider in
+            let allowedIDs = Set(skyStreamPickerOptions.map(\.id))
+            return visibleSkyStreamOptions(for: provider).filter { allowedIDs.contains($0.id) }.count
+        } ?? skyStreamPickerOptions.count
+        return Text(
+            skyStreamPickerOptions.count > shownCount
+                ? "Choose a verified VOD stream to \(actionVerb.lowercased()). \(skyStreamPickerOptions.count - shownCount) of the \(skyStreamPickerOptions.count) streams Eclipse kept are hidden by your stream filters or are not usable for this action."
+                : "Choose a verified VOD stream to \(actionVerb.lowercased())"
+        )
     }
 
     private func handleSkyStreamPlaybackPreparationFailure(
@@ -7438,7 +7507,8 @@ struct ModulesSearchResultsSheet: View {
         if let scraper = selectedNuvioScraper {
             let visible = visibleNuvioOptions(for: scraper)
             let allowedIDs = Set(nuvioPickerOptions.map(\.id))
-            ForEach(visible.filter { allowedIDs.contains($0.id) }) { stream in
+            let shown = visible.filter { allowedIDs.contains($0.id) }
+            ForEach(shown) { stream in
                 Button(stream.option.name) {
                     showingNuvioPicker = false
                     if viewModel.pendingPlaybackAutoMode {
@@ -7467,7 +7537,15 @@ struct ModulesSearchResultsSheet: View {
 
     @ViewBuilder
     private var nuvioPickerMessage: some View {
-        Text("Choose a stream to \(actionVerb.lowercased())")
+        let shownCount = selectedNuvioScraper.map { scraper in
+            let allowedIDs = Set(nuvioPickerOptions.map(\.id))
+            return visibleNuvioOptions(for: scraper).filter { allowedIDs.contains($0.id) }.count
+        } ?? nuvioPickerOptions.count
+        return Text(
+            nuvioPickerOptions.count > shownCount
+                ? "Choose a stream to \(actionVerb.lowercased()). \(nuvioPickerOptions.count - shownCount) of the \(nuvioPickerOptions.count) streams Eclipse kept are hidden by your stream filters or are not usable for this action."
+                : "Choose a stream to \(actionVerb.lowercased())"
+        )
     }
 
     private func handleNuvioPlaybackPreparationFailure(
@@ -10039,6 +10117,7 @@ struct ModulesSearchResultsSheet: View {
                 subtitles: resolvedSubtitleArray ?? [],
                 subtitleNames: resolvedSubtitleNames,
                 subtitleHeadersByURL: nil,
+                headersDroppedBySanitizer: ServiceStreamHeaderSanitizerLedger.shared.droppedKeys(for: url),
                 retryCount: retryCount,
                 titleCandidates: titleMatchCandidates(),
                 serviceContentHref: serviceHref,

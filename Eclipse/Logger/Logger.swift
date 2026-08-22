@@ -10,6 +10,45 @@ import Foundation
 import UIKit
 #endif
 
+enum EclipseLedgerOnce {
+    private static let lock = NSLock()
+    private static var reported: [String: Set<String>] = [:]
+    private static var announcedFull: Set<String> = []
+    private static let maximumSignaturesPerScope = 256
+
+    static func emit(
+        scope: String,
+        signature: String,
+        announce: ((String) -> Void)? = nil,
+        _ body: () -> Void
+    ) {
+        lock.lock()
+        var seen = reported[scope] ?? []
+        let full = seen.count >= maximumSignaturesPerScope
+        var isNew = false
+        var announceFull = false
+        if full {
+            announceFull = announcedFull.insert(scope).inserted
+        } else {
+            isNew = seen.insert(signature).inserted
+            reported[scope] = seen
+        }
+        lock.unlock()
+        if announceFull {
+            let message = "Eclipse ledger scope=\(scope) reached its"
+                + " \(maximumSignaturesPerScope)-signature bound; further verdicts of this kind"
+                + " are not reported for this session"
+            if let announce {
+                announce(message)
+            } else {
+                Logger.shared.log(message, type: "Plugin")
+            }
+        }
+        guard isNew else { return }
+        body()
+    }
+}
+
 class Logger: @unchecked Sendable {
     static let shared = Logger()
 
@@ -613,9 +652,37 @@ class Logger: @unchecked Sendable {
         if logFileBytes + incomingBytes <= maxLogFileBytes { return }
 
         closeLogFileHandle(synchronize: false)
-        try? FileManager.default.removeItem(at: logFileURL)
+        guard let existing = try? String(contentsOf: logFileURL, encoding: .utf8) else {
+            try? FileManager.default.removeItem(at: logFileURL)
+            ensureLogFileExists()
+            logFileBytes = 0
+            return
+        }
+        let target = max(0, maxLogFileBytes / 2 - incomingBytes)
+        var retainedLines: [Substring] = []
+        var retainedBytes = 0
+        for line in existing.split(separator: "\n", omittingEmptySubsequences: false).reversed() {
+            let lineBytes = line.utf8.count + 1
+            if retainedBytes + lineBytes > target { break }
+            retainedBytes += lineBytes
+            retainedLines.append(line)
+        }
+        guard !retainedLines.isEmpty else {
+            try? FileManager.default.removeItem(at: logFileURL)
+            ensureLogFileExists()
+            logFileBytes = 0
+            return
+        }
+        var retained = retainedLines.reversed().joined(separator: "\n")
+        if !retained.hasSuffix("\n") { retained.append("\n") }
+        if (try? retained.write(to: logFileURL, atomically: true, encoding: .utf8)) == nil {
+            try? FileManager.default.removeItem(at: logFileURL)
+            ensureLogFileExists()
+            logFileBytes = 0
+            return
+        }
         ensureLogFileExists()
-        logFileBytes = 0
+        logFileBytes = retained.utf8.count
     }
 
     private func loadLogsFromDisk() -> [LogEntry] {

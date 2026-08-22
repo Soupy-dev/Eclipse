@@ -2775,12 +2775,43 @@ final class ReaderExtensionCoreTests: XCTestCase {
             "X-CSRF-Token": "csrf-secret",
             "X-Vendor-Header": "Bearer disguised-secret",
             "X-Opaque-Proof": "unlabelled-secret-material",
+            "Referer": "https://source.example/series/1",
+            "Cookie": "session=cookie-secret",
             "Accept": "application/json",
             "User-Agent": "Owned Fixture/1.0",
             "Cache-Control": "no-cache",
             "Range": "bytes=0-1023"
         ]
+        let authored = try ReaderExtensionSecurityPolicy.sanitizedHeaders(
+            input,
+            crossOrigin: true,
+            allowsAuthoredNavigationHeaders: true
+        )
+        XCTAssertNotNil(
+            authored.first(where: { $0.key.caseInsensitiveCompare("Referer") == .orderedSame }),
+            "an extension's own first-party request keeps the referer it authored"
+        )
+        XCTAssertNil(
+            authored.first(where: { $0.key.caseInsensitiveCompare("Cookie") == .orderedSame }),
+            "authoring a referer must never re-open credential headers"
+        )
+        for leaked in [
+            "Authorization", "X-API-Key", "X-Auth-Token", "X-Custom-Secret",
+            "X-CSRF-Token", "X-Vendor-Header", "X-Opaque-Proof"
+        ] {
+            XCTAssertNil(
+                authored[leaked],
+                "\(leaked) must not survive a cross-origin request just because a referer was authored"
+            )
+        }
+        XCTAssertEqual(authored["Accept"], "application/json")
+        XCTAssertEqual(authored["Range"], "bytes=0-1023")
+
         let redirected = try ReaderExtensionSecurityPolicy.sanitizedHeaders(input, crossOrigin: true)
+        XCTAssertNil(
+            redirected.first(where: { $0.key.caseInsensitiveCompare("Referer") == .orderedSame }),
+            "a redirect replay carries the header set to an origin the extension never named, so referer still goes"
+        )
         XCTAssertEqual(redirected["Accept"], "application/json")
         XCTAssertEqual(redirected["User-Agent"], "Owned Fixture/1.0")
         XCTAssertEqual(redirected["Cache-Control"], "no-cache")
@@ -4241,7 +4272,9 @@ final class ReaderExtensionCoreTests: XCTestCase {
     }
 
     func testProviderRollsBackOnlyTypedRuntimeIntegrityFailures() async throws {
-        var integrityCallbacks: [(ReaderExtensionSourceID, String?)] = []
+        var integrityCallbacks: [
+            (ReaderExtensionSourceID, String?, ReaderExtensionRuntimeFailureAttribution)
+        ] = []
         let source = installedSource(implementation: .javascript)
         let preferenceFailure = Data(requiredMangaScript(
             preferenceBody: "throw new Error('owned invalid preference schema');"
@@ -4272,7 +4305,7 @@ final class ReaderExtensionCoreTests: XCTestCase {
             approvedDomains: [],
             consentScopeID: "owned-integrity-callback",
             preferenceStore: ReaderExtensionInMemoryPreferenceStore(),
-            onRuntimeIntegrityFailure: { integrityCallbacks.append(($0, $1)) }
+            onRuntimeIntegrityFailure: { integrityCallbacks.append(($0, $1, $2)) }
         )
         do {
             _ = try await preferenceProvider.popular(page: 1)
@@ -4282,6 +4315,11 @@ final class ReaderExtensionCoreTests: XCTestCase {
         }
         XCTAssertEqual(integrityCallbacks.count, 1)
         XCTAssertEqual(integrityCallbacks.first?.0, source.id)
+        XCTAssertEqual(
+            integrityCallbacks.first?.2,
+            .sourceAuthored,
+            "a preference schema the source itself wrote must not be reported as an Eclipse integrity failure"
+        )
 
         let providerFailure = Data("""
         class DefaultExtension extends MProvider {
@@ -4298,7 +4336,7 @@ final class ReaderExtensionCoreTests: XCTestCase {
             approvedDomains: [],
             consentScopeID: "owned-provider-error",
             preferenceStore: ReaderExtensionInMemoryPreferenceStore(),
-            onRuntimeIntegrityFailure: { integrityCallbacks.append(($0, $1)) }
+            onRuntimeIntegrityFailure: { integrityCallbacks.append(($0, $1, $2)) }
         )
         do {
             _ = try await ordinaryProvider.popular(page: 1)
@@ -4319,7 +4357,7 @@ final class ReaderExtensionCoreTests: XCTestCase {
             approvedDomains: [],
             consentScopeID: "owned-source-initialization",
             preferenceStore: ReaderExtensionInMemoryPreferenceStore(),
-            onRuntimeIntegrityFailure: { integrityCallbacks.append(($0, $1)) }
+            onRuntimeIntegrityFailure: { integrityCallbacks.append(($0, $1, $2)) }
         )
         do {
             _ = try await initializationProvider.popular(page: 1)
@@ -4328,6 +4366,11 @@ final class ReaderExtensionCoreTests: XCTestCase {
             XCTAssertEqual(error, .runtimeIntegrityFailed("source initialization"))
         }
         XCTAssertEqual(integrityCallbacks.count, 2)
+        XCTAssertEqual(
+            integrityCallbacks.last?.2,
+            .sourceAuthored,
+            "a top-level throw in the extension's own code is the source's defect, not tampering"
+        )
     }
 
     func testRuntimeIntegrityFailureSynchronouslyQuarantinesExactDigest() async throws {
@@ -4373,6 +4416,259 @@ final class ReaderExtensionCoreTests: XCTestCase {
         } catch let error as ReaderExtensionError {
             XCTAssertEqual(error, .sourceQuarantined)
         }
+    }
+
+    func testARefererTheHostReSuppliesIsStillRemovedFromTheOutgoingSet() throws {
+        let sanitized = try ReaderExtensionSecurityPolicy.sanitizedHeaders(
+            ["Referer": "https://source.example/series/1", "X-Custom": "1"],
+            crossOrigin: true,
+            allowsAuthoredNavigationHeaders: false,
+            hostSuppliesOriginReferer: true
+        )
+        XCTAssertNil(
+            sanitized["Referer"],
+            "the host re-supplies its own origin referer after this call, so the authored one is still dropped here"
+        )
+        XCTAssertNil(sanitized["X-Custom"], "an ordinary cross-origin header is still refused")
+        let withoutFlag = try ReaderExtensionSecurityPolicy.sanitizedHeaders(
+            ["Referer": "https://source.example/series/1", "X-Custom": "1"],
+            crossOrigin: true,
+            allowsAuthoredNavigationHeaders: false,
+            hostSuppliesOriginReferer: false
+        )
+        XCTAssertEqual(
+            sanitized.count,
+            withoutFlag.count,
+            "hostSuppliesOriginReferer is a reporting classification, never an admission decision"
+        )
+    }
+
+    func testUserRetryClearsOnlyTheSessionQuarantineASourceEarnedByItsOwnThrow() async throws {
+        let script = Data("""
+        class DefaultExtension extends MProvider {}
+        throw new Error('owned source initialization failure');
+        """.utf8)
+        let digest = SHA256.hash(data: script).map { String(format: "%02x", $0) }.joined()
+        var source = installedSource(implementation: .javascript)
+        source.activeContentDigest = digest
+        defer {
+            ReaderExtensionJavaScriptRuntime.setQuarantinedForTesting(
+                false,
+                sourceID: source.id,
+                digest: digest
+            )
+        }
+
+        do {
+            _ = try await ReaderExtensionJavaScriptRuntime.execute(
+                scriptData: script,
+                source: source,
+                operation: .popular(1),
+                network: ReaderExtensionDenyNetworkClient(),
+                approvedDomains: [],
+                preferenceStore: ReaderExtensionInMemoryPreferenceStore()
+            )
+            XCTFail("source initialization integrity failure was not surfaced")
+        } catch let error as ReaderExtensionError {
+            XCTAssertEqual(error, .runtimeIntegrityFailed("source initialization"))
+        }
+
+        XCTAssertTrue(
+            ReaderExtensionJavaScriptRuntime.clearSessionQuarantineForUserRetry(
+                sourceID: source.id,
+                digest: digest
+            ),
+            "a source-authored throw must be releasable by an explicit user retry"
+        )
+
+        do {
+            _ = try await ReaderExtensionJavaScriptRuntime.execute(
+                scriptData: script,
+                source: source,
+                operation: .popular(1),
+                network: ReaderExtensionDenyNetworkClient(),
+                approvedDomains: [],
+                preferenceStore: ReaderExtensionInMemoryPreferenceStore()
+            )
+            XCTFail("the retry did not actually run the source")
+        } catch let error as ReaderExtensionError {
+            XCTAssertEqual(
+                error,
+                .runtimeIntegrityFailed("source initialization"),
+                "the retry must reach the source's code again rather than short-circuiting on the stale marker"
+            )
+        }
+
+        XCTAssertFalse(
+            ReaderExtensionJavaScriptRuntime.clearSessionQuarantineForUserRetry(
+                sourceID: source.id,
+                digest: digest.uppercased() + "ff"
+            ),
+            "a digest that was never session-quarantined is not clearable"
+        )
+    }
+
+    func testRelaxedRepositoryAndScriptURLPolicyAcceptsRealRepositoriesAndStillFailsClosed() throws {
+        for accepted in [
+            "https://repo.example/repo.json",
+            "https://repo.example/index.json",
+            "https://repo.example/novel_index.json",
+            "https://repo.example/repo.json?ref=main"
+        ] {
+            XCTAssertNoThrow(
+                try ReaderExtensionSecurityPolicy.validateRepositoryURLSyntax(
+                    XCTUnwrap(URL(string: accepted))
+                ),
+                "a self-hosted repository at \(accepted) must install"
+            )
+        }
+        for accepted in [
+            "https://repo.example/source.js",
+            "https://repo.example/source.mjs",
+            "https://repo.example/source.js?rev=3"
+        ] {
+            XCTAssertNoThrow(
+                try ReaderExtensionSecurityPolicy.validateScriptURLSyntax(
+                    XCTUnwrap(URL(string: accepted))
+                ),
+                "a versioned script URL at \(accepted) must load"
+            )
+        }
+        XCTAssertThrowsError(
+            try ReaderExtensionSecurityPolicy.validateRepositoryURLSyntax(
+                XCTUnwrap(URL(string: "https://repo.example/repo.json?token=secret"))
+            ),
+            "a credential-bearing repository query is still refused"
+        )
+        XCTAssertThrowsError(
+            try ReaderExtensionSecurityPolicy.validateScriptURLSyntax(
+                XCTUnwrap(URL(string: "https://repo.example/source.js?signature=secret"))
+            ),
+            "a credential-bearing script query is still refused"
+        )
+        for accepted in [
+            "https://repo.example:8443/index.json",
+            "https://repo.example:8080/index.json",
+            "https://repo.example:8000/index.json",
+            "https://repo.example:3000/index.json"
+        ] {
+            XCTAssertNoThrow(
+                try ReaderExtensionSecurityPolicy.validatePublicURLSyntax(
+                    XCTUnwrap(URL(string: accepted)),
+                    requireHTTPS: true
+                ),
+                "the widened web-alternate port set must admit \(accepted)"
+            )
+        }
+        for refused in [
+            "https://repo.example:25/index.json",
+            "https://repo.example:6379/index.json",
+            "https://repo.example:6667/index.json",
+            "https://192.168.1.10/index.json",
+            "https://repo.local/index.json"
+        ] {
+            XCTAssertThrowsError(
+                try ReaderExtensionSecurityPolicy.validatePublicURLSyntax(
+                    XCTUnwrap(URL(string: refused)),
+                    requireHTTPS: true
+                ),
+                "widening the port set must not open \(refused)"
+            )
+        }
+    }
+
+    func testUserRetryNeitherClearsNorErasesADurableQuarantine() throws {
+        let source = installedSource(implementation: .javascript)
+        let digest = String(repeating: "a", count: 64)
+        defer {
+            ReaderExtensionJavaScriptRuntime.setQuarantinedForTesting(
+                false,
+                sourceID: source.id,
+                digest: digest
+            )
+            try? ReaderExtensionPersistence.clearRuntimeQuarantine(
+                sourceID: source.id,
+                digest: digest
+            )
+        }
+        try ReaderExtensionPersistence.markRuntimeQuarantined(
+            sourceID: source.id,
+            digest: digest
+        )
+        ReaderExtensionJavaScriptRuntime.setQuarantinedForTesting(
+            true,
+            sourceID: source.id,
+            digest: digest
+        )
+        XCTAssertTrue(
+            try ReaderExtensionPersistence.runtimeQuarantineContains(
+                sourceID: source.id,
+                digest: digest
+            ),
+            "fixture precondition: the durable marker is recorded"
+        )
+
+        XCTAssertFalse(
+            ReaderExtensionJavaScriptRuntime.clearSessionQuarantineForUserRetry(
+                sourceID: source.id,
+                digest: digest
+            ),
+            "a marker without session-only standing is an Eclipse-side integrity verdict and stays fail-closed"
+        )
+        XCTAssertTrue(
+            try ReaderExtensionPersistence.runtimeQuarantineContains(
+                sourceID: source.id,
+                digest: digest
+            ),
+            "a user retry must never erase the durable marker; the tampered bytes would execute after relaunch"
+        )
+    }
+
+    func testASourceAuthoredThrowIsBlockedForTheSessionButNotDurablyMarked() async throws {
+        let script = Data("""
+        class DefaultExtension extends MProvider {}
+        throw new Error('owned source initialization failure');
+        """.utf8)
+        let digest = SHA256.hash(data: script).map { String(format: "%02x", $0) }.joined()
+        var source = installedSource(implementation: .javascript)
+        source.activeContentDigest = digest
+        defer {
+            ReaderExtensionJavaScriptRuntime.setQuarantinedForTesting(
+                false,
+                sourceID: source.id,
+                digest: digest
+            )
+        }
+
+        do {
+            _ = try await ReaderExtensionJavaScriptRuntime.execute(
+                scriptData: script,
+                source: source,
+                operation: .popular(1),
+                network: ReaderExtensionDenyNetworkClient(),
+                approvedDomains: [],
+                preferenceStore: ReaderExtensionInMemoryPreferenceStore()
+            )
+            XCTFail("source initialization integrity failure was not surfaced")
+        } catch let error as ReaderExtensionError {
+            XCTAssertEqual(error, .runtimeIntegrityFailed("source initialization"))
+        }
+
+        XCTAssertEqual(
+            ReaderExtensionJavaScriptRuntime.sessionOnlyQuarantineAttribution(
+                sourceID: source.id,
+                digest: digest
+            ),
+            .sourceAuthored,
+            "the source's own throw blocks the digest for this session, recorded as the source's defect"
+        )
+        XCTAssertFalse(
+            try ReaderExtensionPersistence.runtimeQuarantineContains(
+                sourceID: source.id,
+                digest: digest
+            ),
+            "a community extension with a top-level throw must not be bricked until reinstall"
+        )
     }
 
     func testPreactivationQuarantineUsesExactCandidateDigest() async throws {
@@ -4671,9 +4967,19 @@ final class ReaderExtensionCoreTests: XCTestCase {
             "<p>" + String(repeating: "y", count: 600 * 1_024) + "</p>"
         )
         XCTAssertNotEqual(outputHandle, 0)
-        for _ in 0..<8 {
-            XCTAssertEqual(outputBudget.string(outputHandle, property: "text").utf8.count, 512 * 1_024)
+        let outputCallCeiling =
+            ReaderExtensionSecurityPolicy.maximumDOMReturnedBytesPerOperation / (600 * 1_024) + 4
+        var outputCalls = 0
+        while outputCalls < outputCallCeiling,
+              !outputBudget.string(outputHandle, property: "text").isEmpty {
+            outputCalls += 1
         }
+        XCTAssertGreaterThan(outputCalls, 0)
+        XCTAssertLessThan(
+            outputCalls,
+            outputCallCeiling,
+            "the aggregate output budget must exhaust deterministically"
+        )
         let exhaustedOutputState = outputBudget.budgetStateForTesting
         XCTAssertTrue(outputBudget.string(outputHandle, property: "text").isEmpty)
         XCTAssertEqual(

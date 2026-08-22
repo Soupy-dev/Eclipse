@@ -11,9 +11,9 @@ import CoreData
 enum StremioJSONBoundary {
     static let limits = SkyStreamJSONEnvelopeValidator.Limits(
         maximumDepth: 16,
-        maximumTokens: 100_000,
-        maximumValuesPerContainer: 4_096,
-        maximumStringBytes: 16 * 1_024,
+        maximumTokens: 400_000,
+        maximumValuesPerContainer: 20_000,
+        maximumStringBytes: 1_024 * 1_024,
         maximumScalarTokenBytes: 128
     )
 
@@ -43,7 +43,8 @@ struct StremioManifest: Codable {
         id = try StremioDecodedFieldBoundary.requiredString(
             container.decode(String.self, forKey: .id),
             maximumUTF8Bytes: 512,
-            decoder: decoder
+            decoder: decoder,
+            allowsTruncation: false
         )
         name = try StremioDecodedFieldBoundary.requiredString(
             container.decode(String.self, forKey: .name),
@@ -301,12 +302,14 @@ struct StremioCatalog: Codable, Hashable {
         type = try StremioDecodedFieldBoundary.requiredString(
             container.decode(String.self, forKey: .type),
             maximumUTF8Bytes: 64,
-            decoder: decoder
+            decoder: decoder,
+            allowsTruncation: false
         )
         id = try StremioDecodedFieldBoundary.requiredString(
             container.decode(String.self, forKey: .id),
             maximumUTF8Bytes: 512,
-            decoder: decoder
+            decoder: decoder,
+            allowsTruncation: false
         )
         name = StremioDecodedFieldBoundary.optionalString(
             try container.decodeIfPresent(String.self, forKey: .name),
@@ -456,15 +459,30 @@ struct StremioCatalogResponse: Codable {
 
         var decoded = [StremioMetaPreview]()
         var inspected = 0
+        var undecodable = 0
+        var unreadableRow = false
         while !unkeyedContainer.isAtEnd,
               inspected < StremioDecodingLimits.catalogMetasPerResponse {
             inspected += 1
             if let meta = try? unkeyedContainer.decode(StremioMetaPreview.self) {
                 decoded.append(meta)
             } else {
-                _ = try? unkeyedContainer.decode(AnyCodable.self)
+                undecodable += 1
+                guard (try? unkeyedContainer.decode(AnyCodable.self)) != nil else {
+                    unreadableRow = true
+                    break
+                }
             }
         }
+        StremioFieldTruncationLedger.recordRowReduction(
+            label: "catalog",
+            inspected: inspected,
+            kept: decoded.count,
+            undecodable: undecodable,
+            truncated: !unreadableRow && !unkeyedContainer.isAtEnd,
+            unreadableTail: unreadableRow,
+            cap: StremioDecodingLimits.catalogMetasPerResponse
+        )
         return decoded
     }
 }
@@ -519,7 +537,8 @@ struct StremioMetaPreview: Codable, Identifiable, Hashable {
         id = try StremioDecodedFieldBoundary.requiredString(
             container.decode(String.self, forKey: .id),
             maximumUTF8Bytes: 2 * 1_024,
-            decoder: decoder
+            decoder: decoder,
+            allowsTruncation: false
         )
         type = StremioDecodedFieldBoundary.optionalString(
             try container.decodeIfPresent(String.self, forKey: .type),
@@ -583,15 +602,30 @@ struct StremioMetaPreview: Codable, Identifiable, Hashable {
         if var videoContainer = try? container.nestedUnkeyedContainer(forKey: .videos) {
             var decodedVideos: [StremioVideo] = []
             var inspected = 0
+            var undecodable = 0
+            var unreadableRow = false
             while !videoContainer.isAtEnd,
                   inspected < StremioDecodingLimits.videosPerMeta {
                 inspected += 1
                 if let video = try? videoContainer.decode(StremioVideo.self) {
                     decodedVideos.append(video)
                 } else {
-                    _ = try? videoContainer.decode(AnyCodable.self)
+                    undecodable += 1
+                    guard (try? videoContainer.decode(AnyCodable.self)) != nil else {
+                        unreadableRow = true
+                        break
+                    }
                 }
             }
+            StremioFieldTruncationLedger.recordRowReduction(
+                label: "videos",
+                inspected: inspected,
+                kept: decodedVideos.count,
+                undecodable: undecodable,
+                truncated: !unreadableRow && !videoContainer.isAtEnd,
+                unreadableTail: unreadableRow,
+                cap: StremioDecodingLimits.videosPerMeta
+            )
             videos = decodedVideos.isEmpty ? nil : decodedVideos
         } else {
             videos = nil
@@ -674,7 +708,8 @@ struct StremioVideo: Codable, Identifiable, Hashable {
         id = try StremioDecodedFieldBoundary.requiredString(
             container.decode(String.self, forKey: .id),
             maximumUTF8Bytes: 2 * 1_024,
-            decoder: decoder
+            decoder: decoder,
+            allowsTruncation: false
         )
         title = StremioDecodedFieldBoundary.optionalString(
             try container.decodeIfPresent(String.self, forKey: .title),
@@ -689,15 +724,30 @@ struct StremioVideo: Codable, Identifiable, Hashable {
         if var streamContainer = try? container.nestedUnkeyedContainer(forKey: .streams) {
             var decodedStreams: [StremioStream] = []
             var inspected = 0
+            var undecodable = 0
+            var unreadableRow = false
             while !streamContainer.isAtEnd,
                   inspected < StremioDecodingLimits.streamsPerVideo {
                 inspected += 1
                 if let stream = try? streamContainer.decode(StremioStream.self) {
                     decodedStreams.append(stream)
                 } else {
-                    _ = try? streamContainer.decode(AnyCodable.self)
+                    undecodable += 1
+                    guard (try? streamContainer.decode(AnyCodable.self)) != nil else {
+                        unreadableRow = true
+                        break
+                    }
                 }
             }
+            StremioFieldTruncationLedger.recordRowReduction(
+                label: "video-streams",
+                inspected: inspected,
+                kept: decodedStreams.count,
+                undecodable: undecodable,
+                truncated: !unreadableRow && !streamContainer.isAtEnd,
+                unreadableTail: unreadableRow,
+                cap: StremioDecodingLimits.streamsPerVideo
+            )
             streams = decodedStreams.isEmpty ? nil : decodedStreams
         } else {
             streams = nil
@@ -709,7 +759,7 @@ enum StremioDecodingLimits {
     // Stream payloads are already byte-bounded by StremioClient. These item
     // limits additionally prevent a compact hostile array from constructing an
     // unbounded number of Swift models before the UI applies its own cap.
-    static let streamsPerResponse = 300
+    static let streamsPerResponse = 2_000
     static let subtitlesPerStream = 64
     static let subtitlesPerResponse = 2_048
     static let catalogMetasPerResponse = 300
@@ -730,10 +780,13 @@ enum StremioAddonOutcome: Equatable {
     case unplayableOnly(count: Int)
     case externalOnly(count: Int)
     case addonError(String)
+    case appFailure(String)
 
     var isFailure: Bool {
-        if case .addonError = self { return true }
-        return false
+        switch self {
+        case .addonError, .appFailure: return true
+        default: return false
+        }
     }
 
     var displayMessage: String {
@@ -752,6 +805,8 @@ enum StremioAddonOutcome: Equatable {
                 : "\(count) results, but they open in another service"
         case .addonError:
             return "Addon error"
+        case .appFailure(let reason):
+            return "Eclipse cut this addon's run short (\(reason))"
         }
     }
 
@@ -765,7 +820,21 @@ enum StremioAddonOutcome: Equatable {
             return "This addon links out to another app instead of handing Eclipse a stream."
         case .addonError(let message):
             let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? "This addon did not answer. This is the addon, not Eclipse." : trimmed
+            return trimmed.isEmpty ? "This addon did not return a usable response." : trimmed
+        case .appFailure(let reason):
+            let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty
+                ? "Eclipse stopped this addon's run before it finished. This is Eclipse, not the addon."
+                : "\(trimmed). This is Eclipse, not the addon."
+        }
+    }
+
+    var explainsAnEmptyList: Bool {
+        switch self {
+        case .appFailure, .unplayableOnly, .externalOnly, .addonError:
+            return true
+        case .results, .noResults:
+            return false
         }
     }
 
@@ -776,6 +845,7 @@ enum StremioAddonOutcome: Equatable {
         case .unplayableOnly: return "unplayable-only"
         case .externalOnly: return "external-only"
         case .addonError: return "addon-error"
+        case .appFailure: return "app-failure"
         }
     }
 }
@@ -794,6 +864,9 @@ struct StremioStreamResponse: Codable {
             var decoded = [StremioStream]()
             var seen = Set<String>()
             var inspected = 0
+            var undecodable = 0
+            var duplicates = 0
+            var unreadableRow = false
             while !unkeyedContainer.isAtEnd,
                   inspected < StremioDecodingLimits.streamsPerResponse,
                   decoded.count < StremioDecodingLimits.streamsPerResponse {
@@ -805,14 +878,26 @@ struct StremioStreamResponse: Codable {
                     if let key, !key.isEmpty {
                         if seen.insert(key).inserted {
                             decoded.append(stream)
+                        } else {
+                            duplicates += 1
                         }
                     } else {
                         decoded.append(stream)
                     }
                 } else {
-
-                    _ = try? unkeyedContainer.decode(AnyCodable.self)
+                    undecodable += 1
+                    guard (try? unkeyedContainer.decode(AnyCodable.self)) != nil else {
+                        unreadableRow = true
+                        break
+                    }
                 }
+            }
+            let truncated = !unreadableRow && !unkeyedContainer.isAtEnd
+            if undecodable > 0 || duplicates > 0 || truncated || unreadableRow {
+                Logger.shared.log(
+                    "Stremio stream rows reduced inspected=\(inspected) kept=\(decoded.count) undecodable=\(undecodable) duplicates=\(duplicates) truncated=\(truncated) unreadableTail=\(unreadableRow) cap=streamsPerResponse=\(StremioDecodingLimits.streamsPerResponse); undecodable, duplicate and unreadable rows are the addon's data, truncation is Eclipse's cap",
+                    type: "Stremio"
+                )
             }
             streams = decoded.isEmpty ? nil : decoded
         } else {
@@ -1080,7 +1165,12 @@ struct StremioStreamBehaviorHints: Codable, Hashable {
             try? container.decodeIfPresent(String.self, forKey: .bingeGroup),
             maximumUTF8Bytes: 1_024
         )
-        proxyHeaders = try? container.decodeIfPresent(StremioProxyHeaders.self, forKey: .proxyHeaders)
+        do {
+            proxyHeaders = try container.decodeIfPresent(StremioProxyHeaders.self, forKey: .proxyHeaders)
+        } catch {
+            proxyHeaders = nil
+            StremioFieldTruncationLedger.recordProxyHeaderFailure()
+        }
         filename = StremioDecodedFieldBoundary.optionalString(
             try? container.decodeIfPresent(String.self, forKey: .filename),
             maximumUTF8Bytes: 1_024
@@ -1105,13 +1195,55 @@ struct StremioProxyHeaders: Codable, Hashable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        let raw = try container.decodeIfPresent([String: String].self, forKey: .request) ?? [:]
-        let bounded = raw.sorted { lhs, rhs in
+        guard container.contains(.request),
+              try !container.decodeNil(forKey: .request) else {
+            request = nil
+            return
+        }
+        let entries = try container.nestedContainer(keyedBy: AnyCodingKey.self, forKey: .request)
+        var raw: [String: String] = [:]
+        var unrepresentable: [String] = []
+        for key in entries.allKeys {
+            if (try? entries.decodeNil(forKey: key)) == true {
+                continue
+            }
+            if let text = try? entries.decode(String.self, forKey: key) {
+                raw[key.stringValue] = text
+            } else if let flag = try? entries.decode(Bool.self, forKey: key) {
+                raw[key.stringValue] = flag ? "true" : "false"
+            } else if let whole = try? entries.decode(Int.self, forKey: key) {
+                raw[key.stringValue] = String(whole)
+            } else if let number = try? entries.decode(Double.self, forKey: key), number.isFinite {
+                raw[key.stringValue] = String(number)
+            } else {
+                unrepresentable.append(key.stringValue)
+            }
+        }
+        let sorted = raw.sorted { lhs, rhs in
             lhs.key.localizedStandardCompare(rhs.key) == .orderedAscending
-        }.prefix(64).reduce(into: [String: String]()) { result, pair in
+        }
+        var overBudget: [String] = []
+        let bounded = sorted.prefix(64).reduce(into: [String: String]()) { result, pair in
             guard pair.key.utf8.count <= 128,
-                  pair.value.utf8.count <= 16 * 1_024 else { return }
+                  pair.value.utf8.count <= 16 * 1_024 else {
+                overBudget.append(pair.key)
+                return
+            }
             result[pair.key] = pair.value
+        }
+        let beyondCount = sorted.count > 64 ? sorted.suffix(from: 64).map({ $0.key }) : []
+        let discarded = overBudget + beyondCount
+        if !discarded.isEmpty {
+            Logger.shared.log(
+                "Stremio proxyHeaders dropped keys=[\(discarded.sorted().joined(separator: ","))] kept=\(bounded.count) cap=64/128B/16KiB; a 403 on playback after this is Eclipse's header set, not the addon's",
+                type: "Stremio"
+            )
+        }
+        if !unrepresentable.isEmpty {
+            Logger.shared.log(
+                "Stremio proxyHeaders skipped unreadable keys=[\(unrepresentable.sorted().joined(separator: ","))] kept=\(bounded.count); those values were not a header string, number or boolean, so this is the addon's data, not an Eclipse cap",
+                type: "Stremio"
+            )
         }
         request = bounded.isEmpty ? nil : bounded
     }
@@ -1182,6 +1314,12 @@ struct StremioSubtitle: Codable, Sendable, Hashable {
             if !trimmed.isEmpty, trimmed.utf8.count <= maximumUTF8Bytes {
                 return trimmed
             }
+            if !trimmed.isEmpty {
+                StremioFieldTruncationLedger.recordNulled(
+                    bytes: trimmed.utf8.count,
+                    cap: maximumUTF8Bytes
+                )
+            }
         }
         return nil
     }
@@ -1201,30 +1339,273 @@ struct StremioSubtitle: Codable, Sendable, Hashable {
     }
 }
 
+final class StremioFieldTruncationTally: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    private var largestBytes = 0
+    private var cap = 0
+    private var nulledCount = 0
+    private var largestNulledBytes = 0
+    private var nulledCap = 0
+    private var proxyHeaderFailures = 0
+    private var identityRefusals = 0
+    private var largestIdentityBytes = 0
+    private var identityCap = 0
+    private var rowReductions: [RowReduction] = []
+
+    func record(bytes: Int, cap: Int) {
+        lock.lock()
+        count += 1
+        largestBytes = max(largestBytes, bytes)
+        self.cap = max(self.cap, cap)
+        lock.unlock()
+    }
+
+    func recordProxyHeaderFailure() {
+        lock.lock()
+        proxyHeaderFailures += 1
+        lock.unlock()
+    }
+
+    struct RowReduction {
+        let label: String
+        let inspected: Int
+        let kept: Int
+        let undecodable: Int
+        let truncated: Bool
+        let unreadableTail: Bool
+        let cap: Int
+    }
+
+    func recordRowReduction(_ reduction: RowReduction) {
+        lock.lock()
+        rowReductions.append(reduction)
+        lock.unlock()
+    }
+
+    func recordIdentityRefusal(bytes: Int, cap: Int) {
+        lock.lock()
+        identityRefusals += 1
+        largestIdentityBytes = max(largestIdentityBytes, bytes)
+        identityCap = max(identityCap, cap)
+        lock.unlock()
+    }
+
+    func recordNulled(bytes: Int, cap: Int) {
+        lock.lock()
+        nulledCount += 1
+        largestNulledBytes = max(largestNulledBytes, bytes)
+        nulledCap = max(nulledCap, cap)
+        lock.unlock()
+    }
+
+    fileprivate func snapshot() -> (count: Int, largestBytes: Int, cap: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (count, largestBytes, cap)
+    }
+
+    fileprivate func nulledSnapshot() -> (count: Int, largestBytes: Int, cap: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (nulledCount, largestNulledBytes, nulledCap)
+    }
+
+    fileprivate func rowReductionSnapshot() -> [RowReduction] {
+        lock.lock()
+        defer { lock.unlock() }
+        return rowReductions
+    }
+
+    fileprivate func extrasSnapshot() -> (proxy: Int, identity: Int, identityBytes: Int, identityCap: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (proxyHeaderFailures, identityRefusals, largestIdentityBytes, identityCap)
+    }
+}
+
+enum StremioFieldTruncationLedger {
+    @TaskLocal static var active: StremioFieldTruncationTally?
+
+    static func record(bytes: Int, cap: Int) {
+        active?.record(bytes: bytes, cap: cap)
+    }
+
+    static func recordNulled(bytes: Int, cap: Int) {
+        active?.recordNulled(bytes: bytes, cap: cap)
+    }
+
+    static func recordProxyHeaderFailure() {
+        active?.recordProxyHeaderFailure()
+    }
+
+    static func recordIdentityRefusal(bytes: Int, cap: Int) {
+        active?.recordIdentityRefusal(bytes: bytes, cap: cap)
+    }
+
+    static func recordRowReduction(
+        label: String,
+        inspected: Int,
+        kept: Int,
+        undecodable: Int,
+        truncated: Bool,
+        unreadableTail: Bool,
+        cap: Int
+    ) {
+        guard undecodable > 0 || truncated || unreadableTail else { return }
+        active?.recordRowReduction(
+            StremioFieldTruncationTally.RowReduction(
+                label: label,
+                inspected: inspected,
+                kept: kept,
+                undecodable: undecodable,
+                truncated: truncated,
+                unreadableTail: unreadableTail,
+                cap: cap
+            )
+        )
+    }
+
+    static func measuring<T>(context: String, _ work: () throws -> T) rethrows -> T {
+        let tally = StremioFieldTruncationTally()
+        defer { report(tally, context: context) }
+        return try $active.withValue(tally) { try work() }
+    }
+
+    private static func report(_ tally: StremioFieldTruncationTally, context: String) {
+        for reduction in tally.rowReductionSnapshot() {
+            Logger.shared.log(
+                "Stremio \(reduction.label) rows reduced context=\(context) inspected=\(reduction.inspected)"
+                    + " kept=\(reduction.kept) undecodable=\(reduction.undecodable)"
+                    + " truncated=\(reduction.truncated) unreadableTail=\(reduction.unreadableTail)"
+                    + " cap=\(reduction.cap); undecodable and unreadable rows are the addon's data,"
+                    + " truncation is Eclipse's cap",
+                type: "Stremio"
+            )
+        }
+        let extras = tally.extrasSnapshot()
+        if extras.proxy > 0 {
+            Logger.shared.log(
+                "Stremio stream proxyHeaders failed to decode context=\(context) streams=\(extras.proxy);"
+                    + " the addon supplied a shape Eclipse could not read, so those streams lost every"
+                    + " proxy header — this is the addon's data, not an Eclipse cap",
+                type: "Stremio"
+            )
+        }
+        if extras.identity > 0 {
+            Logger.shared.log(
+                "Stremio identity fields refused by Eclipse context=\(context) rows=\(extras.identity)"
+                    + " largestBytes=\(extras.identityBytes) cap=\(extras.identityCap); truncating an id"
+                    + " would merge two distinct objects, so Eclipse discards the value rather than"
+                    + " shortening it; for a manifest or catalog id that throw discards the whole"
+                    + " object, not just a row — this is Eclipse's bound, not the addon withholding it",
+                type: "Stremio"
+            )
+        }
+        let nulled = tally.nulledSnapshot()
+        if nulled.count > 0 {
+            Logger.shared.log(
+                "Stremio optional fields nulled by Eclipse context=\(context) fields=\(nulled.count)"
+                    + " largestBytes=\(nulled.largestBytes) cap=\(nulled.cap); the addon supplied"
+                    + " those values and Eclipse's per-field bound removed them, so a stream that"
+                    + " looks unplayable after this may be missing a URL Eclipse dropped",
+                type: "Stremio"
+            )
+        }
+        let snapshot = tally.snapshot()
+        guard snapshot.count > 0 else { return }
+        Logger.shared.log(
+            "Stremio fields truncated by Eclipse context=\(context) rows=\(snapshot.count)"
+                + " largestBytes=\(snapshot.largestBytes) cap=\(snapshot.cap); the rows are kept"
+                + " rather than discarding the whole object",
+            type: "Stremio"
+        )
+    }
+}
+
 private enum StremioDecodedFieldBoundary {
     static func requiredString(
         _ rawValue: String,
         maximumUTF8Bytes: Int,
-        decoder: Decoder
+        decoder: Decoder,
+        allowsTruncation: Bool = true
     ) throws -> String {
-        guard let value = optionalString(rawValue, maximumUTF8Bytes: maximumUTF8Bytes) else {
+        if let value = optionalString(
+            rawValue,
+            maximumUTF8Bytes: maximumUTF8Bytes,
+            recordsNulling: false
+        ) {
+            return value
+        }
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
             throw DecodingError.dataCorrupted(
                 .init(
                     codingPath: decoder.codingPath,
-                    debugDescription: "Stremio string exceeded its model boundary"
+                    debugDescription: "Stremio string was empty"
                 )
             )
         }
-        return value
+        guard allowsTruncation else {
+            StremioFieldTruncationLedger.recordIdentityRefusal(
+                bytes: trimmed.utf8.count,
+                cap: maximumUTF8Bytes
+            )
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "Stremio identity field exceeded its model boundary"
+                )
+            )
+        }
+        guard !trimmed.isEmpty else {
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "Stremio string was empty"
+                )
+            )
+        }
+        var truncated = trimmed
+        while truncated.utf8.count > maximumUTF8Bytes, !truncated.isEmpty {
+            truncated.removeLast()
+        }
+        guard !truncated.isEmpty else {
+            StremioFieldTruncationLedger.recordIdentityRefusal(
+                bytes: trimmed.utf8.count,
+                cap: maximumUTF8Bytes
+            )
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "Stremio string was empty"
+                )
+            )
+        }
+        StremioFieldTruncationLedger.record(
+            bytes: trimmed.utf8.count,
+            cap: maximumUTF8Bytes
+        )
+        return truncated
     }
 
     static func optionalString(
         _ rawValue: String?,
-        maximumUTF8Bytes: Int
+        maximumUTF8Bytes: Int,
+        recordsNulling: Bool = true
     ) -> String? {
         guard let rawValue else { return nil }
         let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty, value.utf8.count <= maximumUTF8Bytes else { return nil }
+        guard !value.isEmpty else { return nil }
+        guard value.utf8.count <= maximumUTF8Bytes else {
+            if recordsNulling {
+                StremioFieldTruncationLedger.recordNulled(
+                    bytes: value.utf8.count,
+                    cap: maximumUTF8Bytes
+                )
+            }
+            return nil
+        }
         return value
     }
 
@@ -1255,19 +1636,41 @@ private enum StremioBoundedSubtitleDecoder {
         var decoded: [StremioSubtitle] = []
         var seenURLs = Set<String>()
         var inspected = 0
+        var undecodable = 0
+        var duplicates = 0
+        var missingURL = 0
+        var unreadableRow = false
         while !container.isAtEnd, inspected < maximumInspected {
             inspected += 1
             if let subtitle = try? container.decode(StremioSubtitle.self) {
                 guard let url = subtitle.url?.trimmingCharacters(in: .whitespacesAndNewlines),
-                      !url.isEmpty,
-                      seenURLs.insert(url.lowercased()).inserted else {
+                      !url.isEmpty else {
+                    missingURL += 1
+                    continue
+                }
+                guard seenURLs.insert(url.lowercased()).inserted else {
+                    duplicates += 1
                     continue
                 }
                 decoded.append(subtitle)
             } else {
-                _ = try? container.decode(AnyCodable.self)
+                undecodable += 1
+                guard (try? container.decode(AnyCodable.self)) != nil else {
+                    unreadableRow = true
+                    break
+                }
             }
         }
+        let truncated = !unreadableRow && !container.isAtEnd
+        StremioFieldTruncationLedger.recordRowReduction(
+            label: "subtitle",
+            inspected: inspected,
+            kept: decoded.count,
+            undecodable: undecodable + duplicates + missingURL,
+            truncated: truncated,
+            unreadableTail: unreadableRow,
+            cap: maximumInspected
+        )
         return decoded
     }
 }
@@ -1326,7 +1729,9 @@ extension StremioAddonEntity {
         }
 
         do {
-            let manifest = try JSONDecoder().decode(StremioManifest.self, from: data)
+            let manifest = try StremioFieldTruncationLedger.measuring(context: "stored-manifest") {
+                try JSONDecoder().decode(StremioManifest.self, from: data)
+            }
             return StremioAddon(
                 id: id,
                 configuredURL: StremioConfiguredURLVault.resolve(addonID: id, persistedURL: configuredURL),

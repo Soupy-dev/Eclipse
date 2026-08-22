@@ -769,7 +769,7 @@ final class NuvioPluginManager: ObservableObject {
         strategy: NuvioRepositoryFetchStrategy,
         previousFailedProviderKeys: Set<String> = []
     ) async throws -> NuvioRepositoryFetch {
-        let manifestPayload = try await NuvioManifestFetchRetryPolicy.run(
+        let manifestFetch = try await NuvioManifestFetchRetryPolicy.run(
             operation: { [manifestURL, manifestTimeout] in
                 try await Self.downloadText(
                     from: manifestURL,
@@ -783,7 +783,32 @@ final class NuvioPluginManager: ObservableObject {
                 )
             }
         )
-        let parsedManifest = try parseManifest(manifestPayload)
+        let deliveredCandidate = manifestFetch.finalURL?.absoluteString ?? manifestURL
+        let refusesDowngrade = NuvioPluginSupport.isExecutableSchemeDowngrade(
+            from: manifestURL,
+            to: deliveredCandidate
+        )
+        if refusesDowngrade {
+            Logger.shared.log(
+                "Nuvio refused an https to http downgrade for provider code typed=\(manifestURL) delivered=\(deliveredCandidate); provider code stays pinned to the typed https origin, so a repository that only serves code over http will report foreign-origin by Eclipse's rule",
+                type: "Plugin"
+            )
+        }
+        let deliveredManifestURL = refusesDowngrade ? manifestURL : deliveredCandidate
+        let authorizedExecutableOrigins = NuvioPluginSupport.authorizedExecutableOrigins(
+            typed: manifestURL,
+            delivered: deliveredManifestURL
+        )
+        if deliveredManifestURL != manifestURL {
+            let authorized = authorizedExecutableOrigins
+                .map { $0.absoluteString }
+                .joined(separator: ",")
+            Logger.shared.log(
+                "Nuvio repository manifest was delivered from a different URL typed=\(manifestURL) delivered=\(deliveredManifestURL); relative provider filenames resolve against the delivered URL, and provider code is accepted only from [\(authorized)]",
+                type: "Plugin"
+            )
+        }
+        let parsedManifest = try parseManifest(manifestFetch.text)
         let manifest = parsedManifest.manifest
 
         let candidates = manifest.scrapers.filter(isSupportedOnCurrentPlatform)
@@ -825,8 +850,23 @@ final class NuvioPluginManager: ObservableObject {
         await BoundedProgressiveFanout.run(
             inputs: attemptedCandidates,
             maxConcurrent: maxConcurrentDownloads,
-            operation: { [manifestURL, codeTimeout, maxCodeBytes] info -> NuvioProviderDownloadResult in
-                let url = NuvioPluginSupport.codeURL(manifestURL: manifestURL, filename: info.filename)
+            operation: { [deliveredManifestURL, authorizedExecutableOrigins, codeTimeout, maxCodeBytes] info -> NuvioProviderDownloadResult in
+                let url = NuvioPluginSupport.codeURL(manifestURL: deliveredManifestURL, filename: info.filename)
+                guard !authorizedExecutableOrigins.isEmpty else {
+                    return NuvioProviderDownloadResult(code: nil, failureToken: "unreadable-repository-origin")
+                }
+                guard NuvioPluginSupport.sharesExecutableOrigin(url, withAny: authorizedExecutableOrigins) else {
+                    let authorized = authorizedExecutableOrigins
+                        .map { $0.absoluteString }
+                        .joined(separator: ",")
+                    let codeOrigin = NuvioPluginSupport.executableOrigin(of: url)?.absoluteString
+                        ?? "unreadable"
+                    Logger.shared.log(
+                        "Nuvio refused provider code from an unauthorised origin provider=\(info.id) codeOrigin=\(codeOrigin) authorisedOrigins=[\(authorized)]; the resolved code URL matches none of them — note the comparison is scheme, host and port, so an http code URL is refused for an https repository — and this provider stays uninstalled by Eclipse's rule, not by a network failure",
+                        type: "Plugin"
+                    )
+                    return NuvioProviderDownloadResult(code: nil, failureToken: "foreign-origin")
+                }
                 do {
                     let code = try await NuvioManifestFetchRetryPolicy.run(
                         operation: {
@@ -834,8 +874,9 @@ final class NuvioPluginManager: ObservableObject {
                                 from: url,
                                 timeout: codeTimeout,
                                 kind: "provider",
-                                maximumBytes: maxCodeBytes
-                            )
+                                maximumBytes: maxCodeBytes,
+                                pinnedExecutableOrigins: authorizedExecutableOrigins
+                            ).text
                         },
                         sleep: { seconds in
                             try await Task.sleep(
@@ -1044,6 +1085,9 @@ final class NuvioPluginManager: ObservableObject {
 
     nonisolated private static func providerDownloadFailureToken(_ error: Error) -> String {
         if error is CancellationError { return "cancelled" }
+        if error.localizedDescription.lowercased().contains("refused a redirect") {
+            return "foreign-origin-redirect"
+        }
         if let urlError = error as? URLError {
             switch urlError.code {
             case .timedOut: return "timeout"
@@ -1065,19 +1109,48 @@ final class NuvioPluginManager: ObservableObject {
         from urlString: String,
         timeout: TimeInterval,
         kind: String,
-        maximumBytes: Int = 4 * 1_024 * 1_024
-    ) async throws -> String {
+        maximumBytes: Int = 4 * 1_024 * 1_024,
+        pinnedExecutableOrigins: [URL] = []
+    ) async throws -> (text: String, finalURL: URL?) {
         guard let url = ServiceSandboxState.validatedHTTPURL(urlString) else {
             throw NuvioPluginError.invalidRepositoryURL
+        }
+        if !pinnedExecutableOrigins.isEmpty,
+           !NuvioPluginSupport.sharesExecutableOrigin(url.absoluteString, withAny: pinnedExecutableOrigins) {
+            throw NuvioPluginError.repositoryInstallFailed(
+                "Eclipse refused to load provider code from a different origin than the repository."
+            )
         }
         let requestURL = NuvioRepositoryRequestPolicy.requestURL(url)
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = timeout
         configuration.timeoutIntervalForResource = max(timeout, 30)
         configuration.httpAdditionalHeaders = ["User-Agent": URLSession.randomUserAgent]
+        let refusal = NuvioForeignOriginRedirectFlag()
+        let pinnedOrigins = pinnedExecutableOrigins
+        let redirectAuthorization: FetchDelegate.RedirectAuthorization? = pinnedOrigins.isEmpty
+            ? nil
+            : { source, destination in
+                guard NuvioPluginSupport.sharesExecutableOrigin(
+                    destination.absoluteString,
+                    withAny: pinnedOrigins
+                ) else {
+                    refusal.markRefused()
+                    Logger.shared.log(
+                        "Nuvio refused a redirect that would load provider code from a different origin from=\(source.host ?? "unreadable") to=\(destination.host ?? "unreadable") pinned=[\(pinnedOrigins.compactMap({ $0.host }).joined(separator: ","))]; this provider stays uninstalled by Eclipse's rule, not by an HTTP status",
+                        type: "Plugin"
+                    )
+                    throw NuvioPluginError.repositoryInstallFailed(
+                        "Eclipse refused a redirect that would load provider code from a different origin."
+                    )
+                }
+            }
         let session = URLSession(
             configuration: configuration,
-            delegate: FetchDelegate(allowRedirects: true),
+            delegate: FetchDelegate(
+                allowRedirects: true,
+                redirectAuthorization: redirectAuthorization
+            ),
             delegateQueue: nil
         )
         defer { session.finishTasksAndInvalidate() }
@@ -1099,6 +1172,11 @@ final class NuvioPluginManager: ObservableObject {
                 "The \(kind) response exceeded Eclipse's \(maximumBytes)-byte limit."
             )
         }
+        if refusal.wasRefused {
+            throw NuvioPluginError.repositoryInstallFailed(
+                "Eclipse refused a redirect that would load provider code from a different origin."
+            )
+        }
         if !(200...299).contains(response.statusCode) {
             throw NuvioRepositoryHTTPFailure(
                 statusCode: response.statusCode,
@@ -1110,11 +1188,18 @@ final class NuvioPluginManager: ObservableObject {
         guard !data.isEmpty else {
             throw NuvioPluginError.repositoryInstallFailed("The \(kind) response was empty.")
         }
-        return String(decoding: data, as: UTF8.self)
+        if !pinnedExecutableOrigins.isEmpty,
+           let finalURL = response.url,
+           !NuvioPluginSupport.sharesExecutableOrigin(finalURL.absoluteString, withAny: pinnedExecutableOrigins) {
+            throw NuvioPluginError.repositoryInstallFailed(
+                "Eclipse refused provider code that was delivered from a different origin than the repository."
+            )
+        }
+        return (String(decoding: data, as: UTF8.self), response.url)
     }
 
     private func downloadText(from urlString: String, timeout: TimeInterval, kind: String) async throws -> String {
-        try await Self.downloadText(from: urlString, timeout: timeout, kind: kind)
+        try await Self.downloadText(from: urlString, timeout: timeout, kind: kind).text
     }
 
     func resolveStreams(
@@ -1171,13 +1256,23 @@ final class NuvioPluginManager: ObservableObject {
         _ outcome: NuvioProviderOutcome
     ) -> NuvioProviderOutcome {
         guard case .results(let streams) = outcome, !streams.isEmpty else { return outcome }
-        let boundedStreams = NuvioSubtitleBoundary.boundedForNetworkValidation(streams)
+        let boundedBatch = NuvioSubtitleBoundary.boundedForNetworkValidation(streams)
+        let boundedStreams = boundedBatch.streams
+        if boundedBatch.droppedByBatchBudget > 0 {
+            Logger.shared.log(
+                "Nuvio subtitle tracks dropped by Eclipse dropped=\(boundedBatch.droppedByBatchBudget) cap=maximumTracksPerValidationBatch=\(NuvioSubtitleBoundary.maximumTracksPerValidationBatch); those tracks are missing because of Eclipse's own validation budget, not because the provider withheld them",
+                type: "Plugin"
+            )
+        }
         let originalSubtitleCount = streams.reduce(0) { $0 + ($1.subtitles?.count ?? 0) }
         let boundedSubtitleCount = boundedStreams.reduce(0) { $0 + ($1.subtitles?.count ?? 0) }
 
         var allowed: [NuvioPluginStream] = []
         allowed.reserveCapacity(boundedStreams.count)
-        var rejectedSubtitles = originalSubtitleCount - boundedSubtitleCount
+        var rejectedSubtitles = max(
+            0,
+            originalSubtitleCount - boundedSubtitleCount - boundedBatch.droppedByBatchBudget
+        )
         for stream in boundedStreams {
             guard NuvioPluginSupport.isDirectHTTPURL(stream.url) else { continue }
             guard let subtitles = stream.subtitles, !subtitles.isEmpty else {
@@ -1198,7 +1293,7 @@ final class NuvioPluginManager: ObservableObject {
         }
         let rejected = boundedStreams.count - allowed.count
         guard rejected > 0 else {
-            return rejectedSubtitles > 0 ? .results(allowed) : outcome
+            return .results(allowed)
         }
         Logger.shared.log(
             "Nuvio dropped \(rejected) malformed or unsupported stream(s)",
@@ -1255,7 +1350,8 @@ final class NuvioPluginManager: ObservableObject {
         let scraperSettings = settingsPayload(for: scraper)
         guard let code = await store.readCodeInBackground(
             repositoryID: scraper.repositoryId,
-            codeFileName: scraper.codeFileName
+            codeFileName: scraper.codeFileName,
+            expectedScraperID: scraper.id
         ) else {
             return .appFailure("The plugin code is missing from storage. Refresh the repository.")
         }
@@ -1322,7 +1418,17 @@ final class NuvioPluginManager: ObservableObject {
 
         var seen = Set<String>()
         let deduplicated = batch.streams.filter { seen.insert($0.url).inserted }
-        return .results(Array(deduplicated.prefix(maxStreamsPerScraper)))
+        let retained = Array(deduplicated.prefix(maxStreamsPerScraper))
+        if deduplicated.count != batch.streams.count || retained.count != deduplicated.count {
+            Logger.shared.log(
+                "Nuvio provider=\(scraper.name) rows reduced by Eclipse parsed=\(batch.streams.count)"
+                    + " duplicatesRemoved=\(batch.streams.count - deduplicated.count)"
+                    + " retained=\(retained.count) cap=maxStreamsPerScraper=\(maxStreamsPerScraper);"
+                    + " the ledger's rows= count is what the provider returned, not what the user sees",
+                type: "Plugin"
+            )
+        }
+        return .results(retained)
 #else
         return .appFailure("Nuvio plugins are not supported on this platform.")
 #endif
@@ -1410,7 +1516,8 @@ final class NuvioPluginManager: ObservableObject {
         let scraperSettings = settingsPayload(for: scraper)
         guard let code = await store.readCodeInBackground(
             repositoryID: scraper.repositoryId,
-            codeFileName: scraper.codeFileName
+            codeFileName: scraper.codeFileName,
+            expectedScraperID: scraper.id
         ) else {
             throw NuvioPluginError.providerNotFound
         }
@@ -1605,5 +1712,22 @@ struct NuvioInstallProgress: Equatable {
 
     var fractionCompleted: Double {
         total > 0 ? min(1, Double(completed) / Double(total)) : 0
+    }
+}
+
+private final class NuvioForeignOriginRedirectFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var refused = false
+
+    func markRefused() {
+        lock.lock()
+        refused = true
+        lock.unlock()
+    }
+
+    var wasRefused: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return refused
     }
 }

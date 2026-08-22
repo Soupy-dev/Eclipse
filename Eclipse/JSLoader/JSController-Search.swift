@@ -28,19 +28,34 @@ extension JSController {
         from data: Data,
         maxResults: Int? = nil
     ) throws -> (items: [SearchItem], rawCount: Int) {
-        guard !data.isEmpty, data.count <= maximumSearchResultBytes else {
+        guard !data.isEmpty else {
             throw ServiceSearchResultBoundaryError.invalidPayload
         }
-        try SkyStreamJSONEnvelopeValidator.validate(
-            data,
-            limits: .init(
-                maximumDepth: 12,
-                maximumTokens: 50_000,
-                maximumValuesPerContainer: 4_096,
-                maximumStringBytes: 16 * 1_024,
-                maximumScalarTokenBytes: 128
+        guard data.count <= maximumSearchResultBytes else {
+            Logger.shared.log(
+                "Service search result refused by Eclipse bytes=\(data.count) cap=maximumSearchResultBytes=\(maximumSearchResultBytes); the whole result set is discarded, so an empty search here is an Eclipse limit, not a dead source",
+                type: "Plugin"
             )
-        )
+            throw ServiceSearchResultBoundaryError.invalidPayload
+        }
+        do {
+            try SkyStreamJSONEnvelopeValidator.validate(
+                data,
+                limits: .init(
+                    maximumDepth: 12,
+                    maximumTokens: 400_000,
+                    maximumValuesPerContainer: 20_000,
+                    maximumStringBytes: 1_024 * 1_024,
+                    maximumScalarTokenBytes: 128
+                )
+            )
+        } catch {
+            Logger.shared.log(
+                "Service search envelope refused by Eclipse bytes=\(data.count) caps=depth12/tokens400000/values20000/string1MiB; the whole result set is discarded, so an empty search here is an Eclipse limit, not a dead source",
+                type: "Plugin"
+            )
+            throw error
+        }
         guard let array = try JSONSerialization.jsonObject(
             with: data,
             options: []
@@ -85,6 +100,12 @@ extension JSController {
         }
         let boundedKeyword = (String(data: keywordPrefix, encoding: .utf8) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        if keyword.utf8.count > 1_024 {
+            Logger.shared.log(
+                "Service search keyword truncated by Eclipse bytes=\(keyword.utf8.count) cap=1024; the source is searching for less than the user typed",
+                type: "Plugin"
+            )
+        }
         guard !boundedKeyword.isEmpty else {
             completion([])
             return

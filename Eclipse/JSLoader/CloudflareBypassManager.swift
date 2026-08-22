@@ -229,10 +229,15 @@ final class CloudflareBypassManager: ObservableObject {
             request.setValue(entry.userAgent, forHTTPHeaderField: "User-Agent")
         }
 
-        Logger.shared.log(
-            "CloudflareBypass: applied cached session host=\(host) cachedCookies=\(cookiePairCount(in: vettedCookieHeader)) cookieNames=\(cookieNameSummary(vettedCookieHeader)) mergedWithExisting=\(!existingCookie.isEmpty) userAgent=\(!entry.userAgent.isEmpty) uaProfile=\(userAgentProfile(entry.userAgent))",
-            type: "Service"
-        )
+        EclipseLedgerOnce.emit(
+            scope: "cloudflare-applied-session",
+            signature: "\(host)|\(cookieNameSummary(vettedCookieHeader))|\(!existingCookie.isEmpty)|\(userAgentProfile(entry.userAgent))"
+        ) {
+            Logger.shared.log(
+                "CloudflareBypass: applied cached session host=\(host) cachedCookies=\(cookiePairCount(in: vettedCookieHeader)) cookieNames=\(cookieNameSummary(vettedCookieHeader)) mergedWithExisting=\(!existingCookie.isEmpty) userAgent=\(!entry.userAgent.isEmpty) uaProfile=\(userAgentProfile(entry.userAgent))",
+                type: "Service"
+            )
+        }
     }
 
     func headersByApplyingCachedBypass(_ headers: [String: String], for url: URL) -> [String: String] {
@@ -1325,13 +1330,44 @@ final class CloudflareBypassManager: ObservableObject {
         return lower == "cf_clearance" || lower.hasPrefix("__ddg")
     }
 
+    private static let sharedCookieLedgerLock = NSLock()
+    private static var reportedSharedCookieLedger = Set<String>()
+    private static var reportedSharedCookieLedgerFullAnnounced = false
+
+    private static func reportSharedCookieLedgerOnce(_ signature: String, _ emit: () -> Void) {
+        sharedCookieLedgerLock.lock()
+        let alreadyFull = reportedSharedCookieLedger.count >= 512
+        let isNew = !alreadyFull && reportedSharedCookieLedger.insert(signature).inserted
+        let shouldAnnounceFull = alreadyFull && !reportedSharedCookieLedgerFullAnnounced
+        if shouldAnnounceFull { reportedSharedCookieLedgerFullAnnounced = true }
+        sharedCookieLedgerLock.unlock()
+        if shouldAnnounceFull {
+            Logger.shared.log(
+                "Cloudflare clearance ledger reached its 512-signature bound; further cookie"
+                    + " vetting verdicts are not reported for this session, so a silent"
+                    + " re-challenge after this point has no ledger line",
+                type: "Plugin"
+            )
+        }
+        guard isNew else { return }
+        emit()
+    }
+
     static func vettedSharedCookieHeader(from rawHeader: String) -> String? {
-        guard !rawHeader.isEmpty,
-              rawHeader.utf8.count <= maximumSharedCookieHeaderBytes else {
+        guard !rawHeader.isEmpty else { return nil }
+        guard rawHeader.utf8.count <= maximumSharedCookieHeaderBytes else {
+            reportSharedCookieLedgerOnce("header-bytes") {
+            Logger.shared.log(
+                "Cloudflare clearance header refused by Eclipse bytes=\(rawHeader.utf8.count) cap=maximumSharedCookieHeaderBytes=\(maximumSharedCookieHeaderBytes); the whole solved session is discarded, so a re-challenge after this is Eclipse's cap, not the site's",
+                type: "Plugin"
+            )
+            }
             return nil
         }
         var seenNames: Set<String> = []
         var vetted: [String] = []
+        var dropped: [String] = []
+        var malformed: [String] = []
         for part in rawHeader.split(separator: ";", omittingEmptySubsequences: true) {
             let pieces = part.split(separator: "=", maxSplits: 1).map {
                 String($0).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1342,17 +1378,48 @@ final class CloudflareBypassManager: ObservableObject {
             let normalizedName = name.lowercased()
             guard !name.isEmpty,
                   !value.isEmpty,
-                  name.utf8.count <= maximumSharedCookieNameBytes,
-                  value.utf8.count <= maximumSharedCookieValueBytes,
                   !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
-                  !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
-                  seenNames.insert(normalizedName).inserted,
-                  vetted.count < maximumSharedCookieCount else {
+                  !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+                malformed.append(normalizedName)
+                continue
+            }
+            guard name.utf8.count <= maximumSharedCookieNameBytes,
+                  value.utf8.count <= maximumSharedCookieValueBytes else {
+                dropped.append(normalizedName)
+                continue
+            }
+            guard seenNames.insert(normalizedName).inserted else { continue }
+            guard vetted.count < maximumSharedCookieCount else {
+                dropped.append(normalizedName)
                 continue
             }
             vetted.append("\(name)=\(value)")
         }
-        guard !vetted.isEmpty else { return nil }
+        if !dropped.isEmpty {
+            reportSharedCookieLedgerOnce("dropped:\(dropped.sorted().joined(separator: ","))") {
+            Logger.shared.log(
+                "Cloudflare clearance cookies dropped by Eclipse droppedNames=[\(dropped.sorted().joined(separator: ","))] kept=\(vetted.count) caps=\(maximumSharedCookieCount)/\(maximumSharedCookieNameBytes)B/\(maximumSharedCookieValueBytes)B; a re-challenge after this is Eclipse's cap, not the site's",
+                type: "Plugin"
+            )
+            }
+        }
+        if !malformed.isEmpty {
+            reportSharedCookieLedgerOnce("unusable:\(malformed.sorted().joined(separator: ","))") {
+            Logger.shared.log(
+                "Cloudflare clearance cookies skipped as unusable names=[\(malformed.sorted().joined(separator: ","))] kept=\(vetted.count); they were empty or carried control characters, so this is the site's header, not an Eclipse cap",
+                type: "Plugin"
+            )
+            }
+        }
+        guard !vetted.isEmpty else {
+            reportSharedCookieLedgerOnce("no-usable-cookies") {
+            Logger.shared.log(
+                "Cloudflare clearance header produced no usable cookies after Eclipse vetting; the solved session is discarded",
+                type: "Plugin"
+            )
+            }
+            return nil
+        }
         return vetted.joined(separator: "; ")
     }
 
@@ -1368,26 +1435,57 @@ final class CloudflareBypassManager: ObservableObject {
         }
         var seenNames: Set<String> = []
         var accepted: [String] = []
+        var droppedCookies: [String] = []
+        var unusableCookies: [String] = []
+        var expiredCookies: [String] = []
         var totalBytes = 0
         for cookie in prioritized {
             let name = cookie.name
             let value = cookie.value
             let normalizedName = name.lowercased()
             let entryBytes = name.utf8.count + value.utf8.count + 2
-            guard accepted.count < maximumSharedCookieCount,
-                  cookie.expiresDate.map({ $0 > now }) != false,
-                  !name.isEmpty,
+            guard cookie.expiresDate.map({ $0 > now }) != false else {
+                expiredCookies.append(normalizedName)
+                continue
+            }
+            guard !name.isEmpty,
                   !value.isEmpty,
-                  name.utf8.count <= maximumSharedCookieNameBytes,
-                  value.utf8.count <= maximumSharedCookieValueBytes,
                   !name.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
-                  !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains),
-                  seenNames.insert(normalizedName).inserted,
+                  !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+                unusableCookies.append(normalizedName)
+                continue
+            }
+            guard name.utf8.count <= maximumSharedCookieNameBytes,
+                  value.utf8.count <= maximumSharedCookieValueBytes else {
+                droppedCookies.append(normalizedName)
+                continue
+            }
+            guard seenNames.insert(normalizedName).inserted else { continue }
+            guard accepted.count < maximumSharedCookieCount,
                   entryBytes <= maximumSharedCookieHeaderBytes - totalBytes else {
+                droppedCookies.append(normalizedName)
                 continue
             }
             accepted.append("\(name)=\(value)")
             totalBytes += entryBytes
+        }
+        if !droppedCookies.isEmpty {
+            Logger.shared.log(
+                "Cloudflare solved-session cookies dropped by Eclipse droppedNames=[\(droppedCookies.sorted().joined(separator: ","))] kept=\(accepted.count) caps=\(maximumSharedCookieCount)/\(maximumSharedCookieNameBytes)B/\(maximumSharedCookieValueBytes)B/\(maximumSharedCookieHeaderBytes)B; a re-challenge after this is Eclipse's cap, not the site's",
+                type: "Plugin"
+            )
+        }
+        if !unusableCookies.isEmpty {
+            Logger.shared.log(
+                "Cloudflare solved-session cookies skipped as unusable names=[\(unusableCookies.sorted().joined(separator: ","))] kept=\(accepted.count); they were empty or carried control characters, so this is the site's cookie jar, not an Eclipse cap",
+                type: "Plugin"
+            )
+        }
+        if !expiredCookies.isEmpty {
+            Logger.shared.log(
+                "Cloudflare solved-session cookies skipped as expired names=[\(expiredCookies.sorted().joined(separator: ","))] kept=\(accepted.count); the site set them to expire, so this is not an Eclipse cap",
+                type: "Plugin"
+            )
         }
         return accepted.isEmpty ? nil : accepted.joined(separator: "; ")
     }
@@ -1408,6 +1506,17 @@ final class CloudflareBypassManager: ObservableObject {
         }
         guard applicable.contains(where: { isClearanceCookieName($0.name) }) else {
             return nil
+        }
+        let excluded = cookies.count - applicable.count
+        if excluded > 0 {
+reportSharedCookieLedgerOnce("not-applicable:\(normalizedHost):\(excluded)") {
+                Logger.shared.log(
+                    "Cloudflare solved-session cookies excluded before vetting count=\(excluded);"
+                        + " they were expired or scoped to a different host or path, so this is the"
+                        + " site's cookie jar, not an Eclipse cap",
+                    type: "Plugin"
+                )
+            }
         }
         return vettedSharedCookieHeader(from: applicable, now: now)
     }

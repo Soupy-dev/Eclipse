@@ -387,13 +387,13 @@ enum ReaderExtensionSecurityPolicy {
     static let maximumDOMElementsPerDocument = 131_072
     static let maximumDOMDocumentsPerOperation = 16
     static let maximumDOMHandlesPerOperation = 32_768
-    static let maximumDOMSelectedRows = 4_096
-    static let maximumDOMReturnedBytesPerOperation = 4 * 1_024 * 1_024
+    static let maximumDOMSelectedRows = 8_192
+    static let maximumDOMReturnedBytesPerOperation = 12 * 1_024 * 1_024
     static let maximumFetchesPerOperation = 150
     static let maximumFetchResponseBytesPerOperation = 32 * 1_024 * 1_024
     static let maximumConcurrentFetchesPerOperation = 8
     static let maximumConcurrentRuntimeOperations = 4
-    static let operationTimeout: TimeInterval = 60
+    static let operationTimeout: TimeInterval = 120
     static let maximumPreferenceCount = 200
     static let maximumPreferenceKeyBytes = 256
     static let maximumPreferenceValueBytes = 16 * 1_024
@@ -687,12 +687,21 @@ enum ReaderExtensionSecurityPolicy {
         try validatePublicURL(url, requireHTTPS: true)
     }
 
+    static func carriesNoCredentialQuery(_ url: URL) -> Bool {
+        guard let query = url.query, !query.isEmpty else { return true }
+        guard let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems else {
+            return false
+        }
+        return !items.contains { isCredentialLikeQueryName($0.name) }
+    }
+
     static func validateRepositoryURLSyntax(_ url: URL) throws {
         try validatePublicURLSyntax(url, requireHTTPS: true)
-        guard ["index.json", "novel_index.json"].contains(url.lastPathComponent.lowercased()) else {
+        guard url.lastPathComponent.lowercased().hasSuffix(".json") else {
             throw ReaderExtensionError.invalidRepositoryURL
         }
-        guard url.user == nil, url.password == nil, url.fragment == nil, url.query == nil else {
+        guard url.user == nil, url.password == nil, url.fragment == nil,
+              carriesNoCredentialQuery(url) else {
             throw ReaderExtensionError.invalidRepositoryURL
         }
     }
@@ -704,8 +713,9 @@ enum ReaderExtensionSecurityPolicy {
 
     static func validateScriptURLSyntax(_ url: URL) throws {
         try validatePublicURLSyntax(url, requireHTTPS: true)
-        guard url.pathExtension.lowercased() == "js", url.user == nil, url.password == nil,
-              url.fragment == nil, url.query == nil else {
+        guard ["js", "mjs"].contains(url.pathExtension.lowercased()),
+              url.user == nil, url.password == nil, url.fragment == nil,
+              carriesNoCredentialQuery(url) else {
             throw ReaderExtensionError.insecureURL
         }
     }
@@ -729,8 +739,8 @@ enum ReaderExtensionSecurityPolicy {
         // Keep a deliberately tiny explicit allowlist. 8443 is the ordinary
         // alternate HTTPS port used by some reader login endpoints; arbitrary
         // service, proxy, and administration ports remain blocked.
-        guard (scheme == "https" && [443, 8443].contains(port))
-                || (scheme == "http" && port == 80) else {
+        guard (scheme == "https" && [443, 8443, 8080, 8000, 3000].contains(port))
+                || (scheme == "http" && [80, 8080, 8000, 3000].contains(port)) else {
             throw ReaderExtensionError.insecureURL
         }
         guard url.user == nil, url.password == nil else { throw ReaderExtensionError.insecureURL }
@@ -793,23 +803,110 @@ enum ReaderExtensionSecurityPolicy {
         }
     }
 
-    static func sanitizedHeaders(_ input: [String: String], crossOrigin: Bool) throws -> [String: String] {
-        guard input.count <= maximumHeaderCount else { throw ReaderExtensionError.contentTooLarge }
+    private static let hostSuppliedRequestHeaders: Set<String> = [
+        "user-agent", "accept", "accept-language", "accept-encoding"
+    ]
+
+    private static let hostReplacedRequestHeaders: Set<String> = [
+        "content-length", "host"
+    ]
+
+    static func logOutgoingHeaderBudgetRefusal(count: Int, bytes: Int?) {
+        ReaderLogger.shared.log(
+            "Reader request refused by Eclipse while assembling the outgoing block"
+                + " headers=\(count) bytes=\(bytes.map(String.init) ?? "unmeasured") caps=maximumHeaderCount=\(maximumHeaderCount)"
+                + "/maximumHeaderBytes=\(maximumHeaderBytes); this counts the host's own"
+                + " Host/Accept-Encoding/Referer and the cookie jar, so it can refuse a request"
+                + " whose source-supplied headers were already inside the budget",
+            type: "ReaderExtensionLedger"
+        )
+    }
+
+    static let authoredNavigationRequestHeaders: Set<String> = ["referer", "origin"]
+
+    private static let maximumHeaderValueBytes = 8 * 1_024
+
+    static func sanitizedHeaders(
+        _ input: [String: String],
+        crossOrigin: Bool,
+        allowsAuthoredNavigationHeaders: Bool = false,
+        hostSuppliesOriginReferer: Bool = false,
+        navigationHeadersReportedElsewhere: Bool = false,
+        subject: String = "unattributed"
+    ) throws -> [String: String] {
+        guard input.count <= maximumHeaderCount else {
+            ReaderLogger.shared.log(
+                "Reader request refused by Eclipse headers=\(input.count)"
+                    + " cap=maximumHeaderCount=\(maximumHeaderCount); the whole request is"
+                    + " abandoned here, so a source that looks unreachable after this was stopped"
+                    + " by Eclipse, not by its origin",
+                type: "ReaderExtensionLedger"
+            )
+            throw ReaderExtensionError.contentTooLarge
+        }
         var output: [String: String] = [:]
         var bytes = 0
+        var hostManaged: [String] = []
+        var crossOriginRefused: [String] = []
+        var truncated: [String] = []
         for (rawName, rawValue) in input {
             let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
             let lower = name.lowercased()
-            guard !name.isEmpty, name.range(of: "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$", options: .regularExpression) != nil,
-                  !forbiddenRequestHeaders.contains(lower) else { continue }
+            guard !name.isEmpty, name.range(of: "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$", options: .regularExpression) != nil else {
+                continue
+            }
+            guard !forbiddenRequestHeaders.contains(lower) else {
+                hostManaged.append(lower)
+                continue
+            }
             if crossOrigin {
-                guard crossOriginSafeRequestHeaders.contains(lower),
-                      !isCredentialLikeHeader(name: name, value: rawValue) else { continue }
+                let isAuthoredNavigationHeader = allowsAuthoredNavigationHeaders
+                    && authoredNavigationRequestHeaders.contains(lower)
+                guard crossOriginSafeRequestHeaders.contains(lower) || isAuthoredNavigationHeader,
+                      !isCredentialLikeHeader(name: name, value: rawValue) else {
+                    if hostSuppliesOriginReferer, lower == "referer" {
+                        continue
+                    }
+                    if navigationHeadersReportedElsewhere,
+                       authoredNavigationRequestHeaders.contains(lower) {
+                        continue
+                    }
+                    if !hostSuppliedRequestHeaders.contains(lower) {
+                        crossOriginRefused.append(lower)
+                    }
+                    continue
+                }
             }
             let value = rawValue.replacingOccurrences(of: "[\\r\\n]", with: "", options: .regularExpression)
-            bytes += name.utf8.count + value.utf8.count
-            guard bytes <= maximumHeaderBytes else { throw ReaderExtensionError.contentTooLarge }
-            output[name] = String(value.prefix(8 * 1_024))
+            let bounded = String(value.prefix(maximumHeaderValueBytes))
+            bytes += name.utf8.count + bounded.utf8.count
+            guard bytes <= maximumHeaderBytes else {
+                ReaderLogger.shared.log(
+                    "Reader request refused by Eclipse cap=maximumHeaderBytes=\(maximumHeaderBytes)"
+                        + " at header=\(lower); the whole request is abandoned here, so a source that"
+                        + " looks unreachable after this was stopped by Eclipse, not by its origin",
+                    type: "ReaderExtensionLedger"
+                )
+                throw ReaderExtensionError.contentTooLarge
+            }
+            if bounded.utf8.count < value.utf8.count { truncated.append(lower) }
+            output[name] = bounded
+        }
+        let reportableHostManaged = hostManaged.filter { !hostReplacedRequestHeaders.contains($0) }
+        if !crossOriginRefused.isEmpty || !truncated.isEmpty || !reportableHostManaged.isEmpty {
+            EclipseLedgerOnce.emit(
+                scope: "reader-request-headers",
+                signature: "\(crossOriginRefused.sorted())|\(truncated.sorted())|\(reportableHostManaged.sorted())|\(subject)",
+                announce: { ReaderLogger.shared.log($0, type: "ReaderExtensionLedger") }
+            ) {
+            ReaderLogger.shared.log(
+                "Reader request headers refused by Eclipse crossOriginRefused=[\(crossOriginRefused.sorted().joined(separator: ","))]"
+                    + " truncated=[\(truncated.sorted().joined(separator: ","))]"
+                    + " hostManaged=[\(reportableHostManaged.sorted().joined(separator: ","))];"
+                    + " a 401 or 403 after this is Eclipse's header set, not the source's",
+                type: "ReaderExtensionLedger"
+            )
+            }
         }
         return output
     }
@@ -2207,7 +2304,12 @@ final class ReaderExtensionSecureHTTPClient: ReaderExtensionNetworkClient, @unch
                 request.headers,
                 // Consent-free public requests must never carry provider secrets,
                 // including on an initial host that happens to match baseDomain.
-                crossOrigin: crossOrigin || insecureTransport || request.redirectPolicy == .publicHTTPS
+                crossOrigin: crossOrigin || insecureTransport || request.redirectPolicy == .publicHTTPS,
+                allowsAuthoredNavigationHeaders: !insecureTransport
+                    && request.redirectPolicy != .publicHTTPS,
+                hostSuppliesOriginReferer: request.hostGeneratedOriginReferer != nil
+                    && !insecureTransport,
+                subject: requestHost ?? "unknown-host"
             )
         )
         var method = request.method
@@ -2239,7 +2341,30 @@ final class ReaderExtensionSecureHTTPClient: ReaderExtensionNetworkClient, @unch
                 for: request,
                 targetURL: url
             ) {
+                let authoredReferer = request.headers.first {
+                    $0.key.caseInsensitiveCompare("Referer") == .orderedSame
+                }?.value
+                let replacedAuthored = authoredReferer.map { $0 != originReferer } ?? false
+                for existing in hopHeaders.keys
+                where existing.caseInsensitiveCompare("Referer") == .orderedSame {
+                    hopHeaders.removeValue(forKey: existing)
+                }
                 hopHeaders["Referer"] = originReferer
+                if replacedAuthored {
+                    EclipseLedgerOnce.emit(
+                        scope: "reader-referer-reduced",
+                        signature: originReferer,
+                        announce: { ReaderLogger.shared.log($0, type: "ReaderExtensionLedger") }
+                    ) {
+                        ReaderLogger.shared.log(
+                            "Reader referer reduced by Eclipse to=\(originReferer); the extension"
+                                + " authored a different referer and Eclipse replaced it with the"
+                                + " verified source origin, so a 403 that depends on the original"
+                                + " value is Eclipse's substitution, not the source's request",
+                            type: "ReaderExtensionLedger"
+                        )
+                    }
+                }
             }
             let admitsCookies = ReaderExtensionCookieAdmissionPolicy.allowsCookies(
                 for: url,
@@ -2297,20 +2422,48 @@ final class ReaderExtensionSecureHTTPClient: ReaderExtensionNetworkClient, @unch
                 if crossesOrigin, body != nil, !dropsBody {
                     throw ReaderExtensionError.insecureURL
                 }
+                let carriedNavigationNames = headers.keys
+                    .map { $0.lowercased() }
+                    .filter { $0 == "referer" || $0 == "origin" }
+                    .sorted()
+                let hostWillResupplyReferer = request.hostGeneratedOriginReferer != nil
+                    && destination.scheme?.lowercased() == "https"
                 headers = try ReaderExtensionSecurityPolicy.sanitizedHeaders(
                     headers,
-                    crossOrigin: crossesOrigin || destination.scheme?.lowercased() != "https"
+                    crossOrigin: crossesOrigin || destination.scheme?.lowercased() != "https",
+                    hostSuppliesOriginReferer: hostWillResupplyReferer,
+                    navigationHeadersReportedElsewhere: crossesOrigin,
+                    subject: ReaderExtensionSecurityPolicy.canonicalHost(of: destination) ?? "unknown-host"
                 )
                 if crossesOrigin {
+                    let removed = carriedNavigationNames.filter {
+                        !(hostWillResupplyReferer && $0 == "referer")
+                    }
                     headers = headers.filter {
                         let lower = $0.key.lowercased()
                         return lower != "referer" && lower != "origin"
+                    }
+                    if !removed.isEmpty {
+                        ReaderLogger.shared.log(
+                            "Reader redirect stripped names=[\(removed.joined(separator: ","))] from=\(Self.origin(of: url)) to=\(Self.origin(of: destination)); Eclipse removes these on a cross-origin hop the way a browser does, so a page that needs them will fail here by Eclipse's rule, not the source's",
+                            type: "ReaderExtensionLedger"
+                        )
                     }
                 }
                 if dropsBody {
                     method = .get
                     body = nil
+                    let removed = headers.keys
+                        .map { $0.lowercased() }
+                        .filter { Self.entityHeaderNames.contains($0) }
+                        .sorted()
                     headers = headers.filter { !Self.entityHeaderNames.contains($0.key.lowercased()) }
+                    if !removed.isEmpty {
+                        ReaderLogger.shared.log(
+                            "Reader redirect dropped entity headers names=[\(removed.joined(separator: ","))] status=\(result.statusCode); the request became a GET, so these describe a body that no longer exists",
+                            type: "ReaderExtensionLedger"
+                        )
+                    }
                 }
                 url = destination
                 continue
@@ -2422,21 +2575,40 @@ final class ReaderExtensionSecureHTTPClient: ReaderExtensionNetworkClient, @unch
         approvedDomains: Set<String>,
         existing: [HTTPCookie]
     ) -> [HTTPCookie]? {
-        let incoming = setCookieHeaders.flatMap {
+        let parsed = setCookieHeaders.flatMap {
             HTTPCookie.cookies(withResponseHeaderFields: ["Set-Cookie": $0], for: responseURL)
-        }.filter { cookie in
+        }
+        var unapprovedDomains: Set<String> = []
+        let incoming = parsed.filter { cookie in
             guard let host = ReaderExtensionSecurityPolicy.canonicalHost(of: responseURL),
                   let domain = ReaderExtensionSecurityPolicy.canonicalHost(cookie.domain) else { return false }
             let approved = ReaderExtensionSecurityPolicy.canonicalHosts(approvedDomains)
-            return ReaderExtensionSecurityPolicy.host(host, isEqualToOrSubdomainOf: domain)
+            let accepted = ReaderExtensionSecurityPolicy.host(host, isEqualToOrSubdomainOf: domain)
                 && approved.contains(where: {
                     ReaderExtensionSecurityPolicy.host(domain, isEqualToOrSubdomainOf: $0)
                 })
+            if !accepted { unapprovedDomains.insert(domain) }
+            return accepted
+        }
+        if !unapprovedDomains.isEmpty {
+            ReaderLogger.shared.log(
+                "Reader response cookies refused by Eclipse offered=\(parsed.count) accepted=\(incoming.count) unapprovedDomains=[\(unapprovedDomains.sorted().joined(separator: ","))]; a sign-in that redirects to a host the user has not approved loses its session here, so a later 401 or 403 is an Eclipse approval scope, not the source",
+                type: "ReaderExtensionLedger"
+            )
         }
         guard !incoming.isEmpty else { return nil }
         let identities = Set(incoming.compactMap(
             ReaderExtensionKeychainStore.validatedCookieIdentity
         ))
+        let unstorable = incoming.filter {
+            ReaderExtensionKeychainStore.validatedCookieIdentity($0) == nil
+        }.count
+        if unstorable > 0 {
+            ReaderLogger.shared.log(
+                "Reader response cookies dropped by Eclipse's identity bound accepted=\(incoming.count) unstorable=\(unstorable); those cookies never reach a later request, so this is an Eclipse limit, not the source",
+                type: "ReaderExtensionLedger"
+            )
+        }
         guard !identities.isEmpty else { return nil }
         return existing.filter {
             guard let identity = ReaderExtensionKeychainStore.validatedCookieIdentity($0) else {
@@ -2965,10 +3137,27 @@ private final class ReaderExtensionPinnedHTTPConnection: @unchecked Sendable {
             let name = String(line[..<colon]).trimmingCharacters(in: .whitespaces)
             let value = String(line[line.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
             guard !name.isEmpty,
-                  name.range(of: "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$", options: .regularExpression) != nil,
-                  value.utf8.count <= 16 * 1_024 else { throw ReaderExtensionError.insecureURL }
+                  name.range(of: "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$", options: .regularExpression) != nil else {
+                throw ReaderExtensionError.insecureURL
+            }
+            guard value.utf8.count <= 16 * 1_024 else {
+                ReaderLogger.shared.log(
+                    "Reader response refused by Eclipse header=\(name.lowercased()) bytes=\(value.utf8.count)"
+                        + " cap=16384; the whole response is discarded, so a source that looks"
+                        + " unreachable after this was stopped by Eclipse, not by its origin",
+                    type: "ReaderExtensionLedger"
+                )
+                throw ReaderExtensionError.contentTooLarge
+            }
             headerCount += 1
             guard headerCount <= ReaderExtensionSecurityPolicy.maximumHeaderCount else {
+                ReaderLogger.shared.log(
+                    "Reader response refused by Eclipse headers=\(headerCount)"
+                        + " cap=maximumHeaderCount=\(ReaderExtensionSecurityPolicy.maximumHeaderCount);"
+                        + " the whole response is discarded, so a source that looks unreachable"
+                        + " after this was stopped by Eclipse, not by its origin",
+                    type: "ReaderExtensionLedger"
+                )
                 throw ReaderExtensionError.contentTooLarge
             }
             headers[name, default: []].append(value)
@@ -3079,6 +3268,10 @@ private final class ReaderExtensionPinnedHTTPConnection: @unchecked Sendable {
         fields["Accept-Encoding"] = "gzip, deflate"
         if let body { fields["Content-Length"] = String(body.count) }
         guard fields.count <= ReaderExtensionSecurityPolicy.maximumHeaderCount else {
+            ReaderExtensionSecurityPolicy.logOutgoingHeaderBudgetRefusal(
+                count: fields.count,
+                bytes: nil
+            )
             throw ReaderExtensionError.contentTooLarge
         }
         var head = "\(upperMethod) \(target) HTTP/1.1\r\n"
@@ -3090,6 +3283,10 @@ private final class ReaderExtensionPinnedHTTPConnection: @unchecked Sendable {
         }
         head += "\r\n"
         guard head.utf8.count <= ReaderExtensionSecurityPolicy.maximumHeaderBytes else {
+            ReaderExtensionSecurityPolicy.logOutgoingHeaderBudgetRefusal(
+                count: fields.count,
+                bytes: head.utf8.count
+            )
             throw ReaderExtensionError.contentTooLarge
         }
         var result = Data(head.utf8)

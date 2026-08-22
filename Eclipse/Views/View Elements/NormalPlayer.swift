@@ -1426,6 +1426,8 @@ final class NormalPlayer: UIViewController, AVPlayerViewControllerDelegate, AVPi
             subtitles: request.subtitles,
             subtitleNames: request.subtitleNames,
             subtitleHeadersByURL: request.subtitleHeadersByURL,
+            headersDroppedBySanitizer: ServiceStreamHeaderSanitizerLedger.shared
+                .droppedKeys(for: request.url.absoluteString),
             retryCount: 0
         )
     }

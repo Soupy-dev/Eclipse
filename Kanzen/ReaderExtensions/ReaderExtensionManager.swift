@@ -1360,11 +1360,27 @@ final class ReaderExtensionManager: ObservableObject {
         }
         var candidateSources = installedSources
         candidateSources[index].enabled = enabled
+        if enabled,
+           let existing = candidateSources[index].lastError,
+           Self.selfDisableReasons.contains(existing) {
+            candidateSources[index].lastError = nil
+        }
         try ReaderExtensionDurableMutation.commit(
             candidate: candidateSources,
             persist: { try persist(installedSources: $0) },
             publish: { installedSources = $0 }
         )
+        var clearedSessionQuarantine = false
+        if enabled, let digest = candidateSources[index].activeContentDigest {
+            clearedSessionQuarantine = ReaderExtensionJavaScriptRuntime
+                .clearSessionQuarantineForUserRetry(sourceID: sourceID, digest: digest)
+        }
+        if clearedSessionQuarantine {
+            ReaderLogger.shared.log(
+                "Reader source re-enabled by the user; its session-only runtime quarantine was released so the retry can actually run",
+                type: "ReaderExtensionLedger"
+            )
+        }
         if !enabled { removePageRequests(for: sourceID) }
     }
 
@@ -2005,8 +2021,14 @@ final class ReaderExtensionManager: ObservableObject {
                 runtimeIdentity: ReaderExtensionLanguageCompatibilityPolicy.runtimeIdentity(
                     for: source
                 ),
-                onRuntimeIntegrityFailure: { [weak self] sourceID, digest in
-                    Task { @MainActor in self?.rollbackAfterRuntimeIntegrityFailure(sourceID: sourceID, failedDigest: digest) }
+                onRuntimeIntegrityFailure: { [weak self] sourceID, digest, attribution in
+                    Task { @MainActor in
+                        self?.rollbackAfterRuntimeIntegrityFailure(
+                            sourceID: sourceID,
+                            failedDigest: digest,
+                            attribution: attribution
+                        )
+                    }
                 }
             )
         } else {
@@ -2440,13 +2462,51 @@ final class ReaderExtensionManager: ObservableObject {
         return result
     }
 
-    private func rollbackAfterRuntimeIntegrityFailure(sourceID: ReaderExtensionSourceID, failedDigest: String?) {
+    private static var selfDisableReasons: Set<String> {
+        Set(
+            [ReaderExtensionRuntimeFailureAttribution.sourceAuthored, .timedOut]
+                .map(disableReason(for:))
+        )
+    }
+
+    private static func rollbackReason(
+        for attribution: ReaderExtensionRuntimeFailureAttribution
+    ) -> String {
+        switch attribution {
+        case .sourceAuthored:
+            return "The latest source version was rolled back because its own code failed to start."
+        case .timedOut:
+            return "The latest source version was rolled back because it did not finish in time."
+        case .hostIntegrity:
+            return "The latest source version was rolled back after a runtime integrity failure."
+        }
+    }
+
+    private static func disableReason(
+        for attribution: ReaderExtensionRuntimeFailureAttribution
+    ) -> String {
+        switch attribution {
+        case .sourceAuthored:
+            return "Turned off because this source's own code failed to start. Turn it back on to try again."
+        case .timedOut:
+            return "Turned off because this source did not finish in time. Turn it back on to try again."
+        case .hostIntegrity:
+            return "The source was disabled after a runtime integrity failure."
+        }
+    }
+
+    private func rollbackAfterRuntimeIntegrityFailure(
+        sourceID: ReaderExtensionSourceID,
+        failedDigest: String?,
+        attribution: ReaderExtensionRuntimeFailureAttribution
+    ) {
         guard let index = installedSources.firstIndex(where: { $0.id == sourceID }),
               installedSources[index].activeContentDigest == failedDigest else { return }
         var candidateSources = installedSources
         let restoredDomains: Set<String>?
         if let restored = installedSources[index].restoringLastKnownGood(afterFailureOf: failedDigest) {
             candidateSources[index] = restored
+            candidateSources[index].lastError = Self.rollbackReason(for: attribution)
             restoredDomains = restored.declaredDomains
         } else {
             // A digest without its exact historical metadata is not a safe
@@ -2455,7 +2515,7 @@ final class ReaderExtensionManager: ObservableObject {
             candidateSources[index].enabled = false
             candidateSources[index].rollbackContentDigest = nil
             candidateSources[index].rollbackSourceSnapshot = nil
-            candidateSources[index].lastError = "The source was disabled after a runtime integrity failure."
+            candidateSources[index].lastError = Self.disableReason(for: attribution)
             restoredDomains = nil
         }
         let approvalStores: [ReaderExtensionKeychainStore]

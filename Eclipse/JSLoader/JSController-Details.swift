@@ -82,9 +82,16 @@ extension JSController {
 
     static func boundedEpisodeLinks(
         from data: Data
-    ) throws -> (episodes: [EpisodeLink], rawCount: Int) {
+    ) throws -> (
+        episodes: [EpisodeLink],
+        rawCount: Int,
+        eclipseRejectedRowCount: Int,
+        unreadableRowCount: Int
+    ) {
         let array = try boundedServiceArray(from: data)
         var episodes: [EpisodeLink] = []
+        var eclipseRejectedRowCount = 0
+        var unreadableRowCount = 0
         episodes.reserveCapacity(min(array.count, maximumEpisodeLinks))
         for (index, item) in array.enumerated() {
             guard episodes.count < maximumEpisodeLinks else { break }
@@ -93,32 +100,91 @@ extension JSController {
             // from the list, from Continue Watching and from the download refresh path.
             guard let href = item["href"] as? String,
                   !href.isEmpty,
-                  href.utf8.count <= 16 * 1_024,
                   !href.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+                unreadableRowCount += 1
+                continue
+            }
+            guard href.utf8.count <= maximumEpisodeHrefBytes else {
+                eclipseRejectedRowCount += 1
                 continue
             }
             guard let number = coercedEpisodeNumber(item["number"], fallback: index + 1) else {
+                eclipseRejectedRowCount += 1
                 continue
             }
             episodes.append(EpisodeLink(number: number, title: "", href: href, duration: nil))
         }
-        return (episodes, array.count)
+        return (episodes, array.count, eclipseRejectedRowCount, unreadableRowCount)
+    }
+
+
+    static func payloadDiscardAttribution(_ error: Error) -> String {
+        if let envelope = error as? SkyStreamJSONEnvelopeError {
+            switch envelope {
+            case .excessiveDepth, .excessiveTokens, .excessiveContainerValues, .excessiveTokenBytes:
+                return "the payload failed Eclipse's own bounds, so this empty result is Eclipse's doing"
+            case .empty, .malformedStructure:
+                return "the source returned an empty or malformed payload, so this is the source's data, not an Eclipse cap"
+            }
+        }
+        return "the source's payload could not be read as a list of objects, so this is the source's data, not an Eclipse cap"
+    }
+
+    static func logEpisodeRowReduction(
+        _ bounded: (
+            episodes: [EpisodeLink],
+            rawCount: Int,
+            eclipseRejectedRowCount: Int,
+            unreadableRowCount: Int
+        )
+    ) {
+        let untried = bounded.rawCount
+            - bounded.eclipseRejectedRowCount
+            - bounded.unreadableRowCount
+            - bounded.episodes.count
+        if untried + bounded.eclipseRejectedRowCount > 0 {
+            Logger.shared.log(
+                "Service episode rows cut by Eclipse raw=\(bounded.rawCount) kept=\(bounded.episodes.count) untried=\(untried) rejected=\(bounded.eclipseRejectedRowCount) caps=maximumEpisodeLinks=\(maximumEpisodeLinks)/href=\(maximumEpisodeHrefBytes)B/episodeNumber=\(maximumEpisodeNumberMagnitude); those rows were lost to Eclipse's own bounds, not withheld by the source",
+                type: "Plugin"
+            )
+        }
+        if bounded.unreadableRowCount > 0 {
+            Logger.shared.log(
+                "Service episode rows unreadable raw=\(bounded.rawCount) kept=\(bounded.episodes.count) unreadable=\(bounded.unreadableRowCount); those rows carried no usable href, so this is the source's data, not an Eclipse cap",
+                type: "Plugin"
+            )
+        }
     }
 
     private static func boundedServiceArray(from data: Data) throws -> [[String: Any]] {
-        guard !data.isEmpty, data.count <= maximumDetailResultBytes else {
+        guard !data.isEmpty else {
             throw ServiceDetailResultBoundaryError.invalidPayload
         }
-        try SkyStreamJSONEnvelopeValidator.validate(
-            data,
-            limits: .init(
-                maximumDepth: 12,
-                maximumTokens: 100_000,
-                maximumValuesPerContainer: 8_192,
-                maximumStringBytes: 128 * 1_024,
-                maximumScalarTokenBytes: 128
+        guard data.count <= maximumDetailResultBytes else {
+            Logger.shared.log(
+                "Service detail result refused by Eclipse bytes=\(data.count) cap=maximumDetailResultBytes=\(maximumDetailResultBytes); the whole detail payload is discarded, so an empty episode list here is an Eclipse limit, not a dead source",
+                type: "Plugin"
             )
-        )
+            throw ServiceDetailResultBoundaryError.invalidPayload
+        }
+        do {
+            try SkyStreamJSONEnvelopeValidator.validate(
+                data,
+                limits: .init(
+                    maximumDepth: 12,
+                    maximumTokens: 400_000,
+                    maximumValuesPerContainer: 20_000,
+                    maximumStringBytes: 1_024 * 1_024,
+                    maximumScalarTokenBytes: 128
+                )
+            )
+        } catch {
+            Logger.shared.log(
+                "Service detail envelope refused by Eclipse bytes=\(data.count) caps=depth12/tokens400000/values20000/string1MiB; the whole detail payload is discarded, so an empty episode list here is an Eclipse limit, not a dead source",
+                type: "Plugin"
+            )
+            throw error
+        }
         guard let array = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
             throw ServiceDetailResultBoundaryError.invalidPayload
         }
@@ -143,17 +209,24 @@ extension JSController {
         return ""
     }
 
+    static let maximumEpisodeHrefBytes = 16 * 1_024
+    static let maximumEpisodeNumberMagnitude = 100_000
+
     private static func coercedEpisodeNumber(_ value: Any?, fallback: Int) -> Int? {
         if let bounded = boundedEpisodeNumber(value) { return bounded }
         if let number = value as? NSNumber {
             let rounded = number.doubleValue.rounded()
-            guard rounded.isFinite, rounded >= -100_000, rounded <= 100_000 else { return nil }
+            guard rounded.isFinite,
+                  rounded >= Double(-maximumEpisodeNumberMagnitude),
+                  rounded <= Double(maximumEpisodeNumberMagnitude) else { return nil }
             return Int(rounded)
         }
         if let text = value as? String,
            let parsed = Double(text.trimmingCharacters(in: .whitespacesAndNewlines)) {
             let rounded = parsed.rounded()
-            guard rounded.isFinite, rounded >= -100_000, rounded <= 100_000 else { return nil }
+            guard rounded.isFinite,
+                  rounded >= Double(-maximumEpisodeNumberMagnitude),
+                  rounded <= Double(maximumEpisodeNumberMagnitude) else { return nil }
             return Int(rounded)
         }
         return fallback
@@ -251,7 +324,27 @@ extension JSController {
                 guard request.isPending else { return }
                 var items: [MediaItem] = []
                 if let data = Self.boundedUTF8Data(from: result, maximumBytes: Self.maximumDetailResultBytes) {
-                    items = (try? Self.boundedMediaItems(from: data).items) ?? []
+                    do {
+                        let bounded = try Self.boundedMediaItems(from: data)
+                        items = bounded.items
+                        if bounded.rawCount > bounded.items.count {
+                            Logger.shared.log(
+                                "Service detail items reduced by Eclipse raw=\(bounded.rawCount) kept=\(bounded.items.count); the missing rows were dropped by Eclipse, not withheld by the source",
+                                type: "Plugin"
+                            )
+                        }
+                    } catch {
+                        items = []
+                        Logger.shared.log(
+                            "Service detail items discarded; \(Self.payloadDiscardAttribution(error))",
+                            type: "Plugin"
+                        )
+                    }
+                } else {
+                    Logger.shared.log(
+                        "Service detail payload refused by Eclipse before parsing cap=maximumDetailResultBytes=\(Self.maximumDetailResultBytes); the result was oversized or not a string, so an empty detail here is not a dead source",
+                        type: "Plugin"
+                    )
                 }
                 deliverIfComplete(accumulator.finishDetails(items), reason: "resolved")
             }
@@ -260,7 +353,22 @@ extension JSController {
                 guard request.isPending else { return }
                 var episodes: [EpisodeLink] = []
                 if let data = Self.boundedUTF8Data(from: result, maximumBytes: Self.maximumDetailResultBytes) {
-                    episodes = (try? Self.boundedEpisodeLinks(from: data).episodes) ?? []
+                    do {
+                        let bounded = try Self.boundedEpisodeLinks(from: data)
+                        episodes = bounded.episodes
+                        Self.logEpisodeRowReduction(bounded)
+                    } catch {
+                        episodes = []
+                        Logger.shared.log(
+                            "Service episode rows discarded; \(Self.payloadDiscardAttribution(error))",
+                            type: "Plugin"
+                        )
+                    }
+                } else {
+                    Logger.shared.log(
+                        "Service episode payload refused by Eclipse before parsing cap=maximumDetailResultBytes=\(Self.maximumDetailResultBytes); the result was oversized or not a string, so an empty episode list here is not a dead source",
+                        type: "Plugin"
+                    )
                 }
                 deliverIfComplete(accumulator.finishEpisodes(episodes), reason: "resolved")
             }
@@ -360,9 +468,23 @@ extension JSController {
                 guard request.isPending else { return }
                 let episodes: [EpisodeLink]
                 if let data = Self.boundedUTF8Data(from: result, maximumBytes: Self.maximumDetailResultBytes) {
-                    episodes = (try? Self.boundedEpisodeLinks(from: data).episodes) ?? []
+                    do {
+                        let bounded = try Self.boundedEpisodeLinks(from: data)
+                        episodes = bounded.episodes
+                        Self.logEpisodeRowReduction(bounded)
+                    } catch {
+                        episodes = []
+                        Logger.shared.log(
+                            "Service episode rows discarded; \(Self.payloadDiscardAttribution(error))",
+                            type: "Plugin"
+                        )
+                    }
                 } else {
                     episodes = []
+                    Logger.shared.log(
+                        "Service episode payload refused by Eclipse before parsing cap=maximumDetailResultBytes=\(Self.maximumDetailResultBytes); the result was oversized or not a string, so an empty episode list here is not a dead source",
+                        type: "Plugin"
+                    )
                 }
                 Logger.shared.log("Service episodes completed service=\(module.metadata.sourceName) episodeCount=\(episodes.count) target=\(ServiceSandboxState.redactedURL(url.absoluteString))", type: "Service")
                 finish(episodes, "resolved")

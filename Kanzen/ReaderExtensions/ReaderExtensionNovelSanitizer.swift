@@ -9,7 +9,7 @@ enum ReaderExtensionHTMLPreflight {
     // A real 1,190-chapter WeebCentral list page carries 58,318 attributes
     // and 1.77 MiB of tag markup. The per-tag caps above stay tight; the
     // per-document aggregates must clear mainstream catalog pages.
-    private static let maximumAttributesPerDocument = 262_144
+    private static let maximumAttributesPerDocument = 524_288
     private static let maximumTagBytes = 64 * 1_024
     private static let maximumAggregateTagBytes = 8 * 1_024 * 1_024
 

@@ -9397,6 +9397,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
             subtitles: resolution.subtitles,
             subtitleNames: resolution.subtitleNames,
             subtitleHeadersByURL: resolution.subtitleHeadersByURL,
+            headersDroppedBySanitizer: resolution.sourceKind == .service
+                ? ServiceStreamHeaderSanitizerLedger.shared
+                    .droppedKeys(for: resolution.streamURL.absoluteString)
+                : nil,
             retryCount: 0,
             titleCandidates: resolution.titleCandidates,
             serviceContentHref: resolution.serviceContentHref,
@@ -10842,20 +10846,20 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 for: originalURL,
                 headers: proxyHeaders
             ) else {
-                Logger.shared.log("[PlayerVC.PlaybackStart] MPV warmup proxy URL creation failed; using direct HTTP target={\(playbackURLSummary(originalURL))} headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "MPV")
+                Logger.shared.log("[PlayerVC.PlaybackStart] MPV warmup proxy URL creation failed; using direct HTTP target={\(playbackURLSummary(originalURL))} headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "PlaybackTrace")
                 return (originalURL, proxyHeaders.isEmpty ? headers : proxyHeaders)
             }
 
             registerMPVHeaderProxyURL(proxyURL)
             let reason = forceHeaderProxyForStartup ? "coordinator-engine-fallback" : "warmup"
-            Logger.shared.log("[PlayerVC.PlaybackStart] MPV header proxy activated reason=\(reason) target={\(playbackURLSummary(originalURL))} headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "MPV")
+            Logger.shared.log("[PlayerVC.PlaybackStart] MPV header proxy activated reason=\(reason) target={\(playbackURLSummary(originalURL))} headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "PlaybackTrace")
             return (proxyURL, nil)
         }
 
         let proxySkipReason = isMetalMPVRenderer
             ? (ExperimentalMPVPreloadManager.shared.playbackProxySkipReason(for: originalURL) ?? "not-requested")
             : "renderer-not-moltenvk-active"
-        Logger.shared.log("[PlayerVC.PlaybackStart] MPV direct HTTP playback target={\(playbackURLSummary(originalURL))} warmupProxySkipped=\(proxySkipReason) renderer=\(mpvRendererName) headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "MPV")
+        Logger.shared.log("[PlayerVC.PlaybackStart] MPV direct HTTP playback target={\(playbackURLSummary(originalURL))} warmupProxySkipped=\(proxySkipReason) renderer=\(mpvRendererName) headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "PlaybackTrace")
         return (originalURL, proxyHeaders.isEmpty ? headers : proxyHeaders)
     }
 
@@ -11086,6 +11090,10 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 subtitles: resolution.subtitles,
                 subtitleNames: resolution.subtitleNames,
                 subtitleHeadersByURL: resolution.subtitleHeadersByURL,
+                headersDroppedBySanitizer: resolution.sourceKind == .service
+                    ? ServiceStreamHeaderSanitizerLedger.shared
+                        .droppedKeys(for: resolution.streamURL.absoluteString)
+                    : nil,
                 retryCount: context.retryCount,
                 titleCandidates: resolution.titleCandidates,
                 serviceContentHref: resolution.serviceContentHref,
@@ -11301,6 +11309,8 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         let dispatchedHeaderNames = (initialHeaders ?? [:]).keys.sorted().joined(separator: ",")
         let headersDiffer = providerHeaderNames != dispatchedHeaderNames
 
+        let sanitizerDropped = context.headersDroppedBySanitizer ?? []
+
         let blame: String
         let detail: String
         if defect != nil {
@@ -11310,6 +11320,15 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         } else if dispatchedDiffers || headersDiffer {
             blame = "eclipse-suspect"
             detail = "Eclipse did not dispatch what the source supplied; compare delivered and dispatched below"
+        } else if !sanitizerDropped.isEmpty {
+            blame = "eclipse-suspect"
+            detail = "Eclipse's stream header sanitizer refused [\(sanitizerDropped.joined(separator: ","))]"
+                + " before dispatch, so the host never saw the header set the source supplied"
+        } else if context.sourceKind == .service, context.headersDroppedBySanitizer == nil {
+            blame = "unattributed"
+            detail = "the URL was dispatched unchanged, but Eclipse has no record of whether its"
+                + " stream header sanitizer refused anything for this stream, so this failure"
+                + " cannot be attributed either way"
         } else {
             blame = "provider"
             detail = "Eclipse dispatched the source's URL and headers verbatim, and the host rejected them"
@@ -11322,6 +11341,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
                 + " dispatchedURL=\(dispatchedURL.map { SkyStreamRemoteURLPolicy.defectEvidence(of: $0) } ?? "none")"
                 + " urlUnchanged=\(!dispatchedDiffers)"
                 + " providerHeaders=[\(providerHeaderNames)] dispatchedHeaders=[\(dispatchedHeaderNames)]"
+                + " sanitizerDropped=\(context.headersDroppedBySanitizer.map { "[\($0.joined(separator: ","))]" } ?? "unmeasured")"
                 + " detail=\(detail) message=\(message)",
             type: "Error"
         )
@@ -11385,7 +11405,7 @@ final class PlayerViewController: UIViewController, UIGestureRecognizerDelegate 
         registerMPVHeaderProxyURL(proxyURL)
         mpvTransportBridgeFallbackTried = true
         isMPVTransportBridgePlaybackActive = true
-        Logger.shared.log("[PlayerVC.PlaybackStart] MPV transport bridge activated after TLS failure target={\(playbackURLSummary(originalURL))} headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "MPV")
+        Logger.shared.log("[PlayerVC.PlaybackStart] MPV transport bridge activated after TLS failure target={\(playbackURLSummary(originalURL))} headerKeys=[\(proxyHeaders.keys.sorted().joined(separator: ","))]", type: "PlaybackTrace")
         load(url: proxyURL, preset: preset, headers: nil)
         return true
     }

@@ -706,10 +706,9 @@ final class MediaStateMergeTests: XCTestCase {
         )
     }
 
-    func testPendingIsolationCancellationRequiresActiveLeaseAuthority() {
+    func testPendingIsolationCancellationReturnsToVerifiedOwnerRegardlessOfLease() {
         XCTAssertTrue(
             MediaStatePendingIsolationCancellationPolicy.canReturnToOwnerWithoutCleanup(
-                isPlaybackLeaseActive: true,
                 archiveOwnerRecordName: "account-a",
                 currentAccountRecordName: "account-a",
                 isAccountNeutralLocalStateActive: false,
@@ -719,8 +718,16 @@ final class MediaStateMergeTests: XCTestCase {
         )
         XCTAssertFalse(
             MediaStatePendingIsolationCancellationPolicy.canReturnToOwnerWithoutCleanup(
-                isPlaybackLeaseActive: false,
                 archiveOwnerRecordName: "account-a",
+                currentAccountRecordName: "account-a",
+                isAccountNeutralLocalStateActive: false,
+                hasPendingProfiles: true,
+                pendingTargetMatchesCurrentAccount: true
+            )
+        )
+        XCTAssertFalse(
+            MediaStatePendingIsolationCancellationPolicy.canReturnToOwnerWithoutCleanup(
+                archiveOwnerRecordName: "account-b",
                 currentAccountRecordName: "account-a",
                 isAccountNeutralLocalStateActive: false,
                 hasPendingProfiles: true,
@@ -729,11 +736,28 @@ final class MediaStateMergeTests: XCTestCase {
         )
         XCTAssertFalse(
             MediaStatePendingIsolationCancellationPolicy.canReturnToOwnerWithoutCleanup(
-                isPlaybackLeaseActive: true,
-                archiveOwnerRecordName: "account-a",
-                currentAccountRecordName: "account-b",
+                archiveOwnerRecordName: nil,
+                currentAccountRecordName: "account-a",
                 isAccountNeutralLocalStateActive: false,
                 hasPendingProfiles: true,
+                pendingTargetMatchesCurrentAccount: false
+            )
+        )
+        XCTAssertFalse(
+            MediaStatePendingIsolationCancellationPolicy.canReturnToOwnerWithoutCleanup(
+                archiveOwnerRecordName: "account-a",
+                currentAccountRecordName: "account-a",
+                isAccountNeutralLocalStateActive: true,
+                hasPendingProfiles: true,
+                pendingTargetMatchesCurrentAccount: false
+            )
+        )
+        XCTAssertFalse(
+            MediaStatePendingIsolationCancellationPolicy.canReturnToOwnerWithoutCleanup(
+                archiveOwnerRecordName: "account-a",
+                currentAccountRecordName: "account-a",
+                isAccountNeutralLocalStateActive: false,
+                hasPendingProfiles: false,
                 pendingTargetMatchesCurrentAccount: false
             )
         )

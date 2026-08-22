@@ -122,6 +122,7 @@ struct PlaybackLaunchContext {
     let subtitles: [String]
     let subtitleNames: [String]?
     let subtitleHeadersByURL: [String: [String: String]]?
+    let headersDroppedBySanitizer: [String]?
     let retryCount: Int
     let titleCandidates: [String]
 
@@ -147,6 +148,7 @@ struct PlaybackLaunchContext {
         subtitles: [String],
         subtitleNames: [String]?,
         subtitleHeadersByURL: [String: [String: String]]? = nil,
+        headersDroppedBySanitizer: [String]? = nil,
         retryCount: Int,
         titleCandidates: [String] = [],
         serviceContentHref: String? = nil,
@@ -165,6 +167,7 @@ struct PlaybackLaunchContext {
         self.subtitles = subtitles
         self.subtitleNames = subtitleNames
         self.subtitleHeadersByURL = subtitleHeadersByURL
+        self.headersDroppedBySanitizer = headersDroppedBySanitizer
         self.retryCount = retryCount
         self.titleCandidates = titleCandidates
         self.serviceContentHref = serviceContentHref

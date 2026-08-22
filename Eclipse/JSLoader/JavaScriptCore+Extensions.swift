@@ -276,17 +276,28 @@ struct ServiceJavaScriptValueReader {
                             }
                             const keys = [];
                             let visited = 0;
+                            let omittedByScanCap = 0;
+                            let omittedByKeyLength = 0;
                             for (const key in value) {
                                 visited += 1;
-                                if (visited > maximumCount) return tolerant ? keys : null;
+                                if (visited > maximumCount) {
+                                    if (!tolerant) return null;
+                                    omittedByScanCap += 1;
+                                    continue;
+                                }
                                 if (apply(hasOwn, value, [key])) {
                                     if (key.length > maximumKeyLength) {
-                                        if (tolerant) continue;
+                                        if (tolerant) {
+                                            omittedByKeyLength += 1;
+                                            continue;
+                                        }
                                         return null;
                                     }
                                     keys.push(key);
                                 }
                             }
+                            keys.omittedByScanCap = omittedByScanCap;
+                            keys.omittedByKeyLength = omittedByKeyLength;
                             return keys;
                         } catch (_) {
                             return null;
@@ -323,12 +334,32 @@ struct ServiceJavaScriptValueReader {
         self.typeFunction = typeFunction
     }
 
+    struct EnumeratedKeys {
+        let keys: [String]
+        let omittedByScanCap: Int
+        let omittedByKeyLength: Int
+    }
+
     func ownEnumerableKeys(
         of value: JSValue,
         maximumCount: Int,
         maximumKeyBytes: Int,
         tolerant: Bool = false
     ) throws -> [String] {
+        try enumeratedOwnKeys(
+            of: value,
+            maximumCount: maximumCount,
+            maximumKeyBytes: maximumKeyBytes,
+            tolerant: tolerant
+        ).keys
+    }
+
+    func enumeratedOwnKeys(
+        of value: JSValue,
+        maximumCount: Int,
+        maximumKeyBytes: Int,
+        tolerant: Bool = false
+    ) throws -> EnumeratedKeys {
         guard maximumCount >= 0,
               maximumKeyBytes > 0,
               value.isObject,
@@ -346,9 +377,19 @@ struct ServiceJavaScriptValueReader {
         guard length.isFinite,
               length >= 0,
               length.rounded(.towardZero) == length,
+              length < Double(Int.max),
               length <= Double(maximumCount) else {
             throw ServiceJavaScriptValueBoundaryError.tooManyEntries
         }
+
+        func omittedCount(_ name: String) -> Int {
+            guard let raw = rawKeys.forProperty(name), raw.isNumber else { return 0 }
+            let count = raw.toDouble()
+            guard count.isFinite, count >= 0, count < Double(Int.max) else { return 0 }
+            return Int(count)
+        }
+        let omittedByScanCap = omittedCount("omittedByScanCap")
+        let omittedByKeyLength = omittedCount("omittedByKeyLength")
 
         var result: [String] = []
         result.reserveCapacity(Int(length))
@@ -366,7 +407,11 @@ struct ServiceJavaScriptValueReader {
             }
             result.append(key)
         }
-        return result
+        return EnumeratedKeys(
+            keys: result,
+            omittedByScanCap: omittedByScanCap,
+            omittedByKeyLength: omittedByKeyLength
+        )
     }
 
     func property(_ key: Any, of value: JSValue) throws -> JSValue {
@@ -391,6 +436,7 @@ struct ServiceJavaScriptValueReader {
         guard length.isFinite,
               length >= 0,
               length.rounded(.towardZero) == length,
+              length < Double(Int.max),
               length <= Double(maximumCount) else {
             throw ServiceJavaScriptValueBoundaryError.tooManyEntries
         }
@@ -419,7 +465,7 @@ enum ServiceJavaScriptNetworkInputBoundary {
     static let maximumHeaderCount = 64
     static let maximumHeaderScanCount = 256
     static let maximumHeaderNameBytes = 128
-    static let maximumHeaderValueBytes = 8 * 1_024
+    static let maximumHeaderValueBytes = 16 * 1_024
     static let maximumHeaderBytes = 32 * 1_024
     static let maximumRequestBodyBytes = 2 * 1_024 * 1_024
 
@@ -508,46 +554,88 @@ enum ServiceJavaScriptNetworkInputBoundary {
         reader: ServiceJavaScriptValueReader
     ) throws -> [String: String] {
         guard let value, !value.isUndefined, !value.isNull else { return [:] }
-        let keys = try reader.ownEnumerableKeys(
+        let enumerated = try reader.enumeratedOwnKeys(
             of: value,
             maximumCount: maximumHeaderScanCount,
             maximumKeyBytes: maximumHeaderNameBytes,
             tolerant: true
         )
+        let keys = enumerated.keys
+        if enumerated.omittedByScanCap > 0 || enumerated.omittedByKeyLength > 0 {
+            Logger.shared.log(
+                "Service fetch header names omitted by Eclipse scanCap=\(enumerated.omittedByScanCap)"
+                    + " nameTooLong=\(enumerated.omittedByKeyLength)"
+                    + " caps=maximumHeaderScanCount=\(maximumHeaderScanCount)/maximumHeaderNameBytes=\(maximumHeaderNameBytes)B;"
+                    + " those headers are absent from the request, and this is Eclipse's limit,"
+                    + " not the source's header set",
+                type: "Plugin"
+            )
+        }
         var headers: [String: String] = [:]
         headers.reserveCapacity(keys.count)
         var totalBytes = 0
+        var dropped: [String] = []
+        var unreadable: [String] = []
 
         for key in keys {
-            guard headers.count < maximumHeaderCount else { break }
-            guard let rawValue = try? reader.property(key, of: value) else { continue }
+            guard headers.count < maximumHeaderCount else {
+                dropped.append(key)
+                continue
+            }
+            guard let rawValue = try? reader.property(key, of: value) else {
+                unreadable.append(key)
+                continue
+            }
             if rawValue.isNull || rawValue.isUndefined { continue }
 
             let stringValue: String
-            if rawValue.isString,
-               let bounded = ServiceJavaScriptValueReader.boundedString(
-                from: rawValue,
-                maximumBytes: maximumHeaderValueBytes
-               ) {
+            if rawValue.isString {
+                guard let bounded = ServiceJavaScriptValueReader.boundedString(
+                    from: rawValue,
+                    maximumBytes: maximumHeaderValueBytes
+                ) else {
+                    dropped.append(key)
+                    continue
+                }
                 stringValue = bounded
             } else if rawValue.isNumber {
                 let number = rawValue.toDouble()
-                guard number.isFinite,
-                      let converted = rawValue.toNumber()?.stringValue,
-                      converted.utf8.count <= maximumHeaderValueBytes else {
+                guard number.isFinite, let converted = rawValue.toNumber()?.stringValue else {
+                    unreadable.append(key)
                     continue
                 }
                 stringValue = converted
             } else if rawValue.isBoolean {
-                stringValue = rawValue.toBool() ? "true" : "false"
+                stringValue = rawValue.toBool() ? "1" : "0"
             } else {
+                unreadable.append(key)
                 continue
             }
 
             let entryBytes = key.utf8.count + stringValue.utf8.count + 4
-            guard entryBytes <= maximumHeaderBytes - totalBytes else { continue }
+            guard entryBytes <= maximumHeaderBytes - totalBytes else {
+                dropped.append(key)
+                continue
+            }
             totalBytes += entryBytes
             headers[key] = stringValue
+        }
+        if !dropped.isEmpty {
+            Logger.shared.log(
+                "Service fetch headers dropped by Eclipse droppedKeys=[\(dropped.sorted().joined(separator: ","))]"
+                    + " kept=\(headers.count) caps=\(maximumHeaderCount)/"
+                    + "\(maximumHeaderValueBytes)B/\(maximumHeaderBytes)B;"
+                    + " a 401 or 403 after this is Eclipse's header set, not the source's",
+                type: "Plugin"
+            )
+        }
+        if !unreadable.isEmpty {
+            Logger.shared.log(
+                "Service fetch headers skipped as unreadable keys=[\(unreadable.sorted().joined(separator: ","))]"
+                    + " kept=\(headers.count); those values were not a string, number or boolean,"
+                    + " so this is the source's header set, not an Eclipse cap",
+                type: "Plugin"
+            )
         }
         return headers
     }

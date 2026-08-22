@@ -860,6 +860,7 @@ private struct AppModeWaveRevealModifier: AnimatableModifier {
                         .frame(width: diameter, height: diameter)
                         .position(resolvedOrigin)
                 }
+                .ignoresSafeArea()
             }
         }
     }
@@ -904,6 +905,7 @@ private struct AppModeWaveCutoutModifier: AnimatableModifier {
                     }
                     .compositingGroup()
                 }
+                .ignoresSafeArea()
             }
         }
     }

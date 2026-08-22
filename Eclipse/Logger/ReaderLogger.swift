@@ -25,7 +25,7 @@ class ReaderLogger: @unchecked Sendable {
     private let maxLogFileBytes = 1_000_000
     private let noisyTypes: Set<String> = [
         "ReaderDebug", "AidokuRuntime", "AidokuNetwork", "ReaderNetwork", "ReaderProgress", "ReaderPerf",
-        "ReaderExtensionRuntime", "ReaderExtensionNetwork", "ReaderExtensionCompatibility"
+        "ReaderExtensionRuntime", "ReaderExtensionCompatibility"
     ]
     private let noisyWindowDuration: TimeInterval = 20
     private let noisyTypeBurstLimit = 30
@@ -398,8 +398,31 @@ class ReaderLogger: @unchecked Sendable {
         let currentSize = (attrs?[.size] as? NSNumber)?.intValue ?? 0
         if currentSize + incomingBytes <= maxLogFileBytes { return }
 
-        try? FileManager.default.removeItem(at: logFileURL)
-        ensureLogFileExists()
+        guard let existing = try? String(contentsOf: logFileURL, encoding: .utf8) else {
+            try? FileManager.default.removeItem(at: logFileURL)
+            ensureLogFileExists()
+            return
+        }
+        let target = max(0, maxLogFileBytes / 2 - incomingBytes)
+        var retainedLines: [Substring] = []
+        var retainedBytes = 0
+        for line in existing.split(separator: "\n", omittingEmptySubsequences: false).reversed() {
+            let lineBytes = line.utf8.count + 1
+            if retainedBytes + lineBytes > target { break }
+            retainedBytes += lineBytes
+            retainedLines.append(line)
+        }
+        guard !retainedLines.isEmpty else {
+            try? FileManager.default.removeItem(at: logFileURL)
+            ensureLogFileExists()
+            return
+        }
+        var retained = retainedLines.reversed().joined(separator: "\n")
+        if !retained.hasSuffix("\n") { retained.append("\n") }
+        if (try? retained.write(to: logFileURL, atomically: true, encoding: .utf8)) == nil {
+            try? FileManager.default.removeItem(at: logFileURL)
+            ensureLogFileExists()
+        }
     }
 
     private func loadLogsFromDisk() -> [LogEntry] {

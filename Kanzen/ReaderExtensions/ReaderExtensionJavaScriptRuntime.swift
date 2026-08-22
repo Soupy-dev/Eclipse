@@ -18,6 +18,12 @@ struct ReaderExtensionJavaScriptValidation: Hashable, Sendable {
     var secretPreferenceKeys: Set<String>
 }
 
+enum ReaderExtensionRuntimeFailureAttribution: Equatable {
+    case sourceAuthored
+    case timedOut
+    case hostIntegrity
+}
+
 final class JavaScriptReaderProvider: ReaderSourceProvider {
     let source: ReaderExtensionInstalledSource
     private let scriptData: Data
@@ -26,7 +32,9 @@ final class JavaScriptReaderProvider: ReaderSourceProvider {
     private let consentScopeID: String
     private let preferenceStore: ReaderExtensionPreferenceStore
     private let runtimeIdentity: ReaderExtensionLanguageCompatibilityPolicy.RuntimeIdentity
-    private let onRuntimeIntegrityFailure: ((ReaderExtensionSourceID, String?) -> Void)?
+    private let onRuntimeIntegrityFailure: (
+        (ReaderExtensionSourceID, String?, ReaderExtensionRuntimeFailureAttribution) -> Void
+    )?
 
     init(
         source: ReaderExtensionInstalledSource,
@@ -36,7 +44,9 @@ final class JavaScriptReaderProvider: ReaderSourceProvider {
         consentScopeID: String,
         preferenceStore: ReaderExtensionPreferenceStore,
         runtimeIdentity: ReaderExtensionLanguageCompatibilityPolicy.RuntimeIdentity? = nil,
-        onRuntimeIntegrityFailure: ((ReaderExtensionSourceID, String?) -> Void)? = nil
+        onRuntimeIntegrityFailure: (
+            (ReaderExtensionSourceID, String?, ReaderExtensionRuntimeFailureAttribution) -> Void
+        )? = nil
     ) throws {
         guard source.implementation == .javascript else { throw ReaderExtensionError.unsupportedSource }
         _ = try ReaderExtensionSecurityPolicy.validateScript(scriptData)
@@ -185,13 +195,26 @@ final class JavaScriptReaderProvider: ReaderSourceProvider {
                 runtimeIdentity: runtimeIdentity
             )
         } catch ReaderExtensionError.runtimeTimedOut {
-            onRuntimeIntegrityFailure?(source.id, source.activeContentDigest)
+            onRuntimeIntegrityFailure?(source.id, source.activeContentDigest, .timedOut)
             throw ReaderExtensionError.runtimeTimedOut
         } catch ReaderExtensionError.sourceQuarantined {
-            onRuntimeIntegrityFailure?(source.id, source.activeContentDigest)
+            onRuntimeIntegrityFailure?(
+                source.id,
+                source.activeContentDigest,
+                ReaderExtensionJavaScriptRuntime.sessionOnlyQuarantineAttribution(
+                    sourceID: source.id,
+                    digest: source.activeContentDigest
+                ) ?? .hostIntegrity
+            )
             throw ReaderExtensionError.sourceQuarantined
         } catch ReaderExtensionError.runtimeIntegrityFailed(let phase) {
-            onRuntimeIntegrityFailure?(source.id, source.activeContentDigest)
+            onRuntimeIntegrityFailure?(
+                source.id,
+                source.activeContentDigest,
+                ReaderExtensionJavaScriptRuntime.phaseIsSourceAuthored(phase)
+                    ? .sourceAuthored
+                    : .hostIntegrity
+            )
             throw ReaderExtensionError.runtimeIntegrityFailed(phase)
         }
     }
@@ -860,6 +883,8 @@ enum ReaderExtensionJavaScriptRuntime {
     )
     private static let quarantineLock = NSLock()
     private static var quarantinedDigests = Set<QuarantineKey>()
+    private static var sessionOnlyQuarantines = Set<QuarantineKey>()
+    private static var sessionOnlyQuarantineAttribution: [QuarantineKey: ReaderExtensionRuntimeFailureAttribution] = [:]
     private static var quarantineDurabilityUnavailable = false
     private static let nonDrainingLock = NSLock()
     private static var nonDrainingOperationCount = 0
@@ -993,7 +1018,7 @@ enum ReaderExtensionJavaScriptRuntime {
                         // for this session only — the durable marker deletes
                         // the executable and bricks the install until the
                         // user reinstalls.
-                        quarantineForSessionOnly(quarantineKey)
+                        quarantineForSessionOnly(quarantineKey, attribution: .timedOut)
                     }
                 }
                 queue.async {
@@ -1016,12 +1041,16 @@ enum ReaderExtensionJavaScriptRuntime {
                         )
                         completion.succeed(result)
                     } catch {
-                        if case ReaderExtensionError.runtimeIntegrityFailed = error {
+                        if case ReaderExtensionError.runtimeIntegrityFailed(let phase) = error {
                             // Publish quarantine before resuming the awaiting
                             // provider. Its rollback callback is intentionally
                             // asynchronous and persistence may fail, but this
                             // digest must become unusable immediately.
-                            quarantine(quarantineKey)
+                            if Self.phaseIsSourceAuthored(phase) {
+                                quarantineForSessionOnly(quarantineKey, attribution: .sourceAuthored)
+                            } else {
+                                quarantine(quarantineKey)
+                            }
                         }
                         completion.fail(error)
                     }
@@ -1034,7 +1063,11 @@ enum ReaderExtensionJavaScriptRuntime {
         let key = QuarantineKey(sourceID: sourceID, digest: digest.lowercased())
         do {
             try ReaderExtensionPersistence.clearRuntimeQuarantine(sourceID: sourceID, digest: digest)
-            _ = quarantineLock.withReaderRuntimeLock { quarantinedDigests.remove(key) }
+            quarantineLock.withReaderRuntimeLock {
+                quarantinedDigests.remove(key)
+                sessionOnlyQuarantines.remove(key)
+                sessionOnlyQuarantineAttribution.removeValue(forKey: key)
+            }
         } catch {
             // A stale marker is intentionally fail-closed. It can be retried
             // by a later verified replacement or removal.
@@ -1066,7 +1099,11 @@ enum ReaderExtensionJavaScriptRuntime {
                     digest: entry.digest
                 )
                 let key = QuarantineKey(sourceID: entry.sourceID, digest: entry.digest)
-                _ = quarantineLock.withReaderRuntimeLock { quarantinedDigests.remove(key) }
+                quarantineLock.withReaderRuntimeLock {
+                    quarantinedDigests.remove(key)
+                    sessionOnlyQuarantines.remove(key)
+                    sessionOnlyQuarantineAttribution.removeValue(forKey: key)
+                }
             } catch {
                 // Clear each exact unreferenced pair independently. A failed
                 // durable removal leaves its process marker in place, and a
@@ -1075,12 +1112,57 @@ enum ReaderExtensionJavaScriptRuntime {
         }
     }
 
-    private static func quarantineForSessionOnly(_ key: QuarantineKey) {
-        _ = quarantineLock.withReaderRuntimeLock { quarantinedDigests.insert(key) }
+    static func phaseIsSourceAuthored(_ phase: String) -> Bool {
+        [
+            "source initialization",
+            "source bootstrap",
+            "preference schema initialization"
+        ].contains(phase)
+    }
+
+    private static func quarantineForSessionOnly(
+        _ key: QuarantineKey,
+        attribution: ReaderExtensionRuntimeFailureAttribution
+    ) {
+        quarantineLock.withReaderRuntimeLock {
+            guard !quarantinedDigests.contains(key) || sessionOnlyQuarantines.contains(key) else {
+                return
+            }
+            quarantinedDigests.insert(key)
+            if sessionOnlyQuarantines.insert(key).inserted {
+                sessionOnlyQuarantineAttribution[key] = attribution
+            }
+        }
+    }
+
+    static func sessionOnlyQuarantineAttribution(
+        sourceID: ReaderExtensionSourceID,
+        digest: String?
+    ) -> ReaderExtensionRuntimeFailureAttribution? {
+        guard let digest else { return nil }
+        let key = QuarantineKey(sourceID: sourceID, digest: digest.lowercased())
+        return quarantineLock.withReaderRuntimeLock { sessionOnlyQuarantineAttribution[key] }
+    }
+
+    static func clearSessionQuarantineForUserRetry(
+        sourceID: ReaderExtensionSourceID,
+        digest: String
+    ) -> Bool {
+        let key = QuarantineKey(sourceID: sourceID, digest: digest.lowercased())
+        return quarantineLock.withReaderRuntimeLock {
+            guard sessionOnlyQuarantines.remove(key) != nil else { return false }
+            sessionOnlyQuarantineAttribution.removeValue(forKey: key)
+            quarantinedDigests.remove(key)
+            return true
+        }
     }
 
     private static func quarantine(_ key: QuarantineKey) {
-        _ = quarantineLock.withReaderRuntimeLock { quarantinedDigests.insert(key) }
+        quarantineLock.withReaderRuntimeLock {
+            quarantinedDigests.insert(key)
+            sessionOnlyQuarantines.remove(key)
+            sessionOnlyQuarantineAttribution.removeValue(forKey: key)
+        }
         // This checkpoint is deliberately independent of installed-source
         // metadata. A failed rollback transaction therefore cannot make the
         // bad source+digest pair executable after relaunch.
@@ -1116,8 +1198,15 @@ enum ReaderExtensionJavaScriptRuntime {
     ) {
         let key = QuarantineKey(sourceID: sourceID, digest: digest.lowercased())
         quarantineLock.withReaderRuntimeLock {
-            if quarantined { quarantinedDigests.insert(key) }
-            else { quarantinedDigests.remove(key) }
+            if quarantined {
+                quarantinedDigests.insert(key)
+                sessionOnlyQuarantines.remove(key)
+                sessionOnlyQuarantineAttribution.removeValue(forKey: key)
+            } else {
+                quarantinedDigests.remove(key)
+                sessionOnlyQuarantines.remove(key)
+                sessionOnlyQuarantineAttribution.removeValue(forKey: key)
+            }
         }
         if !quarantined {
             try? ReaderExtensionPersistence.clearRuntimeQuarantine(
@@ -1310,7 +1399,19 @@ enum ReaderExtensionJavaScriptRuntime {
                     maximumTotalTokens: ReaderExtensionSecurityPolicy.maximumHeaderCount * 2 + 4,
                     maximumStringBytes: ReaderExtensionSecurityPolicy.maximumHeaderBytes
                 ))
-                let headers = (try? JSONSerialization.jsonObject(with: headerData) as? [String: String]) ?? [:]
+                let coerced = Self.coercedHeaderStrings(from: headerData)
+                if coerced.decodeFailed {
+                    ReaderLogger.shared.log(
+                        "Reader extension request headers unreadable source=\(source.id.rawValue.prefix(12)) bytes=\(headerData.count); every header was dropped by Eclipse, so a 401 or 403 after this is Eclipse's request, not the source's",
+                        type: ReaderExtensionDiagnostics.networkType
+                    )
+                } else if !coerced.droppedKeys.isEmpty {
+                    ReaderLogger.shared.log(
+                        "Reader extension request headers partially dropped source=\(source.id.rawValue.prefix(12)) droppedKeys=[\(coerced.droppedKeys.joined(separator: ","))]; Eclipse could not represent those values as header strings",
+                        type: ReaderExtensionDiagnostics.networkType
+                    )
+                }
+                let headers = coerced.headers
                 let body = requestBody(rawBody, headers: headers)
                 let request = ReaderExtensionNetworkRequest(
                     method: ReaderExtensionNetworkRequest.Method(rawValue: method.uppercased()) ?? .get,
@@ -1470,6 +1571,34 @@ enum ReaderExtensionJavaScriptRuntime {
         }
         guard semaphore.wait(timeout: .now() + 35) == .success else { throw ReaderExtensionError.runtimeTimedOut }
         return try box.result.get()
+    }
+
+    private struct CoercedRequestHeaders {
+        let headers: [String: String]
+        let droppedKeys: [String]
+        let decodeFailed: Bool
+    }
+
+    private static func coercedHeaderStrings(from data: Data) -> CoercedRequestHeaders {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return CoercedRequestHeaders(headers: [:], droppedKeys: [], decodeFailed: true)
+        }
+        var headers: [String: String] = [:]
+        var dropped: [String] = []
+        for (key, value) in object {
+            if let text = value as? String {
+                headers[key] = text
+            } else if let number = value as? NSNumber {
+                if CFGetTypeID(number as CFTypeRef) == CFBooleanGetTypeID() {
+                    headers[key] = number.boolValue ? "true" : "false"
+                } else {
+                    headers[key] = number.stringValue
+                }
+            } else {
+                dropped.append(key)
+            }
+        }
+        return CoercedRequestHeaders(headers: headers, droppedKeys: dropped.sorted(), decodeFailed: false)
     }
 
     private static func requestBody(_ raw: String, headers: [String: String]) -> Data? {
@@ -1910,7 +2039,7 @@ final class ReaderExtensionRuntimeTimerHost {
 
 final class ReaderExtensionDOMBridge {
     private static let maximumBridgeCallsPerOperation = 65_536
-    private static let maximumBridgeWorkUnitsPerOperation = 262_144
+    private static let maximumBridgeWorkUnitsPerOperation = 524_288
     private let baseURL: URL
     private var elements: [Int: Element] = [:]
     private var subtreeElementCountByHandle: [Int: Int] = [:]
@@ -1920,14 +2049,48 @@ final class ReaderExtensionDOMBridge {
     private var returnedBytes = 0
     private var bridgeCalls = 0
     private var bridgeWorkUnits = 0
+    private var reportedRefusals: Set<String> = []
 
     init(baseURL: URL) { self.baseURL = baseURL }
 
+    private static let truncatingRefusalTokens: Set<String> = [
+        "select-row-cap", "children-row-cap", "output-truncated"
+    ]
+
+    private func recordRefusal(_ token: String, _ detail: String) {
+        guard reportedRefusals.insert(token).inserted else { return }
+        let observed = Self.truncatingRefusalTokens.contains(token)
+            ? "the extension observes a shortened result rather than an error, so a page or chapter that is missing its tail after this is an Eclipse limit, not a source change"
+            : "the extension observes this as an empty selection, so a missing row or chapter after this is an Eclipse limit, not a source change"
+        ReaderLogger.shared.log(
+            "Reader DOM bridge refused token=\(token) \(detail); \(observed)",
+            type: "ReaderExtensionLedger"
+        )
+    }
+
     func parse(_ html: String) -> Int {
         let byteCount = html.utf8.count
-        guard retainedDocumentCount < ReaderExtensionSecurityPolicy.maximumDOMDocumentsPerOperation,
-              byteCount <= ReaderExtensionSecurityPolicy.maximumDOMBytes - parsedInputBytes,
-              admitWork(1 + byteCount / 1_024) else { return 0 }
+        guard retainedDocumentCount < ReaderExtensionSecurityPolicy.maximumDOMDocumentsPerOperation else {
+            recordRefusal(
+                "parse-document-cap",
+                "documents=\(retainedDocumentCount) cap=maximumDOMDocumentsPerOperation=\(ReaderExtensionSecurityPolicy.maximumDOMDocumentsPerOperation)"
+            )
+            return 0
+        }
+        guard byteCount <= ReaderExtensionSecurityPolicy.maximumDOMBytes - parsedInputBytes else {
+            recordRefusal(
+                "parse-byte-cap",
+                "bytes=\(byteCount) alreadyParsed=\(parsedInputBytes) cap=maximumDOMBytes=\(ReaderExtensionSecurityPolicy.maximumDOMBytes)"
+            )
+            return 0
+        }
+        guard admitWork(1 + byteCount / 1_024) else {
+            recordRefusal(
+                "parse-work-budget",
+                "bytes=\(byteCount) cap=maximumBridgeWorkUnitsPerOperation=\(Self.maximumBridgeWorkUnitsPerOperation)"
+            )
+            return 0
+        }
         // Count every admitted parse attempt. A malicious source cannot submit
         // many malformed documents just below the individual limit and make
         // SwiftSoup repeatedly allocate them outside the operation budget.
@@ -1936,10 +2099,22 @@ final class ReaderExtensionDOMBridge {
             html,
             maximumBytes: ReaderExtensionSecurityPolicy.maximumDOMBytes,
             maximumNodeTokens: ReaderExtensionSecurityPolicy.maximumDOMElementsPerDocument
-        )) != nil else { return 0 }
-        guard let document = try? SwiftSoup.parse(html, baseURL.absoluteString) else { return 0 }
+        )) != nil else {
+            recordRefusal("parse-preflight", "bytes=\(byteCount)")
+            return 0
+        }
+        guard let document = try? SwiftSoup.parse(html, baseURL.absoluteString) else {
+            recordRefusal("parse-html-unreadable", "bytes=\(byteCount)")
+            return 0
+        }
         guard let elementCount = try? document.getAllElements().size(),
-              elementCount <= ReaderExtensionSecurityPolicy.maximumDOMElementsPerDocument else { return 0 }
+              elementCount <= ReaderExtensionSecurityPolicy.maximumDOMElementsPerDocument else {
+            recordRefusal(
+                "parse-element-cap",
+                "cap=maximumDOMElementsPerDocument=\(ReaderExtensionSecurityPolicy.maximumDOMElementsPerDocument)"
+            )
+            return 0
+        }
         // The audited DOM contract exposes the whole Document, not only body.
         // Several official extensions select <head> metadata and <title>.
         let handle = store(document)
@@ -1951,11 +2126,27 @@ final class ReaderExtensionDOMBridge {
     }
 
     func select(_ handle: Int, selector: String) -> [Int] {
-        guard ReaderExtensionDOMSelectorPreflight.permits(selector),
-              let root = elements[handle],
-              admitTraversal(of: root, handle: handle),
-              let selected = try? root.select(selector).array() else { return [] }
-        return selected.filter { $0 !== root }.prefix(ReaderExtensionSecurityPolicy.maximumDOMSelectedRows).compactMap {
+        guard ReaderExtensionDOMSelectorPreflight.permits(selector) else {
+            recordRefusal("select-selector-preflight", "selectorBytes=\(selector.utf8.count)")
+            return []
+        }
+        guard let root = elements[handle] else { return [] }
+        guard admitTraversal(of: root, handle: handle) else {
+            recordRefusal(
+                "select-work-budget",
+                "cap=maximumBridgeWorkUnitsPerOperation=\(Self.maximumBridgeWorkUnitsPerOperation)"
+            )
+            return []
+        }
+        guard let selected = try? root.select(selector).array() else { return [] }
+        let matched = selected.filter { $0 !== root }
+        if matched.count > ReaderExtensionSecurityPolicy.maximumDOMSelectedRows {
+            recordRefusal(
+                "select-row-cap",
+                "matched=\(matched.count) cap=maximumDOMSelectedRows=\(ReaderExtensionSecurityPolicy.maximumDOMSelectedRows)"
+            )
+        }
+        return matched.prefix(ReaderExtensionSecurityPolicy.maximumDOMSelectedRows).compactMap {
             let handle = store($0)
             return handle == 0 ? nil : handle
         }
@@ -1965,9 +2156,21 @@ final class ReaderExtensionDOMBridge {
         // Check the aggregate output budget before asking SwiftSoup to traverse
         // and serialize a retained document. boundedOutput remains the exact
         // byte authority after serialization.
-        guard returnedBytes < ReaderExtensionSecurityPolicy.maximumDOMReturnedBytesPerOperation,
-              let element = elements[handle],
-              admitTraversal(of: element, handle: handle) else { return "" }
+        guard returnedBytes < ReaderExtensionSecurityPolicy.maximumDOMReturnedBytesPerOperation else {
+            recordRefusal(
+                "string-output-budget",
+                "returned=\(returnedBytes) cap=maximumDOMReturnedBytesPerOperation=\(ReaderExtensionSecurityPolicy.maximumDOMReturnedBytesPerOperation)"
+            )
+            return ""
+        }
+        guard let element = elements[handle] else { return "" }
+        guard admitTraversal(of: element, handle: handle) else {
+            recordRefusal(
+                "string-work-budget",
+                "cap=maximumBridgeWorkUnitsPerOperation=\(Self.maximumBridgeWorkUnitsPerOperation)"
+            )
+            return ""
+        }
         let value: String
         switch property {
         case "text": value = (try? element.text()) ?? ""
@@ -1976,14 +2179,22 @@ final class ReaderExtensionDOMBridge {
         case "className": value = (try? element.className()) ?? ""
         default: value = ""
         }
-        return boundedOutput(value, perCallMaximum: 512 * 1_024)
+        return boundedOutput(value, perCallMaximum: 8 * 1_024 * 1_024)
     }
 
     func attribute(_ handle: Int, name: String) -> String {
-        guard returnedBytes < ReaderExtensionSecurityPolicy.maximumDOMReturnedBytesPerOperation,
-              name.utf8.count <= 128,
-              let element = elements[handle],
-              admitWork(1) else { return "" }
+        guard returnedBytes < ReaderExtensionSecurityPolicy.maximumDOMReturnedBytesPerOperation else {
+            recordRefusal(
+                "attribute-output-budget",
+                "returned=\(returnedBytes) cap=maximumDOMReturnedBytesPerOperation=\(ReaderExtensionSecurityPolicy.maximumDOMReturnedBytesPerOperation)"
+            )
+            return ""
+        }
+        guard name.utf8.count <= 128 else {
+            recordRefusal("attribute-name-cap", "nameBytes=\(name.utf8.count) cap=128")
+            return ""
+        }
+        guard let element = elements[handle], admitWork(1) else { return "" }
         return boundedOutput((try? element.attr(name)) ?? "", perCallMaximum: 64 * 1_024)
     }
 
@@ -2002,16 +2213,29 @@ final class ReaderExtensionDOMBridge {
     }
 
     func children(_ handle: Int) -> [Int] {
-        guard let element = elements[handle],
-              admitWork(max(1, element.children().size())) else { return [] }
-        return element.children().array().prefix(ReaderExtensionSecurityPolicy.maximumDOMSelectedRows).compactMap {
+        guard let element = elements[handle] else { return [] }
+        let childElements = element.children().array()
+        guard admitWork(max(1, childElements.count)) else { return [] }
+        if childElements.count > ReaderExtensionSecurityPolicy.maximumDOMSelectedRows {
+            recordRefusal(
+                "children-row-cap",
+                "matched=\(childElements.count) cap=maximumDOMSelectedRows=\(ReaderExtensionSecurityPolicy.maximumDOMSelectedRows)"
+            )
+        }
+        return childElements.prefix(ReaderExtensionSecurityPolicy.maximumDOMSelectedRows).compactMap {
             let handle = store($0)
             return handle == 0 ? nil : handle
         }
     }
 
     private func store(_ element: Element) -> Int {
-        guard elements.count < ReaderExtensionSecurityPolicy.maximumDOMHandlesPerOperation else { return 0 }
+        guard elements.count < ReaderExtensionSecurityPolicy.maximumDOMHandlesPerOperation else {
+            recordRefusal(
+                "handle-cap",
+                "cap=maximumDOMHandlesPerOperation=\(ReaderExtensionSecurityPolicy.maximumDOMHandlesPerOperation)"
+            )
+            return 0
+        }
         let handle = nextHandle
         nextHandle += 1
         elements[handle] = element
@@ -2052,9 +2276,21 @@ final class ReaderExtensionDOMBridge {
     }
 
     private func admitWork(_ units: Int) -> Bool {
-        guard units > 0,
-              bridgeCalls < Self.maximumBridgeCallsPerOperation,
-              units <= Self.maximumBridgeWorkUnitsPerOperation - bridgeWorkUnits else { return false }
+        guard units > 0 else { return false }
+        guard bridgeCalls < Self.maximumBridgeCallsPerOperation else {
+            recordRefusal(
+                "bridge-call-cap",
+                "calls=\(bridgeCalls) cap=maximumBridgeCallsPerOperation=\(Self.maximumBridgeCallsPerOperation)"
+            )
+            return false
+        }
+        guard units <= Self.maximumBridgeWorkUnitsPerOperation - bridgeWorkUnits else {
+            recordRefusal(
+                "bridge-work-cap",
+                "used=\(bridgeWorkUnits) requested=\(units) cap=maximumBridgeWorkUnitsPerOperation=\(Self.maximumBridgeWorkUnitsPerOperation)"
+            )
+            return false
+        }
         bridgeCalls += 1
         bridgeWorkUnits += units
         return true
@@ -2062,11 +2298,23 @@ final class ReaderExtensionDOMBridge {
 
     private func boundedOutput(_ value: String, perCallMaximum: Int) -> String {
         let remaining = ReaderExtensionSecurityPolicy.maximumDOMReturnedBytesPerOperation - returnedBytes
-        guard remaining > 0 else { return "" }
+        guard remaining > 0 else {
+            recordRefusal(
+                "output-budget-exhausted",
+                "cap=maximumDOMReturnedBytesPerOperation=\(ReaderExtensionSecurityPolicy.maximumDOMReturnedBytesPerOperation)"
+            )
+            return ""
+        }
         let output = ReaderExtensionRuntimeMemoryBounds.utf8Prefix(
             value,
             maximumBytes: min(perCallMaximum, remaining)
         )
+        if output.utf8.count < value.utf8.count {
+            recordRefusal(
+                "output-truncated",
+                "valueBytes=\(value.utf8.count) kept=\(output.utf8.count) perCallCap=\(perCallMaximum) remainingBudget=\(remaining)"
+            )
+        }
         returnedBytes += output.utf8.count
         return output
     }

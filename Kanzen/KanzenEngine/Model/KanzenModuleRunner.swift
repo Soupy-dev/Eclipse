@@ -36,7 +36,7 @@ enum KanzenLegacyJavaScriptError: LocalizedError {
         case .quarantined:
             return "This legacy Reader module was disabled after non-yielding JavaScript. Re-enable it explicitly to retry."
         case .workerBudgetExhausted:
-            return "Legacy Reader JavaScript is unavailable until Eclipse restarts because both worker lanes stopped yielding."
+            return "Legacy Reader JavaScript is unavailable until Eclipse restarts because every worker lane, including its replacements, stopped yielding."
         case .executionTimedOut:
             return "The legacy Reader module stopped yielding and was disabled."
         case .promiseTimedOut:
@@ -488,8 +488,11 @@ final class KanzenLegacyJavaScriptWorkerPool: @unchecked Sendable {
     static let shared = KanzenLegacyJavaScriptWorkerPool(maximumConcurrentWorkers: 2)
 
     private let lock = NSLock()
-    private let lanes: [KanzenLegacyJavaScriptWorkerLane]
+    private var lanes: [KanzenLegacyJavaScriptWorkerLane]
     private var nextLane = 0
+    private var replacementLanesGranted = 0
+    private let maximumReplacementLanes = 2
+    private var replacementBudgetExhaustionLogged = false
 
     init(maximumConcurrentWorkers: Int = 2) {
         // Production and tests both use the same fixed physical-lane budget.
@@ -500,24 +503,49 @@ final class KanzenLegacyJavaScriptWorkerPool: @unchecked Sendable {
 
     func leaseLane() -> KanzenLegacyJavaScriptWorkerLane? {
         lock.lock()
+        defer { lock.unlock() }
         let start = nextLane
-        var result: KanzenLegacyJavaScriptWorkerLane?
         repeat {
             let candidate = lanes[nextLane]
             nextLane = (nextLane + 1) % lanes.count
             if candidate.isAvailable {
-                result = candidate
-                break
+                return candidate
             }
         } while nextLane != start
-        lock.unlock()
-        return result
+
+        guard replacementLanesGranted < maximumReplacementLanes else {
+            if !replacementBudgetExhaustionLogged {
+                replacementBudgetExhaustionLogged = true
+                Logger.shared.log(
+                    "Kanzen legacy JavaScript worker pool exhausted lanes=\(lanes.count) replacements=\(replacementLanesGranted)/\(maximumReplacementLanes); every lane is wedged and the replacement budget is spent, so further work is refused until relaunch",
+                    type: "Plugin"
+                )
+            }
+            return nil
+        }
+        replacementLanesGranted += 1
+        let replacement = KanzenLegacyJavaScriptWorkerLane(index: lanes.count)
+        replacement.installPool(self)
+        lanes.append(replacement)
+        nextLane = 0
+        Logger.shared.log(
+            "Kanzen legacy JavaScript worker lane replaced after a non-yielding module lanes=\(lanes.count) replacements=\(replacementLanesGranted)/\(maximumReplacementLanes); the wedged thread stays abandoned but legacy module execution continues without a relaunch",
+            type: "Plugin"
+        )
+        return replacement
     }
 
-    var physicalLaneCount: Int { lanes.count }
+    var physicalLaneCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return lanes.count
+    }
 
     var availableLaneCount: Int {
-        lanes.reduce(into: 0) { count, lane in
+        lock.lock()
+        let snapshot = lanes
+        lock.unlock()
+        return snapshot.reduce(into: 0) { count, lane in
             if lane.isAvailable { count += 1 }
         }
     }

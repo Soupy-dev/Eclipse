@@ -675,12 +675,13 @@ enum ServiceNetworkFetchInputBoundary {
         guard keys.contains(key) else { return defaultValue }
         let value = try reader.property(key, of: object)
         if value.isUndefined || value.isNull { return defaultValue }
-        guard value.isNumber else {
-            throw ServiceJavaScriptValueBoundaryError.invalidValue
-        }
         let number = value.toDouble()
-        guard number.isFinite else {
-            throw ServiceJavaScriptValueBoundaryError.invalidValue
+        guard number.isFinite, !value.isBoolean, number > 0 else {
+            Logger.shared.log(
+                "Service networkFetch option key=\(key) is not a usable number; Eclipse is using the default of \(defaultValue) instead of refusing the request",
+                type: "Service"
+            )
+            return defaultValue
         }
         let truncated = number.rounded(.towardZero)
         let clamped = min(max(truncated, 1), Double(maximumTimeoutSeconds))
@@ -703,10 +704,25 @@ enum ServiceNetworkFetchInputBoundary {
         guard keys.contains(key) else { return defaultValue }
         let value = try reader.property(key, of: object)
         if value.isUndefined || value.isNull { return defaultValue }
-        guard value.isBoolean else {
-            throw ServiceJavaScriptValueBoundaryError.invalidValue
+        if value.isBoolean { return value.toBool() }
+        if value.isNumber {
+            let number = value.toDouble()
+            return number.isFinite && number != 0
         }
-        return value.toBool()
+        if value.isString,
+           let text = ServiceJavaScriptValueReader.boundedString(from: value, maximumBytes: 64) {
+            switch text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "true", "1", "yes": return true
+            case "false", "0", "no": return false
+            case "": return defaultValue
+            default: break
+            }
+        }
+        Logger.shared.log(
+            "Service networkFetch option key=\(key) is not a usable boolean; Eclipse is using the default of \(defaultValue) instead of refusing the request",
+            type: "Service"
+        )
+        return defaultValue
     }
 
     private static func optionalString(
@@ -737,24 +753,77 @@ enum ServiceNetworkFetchInputBoundary {
         guard keys.contains(key) else { return [] }
         let value = try reader.property(key, of: object)
         if value.isUndefined || value.isNull { return [] }
-        let count = try reader.arrayLength(of: value, maximumCount: maximumSelectorCount)
+        if !value.isArray {
+            if let single = ServiceJavaScriptValueReader.boundedString(
+                from: value,
+                maximumBytes: maximumSelectorBytes
+            ), !single.isEmpty {
+                return [single]
+            }
+            Logger.shared.log(
+                "Service networkFetch option key=\(key) is not a usable list; Eclipse is using an empty list instead of refusing the request",
+                type: "Service"
+            )
+            return []
+        }
+        let count: Int
+        if let exact = try? reader.arrayLength(of: value, maximumCount: maximumSelectorCount) {
+            count = exact
+        } else {
+            Logger.shared.log(
+                "Service networkFetch option key=\(key) exceeded cap=maximumSelectorCount=\(maximumSelectorCount) or was unreadable; Eclipse is using the entries it could read instead of refusing the request",
+                type: "Service"
+            )
+            count = (try? reader.arrayLength(of: value, maximumCount: Int(UInt32.max))).map {
+                min($0, maximumSelectorCount)
+            } ?? 0
+        }
         var strings: [String] = []
         strings.reserveCapacity(count)
         var totalBytes = 0
+        var skipped = 0
+        var droppedByBudget = 0
+        var refusedByBudget = 0
+        var refusedByEntryCap = 0
         for index in 0..<count {
             let item = try reader.property(index, of: value)
             guard let string = ServiceJavaScriptValueReader.boundedString(
                 from: item,
                 maximumBytes: maximumSelectorBytes
             ) else {
-                throw ServiceJavaScriptValueBoundaryError.invalidValue
+                if item.isString {
+                    refusedByEntryCap += 1
+                } else {
+                    skipped += 1
+                }
+                continue
             }
             let byteCount = string.utf8.count
             guard totalBytes <= maximumSelectorTotalBytes - byteCount else {
-                throw ServiceJavaScriptValueBoundaryError.valueTooLarge
+                refusedByBudget += 1
+                droppedByBudget += count - index - 1
+                break
             }
             totalBytes += byteCount
             strings.append(string)
+        }
+        if skipped > 0 {
+            Logger.shared.log(
+                "Service networkFetch option key=\(key) skipped \(skipped) unusable entries; Eclipse is using the rest instead of refusing the request",
+                type: "Service"
+            )
+        }
+        if refusedByEntryCap > 0 {
+            Logger.shared.log(
+                "Service networkFetch option key=\(key) refused \(refusedByEntryCap) entries at cap=maximumSelectorBytes=\(maximumSelectorBytes); those entries were past Eclipse's per-entry limit, not unusable module data",
+                type: "Plugin"
+            )
+        }
+        if refusedByBudget > 0 || droppedByBudget > 0 {
+            Logger.shared.log(
+                "Service networkFetch option key=\(key) stopped at cap=maximumSelectorTotalBytes=\(maximumSelectorTotalBytes) kept=\(strings.count) refused=\(refusedByBudget) untried=\(droppedByBudget); the refused entry crossed Eclipse's budget and the untried ones were never examined",
+                type: "Plugin"
+            )
         }
         return strings
     }
@@ -1264,6 +1333,12 @@ class NetworkFetchSimpleMonitor: NSObject, ObservableObject {
                 to: &self.networkRequests,
                 totalBytes: &self.networkRequestBytes
             ) == .truncated {
+                if !self.requestsTruncated {
+                    Logger.shared.log(
+                        "Service browser simple request ledger stopped recording recorded=\(self.networkRequests.count) caps=maximumRequestCount=\(ServiceBrowserOutputBoundary.maximumRequestCount)/maximumRequestURLBytes=\(ServiceBrowserOutputBoundary.maximumRequestURLBytes)/maximumRequestTotalBytes=\(ServiceBrowserOutputBoundary.maximumRequestTotalBytes); later navigations are absent from the returned list",
+                        type: "Plugin"
+                    )
+                }
                 self.requestsTruncated = true
             }
         }
@@ -1377,6 +1452,7 @@ class NetworkFetchMonitor: NSObject, ObservableObject {
     @Published private(set) var networkRequests: [String] = []
     @Published private(set) var cutoffTriggered = false
     @Published private(set) var cutoffUrl: String? = nil
+    private var inPageRequestsTruncatedLogged = false
     @Published private(set) var htmlContent: String? = nil
     @Published private(set) var htmlCaptured = false
     @Published private(set) var cookiesCaptured = false
@@ -1409,6 +1485,7 @@ class NetworkFetchMonitor: NSObject, ObservableObject {
         networkRequests.removeAll()
         networkRequestBytes = 0
         requestsTruncated = false
+        inPageRequestsTruncatedLogged = false
         cutoffTriggered = false
         cutoffUrl = nil
         htmlContent = nil
@@ -1559,6 +1636,10 @@ class NetworkFetchMonitor: NSObject, ObservableObject {
             in: config
         ), !cancelled else { return false }
 
+        let cutoffNeedle = options?.cutoff.flatMap { $0.isEmpty ? nil : $0.lowercased() }
+        let cutoffNeedlesJS = (try? JSONEncoder().encode(cutoffNeedle.map { [$0] } ?? []))
+            .map { String(decoding: $0, as: UTF8.self) } ?? "[]"
+
         let jsCode = """
         (function() {
             const eclipseNativeLogger = window.webkit.messageHandlers['\(networkLoggerHandlerName)'];
@@ -1569,7 +1650,31 @@ class NetworkFetchMonitor: NSObject, ObservableObject {
             let eclipseReportedRequestCount = 0;
             let eclipseReportedRequestBytes = 0;
             let eclipseReportedRequestsTruncated = false;
+            let eclipseCutoffEscapes = 0;
             const eclipseReportedRequestURLs = new Set();
+            const eclipseCutoffNeedles = \(cutoffNeedlesJS);
+            const eclipseMaximumCutoffEscapes = 32;
+            function eclipseFoldedForCutoff(value) {
+                try {
+                    return value.normalize('NFC').toLowerCase();
+                } catch(e) {
+                    return value.toLowerCase();
+                }
+            }
+            function eclipseMatchesCutoff(value) {
+                if (eclipseCutoffNeedles.length === 0) return false;
+                let folded;
+                try {
+                    folded = eclipseFoldedForCutoff(value);
+                } catch(e) {
+                    return false;
+                }
+                for (let index = 0; index < eclipseCutoffNeedles.length; index++) {
+                    const needle = eclipseFoldedForCutoff(eclipseCutoffNeedles[index]);
+                    if (needle && folded.indexOf(needle) !== -1) return true;
+                }
+                return false;
+            }
             function eclipseMarkRequestsTruncated() {
                 if (eclipseReportedRequestsTruncated) return;
                 eclipseReportedRequestsTruncated = true;
@@ -1611,21 +1716,22 @@ class NetworkFetchMonitor: NSObject, ObservableObject {
                 return [source.slice(0, end), bytes, end < source.length];
             }
             function eclipseReport(type, value) {
-                const bounded = eclipseBoundedUTF8(value, 16384);
+                const bounded = eclipseBoundedUTF8(value, \(ServiceBrowserOutputBoundary.maximumRequestURLBytes));
                 if (!bounded[0]) return;
                 if (eclipseReportedRequestURLs.has(bounded[0])) return;
-                if (eclipseReportedRequestCount >= 1024) {
-                    eclipseMarkRequestsTruncated();
-                    return;
-                }
                 if (bounded[2]) eclipseMarkRequestsTruncated();
-                if (eclipseReportedRequestBytes + bounded[1] > 1048576) {
+                const overCount = eclipseReportedRequestCount >= \(ServiceBrowserOutputBoundary.maximumRequestCount);
+                const overBytes = eclipseReportedRequestBytes + bounded[1] > \(ServiceBrowserOutputBoundary.maximumRequestTotalBytes);
+                if (overCount || overBytes) {
                     eclipseMarkRequestsTruncated();
-                    return;
+                    if (eclipseCutoffEscapes >= eclipseMaximumCutoffEscapes) return;
+                    if (!eclipseMatchesCutoff(bounded[0])) return;
+                    eclipseCutoffEscapes += 1;
+                } else {
+                    eclipseReportedRequestCount += 1;
+                    eclipseReportedRequestBytes += bounded[1];
                 }
                 eclipseReportedRequestURLs.add(bounded[0]);
-                eclipseReportedRequestCount += 1;
-                eclipseReportedRequestBytes += bounded[1];
                 eclipseNativeLogger.postMessage({
                     type: type,
                     url: bounded[0]
@@ -2133,17 +2239,29 @@ class NetworkFetchMonitor: NSObject, ObservableObject {
                 totalBytes: &self.networkRequestBytes
             )
             if disposition == .truncated {
+                if !self.requestsTruncated {
+                    Logger.shared.log(
+                        "Service browser request ledger stopped recording recorded=\(self.networkRequests.count) caps=maximumRequestCount=\(ServiceBrowserOutputBoundary.maximumRequestCount)/maximumRequestURLBytes=\(ServiceBrowserOutputBoundary.maximumRequestURLBytes)/maximumRequestTotalBytes=\(ServiceBrowserOutputBoundary.maximumRequestTotalBytes); later requests are absent from the returned list, though cutoff matching continues",
+                        type: "Plugin"
+                    )
+                }
                 self.requestsTruncated = true
             }
 
-            if disposition == .appended {
-                if let cutoff = self.options?.cutoff, !cutoff.isEmpty {
-                    if urlString.lowercased().contains(cutoff.lowercased()) {
-                        self.cutoffTriggered = true
-                        self.cutoffUrl = urlString
-                        self.stopMonitoring(reason: "cutoff")
-                        return
+            if let cutoff = self.options?.cutoff, !cutoff.isEmpty {
+                if urlString.lowercased().contains(cutoff.lowercased()) {
+                    self.cutoffTriggered = true
+                    if let bounded = ServiceBrowserOutputBoundary.boundedURLString(urlString) {
+                        self.cutoffUrl = bounded
+                    } else {
+                        self.cutoffUrl = nil
+                        Logger.shared.log(
+                            "Service browser cutoff matched a URL over cap=maximumRequestURLBytes=\(ServiceBrowserOutputBoundary.maximumRequestURLBytes); Eclipse reports the match without the URL rather than handing back a stub",
+                            type: "Plugin"
+                        )
                     }
+                    self.stopMonitoring(reason: "cutoff")
+                    return
                 }
             }
         }
@@ -2201,6 +2319,13 @@ extension NetworkFetchMonitor: WKScriptMessageHandler {
                 } else if let type = messageBody["type"] as? String {
                     if type == "requests-truncated" {
                         DispatchQueue.main.async {
+                            if !self.inPageRequestsTruncatedLogged {
+                                self.inPageRequestsTruncatedLogged = true
+                                Logger.shared.log(
+                                    "Service browser in-page request ledger stopped recording caps=maximumRequestCount=\(ServiceBrowserOutputBoundary.maximumRequestCount)/maximumRequestURLBytes=\(ServiceBrowserOutputBoundary.maximumRequestURLBytes)/maximumRequestTotalBytes=\(ServiceBrowserOutputBoundary.maximumRequestTotalBytes); later fetch/XHR URLs are absent from the returned list, though a URL matching the module's cutoff is still reported",
+                                    type: "Plugin"
+                                )
+                            }
                             self.requestsTruncated = true
                         }
                     } else if type == "click-results" {

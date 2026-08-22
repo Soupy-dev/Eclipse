@@ -931,7 +931,7 @@ final class ServiceCompatibilityTests: XCTestCase {
                     if (response && response.error) rejected += 1;
                 }
                 fetchV2Native(oversizedURL, {}, 'GET', null, true, 'utf-8', capture, function () {});
-                fetchV2Native('https://media.example/page', {}, 'M'.repeat(17), null, true, 'utf-8', capture, function () {});
+                fetchV2Native('https://media.example/page', {}, 'M'.repeat(65), null, true, 'utf-8', capture, function () {});
                 fetchV2Native('https://media.example/page', {}, 'GET', null, true, 'e'.repeat(65), capture, function () {});
                 return rejected;
             })()
@@ -1375,7 +1375,14 @@ final class ServiceCompatibilityTests: XCTestCase {
         XCTAssertTrue(replacementResult.isEmpty)
         XCTAssertTrue(store.isQuarantined(replacementHostile))
         XCTAssertFalse(secondLane.isAvailable)
-        XCTAssertNil(pool.leaseLane(), "The two physical lanes are the entire budget")
+        let firstReplacement = try XCTUnwrap(
+            pool.leaseLane(),
+            "a wedged lane is replaced within a bounded budget rather than shrinking the pool until relaunch"
+        )
+        firstReplacement.markPermanentlyUnavailable()
+        let secondReplacement = try XCTUnwrap(pool.leaseLane())
+        secondReplacement.markPermanentlyUnavailable()
+        XCTAssertNil(pool.leaseLane(), "the replacement budget is finite")
 
         let exhaustedController = JSController(
             worker: pool.leaseLane(),
@@ -1416,6 +1423,15 @@ final class ServiceCompatibilityTests: XCTestCase {
         let secondLane = try XCTUnwrap(pool.leaseLane())
         firstLane.markPermanentlyUnavailable()
         secondLane.markPermanentlyUnavailable()
+
+        let firstReplacement = try XCTUnwrap(
+            pool.leaseLane(),
+            "a wedged pool grants a bounded replacement rather than dying until relaunch"
+        )
+        firstReplacement.markPermanentlyUnavailable()
+        let secondReplacement = try XCTUnwrap(pool.leaseLane())
+        secondReplacement.markPermanentlyUnavailable()
+        XCTAssertNil(pool.leaseLane(), "the replacement budget is finite")
 
         let controller = JSController(worker: pool.leaseLane(), quarantineStore: store)
         let service = makeJavaScriptIsolationTestService(

@@ -67,11 +67,11 @@ enum NuvioPluginRuntime {
     }
     private static let timeoutSeconds: TimeInterval = 60
 
-    private static let maxFetchBodyDecodeBytes = 4 * 1024 * 1024
+    private static let maxFetchBodyDecodeBytes = 12 * 1024 * 1024
 
     private static let maxFetchBodyChars = maxFetchBodyDecodeBytes
 
-    private static let maxFetchResponseBytes = 8 * 1024 * 1024
+    private static let maxFetchResponseBytes = 12 * 1024 * 1024
     private static let maxHeaderValueCharacters = 8 * 1024
     private static let maxRequestHeaderCount = 64
     private static let maxRequestHeaderTotalBytes = 32 * 1024
@@ -314,10 +314,12 @@ enum NuvioPluginRuntime {
 
             guard rawJSON.utf8.count <= maximumResultJSONBytes else {
                 Logger.shared.log(
-                    "Nuvio provider=\(scraper.name) returned \(rawJSON.utf8.count) bytes of results, over the \(maximumResultJSONBytes)-byte cap",
+                    "Nuvio provider result refused by Eclipse provider=\(scraper.name) bytes=\(rawJSON.utf8.count) cap=maximumResultJSONBytes=\(maximumResultJSONBytes); the whole result set is discarded, so an empty result here is an Eclipse limit, not a dead provider",
                     type: "Error"
                 )
-                box.fail(NuvioPluginError.invalidResponse)
+                box.fail(NuvioPluginError.runtimeLimitExceeded(
+                    "Eclipse refused this provider's result set because it was larger than Eclipse's own \(maximumResultJSONBytes)-byte limit."
+                ))
                 return
             }
             do {
@@ -781,7 +783,12 @@ enum NuvioPluginRuntime {
                 )
                 continue
             }
-
+            if value.count > maxHeaderValueCharacters {
+                Logger.shared.log(
+                    "Nuvio plugin truncated a request header provider=\(scraperName) name=\(name) chars=\(value.count) charCap=\(maxHeaderValueCharacters); the value is sent altered, so a 401 or 403 after this is Eclipse's header, not the source's",
+                    type: "Plugin"
+                )
+            }
             candidates[name] = String(value.prefix(maxHeaderValueCharacters))
         }
 
@@ -796,29 +803,80 @@ enum NuvioPluginRuntime {
             charactersIn: "!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
         )
 
-        for (name, value) in candidates.sorted(by: { $0.key < $1.key }) {
-            guard accepted.count < maxRequestHeaderCount else { break }
+        let ordered = candidates.sorted(by: { $0.key < $1.key })
+        let nameIsWellFormed: (String) -> Bool = { name in
+            name.utf8.count <= 128 && name.unicodeScalars.allSatisfy {
+                $0.value < 128 && validNameCharacters.contains($0)
+            }
+        }
+        let valueIsWellFormed: (String) -> Bool = { value in
+            value.unicodeScalars.allSatisfy { $0.value == 9 || $0.value >= 32 && $0.value != 127 }
+        }
+        let sacrificeableKeys: (Int) -> [String] = { offset in
+            ordered[offset...]
+                .filter { nameIsWellFormed($0.key) && valueIsWellFormed($0.value) && !managedNames.contains($0.key) }
+                .map { $0.key }
+        }
+
+        var hostManagedNames: [String] = []
+        for (offset, entry) in ordered.enumerated() {
+            let name = entry.key
+            let value = entry.value
+            guard accepted.count < maxRequestHeaderCount else {
+                let sacrificed = sacrificeableKeys(offset)
+                dropped += sacrificed.count
+                Logger.shared.log(
+                    "Nuvio plugin dropped request headers over the count cap provider=\(scraperName) droppedKeys=[\(sacrificed.joined(separator: ","))] cap=maxRequestHeaderCount=\(maxRequestHeaderCount); a 401 or 403 after this is Eclipse's header set, not the source's",
+                    type: "Plugin"
+                )
+                break
+            }
             let nameIsValid = name.unicodeScalars.allSatisfy {
                 $0.value < 128 && validNameCharacters.contains($0)
             }
-            let valueIsValid = value.unicodeScalars.allSatisfy {
-                $0.value == 9 || $0.value >= 32 && $0.value != 127
-            }
-            guard nameIsValid,
-                  valueIsValid,
-                  name.utf8.count <= 128 else {
+            let valueIsValid = valueIsWellFormed(value)
+            guard name.utf8.count <= 128 else {
                 dropped += 1
                 Logger.shared.log(
-                    "Nuvio plugin dropped unsafe request header provider=\(scraperName) name=\(name)",
+                    "Nuvio plugin dropped an over-long request header name provider=\(scraperName) bytes=\(name.utf8.count) cap=128; this is an Eclipse cap",
                     type: "Plugin"
                 )
                 continue
             }
-            guard !managedNames.contains(name) else { continue }
+            guard nameIsValid, valueIsValid else {
+                Logger.shared.log(
+                    "Nuvio plugin dropped unsafe request header provider=\(scraperName) name=\(name); the header is malformed, so this is the provider's data, not an Eclipse cap",
+                    type: "Plugin"
+                )
+                continue
+            }
+            guard !managedNames.contains(name) else {
+                hostManagedNames.append(name)
+                continue
+            }
             let size = name.utf8.count + value.utf8.count + 4
-            guard totalBytes + size <= maxRequestHeaderTotalBytes else { break }
+            guard totalBytes + size <= maxRequestHeaderTotalBytes else {
+                let sacrificed = sacrificeableKeys(offset)
+                dropped += sacrificed.count
+                Logger.shared.log(
+                    "Nuvio plugin dropped request headers over the byte cap provider=\(scraperName) droppedKeys=[\(sacrificed.joined(separator: ","))] usedBytes=\(totalBytes) cap=maxRequestHeaderTotalBytes=\(maxRequestHeaderTotalBytes); a 401 or 403 after this is Eclipse's header set, not the source's",
+                    type: "Plugin"
+                )
+                break
+            }
             totalBytes += size
             accepted[name] = value
+        }
+        if !hostManagedNames.isEmpty {
+            EclipseLedgerOnce.emit(
+                scope: "nuvio-host-managed",
+                signature: "\(scraperName)|\(hostManagedNames.joined(separator: ","))"
+            ) {
+                Logger.shared.log(
+                    "Nuvio plugin removed host-managed request headers provider=\(scraperName) names=[\(hostManagedNames.joined(separator: ","))]; these are set by the transport and are not counted as an Eclipse refusal",
+                    type: "Plugin"
+                )
+            }
         }
         tally?.recordDroppedRequestHeaders(dropped)
         return accepted
@@ -930,7 +988,16 @@ enum NuvioPluginRuntime {
                 headers: headers,
                 subtitles: subtitles
             ))
-            if streams.count == maximumResultRows { break }
+            if streams.count == maximumResultRows {
+                let untried = scannedRows.count - index - 1
+                if untried > 0 {
+                    Logger.shared.log(
+                        "Nuvio provider=\(scraper.name) result rows stopped at \(maximumResultRows) cap=maximumResultRows untried=\(untried); Eclipse never examined those rows, so it cannot say whether they were playable",
+                        type: "Plugin"
+                    )
+                }
+                break
+            }
         }
         return NuvioStreamBatch(
             streams: streams,
@@ -1025,15 +1092,53 @@ enum NuvioPluginRuntime {
             ))
         }
 
-        for key in ["subtitles", "subtitleTracks", "allSubtitles"] where !subtitles.isFull {
+        for key in ["subtitles", "subtitleTracks", "allSubtitles"] {
             guard let value = item[key] else { continue }
+            guard !subtitles.isFull else {
+                subtitles.noteRefusedURLs(refusedSubtitleURLs(value))
+                continue
+            }
             appendSubtitleValue(
                 value,
                 inheritedHeaders: topLevelHeaders,
                 to: &subtitles
             )
         }
+        if subtitles.refusedWhenFull > 0 {
+            Logger.shared.log(
+                "Nuvio subtitle tracks dropped by Eclipse at cap=maximumTracksPerStream=\(NuvioSubtitleBoundary.maximumTracksPerStream) kept=\(subtitles.tracks.count) refused=\(subtitles.refusedWhenFull); a stream offering more tracks than this loses the remainder to Eclipse, not to the provider",
+                type: "Plugin"
+            )
+        }
         return subtitles.tracks.isEmpty ? nil : subtitles.tracks
+    }
+
+    private static func refusedSubtitleURLs(_ value: Any) -> [String] {
+        func url(_ dictionary: [String: Any]) -> String? {
+            guard let subtitle = parseSubtitleObject(dictionary, inheritedHeaders: nil) else {
+                return nil
+            }
+            let normalized = subtitle.url.trimmingCharacters(in: .whitespacesAndNewlines)
+            return normalized.isEmpty ? nil : normalized
+        }
+        if let dictionary = value as? [String: Any] { return [url(dictionary)].compactMap { $0 } }
+        if let dictionaries = value as? [[String: Any]] { return dictionaries.compactMap(url) }
+        if let mixed = value as? [Any], !(mixed is [String]) {
+            return mixed.flatMap { refusedSubtitleURLs($0) }
+        }
+        if let strings = value as? [String] {
+            return strings.compactMap {
+                guard let cleaned = cleanString($0),
+                      NuvioPluginSupport.isDirectHTTPURL(cleaned) else { return nil }
+                return cleaned
+            }
+        }
+        if let text = value as? String,
+           let cleaned = cleanString(text),
+           NuvioPluginSupport.isDirectHTTPURL(cleaned) {
+            return [cleaned]
+        }
+        return []
     }
 
     private static func appendSubtitleValue(
@@ -1041,7 +1146,10 @@ enum NuvioPluginRuntime {
         inheritedHeaders: [String: String]?,
         to subtitles: inout NuvioSubtitleTrackAccumulator
     ) {
-        guard !subtitles.isFull else { return }
+        guard !subtitles.isFull else {
+            subtitles.noteRefusedURLs(refusedSubtitleURLs(value))
+            return
+        }
         if let dictionary = value as? [String: Any],
            let subtitle = parseSubtitleObject(dictionary, inheritedHeaders: inheritedHeaders) {
             subtitles.append(subtitle)
@@ -1049,7 +1157,11 @@ enum NuvioPluginRuntime {
         }
 
         if let dictionaries = value as? [[String: Any]] {
-            for dictionary in dictionaries where !subtitles.isFull {
+            for dictionary in dictionaries {
+                guard !subtitles.isFull else {
+                    subtitles.noteRefusedURLs(refusedSubtitleURLs(dictionary))
+                    continue
+                }
                 if let subtitle = parseSubtitleObject(
                     dictionary,
                     inheritedHeaders: inheritedHeaders
@@ -1066,6 +1178,17 @@ enum NuvioPluginRuntime {
                 inheritedHeaders: inheritedHeaders,
                 to: &subtitles
             )
+            return
+        }
+
+        if let mixed = value as? [Any] {
+            for element in mixed {
+                guard !subtitles.isFull else {
+                    subtitles.noteRefusedURLs(refusedSubtitleURLs(element))
+                    continue
+                }
+                appendSubtitleValue(element, inheritedHeaders: inheritedHeaders, to: &subtitles)
+            }
             return
         }
 
@@ -1102,7 +1225,14 @@ enum NuvioPluginRuntime {
     ) {
         var pendingLabel: String?
 
-        for rawValue in values where !subtitles.isFull {
+        for rawValue in values {
+            guard !subtitles.isFull else {
+                if let value = cleanString(rawValue),
+                   NuvioPluginSupport.isDirectHTTPURL(value) {
+                    subtitles.noteRefusedURLs([value])
+                }
+                continue
+            }
             guard let value = cleanString(rawValue) else { continue }
             if NuvioPluginSupport.isDirectHTTPURL(value) {
                 subtitles.append(NuvioPluginSubtitle(
@@ -2841,11 +2971,15 @@ struct NuvioEclipseInterference {
     }
 
     var blocksScraping: Bool {
-        !blockingRefusals.isEmpty || truncatedBodies > 0
+        !blockingRefusals.isEmpty || truncatedBodies > 0 || droppedRequestHeaders > 0
     }
 
     var blockingSummary: String {
-        Self.describe(refusals: blockingRefusals, truncatedBodies: truncatedBodies, droppedRequestHeaders: 0)
+        Self.describe(
+            refusals: blockingRefusals,
+            truncatedBodies: truncatedBodies,
+            droppedRequestHeaders: droppedRequestHeaders
+        )
     }
 
     var summary: String {
@@ -3422,11 +3556,11 @@ private final class NuvioCheerioBridge {
 
     private static let maximumLiveDocuments = 32
 
-    private static let maximumDocumentSourceBytes = 4 * 1024 * 1024
+    private static let maximumDocumentSourceBytes = 6 * 1024 * 1024
 
     private static let parsedDocumentSizeMultiplier = 8
     private static let maximumLiveDocumentBytes = 48 * 1024 * 1024
-    private static let maximumLiveElements = 50_000
+    private static let maximumLiveElements = 100_000
 
     private let tally: NuvioFetchTally?
 

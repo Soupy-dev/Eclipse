@@ -1172,6 +1172,7 @@ public actor SkyStreamRuntimePool {
         defer { packagesBeingInvalidated.remove(packageName) }
 
         packageExecutionEpochs[packageName] = UUID()
+        closeRuntimeCircuitForFreshPackage(packageName)
         revokeSourceAdmissions(packageName: packageName)
         let pendingRequestIDs = pendingInstalledABIRequestIDs.removeValue(
             forKey: packageName
@@ -1589,9 +1590,25 @@ public actor SkyStreamRuntimePool {
         if poisonedRuntimeReservationCount >= Self.maximumPoisonedRuntimes,
            !runtimeCircuitIsOpen {
             runtimeCircuitIsOpen = true
+            Logger.shared.log(
+                "SkyStream runtime circuit opened by Eclipse poisoned=\(poisonedRuntimeReservationCount) cap=maximumPoisonedRuntimes=\(Self.maximumPoisonedRuntimes); every SkyStream invocation is refused until a package is reinstalled or updated, so an unresponsive SkyStream after this is an Eclipse latch, not a dead package",
+                type: "Plugin"
+            )
             revokeAllSourceAdmissions()
             Task { await abiLimiter.cancelAllWaiters() }
         }
+    }
+
+    private func closeRuntimeCircuitForFreshPackage(_ packageName: String) {
+        guard runtimeCircuitIsOpen || poisonedRuntimeReservationCount > 0 else { return }
+        let wasOpen = runtimeCircuitIsOpen
+        runtimeCircuitIsOpen = false
+        poisonedRuntimeReservationCount = 0
+        guard wasOpen else { return }
+        Logger.shared.log(
+            "SkyStream runtime circuit closed by Eclipse package=\(packageName); a reinstall or update is the recovery boundary, so SkyStream can run again without relaunching the app",
+            type: "Plugin"
+        )
     }
 
     private static func validationFingerprint(
@@ -2626,7 +2643,15 @@ private extension SkyStreamProviderRuntime {
         let method = (object["method"] as? String ?? "GET").uppercased()
         var headers: [String: String] = [:]
         if let rawHeaders = object["headers"] as? [String: Any] {
-            for (key, value) in rawHeaders.prefix(64) {
+            if rawHeaders.count > 64 {
+                Logger.shared.log(
+                    "SkyStream bridge request headers stopped at cap=64 offered=\(rawHeaders.count);"
+                        + " the remainder never reaches the request, and this is Eclipse's limit,"
+                        + " not the package's header set",
+                    type: "Plugin"
+                )
+            }
+            for (key, value) in rawHeaders.sorted(by: { $0.key < $1.key }).prefix(64) {
                 if let string = value as? String {
                     headers[key] = string
                 } else if let number = value as? NSNumber {
@@ -5129,8 +5154,16 @@ private enum SkyStreamRuntimeMapper {
         purpose: SkyStreamHeaderPurpose
     ) -> [String: String] {
         guard let object = value as? JSONObject else { return [:] }
+        if object.count > 64 {
+            Logger.shared.log(
+                "SkyStream headers stopped at cap=64 offered=\(object.count) purpose=\(purpose);"
+                    + " the remainder never reaches the request, and this is Eclipse's limit,"
+                    + " not the package's header set",
+                type: "Plugin"
+            )
+        }
         var result: [String: String] = [:]
-        for (key, value) in object.prefix(64) {
+        for (key, value) in object.sorted(by: { $0.key < $1.key }).prefix(64) {
             guard !SkyStreamRuntimeHeaderCompatibility.isControlled(key) else { continue }
             let text: String?
             if let string = value as? String { text = string }

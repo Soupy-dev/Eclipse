@@ -131,6 +131,48 @@ final class NuvioBoundaryHardeningTests: XCTestCase {
         )
     }
 
+    func testProviderDuplicateSubtitleURLsAreNotReportedAsAnEclipseBudgetLoss() {
+        let repeated = (0..<10).map { index in
+            NuvioPluginSubtitle(
+                url: index < 4
+                    ? "https://subs.example/shared.vtt"
+                    : "https://subs.example/\(index).vtt",
+                language: "en",
+                name: "Track \(index)",
+                headers: nil
+            )
+        }
+        let stream = NuvioPluginStream(
+            id: "stream-0",
+            scraperId: "scraper",
+            scraperName: "Fixture",
+            sourceId: "nuvio:fixture",
+            sourceName: "Fixture",
+            title: "Stream 0",
+            name: nil,
+            url: "https://media.example/video.mp4",
+            quality: nil,
+            size: nil,
+            language: nil,
+            provider: nil,
+            type: nil,
+            headers: nil,
+            subtitles: repeated
+        )
+
+        let batch = NuvioSubtitleBoundary.boundedForNetworkValidation([stream])
+        XCTAssertEqual(
+            batch.streams.first?.subtitles?.count,
+            7,
+            "the three duplicate URLs collapse; every distinct track survives"
+        )
+        XCTAssertEqual(
+            batch.droppedByBatchBudget,
+            0,
+            "no Eclipse cap engaged, so nothing may be attributed to one"
+        )
+    }
+
     func testSubtitleNetworkValidationBatchIsAggregateBoundedInStreamOrder() {
         func stream(_ index: Int) -> NuvioPluginStream {
             let subtitles = (0..<NuvioSubtitleBoundary.maximumTracksPerStream).map { track in
@@ -160,19 +202,49 @@ final class NuvioBoundaryHardeningTests: XCTestCase {
             )
         }
 
-        let bounded = NuvioSubtitleBoundary.boundedForNetworkValidation(
+        let batch = NuvioSubtitleBoundary.boundedForNetworkValidation(
             (0..<40).map(stream)
         )
-        let tracks = bounded.flatMap { $0.subtitles ?? [] }
+        let tracks = batch.streams.flatMap { $0.subtitles ?? [] }
 
+        XCTAssertLessThanOrEqual(
+            tracks.count,
+            NuvioSubtitleBoundary.maximumTracksPerValidationBatch,
+            "the batch budget must remain a hard aggregate bound"
+        )
+        XCTAssertTrue(
+            batch.streams.allSatisfy { ($0.subtitles?.isEmpty == false) },
+            "no stream may lose every subtitle while an earlier stream keeps a full share"
+        )
+        let shares = batch.streams.map { $0.subtitles?.count ?? 0 }
+        let smallest = shares.min() ?? 0
+        let largest = shares.max() ?? 0
+        XCTAssertLessThanOrEqual(
+            largest - smallest,
+            1,
+            "no stream may be given a materially larger share than another"
+        )
+        let baseShare = max(
+            1,
+            NuvioSubtitleBoundary.maximumTracksPerValidationBatch / batch.streams.count
+        )
+        XCTAssertGreaterThanOrEqual(
+            smallest,
+            baseShare,
+            "no stream may receive less than an even division of the budget"
+        )
         XCTAssertEqual(
             tracks.count,
-            NuvioSubtitleBoundary.maximumTracksPerValidationBatch
+            NuvioSubtitleBoundary.maximumTracksPerValidationBatch,
+            "the batch must spend its whole budget rather than leaving a remainder unused"
         )
         XCTAssertEqual(tracks.first?.name, "Stream 0 Track 0")
-        XCTAssertEqual(tracks.last?.name, "Stream 0 Track 63")
-        XCTAssertEqual(tracks.last?.headers?["X-Track"], "63")
-        XCTAssertTrue(bounded.dropFirst().allSatisfy { $0.subtitles == nil })
+        XCTAssertEqual(tracks.first?.headers?["X-Track"], "0")
+        XCTAssertGreaterThan(
+            batch.droppedByBatchBudget,
+            0,
+            "tracks cut by Eclipse's own budget must be counted so they can be attributed to Eclipse"
+        )
     }
 
     func testPlaybackScopeAuthorityRejectsProfileChangesAndABAStoreReopens() {
@@ -4499,9 +4571,18 @@ final class SkyStreamURLAndHeaderSecurityTests: XCTestCase {
             XCTAssertEqual($0 as? SkyStreamJSONEnvelopeError, .excessiveDepth)
         }
 
-        let excessiveString = try JSONSerialization.data(withJSONObject: [
+        let previouslyRefusedString = try JSONSerialization.data(withJSONObject: [
             "metas": [],
             "padding": String(repeating: "x", count: 16 * 1_024 + 1)
+        ])
+        XCTAssertNoThrow(
+            try StremioJSONBoundary.validate(previouslyRefusedString),
+            "a 16 KiB string must no longer make Eclipse discard the whole addon response"
+        )
+
+        let excessiveString = try JSONSerialization.data(withJSONObject: [
+            "metas": [],
+            "padding": String(repeating: "x", count: 1_024 * 1_024 + 1)
         ])
         XCTAssertThrowsError(try StremioJSONBoundary.validate(excessiveString)) {
             XCTAssertEqual($0 as? SkyStreamJSONEnvelopeError, .excessiveTokenBytes)
@@ -4517,10 +4598,15 @@ final class SkyStreamURLAndHeaderSecurityTests: XCTestCase {
         let catalogData = try JSONSerialization.data(withJSONObject: ["metas": metas])
         try StremioJSONBoundary.validate(catalogData)
         let catalog = try JSONDecoder().decode(StremioCatalogResponse.self, from: catalogData)
-        XCTAssertEqual(catalog.metas.count, 299)
+        XCTAssertEqual(catalog.metas.count, StremioDecodingLimits.catalogMetasPerResponse)
         XCTAssertEqual(catalog.metas.first?.id, "meta-0")
         XCTAssertEqual(catalog.metas.first?.videos?.count, StremioDecodingLimits.videosPerMeta)
-        XCTAssertFalse(catalog.metas.contains { $0.id == "meta-1" })
+        let truncatedNameMeta = catalog.metas.first { $0.id == "meta-1" }
+        XCTAssertNotNil(
+            truncatedNameMeta,
+            "an over-long name must truncate the field rather than discard the whole row"
+        )
+        XCTAssertEqual(truncatedNameMeta?.name.utf8.count, 1_024)
         XCTAssertFalse(catalog.metas.contains { $0.id == "meta-300" })
 
         let manifestData = try JSONSerialization.data(withJSONObject: [

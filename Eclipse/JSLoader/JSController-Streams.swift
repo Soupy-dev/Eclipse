@@ -7,6 +7,46 @@
 
 import JavaScriptCore
 
+final class ServiceStreamHeaderSanitizerLedger: @unchecked Sendable {
+    static let shared = ServiceStreamHeaderSanitizerLedger()
+
+    private let lock = NSLock()
+    private var entries: [String: [String]] = [:]
+    private var order: [String] = []
+    private let maximumEntries = 4_096
+
+    static func isMeasurable(_ streamURL: String) -> Bool {
+        !streamURL.isEmpty && streamURL.utf8.count <= 2_048
+    }
+
+    func record(droppedKeys: [String], for streamURL: String) {
+        guard Self.isMeasurable(streamURL) else { return }
+        lock.lock()
+        defer { lock.unlock() }
+        guard !droppedKeys.isEmpty else {
+            if entries.removeValue(forKey: streamURL) != nil {
+                order.removeAll { $0 == streamURL }
+            }
+            return
+        }
+        if entries[streamURL] == nil {
+            order.append(streamURL)
+            while order.count > maximumEntries, let oldest = order.first {
+                order.removeFirst()
+                entries.removeValue(forKey: oldest)
+            }
+        }
+        entries[streamURL] = droppedKeys
+    }
+
+    func droppedKeys(for streamURL: String) -> [String]? {
+        guard Self.isMeasurable(streamURL) else { return nil }
+        lock.lock()
+        defer { lock.unlock() }
+        return entries[streamURL] ?? []
+    }
+}
+
 enum ServiceStreamResultBoundaryError: Error {
     case invalidPayload
 }
@@ -24,29 +64,46 @@ extension JSController {
     private static let maximumSubtitleEntries = 256
 
     static func boundedStreamExtractionResult(from data: Data) throws -> ServiceStreamExtractionResult {
-        guard !data.isEmpty, data.count <= maximumStreamResultBytes else {
+        guard !data.isEmpty else {
             throw ServiceStreamResultBoundaryError.invalidPayload
         }
-        try SkyStreamJSONEnvelopeValidator.validate(
-            data,
-            limits: .init(
-                maximumDepth: 12,
-                maximumTokens: 100_000,
-                maximumValuesPerContainer: 4_096,
-                maximumStringBytes: 64 * 1_024,
-                maximumScalarTokenBytes: 128
+        guard data.count <= maximumStreamResultBytes else {
+            Logger.shared.log(
+                "Service stream result refused by Eclipse bytes=\(data.count) cap=maximumStreamResultBytes=\(maximumStreamResultBytes); the whole stream list is discarded, so an empty result here is an Eclipse limit, not a dead source",
+                type: "Plugin"
             )
-        )
+            throw ServiceStreamResultBoundaryError.invalidPayload
+        }
+        do {
+            try SkyStreamJSONEnvelopeValidator.validate(
+                data,
+                limits: .init(
+                    maximumDepth: 12,
+                    maximumTokens: 400_000,
+                    maximumValuesPerContainer: 20_000,
+                    maximumStringBytes: 1_024 * 1_024,
+                    maximumScalarTokenBytes: 128
+                )
+            )
+        } catch {
+            Logger.shared.log(
+                "Service stream envelope refused by Eclipse bytes=\(data.count) caps=depth12/tokens400000/values20000/string1MiB; the whole stream list is discarded, so an empty result here is an Eclipse limit, not a dead source",
+                type: "Plugin"
+            )
+            throw error
+        }
         let value = try JSONSerialization.jsonObject(with: data)
         if let object = value as? [String: Any] {
-            let envelopeHeaders = boundedServiceHeaders(object["headers"])
-            let envelopeSubtitleHeaders = boundedServiceHeaders(object["subtitleHeaders"])
+            let envelope = boundedServiceHeaders(object["headers"])
+            let envelopeHeaders = envelope.headers
+            let envelopeSubtitleHeaders = boundedServiceHeaders(object["subtitleHeaders"]).headers
             let carriesEnvelopeHeaders = envelopeHeaders != nil || envelopeSubtitleHeaders != nil
             let sources: [[String: Any]]? = {
                 if let values = object["streams"] as? [[String: Any]] {
                     let bounded = boundedServiceObjects(
                         values,
                         limit: maximumStreamEntries,
+                        label: "stream",
                         transform: boundedStreamSource
                     )
                     return bounded.isEmpty ? nil : bounded
@@ -58,16 +115,19 @@ extension JSController {
                 guard carriesEnvelopeHeaders else { return nil }
                 if let values = object["streams"] as? [String] {
                     let bounded = pairedStreamSources(
-                        boundedServiceStrings(values, limit: maximumStreamEntries, maximumBytes: 16 * 1_024)
+                        boundedServiceStrings(values, limit: maximumStreamEntries, maximumBytes: 64 * 1_024, label: "stream")
                     )
                     return bounded.isEmpty ? nil : bounded
                 }
                 if let value = object["stream"] as? String,
-                   let bounded = boundedServiceString(value, maximumBytes: 16 * 1_024) {
+                   let bounded = boundedServiceString(value, maximumBytes: 64 * 1_024, field: "stream") {
                     return [["streamUrl": bounded]]
                 }
                 return nil
             }()
+            let offsetsLackingOwnHeaders = Set(
+                (sources ?? []).enumerated().compactMap { $0.element["headers"] == nil ? $0.offset : nil }
+            )
             var decoratedSources: [[String: Any]]? = sources
             if carriesEnvelopeHeaders, let values = sources {
                 decoratedSources = values.map { source -> [String: Any] in
@@ -84,22 +144,45 @@ extension JSController {
             let streams: [String]? = {
                 if sources != nil { return nil }
                 if let values = object["streams"] as? [String] {
-                    let bounded = boundedServiceStrings(values, limit: maximumStreamEntries, maximumBytes: 16 * 1_024)
+                    let bounded = boundedServiceStrings(values, limit: maximumStreamEntries, maximumBytes: 64 * 1_024, label: "stream")
                     return bounded.isEmpty ? nil : bounded
                 }
                 if let value = object["stream"] as? String,
-                   let bounded = boundedServiceString(value, maximumBytes: 16 * 1_024) {
+                   let bounded = boundedServiceString(value, maximumBytes: 64 * 1_024, field: "stream") {
                     return [bounded]
                 }
                 return nil
             }()
+            if !envelope.droppedKeys.isEmpty {
+                let envelopeURLKeys = ["streamUrl", "url", "file", "src", "link", "stream"]
+                var envelopeTargets: [String] = []
+                for (offset, source) in (decoratedSources ?? []).enumerated() {
+                    guard offsetsLackingOwnHeaders.contains(offset) else { continue }
+                    for key in envelopeURLKeys {
+                        if let text = source[key] as? String {
+                            envelopeTargets.append(text)
+                            break
+                        }
+                    }
+                }
+                envelopeTargets.append(contentsOf: streams ?? [])
+                for target in envelopeTargets {
+                    let merged = Set(
+                        ServiceStreamHeaderSanitizerLedger.shared.droppedKeys(for: target) ?? []
+                    ).union(envelope.droppedKeys)
+                    ServiceStreamHeaderSanitizerLedger.shared.record(
+                        droppedKeys: merged.sorted(),
+                        for: target
+                    )
+                }
+            }
             let subtitles: [String]? = {
                 if let values = object["subtitles"] as? [String] {
-                    let bounded = boundedServiceStrings(values, limit: maximumSubtitleEntries, maximumBytes: 16 * 1_024)
+                    let bounded = boundedServiceStrings(values, limit: maximumSubtitleEntries, maximumBytes: 64 * 1_024, label: "subtitle")
                     return bounded.isEmpty ? nil : bounded
                 }
                 if let value = object["subtitles"] as? String,
-                   let bounded = boundedServiceString(value, maximumBytes: 16 * 1_024) {
+                   let bounded = boundedServiceString(value, maximumBytes: 64 * 1_024, field: "subtitles") {
                     return [bounded]
                 }
                 if let values = object["subtitles"] as? [[String: Any]] {
@@ -113,7 +196,7 @@ extension JSController {
             return (streams, subtitles, decoratedSources)
         }
         if let values = value as? [String] {
-            let bounded = boundedServiceStrings(values, limit: maximumStreamEntries, maximumBytes: 16 * 1_024)
+            let bounded = boundedServiceStrings(values, limit: maximumStreamEntries, maximumBytes: 64 * 1_024, label: "stream")
             guard !bounded.isEmpty else { throw ServiceStreamResultBoundaryError.invalidPayload }
             return (bounded, nil, nil)
         }
@@ -134,13 +217,13 @@ extension JSController {
         var bounded: [String: Any] = [:]
         for key in urlKeys {
             if let value = source[key] as? String,
-               let value = boundedServiceString(value, maximumBytes: 16 * 1_024) {
+               let value = boundedServiceString(value, maximumBytes: 64 * 1_024, field: key) {
                 bounded[key] = value
             }
         }
         for key in metadataKeys {
             if let value = source[key] as? String,
-               let value = boundedServiceString(value, maximumBytes: 2 * 1_024) {
+               let value = boundedServiceString(value, maximumBytes: 2 * 1_024, field: key) {
                 bounded[key] = value
             } else if let value = source[key] as? NSNumber {
                 bounded[key] = String(value.stringValue.prefix(128))
@@ -148,20 +231,24 @@ extension JSController {
         }
         for key in metadataArrayKeys {
             if let values = source[key] as? [String] {
-                bounded[key] = boundedServiceStrings(values, limit: 32, maximumBytes: 2 * 1_024)
+                bounded[key] = boundedServiceStrings(values, limit: 32, maximumBytes: 2 * 1_024, label: "language")
             }
         }
-        if let headers = boundedServiceHeaders(source["headers"]) {
+        let sanitizedHeaders = boundedServiceHeaders(source["headers"])
+        if let headers = sanitizedHeaders.headers {
             bounded["headers"] = headers
         }
-        if let headers = boundedServiceHeaders(source["subtitleHeaders"]) {
+        let sanitizedSubtitleHeaders = boundedServiceHeaders(source["subtitleHeaders"])
+        if let headers = sanitizedSubtitleHeaders.headers {
             bounded["subtitleHeaders"] = headers
         }
+        let sanitizerDrops = Array(Set(sanitizedHeaders.droppedKeys)).sorted()
         if let values = source["subtitles"] as? [String] {
             bounded["subtitles"] = boundedServiceStrings(
                 values,
                 limit: maximumSubtitleEntries,
-                maximumBytes: 16 * 1_024
+                maximumBytes: 64 * 1_024,
+                label: "subtitle"
             )
         } else if let values = source["subtitles"] as? [[String: Any]] {
             bounded["subtitles"] = boundedSubtitleSources(values)
@@ -176,6 +263,17 @@ extension JSController {
             }
         }
         let hasStreamURL = urlKeys.dropLast().contains { bounded[$0] is String }
+        if hasStreamURL {
+            for key in urlKeys.dropLast() {
+                if let streamURL = bounded[key] as? String {
+                    ServiceStreamHeaderSanitizerLedger.shared.record(
+                        droppedKeys: sanitizerDrops,
+                        for: streamURL
+                    )
+                    break
+                }
+            }
+        }
         return hasStreamURL ? bounded : nil
     }
 
@@ -194,7 +292,7 @@ extension JSController {
                 index += 1
             } else if index + 1 < values.count, isHTTPStream(values[index + 1]) {
                 var source: [String: Any] = ["streamUrl": values[index + 1]]
-                if let title = boundedServiceString(entry, maximumBytes: 2 * 1_024) {
+                if let title = boundedServiceString(entry, maximumBytes: 2 * 1_024, field: "title") {
                     source["title"] = title
                 }
                 sources.append(source)
@@ -223,24 +321,27 @@ extension JSController {
         var bounded: [String: Any] = [:]
         for key in ["url", "file", "src"] {
             if let value = source[key] as? String,
-               let value = boundedServiceString(value, maximumBytes: 16 * 1_024) {
+               let value = boundedServiceString(value, maximumBytes: 64 * 1_024, field: key) {
                 bounded[key] = value
             }
         }
         for key in ["title", "name", "label", "lang", "language"] {
             if let value = source[key] as? String,
-               let value = boundedServiceString(value, maximumBytes: 2 * 1_024) {
+               let value = boundedServiceString(value, maximumBytes: 2 * 1_024, field: key) {
                 bounded[key] = value
             }
         }
-        if let headers = boundedServiceHeaders(source["headers"]) {
+        if let headers = boundedServiceHeaders(source["headers"]).headers {
             bounded["headers"] = headers
         }
         return ["url", "file", "src"].contains { bounded[$0] is String } ? bounded : nil
     }
 
-    private static func boundedServiceHeaders(_ value: Any?) -> [String: String]? {
+    private static func boundedServiceHeaders(
+        _ value: Any?
+    ) -> (headers: [String: String]?, droppedKeys: [String]) {
         let raw: [String: String]
+        var droppedKeys: [String] = []
         if let value = value as? [String: String] {
             raw = value
         } else if let value = value as? [String: Any] {
@@ -249,7 +350,7 @@ extension JSController {
                 else if let number = pair.value as? NSNumber { result[pair.key] = number.stringValue }
             }
         } else {
-            return nil
+            return (nil, [])
         }
         var bounded: [String: String] = [:]
         var totalBytes = 0
@@ -263,52 +364,139 @@ extension JSController {
                   !name.contains("\n"),
                   !value.contains("\r"),
                   !value.contains("\n") else {
+                let isEclipseCap = !name.isEmpty
+                    && !name.contains(":")
+                    && !name.contains("\r")
+                    && !name.contains("\n")
+                    && !value.contains("\r")
+                    && !value.contains("\n")
+                if isEclipseCap { droppedKeys.append(name) }
                 continue
             }
             let entryBytes = name.utf8.count + value.utf8.count + 4
-            guard entryBytes <= 32 * 1_024 - totalBytes else { continue }
+            guard entryBytes <= 32 * 1_024 - totalBytes else {
+                droppedKeys.append(name)
+                continue
+            }
             bounded[name] = value
             totalBytes += entryBytes
         }
-        return bounded.isEmpty ? nil : bounded
+        if !droppedKeys.isEmpty {
+            Logger.shared.log(
+                "Service stream headers dropped by Eclipse droppedKeys=[\(droppedKeys.sorted().joined(separator: ","))] kept=\(bounded.count) caps=64/128B/8KiB/32KiB; a 401 or 403 on playback after this is Eclipse's header set, not the source's",
+                type: "Plugin"
+            )
+        }
+        return (bounded.isEmpty ? nil : bounded, droppedKeys.sorted())
     }
 
     private static func boundedServiceStrings(
         _ values: [String],
         limit: Int,
-        maximumBytes: Int
+        maximumBytes: Int,
+        label: String
     ) -> [String] {
         var bounded: [String] = []
+        var rejected = 0
+        var refusedByValueCap = 0
         bounded.reserveCapacity(min(values.count, limit))
         for value in values {
             guard bounded.count < limit else { break }
-            if let value = boundedServiceString(value, maximumBytes: maximumBytes) {
+            if let value = boundedServiceString(value, maximumBytes: maximumBytes, field: label) {
                 bounded.append(value)
+            } else if value.utf8.count > maximumBytes {
+                refusedByValueCap += 1
+            } else {
+                rejected += 1
             }
         }
+        logRowReduction(
+            label: label,
+            raw: values.count,
+            kept: bounded.count,
+            rejected: rejected,
+            refusedByValueCap: refusedByValueCap,
+            limit: limit
+        )
         return bounded
     }
 
     private static func boundedServiceObjects<T, U>(
         _ values: [T],
         limit: Int,
+        label: String,
         transform: (T) -> U?
     ) -> [U] {
         var bounded: [U] = []
+        var rejected = 0
         bounded.reserveCapacity(min(values.count, limit))
         for value in values {
             guard bounded.count < limit else { break }
             if let value = transform(value) {
                 bounded.append(value)
+            } else {
+                rejected += 1
             }
         }
+        logRowReduction(
+            label: label,
+            raw: values.count,
+            kept: bounded.count,
+            rejected: rejected,
+            refusedByValueCap: 0,
+            limit: limit
+        )
         return bounded
     }
 
-    private static func boundedServiceString(_ value: String, maximumBytes: Int) -> String? {
-        guard !value.isEmpty,
-              value.utf8.count <= maximumBytes,
-              !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+    private static func logRowReduction(
+        label: String,
+        raw: Int,
+        kept: Int,
+        rejected: Int,
+        refusedByValueCap: Int,
+        limit: Int
+    ) {
+        let untried = raw - kept - rejected
+        if untried > 0 {
+            Logger.shared.log(
+                "Service \(label) rows cut by Eclipse raw=\(raw) kept=\(kept) untried=\(untried) cap=\(limit); Eclipse stopped at its own cap and never examined those rows",
+                type: "Plugin"
+            )
+        }
+        if refusedByValueCap > 0 {
+            Logger.shared.log(
+                "Service \(label) rows refused by Eclipse's value cap raw=\(raw) kept=\(kept) refused=\(refusedByValueCap); those values were past Eclipse's per-value byte cap, not unusable source data",
+                type: "Plugin"
+            )
+        }
+        if rejected > 0 {
+            Logger.shared.log(
+                "Service \(label) rows unusable raw=\(raw) kept=\(kept) rejected=\(rejected); Eclipse could not read a usable value out of those rows",
+                type: "Plugin"
+            )
+        }
+    }
+
+    private static func boundedServiceString(
+        _ value: String,
+        maximumBytes: Int,
+        field: String = "value"
+    ) -> String? {
+        guard !value.isEmpty else { return nil }
+        guard value.utf8.count <= maximumBytes else {
+            EclipseLedgerOnce.emit(
+                scope: "service-stream-value-cap",
+                signature: "\(field)|\(maximumBytes)"
+            ) {
+                Logger.shared.log(
+                    "Service stream value dropped by Eclipse field=\(field) cap=\(maximumBytes); the field is absent from the stream Eclipse built, not from the source's result",
+                    type: "Plugin"
+                )
+            }
+            return nil
+        }
+        guard !value.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
             return nil
         }
         return value
@@ -394,6 +582,10 @@ extension JSController {
                     from: result,
                     maximumBytes: Self.maximumStreamResultBytes
                 ) else {
+                    Logger.shared.log(
+                        "Service stream payload refused by Eclipse before parsing cap=maximumStreamResultBytes=\(Self.maximumStreamResultBytes); the result was oversized or not a string, so an empty stream list here is not a dead source",
+                        type: "Plugin"
+                    )
                     finish(emptyResult, "invalid-data")
                     return
                 }
@@ -401,12 +593,12 @@ extension JSController {
                     let bounded = try Self.boundedStreamExtractionResult(from: data)
                     self.logStreamSourceDiagnostics(bounded.sources ?? [], serviceName: module.metadata.sourceName)
                     self.logPlainStreamDiagnostics(bounded.streams ?? [], serviceName: module.metadata.sourceName)
-                    Logger.shared.log("Service stream extraction completed service=\(module.metadata.sourceName) plainStreams=\(bounded.streams?.count ?? 0) structuredSources=\(bounded.sources?.count ?? 0) subtitles=\(bounded.subtitles?.count ?? 0)", type: "Stream")
+                    Logger.shared.log("Service stream extraction completed service=\(module.metadata.sourceName) plainStreams=\(bounded.streams?.count ?? 0) structuredSources=\(bounded.sources?.count ?? 0) subtitles=\(bounded.subtitles?.count ?? 0)", type: "Plugin")
                     finish(bounded, "resolved")
                     return
                 } catch {
                     if let raw = String(data: data, encoding: .utf8),
-                       let bounded = Self.boundedServiceString(raw, maximumBytes: 16 * 1_024),
+                       let bounded = Self.boundedServiceString(raw, maximumBytes: 64 * 1_024, field: "raw-body"),
                        let url = URL(string: bounded),
                        let scheme = url.scheme?.lowercased(),
                        scheme == "http" || scheme == "https" {

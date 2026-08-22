@@ -527,20 +527,36 @@ final class NuvioPluginStore {
         return data
     }
 
-    func readCode(repositoryID: String, codeFileName: String) -> String? {
+    func readCode(
+        repositoryID: String,
+        codeFileName: String,
+        expectedScraperID: String? = nil
+    ) -> String? {
         guard Self.isSafePathComponent(codeFileName),
               let directory = directory(forRepositoryID: repositoryID) else { return nil }
         let source = directory.appendingPathComponent(codeFileName, isDirectory: false)
         guard let data = boundedCodeData(at: source),
-              Self.codeData(data, matchesHashedFileName: codeFileName) else { return nil }
+              Self.codeData(
+                data,
+                matchesHashedFileName: codeFileName,
+                expectedScraperID: expectedScraperID
+              ) else { return nil }
         return String(data: data, encoding: .utf8)
     }
 
-    func readCodeInBackground(repositoryID: String, codeFileName: String) async -> String? {
+    func readCodeInBackground(
+        repositoryID: String,
+        codeFileName: String,
+        expectedScraperID: String? = nil
+    ) async -> String? {
         await withCheckedContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 continuation.resume(
-                    returning: self.readCode(repositoryID: repositoryID, codeFileName: codeFileName)
+                    returning: self.readCode(
+                        repositoryID: repositoryID,
+                        codeFileName: codeFileName,
+                        expectedScraperID: expectedScraperID
+                    )
                 )
             }
         }
@@ -565,7 +581,11 @@ final class NuvioPluginStore {
         return source
     }
 
-    private static func codeData(_ data: Data, matchesHashedFileName codeFileName: String) -> Bool {
+    private static func codeData(
+        _ data: Data,
+        matchesHashedFileName codeFileName: String,
+        expectedScraperID: String? = nil
+    ) -> Bool {
         guard codeFileName.hasSuffix(".js") else { return false }
         let stem = codeFileName.dropLast(3)
         let pieces = stem.split(separator: "-", omittingEmptySubsequences: false)
@@ -574,6 +594,14 @@ final class NuvioPluginStore {
               pieces[1].count == 32,
               pieces.allSatisfy({ $0.allSatisfy(\.isHexDigit) }),
               let code = String(data: data, encoding: .utf8) else {
+            return false
+        }
+        if let expectedScraperID,
+           String(expectedScraperID.sha256.prefix(40)) != pieces[0] {
+            Logger.shared.log(
+                "Nuvio refused provider code whose stored name belongs to a different provider expected=\(String(expectedScraperID.sha256.prefix(40))) named=\(pieces[0]); the code is not executed, so this provider stays unavailable by Eclipse's rule",
+                type: "Plugin"
+            )
             return false
         }
         return String(code.sha256.prefix(32)) == pieces[1]
